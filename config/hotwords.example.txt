@@ -1,0 +1,7 @@
+Example hotwords.txt — copy this to hotwords.txt and edit for your use case.
+
+Word-level keyword bag for faster-whisper. Best as a list of proper nouns
+and tricky vocabulary, comma- or space-separated. Keep it short and
+focused — long lists can produce near-miss errors when Whisper is uncertain.
+
+Acme Inc., Patricia Lin, Kubernetes, Postgres, gRPC, OAuth, CRDT

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TapScribe — operator console</title>
+<meta name="viewport" content="width=1280">
+<link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<div id="app" class="app-grid">
+
+  <header class="ribbon header">
+    <div class="brand">
+      <span class="rec-pill" id="recPill" title="Recorder reachability">
+        <span class="dot rec" style="width:7px;height:7px"></span>REC
+      </span>
+      <button class="rec-pill rec-pill-btn" id="recordingPill" title="Recording state — click to pause / resume">
+        <span class="dot rec" style="width:7px;height:7px"></span>RECORDING
+      </button>
+      <span class="slug">tapscribe://</span>
+      <span class="name">recorder</span>
+    </div>
+    <div class="session-status" id="sessionStatus"></div>
+    <div class="actions">
+      <button class="btn" id="refreshBtn" title="Refresh sessions list">refresh</button>
+      <button class="btn primary" id="newSessionBtn" title="Rotate to a fresh session folder">+ new session</button>
+    </div>
+  </header>
+
+  <aside class="rail">
+    <div class="panel live" id="liveChannelPanel">
+      <div class="panel-hd">
+        <span class="ttl">live channel</span>
+        <span class="pre">·</span><span id="liveStateBadge" class="count">stopped</span>
+        <span class="spacer"></span>
+        <span class="dim tiny" id="liveMlxNote"></span>
+      </div>
+      <div class="panel-bd" id="liveChannelBody"></div>
+    </div>
+
+    <div class="panel" id="activeStreamsPanel">
+      <div class="panel-hd">
+        <span class="ttl">active streams</span>
+        <span class="pre">·</span><span id="activeCount" class="count">0</span>
+        <span class="spacer"></span>
+        <span id="activeStreamsBadge"></span>
+      </div>
+      <div class="panel-bd tight" id="activeStreamsBody">
+        <div class="empty">No streams. Speak in the bridged tab to capture.</div>
+      </div>
+    </div>
+  </aside>
+
+  <section class="feed">
+    <div class="panel feed-shell">
+      <div class="panel-hd">
+        <span class="ttl">live transcripts</span>
+        <span class="pre">·</span>
+        <span class="count tnum" id="liveFeedCount">0</span>
+        <span class="spacer"></span>
+        <label class="row tiny dim" style="gap:4px;">
+          <input type="checkbox" id="liveAutoScroll" checked> autoscroll
+        </label>
+        <button class="btn tiny ghost" id="liveClearBtn" title="Clear feed">clear</button>
+      </div>
+      <div id="liveFeedShell" style="display:contents;"></div>
+    </div>
+  </section>
+
+  <section class="config">
+    <div class="panel" id="configPanel">
+      <div class="panel-hd">
+        <span class="ttl">config in effect</span>
+        <span class="spacer"></span>
+        <span class="dim tiny">prompt.txt · hotwords.txt · hallucinations.txt</span>
+      </div>
+      <div class="panel-bd">
+        <div class="cfg-grid-h" id="configGrid"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sessions">
+    <div class="panel">
+      <div class="panel-hd">
+        <span class="ttl">sessions</span>
+        <span class="pre">·</span><span class="count" id="sessCount">0 on disk</span>
+        <span class="spacer"></span>
+        <button class="btn tiny ghost" id="pruneEmptyBtn" title="Delete every session that has no WAVs, no merged transcript, and no label">× clear empty</button>
+        <span class="dim tiny" style="margin-left:10px;">click to select · type to rename</span>
+      </div>
+      <div class="sess-shell">
+        <div class="sess-side-list">
+          <div class="sess-search">
+            <input class="input" id="sessFilter" placeholder="filter by name or folder…">
+          </div>
+          <div class="sess-list" id="sessList"></div>
+        </div>
+        <div id="sessDetailRoot"></div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script type="module" src="/web/js/main.js"></script>
+</body>
+</html>

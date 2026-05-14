@@ -1,0 +1,11 @@
+Example prompt.txt — copy this to prompt.txt and edit for your use case.
+
+This text is treated by Whisper as "what was said before this audio" — it
+biases the model toward the style and vocabulary of the context. Best
+written as a flowing paragraph under ~150 words (Whisper's context window
+is ~244 tokens).
+
+A weekly engineering planning meeting between three contributors. Topics
+include API design, deployment infrastructure, and the migration roadmap.
+Common terms: pull request, release branch, retrospective, sprint review,
+hotfix, rollback.

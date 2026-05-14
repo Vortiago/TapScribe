@@ -1,0 +1,59 @@
+# TapScribe — hallucination filter
+#
+# Lines in this file define text patterns that the recorder treats as Whisper
+# hallucinations and DROPS from the merged transcript. Each suppressed segment
+# is kept in the per-WAV transcript JSON (and in the merged session JSON)
+# under "suppressed_hallucinations" / "suppressed" so you can audit what was
+# filtered.
+#
+# Three modes (decided by line prefix):
+#
+#   <bare text>           Case-insensitive SUBSTRING match. Use for phrases
+#                         that wouldn't plausibly appear inside legitimate
+#                         meeting speech (e.g. YouTube-specific jargon).
+#
+#   exact:<phrase>        Case-insensitive EXACT match against the segment
+#                         after stripping leading/trailing punctuation and
+#                         whitespace. Use this for phrases that COULD appear
+#                         embedded in legitimate speech but, when Whisper
+#                         hallucinates them, show up as the whole segment.
+#                         Example: a real demo might say "thank you for
+#                         watching this demo" (containing "thank you for
+#                         watching"). But Whisper's hallucination is the
+#                         standalone segment "Thank you for watching." with
+#                         nothing else.
+#
+#   re:<regex>            Case-insensitive REGEX. Most powerful, most
+#                         dangerous. Reserve for cases the other two can't
+#                         express.
+#
+# Lines starting with `#` are comments. Blank lines are ignored.
+#
+# Re-read on every transcribe job — edit and save, no restart needed.
+
+# --- Substring matches (safe to match anywhere; these phrases don't appear
+#     in legitimate meeting speech) -----------------
+
+amara.org
+subtitles by the amara
+hit the bell
+smash that like
+subscribe to my channel
+subscribe to this channel
+subscribe to our channel
+don't forget to subscribe
+don't forget to like and subscribe
+
+# --- Exact matches (these phrases COULD show up embedded in real speech;
+#     suppress only when the whole segment is essentially just this phrase) -
+
+exact:thank you for watching
+exact:thanks for watching
+exact:please subscribe
+exact:please subscribe to my channel
+exact:see you in the next video
+exact:see you in the next one
+exact:see you in the next episode
+exact:see you next time
+exact:like and subscribe
+exact:don't forget to like

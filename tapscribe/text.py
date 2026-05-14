@@ -1,0 +1,103 @@
+"""Pure text helpers — prompt/hotwords reading, slug parsing, sanitisers.
+
+Everything in here is side-effect-free apart from disk reads, and depends
+on nothing in TapScribe besides config paths. Easy to unit-test.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+from . import config
+
+# Whisper's internal special tokens occasionally leak through as literal text
+# ("[BLANK_AUDIO]", "[BLANK_AUDIO/BLANK_AUDIO", "[BLANK_") on near-silent or
+# ambiguous frames. WhisperLiveKit forwards them unfiltered. They're never
+# real speech and clutter the live feed badly — strip at ingest.
+#
+# Pattern requires `[BLANK` immediately followed by `_` or `]` so we don't
+# strip a real bracketed word like `[blanket]` (Whisper sometimes brackets
+# uncertain words). After that, any mix of word chars / slash / dash, with
+# an optional closing bracket (token may be truncated).
+WHISPER_META_TOKEN_RE = re.compile(r"\[BLANK[_\]][\w/\-]*\]?", re.IGNORECASE)
+
+_TERMINAL_PUNCT_RE = re.compile(r"[\s.,;:!?\"'‘’“”…\-]+$")
+_LEADING_PUNCT_RE = re.compile(r"^[\s.,;:!?\"'‘’“”…\-]+")
+
+
+def read_text_file(path: Path) -> str:
+    """Read a small text config file. Returns "" on any failure so callers
+    can treat "missing" and "unreadable" identically."""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return ""
+
+
+def read_prompt() -> str:
+    """Return the Whisper `initial_prompt` from prompt.txt. Read on every
+    call so edits take effect without restarting the recorder."""
+    return read_text_file(config.PROMPT_FILE)
+
+
+def read_hotwords() -> str:
+    """Return the faster-whisper `hotwords` string from hotwords.txt — a
+    comma- or space-separated list of proper nouns / tricky vocabulary."""
+    return read_text_file(config.HOTWORDS_FILE)
+
+
+def normalise_for_exact(text: str) -> str:
+    """Lowercase and strip leading/trailing whitespace and punctuation. Used
+    by the `exact:` matcher in the hallucination filter."""
+    t = text.lower()
+    t = _LEADING_PUNCT_RE.sub("", t)
+    t = _TERMINAL_PUNCT_RE.sub("", t)
+    return t.strip()
+
+
+def clean_meta_tokens(raw: str) -> str:
+    """Strip Whisper meta-tokens ([BLANK_AUDIO] etc.) and collapse runs of
+    whitespace. Used on inbound live-transcript ingest."""
+    cleaned = WHISPER_META_TOKEN_RE.sub("", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def safe_name(s: str | None) -> str:
+    """Sanitise a freeform name for use inside a recording filename. Keeps
+    alnum / dash / underscore / dot; everything else becomes underscore.
+    Capped at 64 chars."""
+    if not s:
+        return ""
+    return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in s)[:64]
+
+
+def parse_wav_start(name: str) -> datetime | None:
+    """Extract the UTC start time from a recording filename.
+
+    Filenames follow: <YYYY-MM-DDTHH-MM-SSZ>_<name_slug>_<short_id>_<utt>.wav
+    """
+    try:
+        head = name.split("_", 1)[0]
+        # strptime can't read the trailing Z in this format, so peel it.
+        if head.endswith("Z"):
+            head = head[:-1]
+        return datetime.strptime(head, "%Y-%m-%dT%H-%M-%S").replace(tzinfo=timezone.utc)
+    except (ValueError, IndexError):
+        return None
+
+
+def parse_wav_speaker_slug(name: str) -> str:
+    """Best-effort recovery of the speaker name from a recording filename.
+    We can't perfectly invert safe_name (spaces/dots became underscores) but
+    the slug is human-readable. Returns the middle chunk between the
+    timestamp and the trailing short_id/utt suffix."""
+    base = name.rsplit(".", 1)[0]
+    parts = base.split("_")
+    if len(parts) < 4:
+        return ""
+    return "_".join(parts[1:-2])
