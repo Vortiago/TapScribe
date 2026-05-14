@@ -13,6 +13,7 @@ import signal
 import subprocess
 import threading
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,87 @@ from typing import Any
 from . import config
 from .models import download_nb_whisper_ct2_dir
 from .text import read_prompt
+
+
+@dataclass(frozen=True)
+class LiveConfig:
+    """Immutable configuration for one whisperlivekit-server invocation.
+
+    Mutation of the live channel's config goes through replacing the
+    whole value, not poking at fields — the runtime swap happens in the
+    surrounding `LIVE_CONFIG` dict for now (Land 4 will move this onto
+    the Recorder context).
+    """
+    model: str
+    language: str
+    host: str
+    port: int
+    vac: bool = True
+    confidence_validation: bool = True
+
+
+def is_nb_whisper(model: str) -> bool:
+    """The nb-whisper-* family needs a different CLI shape — see
+    build_live_cmd. Kept as a tiny predicate so the routing rule is
+    grep-findable."""
+    return model.startswith("nb-whisper-")
+
+
+def build_live_cmd(
+    exe: str,
+    config: LiveConfig,
+    *,
+    use_mlx: bool,
+    nb_whisper_ct2_dir: Path | None = None,
+    init_prompt: str | None = None,
+) -> list[str]:
+    """Build the whisperlivekit-server argv for the given config.
+
+    Pure — no subprocess spawn, no HuggingFace download, no log pump.
+    Callers (start_live_proc below) handle that orchestration; this
+    function exists so the CLI surface is testable as data.
+
+    NB-Whisper routing: WhisperLiveKit's `--model` flag only accepts
+    names from its built-in table. NB-Whisper isn't there, so the
+    escape hatch is `--model-path <local-ct2-dir>`. The caller must
+    supply `nb_whisper_ct2_dir` for those models (download it first
+    via `tapscribe.models.download_nb_whisper_ct2_dir`); we raise
+    `ValueError` rather than silently dropping `--model-path`.
+    """
+    cmd: list[str] = [
+        exe,
+        "--lan", config.language,
+        "--host", config.host,
+        "--port", str(config.port),
+        "--pcm-input",
+    ]
+    if not config.vac:
+        cmd.append("--no-vac")
+    if config.confidence_validation:
+        cmd.append("--confidence-validation")
+
+    if is_nb_whisper(config.model):
+        if nb_whisper_ct2_dir is None:
+            raise ValueError(
+                f"build_live_cmd: nb-whisper model {config.model!r} requires "
+                "nb_whisper_ct2_dir to be supplied. Call "
+                "tapscribe.models.download_nb_whisper_ct2_dir first."
+            )
+        cmd.extend(["--model-path", str(nb_whisper_ct2_dir)])
+        cmd.extend(["--backend-policy", "localagreement"])
+        # Intentionally NO --backend mlx-whisper, regardless of use_mlx:
+        # NB-Whisper has no public MLX weights, and forcing the flag
+        # re-triggers WhisperLiveKit's strict compatibility check that
+        # `--model-path` exists specifically to sidestep.
+    else:
+        cmd.extend(["--model", config.model])
+        if use_mlx:
+            cmd.extend(["--backend", "mlx-whisper"])
+
+    if init_prompt:
+        cmd.extend(["--init-prompt", init_prompt])
+
+    return cmd
 
 # ---------------------------------------------------------------------------
 # Live-channel info (mirrored into the dashboard via /api/state)
@@ -112,31 +194,13 @@ def start_live_proc(
             print(f"[tapscribe] {msg}", flush=True)
             return False, msg
 
-        # WhisperLiveKit's `--model` arg only accepts names it has in its
-        # built-in mapping table (tiny.en / large-v3 / etc.) and errors out
-        # for unknown names. NB-Whisper isn't in that table.
-        #
-        # The escape hatch is `--model-path <hf-repo>` — WhisperLiveKit
-        # calls snapshot_download() and then inspects which backends are
-        # usable against the actual downloaded files (compatible_whisper_mlx
-        # / compatible_faster_whisper). We also drop the explicit
-        # --backend mlx-whisper for that path: forcing it would re-trigger
-        # the strict compatibility check we're trying to sidestep.
+        # Pre-resolve NB-Whisper weights if needed. The download is a real
+        # I/O call (HF Hub fetch) and lives here, not inside the pure
+        # build_live_cmd, so we can surface errors via LIVE_INFO before
+        # spawning anything.
         live_model = str(LIVE_CONFIG["model"])
-        is_nb_whisper = live_model.startswith("nb-whisper-")
-
-        cmd = [
-            exe,
-            "--lan", str(LIVE_CONFIG["language"]),
-            "--host", str(LIVE_CONFIG["host"]),
-            "--port", str(LIVE_CONFIG["port"]),
-            "--pcm-input",
-        ]
-        if not LIVE_CONFIG.get("vac"):
-            cmd.append("--no-vac")
-        if LIVE_CONFIG.get("confidence_validation"):
-            cmd.append("--confidence-validation")
-        if is_nb_whisper:
+        ct2_dir: Path | None = None
+        if is_nb_whisper(live_model):
             try:
                 ct2_dir = download_nb_whisper_ct2_dir(live_model)
             except Exception as e:
@@ -145,16 +209,21 @@ def start_live_proc(
                 LIVE_INFO["last_error"] = msg
                 LIVE_PROC = None
                 return False, msg
-            cmd.extend(["--model-path", str(ct2_dir)])
-            cmd.extend(["--backend-policy", "localagreement"])
-        else:
-            cmd.extend(["--model", live_model])
-            if config.USE_MLX:
-                cmd.extend(["--backend", "mlx-whisper"])
 
-        prompt = read_prompt()
-        if prompt:
-            cmd.extend(["--init-prompt", prompt])
+        live_cfg = LiveConfig(
+            model=live_model,
+            language=str(LIVE_CONFIG["language"]),
+            host=str(LIVE_CONFIG["host"]),
+            port=int(LIVE_CONFIG["port"]),
+            vac=bool(LIVE_CONFIG.get("vac", True)),
+            confidence_validation=bool(LIVE_CONFIG.get("confidence_validation", True)),
+        )
+        cmd = build_live_cmd(
+            exe, live_cfg,
+            use_mlx=config.USE_MLX,
+            nb_whisper_ct2_dir=ct2_dir,
+            init_prompt=read_prompt() or None,
+        )
 
         popen_kwargs: dict[str, Any] = dict(
             stdout=subprocess.PIPE,
