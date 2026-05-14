@@ -22,8 +22,7 @@ import shutil
 import wave
 from collections import deque
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -41,6 +40,7 @@ from . import auth, config, live
 from . import hallucinations as hallucinations_mod
 from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
+from .session_merge import merge_session, select_session_wavs
 from .sessions import (
     ACTIVE,
     ACTIVE_LOCK,
@@ -55,63 +55,12 @@ from .sessions import (
 )
 from .text import (
     clean_meta_tokens,
-    parse_wav_speaker_slug,
-    parse_wav_start,
     read_hotwords,
     read_prompt,
     safe_name,
 )
-from .transcribers import TranscriptionResult, load_transcriber
-
-
-def _result_envelope(
-    result: TranscriptionResult,
-    *,
-    path: Path,
-    source: str,
-    started: datetime,
-    finished: datetime,
-) -> dict[str, Any]:
-    """Wrap a `TranscriptionResult` with the per-WAV write-time metadata
-    that the JSON cache + dashboard expect. The result's own fields are
-    flattened into the same dict for backward-compat — until Land 2's
-    `CachedTranscription` formalises this envelope."""
-    wav_start = parse_wav_start(path.name)
-    envelope: dict[str, Any] = {
-        "transcriber": result.transcriber,
-        "device": result.device,
-        "model": result.model,
-        "language": result.language,
-        "language_probability": result.language_probability,
-        "duration": result.duration,
-        "segments": [_segment_to_dict(s) for s in result.segments],
-        "text": result.text,
-        "initial_prompt_used": result.initial_prompt_used,
-        "hotwords_used": result.hotwords_used,
-        "quality_settings": result.quality_settings,
-        "suppressed_hallucinations": [_segment_to_dict(s) for s in result.suppressed_hallucinations],
-        "transcribed_at": finished.isoformat(),
-        "transcribe_ms": int((finished - started).total_seconds() * 1000),
-        "source": source,
-        "speaker_name": parse_wav_speaker_slug(path.name),
-    }
-    if wav_start is not None:
-        envelope["wav_start"] = wav_start.isoformat()
-    return envelope
-
-
-def _segment_to_dict(seg) -> dict[str, Any]:
-    out: dict[str, Any] = {"start": seg.start, "end": seg.end, "text": seg.text}
-    if seg.avg_logprob is not None:
-        out["avg_logprob"] = seg.avg_logprob
-    if seg.words is not None:
-        out["words"] = [
-            {"start": w.start, "end": w.end, "word": w.word, "prob": w.prob}
-            for w in seg.words
-        ]
-    if seg.matched_rule is not None:
-        out["matched_rule"] = seg.matched_rule
-    return out
+from .transcribers import load_transcriber
+from .wav_cache import cached_transcribe
 
 # ---------------------------------------------------------------------------
 # Logging — silence the per-second poll spam
@@ -595,34 +544,23 @@ async def api_transcribe(req: Request):
             "— Whisper would hallucinate. Remove or skip this file."
         )
 
-    started = datetime.now(timezone.utc)
     transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=config.USE_MLX)
-    # Caller resolves overrides vs files (A2 policy split — Transcriber is
-    # policy-free).
     initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
     hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
     rules = hallucinations_mod.parse_rules()
 
-    raw = await asyncio.to_thread(
-        transcriber.transcribe,
-        path,
+    cached = await asyncio.to_thread(
+        cached_transcribe, path, transcriber,
         initial_prompt=initial_prompt,
         hotwords=hotwords,
-    )
-    filtered = hallucinations_mod.apply(raw, rules=rules)
-
-    finished = datetime.now(timezone.utc)
-    result_dict = _result_envelope(
-        filtered,
-        path=path,
+        hallucination_rules=rules,
+        force=True,  # explicit per-WAV transcribe always re-runs
         source=source,
-        started=started,
-        finished=finished,
     )
 
-    out_path = path.with_suffix(".json")
-    out_path.write_text(json.dumps(result_dict, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[tapscribe] transcribed {name} ({source}) with {model_name} in {result_dict['transcribe_ms']} ms", flush=True)
+    # Read the sidecar back as a dict to preserve the wire shape callers expect.
+    result_dict = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    print(f"[tapscribe] transcribed {name} ({source}) with {model_name} in {cached.transcribe_ms} ms", flush=True)
     return JSONResponse(result_dict)
 
 
@@ -649,61 +587,18 @@ async def api_transcribe_session(req: Request):
     ):
         raise HTTPException(404, "not found")
 
-    wav_dir = resolve_source_dir(session, source)
-
-    def parse_optional(iso: str | None) -> datetime | None:
-        if not iso:
-            return None
-        s = iso.strip()
-        if not s:
-            return None
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        try:
-            dt = datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except ValueError as e:
-            raise HTTPException(400, f"bad iso timestamp: {iso} ({e})") from e
-
-    from_dt = parse_optional(from_iso)
-    to_dt = parse_optional(to_iso)
-
-    selected: list[tuple[Path, datetime]] = []
-    skipped_bad: list[str] = []
-    skipped_silent: list[str] = []
-    for w in sorted(wav_dir.glob("*.wav")):
-        wav_start = parse_wav_start(w.name)
-        if wav_start is None:
-            continue
-        try:
-            size = w.stat().st_size
-        except OSError:
-            size = 0
-        if size < 64 or wav_duration_s(w) <= 0.0:
-            skipped_bad.append(w.name)
-            continue
-        original_path = config.RECORDINGS_DIR / session / w.name
-        if wav_rms_dbfs(original_path) < config.SILENT_RMS_DBFS_FLOOR:
-            skipped_silent.append(w.name)
-            continue
-        if from_dt and wav_start < from_dt:
-            continue
-        if to_dt and wav_start > to_dt:
-            continue
-        selected.append((w, wav_start))
-
-    if skipped_bad:
-        print(f"[tapscribe] transcribe-session: skipped {len(skipped_bad)} empty/corrupt WAVs", flush=True)
-    if skipped_silent:
-        print(f"[tapscribe] transcribe-session: skipped {len(skipped_silent)} silent WAVs", flush=True)
-
-    if not selected:
+    # Phase 0: pure selection.
+    try:
+        selection = select_session_wavs(
+            session_dir, from_iso=from_iso, to_iso=to_iso, source=source,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not selection.wavs:
         raise HTTPException(404, "no usable WAVs in the given range")
 
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=config.USE_MLX)
     # Caller-resolved overrides — Transcriber is policy-free (A2).
+    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=config.USE_MLX)
     initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
     hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
     rules = hallucinations_mod.parse_rules()
@@ -712,140 +607,41 @@ async def api_transcribe_session(req: Request):
     async with SESSION_PROGRESS_LOCK:
         SESSION_PROGRESS[session] = {
             "current": 0,
-            "total": len(selected),
+            "total": len(selection.wavs),
             "started_at": datetime.now(timezone.utc).isoformat(),
             "model": model_name,
             "status": "running",
         }
 
-    all_segments: list[dict[str, Any]] = []
-    all_suppressed: list[dict[str, Any]] = []
-    started = datetime.now(timezone.utc)
-
     try:
-        for idx, (w, wav_start) in enumerate(selected):
+        # Phase 1: ensure every selected WAV is transcribed (cache-aware).
+        for idx, wav in enumerate(selection.wavs):
             async with SESSION_PROGRESS_LOCK:
                 SESSION_PROGRESS[session]["current"] = idx
-                SESSION_PROGRESS[session]["current_file"] = w.name
+                SESSION_PROGRESS[session]["current_file"] = wav.name
+            await asyncio.to_thread(
+                cached_transcribe, wav, transcriber,
+                initial_prompt=initial_prompt,
+                hotwords=hotwords,
+                hallucination_rules=rules,
+                force=effective_force,
+                source=selection.source,
+            )
 
-            json_path = w.with_suffix(".json")
-            result: dict[str, Any] | None = None
-            if not effective_force and json_path.exists():
-                try:
-                    result = json.loads(json_path.read_text(encoding="utf-8"))
-                    if result.get("model") != model_name:
-                        # Different model previously used — re-transcribe.
-                        result = None
-                except (OSError, ValueError):
-                    result = None
+        # Phase 2: pure read-and-build merge.
+        transcript = merge_session(selection)
+        merged = transcript.to_dict()
 
-            if result is None:
-                wav_started = datetime.now(timezone.utc)
-                raw = await asyncio.to_thread(
-                    transcriber.transcribe,
-                    w,
-                    initial_prompt=initial_prompt,
-                    hotwords=hotwords,
-                )
-                filtered = hallucinations_mod.apply(raw, rules=rules)
-                wav_finished = datetime.now(timezone.utc)
-                result = _result_envelope(
-                    filtered,
-                    path=w,
-                    source=source,
-                    started=wav_started,
-                    finished=wav_finished,
-                )
-                json_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-
-            speaker = result.get("speaker_name") or parse_wav_speaker_slug(w.name) or "<anon>"
-            for seg in result.get("segments", []):
-                abs_start = wav_start + timedelta(seconds=float(seg.get("start", 0.0)))
-                abs_end = wav_start + timedelta(seconds=float(seg.get("end", 0.0)))
-                entry: dict[str, Any] = {
-                    "abs_start": abs_start.isoformat(),
-                    "abs_end": abs_end.isoformat(),
-                    "abs_hms": abs_start.strftime("%H:%M:%S"),
-                    "speaker": speaker,
-                    "text": seg.get("text", ""),
-                    "source_wav": w.name,
-                }
-                if seg.get("avg_logprob") is not None:
-                    ap = float(seg["avg_logprob"])
-                    entry["avg_logprob"] = ap
-                    entry["low_confidence"] = ap < -0.5
-                all_segments.append(entry)
-            for sup in result.get("suppressed_hallucinations", []):
-                sup_start = wav_start + timedelta(seconds=float(sup.get("start", 0.0)))
-                all_suppressed.append({
-                    "abs_start": sup_start.isoformat(),
-                    "abs_hms": sup_start.strftime("%H:%M:%S"),
-                    "speaker": speaker,
-                    "text": sup.get("text", ""),
-                    "matched_rule": sup.get("matched_rule", ""),
-                    "source_wav": w.name,
-                })
-
-        all_segments.sort(key=lambda s: s["abs_start"])
-        speakers = sorted({s["speaker"] for s in all_segments if s["speaker"]})
-
-        sp_idx = {sp: i for i, sp in enumerate(speakers)}
-        speaking_seconds = [0.0] * len(speakers)
-        for s in all_segments:
-            if s["speaker"] not in sp_idx:
-                continue
-            try:
-                a = datetime.fromisoformat(s["abs_start"])
-                b = datetime.fromisoformat(s["abs_end"])
-                speaking_seconds[sp_idx[s["speaker"]]] += max(0.0, (b - a).total_seconds())
-            except (ValueError, KeyError):
-                continue
-        speaking_seconds = [round(x, 2) for x in speaking_seconds]
-
-        low_confidence_count = sum(1 for s in all_segments if s.get("low_confidence"))
-
-        def _plain_line(s: dict) -> str:
-            # Trailing "[uncertain]" marker so a downstream summarizer LLM
-            # treats low-confidence text as a less-reliable signal.
-            line = f"[{s['abs_hms']}] {s['speaker']}: {s['text']}"
-            if s.get("low_confidence"):
-                line += " [uncertain]"
-            return line
-
-        plain_lines = [_plain_line(s) for s in all_segments if s["text"]]
-        plain_text = "\n".join(plain_lines)
-
-        all_suppressed.sort(key=lambda s: s["abs_start"])
-        # Device / transcriber labels now come directly from the Transcriber
-        # instance instead of a tuple-tag peek.
-        merged = {
-            "session": session,
-            "model": model_name,
-            "from_iso": from_iso,
-            "to_iso": to_iso,
-            "source": source,
-            "transcribed_at": datetime.now(timezone.utc).isoformat(),
-            "transcribe_ms": int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
-            "wav_count": len(selected),
-            "skipped_bad_count": len(skipped_bad),
-            "skipped_silent_count": len(skipped_silent),
-            "speakers": speakers,
-            "segments": all_segments,
-            "plain_text": plain_text,
-            "suppressed_count": len(all_suppressed),
-            "suppressed": all_suppressed,
-            "device": transcriber.device,
-            "transcriber": transcriber.name,
-            "speaking_seconds": speaking_seconds,
-            "low_confidence_count": low_confidence_count,
-        }
+        # Surface the run-context model on the merged transcript (the merger
+        # picks up the first non-empty value from cached sidecars, but if the
+        # caller specified a different model and force=True, the merged value
+        # is the explicitly-requested one).
+        if not merged.get("model"):
+            merged["model"] = model_name
 
         out_path = session_dir / "session-transcript.json"
         out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-        (session_dir / "session-transcript.txt").write_text(plain_text, encoding="utf-8")
-
-        async with SESSION_PROGRESS_LOCK:
-            SESSION_PROGRESS.pop(session, None)
+        (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
 
         return JSONResponse(merged)
     except Exception as e:
@@ -853,6 +649,9 @@ async def api_transcribe_session(req: Request):
             if session in SESSION_PROGRESS:
                 SESSION_PROGRESS[session]["status"] = "error: " + str(e)
         raise
+    finally:
+        async with SESSION_PROGRESS_LOCK:
+            SESSION_PROGRESS.pop(session, None)
 
 
 # ---------------------------------------------------------------------------

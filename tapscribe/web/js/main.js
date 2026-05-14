@@ -1122,7 +1122,7 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
     let html = '<div class="dim tiny" style="margin-bottom:6px;"><span style="color:var(--warn);">' + hits.length + "</span> match" + (hits.length === 1 ? "" : "es") + " in " + segs.length + " segments</div>";
     for (const h of hits) {
       html += '<span class="rx-hit">' + escapeHtml(h.text || "");
-      html += '<span class="ctx">[' + escapeHtml(h.abs_hms || "") + "] " + escapeHtml(h.speaker || "") + "</span>";
+      html += '<span class="ctx">[' + escapeHtml(fmtClock(h.abs_start)) + "] " + escapeHtml(h.speaker || "") + "</span>";
       html += "</span>";
     }
     return html;
@@ -1138,13 +1138,14 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
 
   function renderMergedTranscript(t, meta) {
     // Build a single chronological list of (segment | suppressed-segment) so
-    // suppressed lines render inline with strikethrough.
+    // suppressed lines render inline with strikethrough. abs_hms is no
+    // longer on the wire — derive HH:MM:SS from abs_start with fmtClock.
     const items = [];
     for (const seg of t.segments || []) {
       items.push({
         kind: "ok",
         ts: seg.abs_start || "",
-        hms: seg.abs_hms || "",
+        hms: fmtClock(seg.abs_start),
         speaker: seg.speaker || "",
         text: seg.text || "",
         lowConf: !!seg.low_confidence,
@@ -1152,7 +1153,7 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
       });
     }
     for (const sup of t.suppressed || []) {
-      items.push({ kind: "sup", ts: sup.abs_start || "", hms: sup.abs_hms || "", speaker: sup.speaker || "", text: sup.text || "", rule: sup.matched_rule || "" });
+      items.push({ kind: "sup", ts: sup.abs_start || "", hms: fmtClock(sup.abs_start), speaker: sup.speaker || "", text: sup.text || "", rule: sup.matched_rule || "" });
     }
     items.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 
@@ -1172,13 +1173,18 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
     html += '<span class="dim tnum tiny">' + (t.wav_count || 0) + " wavs · " + (t.segments || []).length + " seg · took " + escapeHtml(fmtMs(t.transcribe_ms)) + " · model " + escapeHtml(t.model || "?") + "</span></div>";
     html += '<div class="box-bd" style="padding:10px;">';
 
-    // Speaking-time bar (when we have aggregate data)
-    if (speakers.length && Array.isArray(t.speaking_seconds) && t.speaking_seconds.length === speakers.length) {
-      const totalRaw = t.speaking_seconds.reduce((a, b) => a + b, 0);
+    // Speaking-time bar — speaking_seconds is now a dict keyed by speaker
+    // (replaces the prior parallel arrays). Look up each speaker's seconds
+    // by name; defaults to 0 if the speaker didn't actually contribute.
+    const speakingByName = (t.speaking_seconds && typeof t.speaking_seconds === "object" && !Array.isArray(t.speaking_seconds))
+      ? t.speaking_seconds
+      : {};
+    if (speakers.length && Object.keys(speakingByName).length) {
+      const totalRaw = speakers.reduce((acc, name) => acc + (speakingByName[name] || 0), 0);
       const total = totalRaw || 1;
       html += '<div class="spk-bar">';
       for (let i = 0; i < speakers.length; i++) {
-        const sec = t.speaking_seconds[i];
+        const sec = speakingByName[speakers[i]] || 0;
         const pct = ((sec / total) * 100).toFixed(2);
         const display = aliasOf(speakers[i], aliases);
         html += '<span data-spk="' + (i % 5) + '" style="width:' + pct + '%;" title="' + escapeHtml(display) + " · " + escapeHtml(fmtDur(sec)) + '"></span>';
@@ -1186,7 +1192,7 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
       html += "</div>";
       html += '<div class="spk-legend">';
       for (let i = 0; i < speakers.length; i++) {
-        const sec = t.speaking_seconds[i];
+        const sec = speakingByName[speakers[i]] || 0;
         const pct = totalRaw > 0 ? ((sec / total) * 100).toFixed(0) : "0";
         const display = aliasOf(speakers[i], aliases);
         html += "<span>";
@@ -1201,7 +1207,7 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
     // Meta strip
     html += '<div class="dim tiny" style="margin-top:6px;">';
     html += "merged at <span class=\"fg\">" + escapeHtml(fmtClock(t.transcribed_at)) + "</span>";
-    html += " · via <span class=\"fg\">" + escapeHtml(t.backend || "faster-whisper") + "</span>";
+    html += " · via <span class=\"fg\">" + escapeHtml(t.transcriber || t.backend || "faster-whisper") + "</span>";
     html += " on <span class=\"fg\">" + escapeHtml(t.device || "CPU") + "</span>";
     if (lowCount > 0) {
       html += ' · <span style="color:var(--warn);">' + lowCount + " low-confidence</span>";
@@ -1247,7 +1253,7 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
         html += '<table class="tbl audit-tbl" style="border-top:1px solid var(--hairline-2);"><thead><tr><th>time</th><th>speaker</th><th>text</th><th>matched rule</th><th>from</th></tr></thead><tbody>';
         for (const sup of t.suppressed) {
           html += "<tr>";
-          html += '<td class="muted tnum">' + escapeHtml(sup.abs_hms || "") + "</td>";
+          html += '<td class="muted tnum">' + escapeHtml(fmtClock(sup.abs_start)) + "</td>";
           html += "<td>" + escapeHtml(sup.speaker || "") + "</td>";
           html += '<td class="wrap"><code>' + escapeHtml(sup.text || "") + "</code></td>";
           html += '<td class="muted"><code>' + escapeHtml(sup.matched_rule || "") + "</code></td>";
