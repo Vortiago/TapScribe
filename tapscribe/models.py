@@ -1,19 +1,21 @@
-"""Model routing — pick the right backend (faster-whisper, mlx-whisper,
-Voxtral, NB-Whisper) for a given model name and lazy-load it.
+"""Per-backend model helpers — pure mappings shared by the Transcriber adapters.
 
-Imports of the heavy backends happen inside functions so TapScribe starts
-fast and doesn't pay an import cost for backends the operator never selects.
+The actual loading + caching now lives in `tapscribe.transcribers` via
+the `load_transcriber` factory and per-adapter `.load(model_name)`
+classmethods. This module is reduced to:
+
+  - The MLX HuggingFace repo table + lookup
+  - The NB-Whisper HF repo table + ct2/ download helper
+  - `default_language_for(model_name)` — picks "en" / "no" / None from the name
+  - `is_voxtral(model_name)` and `voxtral_repo(model_name)`
+
+Everything here is import-light; the heavy backends are imported only
+inside their adapter modules in `tapscribe.transcribers.*`.
 """
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from typing import Any
-
-from fastapi import HTTPException
-
-from . import config
 
 # Mirrors whisperlivekit/model_mapping.py exactly — upstream is the source
 # of truth since they've pressure-tested it. Note: `large-v3-turbo` is
@@ -109,91 +111,3 @@ def download_nb_whisper_ct2_dir(model_name: str) -> Path:
     return ct2
 
 
-# ---------------------------------------------------------------------------
-# Lazy-loaded, process-wide model cache
-# ---------------------------------------------------------------------------
-
-_MODELS: dict[str, Any] = {}
-_MODELS_LOCK = asyncio.Lock()
-
-
-async def get_model(name: str):
-    """Lazy-load and cache a transcription model by name.
-
-    Routing:
-      voxtral-*     → HuggingFace transformers (CPU/CUDA)
-      nb-whisper-*  → faster-whisper on the ct2/ weights from NbAiLab
-      anything else → mlx-whisper if config.USE_MLX, else faster-whisper / CTranslate2
-
-    Returns a model "pack" — a tagged tuple consumed by tapscribe.transcribe.
-    """
-    async with _MODELS_LOCK:
-        if name in _MODELS:
-            return _MODELS[name]
-
-        if is_voxtral(name):
-            repo = voxtral_repo(name)
-            print(f"[tapscribe] loading Voxtral model from HuggingFace: {repo}", flush=True)
-            try:
-                import torch  # type: ignore
-                from transformers import (  # type: ignore
-                    AutoProcessor,
-                    VoxtralForConditionalGeneration,
-                )
-            except ImportError as e:
-                raise HTTPException(
-                    500,
-                    "Voxtral requires `transformers` (>= 4.46) and `torch`. "
-                    "They should already be installed transitively, but if "
-                    "`VoxtralForConditionalGeneration` is missing your "
-                    "transformers version is too old. "
-                    f"Original error: {e}",
-                ) from e
-
-            # CPU/float32 is the most reliable; Apple Silicon users can edit
-            # this to use MPS+fp16 for ~5x speedup but operator coverage on
-            # MPS is incomplete for some Voxtral ops.
-            device = "cpu"
-            dtype = torch.float32
-            if torch.cuda.is_available():
-                device = "cuda"
-                dtype = torch.bfloat16
-
-            processor = AutoProcessor.from_pretrained(repo)
-            model = VoxtralForConditionalGeneration.from_pretrained(
-                repo, torch_dtype=dtype
-            ).to(device)
-            model.eval()
-            _MODELS[name] = ("voxtral", processor, model, device, dtype)
-            return _MODELS[name]
-
-        # NB-Whisper: no public MLX-converted weights, so even on Apple
-        # Silicon this routes through faster-whisper on the CT2 files
-        # NbAiLab ships inside the `ct2/` subdirectory of their HF repo.
-        if name.startswith("nb-whisper-"):
-            from faster_whisper import WhisperModel  # type: ignore
-            ct2_dir = download_nb_whisper_ct2_dir(name)
-            print(f"[tapscribe] loading faster-whisper from {ct2_dir}", flush=True)
-            m = WhisperModel(str(ct2_dir), device="cpu", compute_type="int8")
-            _MODELS[name] = ("whisper", m)
-            return _MODELS[name]
-
-        # Whisper path. On Apple Silicon with mlx-whisper installed, route
-        # the batch through MLX for ~3-5x speedup over CPU faster-whisper.
-        # Quality knobs (initial_prompt, word_timestamps, no_speech_threshold,
-        # hallucination_silence_threshold) carry over. mlx-whisper has no
-        # `hotwords` kwarg, so hotwords get folded into initial_prompt in
-        # tapscribe.transcribe.transcribe_mlx_sync.
-        if config.USE_MLX:
-            repo = mlx_whisper_repo(name)
-            print(f"[tapscribe] using mlx-whisper for batch model: {repo}", flush=True)
-            _MODELS[name] = ("whisper_mlx", repo)
-            return _MODELS[name]
-
-        # Fallback: faster-whisper on CPU (Windows, Linux, Intel Mac, or
-        # --no-mlx on Apple Silicon).
-        from faster_whisper import WhisperModel  # type: ignore
-        print(f"[tapscribe] loading faster-whisper model: {name}", flush=True)
-        m = WhisperModel(name, device="cpu", compute_type="int8")
-        _MODELS[name] = ("whisper", m)
-        return _MODELS[name]

@@ -9,11 +9,13 @@ See `config/hallucinations.txt` for the human-editable rules.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from typing import Any
 
 from . import config
 from .text import normalise_for_exact, read_text_file
+from .transcribers.base import TranscriptionResult
 
 
 def parse_rules() -> list[dict[str, Any]]:
@@ -50,6 +52,39 @@ def parse_rules() -> list[dict[str, Any]]:
         else:
             rules.append({"raw": s, "kind": "substr", "matcher": s.lower()})
     return rules
+
+
+def apply(result: TranscriptionResult, *, rules: list[dict[str, Any]]) -> TranscriptionResult:
+    """Pipeline post-processor: split `result.segments` into kept + suppressed
+    according to the supplied rules.
+
+    Returns a new `TranscriptionResult` via `dataclasses.replace`. The kept
+    segments stay in `.segments`; matched segments move to
+    `.suppressed_hallucinations` with their `matched_rule` annotated.
+    Existing `suppressed_hallucinations` entries on the input (e.g. from
+    a chained earlier filter) are preserved by appending the new
+    suppressions on the end.
+    """
+    if not rules:
+        # Still return a fresh instance so the contract "apply produces a
+        # new result" holds — callers can safely treat the return value as
+        # the only valid reference going forward.
+        return dataclasses.replace(result)
+
+    kept: list = []
+    new_suppressed: list = []
+    for seg in result.segments:
+        matched_rule = match(seg.text, rules)
+        if matched_rule is None:
+            kept.append(seg)
+        else:
+            new_suppressed.append(dataclasses.replace(seg, matched_rule=matched_rule))
+
+    return dataclasses.replace(
+        result,
+        segments=tuple(kept),
+        suppressed_hallucinations=tuple(result.suppressed_hallucinations) + tuple(new_suppressed),
+    )
 
 
 def match(text: str, rules: list[dict[str, Any]]) -> str | None:

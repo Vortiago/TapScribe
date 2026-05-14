@@ -41,7 +41,6 @@ from . import auth, config, live
 from . import hallucinations as hallucinations_mod
 from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
-from .models import get_model
 from .sessions import (
     ACTIVE,
     ACTIVE_LOCK,
@@ -62,7 +61,57 @@ from .text import (
     read_prompt,
     safe_name,
 )
-from .transcribe import transcribe_wav_sync
+from .transcribers import TranscriptionResult, load_transcriber
+
+
+def _result_envelope(
+    result: TranscriptionResult,
+    *,
+    path: Path,
+    source: str,
+    started: datetime,
+    finished: datetime,
+) -> dict[str, Any]:
+    """Wrap a `TranscriptionResult` with the per-WAV write-time metadata
+    that the JSON cache + dashboard expect. The result's own fields are
+    flattened into the same dict for backward-compat — until Land 2's
+    `CachedTranscription` formalises this envelope."""
+    wav_start = parse_wav_start(path.name)
+    envelope: dict[str, Any] = {
+        "transcriber": result.transcriber,
+        "device": result.device,
+        "model": result.model,
+        "language": result.language,
+        "language_probability": result.language_probability,
+        "duration": result.duration,
+        "segments": [_segment_to_dict(s) for s in result.segments],
+        "text": result.text,
+        "initial_prompt_used": result.initial_prompt_used,
+        "hotwords_used": result.hotwords_used,
+        "quality_settings": result.quality_settings,
+        "suppressed_hallucinations": [_segment_to_dict(s) for s in result.suppressed_hallucinations],
+        "transcribed_at": finished.isoformat(),
+        "transcribe_ms": int((finished - started).total_seconds() * 1000),
+        "source": source,
+        "speaker_name": parse_wav_speaker_slug(path.name),
+    }
+    if wav_start is not None:
+        envelope["wav_start"] = wav_start.isoformat()
+    return envelope
+
+
+def _segment_to_dict(seg) -> dict[str, Any]:
+    out: dict[str, Any] = {"start": seg.start, "end": seg.end, "text": seg.text}
+    if seg.avg_logprob is not None:
+        out["avg_logprob"] = seg.avg_logprob
+    if seg.words is not None:
+        out["words"] = [
+            {"start": w.start, "end": w.end, "word": w.word, "prob": w.prob}
+            for w in seg.words
+        ]
+    if seg.matched_rule is not None:
+        out["matched_rule"] = seg.matched_rule
+    return out
 
 # ---------------------------------------------------------------------------
 # Logging — silence the per-second poll spam
@@ -547,28 +596,34 @@ async def api_transcribe(req: Request):
         )
 
     started = datetime.now(timezone.utc)
-    model = await get_model(model_name)
-    result = await asyncio.to_thread(
-        transcribe_wav_sync,
-        model,
+    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=config.USE_MLX)
+    # Caller resolves overrides vs files (A2 policy split — Transcriber is
+    # policy-free).
+    initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
+    hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
+    rules = hallucinations_mod.parse_rules()
+
+    raw = await asyncio.to_thread(
+        transcriber.transcribe,
         path,
-        model_name,
-        prompt_override,
-        hotwords_override,
+        initial_prompt=initial_prompt,
+        hotwords=hotwords,
     )
+    filtered = hallucinations_mod.apply(raw, rules=rules)
+
     finished = datetime.now(timezone.utc)
-    result["transcribed_at"] = finished.isoformat()
-    result["transcribe_ms"] = int((finished - started).total_seconds() * 1000)
-    result["source"] = source
-    wav_start = parse_wav_start(path.name)
-    if wav_start is not None:
-        result["wav_start"] = wav_start.isoformat()
-    result["speaker_name"] = parse_wav_speaker_slug(path.name)
+    result_dict = _result_envelope(
+        filtered,
+        path=path,
+        source=source,
+        started=started,
+        finished=finished,
+    )
 
     out_path = path.with_suffix(".json")
-    out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[tapscribe] transcribed {name} ({source}) with {model_name} in {result['transcribe_ms']} ms", flush=True)
-    return JSONResponse(result)
+    out_path.write_text(json.dumps(result_dict, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[tapscribe] transcribed {name} ({source}) with {model_name} in {result_dict['transcribe_ms']} ms", flush=True)
+    return JSONResponse(result_dict)
 
 
 @app.post("/api/transcribe-session")
@@ -647,7 +702,11 @@ async def api_transcribe_session(req: Request):
     if not selected:
         raise HTTPException(404, "no usable WAVs in the given range")
 
-    model = await get_model(model_name)
+    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=config.USE_MLX)
+    # Caller-resolved overrides — Transcriber is policy-free (A2).
+    initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
+    hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
+    rules = hallucinations_mod.parse_rules()
     effective_force = force or bool(prompt_override.strip() or hotwords_override.strip())
 
     async with SESSION_PROGRESS_LOCK:
@@ -681,17 +740,22 @@ async def api_transcribe_session(req: Request):
                     result = None
 
             if result is None:
-                result = await asyncio.to_thread(
-                    transcribe_wav_sync,
-                    model,
+                wav_started = datetime.now(timezone.utc)
+                raw = await asyncio.to_thread(
+                    transcriber.transcribe,
                     w,
-                    model_name,
-                    prompt_override,
-                    hotwords_override,
+                    initial_prompt=initial_prompt,
+                    hotwords=hotwords,
                 )
-                result["wav_start"] = wav_start.isoformat()
-                result["speaker_name"] = parse_wav_speaker_slug(w.name)
-                result["transcribed_at"] = datetime.now(timezone.utc).isoformat()
+                filtered = hallucinations_mod.apply(raw, rules=rules)
+                wav_finished = datetime.now(timezone.utc)
+                result = _result_envelope(
+                    filtered,
+                    path=w,
+                    source=source,
+                    started=wav_started,
+                    finished=wav_finished,
+                )
                 json_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 
             speaker = result.get("speaker_name") or parse_wav_speaker_slug(w.name) or "<anon>"
@@ -752,14 +816,8 @@ async def api_transcribe_session(req: Request):
         plain_text = "\n".join(plain_lines)
 
         all_suppressed.sort(key=lambda s: s["abs_start"])
-        pack_kind = model[0] if isinstance(model, tuple) else ""
-        if pack_kind == "whisper_mlx":
-            merged_device, merged_backend = "Apple Silicon GPU (MLX)", "mlx-whisper"
-        elif pack_kind == "voxtral":
-            merged_device, merged_backend = "CPU (HF transformers; NOT MLX)", "voxtral"
-        else:
-            merged_device, merged_backend = "CPU (CTranslate2; NOT MLX)", "faster-whisper"
-
+        # Device / transcriber labels now come directly from the Transcriber
+        # instance instead of a tuple-tag peek.
         merged = {
             "session": session,
             "model": model_name,
@@ -776,8 +834,8 @@ async def api_transcribe_session(req: Request):
             "plain_text": plain_text,
             "suppressed_count": len(all_suppressed),
             "suppressed": all_suppressed,
-            "device": merged_device,
-            "backend": merged_backend,
+            "device": transcriber.device,
+            "transcriber": transcriber.name,
             "speaking_seconds": speaking_seconds,
             "low_confidence_count": low_confidence_count,
         }

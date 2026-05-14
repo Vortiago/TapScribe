@@ -1,8 +1,20 @@
-"""Tests for the hallucination filter — parser + matcher."""
+"""Tests for the hallucination filter — parser, matcher, and pipeline apply."""
 
 from __future__ import annotations
 
 from tapscribe import hallucinations
+from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
+
+
+def _result_with(segments: tuple[TranscriptionSegment, ...]) -> TranscriptionResult:
+    return TranscriptionResult(
+        transcriber="fake", device="test", model="fake-model",
+        language="en", language_probability=1.0,
+        duration=segments[-1].end if segments else 0.0,
+        text=" ".join(s.text for s in segments),
+        segments=segments,
+        initial_prompt_used="", hotwords_used="", quality_settings={},
+    )
 
 
 def _write_rules(path, content: str) -> None:
@@ -81,3 +93,74 @@ def test_first_match_wins(tmp_config_dir):
 def test_missing_file_returns_no_rules(tmp_config_dir):
     rules = hallucinations.parse_rules()
     assert rules == []
+
+
+# ---------------------------------------------------------------------------
+# hallucinations.apply — pipeline post-processor
+# ---------------------------------------------------------------------------
+
+def test_apply_with_empty_rules_returns_same_segments():
+    seg = TranscriptionSegment(start=0.0, end=1.0, text="hello world")
+    result = _result_with((seg,))
+    out = hallucinations.apply(result, rules=[])
+    assert out.segments == (seg,)
+    assert out.suppressed_hallucinations == ()
+
+
+def test_apply_moves_matching_segment_to_suppressed_with_rule_annotated(tmp_config_dir):
+    (tmp_config_dir / "hallucinations.txt").write_text("amara.org\n", encoding="utf-8")
+    rules = hallucinations.parse_rules()
+    keep = TranscriptionSegment(start=0.0, end=1.0, text="welcome to the meeting")
+    drop = TranscriptionSegment(start=2.0, end=3.0, text="subtitles by amara.org")
+    result = _result_with((keep, drop))
+    out = hallucinations.apply(result, rules=rules)
+    assert out.segments == (keep,)
+    assert len(out.suppressed_hallucinations) == 1
+    sup = out.suppressed_hallucinations[0]
+    assert sup.text == "subtitles by amara.org"
+    assert sup.matched_rule == "amara.org"
+
+
+def test_apply_preserves_segment_order(tmp_config_dir):
+    (tmp_config_dir / "hallucinations.txt").write_text("exact:thank you\n", encoding="utf-8")
+    rules = hallucinations.parse_rules()
+    s1 = TranscriptionSegment(start=0.0, end=1.0, text="first")
+    s2 = TranscriptionSegment(start=1.0, end=2.0, text="thank you")
+    s3 = TranscriptionSegment(start=2.0, end=3.0, text="second")
+    s4 = TranscriptionSegment(start=3.0, end=4.0, text="thank you")
+    result = _result_with((s1, s2, s3, s4))
+    out = hallucinations.apply(result, rules=rules)
+    assert tuple(s.text for s in out.segments) == ("first", "second")
+    assert tuple(s.text for s in out.suppressed_hallucinations) == ("thank you", "thank you")
+
+
+def test_apply_returns_a_new_result_not_mutating_input():
+    seg = TranscriptionSegment(start=0.0, end=1.0, text="hello")
+    result = _result_with((seg,))
+    out = hallucinations.apply(result, rules=[])
+    assert out is not result  # new instance
+    # Original untouched (verified by frozen + identity check above)
+    assert result.segments == (seg,)
+
+
+def test_apply_carries_forward_existing_suppressed_list(tmp_config_dir):
+    """If a result somehow already has suppressed entries (e.g. from a
+    chained earlier filter), apply should append new ones rather than
+    drop the existing."""
+    (tmp_config_dir / "hallucinations.txt").write_text("hit the bell\n", encoding="utf-8")
+    rules = hallucinations.parse_rules()
+    earlier = TranscriptionSegment(start=0.0, end=1.0, text="redacted-by-prior-step", matched_rule="prior")
+    keep = TranscriptionSegment(start=1.0, end=2.0, text="hello there")
+    drop = TranscriptionSegment(start=2.0, end=3.0, text="hit the bell")
+    result = TranscriptionResult(
+        transcriber="fake", device="test", model="fake-model",
+        language="en", language_probability=1.0, duration=3.0,
+        text="hello there hit the bell",
+        segments=(keep, drop),
+        initial_prompt_used="", hotwords_used="", quality_settings={},
+        suppressed_hallucinations=(earlier,),
+    )
+    out = hallucinations.apply(result, rules=rules)
+    assert out.segments == (keep,)
+    assert out.suppressed_hallucinations[0] == earlier  # preserved
+    assert out.suppressed_hallucinations[1].matched_rule == "hit the bell"
