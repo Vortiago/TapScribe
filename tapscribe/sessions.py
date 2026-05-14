@@ -11,11 +11,10 @@ isolated between the two sources.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
@@ -24,18 +23,14 @@ from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
 from .text import parse_wav_speaker_slug, parse_wav_start
 
-# ---------------------------------------------------------------------------
-# Live state: active recording WebSockets
-# ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+    pass
 
-# conn_id → { identity, name, started_at, bytes_received, filename }
-ACTIVE: dict[str, dict[str, Any]] = {}
-ACTIVE_LOCK = asyncio.Lock()
 
-# Per-session progress for the "transcribe whole session" job AND for the
-# strip-silence job. session → { current, total, started_at, model, status }
-SESSION_PROGRESS: dict[str, dict[str, Any]] = {}
-SESSION_PROGRESS_LOCK = asyncio.Lock()
+# Active-WebSockets and in-flight-job tracking now live on the Recorder
+# (`recorder.streams`, `recorder.jobs`). Helpers below remain on this
+# module because they're pure filesystem operations against `session_dir`
+# / `stripped/` — not lifecycle state.
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +139,20 @@ def resolve_source_dir(session: str, source: str) -> Path:
 # Session listing for /api/state + /sessions
 # ---------------------------------------------------------------------------
 
-def gather_sessions() -> list[dict[str, Any]]:
+def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Walk RECORDINGS_DIR and produce the dashboard's session list.
+
+    `current_session` is the running Recorder's session ID — used to flag
+    `is_current` and to synthesise an entry when the current session hasn't
+    materialised on disk yet (lazy folder creation).
+
+    `jobs` is an optional dict of session_id → job_state-dict produced by
+    `recorder.jobs.snapshot()`. When present, the matching entries on each
+    session get a `progress` field.
+    """
     out: list[dict[str, Any]] = []
     seen_names: set[str] = set()
+    jobs = jobs or {}
     for sd in sorted(config.RECORDINGS_DIR.glob("*"), reverse=True):
         if not sd.is_dir():
             continue
@@ -211,7 +217,7 @@ def gather_sessions() -> list[dict[str, Any]]:
             except (OSError, ValueError):
                 session_transcript = None
 
-        progress = SESSION_PROGRESS.get(sd.name)
+        progress = jobs.get(sd.name)
         meta = read_session_meta(sd.name)
         stripped = stripped_stats(sd.name)
 
@@ -219,7 +225,7 @@ def gather_sessions() -> list[dict[str, Any]]:
             "session": sd.name,
             "wav_count": len(wavs),
             "files": wavs,
-            "is_current": sd.name == config.SESSION_START,
+            "is_current": sd.name == current_session,
             "earliest_iso": earliest.isoformat() if earliest else None,
             "latest_iso": latest.isoformat() if latest else None,
             "session_transcript": session_transcript,
@@ -231,9 +237,9 @@ def gather_sessions() -> list[dict[str, Any]]:
     # If the current session folder hasn't materialised on disk yet (lazy-
     # creation), the loop above missed it. Surface a synthetic entry so the
     # dashboard's sidebar always shows the current session as an anchor.
-    if config.SESSION_START not in seen_names:
+    if current_session not in seen_names:
         out.insert(0, {
-            "session": config.SESSION_START,
+            "session": current_session,
             "wav_count": 0,
             "files": [],
             "is_current": True,
@@ -241,7 +247,7 @@ def gather_sessions() -> list[dict[str, Any]]:
             "latest_iso": None,
             "session_transcript": None,
             "progress": None,
-            "session_meta": read_session_meta(config.SESSION_START),
+            "session_meta": read_session_meta(current_session),
             "stripped": None,
         })
     return out

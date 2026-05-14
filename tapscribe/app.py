@@ -1,7 +1,11 @@
 """FastAPI app + HTTP / WebSocket routes.
 
-This is the orchestration layer: every route is thin and delegates to the
-focused helper modules. The big-picture flow:
+Routes receive the running `Recorder` via `Depends(get_recorder)`, which
+reads from `request.app.state.recorder`. `__main__.py` constructs the
+Recorder and attaches it before uvicorn starts; tests build their own
+and override `app.state.recorder` for isolation.
+
+The big-picture route map:
 
   GET  /                        — dashboard HTML shell
   GET  /api/state               — sessions + active streams + live channel
@@ -9,7 +13,7 @@ focused helper modules. The big-picture flow:
   POST /api/transcribe-session  — merge per-WAV transcripts into a session
   POST /api/live/start          — start / restart whisperlivekit-server
   POST /api/live/stop           — stop whisperlivekit-server
-  POST /api/live-transcript     — bridge extension forwards settled lines here
+  POST /api/live-transcript     — bridge forwards settled lines here
   WS   /record?identity&name    — one WAV per connection
 """
 
@@ -20,13 +24,14 @@ import json
 import logging
 import shutil
 import wave
-from collections import deque
 from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from fastapi import (
+    Depends,
     FastAPI,
     HTTPException,
     Request,
@@ -36,16 +41,13 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from . import auth, config, live
+from . import auth, config
 from . import hallucinations as hallucinations_mod
 from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
+from .recorder import ActiveStream, JobState, Recorder
 from .session_merge import merge_session, select_session_wavs
 from .sessions import (
-    ACTIVE,
-    ACTIVE_LOCK,
-    SESSION_PROGRESS,
-    SESSION_PROGRESS_LOCK,
     gather_sessions,
     read_session_meta,
     resolve_source_dir,
@@ -53,14 +55,23 @@ from .sessions import (
     stripped_dir,
     write_session_meta,
 )
-from .text import (
-    clean_meta_tokens,
-    read_hotwords,
-    read_prompt,
-    safe_name,
-)
+from .text import clean_meta_tokens, read_hotwords, read_prompt, safe_name
 from .transcribers import load_transcriber
 from .wav_cache import cached_transcribe
+
+# ---------------------------------------------------------------------------
+# Dependency injection — every route reads the Recorder via Depends
+# ---------------------------------------------------------------------------
+
+def get_recorder(request: Request) -> Recorder:
+    """FastAPI dependency that returns the singleton Recorder attached to
+    the app instance. Tests override this via `app.dependency_overrides[
+    get_recorder] = lambda: my_recorder` for per-test isolation."""
+    recorder = getattr(request.app.state, "recorder", None)
+    if recorder is None:
+        raise HTTPException(503, "Recorder not attached to app.state")
+    return recorder
+
 
 # ---------------------------------------------------------------------------
 # Logging — silence the per-second poll spam
@@ -86,21 +97,23 @@ class _SuppressPollAccess(logging.Filter):
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
-async def _lifespan(_app: FastAPI):
+async def _lifespan(app: FastAPI):
     # Install poll-spam filter on the uvicorn access logger. We do this in
     # the lifespan (not module load) because uvicorn replaces the access
     # logger's handlers via dictConfig() during its own boot — anything we
     # add before uvicorn.run() would be dropped.
     logging.getLogger("uvicorn.access").addFilter(_SuppressPollAccess())
 
-    if config.AUTO_START_LIVE:
-        ok, msg = live.start_live_proc()
+    recorder: Recorder | None = getattr(app.state, "recorder", None)
+    if recorder is not None and config.AUTO_START_LIVE:
+        ok, msg = recorder.live.start()
         if not ok:
             print(f"[tapscribe] live auto-start skipped: {msg}", flush=True)
     try:
         yield
     finally:
-        live.stop_live_proc(timeout=3.0)
+        if recorder is not None:
+            recorder.live.stop(timeout=3.0)
 
 
 app = FastAPI(title="TapScribe recorder", lifespan=_lifespan)
@@ -113,37 +126,32 @@ app.add_middleware(
 app.middleware("http")(auth.basic_auth_middleware)
 
 
-# Live transcript feed (chronological, capped). Pushed to by the bridge
-# extension via POST /api/live-transcript; surfaced by /api/state.
-LIVE_FEED: deque[dict[str, Any]] = deque(maxlen=200)
-
-
 # ---------------------------------------------------------------------------
 # Health + simple listings
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-async def health():
-    return {"status": "ok", "session_dir": str(config.SESSION_DIR)}
+async def health(recorder: Recorder = Depends(get_recorder)):
+    return {"status": "ok", "session_dir": str(recorder.session_dir)}
 
 
 @app.get("/sessions")
-async def list_sessions_simple():
+async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
     """Legacy simple listing."""
-    return gather_sessions()
+    return gather_sessions(
+        current_session=recorder.session_start,
+        jobs={k: asdict(v) for k, v in recorder.jobs.snapshot().items()},
+    )
 
 
 @app.post("/api/new-session")
-async def api_new_session():
-    """Rotate the current session.
-
-    Every recorder WebSocket captures config.SESSION_DIR at open time as a
-    local variable, so in-flight recordings keep writing to their original
-    folder. Only WebSockets opened AFTER this call land in the new folder.
-    """
-    prev, current = config.rotate_session()
-    print(f"[tapscribe] new session pending: {config.SESSION_DIR} (previous: {prev})", flush=True)
-    return {"ok": True, "previous": prev, "current": current, "path": str(config.SESSION_DIR)}
+async def api_new_session(recorder: Recorder = Depends(get_recorder)):
+    """Rotate the current session. Already-open /record WebSockets keep
+    writing to their original folder (captured at WS open); only new
+    opens land in the new folder."""
+    prev, current = recorder.rotate_session()
+    print(f"[tapscribe] new session pending: {recorder.session_dir} (previous: {prev})", flush=True)
+    return {"ok": True, "previous": prev, "current": current, "path": str(recorder.session_dir)}
 
 
 # ---------------------------------------------------------------------------
@@ -151,21 +159,24 @@ async def api_new_session():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/state")
-async def api_state():
-    async with ACTIVE_LOCK:
-        active = list(ACTIVE.values())
+async def api_state(recorder: Recorder = Depends(get_recorder)):
+    active_streams = await recorder.streams.snapshot()
+    jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
     prompt = read_prompt()
     hotwords = read_hotwords()
     halluc_rules = hallucinations_mod.parse_rules()
     return {
-        "current_session": config.SESSION_START,
-        "active": active,
-        "sessions": gather_sessions(),
-        "live_feed": list(LIVE_FEED),
-        "live_info": dict(live.LIVE_INFO),
-        "live_log": list(live.LIVE_LOG)[-30:],
-        "mlx_available": config.USE_MLX,
-        "recording_enabled": config.RECORDING_ENABLED,
+        "current_session": recorder.session_start,
+        "active": [asdict(s) for s in active_streams],
+        "sessions": gather_sessions(
+            current_session=recorder.session_start,
+            jobs=jobs_snapshot,
+        ),
+        "live_feed": recorder.transcripts.snapshot(),
+        "live_info": dict(recorder.live.info),
+        "live_log": list(recorder.live.log)[-30:],
+        "mlx_available": recorder.use_mlx,
+        "recording_enabled": recorder.recording_enabled,
         "prompt": {
             "path": str(config.PROMPT_FILE),
             "content": prompt,
@@ -189,16 +200,13 @@ async def api_state():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/live/start")
-async def api_live_start(req: Request):
+async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder)):
     """Start the live channel (whisperlivekit-server). If already running
-    with a different model/language, restarts it. If already running with
-    the same config, no-op. Body (all optional): {"model": str, "language":
-    str, "vac": bool, "confidence_validation": bool}.
+    with a different model/language, restarts it; if already running with
+    the same config, no-op.
 
-    stop_live_proc and start_live_proc are synchronous and can block for
-    several seconds (subprocess wait, model download, etc.). Running them
-    on the event-loop thread would freeze /api/state polling — so we
-    offload to a worker thread.
+    Spawn/stop are synchronous and can block for several seconds — so we
+    offload to a worker thread to keep /api/state polling responsive.
     """
     try:
         body = await req.json()
@@ -208,40 +216,44 @@ async def api_live_start(req: Request):
     language = (body.get("language") or "").strip() or None
     vac = body.get("vac")
     conf = body.get("confidence_validation")
-    if vac is not None:
-        live.LIVE_CONFIG["vac"] = bool(vac)
-    if conf is not None:
-        live.LIVE_CONFIG["confidence_validation"] = bool(conf)
 
-    if live.live_running():
-        same_model = (not model) or model == live.LIVE_CONFIG.get("model")
-        same_lang = (not language) or language == live.LIVE_CONFIG.get("language")
+    # vac/confidence_validation are LiveConfig fields — replace wholesale.
+    if vac is not None or conf is not None:
+        from dataclasses import replace as _replace
+        recorder.live.config = _replace(
+            recorder.live.config,
+            vac=bool(vac) if vac is not None else recorder.live.config.vac,
+            confidence_validation=bool(conf) if conf is not None else recorder.live.config.confidence_validation,
+        )
+
+    if recorder.live.running():
+        same_model = (not model) or model == recorder.live.config.model
+        same_lang = (not language) or language == recorder.live.config.language
         # vac/confidence_validation changes always require a restart since
         # they're CLI flags on the spawned child.
         same_quality = vac is None and conf is None
         if same_model and same_lang and same_quality:
-            return {"ok": True, "msg": "already running with requested config", "state": live.LIVE_INFO["state"]}
-        await asyncio.to_thread(live.stop_live_proc)
+            return {"ok": True, "msg": "already running with requested config", "state": recorder.live.info["state"]}
+        await asyncio.to_thread(recorder.live.stop)
 
-    ok, msg = await asyncio.to_thread(live.start_live_proc, model, language)
+    ok, msg = await asyncio.to_thread(recorder.live.start, model=model, language=language)
     if not ok:
         raise HTTPException(500, msg)
-    return {"ok": True, "msg": msg, "state": live.LIVE_INFO["state"]}
+    return {"ok": True, "msg": msg, "state": recorder.live.info["state"]}
 
 
 @app.post("/api/live/stop")
-async def api_live_stop():
-    ok, msg = await asyncio.to_thread(live.stop_live_proc)
+async def api_live_stop(recorder: Recorder = Depends(get_recorder)):
+    ok, msg = await asyncio.to_thread(recorder.live.stop)
     if not ok:
         raise HTTPException(500, msg)
-    return {"ok": True, "msg": msg, "state": live.LIVE_INFO["state"]}
+    return {"ok": True, "msg": msg, "state": recorder.live.info["state"]}
 
 
 @app.post("/api/live-transcript")
-async def api_live_transcript(req: Request):
-    """Receive a settled transcript line from the bridge extension and
-    append it to the in-memory live feed. Best-effort; failures are
-    non-fatal for the caller."""
+async def api_live_transcript(req: Request, recorder: Recorder = Depends(get_recorder)):
+    """Receive a settled transcript line from the bridge and append it to
+    the in-memory live feed. Best-effort; failures are non-fatal."""
     try:
         body = await req.json()
     except Exception as e:
@@ -258,15 +270,15 @@ async def api_live_transcript(req: Request):
         "identity": body.get("identity") or "",
         "name": body.get("name") or "",
         "text": cleaned,
-        "session": body.get("session") or config.SESSION_START,
+        "session": body.get("session") or recorder.session_start,
     }
-    LIVE_FEED.append(entry)
+    recorder.transcripts.append(entry)
     return {"ok": True}
 
 
 @app.delete("/api/live-transcript")
-async def api_live_transcript_clear():
-    LIVE_FEED.clear()
+async def api_live_transcript_clear(recorder: Recorder = Depends(get_recorder)):
+    recorder.transcripts.clear()
     return {"ok": True}
 
 
@@ -275,12 +287,12 @@ async def api_live_transcript_clear():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/recording/toggle")
-async def api_recording_toggle(req: Request):
-    """Flip config.RECORDING_ENABLED. Optional body {"enabled": bool} to set
-    explicitly; without a body, just toggles. New /record WSes are accepted
-    then immediately closed when disabled — already-open WAVs continue to
-    record their current utterance, which finalises cleanly on the
-    extension's normal trackMuted close."""
+async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_recorder)):
+    """Flip recorder.recording_enabled. Optional body {"enabled": bool} to
+    set explicitly; without a body, just toggles. New /record WSes are
+    accepted then immediately closed when disabled — already-open WAVs
+    continue to record their current utterance, which finalises cleanly
+    on the bridge's normal trackMuted close."""
     body: dict[str, Any] = {}
     try:
         parsed = await req.json()
@@ -289,11 +301,11 @@ async def api_recording_toggle(req: Request):
     except Exception:
         pass
     if "enabled" in body:
-        config.RECORDING_ENABLED = bool(body["enabled"])
+        enabled = recorder.toggle_recording(enabled=bool(body["enabled"]))
     else:
-        config.RECORDING_ENABLED = not config.RECORDING_ENABLED
-    print(f"[tapscribe] recording {'enabled' if config.RECORDING_ENABLED else 'paused'}", flush=True)
-    return {"ok": True, "enabled": config.RECORDING_ENABLED}
+        enabled = recorder.toggle_recording()
+    print(f"[tapscribe] recording {'enabled' if enabled else 'paused'}", flush=True)
+    return {"ok": True, "enabled": enabled}
 
 
 # ---------------------------------------------------------------------------
@@ -301,15 +313,15 @@ async def api_recording_toggle(req: Request):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/sessions/prune-empty")
-async def api_sessions_prune_empty():
-    """Delete every session folder that has zero WAVs, no merged transcript,
-    and no operator-set label. Skips the CURRENT session. Idempotent."""
+async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
+    """Delete every session folder that has zero WAVs, no merged
+    transcript, and no operator-set label. Skips the CURRENT session."""
     pruned: list[str] = []
     failed: list[dict[str, str]] = []
     for sd in config.RECORDINGS_DIR.glob("*"):
         if not sd.is_dir():
             continue
-        if sd.name == config.SESSION_START:
+        if sd.name == recorder.session_start:
             continue
         if any(sd.glob("*.wav")):
             continue
@@ -328,11 +340,11 @@ async def api_sessions_prune_empty():
 
 
 @app.post("/api/sessions/{session}/strip-silence")
-async def api_session_strip_silence(session: str, req: Request):
+async def api_session_strip_silence(
+    session: str, req: Request, recorder: Recorder = Depends(get_recorder),
+):
     """Non-destructively strip silence from every WAV in <session>/. Writes
-    cleaned copies to <session>/stripped/ (originals untouched). Re-running
-    overwrites the stripped/ folder so it's idempotent under different
-    detector parameters."""
+    cleaned copies to <session>/stripped/ (originals untouched)."""
     session_dir = config.RECORDINGS_DIR / session
     if not session_dir.is_dir():
         raise HTTPException(404, "session not found")
@@ -355,19 +367,13 @@ async def api_session_strip_silence(session: str, req: Request):
     if not originals:
         raise HTTPException(404, "no WAVs in this session to strip")
 
-    # Mutual exclusion against concurrent transcribe-session AND concurrent
-    # strip: both contend over <session>/stripped/ and the per-WAV JSON
-    # cache. We claim a sentinel under SESSION_PROGRESS_LOCK so a transcribe
-    # that starts between our check-and-go refuses on the same key.
-    async with SESSION_PROGRESS_LOCK:
-        if session in SESSION_PROGRESS:
-            raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
-        SESSION_PROGRESS[session] = {
-            "current": 0,
-            "total": len(originals),
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "status": "stripping",
-        }
+    # JobTracker.claim() encapsulates the "one job per session" rule.
+    claimed = await recorder.jobs.claim(JobState(
+        session=session, kind="strip", current=0, total=len(originals),
+        started_at=datetime.now(timezone.utc), status="stripping",
+    ))
+    if not claimed:
+        raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
 
     try:
         out_dir = stripped_dir(session)
@@ -392,8 +398,7 @@ async def api_session_strip_silence(session: str, req: Request):
         results = await asyncio.to_thread(_run)
         finished = datetime.now(timezone.utc)
     finally:
-        async with SESSION_PROGRESS_LOCK:
-            SESSION_PROGRESS.pop(session, None)
+        await recorder.jobs.release(session)
 
     written = sum(1 for r in results if r.get("written"))
     in_secs = sum(r.get("in_seconds", 0.0) for r in results)
@@ -422,9 +427,8 @@ async def api_session_strip_silence(session: str, req: Request):
 
 
 @app.delete("/api/sessions/{session}/stripped")
-async def api_session_stripped_delete(session: str):
-    """Remove a session's stripped/ folder so it can be regenerated. The
-    originals are never touched."""
+async def api_session_stripped_delete(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """Remove a session's stripped/ folder so it can be regenerated."""
     session_dir = config.RECORDINGS_DIR / session
     if not session_dir.is_dir():
         raise HTTPException(404, "session not found")
@@ -442,9 +446,9 @@ async def api_session_stripped_delete(session: str):
 
 
 @app.delete("/api/sessions/{session}")
-async def api_session_delete(session: str):
+async def api_session_delete(session: str, recorder: Recorder = Depends(get_recorder)):
     """Recursively delete a recordings folder. Refuses the CURRENT session."""
-    if session == config.SESSION_START:
+    if session == recorder.session_start:
         raise HTTPException(409, "cannot delete the current session — rotate to a new one first")
     session_dir = config.RECORDINGS_DIR / session
     if not session_dir.is_dir():
@@ -455,14 +459,13 @@ async def api_session_delete(session: str):
         shutil.rmtree(session_dir)
     except OSError as e:
         raise HTTPException(500, f"delete failed: {e}") from e
-    async with SESSION_PROGRESS_LOCK:
-        SESSION_PROGRESS.pop(session, None)
+    await recorder.jobs.release(session)
     print(f"[tapscribe] deleted session: {session_dir}", flush=True)
     return {"ok": True, "deleted": session}
 
 
 @app.get("/api/session-meta/{session}")
-async def api_session_meta_get(session: str):
+async def api_session_meta_get(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
     session_dir = config.RECORDINGS_DIR / session
     if not session_dir.is_dir():
         raise HTTPException(404, "session not found")
@@ -472,7 +475,7 @@ async def api_session_meta_get(session: str):
 
 
 @app.put("/api/session-meta/{session}")
-async def api_session_meta_put(session: str, req: Request):
+async def api_session_meta_put(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
     session_dir = config.RECORDINGS_DIR / session
     if not session_dir.is_dir():
         raise HTTPException(404, "session not found")
@@ -509,7 +512,7 @@ async def get_wav(session: str, name: str, source: str = "original"):
 
 
 @app.post("/api/transcribe")
-async def api_transcribe(req: Request):
+async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await req.json()
     session = body.get("session") or ""
     name = body.get("name") or ""
@@ -532,9 +535,6 @@ async def api_transcribe(req: Request):
     if size < 64 or wav_duration_s(path) <= 0.0:
         raise HTTPException(422, "empty or unreadable WAV (size=" + str(size) + " bytes)")
     # Silence detection always reads the ORIGINAL, not the per-source file.
-    # When source=stripped, the stripped sibling's RMS is misleadingly high
-    # — silero may have false-positive'd on a brief noise burst, and that
-    # tiny region is now the entire stripped audio.
     original_path = config.RECORDINGS_DIR / session / name
     rms_dbfs = wav_rms_dbfs(original_path)
     if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
@@ -544,7 +544,7 @@ async def api_transcribe(req: Request):
             "— Whisper would hallucinate. Remove or skip this file."
         )
 
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=config.USE_MLX)
+    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=recorder.use_mlx)
     initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
     hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
     rules = hallucinations_mod.parse_rules()
@@ -565,7 +565,7 @@ async def api_transcribe(req: Request):
 
 
 @app.post("/api/transcribe-session")
-async def api_transcribe_session(req: Request):
+async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await req.json()
     session = body.get("session") or ""
     model_name = body.get("model") or "small.en"
@@ -597,28 +597,23 @@ async def api_transcribe_session(req: Request):
     if not selection.wavs:
         raise HTTPException(404, "no usable WAVs in the given range")
 
-    # Caller-resolved overrides — Transcriber is policy-free (A2).
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=config.USE_MLX)
+    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=recorder.use_mlx)
     initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
     hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
     rules = hallucinations_mod.parse_rules()
     effective_force = force or bool(prompt_override.strip() or hotwords_override.strip())
 
-    async with SESSION_PROGRESS_LOCK:
-        SESSION_PROGRESS[session] = {
-            "current": 0,
-            "total": len(selection.wavs),
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "model": model_name,
-            "status": "running",
-        }
+    claimed = await recorder.jobs.claim(JobState(
+        session=session, kind="transcribe", current=0, total=len(selection.wavs),
+        started_at=datetime.now(timezone.utc), model=model_name, status="running",
+    ))
+    if not claimed:
+        raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
 
     try:
         # Phase 1: ensure every selected WAV is transcribed (cache-aware).
         for idx, wav in enumerate(selection.wavs):
-            async with SESSION_PROGRESS_LOCK:
-                SESSION_PROGRESS[session]["current"] = idx
-                SESSION_PROGRESS[session]["current_file"] = wav.name
+            await recorder.jobs.update(session, current=idx, current_file=wav.name)
             await asyncio.to_thread(
                 cached_transcribe, wav, transcriber,
                 initial_prompt=initial_prompt,
@@ -631,11 +626,6 @@ async def api_transcribe_session(req: Request):
         # Phase 2: pure read-and-build merge.
         transcript = merge_session(selection)
         merged = transcript.to_dict()
-
-        # Surface the run-context model on the merged transcript (the merger
-        # picks up the first non-empty value from cached sidecars, but if the
-        # caller specified a different model and force=True, the merged value
-        # is the explicitly-requested one).
         if not merged.get("model"):
             merged["model"] = model_name
 
@@ -645,13 +635,10 @@ async def api_transcribe_session(req: Request):
 
         return JSONResponse(merged)
     except Exception as e:
-        async with SESSION_PROGRESS_LOCK:
-            if session in SESSION_PROGRESS:
-                SESSION_PROGRESS[session]["status"] = "error: " + str(e)
+        await recorder.jobs.update(session, status="error: " + str(e))
         raise
     finally:
-        async with SESSION_PROGRESS_LOCK:
-            SESSION_PROGRESS.pop(session, None)
+        await recorder.jobs.release(session)
 
 
 # ---------------------------------------------------------------------------
@@ -660,13 +647,19 @@ async def api_transcribe_session(req: Request):
 
 @app.websocket("/record")
 async def record(ws: WebSocket):
+    """One WAV per WebSocket connection. The Recorder is fetched off the
+    app instance directly — WebSockets don't have Depends() injection."""
+    recorder: Recorder | None = getattr(ws.app.state, "recorder", None)
     await ws.accept()
+    if recorder is None:
+        await ws.close(code=1011, reason="recorder not ready")
+        return
     # Honor the operator's pause toggle: accept the WS so the bridge knows
-    # we heard the open, then close cleanly. The bridge's framework drops
-    # frames silently rather than spinning a reconnect loop.
-    if not config.RECORDING_ENABLED:
+    # we heard the open, then close cleanly.
+    if not recorder.recording_enabled:
         await ws.close(code=1000, reason="recording paused by operator")
         return
+
     identity = ws.query_params.get("identity", "unknown")
     name = ws.query_params.get("name", "")
     started = datetime.now(timezone.utc)
@@ -676,21 +669,17 @@ async def record(ws: WebSocket):
     short_id = safe_name(identity)[:10] or "unknown"
     name_slug = safe_name(name) or "anon"
     fname = f"{started_iso}_{name_slug}_{short_id}_{utt}.wav"
-    # Lazy-create the session folder so empty/unused sessions never appear
-    # on disk. Safe to call every WS open.
-    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    fpath = config.SESSION_DIR / fname
+    # Capture the session dir at WS open — rotate_session() while a WAV is
+    # being recorded must NOT redirect it to the new folder.
+    session_dir = recorder.session_dir
+    session_dir.mkdir(parents=True, exist_ok=True)
+    fpath = session_dir / fname
 
     conn_id = utt + "-" + short_id
-    async with ACTIVE_LOCK:
-        ACTIVE[conn_id] = {
-            "conn_id": conn_id,
-            "identity": identity,
-            "name": name,
-            "started_at": started.isoformat(),
-            "filename": fname,
-            "bytes_received": 0,
-        }
+    await recorder.streams.register(ActiveStream(
+        conn_id=conn_id, identity=identity, name=name,
+        filename=fname, started_at=started, bytes_received=0,
+    ))
 
     print(f"[tapscribe] WS open -> {fname}", flush=True)
 
@@ -712,17 +701,14 @@ async def record(ws: WebSocket):
                 buf = msg["bytes"]
                 wf.writeframes(buf)
                 bytes_received += len(buf)
-                async with ACTIVE_LOCK:
-                    if conn_id in ACTIVE:
-                        ACTIVE[conn_id]["bytes_received"] = bytes_received
+                await recorder.streams.update_bytes(conn_id, bytes_received)
     except WebSocketDisconnect:
         pass
     except Exception as e:  # pragma: no cover
         print(f"[tapscribe] WS error for {fname}: {e}", flush=True)
     finally:
         wf.close()
-        async with ACTIVE_LOCK:
-            ACTIVE.pop(conn_id, None)
+        await recorder.streams.remove(conn_id)
         if bytes_received == 0:
             with suppress(OSError):
                 fpath.unlink()
@@ -770,8 +756,7 @@ async def dashboard_css():
 
 @app.get("/web/js/{name}")
 async def dashboard_js_module(name: str):
-    """Serve dashboard JS modules. Restricted to .js files under web/js/ to
-    keep this from doubling as a generic static-file route."""
+    """Serve dashboard JS modules. Restricted to .js files under web/js/."""
     if not name.endswith(".js") or "/" in name or "\\" in name:
         raise HTTPException(404, "not found")
     path = DASHBOARD_JS_DIR / name

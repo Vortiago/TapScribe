@@ -1,8 +1,11 @@
-"""WhisperLiveKit child-process management.
+"""WhisperLiveKit child-process management — `LiveChannel` class.
 
-The recorder owns a single `whisperlivekit-server` child process and exposes
-start / stop / restart controls to the dashboard. State is kept in module-
-level dicts so /api/state can render it without any extra IPC.
+The Recorder holds one `LiveChannel` instance. The class encapsulates
+the subprocess.Popen handle, the threading lock guarding spawn/kill,
+the log-pump tail, and the human-readable state dict the dashboard
+displays. `build_live_cmd` is the pure argv builder (testable as data);
+the class wires the surrounding orchestration (find the exe, download
+NB-Whisper weights, spawn, drain stdout, update INFO).
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -18,7 +22,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import config
 from .models import download_nb_whisper_ct2_dir
 from .text import read_prompt
 
@@ -28,9 +31,8 @@ class LiveConfig:
     """Immutable configuration for one whisperlivekit-server invocation.
 
     Mutation of the live channel's config goes through replacing the
-    whole value, not poking at fields — the runtime swap happens in the
-    surrounding `LIVE_CONFIG` dict for now (Land 4 will move this onto
-    the Recorder context).
+    whole value, not poking at fields — the LiveChannel.config attribute
+    is swapped wholesale by `start()` when called with overrides.
     """
     model: str
     language: str
@@ -58,8 +60,8 @@ def build_live_cmd(
     """Build the whisperlivekit-server argv for the given config.
 
     Pure — no subprocess spawn, no HuggingFace download, no log pump.
-    Callers (start_live_proc below) handle that orchestration; this
-    function exists so the CLI surface is testable as data.
+    Callers handle that orchestration; this function exists so the CLI
+    surface is testable as data.
 
     NB-Whisper routing: WhisperLiveKit's `--model` flag only accepts
     names from its built-in table. NB-Whisper isn't there, so the
@@ -103,249 +105,237 @@ def build_live_cmd(
 
     return cmd
 
+
 # ---------------------------------------------------------------------------
-# Live-channel info (mirrored into the dashboard via /api/state)
+# LiveChannel — owns the whisperlivekit-server child + its supervision
 # ---------------------------------------------------------------------------
 
-LIVE_INFO: dict[str, str] = {
-    "model": "",
-    "backend": "",       # "mlx-whisper" or "faster-whisper" or ""
-    "device": "",        # human-readable
-    "language": "",
-    "host": "",
-    "port": "",
-    "state": "stopped",  # stopped | starting | running | error
-    "last_error": "",
-    "pid": "",
-    "started_at": "",
-    "vac": "",           # "on" / "off"
-    "confidence_validation": "",  # "on" / "off"
-}
-
-# Mutable config; updated by --live-* CLI args at boot and by /api/live/start
-# payloads at runtime. _start_live_proc() reads from here when building argv.
-#
-# Quality knobs:
-#   vac=True (default)
-#     Silero-VAD gates Whisper at the audio layer — inference only runs
-#     while speech is detected, eliminating "[BLANK_AUDIO]" / "Thanks for
-#     watching" hallucinations Whisper otherwise emits on silence.
-#     WhisperLiveKit defaults VAC to ON; the only relevant CLI flag is
-#     --no-vac.
-#   confidence_validation=True
-#     Whisper commits a token only when its avg_logprob clears a confidence
-#     bar; uncertain tokens are held back instead of flickering on screen.
-#     Reduces visual noise and near-silence hallucinations VAC missed.
-LIVE_CONFIG: dict[str, Any] = {
-    "model": "tiny.en",
-    "language": "en",
-    "host": "localhost",
-    "port": 8000,
-    "vac": True,
-    "confidence_validation": True,
-}
-
-# Held while spawning/killing the child so two concurrent /api/live/* calls
-# can't race. A regular threading lock is sufficient.
-LIVE_LOCK = threading.Lock()
-LIVE_PROC: subprocess.Popen | None = None
-LIVE_LOG: deque[str] = deque(maxlen=200)
+def _initial_info() -> dict[str, str]:
+    return {
+        "model": "",
+        "transcriber": "",   # "mlx-whisper" or "faster-whisper" or ""
+        "device": "",        # human-readable
+        "language": "",
+        "host": "",
+        "port": "",
+        "state": "stopped",  # stopped | starting | running | error
+        "last_error": "",
+        "pid": "",
+        "started_at": "",
+        "vac": "",           # "on" / "off"
+        "confidence_validation": "",  # "on" / "off"
+    }
 
 
-def live_running() -> bool:
-    return LIVE_PROC is not None and LIVE_PROC.poll() is None
+class LiveChannel:
+    """Owns one supervised whisperlivekit-server child process.
 
+    `info` is a dict mirrored into `/api/state` so the dashboard can
+    render the live-channel panel. `log` is a 200-entry deque of the
+    child's stdout tail. `config` holds the current LiveConfig; replaced
+    wholesale via `start(model=..., language=...)`.
+    """
 
-def start_live_proc(
-    model: str | None = None,
-    language: str | None = None,
-) -> tuple[bool, str]:
-    """Spawn whisperlivekit-server with the current (optionally overridden)
-    config. Returns (ok, message). Does NOT stop a running process first —
-    /api/live/start handles 'apply' as stop+start."""
-    global LIVE_PROC
-    with LIVE_LOCK:
-        if live_running():
-            return False, "already running"
+    def __init__(self, *, config: LiveConfig, use_mlx: bool):
+        self.config = config
+        self.use_mlx = use_mlx
+        self.info: dict[str, str] = _initial_info()
+        self.log: deque[str] = deque(maxlen=200)
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        # Seed info with the boot-time config so the dashboard renders
+        # something useful before the child has started.
+        self.info["model"] = config.model
+        self.info["language"] = config.language
+        self.info["host"] = config.host
+        self.info["port"] = str(config.port)
+        self.info["transcriber"] = "mlx-whisper" if use_mlx else "faster-whisper"
+        self.info["device"] = "Apple Silicon GPU" if use_mlx else "CPU"
 
-        if model:
-            LIVE_CONFIG["model"] = model
-        if language:
-            LIVE_CONFIG["language"] = language
+    def running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
 
-        exe = shutil.which("whisperlivekit-server")
-        if not exe:
-            # Fallback: if the recorder is itself running inside a venv,
-            # look for whisperlivekit-server in that venv's bin/Scripts
-            # directly. This works without `source .venv/bin/activate` and
-            # matters when the recorder is run as `path/to/venv/python -m
-            # tapscribe` (e.g. a service that doesn't activate).
-            import sys as _sys
-            venv_bin = Path(_sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
-            for cand in ("whisperlivekit-server.exe", "whisperlivekit-server"):
-                p = venv_bin / cand
-                if p.is_file():
-                    exe = str(p)
-                    break
-        if not exe:
-            msg = "whisperlivekit-server not found on PATH or in the recorder's venv"
-            LIVE_INFO["state"] = "error"
-            LIVE_INFO["last_error"] = msg
-            print(f"[tapscribe] {msg}", flush=True)
-            return False, msg
+    def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]:
+        """Spawn whisperlivekit-server with the current (optionally overridden)
+        config. Returns (ok, message). Does NOT stop a running process first —
+        callers wanting 'apply' semantics call stop() then start()."""
+        with self._lock:
+            if self.running():
+                return False, "already running"
 
-        # Pre-resolve NB-Whisper weights if needed. The download is a real
-        # I/O call (HF Hub fetch) and lives here, not inside the pure
-        # build_live_cmd, so we can surface errors via LIVE_INFO before
-        # spawning anything.
-        live_model = str(LIVE_CONFIG["model"])
-        ct2_dir: Path | None = None
-        if is_nb_whisper(live_model):
-            try:
-                ct2_dir = download_nb_whisper_ct2_dir(live_model)
-            except Exception as e:
-                msg = f"failed to fetch nb-whisper ct2 weights: {e}"
-                LIVE_INFO["state"] = "error"
-                LIVE_INFO["last_error"] = msg
-                LIVE_PROC = None
+            # Update config with overrides (LiveConfig is frozen — replace).
+            if model is not None or language is not None:
+                from dataclasses import replace as _replace
+                self.config = _replace(
+                    self.config,
+                    model=model if model is not None else self.config.model,
+                    language=language if language is not None else self.config.language,
+                )
+
+            exe = self._find_exe()
+            if exe is None:
+                msg = "whisperlivekit-server not found on PATH or in the recorder's venv"
+                self.info["state"] = "error"
+                self.info["last_error"] = msg
+                print(f"[tapscribe] {msg}", flush=True)
                 return False, msg
 
-        live_cfg = LiveConfig(
-            model=live_model,
-            language=str(LIVE_CONFIG["language"]),
-            host=str(LIVE_CONFIG["host"]),
-            port=int(LIVE_CONFIG["port"]),
-            vac=bool(LIVE_CONFIG.get("vac", True)),
-            confidence_validation=bool(LIVE_CONFIG.get("confidence_validation", True)),
-        )
-        cmd = build_live_cmd(
-            exe, live_cfg,
-            use_mlx=config.USE_MLX,
-            nb_whisper_ct2_dir=ct2_dir,
-            init_prompt=read_prompt() or None,
-        )
+            # Pre-resolve NB-Whisper weights if needed. Real I/O (HF fetch)
+            # so it stays out of the pure build_live_cmd.
+            ct2_dir: Path | None = None
+            if is_nb_whisper(self.config.model):
+                try:
+                    ct2_dir = download_nb_whisper_ct2_dir(self.config.model)
+                except Exception as e:
+                    msg = f"failed to fetch nb-whisper ct2 weights: {e}"
+                    self.info["state"] = "error"
+                    self.info["last_error"] = msg
+                    self._proc = None
+                    return False, msg
 
-        popen_kwargs: dict[str, Any] = dict(
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            # On Windows the default text-mode codec is cp1252; non-ASCII
-            # output from WhisperLiveKit (e.g. a Norwegian transcript
-            # snippet echoed back) would raise UnicodeDecodeError and kill
-            # the pump thread. errors="replace" makes that tolerable.
-            errors="replace",
-        )
-        # On POSIX, give the child its own process group so we can SIGTERM
-        # the whole tree (uvicorn → ASR worker) cleanly.
-        if os.name == "posix":
-            popen_kwargs["start_new_session"] = True
-
-        try:
-            print(
-                f"[tapscribe] starting whisperlivekit-server: model={LIVE_CONFIG['model']} "
-                f"lang={LIVE_CONFIG['language']} mlx={config.USE_MLX}",
-                flush=True,
+            cmd = build_live_cmd(
+                exe, self.config,
+                use_mlx=self.use_mlx,
+                nb_whisper_ct2_dir=ct2_dir,
+                init_prompt=read_prompt() or None,
             )
-            LIVE_PROC = subprocess.Popen(cmd, **popen_kwargs)
-        except Exception as e:
-            LIVE_PROC = None
-            LIVE_INFO["state"] = "error"
-            LIVE_INFO["last_error"] = f"spawn failed: {e}"
-            return False, LIVE_INFO["last_error"]
 
-        LIVE_INFO["model"] = str(LIVE_CONFIG["model"])
-        LIVE_INFO["language"] = str(LIVE_CONFIG["language"])
-        LIVE_INFO["host"] = str(LIVE_CONFIG["host"])
-        LIVE_INFO["port"] = str(LIVE_CONFIG["port"])
-        LIVE_INFO["backend"] = "mlx-whisper" if config.USE_MLX else "faster-whisper"
-        LIVE_INFO["device"] = "Apple Silicon GPU" if config.USE_MLX else "CPU"
-        LIVE_INFO["vac"] = "on" if LIVE_CONFIG.get("vac") else "off"
-        LIVE_INFO["confidence_validation"] = "on" if LIVE_CONFIG.get("confidence_validation") else "off"
-        LIVE_INFO["state"] = "starting"
-        LIVE_INFO["last_error"] = ""
-        LIVE_INFO["pid"] = str(LIVE_PROC.pid)
-        LIVE_INFO["started_at"] = datetime.now(timezone.utc).isoformat()
-        LIVE_LOG.clear()
+            popen_kwargs: dict[str, Any] = dict(
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                # On Windows the default text-mode codec is cp1252; non-ASCII
+                # output from WhisperLiveKit (e.g. a Norwegian transcript
+                # snippet echoed back) would raise UnicodeDecodeError and kill
+                # the pump thread. errors="replace" makes that tolerable.
+                errors="replace",
+            )
+            # On POSIX, give the child its own process group so we can SIGTERM
+            # the whole tree (uvicorn → ASR worker) cleanly.
+            if os.name == "posix":
+                popen_kwargs["start_new_session"] = True
 
-        threading.Thread(target=_pump_live_logs, args=(LIVE_PROC,), daemon=True).start()
-        return True, f"started pid {LIVE_PROC.pid}"
-
-
-def _pump_live_logs(proc: subprocess.Popen) -> None:
-    """Drain the child's stdout into LIVE_LOG (tail) and the recorder's
-    stdout (prefixed). Promote 'starting' → 'running' on uvicorn-startup
-    signal. On exit, mark 'stopped' or 'error' and capture a tail of the
-    last lines."""
-    promoted = False
-    try:
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                ln = line.rstrip("\n")
-                LIVE_LOG.append(ln)
-                print(f"[wlk] {ln}", flush=True)
-                if not promoted:
-                    low = ln.lower()
-                    if "uvicorn running" in low or "application startup complete" in low:
-                        LIVE_INFO["state"] = "running"
-                        promoted = True
-    finally:
-        rc = proc.wait()
-        # Only update INFO if this proc is still the active one; a fresh
-        # start_live_proc() may already have replaced it.
-        if LIVE_PROC is proc:
-            if rc == 0 or rc is None:
-                LIVE_INFO["state"] = "stopped"
-            else:
-                LIVE_INFO["state"] = "error"
-                tail = list(LIVE_LOG)[-5:]
-                LIVE_INFO["last_error"] = (" | ".join(tail))[:500] or f"exited with code {rc}"
-            LIVE_INFO["pid"] = ""
-
-
-def stop_live_proc(timeout: float = 5.0) -> tuple[bool, str]:
-    """Terminate the live child (if any). Idempotent."""
-    global LIVE_PROC
-    with LIVE_LOCK:
-        proc = LIVE_PROC
-        if proc is None:
-            LIVE_INFO["state"] = "stopped"
-            return True, "not running"
-        if proc.poll() is not None:
-            LIVE_PROC = None
-            LIVE_INFO["state"] = "stopped"
-            LIVE_INFO["pid"] = ""
-            return True, "already exited"
-
-    # Released the lock while we wait — log pump will see exit.
-    try:
-        if os.name == "posix":
             try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-        else:
-            proc.terminate()
+                print(
+                    f"[tapscribe] starting whisperlivekit-server: model={self.config.model} "
+                    f"lang={self.config.language} mlx={self.use_mlx}",
+                    flush=True,
+                )
+                self._proc = subprocess.Popen(cmd, **popen_kwargs)
+            except Exception as e:
+                self._proc = None
+                self.info["state"] = "error"
+                self.info["last_error"] = f"spawn failed: {e}"
+                return False, self.info["last_error"]
+
+            self.info["model"] = self.config.model
+            self.info["language"] = self.config.language
+            self.info["host"] = self.config.host
+            self.info["port"] = str(self.config.port)
+            self.info["transcriber"] = "mlx-whisper" if self.use_mlx else "faster-whisper"
+            self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
+            self.info["vac"] = "on" if self.config.vac else "off"
+            self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
+            self.info["state"] = "starting"
+            self.info["last_error"] = ""
+            self.info["pid"] = str(self._proc.pid)
+            self.info["started_at"] = datetime.now(timezone.utc).isoformat()
+            self.log.clear()
+
+            threading.Thread(target=self._pump_logs, args=(self._proc,), daemon=True).start()
+            return True, f"started pid {self._proc.pid}"
+
+    def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]:
+        """Terminate the live child (if any). Idempotent."""
+        with self._lock:
+            proc = self._proc
+            if proc is None:
+                self.info["state"] = "stopped"
+                return True, "not running"
+            if proc.poll() is not None:
+                self._proc = None
+                self.info["state"] = "stopped"
+                self.info["pid"] = ""
+                return True, "already exited"
+
+        # Released the lock while we wait — pump thread will see the exit.
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
             if os.name == "posix":
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    os.killpg(proc.pid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
                     pass
             else:
-                proc.kill()
+                proc.terminate()
             try:
-                proc.wait(timeout=2)
+                proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                pass
-    except Exception as e:
-        return False, f"stop failed: {e}"
+                if os.name == "posix":
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                else:
+                    proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+        except Exception as e:
+            return False, f"stop failed: {e}"
 
-    with LIVE_LOCK:
-        if LIVE_PROC is proc:
-            LIVE_PROC = None
-    LIVE_INFO["state"] = "stopped"
-    LIVE_INFO["pid"] = ""
-    return True, "stopped"
+        with self._lock:
+            if self._proc is proc:
+                self._proc = None
+        self.info["state"] = "stopped"
+        self.info["pid"] = ""
+        return True, "stopped"
+
+    @staticmethod
+    def _find_exe() -> str | None:
+        """Find whisperlivekit-server on PATH, falling back to the
+        current venv's Scripts/bin directory."""
+        exe = shutil.which("whisperlivekit-server")
+        if exe:
+            return exe
+        # Fallback: if the recorder is itself running inside a venv,
+        # look for whisperlivekit-server in that venv's bin/Scripts
+        # directly. This works without `source .venv/bin/activate` and
+        # matters when the recorder is run as `path/to/venv/python -m
+        # tapscribe` (e.g. a service that doesn't activate).
+        venv_bin = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
+        for cand in ("whisperlivekit-server.exe", "whisperlivekit-server"):
+            p = venv_bin / cand
+            if p.is_file():
+                return str(p)
+        return None
+
+    def _pump_logs(self, proc: subprocess.Popen) -> None:
+        """Drain the child's stdout into `log` (tail) and the recorder's
+        own stdout (prefixed). Promote 'starting' → 'running' on the
+        uvicorn-startup signal. On exit, mark 'stopped' or 'error'."""
+        promoted = False
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    ln = line.rstrip("\n")
+                    self.log.append(ln)
+                    print(f"[wlk] {ln}", flush=True)
+                    if not promoted:
+                        low = ln.lower()
+                        if "uvicorn running" in low or "application startup complete" in low:
+                            self.info["state"] = "running"
+                            promoted = True
+        finally:
+            rc = proc.wait()
+            # Only update INFO if this proc is still the active one; a fresh
+            # start() may already have replaced it.
+            if self._proc is proc:
+                if rc == 0 or rc is None:
+                    self.info["state"] = "stopped"
+                else:
+                    self.info["state"] = "error"
+                    tail = list(self.log)[-5:]
+                    self.info["last_error"] = (" | ".join(tail))[:500] or f"exited with code {rc}"
+                self.info["pid"] = ""
