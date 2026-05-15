@@ -71,7 +71,7 @@
   function ensureChannel(identity, name) {
     let ch = channels.get(identity);
     if (ch) {
-      if (name && !ch.name) ch.name = name;
+      if (name && name !== ch.name) ch.name = name;
       return ch;
     }
     ch = {
@@ -178,15 +178,24 @@
         if (!ch.tapWs) openTapWs(d.identity, ch);
         if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) {
           if (ch.tapWs.bufferedAmount > 1_000_000) {
-            console.warn(
-              "[tapscribe-bridge] backpressure for " + d.identity +
-              " buffered=" + ch.tapWs.bufferedAmount,
-            );
+            if (ch.error !== "backpressure") {
+              ch.error = "backpressure";
+              console.warn(
+                "[tapscribe-bridge] backpressure for " + d.identity +
+                " buffered=" + ch.tapWs.bufferedAmount,
+              );
+              publishStatus();
+            }
           } else {
             try {
               ch.tapWs.send(d.buffer);
               ch.framesSent++;
               ch.bytesSent += d.buffer.byteLength;
+              // Clear transient errors after a successful send. Real link
+              // failures will be re-set by onerror/onclose.
+              if (ch.error === "tap-send-failed" || ch.error === "backpressure") {
+                ch.error = null;
+              }
             } catch (e) {
               ch.error = "tap-send-failed";
               console.error("[tapscribe-bridge] /tap send failed for " + d.identity, e);

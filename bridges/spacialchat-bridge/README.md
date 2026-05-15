@@ -77,3 +77,11 @@ reach a Recorder on the LAN (e.g. `192.168.1.50:8001`). The content
 script itself is restricted to `https://app.spatial.chat/*`. If your
 deployment only ever uses `localhost`, you can tighten the
 `host_permissions` array in `manifest.json` accordingly.
+
+## Notes on transport security
+
+Audio is streamed over plain `ws://` — the Recorder is intended to run
+locally or on a trusted LAN, in line with TapScribe's local-first
+posture. If you need to reach a Recorder across an untrusted network,
+front it with a TLS-terminating proxy (or an SSH tunnel) and adjust the
+URL building in `content.js` / `popup.js` to `wss://` accordingly.
