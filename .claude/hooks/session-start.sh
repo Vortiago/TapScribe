@@ -8,6 +8,12 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
+# Run the install in the background so the session can start immediately.
+# Trade-off: if Claude tries to run pytest/ruff in the first ~10s of the
+# session, it may race the install. The deps are deterministic and small,
+# so the race window is short.
+echo '{"async": true, "asyncTimeout": 300000}'
+
 # Python: install the runtime + dev deps the CI matrix uses. Mirrors
 # .github/workflows so a green hook implies a green CI install step.
 pip install --quiet --disable-pip-version-check \
