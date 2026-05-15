@@ -41,7 +41,7 @@ jobs:
           pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx ruff
 
       - name: Lint (ruff)
-        run: ruff check tapscribe tools tests
+        run: ruff check tapscribe tools tests bridges/local-test-bridge
 
       - name: Run tests
         run: pytest tests -q --cov=tapscribe --cov-report=term-missing

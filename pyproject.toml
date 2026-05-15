@@ -45,6 +45,9 @@ dev = [
     "pytest-cov>=5",
     "httpx>=0.27",
     "ruff>=0.5",
+    # local-test-bridge dev tool — captures from the system mic and
+    # streams to /tap. See bridges/local-test-bridge/README.md.
+    "sounddevice>=0.4",
 ]
 
 [project.scripts]
