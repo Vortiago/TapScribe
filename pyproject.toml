@@ -26,6 +26,10 @@ dependencies = [
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
     "numpy>=1.24",
+    # Used as a *client* by the Recorder to relay /tap bytes into its
+    # supervised WhisperLiveKit child (see tapscribe.live_relay). FastAPI
+    # gives us a WS server; this gives us the matching client.
+    "websockets>=12",
 ]
 
 [project.optional-dependencies]

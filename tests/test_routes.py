@@ -127,21 +127,12 @@ def test_api_state_returns_recorder_view(client, recorder_under_test):
 # /api/live-transcript
 # ---------------------------------------------------------------------------
 
-def test_live_transcript_appends_to_recorder_feed(client, recorder_under_test):
-    r = client.post("/api/live-transcript", json={
-        "text": "hello world", "identity": "alice", "name": "Alice",
-    })
-    assert r.json() == {"ok": True}
-    snap = recorder_under_test.transcripts.snapshot()
-    assert len(snap) == 1
-    assert snap[0]["text"] == "hello world"
-
-
-def test_live_transcript_drops_empty_or_meta_only_input(client, recorder_under_test):
-    r = client.post("/api/live-transcript", json={"text": ". [BLANK_AUDIO] ."})
-    assert r.status_code == 200
-    assert r.json()["skipped"] == "empty-or-no-letters"
-    assert recorder_under_test.transcripts.snapshot() == []
+def test_live_transcript_post_endpoint_is_gone(client):
+    """Per ADR-0002, the Bridge no longer POSTs settled lines. The
+    Recorder consumes them internally via the WlK relay opened by /tap.
+    The POST route is gone; only DELETE remains."""
+    r = client.post("/api/live-transcript", json={"text": "should not work"})
+    assert r.status_code in (404, 405)
 
 
 def test_live_transcript_clear_empties_feed(client, recorder_under_test):

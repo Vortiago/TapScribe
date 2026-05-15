@@ -38,7 +38,7 @@ jobs:
           # We only install the lightweight dependencies needed to run the
           # unit tests — no torch / faster-whisper / mlx-whisper. The tests
           # are scoped to pure helpers that don't need a real model loaded.
-          pip install fastapi uvicorn python-multipart numpy pytest pytest-asyncio pytest-cov httpx ruff
+          pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx ruff
 
       - name: Lint (ruff)
         run: ruff check tapscribe tools tests

@@ -57,29 +57,37 @@ dropped segments with their `matched_rule` annotated.
 
 ## LiveChannel · ActiveStreams · LiveTranscripts
 
-Three independent dataflows that all involve the Bridge but play different
-roles. Easy to confuse from names alone; the dashboard's three panels each
-map to exactly one of these.
+Three internal dataflows the Recorder maintains. The Bridge only ever
+opens **one** thing — the `/tap` WebSocket — and the Recorder fans the
+audio out to LiveChannel and writes it to disk for ActiveStreams. Settled
+caption lines come back from LiveChannel and land directly in
+LiveTranscripts. The dashboard's three panels each map to one of these.
 
-| Concept | What it owns | Inbound from the Bridge | Dashboard panel |
+| Concept | What it owns | Where it gets its data | Dashboard panel |
 |---|---|---|---|
-| **LiveChannel** | The supervised `whisperlivekit-server` child process (port 8000). | WebSocket carrying raw PCM frames for live captioning. | "live channel" |
-| **ActiveStreams** | The map of currently-open `/record` WebSockets that are writing per-utterance WAVs (port 8001). | One WebSocket per remote participant per utterance, raw PCM frames. | "active streams" |
-| **LiveTranscripts** | A bounded in-memory deque of settled caption lines (max 200). | HTTP POSTs to `/api/live-transcript` carrying the Bridge's view of WhisperLiveKit's settled output. | "live transcripts" |
+| **LiveChannel** | The supervised `whisperlivekit-server` child process (port 8000). | Bytes relayed by the Recorder from each open `/tap` WS — one internal client connection per `/tap` WS, so settled lines stay attributable to a single speaker. | "live channel" |
+| **ActiveStreams** | The map of currently-open `/tap` WebSockets that are writing per-utterance WAVs. | One Bridge WebSocket per remote participant per utterance, raw PCM frames. | "active streams" |
+| **LiveTranscripts** | A bounded in-memory deque of settled caption lines (max 200). | Settled lines consumed by the Recorder from its WhisperLiveKit relays, attributed to the originating `/tap` WS's `identity` / `name`. | "live transcripts" |
 
-The Bridge is the producer for all three; the Recorder is the consumer.
-None of the three sees the others — settled lines from the LiveChannel
-don't automatically populate LiveTranscripts (the Bridge does that
-explicitly), and a `/record` WebSocket carries audio that's totally
-independent of the LiveChannel's audio stream.
+The Bridge produces audio for exactly one place (`/tap`); the Recorder is
+the orchestrator that routes those bytes into all three concerns.
 
 ## Bridge
 
 The platform-side audio tap that forwards remote-participant PCM to the
 Recorder. Typically a browser extension (Chrome MV3 today) but can be
 any native helper for a different platform — Teams add-in, Zoom plugin,
-etc. Each Bridge talks the same wire protocol (see
-`bridges/README.md`). Bridges live in `bridges/<platform>-bridge/`.
+etc. Bridges live in `bridges/<platform>-bridge/`.
+
+Wire contract: one WebSocket per utterance to `ws://<recorder-host>/tap?identity=…&name=…`,
+streaming raw 16 kHz mono int16 PCM frames (20 ms / 640 bytes per frame).
+That's the entire contract — the Recorder fans the audio out internally
+to a per-WS WhisperLiveKit relay for live captioning *and* to a WAV on
+disk. Bridges don't talk to WhisperLiveKit themselves and don't POST
+settled lines back; the verb the Bridge performs is "tap," and the
+endpoint name reflects that.
+
+The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
 
 ## Wire-format note
 

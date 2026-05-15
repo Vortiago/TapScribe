@@ -13,8 +13,9 @@ The big-picture route map:
   POST /api/transcribe-session  — merge per-WAV transcripts into a session
   POST /api/live/start          — start / restart whisperlivekit-server
   POST /api/live/stop           — stop whisperlivekit-server
-  POST /api/live-transcript     — bridge forwards settled lines here
-  WS   /record?identity&name    — one WAV per connection
+  DELETE /api/live-transcript   — clear the live transcripts feed (dashboard "clear")
+  WS   /tap?identity&name       — Bridge audio in (one WS per utterance);
+                                  Recorder fans out to WAV + WlK relay (ADR-0002)
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from . import auth, config
 from . import hallucinations as hallucinations_mod
 from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
+from .live_relay import WlKRelay
 from .recorder import ActiveStream, JobState, Recorder
 from .session_merge import merge_session, select_session_wavs
 from .sessions import (
@@ -250,34 +252,14 @@ async def api_live_stop(recorder: Recorder = Depends(get_recorder)):
     return {"ok": True, "msg": msg, "state": recorder.live.info["state"]}
 
 
-@app.post("/api/live-transcript")
-async def api_live_transcript(req: Request, recorder: Recorder = Depends(get_recorder)):
-    """Receive a settled transcript line from the bridge and append it to
-    the in-memory live feed. Best-effort; failures are non-fatal."""
-    try:
-        body = await req.json()
-    except Exception as e:
-        raise HTTPException(400, "invalid JSON") from e
-    raw_text = (body.get("text") or "").strip()
-    # Drop Whisper meta-token leakage. Then drop residues with no letters —
-    # Whisper also emits standalone "." on silent frames, and a meta-only
-    # line like ". [BLANK_AUDIO] [BLANK_" cleans to ". ." which is noise.
-    cleaned = clean_meta_tokens(raw_text)
-    if not cleaned or not any(c.isalpha() for c in cleaned):
-        return {"ok": True, "skipped": "empty-or-no-letters", "raw_chars": len(raw_text)}
-    entry = {
-        "ts": body.get("ts") or datetime.now(timezone.utc).isoformat(),
-        "identity": body.get("identity") or "",
-        "name": body.get("name") or "",
-        "text": cleaned,
-        "session": body.get("session") or recorder.session_start,
-    }
-    recorder.transcripts.append(entry)
-    return {"ok": True}
-
-
 @app.delete("/api/live-transcript")
 async def api_live_transcript_clear(recorder: Recorder = Depends(get_recorder)):
+    """Clear the live transcript feed (the dashboard's "clear" button).
+
+    Note: there is no POST counterpart anymore. Bridges send audio to /tap;
+    settled lines are consumed by the Recorder's internal WlK relay and
+    appended to recorder.transcripts directly. See ADR-0002.
+    """
     recorder.transcripts.clear()
     return {"ok": True}
 
@@ -645,10 +627,21 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
 # WebSocket: record one WAV per connection
 # ---------------------------------------------------------------------------
 
-@app.websocket("/record")
-async def record(ws: WebSocket):
-    """One WAV per WebSocket connection. The Recorder is fetched off the
-    app instance directly — WebSockets don't have Depends() injection."""
+@app.websocket("/tap")
+async def tap(ws: WebSocket):
+    """The Bridge's only endpoint. One WS per utterance.
+
+    Behaviour: every received PCM frame is BOTH written to a WAV on disk
+    AND relayed to the Recorder's supervised WhisperLiveKit child for
+    live captioning. Settled lines from WlK land directly in
+    `recorder.transcripts` attributed to this WS's identity / name —
+    Bridges never see the WlK protocol.
+
+    Graceful degradation (per ADR-0002): if WlK isn't running or the
+    relay's connection fails mid-stream, WAV recording continues
+    unaffected; the operator can see the live-channel state on the
+    dashboard.
+    """
     recorder: Recorder | None = getattr(ws.app.state, "recorder", None)
     await ws.accept()
     if recorder is None:
@@ -681,7 +674,36 @@ async def record(ws: WebSocket):
         filename=fname, started_at=started, bytes_received=0,
     ))
 
-    print(f"[tapscribe] WS open -> {fname}", flush=True)
+    print(f"[tapscribe] /tap open -> {fname}", flush=True)
+
+    # Set up the WlK relay. Per ADR-0002, this is per-WS so settled
+    # lines stay attributed to one speaker. The on-settled-line callback
+    # cleans Whisper meta-tokens and skips letterless residues, then
+    # appends to the live transcripts feed.
+    def _on_settled_line(text: str) -> None:
+        cleaned = clean_meta_tokens(text)
+        if not cleaned or not any(c.isalpha() for c in cleaned):
+            return
+        recorder.transcripts.append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "identity": identity,
+            "name": name,
+            "text": cleaned,
+            "session": recorder.session_start,
+        })
+
+    relay: WlKRelay | None = None
+    relay_alive = False
+    if recorder.live.running():
+        candidate = WlKRelay(
+            host=recorder.live.config.host,
+            port=recorder.live.config.port,
+            language=recorder.live.config.language,
+            on_settled_line=_on_settled_line,
+        )
+        if await candidate.connect():
+            relay = candidate
+            relay_alive = True
 
     wf = wave.open(str(fpath), "wb")
     wf.setnchannels(1)
@@ -702,21 +724,29 @@ async def record(ws: WebSocket):
                 wf.writeframes(buf)
                 bytes_received += len(buf)
                 await recorder.streams.update_bytes(conn_id, bytes_received)
+                # Best-effort relay. If the relay reports closed/dead,
+                # stop trying for the rest of this WS — recording
+                # continues unaffected.
+                if relay_alive:
+                    if not await relay.send(buf):
+                        relay_alive = False
     except WebSocketDisconnect:
         pass
     except Exception as e:  # pragma: no cover
-        print(f"[tapscribe] WS error for {fname}: {e}", flush=True)
+        print(f"[tapscribe] /tap error for {fname}: {e}", flush=True)
     finally:
         wf.close()
+        if relay is not None:
+            await relay.close()  # drains tail captions per Q2
         await recorder.streams.remove(conn_id)
         if bytes_received == 0:
             with suppress(OSError):
                 fpath.unlink()
-            print(f"[tapscribe] WS closed (empty), removed {fname}", flush=True)
+            print(f"[tapscribe] /tap closed (empty), removed {fname}", flush=True)
         else:
             dur = bytes_received / 32000.0
             print(
-                f"[tapscribe] WS closed, wrote {bytes_received} bytes ({dur:.2f}s) to {fname}",
+                f"[tapscribe] /tap closed, wrote {bytes_received} bytes ({dur:.2f}s) to {fname}",
                 flush=True,
             )
 
