@@ -105,6 +105,43 @@ flowchart LR
 - **WhisperLiveKit** runs as a child process the backend starts, stops, and
   restarts from the dashboard. Bridges never talk to it directly.
 
+### Audio pipeline (per utterance)
+
+One `/tap` WebSocket = one utterance. Each PCM frame is tee'd: appended to
+the per-utterance WAV on disk **and** forwarded to the WhisperLiveKit child
+for live captions. Settled caption lines flow back to the operator
+dashboard. WAV writing is independent of the live relay — if WhisperLiveKit
+is down, recording still works.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Bridge
+    participant T as /tap handler
+    participant W as WAV file
+    participant R as WlKRelay
+    participant L as WhisperLiveKit
+    participant D as Dashboard
+
+    B->>T: open /tap?identity&name<br/>(one WS per utterance)
+    T->>W: open recordings/<session>/<utt>.wav
+    T->>R: connect to WhisperLiveKit
+
+    loop each PCM frame (16 kHz mono s16le)
+        B->>T: PCM bytes
+        T->>W: append frame
+        T->>R: forward frame
+        R->>L: PCM
+        L-->>R: settled caption line
+        R-->>T: on_settled_line(text)
+        T-->>D: push to live feed
+    end
+
+    B->>T: close (mute / leave)
+    T->>W: finalise WAV<br/>(or delete if empty)
+    T->>R: close
+```
+
 ## Backends
 
 | Model | Backend | Languages | Notes |

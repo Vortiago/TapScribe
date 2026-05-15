@@ -89,6 +89,81 @@ endpoint name reflects that.
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
 
+## Utterance
+
+A continuous speech segment from one speaker, delimited by mute
+boundaries on the Bridge side. One utterance maps to one WAV on disk
+and — most of the time — to one `/tap` WebSocket. When the network
+blips mid-utterance, the Bridge reconnects with the same `utterance_id`
+and the Recorder appends to the existing WAV rather than starting a new
+one (see `UtteranceIndex` in `tapscribe/app.py`), so an utterance is a
+logical concept that can span multiple physical `/tap` WSes.
+
+Lifecycle: Bridge detects speech → opens `/tap` → streams PCM → Bridge
+detects mute → drains any trailing PCM → Bridge closes `/tap` → Recorder
+finalizes the WAV.
+
+## utterance_id
+
+The UUID the Bridge generates per utterance and sends as the `?utterance_id=`
+query parameter on `/tap`. Stable across reconnects within a single
+unmuted segment so the Recorder can resume the same WAV; if the Bridge
+omits it, the Recorder mints one. Keyed in `UtteranceIndex` so a returning
+WS with a known `utterance_id` (matching identity, file still on disk,
+not currently open) appends instead of creating a new file. On-disk
+filenames use a *separate* local UUID for collision-safety; don't conflate
+the two.
+
+## Mute
+
+The Bridge-side signal that the speaker has stopped talking — on the
+SpatialChat Bridge it's the `TrackMuted` event on the input
+`MediaStreamTrack`. Mute is the only thing that ends an utterance from
+the Bridge's perspective. If audio is still buffered when mute fires
+(typical during a network blip), the Bridge enters **drain** mode rather
+than closing immediately.
+
+## Drain
+
+The flush of trailing PCM that was buffered on the Bridge when mute fired
+but hadn't yet been delivered to the Recorder. On mute, the Bridge keeps
+its reconnect ladder running for up to `DRAIN_MAX_MS` (8 s); once a `/tap`
+WS reconnects, the buffered audio is flushed to it before the WS closes,
+so the WAV finalizes with that trailing audio intact. The timeout exists
+so an unreachable Recorder can't wedge the utterance forever. Implemented
+in the Bridge's `startDrainTimer()` / `endUtterance()` and on the Recorder
+side in `live_relay.close()` / `_flush_tail()`.
+
+## Tail flush
+
+The Recorder-side counterpart to drain, *not* a synonym. After a `/tap`
+WS closes, the WhisperLiveKit relay still has one in-flight caption line
+that was growing and never got superseded by a newer line. `_flush_tail`
+emits that final line so a short utterance producing exactly one caption
+doesn't vanish. Lives entirely inside `tapscribe/live_relay.py`; the
+Bridge knows nothing about it.
+
+## Invariants
+
+Things the rest of the system relies on. Break one and something
+elsewhere will silently misbehave; if you find yourself wanting to relax
+one, document why and update this list.
+
+- **One `/tap` WS = one speaker at a time.** Settled live caption lines
+  are attributed by the originating `/tap` WS's `identity`/`name`; a WS
+  carrying audio from two speakers would scramble attribution in
+  LiveTranscripts.
+- **One utterance = one WAV.** Reconnects with a known `utterance_id`
+  append to the existing file; a fresh `utterance_id` always means a
+  fresh WAV. The reverse (one WAV containing multiple utterances) must
+  not happen.
+- **Bridge → `/tap` is the only audio path.** Bridges don't open
+  WhisperLiveKit connections directly and don't POST settled lines back.
+  The Recorder owns all fan-out.
+- **Drain is bounded.** If the Bridge can't reach the Recorder within
+  `DRAIN_MAX_MS`, trailing audio is dropped rather than blocking the
+  utterance close forever. Don't remove the timeout.
+
 ## Wire-format note
 
 Result JSON files (per-WAV `<name>.json`, `session-transcript.json`)
