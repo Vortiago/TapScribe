@@ -43,6 +43,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import auth, config
 from . import hallucinations as hallucinations_mod
@@ -54,6 +55,7 @@ from .session_merge import merge_session, select_session_wavs
 from .sessions import (
     gather_sessions,
     read_session_meta,
+    resolve_session_dir,
     resolve_source_dir,
     strip_one_wav,
     stripped_dir,
@@ -75,6 +77,18 @@ def get_recorder(request: Request) -> Recorder:
     if recorder is None:
         raise HTTPException(503, "Recorder not attached to app.state")
     return recorder
+
+
+async def _json_body(req: Request) -> dict[str, Any]:
+    """Return the request body parsed as a dict, or {} on any failure.
+    Routes that want to *require* a JSON object body call this then
+    branch on emptiness; routes that treat the body as optional just use
+    the dict directly."""
+    try:
+        body = await req.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -223,10 +237,7 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     Spawn/stop are synchronous and can block for several seconds — so we
     offload to a worker thread to keep /api/state polling responsive.
     """
-    try:
-        body = await req.json()
-    except Exception:
-        body = {}
+    body = await _json_body(req)
     model = (body.get("model") or "").strip() or None
     language = (body.get("language") or "").strip() or None
     vac = body.get("vac")
@@ -308,12 +319,7 @@ async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_re
     may be omitted to leave that preference unchanged. Takes effect on
     the NEXT /tap WebSocket open for this identity — already-open WSes
     finish their current utterance on the bridge's normal close."""
-    try:
-        body = await req.json()
-    except Exception as e:
-        raise HTTPException(400, "invalid JSON") from e
-    if not isinstance(body, dict):
-        raise HTTPException(400, "expected an object body")
+    body = await _json_body(req)
     identity = body.get("identity")
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity required")
@@ -339,13 +345,7 @@ async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_re
     accepted then immediately closed when disabled — already-open WAVs
     continue to record their current utterance, which finalises cleanly
     on the bridge's normal trackMuted close."""
-    body: dict[str, Any] = {}
-    try:
-        parsed = await req.json()
-        if isinstance(parsed, dict):
-            body = parsed
-    except Exception:
-        pass
+    body = await _json_body(req)
     if "enabled" in body:
         enabled = recorder.toggle_recording(enabled=bool(body["enabled"]))
     else:
@@ -391,18 +391,9 @@ async def api_session_strip_silence(
 ):
     """Non-destructively strip silence from every WAV in <session>/. Writes
     cleaned copies to <session>/stripped/ (originals untouched)."""
-    session_dir = config.RECORDINGS_DIR / session
-    if not session_dir.is_dir():
-        raise HTTPException(404, "session not found")
-    if config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents:
-        raise HTTPException(404, "session not found")
+    session_dir = resolve_session_dir(session)
 
-    try:
-        body = await req.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
+    body = await _json_body(req)
     min_silence_ms = int(body.get("min_silence_ms") or 500)
     pad_ms = int(body.get("pad_ms") or 200)
     threshold_db = float(body.get("threshold_db") or -45.0)
@@ -475,11 +466,7 @@ async def api_session_strip_silence(
 @app.delete("/api/sessions/{session}/stripped")
 async def api_session_stripped_delete(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
     """Remove a session's stripped/ folder so it can be regenerated."""
-    session_dir = config.RECORDINGS_DIR / session
-    if not session_dir.is_dir():
-        raise HTTPException(404, "session not found")
-    if config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents:
-        raise HTTPException(404, "session not found")
+    resolve_session_dir(session)
     d = stripped_dir(session)
     if not d.is_dir():
         return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
@@ -496,11 +483,7 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     """Recursively delete a recordings folder. Refuses the CURRENT session."""
     if session == recorder.session_start:
         raise HTTPException(409, "cannot delete the current session — rotate to a new one first")
-    session_dir = config.RECORDINGS_DIR / session
-    if not session_dir.is_dir():
-        raise HTTPException(404, "session not found")
-    if config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents:
-        raise HTTPException(404, "session not found")
+    session_dir = resolve_session_dir(session)
     try:
         shutil.rmtree(session_dir)
     except OSError as e:
@@ -512,28 +495,14 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
 
 @app.get("/api/session-meta/{session}")
 async def api_session_meta_get(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
-    session_dir = config.RECORDINGS_DIR / session
-    if not session_dir.is_dir():
-        raise HTTPException(404, "session not found")
-    if config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents:
-        raise HTTPException(404, "session not found")
+    resolve_session_dir(session)
     return read_session_meta(session)
 
 
 @app.put("/api/session-meta/{session}")
 async def api_session_meta_put(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
-    session_dir = config.RECORDINGS_DIR / session
-    if not session_dir.is_dir():
-        raise HTTPException(404, "session not found")
-    if config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents:
-        raise HTTPException(404, "session not found")
-    try:
-        body = await req.json()
-    except Exception as e:
-        raise HTTPException(400, "invalid JSON") from e
-    if not isinstance(body, dict):
-        raise HTTPException(400, "expected an object body")
-    write_session_meta(session, body)
+    resolve_session_dir(session)
+    write_session_meta(session, await _json_body(req))
     return {"ok": True, "meta": read_session_meta(session)}
 
 
@@ -623,15 +592,7 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     source = body.get("source") or "original"
     if not session:
         raise HTTPException(400, "session is required")
-
-    session_dir = config.RECORDINGS_DIR / session
-    if not session_dir.is_dir():
-        raise HTTPException(404, "session not found")
-    if (
-        config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents
-        and session_dir.resolve() != config.RECORDINGS_DIR.resolve() / session
-    ):
-        raise HTTPException(404, "not found")
+    session_dir = resolve_session_dir(session)
 
     # Phase 0: pure selection.
     try:
@@ -951,14 +912,7 @@ async def dashboard_css():
     return FileResponse(DASHBOARD_CSS_PATH, media_type="text/css")
 
 
-@app.get("/web/js/{name}")
-async def dashboard_js_module(name: str):
-    """Serve dashboard JS modules. Restricted to .js files under web/js/."""
-    if not name.endswith(".js") or "/" in name or "\\" in name:
-        raise HTTPException(404, "not found")
-    path = DASHBOARD_JS_DIR / name
-    if not path.is_file():
-        raise HTTPException(404, "not found")
-    if DASHBOARD_JS_DIR.resolve() not in path.resolve().parents:
-        raise HTTPException(404, "not found")
-    return FileResponse(path, media_type="application/javascript")
+# Dashboard JS modules. StaticFiles handles path-traversal protection and
+# content-type detection — no per-file handler needed.
+if DASHBOARD_JS_DIR.is_dir():
+    app.mount("/web/js", StaticFiles(directory=str(DASHBOARD_JS_DIR)), name="web_js")
