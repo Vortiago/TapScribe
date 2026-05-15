@@ -113,7 +113,7 @@ def build_live_cmd(
 def _initial_info() -> dict[str, str]:
     return {
         "model": "",
-        "transcriber": "",   # "mlx-whisper" or "faster-whisper" or ""
+        "backend": "",       # "mlx-whisper" or "faster-whisper" or ""
         "device": "",        # human-readable
         "language": "",
         "host": "",
@@ -149,7 +149,7 @@ class LiveChannel:
         self.info["language"] = config.language
         self.info["host"] = config.host
         self.info["port"] = str(config.port)
-        self.info["transcriber"] = "mlx-whisper" if use_mlx else "faster-whisper"
+        self.info["backend"] = "mlx-whisper" if use_mlx else "faster-whisper"
         self.info["device"] = "Apple Silicon GPU" if use_mlx else "CPU"
 
     def running(self) -> bool:
@@ -233,7 +233,7 @@ class LiveChannel:
             self.info["language"] = self.config.language
             self.info["host"] = self.config.host
             self.info["port"] = str(self.config.port)
-            self.info["transcriber"] = "mlx-whisper" if self.use_mlx else "faster-whisper"
+            self.info["backend"] = "mlx-whisper" if self.use_mlx else "faster-whisper"
             self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
             self.info["vac"] = "on" if self.config.vac else "off"
             self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
