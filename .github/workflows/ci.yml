@@ -2,9 +2,19 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Run on main (post-merge) and on any feature branch — including the
+    # `claude/**` branches the Claude-Code integration pushes — so the
+    # underlying push event triggers CI even when the PR was opened by a
+    # bot whose pull_request events don't trigger workflows.
+    branches:
+      - main
+      - 'claude/**'
   pull_request:
     branches: [main]
+  # Allow the operator to manually re-run from the Actions tab — useful
+  # when a PR was opened by an integration whose token doesn't trigger
+  # the pull_request event.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,7 +48,10 @@ jobs:
           # We only install the lightweight dependencies needed to run the
           # unit tests — no torch / faster-whisper / mlx-whisper. The tests
           # are scoped to pure helpers that don't need a real model loaded.
-          pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx ruff
+          # `cryptography` is needed so test_tls runs (the test itself uses
+          # pytest.importorskip, so omitting it just silently skips
+          # coverage of the --tls boot path).
+          pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx ruff cryptography
 
       - name: Lint (ruff)
         run: ruff check tapscribe tools tests bridges/local-test-bridge
