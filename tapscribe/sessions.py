@@ -118,6 +118,21 @@ def stripped_stats(session: str) -> dict[str, Any] | None:
     }
 
 
+def resolve_session_dir(session: str) -> Path:
+    """Return `<RECORDINGS_DIR>/<session>` after validating it exists and
+    doesn't escape RECORDINGS_DIR. Raises `HTTPException(404)` otherwise.
+
+    This is the single seam every session-scoped route handler goes
+    through — the path-traversal rule lives here, not duplicated in
+    each route."""
+    session_dir = config.RECORDINGS_DIR / session
+    if not session_dir.is_dir():
+        raise HTTPException(404, "session not found")
+    if config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents:
+        raise HTTPException(404, "session not found")
+    return session_dir
+
+
 def resolve_source_dir(session: str, source: str) -> Path:
     """Pick the WAV folder for a transcribe request.
 
