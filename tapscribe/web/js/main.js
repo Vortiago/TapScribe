@@ -20,6 +20,7 @@ const $ = (id) => document.getElementById(id);
 const LIVE_MODELS = [
   "tiny.en", "base.en", "small.en", "medium.en",
   "large-v3", "large-v3-turbo",
+  "nb-whisper-tiny", "nb-whisper-base", "nb-whisper-small",
   "nb-whisper-medium", "nb-whisper-large",
 ];
 
@@ -760,7 +761,10 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
       ["small.en", "small.en (Whisper, English)"],
       ["medium.en", "medium.en (Whisper, English, better)"],
       ["large-v3", "large-v3 (Whisper, multilingual incl. Norwegian, slow)"],
-      ["nb-whisper-medium", "nb-whisper-medium (NB-AiLab, Norwegian-tuned)"],
+      ["nb-whisper-tiny", "nb-whisper-tiny (NB-AiLab, Norwegian-tuned, fastest)"],
+      ["nb-whisper-base", "nb-whisper-base (NB-AiLab, Norwegian-tuned, fast)"],
+      ["nb-whisper-small", "nb-whisper-small (NB-AiLab, Norwegian-tuned)"],
+      ["nb-whisper-medium", "nb-whisper-medium (NB-AiLab, Norwegian-tuned, better)"],
       ["nb-whisper-large", "nb-whisper-large (NB-AiLab, Norwegian-tuned, slow)"],
       ["voxtral-mini", "voxtral-mini (Mistral 3B, EN/ES/FR/PT/HI/DE/NL/IT — no Norwegian)"],
     ];
