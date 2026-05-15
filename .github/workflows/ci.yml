@@ -61,24 +61,19 @@ jobs:
 
   # The bridge is plain JS with no Python dependency, so it runs in its
   # own job — decoupled from the pytest matrix so a Python flake doesn't
-  # hide a real bridge regression (and vice versa).
+  # hide a real bridge regression (and vice versa). Node 22 only: the
+  # bridge ships as a Chrome extension (V8, not Node), so this job is
+  # purely test infra and there's no reason to support older Node.
   bridge-js:
-    name: bridge JS tests (node ${{ matrix.node-version }})
+    name: bridge JS tests
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: ["20", "22"]
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: "22"
 
       - name: Run bridge tests (Node built-in runner, no deps)
-        # Glob is shell-expanded — Node 20's `--test` does not accept
-        # glob patterns directly (that's Node 22+), but it happily
-        # accepts the resulting list of files.
-        run: node --test bridges/spacialchat-bridge/tests/*.test.js
+        run: node --test "bridges/spacialchat-bridge/tests/*.test.js"
