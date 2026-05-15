@@ -30,9 +30,11 @@
   window.__tapscribeBridgeContentInstalled = true;
 
   // ---- Recorder host (configurable via popup) -------------------------------
-  // Read once at startup. Changes via the popup require a SpatialChat tab
-  // reload to take effect — we don't tear down existing /tap WSes on
-  // storage change.
+  // Read at startup and kept live via chrome.storage.onChanged: popup edits
+  // (host/port/token/TLS) apply immediately. Open /tap WSes are torn down
+  // and reopened against the new settings; if the operator rotates the tap
+  // token while a speaker is in a 4401-retry loop, the next retry uses the
+  // fresh token without a SpatialChat tab reload.
   const TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap.";
   let recorderHost = "localhost";
   let recorderPort = 8001;
@@ -53,6 +55,62 @@
     settingsReady = true; // fall back to default rather than block forever
     console.warn("[tapscribe-bridge] could not read recorder settings; using defaults", e);
   });
+
+  // Re-pick up popup edits without a tab reload. We update the in-memory
+  // settings and tear down any in-flight /tap WS so the reconnect path
+  // dials the new host/port and presents the new token. Active speakers
+  // keep their utterance_id, so the recorder appends to the same WAV
+  // when the new connection lands on the same recorder.
+  if (chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local") return;
+      let touched = false;
+      if (changes.recorderHost) {
+        recorderHost = changes.recorderHost.newValue || "localhost";
+        touched = true;
+      }
+      if (changes.recorderPort) {
+        recorderPort = Number(changes.recorderPort.newValue) || 8001;
+        touched = true;
+      }
+      if (changes.tapToken) {
+        tapToken = typeof changes.tapToken.newValue === "string" ? changes.tapToken.newValue : "";
+        touched = true;
+      }
+      if (changes.useTls) {
+        recorderUseTls = !!changes.useTls.newValue;
+        touched = true;
+      }
+      if (!touched) return;
+      console.log(
+        "[tapscribe-bridge] settings updated live: " + (recorderUseTls ? "wss://" : "ws://") +
+        recorderHost + ":" + recorderPort + " (tap-token " + (tapToken ? "set" : "MISSING") + ")",
+      );
+      reconnectAllForSettingsChange();
+    });
+  }
+
+  function reconnectAllForSettingsChange() {
+    for (const [identity, ch] of channels) {
+      const hadWs = !!ch.tapWs;
+      const hadTimer = ch.reconnectTimer !== null;
+      if (!hadWs && !hadTimer) continue;
+      clearReconnectTimer(ch);
+      const w = ch.tapWs;
+      ch.tapWs = null;
+      if (w && (w.readyState === WebSocket.OPEN || w.readyState === WebSocket.CONNECTING)) {
+        try { w.close(1000, "settings changed"); } catch (e) {}
+      }
+      // Restart the reconnect ladder so the first retry fires quickly
+      // (~200ms) with the new settings, but only while the speaker is
+      // actually mid-utterance.
+      if (!ch.muted && !ch.stopped && ch.utteranceId) {
+        ch.reconnectAttempt = 0;
+        scheduleReconnect(identity, ch);
+      }
+    }
+    publishStatus();
+  }
 
   const tapWsUrl = (identity, name, utteranceId) => {
     const qp = new URLSearchParams({
