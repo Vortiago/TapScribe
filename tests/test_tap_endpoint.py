@@ -345,6 +345,12 @@ def test_tap_resume_rejected_for_different_identity(
 ):
     """A reused utterance_id with a different identity must not collide —
     it gets a fresh WAV."""
+    # Disable the WlK relay path for the same reason as the resume test
+    # above: its `await candidate.connect()` is a slow yield that the
+    # TestClient's portal-shutdown cancellation can interrupt before the
+    # handler reads the queued PCM frame, leaving bytes_received=0 and
+    # the empty-WAV cleanup branch deletes the file under our feet.
+    recorder_with_fake_wlk.live._proc = None
     pcm_frame = b"\x10\x00" * 320
     utt = "shared-id-xyz"
 
@@ -352,11 +358,13 @@ def test_tap_resume_rejected_for_different_identity(
         f"/tap?identity=alice&name=Alice&utterance_id={utt}",
     ) as ws:
         ws.send_bytes(pcm_frame)
+    assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
 
     with client.websocket_connect(
         f"/tap?identity=bob&name=Bob&utterance_id={utt}",
     ) as ws:
         ws.send_bytes(pcm_frame)
+    assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
 
     wavs = sorted(recorder_with_fake_wlk.session_dir.glob("*.wav"))
     assert len(wavs) == 2
@@ -367,16 +375,22 @@ def test_tap_distinct_utterance_ids_produce_distinct_wavs(
 ):
     """Sanity: different utterance_ids (the bridge's normal between-mute
     behaviour) still produce one WAV per id."""
+    # See test_tap_resume_rejected_for_different_identity for why we
+    # bypass the relay here — same TestClient cancellation race.
+    recorder_with_fake_wlk.live._proc = None
     pcm_frame = b"\x10\x00" * 320
 
     with client.websocket_connect(
         "/tap?identity=alice&name=Alice&utterance_id=first",
     ) as ws:
         ws.send_bytes(pcm_frame)
+    assert _wait_for_utterance_closed(recorder_with_fake_wlk, "first")
+
     with client.websocket_connect(
         "/tap?identity=alice&name=Alice&utterance_id=second",
     ) as ws:
         ws.send_bytes(pcm_frame)
+    assert _wait_for_utterance_closed(recorder_with_fake_wlk, "second")
 
     wavs = list(recorder_with_fake_wlk.session_dir.glob("*.wav"))
     assert len(wavs) == 2
