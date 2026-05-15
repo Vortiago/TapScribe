@@ -59,5 +59,23 @@ jobs:
       - name: Run tests
         run: pytest tests -q --cov=tapscribe --cov-report=term-missing
 
-      - name: Bridge JS tests (Node, no deps)
+  # The bridge is plain JS with no Python dependency, so it runs in its
+  # own job — decoupled from the pytest matrix so a Python flake doesn't
+  # hide a real bridge regression (and vice versa).
+  bridge-js:
+    name: bridge JS tests (node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Run bridge tests (Node built-in runner, no deps)
         run: node --test "bridges/spacialchat-bridge/tests/*.test.js"
