@@ -148,23 +148,49 @@
       stopped: false,
       error: null,
       name: name || "",
+      // Set true once /tap has opened at least once in the current
+      // utterance. Distinguishes "lost audio mid-utterance because the
+      // link flapped" (buffer-overflow) from "recorder isn't reachable
+      // at all, never connected" (recorder-unreachable). Reset by
+      // endUtterance().
+      everOpened: false,
     };
     channels.set(identity, ch);
     return ch;
   }
 
   // ---- /tap WS (per utterance, resilient across blips) ----------------------
+  // Errors that describe the underlying transport failure. Buffer-overflow
+  // is a *consequence* of one of these, so we don't overwrite them.
+  function isTransportError(err) {
+    if (!err) return false;
+    return (
+      err === "tap-ws-error" ||
+      err === "tap-auth-failed" ||
+      err.startsWith("tap-ws-closed-")
+    );
+  }
+
   function bufferPush(ch, buf) {
     ch.buffer.push(buf);
     ch.bufferBytes += buf.byteLength;
     while (ch.bufferBytes > MAX_BUFFER_BYTES && ch.buffer.length > 0) {
       const dropped = ch.buffer.shift();
       ch.bufferBytes -= dropped.byteLength;
-      if (ch.error !== "buffer-overflow") {
-        ch.error = "buffer-overflow";
+      // Pick the most diagnostic label:
+      //   - keep any real transport error (tap-ws-closed-1006, etc.)
+      //   - if we never managed to open the WS this utterance, the
+      //     recorder is unreachable, not the buffer at fault
+      //   - otherwise (had a successful open, link flapped) it is a
+      //     genuine buffer overflow during a mid-utterance gap
+      const nextErr = isTransportError(ch.error)
+        ? ch.error
+        : (ch.everOpened ? "buffer-overflow" : "recorder-unreachable");
+      if (ch.error !== nextErr) {
+        ch.error = nextErr;
         console.warn(
-          "[tapscribe-bridge] buffer overflow; dropping oldest PCM frame " +
-          "(outage exceeded " + Math.round(MAX_BUFFER_BYTES / 32) + "ms)",
+          "[tapscribe-bridge] dropping oldest PCM frame (" + nextErr + "); " +
+          "outage exceeded " + Math.round(MAX_BUFFER_BYTES / 32) + "ms",
         );
       }
     }
@@ -240,6 +266,7 @@
     ws.onopen = () => {
       console.log("[tapscribe-bridge] /tap open for " + identity);
       ch.reconnectAttempt = 0;
+      ch.everOpened = true;
       if (ch.error) ch.error = null;
       bufferFlush(ch);
       publishStatus();
@@ -298,6 +325,7 @@
     ch.reconnectAttempt = 0;
     ch.buffer = [];
     ch.bufferBytes = 0;
+    ch.everOpened = false;
   }
 
   // ---- Message handler from page world --------------------------------------
@@ -379,7 +407,8 @@
               if (
                 ch.error === "tap-send-failed" ||
                 ch.error === "backpressure" ||
-                ch.error === "buffer-overflow"
+                ch.error === "buffer-overflow" ||
+                ch.error === "recorder-unreachable"
               ) {
                 ch.error = null;
               }

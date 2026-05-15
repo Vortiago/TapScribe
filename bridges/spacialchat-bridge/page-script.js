@@ -158,6 +158,10 @@
     room.on("trackSubscribed", (track, pub, participant) => {
       if (track.kind === "audio" && pub.source === "microphone") {
         tap(participant, track.mediaStreamTrack);
+        // If they joined already muted, trackMuted will never fire — seed
+        // the muted state here so the bridge waits for the unmute instead
+        // of opening a /tap WS on the silence the worklet keeps emitting.
+        if (pub.isMuted) setMute(participant.identity, true);
       }
     });
     room.on("trackUnsubscribed", (track, pub, participant) => {
