@@ -16,6 +16,6 @@ def test_lightweight_modules_import():
         "tapscribe.hallucinations",
         "tapscribe.audio",
         "tapscribe.strip_silence",
-        "tapscribe.models",
+        "tapscribe.nb_whisper",
     ]:
         importlib.import_module(name)

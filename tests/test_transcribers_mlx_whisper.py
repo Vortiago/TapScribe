@@ -13,7 +13,25 @@ from pathlib import Path
 import numpy as np
 
 from tapscribe.transcribers.base import TranscriptionResult
-from tapscribe.transcribers.mlx_whisper import MlxWhisperTranscriber
+from tapscribe.transcribers.mlx_whisper import (
+    MlxWhisperTranscriber,
+    mlx_whisper_repo,
+)
+
+
+def test_mlx_whisper_repo_known_models():
+    assert mlx_whisper_repo("tiny.en") == "mlx-community/whisper-tiny.en-mlx"
+    assert mlx_whisper_repo("large-v3") == "mlx-community/whisper-large-v3-mlx"
+
+
+def test_mlx_whisper_repo_large_v3_turbo_has_no_mlx_suffix():
+    # Upstream publishes this one without the -mlx suffix; verify we don't
+    # construct the wrong repo name.
+    assert mlx_whisper_repo("large-v3-turbo") == "mlx-community/whisper-large-v3-turbo"
+
+
+def test_mlx_whisper_repo_falls_back_for_unknown():
+    assert mlx_whisper_repo("xyz") == "mlx-community/whisper-xyz-mlx"
 
 
 def _one_second_wav(path: Path) -> Path:

@@ -13,8 +13,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import wav_duration_s
-from ..models import voxtral_repo
 from .base import TranscriptionResult, TranscriptionSegment
+
+# Currently only Voxtral Mini is realistic for local CPU use; other Voxtral
+# sizes can be added later by branching on model_name in load().
+_VOXTRAL_REPO = "mistralai/Voxtral-Mini-3B-2507"
 
 _INSTRUCTION_BASE = (
     "Transcribe the audio verbatim into text. "
@@ -48,17 +51,16 @@ class VoxtralTranscriber:
             VoxtralForConditionalGeneration,
         )
 
-        repo = voxtral_repo(model_name)
-        print(f"[tapscribe] loading Voxtral model from HuggingFace: {repo}", flush=True)
+        print(f"[tapscribe] loading Voxtral model from HuggingFace: {_VOXTRAL_REPO}", flush=True)
         device = "cpu"
         dtype = torch.float32
         if torch.cuda.is_available():
             device = "cuda"
             dtype = torch.bfloat16
 
-        processor = AutoProcessor.from_pretrained(repo)
+        processor = AutoProcessor.from_pretrained(_VOXTRAL_REPO)
         model = VoxtralForConditionalGeneration.from_pretrained(
-            repo, torch_dtype=dtype
+            _VOXTRAL_REPO, torch_dtype=dtype
         ).to(device)
         model.eval()
         return cls(model_name=model_name, processor=processor, model=model, device=device)

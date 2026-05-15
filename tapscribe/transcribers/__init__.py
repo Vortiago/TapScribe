@@ -13,9 +13,6 @@ functions — see `tapscribe.hallucinations.apply`.
 
 from __future__ import annotations
 
-import asyncio
-
-from ..models import is_voxtral
 from .base import (
     Transcriber,
     TranscriptionResult,
@@ -37,7 +34,6 @@ __all__ = [
 # entries — `nb-whisper-medium` for Norwegian, a Voxtral or large-v3 for
 # other speakers — without double-loading shared models.
 _cache: dict[tuple[str, bool], Transcriber] = {}
-_cache_lock = asyncio.Lock()
 
 
 def load_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
@@ -63,7 +59,7 @@ def load_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
 
 
 def _build_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
-    if is_voxtral(model_name):
+    if model_name.lower().startswith("voxtral"):
         from .voxtral import VoxtralTranscriber
         return VoxtralTranscriber.load(model_name)
 
