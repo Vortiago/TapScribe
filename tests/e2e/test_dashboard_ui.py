@@ -321,7 +321,11 @@ async def test_dashboard_with_real_audio_and_whisper(
             # Real Whisper on CPU + a model-download-if-uncached step can
             # easily take 60+ s on first run. After the transcript
             # arrives the dashboard renders it on its next 1 s poll
-            # tick — bound the wait generously.
+            # tick — bound the wait generously. Two checks: at least one
+            # reference anchor word appears (content), and every segment
+            # `<div>` renders on a single visual line (layout — `.transcript`
+            # uses `white-space: pre-wrap`, so stray template whitespace
+            # would silently split each segment across multiple lines).
             await page.wait_for_function(
                 f"""
                 () => {{
@@ -330,7 +334,9 @@ async def test_dashboard_with_real_audio_and_whisper(
                   const text = region.textContent.toLowerCase();
                   if (text.length < 8) return false;
                   const refWords = {sorted(reference_words)!r};
-                  return refWords.some((w) => text.includes(w));
+                  if (!refWords.some((w) => text.includes(w))) return false;
+                  const lines = Array.from(region.querySelectorAll(':scope > div'));
+                  return lines.length > 0 && lines.every((l) => !l.innerText.includes('\\n'));
                 }}
                 """,
                 timeout=300000,
