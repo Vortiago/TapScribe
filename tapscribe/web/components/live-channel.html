@@ -1,0 +1,40 @@
+<template id="tpl-live-channel">
+  <div class="live-row">
+    <span class="lbl">model</span>
+    <select class="select" id="liveModelSelect"></select>
+  </div>
+  <div class="live-row">
+    <span class="lbl">lang</span>
+    <input class="input" id="liveLangInput" size="6">
+  </div>
+
+  <div class="action-row" style="margin-top:6px;" data-slot="actions"></div>
+
+  <div class="live-meta">
+    <span>port <code data-slot="port"></code></span>
+    <span>backend <code data-slot="backend"></code></span>
+    <span>device <code data-slot="device"></code></span>
+    <span data-slot="pidRow" hidden>pid <code data-slot="pid"></code></span>
+  </div>
+
+  <div class="live-err" data-slot="lastError" hidden></div>
+
+  <details class="live-log" data-slot="logBlock" hidden>
+    <summary><span data-slot="logSummary"></span></summary>
+    <pre data-slot="log"></pre>
+  </details>
+</template>
+
+<template id="tpl-live-actions-starting">
+  <button class="btn primary" disabled>starting…</button>
+  <button class="btn danger" id="liveStopBtn" title="Cancel the in-progress start">cancel</button>
+</template>
+
+<template id="tpl-live-actions-running">
+  <button class="btn primary" id="liveApplyBtn" title="Stop and re-spawn WhisperLiveKit with the model/lang above">apply (restart)</button>
+  <button class="btn danger" id="liveStopBtn">stop</button>
+</template>
+
+<template id="tpl-live-actions-stopped">
+  <button class="btn primary" id="liveStartBtn">start</button>
+</template>
