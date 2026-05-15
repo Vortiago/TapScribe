@@ -29,26 +29,20 @@
   </span>
 </template>
 
-<template id="tpl-merged-line">
-  <div>
-    <span class="ts" data-slot="ts"></span>
-    <span data-slot="speakerLabel"></span>
-    <span data-slot="body"></span>
-  </div>
-</template>
+<!--
+  The .transcript container uses `white-space: pre-wrap` so the line
+  glyphs render with real spaces and word-wrap. Every template that
+  renders *inside* .transcript must therefore live on a single line —
+  any indentation/newlines we'd add for readability would render as
+  literal whitespace and split each segment across multiple lines.
+-->
+<template id="tpl-merged-line"><div><span class="ts" data-slot="ts"></span> <span data-slot="speakerLabel"></span> <span data-slot="body"></span></div></template>
 
 <template id="tpl-merged-seg-ok"><span data-slot="text"></span></template>
 
-<template id="tpl-merged-seg-suppressed">
-  <span class="seg suppressed" data-slot="text"></span>
-</template>
+<template id="tpl-merged-seg-suppressed"><span class="seg suppressed" data-slot="text"></span></template>
 
-<template id="tpl-merged-seg-lowconf">
-  <span class="seg lowconf" data-slot="lc">
-    <span data-slot="text"></span>
-    <span class="conf-chip" data-slot="pct"></span>
-  </span>
-</template>
+<template id="tpl-merged-seg-lowconf"><span class="seg lowconf" data-slot="lc"><span data-slot="text"></span><span class="conf-chip" data-slot="pct"></span></span></template>
 
 <template id="tpl-audit-wrapper">
   <div style="border-top:1px solid var(--hairline-2);">

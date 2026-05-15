@@ -208,17 +208,24 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             await tx_button.click()
 
             # And the merged transcript must render in .sess-main with
-            # both speakers' scripted text. The transcript renders
-            # speaker-then-text in adjacent spans; assert against the
-            # whole transcript region's text so we don't depend on
-            # exact escape boundaries.
+            # both speakers' scripted text. We assert on `innerText` (the
+            # rendered, layout-aware string) rather than `textContent`
+            # (raw concatenated text). The transcript container is
+            # `white-space: pre-wrap`, so any stray whitespace/newlines
+            # between sibling spans would split a single segment across
+            # multiple visual lines while still passing a textContent
+            # `.includes()` check — innerText catches that.
             await page.wait_for_function(
                 f"""
                 () => {{
                   const region = document.querySelector('.sess-main .transcript');
                   if (!region) return false;
-                  const text = region.textContent;
-                  return text.includes({ALICE_TEXT!r}) && text.includes({BOB_TEXT!r});
+                  const visible = region.innerText;
+                  // Each speaker's label and body must appear adjacent on
+                  // the same visual line — i.e. "Alice: <text>" — not on
+                  // separate lines with a wrapped break in between.
+                  return visible.includes('Alice: ' + {ALICE_TEXT!r})
+                      && visible.includes('Bob: ' + {BOB_TEXT!r});
                 }}
                 """,
                 timeout=15000,

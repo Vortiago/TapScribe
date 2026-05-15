@@ -108,7 +108,9 @@ function buildLine(it, speakers, aliases) {
   pick(row, "ts").textContent = `[${it.hms}]`;
   const label = pick(row, "speakerLabel");
   label.className = spkClassOf(speakers, it.speaker);
-  label.textContent = `${aliasOf(it.speaker, aliases)}: `;
+  // No trailing space — the template carries a literal " " between spans
+  // for the pre-wrap layout.
+  label.textContent = `${aliasOf(it.speaker, aliases)}:`;
   const body = pick(row, "body");
 
   if (it.kind === "sup") {
