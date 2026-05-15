@@ -63,10 +63,30 @@ class _FakeWlkThread:
         self._thread.join(timeout=2.0)
 
     def push_committed(self, text: str) -> None:
-        """Schedule a settled-line broadcast on the WlK loop's thread."""
+        """Schedule a settled-line broadcast on the WlK loop's thread.
+
+        Mirrors the real WlK wire format: each call appends a new line to
+        the cumulative list and broadcasts the FrontData-shaped snapshot.
+        See whisperlivekit/timed_objects.py FrontData.to_dict for the
+        source of truth on the keys."""
         if self._loop is None:
             return
-        msg = json.dumps({"committed_lines": [{"text": text}]})
+        if not hasattr(self, "_lines_acc"):
+            self._lines_acc = []
+        idx = len(self._lines_acc)
+        self._lines_acc.append({
+            "text": text, "speaker": 1,
+            "start": float(idx), "end": float(idx) + 1.0,
+        })
+        msg = json.dumps({
+            "status": "active_transcription",
+            "lines": list(self._lines_acc),
+            "buffer_transcription": "",
+            "buffer_diarization": "",
+            "buffer_translation": "",
+            "remaining_time_transcription": 0,
+            "remaining_time_diarization": 0,
+        })
 
         async def _push():
             for c in list(self.connections):
@@ -197,19 +217,57 @@ def test_tap_settled_lines_from_wlk_land_in_live_transcripts(
     client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: _FakeWlkThread,
 ):
     """When WlK pushes a settled line during a /tap WS, it should land in
-    recorder.transcripts attributed to the WS's identity/name."""
+    recorder.transcripts attributed to the WS's identity/name. WlK
+    snapshots are cumulative and the relay holds the in-flight tail
+    until either a newer line arrives or the relay closes — pushing a
+    second line surfaces the first immediately."""
     with client.websocket_connect("/tap?identity=alice&name=Alice") as ws:
         ws.send_bytes(b"\x10\x00" * 320)
         time.sleep(0.05)
         fake_wlk.push_committed("hello from WlK")
+        fake_wlk.push_committed("second from WlK")
         time.sleep(0.15)
 
+    # Give the WS handler's finally → relay.close() drain a moment to
+    # finish — TestClient's `with` exit doesn't wait on it.
+    time.sleep(0.2)
     snap = recorder_with_fake_wlk.transcripts.snapshot()
-    assert len(snap) == 1
-    entry = snap[0]
-    assert entry["text"] == "hello from WlK"
-    assert entry["identity"] == "alice"
-    assert entry["name"] == "Alice"
+    texts = [e["text"] for e in snap]
+    assert "hello from WlK" in texts
+    assert "second from WlK" in texts
+    for entry in snap:
+        assert entry["identity"] == "alice"
+        assert entry["name"] == "Alice"
+
+
+def test_tap_settled_lines_surface_in_api_state_live_feed(
+    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: _FakeWlkThread,
+):
+    """End-to-end dashboard smoke test: the path the operator actually
+    sees. /tap WS opens → fake WlK pushes settled lines → /api/state
+    returns them under `live_feed` with the right attribution. This is
+    what the dashboard's renderLiveFeed() consumes."""
+    with client.websocket_connect("/tap?identity=alice&name=Alice") as ws:
+        ws.send_bytes(b"\x10\x00" * 320)
+        time.sleep(0.05)
+        fake_wlk.push_committed("first settled line")
+        fake_wlk.push_committed("second settled line")
+        time.sleep(0.2)
+
+    # Wait for the WS handler's finally → relay.close() drain to flush
+    # the tail before /api/state polls.
+    time.sleep(0.2)
+    state = client.get("/api/state").json()
+    feed = state["live_feed"]
+    texts = [e["text"] for e in feed]
+    assert "first settled line" in texts
+    assert "second settled line" in texts
+    # Attribution survives end-to-end.
+    for e in feed:
+        assert e["identity"] == "alice"
+        assert e["name"] == "Alice"
+        assert e["session"] == recorder_with_fake_wlk.session_start
+        assert "ts" in e
 
 
 def test_tap_drains_tail_caption_after_bridge_disconnects(
