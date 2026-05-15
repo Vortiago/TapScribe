@@ -27,14 +27,22 @@
   // Read once at startup. Changes via the popup require a SpatialChat tab
   // reload to take effect — we don't tear down existing /tap WSes on
   // storage change.
+  const TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap.";
   let recorderHost = "localhost";
   let recorderPort = 8001;
+  let recorderUseTls = false;
+  let tapToken = "";
   let settingsReady = false;
-  chrome.storage.local.get(["recorderHost", "recorderPort"]).then((s) => {
+  chrome.storage.local.get(["recorderHost", "recorderPort", "tapToken", "useTls"]).then((s) => {
     if (s && s.recorderHost) recorderHost = s.recorderHost;
     if (s && s.recorderPort) recorderPort = Number(s.recorderPort) || 8001;
+    if (s && typeof s.tapToken === "string") tapToken = s.tapToken;
+    if (s && typeof s.useTls === "boolean") recorderUseTls = s.useTls;
     settingsReady = true;
-    console.log("[tapscribe-bridge] recorder: " + recorderHost + ":" + recorderPort);
+    console.log(
+      "[tapscribe-bridge] recorder: " + (recorderUseTls ? "wss://" : "ws://") +
+      recorderHost + ":" + recorderPort + " (tap-token " + (tapToken ? "set" : "MISSING") + ")",
+    );
   }).catch((e) => {
     settingsReady = true; // fall back to default rather than block forever
     console.warn("[tapscribe-bridge] could not read recorder settings; using defaults", e);
@@ -42,7 +50,17 @@
 
   const tapWsUrl = (identity, name) => {
     const qp = new URLSearchParams({ identity, name: name || "" });
-    return "ws://" + recorderHost + ":" + recorderPort + "/tap?" + qp.toString();
+    const scheme = recorderUseTls ? "wss" : "ws";
+    return scheme + "://" + recorderHost + ":" + recorderPort + "/tap?" + qp.toString();
+  };
+
+  // Construct the WebSocket with the tap-token carried via subprotocol
+  // when the operator set one. With --no-auth the recorder ignores
+  // subprotocols entirely; we omit it so the upgrade succeeds without
+  // server-side echo.
+  const openWs = (url) => {
+    if (tapToken) return new WebSocket(url, [TAP_SUBPROTOCOL_PREFIX + tapToken]);
+    return new WebSocket(url);
   };
 
   // ---- Inject page-script.js -------------------------------------------------
@@ -91,7 +109,7 @@
     const url = tapWsUrl(identity, ch.name);
     console.log("[tapscribe-bridge] opening /tap for " + identity + " -> " + url);
     ch.framesSent = 0;
-    const ws = new WebSocket(url);
+    const ws = openWs(url);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       console.log("[tapscribe-bridge] /tap open for " + identity);
@@ -105,13 +123,22 @@
     };
     ws.onclose = (ev) => {
       // 1000 = clean close (we closed it on mute / tap-stop / paused).
-      // Anything else means the Recorder rejected us or the link died.
+      // 4401 = the recorder rejected our tap token. Anything else means
+      // the link died or the recorder rejected us for another reason.
       if (!ev.wasClean || ev.code !== 1000) {
-        ch.error = "tap-ws-closed-" + ev.code;
-        console.error(
-          "[tapscribe-bridge] /tap ws closed for " + identity +
-          " code=" + ev.code + " reason=" + (ev.reason || "<none>"),
-        );
+        if (ev.code === 4401) {
+          ch.error = "tap-auth-failed";
+          console.error(
+            "[tapscribe-bridge] /tap auth failed for " + identity +
+            " — check the tap token in the popup",
+          );
+        } else {
+          ch.error = "tap-ws-closed-" + ev.code;
+          console.error(
+            "[tapscribe-bridge] /tap ws closed for " + identity +
+            " code=" + ev.code + " reason=" + (ev.reason || "<none>"),
+          );
+        }
       }
       if (ch.tapWs === ws) ch.tapWs = null;
       publishStatus();

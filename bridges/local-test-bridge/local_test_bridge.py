@@ -56,9 +56,19 @@ def chunk_into_frames(buf: bytes) -> Iterator[bytes]:
         yield buf[i * FRAME_BYTES : (i + 1) * FRAME_BYTES]
 
 
-def build_tap_url(*, host: str, port: int, identity: str, name: str) -> str:
+TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap."
+
+
+def build_tap_url(*, host: str, port: int, identity: str, name: str, tls: bool = False) -> str:
     qs = urllib.parse.urlencode({"identity": identity, "name": name})
-    return f"ws://{host}:{port}/tap?{qs}"
+    scheme = "wss" if tls else "ws"
+    return f"{scheme}://{host}:{port}/tap?{qs}"
+
+
+def build_subprotocols(tap_token: str) -> list[str]:
+    """Return the list to pass to `websockets.connect(subprotocols=...)`.
+    Empty list = bridge speaks no subprotocol (operator ran with --no-auth)."""
+    return [TAP_SUBPROTOCOL_PREFIX + tap_token] if tap_token else []
 
 
 def default_identity() -> str:
@@ -136,16 +146,19 @@ async def run_tap_session(
     name: str,
     pcm_queue: queue.Queue[bytes],
     stop_event: asyncio.Event,
+    tap_token: str = "",
+    tls: bool = False,
 ) -> int:
     """Open one /tap WS and stream queue bytes until stop_event is set or
     the WS dies. Returns the total bytes sent."""
-    url = build_tap_url(host=host, port=port, identity=identity, name=name)
-    print(f"[bridge] connecting → {url}", flush=True)
+    url = build_tap_url(host=host, port=port, identity=identity, name=name, tls=tls)
+    subprotocols = build_subprotocols(tap_token)
+    print(f"[bridge] connecting → {url}" + (" (with tap-token)" if tap_token else " (no auth)"), flush=True)
     sent = 0
     pending = b""  # bytes carried over between queue gets so frames stay aligned
 
     try:
-        async with websockets.connect(url) as ws:
+        async with websockets.connect(url, subprotocols=subprotocols or None) as ws:
             print("[bridge] /tap open — streaming", flush=True)
             while not stop_event.is_set():
                 # Wait for at least one chunk from the audio thread, but
@@ -249,6 +262,8 @@ async def _main(args: argparse.Namespace) -> int:
                         identity=args.identity, name=args.name,
                         pcm_queue=capture.pcm_queue,
                         stop_event=this_stop,
+                        tap_token=args.tap_token,
+                        tls=args.tls,
                     )
                     capture.stop()
                     state["recording"] = False
@@ -289,6 +304,12 @@ def main() -> int:
     p.add_argument("--name", default="Local Tester", help="Display name (shown on the dashboard)")
     p.add_argument("--mic", default=None,
                    help="sounddevice input device name or index. Default: system default input.")
+    p.add_argument("--tap-token", default=os.environ.get("TAPSCRIBE_TAP_TOKEN", ""),
+                   help="Bearer token the recorder requires on the /tap WS (carried via "
+                        "Sec-WebSocket-Protocol). Defaults to $TAPSCRIBE_TAP_TOKEN or empty "
+                        "(use when the recorder runs with --no-auth).")
+    p.add_argument("--tls", action="store_true",
+                   help="Connect over wss:// (the recorder was started with --tls).")
     args = p.parse_args()
 
     try:

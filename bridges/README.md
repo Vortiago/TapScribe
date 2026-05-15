@@ -40,11 +40,22 @@ recording — bridges don't talk to WhisperLiveKit themselves and don't
 POST settled lines back. (See ADR-0002 for why.)
 
 **Endpoint:** `ws://<recorder-host>:8001/tap?identity=<id>&name=<display>`
+(or `wss://...` when the recorder was started with `--tls`).
 
 **Audio format:** PCM signed 16-bit little-endian, 16 kHz mono, raw
 binary frames. Frame size: 20 ms (320 samples = 640 bytes). Send one
 frame per WebSocket message; don't buffer multiple frames per send if
 you want clean live caption granularity.
+
+**Auth:** unless the recorder was started with `--no-auth`, every bridge
+MUST offer a `Sec-WebSocket-Protocol` of the form
+`tapscribe.v1.tap.<token>` where `<token>` is the value the recorder
+printed at boot (also stored in `.tap-token`). The server echoes the
+same subprotocol back on a successful upgrade and refuses the upgrade
+otherwise. Browsers can only set the subprotocol via the second
+argument of `new WebSocket(url, [proto])` — there is no way to set
+arbitrary headers from a content script, which is why we use the
+subprotocol slot instead of `Authorization`.
 
 **Lifecycle:**
 

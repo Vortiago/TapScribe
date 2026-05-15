@@ -52,10 +52,13 @@ spacialchat-bridge/
 3. Open `https://app.spatial.chat/...` in a new tab.
 4. Click the extension icon → set **Recorder host** to `localhost` (or
    the LAN IP of the Recorder machine, if running cross-machine) and
-   **Port** to `8001` → **Save**.
+   **Port** to `8001`. Paste the **/tap bearer token** the recorder
+   printed at boot (also stored in `.tap-token`). Tick **Use TLS** if
+   the recorder was started with `--tls`. Click **Save**.
 5. Reload the spatial.chat tab. The content script will open one
    `/tap` WebSocket per remote participant per utterance, keyed by the
-   participant's spatial.chat identity.
+   participant's spatial.chat identity. The popup's "Tap token" pill
+   reflects whether the server accepted your token.
 
 The popup probes the Recorder's `/health` endpoint as soon as you open
 it and shows a per-speaker table of currently-tapped channels (WS state,
@@ -80,8 +83,14 @@ deployment only ever uses `localhost`, you can tighten the
 
 ## Notes on transport security
 
-Audio is streamed over plain `ws://` — the Recorder is intended to run
-locally or on a trusted LAN, in line with TapScribe's local-first
-posture. If you need to reach a Recorder across an untrusted network,
-front it with a TLS-terminating proxy (or an SSH tunnel) and adjust the
-URL building in `content.js` / `popup.js` to `wss://` accordingly.
+By default the bridge speaks plain `ws://` to a Recorder bound to
+`localhost` or a trusted LAN. When the Recorder is started with `--tls`,
+tick **Use TLS** in the popup and the bridge will switch to `wss://`
+(and `https://` for the `/health` probe). The Recorder's self-signed
+default cert will need a one-time browser trust prompt — visit
+`https://<recorder-host>:<port>/` in a normal tab first and accept it.
+
+The `/tap` bearer token, generated at boot and printed to the recorder
+terminal, gates the WebSocket upgrade. Without it (or with the wrong
+one) the recorder refuses the handshake; the popup surfaces this as a
+"rejected" pill on the tap-token row.

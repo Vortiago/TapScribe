@@ -1,19 +1,48 @@
-"""HTTP Basic auth middleware.
+"""HTTP Basic auth middleware + the /tap WebSocket subprotocol gate.
 
-The password itself lives on the Recorder (`recorder.auth.password`,
-loaded/persisted via `AuthState`). This module only contains the
-FastAPI middleware that reads it via `request.app.state.recorder`.
+Two secrets live on the Recorder:
+
+  - `recorder.auth.password` — Basic auth for the dashboard / REST API.
+  - `recorder.tap.token`     — bearer token for the /tap WebSocket,
+                               carried in `Sec-WebSocket-Protocol`.
+
+The Basic middleware here covers HTTP. The /tap gate is a pure helper
+(`pick_tap_subprotocol`) called from the WS route handler — middleware
+of this class can't intercept the WS upgrade.
 """
 
 from __future__ import annotations
 
 import base64
 import hmac
+from collections.abc import Iterable
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from . import config
+
+# The bridge prepends this to the tap token and sends the joined string
+# as a WebSocket subprotocol value. Versioned so we can add a second
+# scheme later (e.g. signed JWT) without breaking older bridges.
+TAP_SUBPROTOCOL_PREFIX: str = "tapscribe.v1.tap."
+
+
+def pick_tap_subprotocol(offered: Iterable[str] | None, expected_token: str) -> str | None:
+    """Return the subprotocol the server should echo back, or None when
+    no offered protocol carries the right tap token. Constant-time
+    compare so timing can't be used to guess the token character-by-
+    character."""
+    if not expected_token:
+        return None
+    for proto in offered or ():
+        proto = proto.strip()
+        if not proto.startswith(TAP_SUBPROTOCOL_PREFIX):
+            continue
+        offered_token = proto[len(TAP_SUBPROTOCOL_PREFIX):]
+        if hmac.compare_digest(offered_token, expected_token):
+            return proto
+    return None
 
 
 async def basic_auth_middleware(request: Request, call_next):
@@ -22,10 +51,9 @@ async def basic_auth_middleware(request: Request, call_next):
     Constant-time comparison so the response time can't be used to guess
     characters.
 
-    Known gap: the /record WebSocket is NOT protected here because adding
-    auth there requires the bridge extension to send the password during
-    the WS handshake, which is a bigger plumbing change. In LAN mode the
-    operator should still be cautious about what's running on the network.
+    The /tap WebSocket has its own auth path (a bearer token in
+    `Sec-WebSocket-Protocol`, validated by `pick_tap_subprotocol` above
+    and called from the WS route handler).
     """
     if not config.AUTH_ENABLED:
         return await call_next(request)
