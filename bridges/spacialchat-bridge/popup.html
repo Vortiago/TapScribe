@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SpatialChat Bridge</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 13px/1.4 system-ui, sans-serif; padding: 12px; width: 340px; margin: 0; }
+  h3 { margin: 0 0 6px; font-size: 14px; }
+  h4 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.7; }
+  label { display: block; margin: 10px 0 4px; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: 5px 6px; font: inherit; border: 1px solid rgba(127,127,127,0.4); border-radius: 4px; }
+  .row { display: flex; gap: 6px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  .row.fields { gap: 8px; align-items: flex-end; }
+  .row.fields .host { flex: 1 1 auto; }
+  .row.fields .port { flex: 0 0 80px; }
+  button { font: inherit; padding: 5px 12px; cursor: pointer; border: 1px solid rgba(127,127,127,0.5); border-radius: 4px; background: transparent; }
+  button:hover { background: rgba(127,127,127,0.12); }
+  .small { font-size: 11px; opacity: 0.75; }
+  .muted { opacity: 0.6; }
+  .status { margin-top: 8px; font-size: 12px; }
+  .status.ok { color: #2a8; }
+  .status.err { color: #c44; }
+  .pill { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 11px; font-weight: 600; }
+  .pill.ok { background: rgba(42,170,80,0.18); color: #2a8; }
+  .pill.err { background: rgba(200,68,68,0.18); color: #c44; }
+  .pill.wait { background: rgba(127,127,127,0.18); }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 4px; }
+  th, td { text-align: left; padding: 2px 4px; border-bottom: 1px solid rgba(127,127,127,0.18); vertical-align: top; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+  a { color: inherit; }
+  .meta { font-size: 10px; opacity: 0.55; margin-top: 2px; }
+</style>
+</head>
+<body>
+<h3>SpatialChat Bridge</h3>
+
+<div class="row fields">
+  <div class="host">
+    <label for="host">Recorder host</label>
+    <input id="host" placeholder="e.g. localhost or 192.168.1.50">
+  </div>
+  <div class="port">
+    <label for="port">Port</label>
+    <input id="port" placeholder="8001" inputmode="numeric">
+  </div>
+</div>
+<div class="small">Streams audio to <code>ws://host:port/tap</code> — one WebSocket per speaker per utterance.</div>
+
+<div class="row">
+  <button id="save">Save</button>
+  <button id="recheck">Test connection</button>
+  <a href="#" id="openDash">Open dashboard ↗</a>
+</div>
+<div id="saveStatus" class="status"></div>
+
+<h4>Recorder reachability</h4>
+<div class="row" style="gap:14px;">
+  <div>Recorder <span id="recorderStatus" class="pill wait">checking…</span></div>
+</div>
+<div class="meta" id="probeMeta"></div>
+
+<h4>Active taps (per speaker)</h4>
+<div id="tapState" class="small muted">No data yet.</div>
+
+<div class="small muted" style="margin-top:14px;">
+  After changing the host or port, reload the SpatialChat tab so the
+  content script picks up the new settings.
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>
