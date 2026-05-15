@@ -350,11 +350,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-1);
 }
 
-/* ── Active streams ──────────────────────────────────────────── */
+/* ── Active taps ─────────────────────────────────────────────── */
 
 .stream-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
   gap: 10px;
   padding: 7px 0;
@@ -381,6 +381,38 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .stream-row .stats .b { color: var(--fg-0); }
 .stream-row .stats .m { color: var(--fg-2); }
+
+.tap-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: stretch;
+}
+.tap-toggle {
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid var(--hairline-2);
+  background: var(--bg-0);
+  color: var(--fg-3);
+  min-width: 44px;
+  text-align: center;
+  transition: background 0.08s, color 0.08s, border-color 0.08s;
+}
+.tap-toggle:hover { border-color: var(--hairline-1, var(--hairline-2)); color: var(--fg-1); }
+.tap-toggle.on {
+  background: var(--bg-2);
+  color: var(--fg-0);
+  border-color: var(--hairline-1, var(--hairline-2));
+}
+.tap-toggle.on.rec { color: #c44; border-color: rgba(196,68,68,0.45); }
+.tap-toggle.on.live { color: #2a8; border-color: rgba(42,170,80,0.45); }
+.tap-toggle[disabled] { opacity: 0.5; cursor: progress; }
 
 .empty {
   color: var(--fg-3);

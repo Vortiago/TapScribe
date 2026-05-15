@@ -30,13 +30,20 @@ from typing import Literal
 
 @dataclass
 class ActiveStream:
-    """One live /record WebSocket. Mutated only via ActiveStreams methods."""
+    """One live /record WebSocket. Mutated only via ActiveStreams methods.
+
+    `record` / `live` mirror the per-identity TapSetting that was in
+    effect when this WS opened — surfaced here so the dashboard can show
+    the operator what's currently happening for this tap without a
+    second lookup."""
     conn_id: str
     identity: str
     name: str
     filename: str
     started_at: datetime
     bytes_received: int = 0
+    record: bool = True
+    live: bool = True
 
 
 class ActiveStreams:
@@ -70,6 +77,55 @@ class ActiveStreams:
     async def snapshot(self) -> list[ActiveStream]:
         async with self._lock:
             return [replace(s) for s in self._by_id.values()]
+
+
+# ---------------------------------------------------------------------------
+# TapSettings — per-identity record / live preferences
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TapSetting:
+    """Per-identity preferences for an incoming /tap WebSocket.
+
+    `record` controls whether a WAV is written to disk; `live` controls
+    whether PCM is relayed to the WhisperLiveKit child for live
+    captioning. Both default to True. Snapshotted at WS open — toggling
+    mid-utterance applies to the next /tap WS for this identity, same
+    semantics as the global pause toggle."""
+    record: bool = True
+    live: bool = True
+
+
+class TapSettings:
+    """identity -> TapSetting. In-memory only (lost on restart). Not
+    locked: every caller runs on the asyncio event loop and there are
+    no `await`s inside any method, so the loop's cooperative scheduling
+    serialises access."""
+
+    def __init__(self) -> None:
+        self._by_identity: dict[str, TapSetting] = {}
+
+    def get(self, identity: str) -> TapSetting:
+        """Return a copy so callers can't mutate the stored entry by
+        accident. Unknown identities return the default (both on)."""
+        existing = self._by_identity.get(identity)
+        if existing is None:
+            return TapSetting()
+        return replace(existing)
+
+    def set(
+        self, identity: str, *, record: bool | None = None, live: bool | None = None,
+    ) -> TapSetting:
+        existing = self._by_identity.get(identity) or TapSetting()
+        if record is not None:
+            existing.record = bool(record)
+        if live is not None:
+            existing.live = bool(live)
+        self._by_identity[identity] = existing
+        return replace(existing)
+
+    def snapshot(self) -> dict[str, TapSetting]:
+        return {k: replace(v) for k, v in self._by_identity.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +396,7 @@ class Recorder:
 
         # Composed sub-components.
         self.streams = ActiveStreams()
+        self.tap_settings = TapSettings()
         self.jobs = JobTracker()
         self.transcripts = LiveTranscripts(max_entries=200)
         self.utterances = UtteranceIndex()
