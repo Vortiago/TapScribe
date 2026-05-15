@@ -39,7 +39,7 @@ fans the audio out internally to live captioning AND per-utterance WAV
 recording — bridges don't talk to WhisperLiveKit themselves and don't
 POST settled lines back. (See ADR-0002 for why.)
 
-**Endpoint:** `ws://<recorder-host>:8001/tap?identity=<id>&name=<display>`
+**Endpoint:** `ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>`
 (or `wss://...` when the recorder was started with `--tls`).
 
 **Audio format:** PCM signed 16-bit little-endian, 16 kHz mono, raw
@@ -83,6 +83,29 @@ errors — there's nothing for it to do about WlK state anyway.
   entries. Falls back to `unknown` if not supplied.
 - `name`: human-readable display name (e.g. "Alice"). Used on the
   dashboard. Falls back to empty.
+- `utterance_id` (recommended): a per-utterance id the bridge mints once
+  at the start of an unmuted speech segment and keeps stable across
+  reconnects within that utterance. If a /tap WS dies mid-utterance and
+  the bridge reopens with the same `utterance_id` within
+  `UtteranceIndex.RESUME_WINDOW_SECONDS` (60 s by default), the Recorder
+  appends to the same WAV instead of producing a second file. Clear it
+  on mute / end-of-utterance and mint a fresh one on the next unmute.
+  Omitting this still works (each WS gets its own WAV), but bridges that
+  want blip resilience should supply it.
+
+**Reconnect / blip resilience:** the Recorder will not auto-reconnect to
+the bridge — `/tap` is bridge-initiated. A bridge that wants to recover
+from a transient WS failure (network blip, recorder restart) should:
+
+1. Detect close-with-code != 1000 (or `onerror`).
+2. Reopen `/tap` with the **same** `utterance_id` after a short backoff
+   (e.g. jittered exponential, 200 ms → 5 s).
+3. Buffer PCM frames during the gap so audio captured while disconnected
+   isn't lost when the WS comes back. The SpatialChat bridge keeps a
+   ~3 s ring buffer; tune this to the loss budget you can accept.
+
+The bundled `spacialchat-bridge` implements all of this; see
+`bridges/spacialchat-bridge/content.js` for a reference.
 
 ## Adding a new bridge
 

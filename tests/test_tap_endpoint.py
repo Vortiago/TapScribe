@@ -287,6 +287,134 @@ def test_old_live_transcript_post_route_is_gone(
 
 
 # ---------------------------------------------------------------------------
+# Utterance resume: a /tap WS that reconnects with the same utterance_id
+# appends to the same WAV instead of creating a second file.
+# ---------------------------------------------------------------------------
+
+def _wait_for_utterance_closed(recorder: Recorder, utt: str, timeout: float = 5.0) -> bool:
+    """Poll until the server-side finally has marked the utterance closed
+    in the index. TestClient's websocket_connect context manager doesn't
+    await the server handler's finally block; without this, the resume
+    path races against the prior release()."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        snap = recorder.utterances.snapshot()
+        rec = snap.get(utt)
+        if rec is not None and not rec.open:
+            return True
+        time.sleep(0.02)
+    return False
+
+def test_tap_resume_with_same_utterance_id_appends_to_same_wav(
+    client: TestClient, recorder_with_fake_wlk: Recorder,  # noqa: ARG001
+):
+    """Mid-utterance blip recovery: bridge passes a stable utterance_id;
+    second /tap with the same id appends rather than starting a new file."""
+    # Disable the WlK relay path — it can hold the event loop in the
+    # test environment long enough to bust our deterministic polling. The
+    # resume behaviour we're verifying is WAV-side only.
+    recorder_with_fake_wlk.live._proc = None
+    pcm_frame = b"\x10\x00" * 320  # 20 ms frame
+    utt = "abc123def456"
+
+    # First half of the utterance
+    with client.websocket_connect(
+        f"/tap?identity=alice&name=Alice&utterance_id={utt}",
+    ) as ws:
+        ws.send_bytes(pcm_frame)
+        ws.send_bytes(pcm_frame)
+    assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
+
+    # Reconnect with same id — should resume the existing WAV
+    with client.websocket_connect(
+        f"/tap?identity=alice&name=Alice&utterance_id={utt}",
+    ) as ws:
+        ws.send_bytes(pcm_frame)
+    # Wait again so the WAV has been finalised before we open it for reading.
+    assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
+
+    wavs = list(recorder_with_fake_wlk.session_dir.glob("*.wav"))
+    assert len(wavs) == 1, f"expected one WAV, got {[w.name for w in wavs]}"
+    with wave.open(str(wavs[0]), "rb") as w:
+        # 3 frames * 320 samples = 960 frames if append worked
+        assert w.getnframes() == 960
+
+
+def test_tap_resume_rejected_for_different_identity(
+    client: TestClient, recorder_with_fake_wlk: Recorder,
+):
+    """A reused utterance_id with a different identity must not collide —
+    it gets a fresh WAV."""
+    pcm_frame = b"\x10\x00" * 320
+    utt = "shared-id-xyz"
+
+    with client.websocket_connect(
+        f"/tap?identity=alice&name=Alice&utterance_id={utt}",
+    ) as ws:
+        ws.send_bytes(pcm_frame)
+
+    with client.websocket_connect(
+        f"/tap?identity=bob&name=Bob&utterance_id={utt}",
+    ) as ws:
+        ws.send_bytes(pcm_frame)
+
+    wavs = sorted(recorder_with_fake_wlk.session_dir.glob("*.wav"))
+    assert len(wavs) == 2
+
+
+def test_tap_distinct_utterance_ids_produce_distinct_wavs(
+    client: TestClient, recorder_with_fake_wlk: Recorder,
+):
+    """Sanity: different utterance_ids (the bridge's normal between-mute
+    behaviour) still produce one WAV per id."""
+    pcm_frame = b"\x10\x00" * 320
+
+    with client.websocket_connect(
+        "/tap?identity=alice&name=Alice&utterance_id=first",
+    ) as ws:
+        ws.send_bytes(pcm_frame)
+    with client.websocket_connect(
+        "/tap?identity=alice&name=Alice&utterance_id=second",
+    ) as ws:
+        ws.send_bytes(pcm_frame)
+
+    wavs = list(recorder_with_fake_wlk.session_dir.glob("*.wav"))
+    assert len(wavs) == 2
+
+
+def test_tap_resume_past_window_starts_fresh_wav(
+    client: TestClient, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch,
+):
+    """If the bridge reconnects long after the resume window has elapsed,
+    we treat it as a new utterance and write a new WAV."""
+    recorder_with_fake_wlk.live._proc = None
+    pcm_frame = b"\x10\x00" * 320
+    utt = "expiring-utt"
+
+    # Shrink the resume window so the test doesn't sleep for a minute.
+    monkeypatch.setattr(
+        recorder_with_fake_wlk.utterances, "RESUME_WINDOW_SECONDS", 0.05,
+    )
+
+    with client.websocket_connect(
+        f"/tap?identity=alice&name=Alice&utterance_id={utt}",
+    ) as ws:
+        ws.send_bytes(pcm_frame)
+    assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
+    # Now let the resume window age out.
+    time.sleep(0.15)
+
+    with client.websocket_connect(
+        f"/tap?identity=alice&name=Alice&utterance_id={utt}",
+    ) as ws:
+        ws.send_bytes(pcm_frame)
+    assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
+
+    wavs = list(recorder_with_fake_wlk.session_dir.glob("*.wav"))
+    assert len(wavs) == 2
+
+
+# ---------------------------------------------------------------------------
 # /tap auth gate — Sec-WebSocket-Protocol bearer token
 # ---------------------------------------------------------------------------
 

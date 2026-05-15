@@ -150,6 +150,87 @@ class LiveTranscripts:
 
 
 # ---------------------------------------------------------------------------
+# UtteranceIndex — bridge-supplied utterance_id -> WAV record, for resume
+# ---------------------------------------------------------------------------
+
+@dataclass
+class UtteranceRecord:
+    """One bridge utterance. The bridge keeps `utterance_id` stable across
+    reconnects within a single unmuted speech segment, so a /tap WS that
+    drops mid-utterance and comes back appends to the same WAV instead
+    of producing a second file."""
+    utterance_id: str
+    identity: str
+    name: str
+    filename: str
+    path: Path
+    started_at: datetime
+    bytes_received: int = 0
+    open: bool = False
+    last_close: datetime | None = None
+
+
+class UtteranceIndex:
+    """utterance_id -> UtteranceRecord. Resume window: a closed record is
+    eligible for resume until it ages past RESUME_WINDOW_SECONDS, at
+    which point the bridge is treated as starting a fresh utterance.
+
+    Methods are sync: every caller runs on the single asyncio event loop
+    and there are no `await` points inside any method, so the loop's
+    cooperative scheduling already serialises access. That also means
+    release() still completes even if the WS handler is being cancelled
+    mid-cleanup (no `await` to abort on)."""
+
+    RESUME_WINDOW_SECONDS = 60.0
+
+    def __init__(self) -> None:
+        self._by_id: dict[str, UtteranceRecord] = {}
+
+    def try_resume(self, utterance_id: str, *, identity: str) -> UtteranceRecord | None:
+        """Return the existing record marked open=True if resumable, else
+        None. Caller is expected to reopen the WAV for append."""
+        self._prune_expired()
+        rec = self._by_id.get(utterance_id)
+        if rec is None or rec.open or rec.identity != identity:
+            return None
+        if not rec.path.exists():
+            # File was deleted (e.g. operator wiped the session dir).
+            self._by_id.pop(utterance_id, None)
+            return None
+        rec.open = True
+        return rec
+
+    def register_new(self, rec: UtteranceRecord) -> None:
+        self._prune_expired()
+        rec.open = True
+        self._by_id[rec.utterance_id] = rec
+
+    def release(self, utterance_id: str, *, bytes_received: int, kept: bool) -> None:
+        rec = self._by_id.get(utterance_id)
+        if rec is None:
+            return
+        if not kept:
+            self._by_id.pop(utterance_id, None)
+            return
+        rec.open = False
+        rec.bytes_received = bytes_received
+        rec.last_close = datetime.now(timezone.utc)
+
+    def snapshot(self) -> dict[str, UtteranceRecord]:
+        return dict(self._by_id)
+
+    def _prune_expired(self) -> None:
+        cutoff = datetime.now(timezone.utc).timestamp() - self.RESUME_WINDOW_SECONDS
+        stale = [
+            uid for uid, rec in self._by_id.items()
+            if not rec.open and rec.last_close is not None
+            and rec.last_close.timestamp() < cutoff
+        ]
+        for uid in stale:
+            self._by_id.pop(uid, None)
+
+
+# ---------------------------------------------------------------------------
 # AuthState / TapTokenState — secrets persisted under .auth-password / .tap-token
 # ---------------------------------------------------------------------------
 
@@ -261,6 +342,7 @@ class Recorder:
         self.streams = ActiveStreams()
         self.jobs = JobTracker()
         self.transcripts = LiveTranscripts(max_entries=200)
+        self.utterances = UtteranceIndex()
         self.auth = AuthState.load_or_create(auth_password_file)
         # Default the tap-token file next to the auth-password file so the
         # two secrets live together. Tests that built a Recorder before

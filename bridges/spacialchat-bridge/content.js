@@ -9,12 +9,18 @@
 //   - Close the /tap WS on TrackMuted (= end of utterance) so the
 //     Recorder finalises its WAV. Open a fresh /tap WS on the next
 //     non-muted PCM frame (= start of the next utterance).
+//   - Survive network blips mid-utterance: if the /tap WS dies for any
+//     reason while the speaker is still unmuted, schedule a reconnect
+//     with jittered backoff, buffer up to ~3 s of PCM in the meantime,
+//     and flush it on reconnect. The bridge reuses the same
+//     `utterance_id` query param across reconnects so the Recorder
+//     appends to the same WAV instead of producing a new file.
 //   - Publish a status snapshot to chrome.storage so the popup can show
 //     per-speaker state without needing DevTools, and update the tab
 //     title with a tiny tx/state indicator.
 //
 // Wire contract (see bridges/README.md):
-//   ws://<recorder-host>:8001/tap?identity=<id>&name=<display>
+//   ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>
 //   Binary frames, 20 ms each (320 samples = 640 bytes), int16 LE mono.
 //   No JSON, no HTTP, no WhisperLiveKit awareness — the Recorder fans
 //   audio out internally to its supervised WlK child and to disk.
@@ -48,8 +54,12 @@
     console.warn("[tapscribe-bridge] could not read recorder settings; using defaults", e);
   });
 
-  const tapWsUrl = (identity, name) => {
-    const qp = new URLSearchParams({ identity, name: name || "" });
+  const tapWsUrl = (identity, name, utteranceId) => {
+    const qp = new URLSearchParams({
+      identity,
+      name: name || "",
+      utterance_id: utteranceId,
+    });
     const scheme = recorderUseTls ? "wss" : "ws";
     return scheme + "://" + recorderHost + ":" + recorderPort + "/tap?" + qp.toString();
   };
@@ -63,6 +73,33 @@
     return new WebSocket(url);
   };
 
+  // Backoff: jittered exponential, capped. Indexed by ch.reconnectAttempt
+  // (0 = first retry). The cap matches what feels reasonable for an
+  // operator watching the popup — long enough not to hammer a downed
+  // recorder, short enough that recovery feels live.
+  const BACKOFF_MS = [200, 400, 800, 1600, 3200];
+  const BACKOFF_CAP_MS = 5000;
+  // ~3 s of int16 mono 16 kHz audio = 96000 bytes. We drop the OLDEST
+  // buffered frames when this is exceeded so a long outage doesn't
+  // grow without bound. Choosing 3 s means a typical reconnect cycle
+  // preserves all audio; a multi-second outage loses only the tail.
+  const MAX_BUFFER_BYTES = 96000;
+
+  function newUtteranceId() {
+    if (crypto && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID().replace(/-/g, "");
+    }
+    // Fallback for older environments — not strictly UUID but unique enough.
+    return Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+
+  function nextBackoffMs(attempt) {
+    const base = attempt < BACKOFF_MS.length ? BACKOFF_MS[attempt] : BACKOFF_CAP_MS;
+    // ±25% jitter so a roomful of reconnecting bridges doesn't synchronise.
+    const jitter = 1 + (Math.random() - 0.5) * 0.5;
+    return Math.min(BACKOFF_CAP_MS, Math.round(base * jitter));
+  }
+
   // ---- Inject page-script.js -------------------------------------------------
   const pageScriptUrl = chrome.runtime.getURL("page-script.js");
   const s = document.createElement("script");
@@ -75,12 +112,18 @@
   // ---- State -----------------------------------------------------------------
   /**
    * identity -> {
-   *   tapWs:      WebSocket | null,
-   *   framesSent: number,    // frames forwarded on the current /tap WS
-   *   bytesSent:  number,    // bytes forwarded across all utterances this session
-   *   muted:      boolean,
-   *   error:      string | null,
-   *   name:       string,
+   *   tapWs:           WebSocket | null,
+   *   utteranceId:     string | null,        // stable across reconnects within an utterance
+   *   reconnectAttempt:number,
+   *   reconnectTimer:  number | null,
+   *   buffer:          ArrayBuffer[],         // pending PCM during gap
+   *   bufferBytes:     number,
+   *   framesSent:      number,
+   *   bytesSent:       number,
+   *   muted:           boolean,
+   *   stopped:         boolean,               // tap-stop has fired; do not reconnect
+   *   error:           string | null,
+   *   name:            string,
    * }
    */
   const channels = new Map();
@@ -94,9 +137,15 @@
     }
     ch = {
       tapWs: null,
+      utteranceId: null,
+      reconnectAttempt: 0,
+      reconnectTimer: null,
+      buffer: [],
+      bufferBytes: 0,
       framesSent: 0,
       bytesSent: 0,
       muted: false,
+      stopped: false,
       error: null,
       name: name || "",
     };
@@ -104,16 +153,95 @@
     return ch;
   }
 
-  // ---- /tap WS (per utterance) ----------------------------------------------
+  // ---- /tap WS (per utterance, resilient across blips) ----------------------
+  function bufferPush(ch, buf) {
+    ch.buffer.push(buf);
+    ch.bufferBytes += buf.byteLength;
+    while (ch.bufferBytes > MAX_BUFFER_BYTES && ch.buffer.length > 0) {
+      const dropped = ch.buffer.shift();
+      ch.bufferBytes -= dropped.byteLength;
+      if (ch.error !== "buffer-overflow") {
+        ch.error = "buffer-overflow";
+        console.warn(
+          "[tapscribe-bridge] buffer overflow; dropping oldest PCM frame " +
+          "(outage exceeded " + Math.round(MAX_BUFFER_BYTES / 32) + "ms)",
+        );
+      }
+    }
+  }
+
+  function bufferFlush(ch) {
+    // Called on onopen. Sends everything we have, oldest first.
+    if (ch.buffer.length === 0) return;
+    const ws = ch.tapWs;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    let flushed = 0;
+    while (ch.buffer.length > 0) {
+      const buf = ch.buffer.shift();
+      ch.bufferBytes -= buf.byteLength;
+      try {
+        ws.send(buf);
+        ch.framesSent++;
+        ch.bytesSent += buf.byteLength;
+        flushed++;
+      } catch (e) {
+        // Put it back at the head; reconnect path will try again.
+        ch.buffer.unshift(buf);
+        ch.bufferBytes += buf.byteLength;
+        ch.error = "tap-send-failed";
+        console.error("[tapscribe-bridge] flush failed; will retry on reconnect", e);
+        return;
+      }
+    }
+    if (flushed > 0) {
+      console.log(
+        "[tapscribe-bridge] flushed " + flushed + " buffered frame(s) after reconnect",
+      );
+    }
+  }
+
+  function clearReconnectTimer(ch) {
+    if (ch.reconnectTimer !== null) {
+      clearTimeout(ch.reconnectTimer);
+      ch.reconnectTimer = null;
+    }
+  }
+
+  function scheduleReconnect(identity, ch) {
+    if (ch.muted || ch.stopped) return;
+    if (ch.reconnectTimer !== null) return;
+    if (!ch.utteranceId) return;
+    const delay = nextBackoffMs(ch.reconnectAttempt);
+    ch.reconnectAttempt++;
+    console.log(
+      "[tapscribe-bridge] /tap reconnect for " + identity +
+      " in " + delay + "ms (attempt " + ch.reconnectAttempt + ")",
+    );
+    ch.reconnectTimer = setTimeout(() => {
+      ch.reconnectTimer = null;
+      // State might have changed while we waited.
+      if (ch.muted || ch.stopped) return;
+      if (ch.tapWs) return;
+      openTapWs(identity, ch);
+    }, delay);
+    publishStatus();
+  }
+
   function openTapWs(identity, ch) {
-    const url = tapWsUrl(identity, ch.name);
-    console.log("[tapscribe-bridge] opening /tap for " + identity + " -> " + url);
+    if (!ch.utteranceId) ch.utteranceId = newUtteranceId();
+    const url = tapWsUrl(identity, ch.name, ch.utteranceId);
+    console.log(
+      "[tapscribe-bridge] opening /tap for " + identity +
+      " utt=" + ch.utteranceId.slice(0, 8) + " -> " + url,
+    );
     ch.framesSent = 0;
     const ws = openWs(url);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       console.log("[tapscribe-bridge] /tap open for " + identity);
+      ch.reconnectAttempt = 0;
       if (ch.error) ch.error = null;
+      bufferFlush(ch);
       publishStatus();
     };
     ws.onerror = () => {
@@ -125,8 +253,10 @@
       // 1000 = clean close (we closed it on mute / tap-stop / paused).
       // 4401 = the recorder rejected our tap token. Anything else means
       // the link died or the recorder rejected us for another reason.
-      if (!ev.wasClean || ev.code !== 1000) {
-        if (ev.code === 4401) {
+      const clean = ev.wasClean && ev.code === 1000;
+      const authFailed = ev.code === 4401;
+      if (!clean) {
+        if (authFailed) {
           ch.error = "tap-auth-failed";
           console.error(
             "[tapscribe-bridge] /tap auth failed for " + identity +
@@ -141,17 +271,33 @@
         }
       }
       if (ch.tapWs === ws) ch.tapWs = null;
+      // Reconnect only if the speaker is still active and the close was
+      // recoverable. A clean close (operator pause, mute, tap-stop) means
+      // the utterance is over; an auth rejection won't fix itself by
+      // retrying — leave it surfaced so the operator updates the token.
+      if (!clean && !authFailed && !ch.muted && !ch.stopped) {
+        scheduleReconnect(identity, ch);
+      }
       publishStatus();
     };
     ch.tapWs = ws;
   }
 
   function closeTapWs(identity, ch, reason) {
+    clearReconnectTimer(ch);
     const w = ch.tapWs;
     ch.tapWs = null;
     if (w && (w.readyState === WebSocket.OPEN || w.readyState === WebSocket.CONNECTING)) {
       try { w.close(1000, reason || "end of utterance"); } catch (e) {}
     }
+  }
+
+  function endUtterance(identity, ch, reason) {
+    closeTapWs(identity, ch, reason);
+    ch.utteranceId = null;
+    ch.reconnectAttempt = 0;
+    ch.buffer = [];
+    ch.bufferBytes = 0;
   }
 
   // ---- Message handler from page world --------------------------------------
@@ -163,14 +309,16 @@
     switch (d.kind) {
       case "tap-start": {
         console.log("[tapscribe-bridge] tap-start " + d.identity + " (" + (d.name || "?") + ")");
-        ensureChannel(d.identity, d.name);
+        const ch = ensureChannel(d.identity, d.name);
+        ch.stopped = false;
         publishStatus();
         break;
       }
       case "tap-stop": {
         const ch = channels.get(d.identity);
         if (ch) {
-          closeTapWs(d.identity, ch, "tap stopped");
+          ch.stopped = true;
+          endUtterance(d.identity, ch, "tap stopped");
           channels.delete(d.identity);
           console.log("[tapscribe-bridge] tap-stop " + d.identity);
           publishStatus();
@@ -183,8 +331,9 @@
           const wasMuted = ch.muted;
           ch.muted = !!d.muted;
           if (ch.muted && !wasMuted) {
-            // Mute is the "end of utterance" signal — finalise the WAV.
-            closeTapWs(d.identity, ch, "muted");
+            // Mute is the "end of utterance" signal — finalise the WAV
+            // and discard any buffered PCM / pending reconnect.
+            endUtterance(d.identity, ch, "muted");
             console.log("[tapscribe-bridge] mute " + d.identity + " -> closed /tap");
           } else {
             console.log("[tapscribe-bridge] mute " + d.identity + " -> " + ch.muted);
@@ -202,7 +351,14 @@
         // connect to the default host and then have to throw it away.
         if (!settingsReady) return;
 
-        if (!ch.tapWs) openTapWs(d.identity, ch);
+        // First frame of a new utterance — mint the id the recorder will
+        // use to stitch reconnects together.
+        if (!ch.utteranceId) ch.utteranceId = newUtteranceId();
+
+        if (!ch.tapWs && ch.reconnectTimer === null) {
+          openTapWs(d.identity, ch);
+        }
+
         if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) {
           if (ch.tapWs.bufferedAmount > 1_000_000) {
             if (ch.error !== "backpressure") {
@@ -220,14 +376,24 @@
               ch.bytesSent += d.buffer.byteLength;
               // Clear transient errors after a successful send. Real link
               // failures will be re-set by onerror/onclose.
-              if (ch.error === "tap-send-failed" || ch.error === "backpressure") {
+              if (
+                ch.error === "tap-send-failed" ||
+                ch.error === "backpressure" ||
+                ch.error === "buffer-overflow"
+              ) {
                 ch.error = null;
               }
             } catch (e) {
               ch.error = "tap-send-failed";
               console.error("[tapscribe-bridge] /tap send failed for " + d.identity, e);
+              // Buffer the frame; the close handler will schedule reconnect.
+              bufferPush(ch, d.buffer);
             }
           }
+        } else {
+          // CONNECTING, or waiting on a reconnect timer — keep audio
+          // around so we can flush it once the WS comes up.
+          bufferPush(ch, d.buffer);
         }
         break;
       }
@@ -262,6 +428,10 @@
         error: ch.error,
         framesSent: ch.framesSent,
         bytesSent: ch.bytesSent,
+        bufferedFrames: ch.buffer.length,
+        bufferedBytes: ch.bufferBytes,
+        reconnectAttempt: ch.reconnectAttempt,
+        reconnecting: ch.reconnectTimer !== null,
         tapWs: ch.tapWs ? wsStateName(ch.tapWs.readyState) : null,
       })),
     };
@@ -272,7 +442,8 @@
   // out chrome.storage.onChanged events at 2 Hz for no reason.
   function snapshotFingerprint(snap) {
     return snap.channels.map(c =>
-      c.identity + "|" + c.tapWs + "|" + c.muted + "|" + c.error + "|" + c.framesSent,
+      c.identity + "|" + c.tapWs + "|" + c.muted + "|" + c.error + "|" +
+      c.framesSent + "|" + c.reconnecting + "|" + c.bufferedFrames,
     ).join(";");
   }
 
@@ -306,16 +477,23 @@
     let openTaps = 0;
     let total = 0;
     let firstError = null;
+    let anyReconnecting = false;
     for (const [id, ch] of channels) {
       total++;
       totalBytes += ch.bytesSent;
       if (ch.error && !firstError) firstError = id;
       if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) openTaps++;
+      if (ch.reconnectTimer !== null) anyReconnecting = true;
     }
 
-    const suffix = firstError
-      ? " [tap ERR " + firstError + "]"
-      : " [tap " + openTaps + "/" + total + " " + Math.round(totalBytes / 1024) + "K]";
+    let suffix;
+    if (firstError) {
+      suffix = " [tap ERR " + firstError + "]";
+    } else if (anyReconnecting) {
+      suffix = " [tap reconnecting…]";
+    } else {
+      suffix = " [tap " + openTaps + "/" + total + " " + Math.round(totalBytes / 1024) + "K]";
+    }
     const next = origTitle + suffix;
     if (document.title !== next) document.title = next;
   }, 500);
