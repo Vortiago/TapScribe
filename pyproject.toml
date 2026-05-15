@@ -48,6 +48,13 @@ dev = [
     # local-test-bridge dev tool — captures from the system mic and
     # streams to /tap. See bridges/local-test-bridge/README.md.
     "sounddevice>=0.4",
+    # Real-audio fixture conversion (OGG → 16 kHz mono int16 WAV) and
+    # the real-Whisper E2E test (tests/e2e/test_pipeline_e2e.py).
+    "soundfile>=0.12",
+    "scipy>=1.10",
+    # Browser-driven dashboard E2E (tests/e2e/test_dashboard_ui.py).
+    # After install, run: `python -m playwright install chromium`.
+    "playwright>=1.40",
 ]
 
 [project.scripts]
@@ -65,6 +72,9 @@ addopts = "-q --strict-markers"
 asyncio_mode = "auto"
 filterwarnings = [
     "ignore::DeprecationWarning",
+]
+markers = [
+    "real_audio: end-to-end test that streams real audio fixtures and runs a real Whisper backend. Skipped unless tests/fixtures/audio/ is populated and faster-whisper is installed.",
 ]
 
 [tool.ruff]

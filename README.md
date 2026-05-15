@@ -23,6 +23,20 @@ included bridge, `spacialchat-bridge/`, targets spatial.chat. See
 [`bridges/README.md`](bridges/README.md) for the wire protocol if you want to
 add another.
 
+## Dashboard
+
+One operator console at `/`. Sessions list on the bottom-left, live
+captions and active taps up top, merged transcript on the right after
+the **▶ transcribe whole session** button runs.
+
+![Merged session transcript](docs/dashboard-shots/06-real-audio-transcript.png)
+
+The screenshot is captured live by the browser E2E test described
+under [Tests](#tests), running the real Apollo 11 audio fixture
+through the bridge and a real `faster-whisper` `tiny.en` over CPU.
+Whisper self-flagged the imperfect output as low-confidence; bigger
+models clean that up considerably.
+
 ## Quick start (macOS / Linux)
 
 ```bash
@@ -157,13 +171,47 @@ Pass `--no-mlx` to opt out.
 ## Tests
 
 ```bash
-pip install pytest fastapi numpy
-python -m pytest tests -q
+pip install -e ".[dev]"
+python -m pytest -q
 ```
 
-Tests cover the pure helpers (hallucination filter, prompt/hotwords reading,
-slug parsing, WAV I/O, model routing). The Whisper, Voxtral, and silero
-backends are not exercised, so the suite stays fast.
+Three layers, all fast:
+
+- **Unit + route tests** (`tests/test_*.py`) cover pure helpers
+  (hallucination filter, prompt/hotwords reading, slug parsing, WAV I/O,
+  model routing) and FastAPI routes via `TestClient`. Whisper / Voxtral
+  backends are stubbed; the suite stays under 20 s.
+- **HTTP pipeline E2E** (`tests/e2e/test_pipeline_e2e.py`) boots a real
+  uvicorn server, streams two synthetic WAVs concurrently through real
+  `/tap` WebSockets, then walks every dashboard HTTP route to verify
+  the recorder finalised the WAVs, fanned settled lines into the live
+  feed, and produced a merged session transcript. Uses a
+  `FakeTranscriber` so the test runs without faster-whisper installed.
+- **Real-Whisper E2E** (same file, `test_pipeline_with_real_whisper`)
+  streams committed CC-licensed audio fixtures (Apollo 11 English, Marlene
+  Dietrich Norwegian) through the bridge and runs real `faster-whisper`
+  on what the recorder wrote. Skipped automatically when
+  `faster-whisper` isn't installed. See
+  [`tests/fixtures/audio/README.md`](tests/fixtures/audio/README.md) for
+  licence details and how to add more clips.
+- **Dashboard UI E2E** (`tests/e2e/test_dashboard_ui.py`) launches
+  headless Chromium via Playwright against the running server and
+  asserts on actual DOM. Two variants:
+  - The fast plumbing check (synthetic WAVs + `FakeTranscriber`)
+    verifies active-taps rows appear while bridges stream, settled
+    lines land in the live transcripts panel with correct per-speaker
+    attribution, and the **▶ transcribe whole session** button
+    renders the merged transcript with both speakers' text.
+  - The real-audio check (`@pytest.mark.real_audio`) streams the
+    committed Apollo 11 fixture through the bridge, clicks the same
+    button, and waits for real `faster-whisper` to produce a merged
+    transcript in the UI. This is what produces the screenshot in
+    the [Dashboard](#dashboard) section above.
+
+  ```bash
+  pip install -e ".[dev]" && python -m playwright install chromium
+  python -m pytest tests/e2e/test_dashboard_ui.py
+  ```
 
 GitHub Actions runs the suite and `ruff check` on every push and PR across
 Python 3.10-3.13 on Ubuntu, macOS, and Windows.
