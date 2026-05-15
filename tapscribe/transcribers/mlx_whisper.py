@@ -14,11 +14,42 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import load_recorder_wav_as_pcm, wav_duration_s
-from ..models import default_language_for, mlx_whisper_repo
-from .base import TranscriptionResult, TranscriptionSegment, Word
+from .base import TranscriptionResult, TranscriptionSegment, Word, default_language_for
 
 # Used when folding hotwords into the initial prompt.
 _HOTWORDS_FRAMING = "Proper nouns, names, and jargon that may appear: "
+
+# Mirrors whisperlivekit/model_mapping.py exactly — upstream is the source
+# of truth since they've pressure-tested it. Note: `large-v3-turbo` is
+# published WITHOUT the `-mlx` suffix; the naive `whisper-<name>-mlx`
+# pattern would 404. Anything not in this table falls back to that pattern.
+MLX_REPO_TABLE: dict[str, str] = {
+    "tiny.en":         "mlx-community/whisper-tiny.en-mlx",
+    "tiny":            "mlx-community/whisper-tiny-mlx",
+    "base.en":         "mlx-community/whisper-base.en-mlx",
+    "base":            "mlx-community/whisper-base-mlx",
+    "small.en":        "mlx-community/whisper-small.en-mlx",
+    "small":           "mlx-community/whisper-small-mlx",
+    "medium.en":       "mlx-community/whisper-medium.en-mlx",
+    "medium":          "mlx-community/whisper-medium-mlx",
+    "large-v1":        "mlx-community/whisper-large-v1-mlx",
+    "large-v2":        "mlx-community/whisper-large-v2-mlx",
+    "large-v3":        "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo":  "mlx-community/whisper-large-v3-turbo",
+    "large":           "mlx-community/whisper-large-mlx",
+    # NB-Whisper (Norwegian-finetuned by Nasjonalbiblioteket) intentionally
+    # excluded here: probed HF and there are NO public MLX conversions
+    # (NbAiLabBeta/*-mlx, mlx-community/nb-whisper-*-mlx all 404). NB-Whisper
+    # runs via faster-whisper on the CT2 weights bundled inside
+    # NbAiLab/nb-whisper-<size>/ct2/, even on Apple Silicon.
+}
+
+
+def mlx_whisper_repo(name: str) -> str:
+    """Map an OpenAI-style Whisper model name to its mlx-community HF repo.
+    Looks up the WhisperLiveKit-compatible table first; falls back to
+    `mlx-community/whisper-<name>-mlx` for anything else."""
+    return MLX_REPO_TABLE.get(name, f"mlx-community/whisper-{name}-mlx")
 
 
 class MlxWhisperTranscriber:

@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import download_nb_whisper_ct2_dir
+from .nb_whisper import download_nb_whisper_ct2_dir
 from .text import read_prompt
 
 
@@ -67,7 +67,7 @@ def build_live_cmd(
     names from its built-in table. NB-Whisper isn't there, so the
     escape hatch is `--model-path <local-ct2-dir>`. The caller must
     supply `nb_whisper_ct2_dir` for those models (download it first
-    via `tapscribe.models.download_nb_whisper_ct2_dir`); we raise
+    via `tapscribe.nb_whisper.download_nb_whisper_ct2_dir`); we raise
     `ValueError` rather than silently dropping `--model-path`.
     """
     cmd: list[str] = [
@@ -87,7 +87,7 @@ def build_live_cmd(
             raise ValueError(
                 f"build_live_cmd: nb-whisper model {config.model!r} requires "
                 "nb_whisper_ct2_dir to be supplied. Call "
-                "tapscribe.models.download_nb_whisper_ct2_dir first."
+                "tapscribe.nb_whisper.download_nb_whisper_ct2_dir first."
             )
         cmd.extend(["--model-path", str(nb_whisper_ct2_dir)])
         cmd.extend(["--backend-policy", "localagreement"])

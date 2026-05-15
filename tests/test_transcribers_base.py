@@ -12,7 +12,23 @@ from tapscribe.transcribers.base import (
     TranscriptionResult,
     TranscriptionSegment,
     Word,
+    default_language_for,
 )
+
+
+def test_default_language_for_english_only_models():
+    assert default_language_for("tiny.en") == "en"
+    assert default_language_for("small.en") == "en"
+
+
+def test_default_language_for_nb_whisper():
+    assert default_language_for("nb-whisper-medium") == "no"
+
+
+def test_default_language_for_unknown_returns_none():
+    assert default_language_for("large-v3") is None
+    assert default_language_for("voxtral-mini") is None
+    assert default_language_for("") is None
 
 
 class _FakeTranscriber:

@@ -9,8 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, ClassVar
 
-from ..models import default_language_for, download_nb_whisper_ct2_dir
-from .base import TranscriptionResult, TranscriptionSegment, Word
+from ..nb_whisper import download_nb_whisper_ct2_dir
+from .base import TranscriptionResult, TranscriptionSegment, Word, default_language_for
 
 
 class FasterWhisperTranscriber:

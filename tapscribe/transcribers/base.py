@@ -72,3 +72,18 @@ class Transcriber(Protocol):
         initial_prompt: str | None = None,
         hotwords: str | None = None,
     ) -> TranscriptionResult: ...
+
+
+def default_language_for(model_name: str) -> str | None:
+    """Pick a language hint from the model name.
+
+    `.en` suffix → English-only Whisper checkpoint.
+    `nb-*` → Norwegian-tuned (NB-Whisper).
+    Everything else returns None so the model runs language detection.
+    """
+    n = (model_name or "").lower()
+    if n.endswith(".en"):
+        return "en"
+    if n.startswith("nb-"):
+        return "no"
+    return None

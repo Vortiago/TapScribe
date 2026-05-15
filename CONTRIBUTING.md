@@ -43,10 +43,13 @@ Both run on CI for every push and PR — keep them green.
 
 ## Adding a model backend
 
-The hot-loop is `tapscribe.models.get_model` and the per-WAV functions in
-`tapscribe.transcribe`. New backends get a tagged tuple in the model
-cache and a dispatch branch in `transcribe_wav_sync`. Mirror the shape
-of the existing result dicts so the dashboard renders consistently.
+Add a new adapter module under `tapscribe/transcribers/` exposing a class
+that satisfies the `Transcriber` Protocol (see
+`tapscribe/transcribers/base.py`): `name`, `device`, `model_name`, and
+`transcribe(path, *, initial_prompt, hotwords) -> TranscriptionResult`.
+Wire a dispatch branch into `_build_transcriber` in
+`tapscribe/transcribers/__init__.py`. The factory caches per
+`(model_name, use_mlx)` automatically.
 
 ## Reporting issues
 
