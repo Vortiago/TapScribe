@@ -90,14 +90,11 @@
   function openTapWs(identity, ch) {
     const url = tapWsUrl(identity, ch.name);
     console.log("[tapscribe-bridge] opening /tap for " + identity + " -> " + url);
-    ch.lastTapAttempt = { url, ts: Date.now() };
     ch.framesSent = 0;
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       console.log("[tapscribe-bridge] /tap open for " + identity);
-      // Clear any prior error once a fresh connection succeeds, so the
-      // dashboard reflects current state rather than the previous failure.
       if (ch.error) ch.error = null;
       publishStatus();
     };
@@ -178,8 +175,6 @@
         // connect to the default host and then have to throw it away.
         if (!settingsReady) return;
 
-        // Lazy-open on first non-muted PCM after the previous utterance
-        // closed (or on the very first PCM frame for this speaker).
         if (!ch.tapWs) openTapWs(d.identity, ch);
         if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) {
           if (ch.tapWs.bufferedAmount > 1_000_000) {
@@ -232,28 +227,36 @@
         framesSent: ch.framesSent,
         bytesSent: ch.bytesSent,
         tapWs: ch.tapWs ? wsStateName(ch.tapWs.readyState) : null,
-        lastTapAttempt: ch.lastTapAttempt || null,
       })),
     };
   }
 
-  // Called eagerly from anything that changes channel state — tap-start,
-  // tap-stop, mute, WS open/close — in addition to the periodic publish
-  // below. The popup subscribes to chrome.storage.onChanged, so an
-  // event-driven write here reaches it in <100ms instead of waiting for
-  // the next tick.
+  // Hash of the parts of the snapshot the popup actually renders. Used to
+  // skip storage writes when nothing observable changed, so we don't fan
+  // out chrome.storage.onChanged events at 2 Hz for no reason.
+  function snapshotFingerprint(snap) {
+    return snap.channels.map(c =>
+      c.identity + "|" + c.tapWs + "|" + c.muted + "|" + c.error + "|" + c.framesSent,
+    ).join(";");
+  }
+
+  let lastFingerprint = "";
+  // Event-driven: called whenever channel state changes so the popup
+  // reflects the change within ~50 ms instead of waiting for the periodic
+  // tick. chrome.storage.set can reject in odd states (extension
+  // reloading, quota) — swallow.
   function publishStatus() {
     try {
-      chrome.storage.local.set({ bridgeStatus: buildStatusSnapshot() });
+      const snap = buildStatusSnapshot();
+      const fp = snapshotFingerprint(snap);
+      if (fp === lastFingerprint) return;
+      lastFingerprint = fp;
+      chrome.storage.local.set({ bridgeStatus: snap });
     } catch (e) { /* ignore */ }
   }
 
   setInterval(() => {
-    // Publish a periodic status snapshot so the popup's "last update Ns
-    // ago" stamp stays fresh even when nothing is changing.
-    try {
-      chrome.storage.local.set({ bridgeStatus: buildStatusSnapshot() });
-    } catch (e) { /* ignore */ }
+    publishStatus();
 
     if (channels.size === 0) {
       if (origTitle !== null && document.title !== origTitle) {

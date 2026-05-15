@@ -110,17 +110,20 @@
     const silentGain = ctx.createGain();
     silentGain.gain.value = 0;
 
+    const entry = { source, worklet, silentGain, name, resolvedName: name || "" };
+
     worklet.port.onmessage = (ev) => {
       const buf = ev.data.buffer;
-      // Re-resolve the display name on every frame so the label catches
-      // up automatically once SpatialChat's sidebar renders the user.
-      // Cheap (one querySelectorAll per ~20 ms frame; cached element
-      // list could optimise later if it ever shows up in a profile).
-      const currentName = getDisplayName(participant) || name;
+      // The sidebar may not have rendered the user yet at tap time; retry
+      // until it gives us a non-empty name, then stop querying the DOM.
+      if (!entry.resolvedName) {
+        const n = getDisplayName(participant);
+        if (n) entry.resolvedName = n;
+      }
       postToContent({
         kind: "pcm",
         identity: participant.identity,
-        name: currentName,
+        name: entry.resolvedName,
         buffer: buf,
       }, [buf]);
     };
@@ -128,7 +131,7 @@
     source.connect(worklet);
     worklet.connect(silentGain).connect(ctx.destination);
 
-    taps.set(participant.identity, { source, worklet, silentGain, name });
+    taps.set(participant.identity, entry);
     postToContent({ kind: "tap-start", identity: participant.identity, name });
     console.log("[tapscribe-bridge/page] tapping " + participant.identity + " (" + (name || "no-name") + ")");
   }
