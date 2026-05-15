@@ -78,4 +78,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
 
       - name: Run bridge tests (Node built-in runner, no deps)
-        run: node --test "bridges/spacialchat-bridge/tests/*.test.js"
+        # Glob is shell-expanded — Node 20's `--test` does not accept
+        # glob patterns directly (that's Node 22+), but it happily
+        # accepts the resulting list of files.
+        run: node --test bridges/spacialchat-bridge/tests/*.test.js
