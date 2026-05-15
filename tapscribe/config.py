@@ -43,7 +43,7 @@ HALLUCINATIONS_FILE: Path = CONFIG_DIR / "hallucinations.txt"
 SILENT_RMS_DBFS_FLOOR: float = -50.0
 
 # HTTP Basic auth. Username is fixed; password lives on the Recorder
-# (`recorder.auth.password`) and is generated/persisted under
+# (`recorder.auth.value`) and is generated/persisted under
 # AUTH_PASSWORD_FILE on first run.
 AUTH_USER: str = "admin"
 AUTH_PASSWORD_FILE: Path = BASE_DIR / ".auth-password"

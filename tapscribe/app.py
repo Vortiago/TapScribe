@@ -679,13 +679,13 @@ async def tap(ws: WebSocket):
         return
 
     # Auth gate: when AUTH_ENABLED, the bridge must offer a subprotocol of
-    # the form "tapscribe.v1.tap.<token>" whose token matches recorder.tap.token.
+    # the form "tapscribe.v1.tap.<token>" whose token matches recorder.tap.value.
     # We accept-with-subprotocol on match (browsers require the server to
     # echo one of the offered values), and refuse the upgrade on mismatch.
     accept_subprotocol: str | None = None
     if config.AUTH_ENABLED:
         offered = ws.scope.get("subprotocols") or []
-        accept_subprotocol = auth.pick_tap_subprotocol(offered, recorder.tap.token)
+        accept_subprotocol = auth.pick_tap_subprotocol(offered, recorder.tap.value)
         if accept_subprotocol is None:
             await ws.close(code=4401, reason="missing or invalid tap token")
             return

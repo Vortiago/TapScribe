@@ -1,10 +1,10 @@
 """HTTP Basic auth middleware + the /tap WebSocket subprotocol gate.
 
-Two secrets live on the Recorder:
+Two secrets live on the Recorder, both `SecretFile` instances:
 
-  - `recorder.auth.password` — Basic auth for the dashboard / REST API.
-  - `recorder.tap.token`     — bearer token for the /tap WebSocket,
-                               carried in `Sec-WebSocket-Protocol`.
+  - `recorder.auth.value` — Basic auth for the dashboard / REST API.
+  - `recorder.tap.value`  — bearer token for the /tap WebSocket,
+                            carried in `Sec-WebSocket-Protocol`.
 
 The Basic middleware here covers HTTP. The /tap gate is a pure helper
 (`pick_tap_subprotocol`) called from the WS route handler — middleware
@@ -84,7 +84,7 @@ async def basic_auth_middleware(request: Request, call_next):
         return JSONResponse({"detail": "Recorder not ready"}, status_code=503)
 
     user_ok = hmac.compare_digest(user, config.AUTH_USER)
-    pass_ok = hmac.compare_digest(pw, recorder.auth.password)
+    pass_ok = hmac.compare_digest(pw, recorder.auth.value)
     if not (user_ok and pass_ok):
         return JSONResponse({"detail": "Invalid credentials"}, status_code=401, headers=realm_header)
     return await call_next(request)

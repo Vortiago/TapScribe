@@ -399,7 +399,7 @@ class TestTapAuth:
         # for this auth check — the focus here is the upgrade gate, not
         # the relay.
         recorder_with_fake_wlk.live._proc = None
-        token = recorder_with_fake_wlk.tap.token
+        token = recorder_with_fake_wlk.tap.value
         from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX
         subprotocol = TAP_SUBPROTOCOL_PREFIX + token
         with auth_client.websocket_connect(

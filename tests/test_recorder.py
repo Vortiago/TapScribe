@@ -9,10 +9,10 @@ from pathlib import Path
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import (
     ActiveStreams,
-    AuthState,
     JobTracker,
     LiveTranscripts,
     Recorder,
+    SecretFile,
 )
 
 
@@ -31,7 +31,7 @@ def test_recorder_composes_all_five_subcomponents(tmp_path: Path):
     assert isinstance(r.streams, ActiveStreams)
     assert isinstance(r.jobs, JobTracker)
     assert isinstance(r.transcripts, LiveTranscripts)
-    assert isinstance(r.auth, AuthState)
+    assert isinstance(r.auth, SecretFile)
     # LiveChannel is built lazily — check the attribute exists
     assert r.live is not None
 
@@ -94,6 +94,6 @@ def test_recorder_auth_password_persists_across_instances(tmp_path: Path):
     """The password is on disk; a second Recorder with the same file
     path reads the same password."""
     r1 = _build_recorder(tmp_path)
-    pw = r1.auth.password
+    pw = r1.auth.value
     r2 = _build_recorder(tmp_path)
-    assert r2.auth.password == pw
+    assert r2.auth.value == pw
