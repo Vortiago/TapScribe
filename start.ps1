@@ -38,16 +38,22 @@ if (-not (Test-Path ".venv\Scripts\Activate.ps1")) {
     & $Py -m venv .venv
 }
 . .\.venv\Scripts\Activate.ps1
-python -m pip install --quiet --upgrade pip
+
+# Force unbuffered stdout/stderr from every child Python we spawn — without
+# this, PowerShell's non-TTY stdout makes Python block-buffer, so the recorder
+# appears to "hang" while torch/transformers are importing on first launch.
+$env:PYTHONUNBUFFERED = "1"
+
+Write-Host "[start] Upgrading pip…"
+& python -m pip install --upgrade pip
 
 # --- Dependencies -----------------------------------------------------------
+Write-Host "[start] Checking installed dependencies…"
 $needInstall = $false
-foreach ($pkg in @("whisperlivekit", "multipart", "fastapi", "uvicorn")) {
-    & python -c "import $pkg" *> $null
+foreach ($pkg in @("whisperlivekit", "multipart", "fastapi", "uvicorn", "transformers")) {
+    & python -c "import $pkg" 2>$null
     if ($LASTEXITCODE -ne 0) { $needInstall = $true }
 }
-& python -c "from transformers import VoxtralForConditionalGeneration" *> $null
-if ($LASTEXITCODE -ne 0) { $needInstall = $true }
 
 if ($needInstall) {
     Write-Host "[start] Installing dependencies — first run pulls PyTorch (several hundred MB)…"
@@ -77,9 +83,10 @@ Write-Host ""
 Write-Host "[start] Launching TapScribe…"
 Write-Host "        Dashboard       http://${BindHost}:${PortRec}/"
 Write-Host "        Live channel    ws://${BindHost}:${PortWlk}/asr"
+Write-Host "        (first launch can take 10–30s while torch/transformers import — be patient)"
 Write-Host ""
 
-& python -m tapscribe `
+& python -u -m tapscribe `
     --host $BindHost `
     --port $PortRec `
     --live-model $Model `
