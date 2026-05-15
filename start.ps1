@@ -5,14 +5,16 @@
 #   .\start.ps1 -Lan                     # bind to 0.0.0.0 (LAN access)
 #   .\start.ps1 -NoMlx                   # skip MLX (irrelevant on Windows but accepted for parity)
 #   .\start.ps1 -NoAutoLive              # boot without starting the live channel
-#   .\start.ps1 -NoAuth                  # disable dashboard auth (DEV ONLY)
+#   .\start.ps1 -NoAuth                  # disable dashboard auth + /tap token gate (DEV ONLY)
+#   .\start.ps1 -Tls                     # serve https:// + wss:// (auto self-signed)
 
 [CmdletBinding()]
 param(
     [switch]$Lan,
     [switch]$NoMlx,
     [switch]$NoAutoLive,
-    [switch]$NoAuth
+    [switch]$NoAuth,
+    [switch]$Tls
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,6 +65,7 @@ $ExtraArgs = @()
 if ($NoMlx)      { $ExtraArgs += "--no-mlx" }
 if ($NoAutoLive) { $ExtraArgs += "--no-auto-live" }
 if ($NoAuth)     { $ExtraArgs += "--no-auth" }
+if ($Tls)        { $ExtraArgs += "--tls" }
 
 Write-Host ""
 Write-Host "[start] Launching TapScribe…"

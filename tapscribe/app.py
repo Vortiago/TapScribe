@@ -15,7 +15,9 @@ The big-picture route map:
   POST /api/live/stop           — stop whisperlivekit-server
   DELETE /api/live-transcript   — clear the live transcripts feed (dashboard "clear")
   WS   /tap?identity&name       — Bridge audio in (one WS per utterance);
-                                  Recorder fans out to WAV + WlK relay (ADR-0002)
+                                  Recorder fans out to WAV + WlK relay (ADR-0002).
+                                  Auth: Sec-WebSocket-Protocol "tapscribe.v1.tap.<token>"
+                                  when AUTH_ENABLED; gate is in the route handler.
 """
 
 from __future__ import annotations
@@ -667,10 +669,26 @@ async def tap(ws: WebSocket):
     dashboard.
     """
     recorder: Recorder | None = getattr(ws.app.state, "recorder", None)
-    await ws.accept()
     if recorder is None:
+        # Refuse the upgrade before accept so the bridge sees a hard fail
+        # rather than an empty open-then-close.
         await ws.close(code=1011, reason="recorder not ready")
         return
+
+    # Auth gate: when AUTH_ENABLED, the bridge must offer a subprotocol of
+    # the form "tapscribe.v1.tap.<token>" whose token matches recorder.tap.token.
+    # We accept-with-subprotocol on match (browsers require the server to
+    # echo one of the offered values), and refuse the upgrade on mismatch.
+    accept_subprotocol: str | None = None
+    if config.AUTH_ENABLED:
+        offered = ws.scope.get("subprotocols") or []
+        accept_subprotocol = auth.pick_tap_subprotocol(offered, recorder.tap.token)
+        if accept_subprotocol is None:
+            await ws.close(code=4401, reason="missing or invalid tap token")
+            return
+
+    await ws.accept(subprotocol=accept_subprotocol)
+
     # Honor the operator's pause toggle: accept the WS so the bridge knows
     # we heard the open, then close cleanly.
     if not recorder.recording_enabled:

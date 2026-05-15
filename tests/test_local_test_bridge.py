@@ -58,6 +58,23 @@ def test_build_tap_url_handles_empty_name():
     assert url.endswith("&name=") or "name=" in url
 
 
+def test_build_tap_url_uses_wss_when_tls_set():
+    url = ltb.build_tap_url(host="recorder.lan", port=8001, identity="x", name="X", tls=True)
+    assert url.startswith("wss://recorder.lan:8001/tap?")
+
+
+def test_build_subprotocols_empty_for_blank_token():
+    """No subprotocols when the operator left the token blank — the
+    server should be in --no-auth mode."""
+    assert ltb.build_subprotocols("") == []
+
+
+def test_build_subprotocols_prefixes_token():
+    """The Sec-WebSocket-Protocol value is the prefix + the token."""
+    got = ltb.build_subprotocols("abc123")
+    assert got == [ltb.TAP_SUBPROTOCOL_PREFIX + "abc123"]
+
+
 def test_default_identity_uses_env_username_or_local_tester(monkeypatch):
     """The default identity should be reproducible: prefer the OS username
     so multi-instance testing produces distinct identities."""

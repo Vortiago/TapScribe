@@ -49,6 +49,17 @@ AUTH_USER: str = "admin"
 AUTH_PASSWORD_FILE: Path = BASE_DIR / ".auth-password"
 AUTH_ENABLED: bool = True
 
+# Bearer token bridges send on the /tap WebSocket (carried via
+# Sec-WebSocket-Protocol). Distinct from the dashboard password so the
+# operator can hand a tap-token to browser extensions without exposing
+# the dashboard. Generated/persisted under TAP_TOKEN_FILE on first run.
+TAP_TOKEN_FILE: Path = BASE_DIR / ".tap-token"
+
+# TLS files for the dashboard + /tap (when --tls is set). Auto-generated
+# as self-signed if missing.
+TLS_CERT_FILE: Path = BASE_DIR / ".tapscribe-cert.pem"
+TLS_KEY_FILE: Path = BASE_DIR / ".tapscribe-key.pem"
+
 # Method-aware routes that bypass auth. /health is for monitors; the
 # live-transcript ingest is exempt because the browser bridge can't
 # easily inject Basic credentials on a fire-and-forget POST.

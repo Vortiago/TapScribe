@@ -412,3 +412,90 @@ def test_tap_resume_past_window_starts_fresh_wav(
 
     wavs = list(recorder_with_fake_wlk.session_dir.glob("*.wav"))
     assert len(wavs) == 2
+
+
+# ---------------------------------------------------------------------------
+# /tap auth gate — Sec-WebSocket-Protocol bearer token
+# ---------------------------------------------------------------------------
+
+class TestTapAuth:
+    """When AUTH_ENABLED, the /tap WS requires a Sec-WebSocket-Protocol of
+    the form 'tapscribe.v1.tap.<token>'. With the right token the upgrade
+    succeeds and the server echoes the same subprotocol back; with the
+    wrong token (or none) the recorder closes the upgrade with code 4401."""
+
+    @pytest.fixture
+    def auth_client(self, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch):
+        """Same client as the parent test module but with AUTH_ENABLED so
+        the WS handler runs the subprotocol gate."""
+        monkeypatch.setattr(_config, "AUTH_ENABLED", True)
+        app.dependency_overrides[get_recorder] = lambda: recorder_with_fake_wlk
+        app.state.recorder = recorder_with_fake_wlk
+        with TestClient(app) as c:
+            yield c
+        app.dependency_overrides.clear()
+
+    def test_tap_accepts_correct_token_and_writes_wav(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder,
+    ):
+        # The relay handshake to the fake WlK can race the test-client
+        # close; match the existing /tap tests by side-stepping the relay
+        # for this auth check — the focus here is the upgrade gate, not
+        # the relay.
+        recorder_with_fake_wlk.live._proc = None
+        token = recorder_with_fake_wlk.tap.token
+        from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX
+        subprotocol = TAP_SUBPROTOCOL_PREFIX + token
+        with auth_client.websocket_connect(
+            "/tap?identity=alice&name=Alice", subprotocols=[subprotocol],
+        ) as ws:
+            ws.send_bytes(b"\x10\x00" * 320)
+        wavs = list(recorder_with_fake_wlk.session_dir.glob("*.wav"))
+        assert len(wavs) == 1
+
+    def test_tap_rejects_missing_subprotocol(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder,
+    ):
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect):
+            with auth_client.websocket_connect("/tap?identity=alice&name=Alice"):
+                pass
+        assert list(recorder_with_fake_wlk.session_dir.glob("*.wav")) == []
+
+    def test_tap_rejects_wrong_token(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder,
+    ):
+        from starlette.websockets import WebSocketDisconnect
+
+        from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX
+        bad = TAP_SUBPROTOCOL_PREFIX + "definitely-not-the-token"
+        with pytest.raises(WebSocketDisconnect):
+            with auth_client.websocket_connect(
+                "/tap?identity=alice&name=Alice", subprotocols=[bad],
+            ):
+                pass
+        assert list(recorder_with_fake_wlk.session_dir.glob("*.wav")) == []
+
+    def test_tap_rejects_unrelated_subprotocol(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder,
+    ):
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect):
+            with auth_client.websocket_connect(
+                "/tap?identity=alice&name=Alice", subprotocols=["chat.v3"],
+            ):
+                pass
+        assert list(recorder_with_fake_wlk.session_dir.glob("*.wav")) == []
+
+
+def test_pick_tap_subprotocol_returns_match():
+    """Pure helper test — the heart of the auth gate, exercised in isolation."""
+    from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX, pick_tap_subprotocol
+    token = "ABCxyz_123-"
+    proto = TAP_SUBPROTOCOL_PREFIX + token
+    assert pick_tap_subprotocol([proto], token) == proto
+    assert pick_tap_subprotocol(["chat.v3", proto], token) == proto
+    assert pick_tap_subprotocol([proto + "wrong"], token) is None
+    assert pick_tap_subprotocol([], token) is None
+    # An empty expected token is never satisfied (would otherwise be a bypass).
+    assert pick_tap_subprotocol([TAP_SUBPROTOCOL_PREFIX], "") is None
