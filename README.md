@@ -105,8 +105,8 @@ tests/                      pytest suite
 | `nb-whisper-medium` / `nb-whisper-large` | faster-whisper on CT2 weights | Norwegian | Pulled from `NbAiLab/nb-whisper-*/ct2/`. No MLX. |
 | `voxtral-mini` | HF transformers | EN/ES/FR/PT/HI/DE/NL/IT | First load downloads ~6 GB. Best on CUDA. |
 
-On Apple Silicon, live and batch both route through mlx-whisper for roughly
-3-5x over CPU faster-whisper. Pass `--no-mlx` to opt out.
+On Apple Silicon, live and batch both route through mlx-whisper by default.
+Pass `--no-mlx` to opt out.
 
 ## Tests
 
