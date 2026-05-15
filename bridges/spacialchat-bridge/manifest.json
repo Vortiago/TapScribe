@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "SpatialChat Bridge",
+  "version": "0.1.0",
+  "description": "Tap remote audio in spatial.chat and stream it to a TapScribe Recorder over the /tap WebSocket endpoint.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://app.spatial.chat/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_title": "SpatialChat Bridge",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [{
+    "matches": ["https://app.spatial.chat/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }],
+  "web_accessible_resources": [{
+    "resources": ["page-script.js"],
+    "matches": ["https://app.spatial.chat/*"]
+  }]
+}
