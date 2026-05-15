@@ -59,7 +59,13 @@ $Model = if ($env:SX_MODEL) { $env:SX_MODEL } else { "tiny.en" }
 $LangCode = if ($env:SX_LANG) { $env:SX_LANG } else { "en" }
 $PortRec = if ($env:SX_PORT_REC) { $env:SX_PORT_REC } else { "8001" }
 $PortWlk = if ($env:SX_PORT_WLK) { $env:SX_PORT_WLK } else { "8000" }
-$BindHost = if ($Lan) { (if ($env:SX_HOST) { $env:SX_HOST } else { "0.0.0.0" }) } else { (if ($env:SX_HOST) { $env:SX_HOST } else { "localhost" }) }
+if ($env:SX_HOST) {
+    $BindHost = $env:SX_HOST
+} elseif ($Lan) {
+    $BindHost = "0.0.0.0"
+} else {
+    $BindHost = "localhost"
+}
 
 $ExtraArgs = @()
 if ($NoMlx)      { $ExtraArgs += "--no-mlx" }
