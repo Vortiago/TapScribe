@@ -1573,7 +1573,9 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
 
   // Delegated click for the per-tap rec/live toggles. The body re-renders
   // every tick, so binding once on the panel survives all re-renders.
-  // data-state is the CURRENT value; we PUT the inverse.
+  // data-state is the CURRENT value; we PUT the inverse. We flip the
+  // visual state immediately so the click feels responsive — the poll
+  // tick after setTapPref() will re-paint from the authoritative state.
   $("activeTapsBody").addEventListener("click", async (ev) => {
     const btn = ev.target.closest(".tap-toggle");
     if (!btn) return;
@@ -1582,6 +1584,8 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
     const which = btn.dataset.toggle;
     if (!identity || !which) return;
     const next = btn.dataset.state !== "1";
+    btn.dataset.state = next ? "1" : "0";
+    btn.classList.toggle("on", next);
     btn.disabled = true;
     try {
       await setTapPref(identity, which, next);

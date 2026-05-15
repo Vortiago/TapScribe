@@ -9,6 +9,7 @@ is loaded.
 from __future__ import annotations
 
 import wave
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +19,7 @@ from fastapi.testclient import TestClient
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
 from tapscribe.live import LiveConfig
-from tapscribe.recorder import Recorder
+from tapscribe.recorder import ActiveStream, Recorder
 
 
 @pytest.fixture
@@ -121,6 +122,46 @@ def test_api_state_returns_recorder_view(client, recorder_under_test):
     assert isinstance(body["active"], list)
     assert isinstance(body["sessions"], list)
     assert isinstance(body["live_feed"], list)
+
+
+def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_test):
+    """The per-row rec/live toggles render their state from the active
+    entry's record/live fields. Those must follow the *current*
+    per-identity preference (which is what the PUT mutates), not the
+    WS-open snapshot — otherwise a click PUTs the new pref but the
+    button never visually flips."""
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(
+        recorder_under_test.streams.register(ActiveStream(
+            conn_id="abc-bob",
+            identity="bob",
+            name="Bob",
+            filename="bob.wav",
+            started_at=datetime.now(timezone.utc),
+            record=True, live=True,
+        ))
+    )
+
+    recorder_under_test.tap_settings.set("bob", record=False, live=False)
+
+    body = client.get("/api/state").json()
+    row = next(a for a in body["active"] if a["identity"] == "bob")
+    assert row["record"] is False
+    assert row["live"] is False
+
+
+def test_tap_settings_put_updates_pref(client, recorder_under_test):
+    r = client.put("/api/tap-settings", json={"identity": "alice", "record": False})
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ok": True, "identity": "alice", "record": False, "live": True}
+    assert recorder_under_test.tap_settings.get("alice").record is False
+    assert recorder_under_test.tap_settings.get("alice").live is True
+
+    r = client.put("/api/tap-settings", json={"identity": "alice", "live": False})
+    assert r.json()["live"] is False
+    # The previous record=False should persist across partial updates.
+    assert recorder_under_test.tap_settings.get("alice").record is False
 
 
 # ---------------------------------------------------------------------------
