@@ -58,3 +58,6 @@ jobs:
 
       - name: Run tests
         run: pytest tests -q --cov=tapscribe --cov-report=term-missing
+
+      - name: Bridge JS tests (Node, no deps)
+        run: node --test "bridges/spacialchat-bridge/tests/*.test.js"

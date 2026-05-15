@@ -110,9 +110,11 @@
       }
       // Restart the reconnect ladder so the first retry fires quickly
       // (~200ms) with the new settings, but only while the speaker is
-      // actually mid-utterance — or finishing draining one.
-      if (!ch.stopped && ch.utteranceId && (!ch.muted || ch.draining)) {
+      // actually mid-utterance — or finishing draining one. Also refresh
+      // the drain timer so the new host gets a full DRAIN_MAX_MS window.
+      if (shouldReconnect(ch)) {
         ch.reconnectAttempt = 0;
+        if (ch.draining) restartDrainTimer(identity, ch);
         scheduleReconnect(identity, ch);
       }
     }
@@ -310,13 +312,16 @@
     }
   }
 
+  // Drain is the one case where we keep reconnecting despite ch.muted —
+  // the trailing buffered PCM still needs a WS to land on so the
+  // recorder can transcribe it.
+  function shouldReconnect(ch) {
+    return !ch.stopped && !!ch.utteranceId && (!ch.muted || ch.draining);
+  }
+
   function scheduleReconnect(identity, ch) {
-    if (ch.stopped) return;
-    // While draining we keep reconnecting despite ch.muted so the
-    // trailing buffered PCM has a WS to land on.
-    if (ch.muted && !ch.draining) return;
+    if (!shouldReconnect(ch)) return;
     if (ch.reconnectTimer !== null) return;
-    if (!ch.utteranceId) return;
     const delay = nextBackoffMs(ch.reconnectAttempt);
     ch.reconnectAttempt++;
     console.log(
@@ -327,8 +332,7 @@
     ch.reconnectTimer = setTimeout(() => {
       ch.reconnectTimer = null;
       // State might have changed while we waited.
-      if (ch.stopped) return;
-      if (ch.muted && !ch.draining) return;
+      if (!shouldReconnect(ch)) return;
       if (ch.tapWs) return;
       openTapWs(identity, ch);
     }, delay);
@@ -391,9 +395,8 @@
       // recoverable. A clean close (operator pause, mute, tap-stop) means
       // the utterance is over; an auth rejection won't fix itself by
       // retrying — leave it surfaced so the operator updates the token.
-      // Draining is the one exception to the muted check: we keep
-      // reconnecting after a mute so the trailing buffered PCM can land.
-      if (!clean && !authFailed && !ch.stopped && (!ch.muted || ch.draining)) {
+      // shouldReconnect carves out the drain-after-mute exception.
+      if (!clean && !authFailed && shouldReconnect(ch)) {
         scheduleReconnect(identity, ch);
       }
       publishStatus();
@@ -428,6 +431,25 @@
     clearDrainTimer(ch);
   }
 
+  // Hard cap on how long we'll wait for the trailing buffered PCM to
+  // reach a /tap WS after the speaker muted. Past this point the audio
+  // is lost — but we'd rather give up and surface an error than wedge
+  // the utterance forever against an unreachable recorder.
+  function restartDrainTimer(identity, ch) {
+    clearDrainTimer(ch);
+    ch.drainTimer = setTimeout(() => {
+      ch.drainTimer = null;
+      console.warn("[tapscribe-bridge] drain timeout for " + identity +
+        "; discarding " + ch.bufferBytes + " buffered byte(s)");
+      // Surface the loss so the popup pill flips to an error rather
+      // than silently dropping back to "muted".
+      ch.error = "drain-timeout";
+      closeTapWs(identity, ch, "drain timeout");
+      resetUtteranceState(ch);
+      publishStatus();
+    }, DRAIN_MAX_MS);
+  }
+
   // Called from the WS onopen handler once we've flushed the buffered
   // PCM that was waiting for a transport. The buffer is now on the wire
   // (or in the browser's WS send queue, which close() will drain before
@@ -441,30 +463,34 @@
     resetUtteranceState(ch);
   }
 
-  // Mute (and tap-stop) ends an utterance. The naive version closes the
-  // WS and clears the buffer immediately — but if a network blip left
-  // PCM in ch.buffer and the WS still reconnecting, that trailing audio
-  // (and its transcript) would be lost. Instead: if there's nothing to
-  // drain, close immediately as before; if the WS is open with leftover
-  // buffer, flush-and-close synchronously; otherwise enter drain mode
-  // so the reconnect ladder can land a WS, flush, and only then close.
-  // A hard timeout caps the wait so an unreachable recorder doesn't
-  // wedge the utterance forever.
+  // Force-close the utterance and reset state, regardless of any
+  // pending buffer. Used when there's nothing to drain (empty buffer)
+  // or when draining would be pointless (tap-stop = speaker is gone).
+  function endUtteranceImmediate(identity, ch, reason) {
+    closeTapWs(identity, ch, reason);
+    resetUtteranceState(ch);
+  }
+
+  // Mute ends an utterance. The naive version closes the WS and clears
+  // the buffer immediately — but if a network blip left PCM in
+  // ch.buffer with the WS still reconnecting, that trailing audio (and
+  // its transcript) would be lost. Instead: if there's nothing to
+  // drain, close immediately; if the WS is open with leftover buffer,
+  // flush-and-close synchronously; otherwise enter drain mode so the
+  // reconnect ladder can land a WS, flush, and only then close.
   function endUtterance(identity, ch, reason) {
     const hasBuffered = ch.buffer.length > 0;
     const ws = ch.tapWs;
     const wsOpen = ws && ws.readyState === WebSocket.OPEN;
 
     if (!hasBuffered) {
-      closeTapWs(identity, ch, reason);
-      resetUtteranceState(ch);
+      endUtteranceImmediate(identity, ch, reason);
       return;
     }
 
     if (wsOpen) {
       bufferFlush(ch);
-      closeTapWs(identity, ch, reason);
-      resetUtteranceState(ch);
+      endUtteranceImmediate(identity, ch, reason);
       return;
     }
 
@@ -472,15 +498,11 @@
       " buffered byte(s) for " + identity + "; draining before close");
     ch.draining = true;
     ch.drainReason = reason;
-    clearDrainTimer(ch);
-    ch.drainTimer = setTimeout(() => {
-      ch.drainTimer = null;
-      console.warn("[tapscribe-bridge] drain timeout for " + identity +
-        "; discarding " + ch.bufferBytes + " buffered byte(s)");
-      closeTapWs(identity, ch, "drain timeout");
-      resetUtteranceState(ch);
-      publishStatus();
-    }, DRAIN_MAX_MS);
+    // Reset the backoff ladder so the drain gets a fresh fast retry
+    // (~200ms) instead of inheriting a long delay from prior failed
+    // attempts and burning the DRAIN_MAX_MS budget waiting.
+    ch.reconnectAttempt = 0;
+    restartDrainTimer(identity, ch);
 
     if (!ch.tapWs && ch.reconnectTimer === null) {
       scheduleReconnect(identity, ch);
@@ -509,8 +531,7 @@
           // track unsubscribed). There's no point draining trailing
           // PCM: even if we landed a WS, the operator doesn't expect a
           // late transcript from a departed speaker. Force close.
-          closeTapWs(d.identity, ch, "tap stopped");
-          resetUtteranceState(ch);
+          endUtteranceImmediate(d.identity, ch, "tap stopped");
           channels.delete(d.identity);
           console.log("[tapscribe-bridge] tap-stop " + d.identity);
           publishStatus();
@@ -527,23 +548,17 @@
             // PCM still in our local buffer so the recorder gets the
             // whole utterance, then close cleanly to finalise the WAV.
             endUtterance(d.identity, ch, "muted");
-            console.log("[tapscribe-bridge] mute " + d.identity +
-              (ch.draining ? " -> draining /tap" : " -> closed /tap"));
-          } else if (!ch.muted && wasMuted) {
+          } else if (!ch.muted && wasMuted && ch.draining) {
             // Speaker is talking again before the previous utterance
             // finished draining. Abandon the drain: tear down anything
             // that was still pending so the next PCM frame starts a
             // fresh utterance with a new utterance_id.
-            if (ch.draining) {
-              console.log("[tapscribe-bridge] unmute " + d.identity +
-                " mid-drain; abandoning drain");
-              closeTapWs(d.identity, ch, "unmuted mid-drain");
-              resetUtteranceState(ch);
-            }
-            console.log("[tapscribe-bridge] mute " + d.identity + " -> " + ch.muted);
-          } else {
-            console.log("[tapscribe-bridge] mute " + d.identity + " -> " + ch.muted);
+            console.log("[tapscribe-bridge] unmute " + d.identity +
+              " mid-drain; abandoning drain");
+            endUtteranceImmediate(d.identity, ch, "unmuted mid-drain");
           }
+          console.log("[tapscribe-bridge] mute " + d.identity + " -> " +
+            (ch.muted ? (ch.draining ? "draining /tap" : "closed /tap") : "unmuted"));
           publishStatus();
         }
         break;
