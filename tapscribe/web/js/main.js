@@ -145,7 +145,6 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
     try {
       const j = await fetchState();
       lastJson = j;
-      $("recPill").style.opacity = "1";
       renderRibbonSessionStatus(j);
       renderRecordingPill(j);
       renderLiveChannel(j);
@@ -156,7 +155,6 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
       updateSessionProgressInPlace(j);
       updateWavInflightInPlace();
     } catch (e) {
-      $("recPill").style.opacity = "0.35";
       $("sessionStatus").innerHTML =
         '<span class="dim tiny">recorder unreachable: ' + escapeHtml(String(e)) + "</span>";
     }
