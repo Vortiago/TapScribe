@@ -270,6 +270,37 @@ async def api_live_transcript_clear(recorder: Recorder = Depends(get_recorder)):
 # Recording toggle
 # ---------------------------------------------------------------------------
 
+@app.put("/api/tap-settings")
+async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_recorder)):
+    """Set per-identity record/live preferences. Body:
+    `{"identity": "...", "record"?: bool, "live"?: bool}`. Either field
+    may be omitted to leave that preference unchanged. Takes effect on
+    the NEXT /tap WebSocket open for this identity — already-open WSes
+    finish their current utterance on the bridge's normal close."""
+    try:
+        body = await req.json()
+    except Exception as e:
+        raise HTTPException(400, "invalid JSON") from e
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected an object body")
+    identity = body.get("identity")
+    if not isinstance(identity, str) or not identity:
+        raise HTTPException(400, "identity required")
+    record = body.get("record")
+    live = body.get("live")
+    setting = recorder.tap_settings.set(
+        identity,
+        record=bool(record) if record is not None else None,
+        live=bool(live) if live is not None else None,
+    )
+    return {
+        "ok": True,
+        "identity": identity,
+        "record": setting.record,
+        "live": setting.live,
+    }
+
+
 @app.post("/api/recording/toggle")
 async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_recorder)):
     """Flip recorder.recording_enabled. Optional body {"enabled": bool} to
@@ -699,57 +730,80 @@ async def tap(ws: WebSocket):
     name = ws.query_params.get("name", "")
     utterance_id = ws.query_params.get("utterance_id") or uuid4().hex
 
-    resumed = recorder.utterances.try_resume(utterance_id, identity=identity)
-    if resumed is not None:
-        fpath = resumed.path
-        fname = resumed.filename
-        record = resumed
-        if name and name != record.name:
-            record.name = name
-        wf = _reopen_wav_for_append(fpath)
-        bytes_received = resumed.bytes_received
-        print(
-            f"[tapscribe] /tap resume -> {fname} "
-            f"(prior {bytes_received} bytes)",
-            flush=True,
-        )
+    # Per-identity record/live preferences. Snapshotted at WS open —
+    # toggling mid-utterance takes effect on the NEXT /tap WS for this
+    # identity. Same semantics as the global pause toggle so an operator
+    # who flips a switch never has a half-written WAV finalised under
+    # them.
+    tap_pref = recorder.tap_settings.get(identity)
+    do_record = tap_pref.record
+    do_live = tap_pref.live
+
+    wf: wave.Wave_write | None = None
+    record: UtteranceRecord | None = None
+    fpath = None
+    fname = ""
+    bytes_received = 0
+    started_at = datetime.now(timezone.utc)
+
+    if do_record:
+        resumed = recorder.utterances.try_resume(utterance_id, identity=identity)
+        if resumed is not None:
+            fpath = resumed.path
+            fname = resumed.filename
+            record = resumed
+            if name and name != record.name:
+                record.name = name
+            wf = _reopen_wav_for_append(fpath)
+            bytes_received = resumed.bytes_received
+            started_at = resumed.started_at
+            print(
+                f"[tapscribe] /tap resume -> {fname} "
+                f"(prior {bytes_received} bytes)",
+                flush=True,
+            )
+        else:
+            started_iso = started_at.strftime("%Y-%m-%dT%H-%M-%SZ")
+            short_id = safe_name(identity)[:10] or "unknown"
+            name_slug = safe_name(name) or "anon"
+            # Filename uses a fresh local uuid for uniqueness; the bridge's
+            # utterance_id lives in the index, not in the path. This avoids
+            # two distinct utterances colliding on disk when they happen to
+            # reuse the same utterance_id within the same wall-clock second
+            # (e.g. an expired-and-restarted utterance).
+            fname = f"{started_iso}_{name_slug}_{short_id}_{uuid4().hex[:8]}.wav"
+            # Capture the session dir at WS open — rotate_session() while a WAV
+            # is being recorded must NOT redirect it to the new folder.
+            session_dir = recorder.session_dir
+            session_dir.mkdir(parents=True, exist_ok=True)
+            fpath = session_dir / fname
+            record = UtteranceRecord(
+                utterance_id=utterance_id,
+                identity=identity,
+                name=name,
+                filename=fname,
+                path=fpath,
+                started_at=started_at,
+            )
+            recorder.utterances.register_new(record)
+            wf = wave.open(str(fpath), "wb")
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            print(f"[tapscribe] /tap open -> {fname}", flush=True)
     else:
-        started = datetime.now(timezone.utc)
-        started_iso = started.strftime("%Y-%m-%dT%H-%M-%SZ")
-        short_id = safe_name(identity)[:10] or "unknown"
-        name_slug = safe_name(name) or "anon"
-        # Filename uses a fresh local uuid for uniqueness; the bridge's
-        # utterance_id lives in the index, not in the path. This avoids
-        # two distinct utterances colliding on disk when they happen to
-        # reuse the same utterance_id within the same wall-clock second
-        # (e.g. an expired-and-restarted utterance).
-        fname = f"{started_iso}_{name_slug}_{short_id}_{uuid4().hex[:8]}.wav"
-        # Capture the session dir at WS open — rotate_session() while a WAV
-        # is being recorded must NOT redirect it to the new folder.
-        session_dir = recorder.session_dir
-        session_dir.mkdir(parents=True, exist_ok=True)
-        fpath = session_dir / fname
-        record = UtteranceRecord(
-            utterance_id=utterance_id,
-            identity=identity,
-            name=name,
-            filename=fname,
-            path=fpath,
-            started_at=started,
-        )
-        recorder.utterances.register_new(record)
-        wf = wave.open(str(fpath), "wb")
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(16000)
-        bytes_received = 0
-        print(f"[tapscribe] /tap open -> {fname}", flush=True)
+        # record=False: don't open a WAV or touch the utterance index;
+        # frames flow to the relay (if live=True) and the active-stream
+        # row stays visible so the operator can flip recording back on.
+        fname = "(record off)"
+        print(f"[tapscribe] /tap open (record off) for {identity}", flush=True)
 
     conn_id = utterance_id[:8] + "-" + (safe_name(identity)[:10] or "unknown")
     await recorder.streams.register(ActiveStream(
         conn_id=conn_id, identity=identity, name=name,
-        filename=fname, started_at=record.started_at,
+        filename=fname, started_at=started_at,
         bytes_received=bytes_received,
+        record=do_record, live=do_live,
     ))
 
     # Set up the WlK relay. Per ADR-0002, this is per-WS so settled
@@ -770,7 +824,7 @@ async def tap(ws: WebSocket):
 
     relay: WlKRelay | None = None
     relay_alive = False
-    if recorder.live.running():
+    if do_live and recorder.live.running():
         candidate = WlKRelay(
             host=recorder.live.config.host,
             port=recorder.live.config.port,
@@ -791,9 +845,10 @@ async def tap(ws: WebSocket):
                 continue
             if msg.get("bytes"):
                 buf = msg["bytes"]
-                wf.writeframes(buf)
-                bytes_received += len(buf)
-                await recorder.streams.update_bytes(conn_id, bytes_received)
+                if wf is not None:
+                    wf.writeframes(buf)
+                    bytes_received += len(buf)
+                    await recorder.streams.update_bytes(conn_id, bytes_received)
                 # Best-effort relay. If the relay reports closed/dead,
                 # stop trying for the rest of this WS — recording
                 # continues unaffected.
@@ -809,21 +864,24 @@ async def tap(ws: WebSocket):
         # being cancelled (TestClient does that; some ASGI servers do
         # under shutdown). Any `await` after this point can raise
         # CancelledError and skip the rest of the block.
-        wf.close()
-        kept = bytes_received > 0
-        if not kept:
-            with suppress(OSError):
-                fpath.unlink()
-            print(f"[tapscribe] /tap closed (empty), removed {fname}", flush=True)
-        else:
-            dur = bytes_received / 32000.0
-            print(
-                f"[tapscribe] /tap closed, wrote {bytes_received} bytes ({dur:.2f}s) to {fname}",
-                flush=True,
+        if wf is not None:
+            wf.close()
+            kept = bytes_received > 0
+            if not kept:
+                with suppress(OSError):
+                    fpath.unlink()
+                print(f"[tapscribe] /tap closed (empty), removed {fname}", flush=True)
+            else:
+                dur = bytes_received / 32000.0
+                print(
+                    f"[tapscribe] /tap closed, wrote {bytes_received} bytes ({dur:.2f}s) to {fname}",
+                    flush=True,
+                )
+            recorder.utterances.release(
+                utterance_id, bytes_received=bytes_received, kept=kept,
             )
-        recorder.utterances.release(
-            utterance_id, bytes_received=bytes_received, kept=kept,
-        )
+        else:
+            print(f"[tapscribe] /tap closed (record off) for {identity}", flush=True)
         if relay is not None:
             await relay.close()  # drains tail captions per Q2
         await recorder.streams.remove(conn_id)

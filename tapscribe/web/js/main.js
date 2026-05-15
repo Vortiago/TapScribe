@@ -338,15 +338,15 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
     await tick();
   }
 
-  // ---- Active streams ------------------------------------------------------
+  // ---- Active taps ---------------------------------------------------------
 
   function renderActiveStreams(j) {
     const list = j.active || [];
     $("activeCount").textContent = String(list.length);
-    const badgeEl = $("activeStreamsBadge");
+    const badgeEl = $("activeTapsBadge");
     if (list.length === 0) {
       badgeEl.innerHTML = '<span class="dim tiny">idle</span>';
-      $("activeStreamsBody").innerHTML = '<div class="empty">No streams. Speak in the bridged tab to capture.</div>';
+      $("activeTapsBody").innerHTML = '<div class="empty">No taps. Speak in the bridged tab to capture.</div>';
       return;
     }
     badgeEl.innerHTML = '<span class="chip rec" style="padding:1px 6px; font-size:10px;"><span class="dot rec" style="width:6px;height:6px;"></span>capturing</span>';
@@ -355,11 +355,28 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
     for (const a of list) {
       const dur = (a.bytes_received || 0) / 32000;
       const spk = speakerIndex(a.name || a.identity);
+      // Settings default to true when the server didn't include them
+      // (older payload, or first-ever sighting of this identity).
+      const recOn = a.record !== false;
+      const liveOn = a.live !== false;
+      const ident = a.identity || "";
       html += '<div class="stream-row">';
       html += '<span class="dot rec" title="receiving"></span>';
       html += '<div class="who">';
       html += '<div class="name"><span data-spk="' + spk + '">●</span> <span class="fg">' + escapeHtml(a.name || "<anon>") + "</span></div>";
-      html += '<div class="ident" title="' + escapeHtml(a.filename || "") + '">' + escapeHtml(a.identity || "") + " · " + escapeHtml(truncMid(a.filename || "", 30)) + "</div>";
+      html += '<div class="ident" title="' + escapeHtml(a.filename || "") + '">' + escapeHtml(ident) + " · " + escapeHtml(truncMid(a.filename || "", 30)) + "</div>";
+      html += "</div>";
+      html += '<div class="tap-toggles">';
+      html += '<button class="tap-toggle rec' + (recOn ? " on" : "") + '"'
+        + ' data-identity="' + escapeHtml(ident) + '"'
+        + ' data-toggle="record"'
+        + ' data-state="' + (recOn ? "1" : "0") + '"'
+        + ' title="Save this tap to a WAV (applies to next utterance)">rec</button>';
+      html += '<button class="tap-toggle live' + (liveOn ? " on" : "") + '"'
+        + ' data-identity="' + escapeHtml(ident) + '"'
+        + ' data-toggle="live"'
+        + ' data-state="' + (liveOn ? "1" : "0") + '"'
+        + ' title="Send this tap to the live channel (applies to next utterance)">live</button>';
       html += "</div>";
       html += '<div class="stats">';
       html += '<div><span class="b">' + escapeHtml(fmtBytes(a.bytes_received || 0)) + "</span></div>";
@@ -367,7 +384,22 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
       html += "</div>";
       html += "</div>";
     }
-    $("activeStreamsBody").innerHTML = html;
+    $("activeTapsBody").innerHTML = html;
+  }
+
+  async function setTapPref(identity, which, enabled) {
+    try {
+      const r = await fetch("/api/tap-settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identity, [which]: enabled }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || r.statusText);
+    } catch (e) {
+      alert("Tap setting toggle failed: " + e);
+    }
+    await tick();
   }
 
   // ---- Live feed -----------------------------------------------------------
@@ -1541,6 +1573,25 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
     await tick();
   });
 
+  // Delegated click for the per-tap rec/live toggles. The body re-renders
+  // every tick, so binding once on the panel survives all re-renders.
+  // data-state is the CURRENT value; we PUT the inverse.
+  $("activeTapsBody").addEventListener("click", async (ev) => {
+    const btn = ev.target.closest(".tap-toggle");
+    if (!btn) return;
+    if (btn.disabled) return;
+    const identity = btn.dataset.identity;
+    const which = btn.dataset.toggle;
+    if (!identity || !which) return;
+    const next = btn.dataset.state !== "1";
+    btn.disabled = true;
+    try {
+      await setTapPref(identity, which, next);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   // Toggle recording (pause / resume). Pass explicit `enabled` so a
   // simultaneous click in another tab doesn't desync us.
   $("recordingPill").addEventListener("click", async () => {
@@ -1603,7 +1654,7 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
 // ---- Boot ---------------------------------------------------------------
 
 tick();
-// 500ms is the sweet spot — fast enough that "active streams" / live-channel
+// 500ms is the sweet spot — fast enough that "active taps" / live-channel
 // state badge changes feel near-instant, slow enough that /api/state isn't
 // doing meaningful CPU work between ticks. Most renders short-circuit on
 // unchanged signatures, so we're not actually re-painting twice per second.

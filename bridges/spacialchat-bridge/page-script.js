@@ -132,23 +132,50 @@
     worklet.connect(silentGain).connect(ctx.destination);
 
     taps.set(participant.identity, entry);
-    postToContent({ kind: "tap-start", identity: participant.identity, name });
+    if (!announced.has(participant.identity)) {
+      announced.add(participant.identity);
+      postToContent({ kind: "tap-start", identity: participant.identity, name });
+    }
     console.log("[tapscribe-bridge/page] tapping " + participant.identity + " (" + (name || "no-name") + ")");
   }
 
   function untap(identity) {
     const t = taps.get(identity);
-    if (!t) return;
-    try { t.source.disconnect(); } catch (e) {}
-    try { t.worklet.disconnect(); } catch (e) {}
-    try { t.silentGain.disconnect(); } catch (e) {}
-    taps.delete(identity);
-    postToContent({ kind: "tap-stop", identity });
-    console.log("[tapscribe-bridge/page] untap " + identity);
+    if (t) {
+      try { t.source.disconnect(); } catch (e) {}
+      try { t.worklet.disconnect(); } catch (e) {}
+      try { t.silentGain.disconnect(); } catch (e) {}
+      taps.delete(identity);
+      console.log("[tapscribe-bridge/page] untap " + identity);
+    }
+    // Always remove the channel from the popup, even if we never tapped
+    // (presence-only entries created via announcePresence have no audio
+    // graph to tear down but still need their popup row cleared).
+    if (announced.delete(identity)) {
+      postToContent({ kind: "tap-stop", identity });
+    }
   }
 
   function setMute(identity, muted) {
     postToContent({ kind: "mute", identity, muted });
+  }
+
+  // Surface a participant in the popup even when their mic isn't being
+  // tapped — typically because they joined the room muted and LiveKit
+  // hasn't subscribed their audio publication yet. Posts tap-start so a
+  // channel exists, then seeds the muted flag so the popup shows them
+  // as "muted" instead of dropping them entirely.
+  const announced = new Set();
+  function announcePresence(participant, isMuted) {
+    if (announced.has(participant.identity)) {
+      // Refresh the muted flag in case it changed since last call.
+      setMute(participant.identity, !!isMuted);
+      return;
+    }
+    const name = getDisplayName(participant);
+    announced.add(participant.identity);
+    postToContent({ kind: "tap-start", identity: participant.identity, name });
+    setMute(participant.identity, !!isMuted);
   }
 
   function attachListeners(room) {
@@ -190,14 +217,29 @@
       if (pub.kind === "audio") setMute(participant.identity, false);
     });
 
+    // Late joiners — surface them in the popup right away so the operator
+    // sees who's in the room. If they have a mic publication that's
+    // muted we show them as "muted"; if they unmute, trackSubscribed +
+    // trackUnmuted upgrade them to a real tap.
+    room.on("participantConnected", (participant) => {
+      announcePresence(participant, anyAudioPubMuted(participant));
+    });
+    room.on("participantDisconnected", (participant) => {
+      untap(participant.identity);
+    });
+
     room.on("disconnected", () => {
       console.warn("[tapscribe-bridge/page] room disconnected; tearing down taps");
-      for (const id of Array.from(taps.keys())) untap(id);
+      // Clear both tapped and presence-only entries from the popup.
+      for (const id of Array.from(announced)) untap(id);
     });
 
     // Iterate existing publications already in place at attach time.
-    // Remote participants:
+    // Remote participants: surface every participant first (so muted-on-
+    // entry users appear in the popup as "muted"), then upgrade to a
+    // real tap if their audio track is already subscribed and live.
     for (const participant of room.remoteParticipants.values()) {
+      announcePresence(participant, anyAudioPubMuted(participant));
       for (const pub of participant.audioTrackPublications.values()) {
         if (pub.isSubscribed && pub.track && pub.track.mediaStreamTrack) {
           tap(participant, pub.track.mediaStreamTrack);
@@ -208,6 +250,7 @@
     // Local participant (mic enabled before extension attached):
     const lp = room.localParticipant;
     if (lp && lp.audioTrackPublications) {
+      announcePresence(lp, anyAudioPubMuted(lp));
       for (const pub of lp.audioTrackPublications.values()) {
         if (pub.source === "microphone" && pub.track && pub.track.mediaStreamTrack) {
           tap(lp, pub.track.mediaStreamTrack);
@@ -215,6 +258,17 @@
         }
       }
     }
+  }
+
+  // True if the participant has at least one mic publication that is
+  // currently muted. Used to seed the popup's "muted" pill at attach
+  // time / participant-connected time, before any track event fires.
+  function anyAudioPubMuted(participant) {
+    if (!participant || !participant.audioTrackPublications) return false;
+    for (const pub of participant.audioTrackPublications.values()) {
+      if (pub.isMuted) return true;
+    }
+    return false;
   }
 
   // ---- Watch window.room ----------------------------------------------------
