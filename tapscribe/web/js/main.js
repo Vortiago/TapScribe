@@ -243,21 +243,28 @@ let liveLogOpen = false;         // persist the "recent log" <details> state acr
       .join("");
 
     const running = state === "running" || state === "starting";
+    const starting = state === "starting";
+    // While starting, lock the form so the user can't queue another change
+    // mid-spawn (and so "starting" reads as visibly distinct from "running").
+    const inputAttrs = starting ? " disabled" : "";
 
     let html = "";
     html +=
       '<div class="live-row">' +
         '<span class="lbl">model</span>' +
-        '<select class="select" id="liveModelSelect">' + modelOpts + "</select>" +
+        '<select class="select" id="liveModelSelect"' + inputAttrs + ">" + modelOpts + "</select>" +
       "</div>";
     html +=
       '<div class="live-row">' +
         '<span class="lbl">lang</span>' +
-        '<input class="input" id="liveLangInput" value="' + escapeHtml(li.language || "en") + '" size="6">' +
+        '<input class="input" id="liveLangInput" value="' + escapeHtml(li.language || "en") + '" size="6"' + inputAttrs + ">" +
       "</div>";
 
     html += '<div class="action-row" style="margin-top:6px;">';
-    if (running) {
+    if (starting) {
+      html += '<button class="btn primary" disabled>starting…</button>';
+      html += '<button class="btn danger" id="liveStopBtn" title="Cancel the in-progress start">cancel</button>';
+    } else if (running) {
       html += '<button class="btn primary" id="liveApplyBtn" title="Stop and re-spawn WhisperLiveKit with the model/lang above">apply (restart)</button>';
       html += '<button class="btn danger" id="liveStopBtn">stop</button>';
     } else {

@@ -249,7 +249,27 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
         same_quality = vac is None and conf is None
         if same_model and same_lang and same_quality:
             return {"ok": True, "msg": "already running with requested config", "state": recorder.live.info["state"]}
+
+    # Reflect the upcoming transition in `info` *before* we start tearing
+    # down the old child or fetching weights. Without this, dashboards
+    # polling /api/state during the stop→start window (or during an HF
+    # download inside start()) would render state="stopped" with the
+    # *previous* model selection — making it look like the user's pick
+    # was discarded.
+    recorder.live.info["state"] = "starting"
+    recorder.live.info["last_error"] = ""
+    if model is not None:
+        recorder.live.info["model"] = model
+    if language is not None:
+        recorder.live.info["language"] = language
+
+    if recorder.live.running():
         await asyncio.to_thread(recorder.live.stop)
+        # stop() sets state="stopped"; restore the transitional state so
+        # the dashboard stays on "starting" with the new model.
+        recorder.live.info["state"] = "starting"
+        if model is not None:
+            recorder.live.info["model"] = model
 
     ok, msg = await asyncio.to_thread(recorder.live.start, model=model, language=language)
     if not ok:
