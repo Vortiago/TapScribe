@@ -72,6 +72,29 @@ LiveTranscripts. The dashboard's three panels each map to one of these.
 The Bridge produces audio for exactly one place (`/tap`); the Recorder is
 the orchestrator that routes those bytes into all three concerns.
 
+## TapFanOut
+
+The per-`/tap`-WebSocket lifecycle object that owns one Bridge
+utterance's audio fan-out. ADR-0002 says "the Recorder owns the fan-out
+internally"; TapFanOut is the concrete thing that does it. The `/tap`
+route builds one per WS, pumps each PCM frame into `write_frame`, and
+relies on its async context manager for cleanup.
+
+Concerns the fan-out owns (the route knows none of these):
+
+- WAV-file open / resume-via-`UtteranceIndex.try_resume` / writeframes /
+  finalize / unlink-when-empty.
+- UtteranceIndex `register_new` / `release` bookkeeping.
+- ActiveStream registration and per-frame `bytes_received` updates.
+- WlKRelay create / connect / send / close-with-drain (when `do_live`
+  and the LiveChannel is running), including the `on_settled_line`
+  callback that cleans Whisper meta-tokens and appends to LiveTranscripts.
+
+Lives in `tapscribe/tap_fan_out.py`. One instance per `/tap` WS;
+construction takes `do_record` / `do_live` snapshotted at WS open from
+`recorder.tap_settings.get(identity)`, mirroring the global recording
+toggle's "next-utterance, not this one" semantics.
+
 ## Bridge
 
 The platform-side audio tap that forwards remote-participant PCM to the

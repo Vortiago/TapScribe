@@ -9,143 +9,27 @@ landed in recorder.transcripts.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import json
-import socket
-import threading
 import time
 import wave
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-import websockets
 from fastapi.testclient import TestClient
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
+from tests.conftest import FakeWlkThread
 
 # ---------------------------------------------------------------------------
-# Fake WlK running in a background asyncio loop in another thread
-# ---------------------------------------------------------------------------
-
-class _FakeWlkThread:
-    """Minimal whisperlivekit-server stand-in. Runs its own event loop in
-    a daemon thread so the synchronous TestClient can drive a WS that
-    triggers a relay back to this server."""
-
-    def __init__(self) -> None:
-        self.received: list[bytes] = []
-        self.connections: list = []
-        self._port = _free_port()
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._server = None
-        self._ready = threading.Event()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    @property
-    def port(self) -> int:
-        return self._port
-
-    def start(self) -> None:
-        self._thread.start()
-        # Wait for the server to actually be listening
-        assert self._ready.wait(timeout=2.0), "fake WlK didn't start"
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=2.0)
-
-    def push_committed(self, text: str) -> None:
-        """Schedule a settled-line broadcast on the WlK loop's thread.
-
-        Mirrors the real WlK wire format: each call appends a new line to
-        the cumulative list and broadcasts the FrontData-shaped snapshot.
-        See whisperlivekit/timed_objects.py FrontData.to_dict for the
-        source of truth on the keys."""
-        if self._loop is None:
-            return
-        if not hasattr(self, "_lines_acc"):
-            self._lines_acc = []
-        idx = len(self._lines_acc)
-        self._lines_acc.append({
-            "text": text, "speaker": 1,
-            "start": float(idx), "end": float(idx) + 1.0,
-        })
-        msg = json.dumps({
-            "status": "active_transcription",
-            "lines": list(self._lines_acc),
-            "buffer_transcription": "",
-            "buffer_diarization": "",
-            "buffer_translation": "",
-            "remaining_time_transcription": 0,
-            "remaining_time_diarization": 0,
-        })
-
-        async def _push():
-            for c in list(self.connections):
-                with contextlib.suppress(Exception):
-                    await c.send(msg)
-
-        asyncio.run_coroutine_threadsafe(_push(), self._loop)
-
-    def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._serve())
-
-    async def _serve(self) -> None:
-        self._server = await websockets.serve(self._handler, "localhost", self._port)
-        self._ready.set()
-        try:
-            while not self._stop.is_set():
-                await asyncio.sleep(0.05)
-        finally:
-            for c in list(self.connections):
-                with contextlib.suppress(Exception):
-                    await c.close()
-            self._server.close()
-            await self._server.wait_closed()
-
-    async def _handler(self, ws) -> None:
-        self.connections.append(ws)
-        try:
-            async for msg in ws:
-                if isinstance(msg, bytes):
-                    self.received.append(msg)
-        finally:
-            if ws in self.connections:
-                self.connections.remove(ws)
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("localhost", 0))
-        return s.getsockname()[1]
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures (the `fake_wlk` fixture is shared via conftest.py so the
+# TapFanOut unit tests can use the same WlK stand-in.)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def fake_wlk() -> Iterator[_FakeWlkThread]:
-    wlk = _FakeWlkThread()
-    wlk.start()
-    try:
-        yield wlk
-    finally:
-        wlk.stop()
-
-
-@pytest.fixture
-def recorder_with_fake_wlk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_wlk: _FakeWlkThread) -> Recorder:
+def recorder_with_fake_wlk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_wlk: FakeWlkThread) -> Recorder:
     """Build a Recorder pointed at the fake WlK. Pretend the live channel
     is 'running' by tweaking LiveChannel.info — we don't actually spawn
     a subprocess, but the relay only needs the host/port to connect."""
@@ -188,7 +72,7 @@ def client(recorder_with_fake_wlk: Recorder) -> Iterator[TestClient]:
 # ---------------------------------------------------------------------------
 
 def test_tap_endpoint_writes_wav_and_records_bytes_in_active_streams(
-    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: _FakeWlkThread,
+    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: FakeWlkThread,
 ):
     """Tracer bullet: open /tap, send a PCM frame, close. Assert WAV
     written + relay forwarded bytes."""
@@ -214,7 +98,7 @@ def test_tap_endpoint_writes_wav_and_records_bytes_in_active_streams(
 
 
 def test_tap_settled_lines_from_wlk_land_in_live_transcripts(
-    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: _FakeWlkThread,
+    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: FakeWlkThread,
 ):
     """When WlK pushes a settled line during a /tap WS, it should land in
     recorder.transcripts attributed to the WS's identity/name. WlK
@@ -241,7 +125,7 @@ def test_tap_settled_lines_from_wlk_land_in_live_transcripts(
 
 
 def test_tap_settled_lines_surface_in_api_state_live_feed(
-    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: _FakeWlkThread,
+    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: FakeWlkThread,
 ):
     """End-to-end dashboard smoke test: the path the operator actually
     sees. /tap WS opens → fake WlK pushes settled lines → /api/state
@@ -271,7 +155,7 @@ def test_tap_settled_lines_surface_in_api_state_live_feed(
 
 
 def test_tap_drains_tail_caption_after_bridge_disconnects(
-    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: _FakeWlkThread,
+    client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: FakeWlkThread,
 ):
     """Per Q2: settled lines emitted by WlK during the post-disconnect
     drain window must still land in transcripts."""
