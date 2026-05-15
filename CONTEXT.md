@@ -134,9 +134,6 @@ so an unreachable Recorder can't wedge the utterance forever. Implemented
 in the Bridge's `startDrainTimer()` / `endUtterance()` and on the Recorder
 side in `live_relay.close()` / `_flush_tail()`.
 
-The mnemonic: **drain happens on the wire** — it's about getting bytes
-from the Bridge into the Recorder before hanging up.
-
 ## Tail flush
 
 The Recorder-side counterpart to drain, *not* a synonym. After a `/tap`
@@ -145,9 +142,6 @@ that was growing and never got superseded by a newer line. `_flush_tail`
 emits that final line so a short utterance producing exactly one caption
 doesn't vanish. Lives entirely inside `tapscribe/live_relay.py`; the
 Bridge knows nothing about it.
-
-The mnemonic: **tail flush happens in the captions** — it's about getting
-the last line out of the relay before the consumer task exits.
 
 ## Invariants
 
@@ -166,12 +160,6 @@ one, document why and update this list.
 - **Bridge → `/tap` is the only audio path.** Bridges don't open
   WhisperLiveKit connections directly and don't POST settled lines back.
   The Recorder owns all fan-out.
-- **Wire frames are 16 kHz mono int16 PCM, 20 ms / 640 bytes per frame.**
-  Anything else is a Bridge bug.
-- **TranscriptionResults are immutable.** Post-processors return a new
-  result via `dataclasses.replace`; never mutate in place.
-- **`RECORDING_ENABLED` gates new recordings only.** It does not stop
-  live transcription, and it does not abort in-flight WAVs.
 - **Drain is bounded.** If the Bridge can't reach the Recorder within
   `DRAIN_MAX_MS`, trailing audio is dropped rather than blocking the
   utterance close forever. Don't remove the timeout.
