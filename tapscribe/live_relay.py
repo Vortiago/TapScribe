@@ -6,11 +6,21 @@ relay holds:
 
   - One outbound WS to `ws://<host>:<port>/asr?language=<lang>` (the
     `WhisperLiveKit` child). The Recorder writes Bridge bytes to this
-    stream; WlK responds with rolling JSON transcripts.
+    stream; WlK responds with rolling JSON transcripts (see
+    `whisperlivekit/timed_objects.py FrontData.to_dict` for the source
+    of truth on the wire shape).
   - One background consumer task that parses those responses and calls
-    `on_settled_line(text)` for every entry in `committed_lines`. The
-    handler typically appends the result to `recorder.transcripts` so
-    the dashboard sees it.
+    `on_settled_line(text)` for each newly-finalized line. The handler
+    typically appends the result to `recorder.transcripts` so the
+    dashboard sees it.
+
+WlK semantics: every response carries a CUMULATIVE `lines` list — i.e.
+each tick re-sends every line emitted so far in the session, not just
+the new ones. The last entry may still be growing as new tokens arrive.
+The relay treats a line as finalized when (a) a newer line appears
+after it (so the position is stable), or (b) the relay closes (drain) —
+in which case the in-flight tail is also flushed so a short utterance
+that produced exactly one line isn't lost.
 
 Lifecycle: `connect()` returns False on any failure (WlK not running,
 host down, etc.) — callers branch on the bool rather than catching
@@ -55,6 +65,12 @@ class WlKRelay:
         self._drain_timeout = drain_timeout
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._consumer: asyncio.Task | None = None
+        # How many entries from the cumulative `lines` snapshot we've
+        # already passed to the callback. Each tick we emit
+        # `snapshot[_emitted_count : len(snapshot) - 1]` (skipping the
+        # in-flight tail); on close-drain we also emit the tail.
+        self._emitted_count: int = 0
+        self._last_snapshot: list[dict] = []
 
     async def connect(self) -> bool:
         """Open the relay. Returns False on any failure — callers branch
@@ -84,27 +100,45 @@ class WlKRelay:
 
     async def close(self) -> None:
         """Close the WS and drain the consumer so any tail settled-lines
-        for audio we already sent get appended before we return."""
-        if self._ws is not None:
-            with contextlib.suppress(Exception):
-                await self._ws.close()
-            self._ws = None
-        if self._consumer is not None:
-            try:
-                await asyncio.wait_for(self._consumer, timeout=self._drain_timeout)
-            except asyncio.TimeoutError:
-                self._consumer.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await self._consumer
-            self._consumer = None
+        for audio we already sent get appended before we return.
+
+        After the consumer task has drained, we flush the in-flight tail
+        from the most-recent snapshot — the line that was being held
+        because no newer line had appeared after it. Without this, a
+        short utterance that produced exactly one line would never reach
+        the dashboard.
+
+        The tail flush is wrapped in a `finally` so that even if the
+        outer task is being cancelled mid-close (TestClient does this on
+        WS exit; some ASGI servers do under shutdown), the held-back
+        line still reaches the callback."""
+        try:
+            if self._ws is not None:
+                with contextlib.suppress(Exception):
+                    await self._ws.close()
+                self._ws = None
+            if self._consumer is not None:
+                try:
+                    await asyncio.wait_for(self._consumer, timeout=self._drain_timeout)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    self._consumer.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await self._consumer
+                self._consumer = None
+        finally:
+            self._flush_tail()
 
     async def _consume(self) -> None:
         """Read WlK's response stream and route settled lines to the callback.
 
-        WlK emits rolling JSON with both `committed_lines` (settled) and
-        `buffer_transcription` (still being refined). We only fire the
-        callback for committed entries; malformed payloads and lines with
-        no usable text are dropped silently.
+        WlK emits rolling JSON whose `lines` field is a CUMULATIVE
+        snapshot of every committed line so far in the session. The last
+        entry may still be growing — we only emit lines whose position
+        has been superseded by a newer entry. The remaining tail is
+        emitted on close (`_flush_tail`).
+
+        Malformed payloads, snapshots that shrink (shouldn't happen in
+        practice), and entries with no usable text are dropped silently.
         """
         if self._ws is None:
             return
@@ -116,16 +150,36 @@ class WlKRelay:
                     continue
                 if not isinstance(data, dict):
                     continue
-                lines = data.get("committed_lines")
-                if not isinstance(lines, list):
+                snapshot = data.get("lines")
+                if not isinstance(snapshot, list):
                     continue
-                for line in lines:
-                    if not isinstance(line, dict):
-                        continue
-                    text = (line.get("text") or "").strip()
-                    if text:
-                        self._on_settled_line(text)
+                self._last_snapshot = snapshot
+                # Emit everything strictly before the tail. The tail (last
+                # entry) may still be growing; hold it until either a newer
+                # line appears in a future snapshot, or close() drains.
+                upto = max(0, len(snapshot) - 1)
+                while self._emitted_count < upto:
+                    self._emit_line(snapshot[self._emitted_count])
+                    self._emitted_count += 1
         except (ConnectionClosed, asyncio.CancelledError):
             pass
         except Exception as e:
             print(f"[tapscribe] WlK relay consumer error: {e}", flush=True)
+
+    def _emit_line(self, line: dict) -> None:
+        """Push one settled line to the callback. Skips entries with no
+        text (e.g. silence segments WlK emits with `speaker == -2`)."""
+        if not isinstance(line, dict):
+            return
+        text = (line.get("text") or "").strip()
+        if text:
+            self._on_settled_line(text)
+
+    def _flush_tail(self) -> None:
+        """Emit any held-back tail lines from the last snapshot. Called
+        once on close — sees every line whose position the consumer
+        hadn't yet superseded with a newer entry."""
+        snapshot = self._last_snapshot
+        while self._emitted_count < len(snapshot):
+            self._emit_line(snapshot[self._emitted_count])
+            self._emitted_count += 1

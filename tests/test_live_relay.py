@@ -3,8 +3,11 @@ WhisperLiveKit.
 
 We spin up a tiny in-process WS server that pretends to be
 whisperlivekit-server: it records every PCM frame it receives so the
-test can assert bytes round-trip, and on demand it emits a
-`committed_lines` JSON message so we can verify settled-line consumption.
+test can assert bytes round-trip, and on demand it emits the
+realistic FrontData JSON shape (`{"lines": [...], "buffer_transcription": ...}`)
+so we can verify settled-line consumption against the wire format the
+production WlK actually sends. See whisperlivekit/timed_objects.py
+(`FrontData.to_dict`) for the source of truth.
 """
 
 from __future__ import annotations
@@ -27,7 +30,14 @@ from tapscribe.live_relay import WlKRelay
 
 class _FakeWlk:
     """One-connection WS server. Captures every received message and lets
-    the test push `committed_lines` JSON back at will."""
+    the test push FrontData-shaped JSON back at will.
+
+    The real WhisperLiveKit emits a CUMULATIVE snapshot of all committed
+    lines on every update — the relay is responsible for de-duplicating.
+    `push_lines_snapshot()` mirrors that semantics; `push_committed()`
+    is a thin convenience that wraps a single new tail line in a snapshot
+    that grows by one each call (so a sequence of pushes simulates a
+    typical streaming session)."""
 
     def __init__(self) -> None:
         self.received: list[bytes] = []
@@ -35,6 +45,7 @@ class _FakeWlk:
         self._port = _free_port()
         self._server: Any = None
         self._stop_event = asyncio.Event()
+        self._committed_lines: list[dict[str, Any]] = []
 
     @property
     def port(self) -> int:
@@ -51,12 +62,36 @@ class _FakeWlk:
             self._server.close()
             await self._server.wait_closed()
 
-    async def push_committed(self, text: str) -> None:
-        """Emit a settled-line JSON on every active connection."""
-        msg = json.dumps({"committed_lines": [{"text": text}]})
+    async def push_lines_snapshot(
+        self, lines: list[dict[str, Any]], *, buffer_transcription: str = "",
+    ) -> None:
+        """Emit a FrontData-shaped snapshot. `lines` is the FULL cumulative
+        list as the real WlK sends — the relay must dedupe."""
+        msg = json.dumps({
+            "status": "active_transcription",
+            "lines": lines,
+            "buffer_transcription": buffer_transcription,
+            "buffer_diarization": "",
+            "buffer_translation": "",
+            "remaining_time_transcription": 0,
+            "remaining_time_diarization": 0,
+        })
         for c in list(self._connections):
             with contextlib.suppress(Exception):
                 await c.send(msg)
+
+    async def push_committed(self, text: str) -> None:
+        """Convenience: append `text` as a new committed line and push the
+        cumulative snapshot. Mirrors a typical streaming session where each
+        new settled line arrives in a fresh snapshot containing all prior
+        lines too. The line's `start`/`end` advance with each call so each
+        committed line has a stable identity."""
+        idx = len(self._committed_lines)
+        self._committed_lines.append({
+            "text": text, "speaker": 1,
+            "start": float(idx), "end": float(idx) + 1.0,
+        })
+        await self.push_lines_snapshot(list(self._committed_lines))
 
     async def _handler(self, ws) -> None:
         self._connections.append(ws)
@@ -103,7 +138,12 @@ async def test_relay_connect_then_send_round_trips_bytes(fake_wlk: _FakeWlk):
     await relay.close()
 
 
-async def test_relay_consumes_committed_lines_into_callback(fake_wlk: _FakeWlk):
+async def test_relay_consumes_lines_into_callback_with_close_drain(fake_wlk: _FakeWlk):
+    """The real WlK emits a CUMULATIVE `lines` snapshot on each tick. The
+    relay holds the in-flight tail (latest line) until either a newer
+    line appears after it or the relay closes — ensuring each settled
+    line is emitted exactly once regardless of how many snapshots
+    contained it."""
     lines: list[str] = []
     relay = WlKRelay(
         host="localhost", port=fake_wlk.port, language="en",
@@ -112,29 +152,69 @@ async def test_relay_consumes_committed_lines_into_callback(fake_wlk: _FakeWlk):
     await relay.connect()
     await fake_wlk.push_committed("hello world")
     await fake_wlk.push_committed("second line")
-    # Give the consumer task a tick to process the pushed messages
     await asyncio.sleep(0.05)
-    assert lines == ["hello world", "second line"]
+    # After two snapshots, "hello world" is finalized (a newer line
+    # exists after it); "second line" is still the tail.
+    assert lines == ["hello world"]
     await relay.close()
+    # close() drains: the remaining tail line gets emitted.
+    assert lines == ["hello world", "second line"]
 
 
-async def test_relay_ignores_committed_lines_without_text(fake_wlk: _FakeWlk):
-    """WlK sometimes emits empty committed_lines entries on near-silent
-    frames. The consumer should skip them rather than appending empty
-    strings to LiveTranscripts."""
+async def test_relay_dedupes_lines_across_repeated_snapshots(fake_wlk: _FakeWlk):
+    """WlK re-sends the full lines list on every tick. The relay must
+    NOT re-emit a line just because it appeared in three consecutive
+    snapshots — the dashboard would fill with duplicates."""
     lines: list[str] = []
     relay = WlKRelay(
         host="localhost", port=fake_wlk.port, language="en",
         on_settled_line=lines.append,
     )
     await relay.connect()
-    # Push a malformed-looking message and an empty-text line
+    base = [
+        {"text": "first", "speaker": 1, "start": 0.0, "end": 1.0},
+        {"text": "second", "speaker": 1, "start": 1.0, "end": 2.0},
+        {"text": "third (in-flight)", "speaker": 1, "start": 2.0, "end": 3.0},
+    ]
+    # The same snapshot delivered three times should yield each
+    # finalized line exactly once.
+    for _ in range(3):
+        await fake_wlk.push_lines_snapshot(base)
+        await asyncio.sleep(0.02)
+    assert lines == ["first", "second"]
+    await relay.close()
+
+
+async def test_relay_ignores_lines_without_text(fake_wlk: _FakeWlk):
+    """WlK can emit speaker-only / silence segments with empty text.
+    Those should be skipped rather than appending empty strings to
+    LiveTranscripts."""
+    lines: list[str] = []
+    relay = WlKRelay(
+        host="localhost", port=fake_wlk.port, language="en",
+        on_settled_line=lines.append,
+    )
+    await relay.connect()
+    # Snapshot with a no-text entry, a whitespace-only entry, then a
+    # valid line. The valid line will be the tail so it won't emit yet.
+    snap = [
+        {"text": "", "speaker": -2, "start": 0.0, "end": 0.5},
+        {"text": "   ", "speaker": 1, "start": 0.5, "end": 1.0},
+        {"text": "real line", "speaker": 1, "start": 1.0, "end": 2.0},
+    ]
+    await fake_wlk.push_lines_snapshot(snap)
+    # Push another snapshot that adds a real line so the prior real
+    # line becomes finalized.
+    snap2 = snap + [{"text": "newer", "speaker": 1, "start": 2.0, "end": 3.0}]
+    await fake_wlk.push_lines_snapshot(snap2)
+    # And another raw malformed payload — must not crash.
     for c in fake_wlk._connections:
-        await c.send(json.dumps({"committed_lines": [{"text": ""}, {"text": "   "}]}))
-        await c.send(json.dumps({"foo": "bar"}))  # no committed_lines key
+        await c.send(json.dumps({"foo": "bar"}))
         await c.send("not even json {{{")
     await asyncio.sleep(0.05)
-    assert lines == []
+    # Empty-text entries are skipped; only "real line" makes it through
+    # (the in-flight "newer" tail is held until close).
+    assert lines == ["real line"]
     await relay.close()
 
 
@@ -184,7 +264,10 @@ async def test_relay_send_returns_false_after_server_closes(fake_wlk: _FakeWlk):
 
 async def test_relay_close_drains_tail_settled_lines(fake_wlk: _FakeWlk):
     """After the Bridge disconnects, the relay should give WlK a moment
-    to emit any settled lines for audio already sent (drain timeout)."""
+    to emit any settled lines for audio already sent (drain timeout).
+    Even a single in-flight tail line gets emitted on close — otherwise
+    a short utterance that produced exactly one line would be lost
+    every time."""
     lines: list[str] = []
     relay = WlKRelay(
         host="localhost", port=fake_wlk.port, language="en",
@@ -197,3 +280,23 @@ async def test_relay_close_drains_tail_settled_lines(fake_wlk: _FakeWlk):
     await fake_wlk.push_committed("tail caption")
     await relay.close()
     assert "tail caption" in lines
+
+
+async def test_relay_emits_finalized_lines_immediately_not_just_on_close(fake_wlk: _FakeWlk):
+    """Sanity guard against a regression where the relay only flushed at
+    close: in a multi-line utterance, settled lines must reach the
+    dashboard's live-transcripts feed in real time, not all at once when
+    the bridge disconnects."""
+    lines: list[str] = []
+    relay = WlKRelay(
+        host="localhost", port=fake_wlk.port, language="en",
+        on_settled_line=lines.append,
+    )
+    await relay.connect()
+    await fake_wlk.push_committed("one")
+    await fake_wlk.push_committed("two")
+    await fake_wlk.push_committed("three")
+    await asyncio.sleep(0.05)
+    # Without close: "one" and "two" are finalized, "three" is the tail.
+    assert lines == ["one", "two"]
+    await relay.close()
