@@ -16,6 +16,7 @@ inside their adapter modules in `tapscribe.transcribers.*`.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 # Mirrors whisperlivekit/model_mapping.py exactly — upstream is the source
@@ -102,7 +103,14 @@ def download_nb_whisper_ct2_dir(model_name: str) -> Path:
     from huggingface_hub import snapshot_download
     repo = FW_HF_REPO_TABLE.get(model_name, model_name)
     print(f"[tapscribe] fetching ct2/ subdir of {repo} via huggingface_hub…", flush=True)
-    local = snapshot_download(repo_id=repo, allow_patterns=["ct2/*"])
+    # Also pull the root-level preprocessor_config.json — faster-whisper reads
+    # `feature_size` (n_mels) from it. NB-Whisper-large is based on Whisper
+    # large-v3 (128 mels); without this file faster-whisper falls back to 80
+    # mels and the encoder rejects the features with shape (1, 80, 3000).
+    local = snapshot_download(
+        repo_id=repo,
+        allow_patterns=["ct2/*", "preprocessor_config.json"],
+    )
     ct2 = Path(local) / "ct2"
     if not (ct2 / "model.bin").is_file():
         raise RuntimeError(
@@ -110,6 +118,7 @@ def download_nb_whisper_ct2_dir(model_name: str) -> Path:
             f"got files: {list(p.name for p in ct2.glob('*'))}"
         )
     ensure_nb_whisper_lang_ids(ct2)
+    ensure_nb_whisper_preprocessor(ct2, Path(local))
     return ct2
 
 
@@ -161,6 +170,30 @@ def ensure_nb_whisper_lang_ids(ct2_dir: Path) -> bool:
         flush=True,
     )
     return True
+
+
+def ensure_nb_whisper_preprocessor(ct2_dir: Path, snapshot_root: Path) -> bool:
+    """Make sure `ct2_dir/preprocessor_config.json` exists so faster-whisper
+    picks up the right `feature_size` (mel-bin count).
+
+    NB-Whisper publishes `preprocessor_config.json` at the repo root, but
+    faster-whisper only looks for it next to `model.bin`. We copy it in.
+    Returns True if a copy was made, False if the target already existed or
+    no source file was found. Idempotent on re-runs.
+    """
+    target = ct2_dir / "preprocessor_config.json"
+    if target.is_file():
+        return False
+    for candidate in (ct2_dir / "preprocessor_config.json", snapshot_root / "preprocessor_config.json"):
+        if candidate.is_file() and candidate.resolve() != target.resolve():
+            shutil.copyfile(candidate, target)
+            print(
+                f"[tapscribe] copied {candidate.name} into {ct2_dir} — "
+                "faster-whisper will now use the model's true mel-bin count.",
+                flush=True,
+            )
+            return True
+    return False
 
 
 def _extract_whisper_lang_ids(tokenizer_path: Path) -> list[int]:
