@@ -70,31 +70,40 @@ Templates: `config/prompt.example.txt`, `config/hotwords.example.txt`.
 `config/hallucinations.txt` ships with rules for common YouTube-trained
 Whisper hallucinations.
 
-## Project layout
+## Architecture
 
+One backend, one supervised child, N bridges. Audio flows in over WebSocket;
+captions and recordings come out.
+
+```mermaid
+flowchart LR
+    subgraph Meeting["Meeting platform (e.g. spatial.chat)"]
+        Bridge["Bridge<br/>(browser extension<br/>or native helper)"]
+    end
+
+    subgraph Host["TapScribe host"]
+        Backend["TapScribe backend<br/>FastAPI :8001<br/>/tap · /api · dashboard"]
+        WLK["whisperlivekit-server<br/>:8000 (child process)"]
+        WAVs[("recordings/<br/>&lt;session&gt;/*.wav")]
+    end
+
+    Operator["Operator browser<br/>(dashboard)"]
+
+    Bridge -- "PCM 16k mono<br/>over WS /tap" --> Backend
+    Backend -- "forwards PCM" --> WLK
+    WLK -- "settled live captions" --> Backend
+    Backend -- "one WAV per utterance" --> WAVs
+    Operator <-- "HTTPS + dashboard WS" --> Backend
 ```
-tapscribe/                  Python package
-├── __main__.py             CLI entry: python -m tapscribe
-├── config.py               Paths, env, feature flags
-├── text.py                 Prompt/hotwords, slug parsing
-├── hallucinations.py       Filter parser and matcher
-├── audio.py                WAV duration, RMS, PCM decoding
-├── strip_silence.py        Silero + RMS fallback
-├── models.py               Backend routing
-├── transcribe.py           Per-WAV transcription
-├── sessions.py             Folder layout, metadata, strip-silence
-├── live.py                 WhisperLiveKit process management
-├── auth.py                 HTTP Basic auth
-├── app.py                  FastAPI app and routes
-└── web/                    Dashboard HTML/CSS/JS
 
-bridges/                    Platform bridges
-└── spacialchat-bridge/     Chrome MV3 extension for spatial.chat
-
-config/                     User-editable config files
-tools/                      Standalone CLIs (bench, strip-silence)
-tests/                      pytest suite
-```
+- **Bridges** tap a meeting platform's audio and stream raw PCM to `/tap`.
+  One WebSocket per speaker per utterance. See [`bridges/README.md`](bridges/README.md).
+- **Backend** (`tapscribe/`) fans each PCM frame out to two sinks: a
+  per-utterance WAV on disk, and an internal relay to the supervised
+  WhisperLiveKit child for live captions. It also serves the operator
+  dashboard.
+- **WhisperLiveKit** runs as a child process the backend starts, stops, and
+  restarts from the dashboard. Bridges never talk to it directly.
 
 ## Backends
 
