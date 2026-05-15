@@ -169,9 +169,20 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
     prompt = read_prompt()
     hotwords = read_hotwords()
     halluc_rules = hallucinations_mod.parse_rules()
+    # The per-row rec/live toggles control the per-identity preference,
+    # not the in-flight WS snapshot — so the button state needs to track
+    # the current preference, otherwise clicks land server-side but the
+    # UI never flips and looks like the buttons do nothing.
+    active = []
+    for s in active_streams:
+        row = asdict(s)
+        pref = recorder.tap_settings.get(s.identity)
+        row["record"] = pref.record
+        row["live"] = pref.live
+        active.append(row)
     return {
         "current_session": recorder.session_start,
-        "active": [asdict(s) for s in active_streams],
+        "active": active,
         "sessions": gather_sessions(
             current_session=recorder.session_start,
             jobs=jobs_snapshot,
