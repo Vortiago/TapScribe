@@ -8,14 +8,27 @@ const $ = (id) => document.getElementById(id);
 
 let currentHost = "localhost";
 let currentPort = 8001;
+let currentTapToken = "";
+let currentUseTls = false;
 let pollTimer = null;
 
+const TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap.";
+
+function httpScheme() { return currentUseTls ? "https" : "http"; }
+function wsScheme()   { return currentUseTls ? "wss" : "ws"; }
+
 async function load() {
-  const { recorderHost, recorderPort } = await chrome.storage.local.get(["recorderHost", "recorderPort"]);
+  const { recorderHost, recorderPort, tapToken, useTls } = await chrome.storage.local.get(
+    ["recorderHost", "recorderPort", "tapToken", "useTls"],
+  );
   currentHost = (recorderHost || "localhost").trim();
   currentPort = Number(recorderPort) || 8001;
+  currentTapToken = (tapToken || "").trim();
+  currentUseTls = !!useTls;
   $("host").value = currentHost;
   $("port").value = String(currentPort);
+  $("tapToken").value = currentTapToken;
+  $("useTls").checked = currentUseTls;
   await refresh();
 }
 
@@ -32,7 +45,7 @@ function setPill(id, ok, label) {
 }
 
 async function probeHealth(host, port, signal) {
-  const url = "http://" + host + ":" + port + "/health";
+  const url = httpScheme() + "://" + host + ":" + port + "/health";
   try {
     const r = await fetch(url, { method: "GET", signal });
     if (!r.ok) return { ok: false, status: r.status, url };
@@ -43,8 +56,38 @@ async function probeHealth(host, port, signal) {
   }
 }
 
+// Verifies the tap token by opening a /tap WS with the right subprotocol
+// and closing immediately. If the server accepts the upgrade (readyState
+// hits OPEN), the token is good; if it rejects (4401), we see a close
+// before open. Empty token + auth-disabled recorder = open without
+// subprotocol negotiation.
+async function probeTapToken(host, port, token, signal) {
+  return new Promise((resolve) => {
+    const url = wsScheme() + "://" + host + ":" + port + "/tap?identity=__probe__&name=probe";
+    let ws;
+    try {
+      ws = token ? new WebSocket(url, [TAP_SUBPROTOCOL_PREFIX + token]) : new WebSocket(url);
+    } catch (e) {
+      resolve({ ok: false, error: String(e && e.message || e) });
+      return;
+    }
+    let settled = false;
+    const finish = (res) => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(1000, "probe done"); } catch (e) {}
+      resolve(res);
+    };
+    if (signal) signal.addEventListener("abort", () => finish({ ok: false, error: "timeout" }));
+    ws.onopen = () => finish({ ok: true });
+    ws.onerror = () => finish({ ok: false, error: "rejected" });
+    ws.onclose = (ev) => finish({ ok: ev.code === 1000, error: "code " + ev.code });
+  });
+}
+
 async function probeAll() {
   setPill("recorderStatus", null, "checking…");
+  setPill("tokenStatus", null, "checking…");
   $("probeMeta").textContent = "Probing " + currentHost + ":" + currentPort + " …";
   const ctrl = new AbortController();
   const tmo = setTimeout(() => ctrl.abort(), 4000);
@@ -52,7 +95,21 @@ async function probeAll() {
   clearTimeout(tmo);
   setPill("recorderStatus", rec.ok, rec.ok ? "reachable" : "unreachable");
   const detail = rec.ok ? "ok" : (rec.error || ("HTTP " + rec.status));
-  $("probeMeta").textContent = "recorder: " + detail;
+
+  // Token probe only runs when the recorder is reachable, else the
+  // failure is just the same network error twice.
+  let tokenDetail = "n/a";
+  if (rec.ok) {
+    const ctrl2 = new AbortController();
+    const tmo2 = setTimeout(() => ctrl2.abort(), 4000);
+    const tok = await probeTapToken(currentHost, currentPort, currentTapToken, ctrl2.signal);
+    clearTimeout(tmo2);
+    setPill("tokenStatus", tok.ok, tok.ok ? "accepted" : "rejected");
+    tokenDetail = tok.ok ? "ok" : (tok.error || "rejected");
+  } else {
+    setPill("tokenStatus", null, "skipped");
+  }
+  $("probeMeta").textContent = "recorder: " + detail + " · tap-token: " + tokenDetail;
 }
 
 function renderTaps(status) {
@@ -117,6 +174,8 @@ async function refresh() {
 $("save").addEventListener("click", async () => {
   const rawHost = $("host").value.trim();
   const rawPort = $("port").value.trim();
+  const rawToken = $("tapToken").value.trim();
+  const rawUseTls = !!$("useTls").checked;
   if (!rawHost) {
     setSaveStatus("Host cannot be empty.", "err");
     return;
@@ -131,12 +190,20 @@ $("save").addEventListener("click", async () => {
     setSaveStatus("Port must be between 1 and 65535.", "err");
     return;
   }
-  await chrome.storage.local.set({ recorderHost: cleanHost, recorderPort: cleanPort });
+  await chrome.storage.local.set({
+    recorderHost: cleanHost,
+    recorderPort: cleanPort,
+    tapToken: rawToken,
+    useTls: rawUseTls,
+  });
   $("host").value = cleanHost;
   $("port").value = String(cleanPort);
   currentHost = cleanHost;
   currentPort = cleanPort;
-  setSaveStatus("Saved (" + cleanHost + ":" + cleanPort + "). Reload the SpatialChat tab.", "ok");
+  currentTapToken = rawToken;
+  currentUseTls = rawUseTls;
+  setSaveStatus("Saved (" + (rawUseTls ? "wss" : "ws") + "://" + cleanHost + ":" + cleanPort
+                + "). Reload the SpatialChat tab.", "ok");
   await probeAll();
 });
 
@@ -144,7 +211,7 @@ $("recheck").addEventListener("click", probeAll);
 
 $("openDash").addEventListener("click", (ev) => {
   ev.preventDefault();
-  chrome.tabs.create({ url: "http://" + currentHost + ":" + currentPort + "/" });
+  chrome.tabs.create({ url: httpScheme() + "://" + currentHost + ":" + currentPort + "/" });
 });
 
 load();

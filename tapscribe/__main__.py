@@ -37,9 +37,20 @@ def main() -> None:
     p.add_argument("--no-auto-live", action="store_true",
                    help="Don't auto-start the live channel on boot.")
     p.add_argument("--no-auth", action="store_true",
-                   help="Disable HTTP Basic auth on the dashboard. Only safe on a trusted single-user localhost.")
+                   help="Disable HTTP Basic auth on the dashboard AND the /tap WebSocket token gate. "
+                        "Only safe on a trusted single-user localhost.")
     p.add_argument("--rotate-password", action="store_true",
                    help="Delete the persisted password and generate a new one. Invalidates browser sessions.")
+    p.add_argument("--rotate-tap-token", action="store_true",
+                   help="Delete the persisted /tap bearer token and generate a new one. "
+                        "Bridges with the old token will be refused at the WS upgrade.")
+    p.add_argument("--tls", action="store_true",
+                   help="Serve the dashboard + /tap over TLS (https:// and wss://). If --cert/--key "
+                        "are not supplied, a self-signed pair is generated next to .auth-password.")
+    p.add_argument("--cert", default=None,
+                   help="Path to a PEM certificate. Implies --tls. Defaults to .tapscribe-cert.pem.")
+    p.add_argument("--key", default=None,
+                   help="Path to the PEM private key for --cert. Defaults to .tapscribe-key.pem.")
     args = p.parse_args()
 
     # Boot-time constants that affect every transcribe-call route the
@@ -63,10 +74,13 @@ def main() -> None:
         live_config=live_config,
         use_mlx=use_mlx,
         auth_password_file=config.AUTH_PASSWORD_FILE,
+        tap_token_file=config.TAP_TOKEN_FILE,
     )
 
     if args.rotate_password:
         recorder.auth.rotate()
+    if args.rotate_tap_token:
+        recorder.tap.rotate()
 
     app.state.recorder = recorder
 
@@ -92,15 +106,46 @@ def main() -> None:
         print(f"[tapscribe]   stored in: {config.AUTH_PASSWORD_FILE}", flush=True)
         print("[tapscribe] (persists across restarts — your browser stays logged in.", flush=True)
         print("[tapscribe]  Rotate via --rotate-password or delete the file.)", flush=True)
-        print("[tapscribe] /record WebSocket is NOT auth'd; --no-auth disables.", flush=True)
+        print("[tapscribe] /tap WebSocket auth: bearer token (Sec-WebSocket-Protocol)", flush=True)
+        print(f"[tapscribe]   tap token: {recorder.tap.token}", flush=True)
+        print(f"[tapscribe]   stored in: {config.TAP_TOKEN_FILE}", flush=True)
+        print("[tapscribe]   (paste into the bridge popup. Rotate via --rotate-tap-token.)", flush=True)
         print(bar, flush=True)
     else:
-        print("[tapscribe] WARNING: --no-auth — dashboard is UNAUTHENTICATED.", flush=True)
+        print("[tapscribe] WARNING: --no-auth — dashboard AND /tap are UNAUTHENTICATED.", flush=True)
         if args.host == "0.0.0.0":
             print("[tapscribe] WARNING: combined with LAN binding, anyone on the", flush=True)
             print("[tapscribe]  network can view/delete recordings. Re-enable auth.", flush=True)
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    # TLS wiring — opt-in via --tls (or implied by --cert/--key). When no
+    # cert path is given, generate a self-signed pair next to the secret
+    # files; reuse it across restarts so browsers only prompt once.
+    ssl_certfile: str | None = None
+    ssl_keyfile: str | None = None
+    use_tls = args.tls or bool(args.cert or args.key)
+    if use_tls:
+        from pathlib import Path as _Path
+
+        from .tls import ensure_self_signed_cert
+        cert_path = _Path(args.cert) if args.cert else config.TLS_CERT_FILE
+        key_path = _Path(args.key) if args.key else config.TLS_KEY_FILE
+        if args.cert or args.key:
+            if not (cert_path.is_file() and key_path.is_file()):
+                print(f"[tapscribe] ERROR: --cert/--key set but {cert_path} or {key_path} missing.", flush=True)
+                raise SystemExit(2)
+            pair = type("Pair", (), {"cert_file": cert_path, "key_file": key_path})()
+        else:
+            pair = ensure_self_signed_cert(cert_path, key_path, host=args.host)
+            print(f"[tapscribe] TLS: using self-signed cert at {pair.cert_file}", flush=True)
+            print("[tapscribe]      (first browser visit will show a 'not secure' prompt — accept once.)", flush=True)
+        ssl_certfile = str(pair.cert_file)
+        ssl_keyfile = str(pair.key_file)
+        print(f"[tapscribe] TLS enabled: https://{args.host}:{args.port}/", flush=True)
+
+    uvicorn.run(
+        app, host=args.host, port=args.port, log_level="info",
+        ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
+    )
 
 
 def _detect_use_mlx() -> bool:

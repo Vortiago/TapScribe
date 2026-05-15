@@ -16,6 +16,9 @@ htmlcov/
 # Recorder state — gitignored entirely; created at runtime.
 recordings/
 .auth-password
+.tap-token
+.tapscribe-cert.pem
+.tapscribe-key.pem
 
 # OS / editor
 .DS_Store

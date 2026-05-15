@@ -150,8 +150,32 @@ class LiveTranscripts:
 
 
 # ---------------------------------------------------------------------------
-# AuthState — the dashboard's HTTP Basic password
+# AuthState / TapTokenState — secrets persisted under .auth-password / .tap-token
 # ---------------------------------------------------------------------------
+
+def _load_or_create_secret(path: Path, *, label: str) -> str:
+    """Read a token-shaped secret from `path`, or generate a fresh one and
+    persist it (best-effort 0600). `label` only shapes the warning printed
+    when the FS is read-only."""
+    try:
+        if path.is_file():
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+    except OSError:
+        pass
+    val = secrets.token_urlsafe(12)
+    try:
+        path.write_text(val, encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except (OSError, NotImplementedError):
+            pass  # Windows / restricted FS — best-effort
+    except OSError as e:
+        print(f"[tapscribe] WARNING: could not write {path}: {e}", flush=True)
+        print(f"[tapscribe]          {label} will rotate on next restart.", flush=True)
+    return val
+
 
 @dataclass
 class AuthState:
@@ -162,32 +186,42 @@ class AuthState:
 
     @classmethod
     def load_or_create(cls, password_file: Path) -> AuthState:
-        try:
-            if password_file.is_file():
-                existing = password_file.read_text(encoding="utf-8").strip()
-                if existing:
-                    return cls(password=existing, password_file=password_file)
-        except OSError:
-            pass
-        pw = secrets.token_urlsafe(12)
-        try:
-            password_file.write_text(pw, encoding="utf-8")
-            try:
-                os.chmod(password_file, 0o600)
-            except (OSError, NotImplementedError):
-                pass  # Windows / restricted FS — best-effort
-        except OSError as e:
-            print(f"[tapscribe] WARNING: could not write {password_file}: {e}", flush=True)
-            print("[tapscribe]          password will rotate on next restart.", flush=True)
-        return cls(password=pw, password_file=password_file)
+        return cls(
+            password=_load_or_create_secret(password_file, label="password"),
+            password_file=password_file,
+        )
 
     def rotate(self) -> None:
         try:
             self.password_file.unlink(missing_ok=True)
         except OSError:
             pass
-        new = self.__class__.load_or_create(self.password_file)
-        self.password = new.password
+        self.password = _load_or_create_secret(self.password_file, label="password")
+
+
+@dataclass
+class TapTokenState:
+    """Opaque bearer token the Bridge sends on the /tap WebSocket via
+    `Sec-WebSocket-Protocol`. Kept separate from the dashboard password
+    so an operator can hand the tap token to bridges without exposing
+    dashboard auth. Rotated via `--rotate-tap-token` or by deleting the
+    file."""
+    token: str
+    token_file: Path
+
+    @classmethod
+    def load_or_create(cls, token_file: Path) -> TapTokenState:
+        return cls(
+            token=_load_or_create_secret(token_file, label="tap token"),
+            token_file=token_file,
+        )
+
+    def rotate(self) -> None:
+        try:
+            self.token_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self.token = _load_or_create_secret(self.token_file, label="tap token")
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +244,7 @@ class Recorder:
         live_config,  # tapscribe.live.LiveConfig; imported lazily to avoid cycles
         use_mlx: bool,
         auth_password_file: Path,
+        tap_token_file: Path | None = None,
     ):
         self.recordings_dir = recordings_dir
         self.config_dir = config_dir
@@ -227,6 +262,12 @@ class Recorder:
         self.jobs = JobTracker()
         self.transcripts = LiveTranscripts(max_entries=200)
         self.auth = AuthState.load_or_create(auth_password_file)
+        # Default the tap-token file next to the auth-password file so the
+        # two secrets live together. Tests that built a Recorder before
+        # the tap-token landed continue to work without changes.
+        if tap_token_file is None:
+            tap_token_file = auth_password_file.with_name(".tap-token")
+        self.tap = TapTokenState.load_or_create(tap_token_file)
 
         # LiveChannel is constructed here too (imported lazily to break
         # what would otherwise be a circular import via tapscribe.live).

@@ -6,7 +6,8 @@
 #   bash start.sh --lan                   # bind to 0.0.0.0 so other machines can connect
 #   bash start.sh --no-mlx                # skip MLX even on Apple Silicon (live AND batch)
 #   bash start.sh --no-auto-live          # boot the recorder without starting the live channel
-#   bash start.sh --no-auth               # disable dashboard auth (DEV ONLY; insecure on LAN)
+#   bash start.sh --no-auth               # disable dashboard auth + /tap token gate (DEV ONLY; insecure on LAN)
+#   bash start.sh --tls                   # serve https:// + wss:// (auto self-signed if no cert provided)
 #   SX_MODEL=small.en bash start.sh       # initial live model; changeable from the dashboard
 #
 # Dashboard auth: a password is generated on first run, persisted to
@@ -44,12 +45,14 @@ LAN=0
 NO_MLX=0
 NO_AUTO_LIVE=0
 NO_AUTH=0
+TLS=0
 for a in "$@"; do
     case "$a" in
         --lan) LAN=1 ;;
         --no-mlx) NO_MLX=1 ;;
         --no-auto-live) NO_AUTO_LIVE=1 ;;
         --no-auth) NO_AUTH=1 ;;
+        --tls) TLS=1 ;;
         -h|--help)
             sed -n '2,30p' "$0"
             exit 0
@@ -174,6 +177,9 @@ if [ "$NO_AUTO_LIVE" -eq 1 ]; then
 fi
 if [ "$NO_AUTH" -eq 1 ]; then
     EXTRA_ARGS+=(--no-auth)
+fi
+if [ "$TLS" -eq 1 ]; then
+    EXTRA_ARGS+=(--tls)
 fi
 
 BACKEND_LABEL="faster-whisper (CPU)"

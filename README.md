@@ -49,9 +49,19 @@ The script will:
    (port 8000) as a child. Logs from the child are prefixed `[wlk]`.
 5. Ctrl+C stops both cleanly.
 
-Open `http://localhost:8001/` in a browser. A dashboard password is
-generated on first run and printed to the terminal (persisted to
-`.auth-password`).
+Open `http://localhost:8001/` in a browser. Two secrets are generated on
+first run and printed to the terminal:
+
+- a **dashboard password** for HTTP Basic auth (persisted to `.auth-password`)
+- a **/tap bearer token** for the bridge to send on the WebSocket
+  upgrade (persisted to `.tap-token`) — paste it into the bridge popup
+  alongside the host/port.
+
+Rotate either via `--rotate-password` / `--rotate-tap-token`. Pass
+`--tls` to serve `https://` and `wss://` instead; a self-signed cert is
+generated on first boot (`.tapscribe-cert.pem` / `.tapscribe-key.pem`)
+and reused on subsequent boots so browsers only prompt once. Supply
+your own with `--cert <path> --key <path>` if you have one.
 
 ## Quick start (Windows / PowerShell)
 
