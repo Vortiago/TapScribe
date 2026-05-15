@@ -136,6 +136,7 @@ function renderTaps(status) {
     const tapPill = wsPill(c.tapWs);
     let stateLabel = "";
     if (c.error) stateLabel = '<span class="pill err">' + escapeHtml(c.error) + '</span>';
+    else if (c.draining) stateLabel = '<span class="pill wait">draining</span>';
     else if (c.muted) stateLabel = '<span class="pill wait">muted</span>';
     else stateLabel = '<span class="pill ok">active</span>';
     h += '<tr>';
