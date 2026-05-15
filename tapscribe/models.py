@@ -15,6 +15,7 @@ inside their adapter modules in `tapscribe.transcribers.*`.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 # Mirrors whisperlivekit/model_mapping.py exactly — upstream is the source
@@ -108,6 +109,88 @@ def download_nb_whisper_ct2_dir(model_name: str) -> Path:
             f"NB-Whisper repo {repo} downloaded but ct2/model.bin is missing — "
             f"got files: {list(p.name for p in ct2.glob('*'))}"
         )
+    ensure_nb_whisper_lang_ids(ct2)
     return ct2
+
+
+# CTranslate2 reports `is_multilingual=False` when the model's config.json has
+# no `lang_ids` array. faster-whisper then silently rewrites our `language="no"`
+# hint to `"en"` (see SYSTRAN/faster-whisper transcribe.py: "current model is
+# English-only…; using 'en' instead"). NB-Whisper's published ct2/ weights ship
+# with empty/missing lang_ids despite being a multilingual finetune, so Norwegian
+# audio comes back as broken English. We patch lang_ids in on download by mining
+# the `<|xx|>` language tokens out of the bundled tokenizer.json.
+_NON_LANG_SPECIAL_TOKENS = frozenset({
+    "<|endoftext|>",
+    "<|startoftranscript|>",
+    "<|translate|>",
+    "<|transcribe|>",
+    "<|startoflm|>",
+    "<|startofprev|>",
+    "<|nocaptions|>",
+    "<|notimestamps|>",
+    "<|nospeech|>",
+})
+
+
+def ensure_nb_whisper_lang_ids(ct2_dir: Path) -> bool:
+    """Inject Whisper language token IDs into ct2/config.json if missing.
+
+    Returns True if the file was rewritten, False if it already had lang_ids
+    (or could not be parsed). Idempotent on re-runs.
+    """
+    config_path = ct2_dir / "config.json"
+    tokenizer_path = ct2_dir / "tokenizer.json"
+    if not config_path.is_file() or not tokenizer_path.is_file():
+        return False
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    existing = config.get("lang_ids")
+    if isinstance(existing, list) and len(existing) > 1:
+        return False
+    lang_ids = _extract_whisper_lang_ids(tokenizer_path)
+    if not lang_ids:
+        return False
+    config["lang_ids"] = lang_ids
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    print(
+        f"[tapscribe] patched {config_path} with {len(lang_ids)} lang_ids — "
+        "NB-Whisper now reports as multilingual to faster-whisper.",
+        flush=True,
+    )
+    return True
+
+
+def _extract_whisper_lang_ids(tokenizer_path: Path) -> list[int]:
+    """Scan a HuggingFace tokenizer.json for `<|xx|>` language tokens.
+
+    Whisper's tokenizer uses two-letter `<|en|>`, `<|no|>`, … markers in its
+    added_tokens table. We exclude the non-language `<|...|>` tokens (eos,
+    transcribe, etc.) and return the remaining IDs sorted.
+    """
+    try:
+        data = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    added = data.get("added_tokens") or []
+    ids: list[int] = []
+    for entry in added:
+        content = entry.get("content")
+        tid = entry.get("id")
+        if not isinstance(content, str) or not isinstance(tid, int):
+            continue
+        if not (content.startswith("<|") and content.endswith("|>")):
+            continue
+        if content in _NON_LANG_SPECIAL_TOKENS:
+            continue
+        inner = content[2:-2]
+        # Whisper language tokens are 2-letter codes (e.g. "no", "nb", "en");
+        # skip timestamp tokens like "<|0.00|>" and any other special markers.
+        if not (inner.isalpha() and 2 <= len(inner) <= 3):
+            continue
+        ids.append(tid)
+    return sorted(set(ids))
 
 
