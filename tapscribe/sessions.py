@@ -190,9 +190,7 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     real = os.path.realpath(os.path.join(str(source_dir), name))
     if real != root and not real.startswith(root + os.sep):
         raise HTTPException(404, "not found")
-    if not os.path.isfile(real) or not real.lower().endswith(
-        ".wav"
-    ):  # lgtm[py/path-injection] — sanitised above
+    if not os.path.isfile(real) or not real.lower().endswith(".wav"):
         raise HTTPException(404, "not found")
     return Path(real)
 
