@@ -98,3 +98,14 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["E501", "B008"]
+
+[tool.bandit]
+# B104 — binding to 0.0.0.0: TapScribe is an operator-opt-in LAN service.
+#   The operator passes `--lan` (or `--host 0.0.0.0` to the Docker container)
+#   to deliberately expose the dashboard. `tls.py` uses 0.0.0.0 as the
+#   Common Name on the self-signed cert. None of these are accidental.
+# B615 — unpinned Hugging Face downloads: NB-Whisper and Voxtral model
+#   revisions intentionally float so model updates flow to operators
+#   without code changes. Pinning to a SHA would buy supply-chain
+#   integrity at the cost of every model update requiring a release.
+skips = ["B104", "B615"]

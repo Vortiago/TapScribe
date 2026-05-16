@@ -151,9 +151,21 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install runtime dependencies
+        # The pip-audit action can't parse `pyproject.toml` directly (it
+        # expects requirements.txt syntax), so install the runtime deps
+        # into the runner's env and audit what's actually installed. We
+        # skip the heavy `[whisper] / [voxtral] / [mlx]` optional extras
+        # — operators opt into those on a per-deploy basis and the
+        # vulnerability surface that matters for tapscribe-the-server
+        # is the runtime deps only.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
       - name: Run pip-audit
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
-          # `inputs:` scans the declared deps in pyproject.toml without
-          # actually building a venv — fast, deterministic.
-          inputs: pyproject.toml
+          # `local: true` audits the packages installed in this runner's
+          # Python environment. Resolved versions, deterministic results.
+          local: true
