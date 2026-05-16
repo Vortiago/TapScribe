@@ -420,7 +420,9 @@ async def api_session_strip_silence(
     )
     use_silero = bool(body.get("use_silero", True))
 
-    originals = sorted(session_dir.glob("*.wav"))
+    # `session_dir` is the realpath returned by `resolve_session_dir` after
+    # the realpath + .startswith(root+sep) containment check; safe to glob.
+    originals = sorted(session_dir.glob("*.wav"))  # lgtm[py/path-injection]
     if not originals:
         raise HTTPException(404, "no WAVs in this session to strip")
 
@@ -439,10 +441,12 @@ async def api_session_strip_silence(
         raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
 
     try:
+        # `stripped_dir` returns the realpath after the same containment
+        # check `resolve_session_dir` uses; safe to exists()/rmtree().
         out_dir = stripped_dir(session)
-        if out_dir.exists():
+        if out_dir.exists():  # lgtm[py/path-injection]
             try:
-                shutil.rmtree(out_dir)
+                shutil.rmtree(out_dir)  # lgtm[py/path-injection]
             except OSError as e:
                 raise HTTPException(500, f"could not clear stripped/: {e}") from e
 

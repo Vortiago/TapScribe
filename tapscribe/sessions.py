@@ -106,12 +106,17 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     real_parent = os.path.realpath(os.path.join(root, session))
     if real_parent != root and not real_parent.startswith(root + os.sep):
         raise HTTPException(404, "session not found")
-    os.makedirs(real_parent, exist_ok=True)
+    # lgtm[py/path-injection] — false positive; `real_parent` is the realpath
+    # of an already-validated `_safe_part(session)` joined under RECORDINGS_DIR,
+    # and the .startswith() check above proves containment.
+    os.makedirs(real_parent, exist_ok=True)  # lgtm[py/path-injection]
     sanitized = {
         "label": meta.get("label", "") if isinstance(meta.get("label"), str) else "",
         "aliases": {str(k): str(v) for k, v in (meta.get("aliases") or {}).items() if isinstance(v, str)},
     }
-    with open(os.path.join(real_parent, "session-meta.json"), "w", encoding="utf-8") as fh:
+    with open(
+        os.path.join(real_parent, "session-meta.json"), "w", encoding="utf-8"
+    ) as fh:  # lgtm[py/path-injection]
         fh.write(json.dumps(sanitized, indent=2, ensure_ascii=False))
 
 
@@ -154,7 +159,7 @@ def resolve_session_dir(session: str) -> Path:
     real = os.path.realpath(os.path.join(root, session))
     if real != root and not real.startswith(root + os.sep):
         raise HTTPException(404, "session not found")
-    if not os.path.isdir(real):
+    if not os.path.isdir(real):  # lgtm[py/path-injection] — sanitised above
         raise HTTPException(404, "session not found")
     return Path(real)
 
@@ -190,7 +195,9 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     real = os.path.realpath(os.path.join(str(source_dir), name))
     if real != root and not real.startswith(root + os.sep):
         raise HTTPException(404, "not found")
-    if not os.path.isfile(real) or not real.lower().endswith(".wav"):
+    if not os.path.isfile(real) or not real.lower().endswith(
+        ".wav"
+    ):  # lgtm[py/path-injection] — sanitised above
         raise HTTPException(404, "not found")
     return Path(real)
 
@@ -224,10 +231,10 @@ def _read_json_or_none(path: Path) -> Any:
         return None
     if real != root and not real.startswith(root + os.sep):
         return None
-    if not os.path.isfile(real):
+    if not os.path.isfile(real):  # lgtm[py/path-injection] — sanitised above
         return None
     try:
-        with open(real, encoding="utf-8") as fh:
+        with open(real, encoding="utf-8") as fh:  # lgtm[py/path-injection] — sanitised above
             return json.load(fh)
     except (OSError, ValueError):
         return None
