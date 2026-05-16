@@ -25,7 +25,7 @@ from typing import Any
 
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
-from .text import parse_wav_start
+from .text import parse_iso, parse_wav_start
 from .wav_cache import read_cached
 
 
@@ -41,20 +41,6 @@ class SessionSelection:
     skipped_silent: tuple[str, ...]
     from_iso: str | None = None
     to_iso: str | None = None
-
-
-def _parse_optional_iso(iso: str | None) -> datetime | None:
-    if not iso:
-        return None
-    s = iso.strip()
-    if not s:
-        return None
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
 
 
 def select_session_wavs(
@@ -95,8 +81,8 @@ def select_session_wavs(
     else:
         raise ValueError(f"unknown source: {source!r}")
 
-    from_dt = _parse_optional_iso(from_iso)
-    to_dt = _parse_optional_iso(to_iso)
+    from_dt = parse_iso(from_iso)
+    to_dt = parse_iso(to_iso)
 
     selected: list[Path] = []
     skipped_bad: list[str] = []

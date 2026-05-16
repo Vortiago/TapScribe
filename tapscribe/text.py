@@ -76,6 +76,24 @@ def safe_name(s: str | None) -> str:
     return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in s)[:64]
 
 
+def parse_iso(s: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp into a tz-aware UTC datetime. Accepts
+    a trailing `Z`, treats naive timestamps as UTC, and returns None for
+    blank/missing input. Used by both the per-WAV sidecar reader and
+    the session merger."""
+    if not s:
+        return None
+    s = s.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def parse_wav_start(name: str) -> datetime | None:
     """Extract the UTC start time from a recording filename.
 

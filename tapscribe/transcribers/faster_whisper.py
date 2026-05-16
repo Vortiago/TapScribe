@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..nb_whisper import download_nb_whisper_ct2_dir
-from .base import TranscriptionResult, TranscriptionSegment, Word, default_language_for
+from .base import TranscriptionResult, TranscriptionSegment, default_language_for
 
 
 class FasterWhisperTranscriber:
@@ -75,29 +75,7 @@ class FasterWhisperTranscriber:
             segments = list(segments_iter)
             applied = dict(common)
 
-        typed_segments: list[TranscriptionSegment] = []
-        for s in segments:
-            words: tuple[Word, ...] | None = None
-            if getattr(s, "words", None):
-                words = tuple(
-                    Word(
-                        start=round(w.start, 2),
-                        end=round(w.end, 2),
-                        word=w.word,
-                        prob=round(w.probability, 3),
-                    )
-                    for w in s.words
-                )
-            avg = getattr(s, "avg_logprob", None)
-            typed_segments.append(
-                TranscriptionSegment(
-                    start=round(s.start, 2),
-                    end=round(s.end, 2),
-                    text=s.text.strip(),
-                    avg_logprob=round(float(avg), 3) if avg is not None else None,
-                    words=words,
-                )
-            )
+        typed_segments = [TranscriptionSegment.from_payload(s) for s in segments]
 
         applied_view = {k: (v if not callable(v) else str(v)) for k, v in applied.items()}
         return TranscriptionResult(
