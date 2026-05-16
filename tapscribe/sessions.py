@@ -12,6 +12,8 @@ isolated between the two sources.
 from __future__ import annotations
 
 import json
+import os
+import os.path
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,21 +58,31 @@ def _safe_part(part: object, what: str = "session") -> str:
     return part
 
 
-def _within_recordings(path: Path) -> bool:
-    """True iff `path` resolves to a location under RECORDINGS_DIR.
-    Equality with RECORDINGS_DIR itself counts as "within" — relevant for
-    the session-folder case where the parent IS the root.
+def _enforce_within_recordings(path: Path) -> Path:
+    """Raise `HTTPException(404)` if `path` resolves outside RECORDINGS_DIR;
+    return `path` otherwise. Chainable inside expressions:
+    `p = _enforce_within_recordings(config.RECORDINGS_DIR / session)`.
 
-    Used as the path-level sanitizer at every helper that touches the
-    filesystem with a session/name-derived path. Called BEFORE the path
-    is read from / written to, so a malicious value can't leak a
-    file-existence signal even via `Path.is_file()`."""
+    Uses the `os.path.commonpath([root, candidate]) == root` idiom rather
+    than `Path.is_relative_to(...)` because the former is the canonical
+    path-traversal sanitiser CodeQL's `py/path-injection` query
+    recognises — wrapping `is_relative_to` (or anything else) inside a
+    helper opaque to taint analysis leaves the downstream filesystem
+    calls flagged even though the behaviour is correct.
+
+    `os.path.commonpath` raises `ValueError` for mixed-drive paths on
+    Windows; that case is treated as an escape attempt."""
+    root = os.path.realpath(config.RECORDINGS_DIR)
     try:
-        resolved = path.resolve()
-    except (OSError, ValueError):
-        return False
-    root = config.RECORDINGS_DIR.resolve()
-    return resolved == root or resolved.is_relative_to(root)
+        real = os.path.realpath(path)
+    except (OSError, ValueError) as e:
+        raise HTTPException(404, "not found") from e
+    try:
+        if os.path.commonpath([root, real]) != root:
+            raise HTTPException(404, "not found")
+    except ValueError as e:
+        raise HTTPException(404, "not found") from e
+    return path
 
 
 def session_meta_path(session: str) -> Path:
@@ -101,8 +113,7 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     # Containment check BEFORE any filesystem op — keeps the path-level
     # sanitizer at the top of the function so neither mkdir nor write_text
     # ever runs on an escape path.
-    if not _within_recordings(p.parent):
-        raise HTTPException(404, "session not found")
+    _enforce_within_recordings(p.parent)
     p.parent.mkdir(parents=True, exist_ok=True)
     sanitized = {
         "label": meta.get("label", "") if isinstance(meta.get("label"), str) else "",
@@ -146,9 +157,9 @@ def resolve_session_dir(session: str) -> Path:
     through — the path-traversal rule lives here, not duplicated in
     each route. Containment is checked BEFORE `is_dir()` so an attacker
     can't probe for the existence of files outside RECORDINGS_DIR."""
-    session_dir = config.RECORDINGS_DIR / _safe_part(session, "session")
-    if not _within_recordings(session_dir):
-        raise HTTPException(404, "session not found")
+    session_dir = _enforce_within_recordings(
+        config.RECORDINGS_DIR / _safe_part(session, "session"),
+    )
     if not session_dir.is_dir():
         raise HTTPException(404, "session not found")
     return session_dir
@@ -182,9 +193,7 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     RECORDINGS_DIR via the suffix-mismatch branch."""
     name = _safe_part(name, "file")
     source_dir = resolve_source_dir(session, source)
-    path = source_dir / name
-    if not _within_recordings(path):
-        raise HTTPException(404, "not found")
+    path = _enforce_within_recordings(source_dir / name)
     if not path.is_file() or path.suffix.lower() != ".wav":
         raise HTTPException(404, "not found")
     return path
@@ -207,7 +216,14 @@ def _read_json_or_none(path: Path) -> Any:
     analysis, so a future refactor that bypasses the route-level
     validation can't silently leak the function as an arbitrary
     file-reader."""
-    if not _within_recordings(path):
+    # Inline the os.path.commonpath sanitiser so taint analysis sees the
+    # check at the point of file access, not behind a helper boundary.
+    root = os.path.realpath(config.RECORDINGS_DIR)
+    try:
+        real = os.path.realpath(path)
+        if os.path.commonpath([root, real]) != root:
+            return None
+    except (OSError, ValueError):
         return None
     if not path.is_file():
         return None
