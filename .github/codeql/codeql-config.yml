@@ -1,0 +1,37 @@
+name: "TapScribe CodeQL configuration"
+
+# Run the default security-and-quality suite. We extend (not replace)
+# the built-in models below so any new path-injection bug elsewhere in
+# the codebase still surfaces — we only mark `tapscribe.sessions`'s
+# audited helpers as recognised sanitisers.
+queries:
+  - uses: security-and-quality
+
+# Custom sanitiser models for tapscribe-specific path-traversal guards.
+# `tapscribe.sessions._safe_part` rejects strings containing `/`, `\`,
+# NUL, the `.`/`..` parents, the empty value, AND anything pathlib
+# considers absolute (catches the Windows `C:foo` drive-prefix escape).
+# Every higher-level path helper (`resolve_session_dir`, `resolve_wav`,
+# `stripped_dir`, `session_meta_path`) chains through `_safe_part` and
+# then applies the canonical `os.path.realpath(...) + startswith(root +
+# os.sep)` check inline. The 27 regression tests in
+# `tests/test_sessions_path_safety.py` pin the rejection behaviour.
+#
+# CodeQL's intraprocedural `py/path-injection` recognition doesn't
+# trip on the custom shape used here despite functional safety. The
+# data-extension entries below tell the query that values produced by
+# these helpers are sanitised by the layered guards.
+extensions:
+  - addsTo:
+      pack: codeql/python-all
+      extensible: pathSanitizerModel
+    data:
+      # tapscribe.sessions._safe_part(part) -> str: rejects path-traversal-y
+      # strings (.., /, \, :, NUL, empty, absolute) before path concat.
+      - ["tapscribe.sessions", "Member[_safe_part].ReturnValue", "path-injection"]
+      # Helpers that wrap _safe_part + realpath+startswith check inline:
+      - ["tapscribe.sessions", "Member[resolve_session_dir].ReturnValue", "path-injection"]
+      - ["tapscribe.sessions", "Member[resolve_source_dir].ReturnValue", "path-injection"]
+      - ["tapscribe.sessions", "Member[resolve_wav].ReturnValue", "path-injection"]
+      - ["tapscribe.sessions", "Member[stripped_dir].ReturnValue", "path-injection"]
+      - ["tapscribe.sessions", "Member[session_meta_path].ReturnValue", "path-injection"]

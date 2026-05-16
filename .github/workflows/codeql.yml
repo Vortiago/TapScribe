@@ -39,7 +39,10 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          queries: security-and-quality
+          # config-file declares custom sanitiser models for our
+          # tapscribe.sessions path-traversal helpers; see the file for
+          # the audit rationale. `queries:` moves into the config too.
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
