@@ -58,41 +58,26 @@ def _safe_part(part: object, what: str = "session") -> str:
     return part
 
 
-def _sanitize_under_recordings(candidate: Path | str, what: str = "not found") -> str:
-    """Return the realpath of `candidate` if it sits under RECORDINGS_DIR;
-    raise `HTTPException(404)` otherwise.
-
-    Returns a STRING (the realpath) rather than a Path so that the
-    sanitised value flows through CodeQL's `py/path-injection` taint
-    analysis. The canonical idiom CodeQL recognises is:
-        real = os.path.realpath(x)
-        if os.path.commonpath([root, real]) != root: raise
-        # downstream uses of `real` are sanitised
-    Wrapping it behind a helper that returns a `Path` breaks that flow —
-    CodeQL doesn't propagate the sanitiser property through arbitrary
-    function returns or `Path()` constructors. Returning the string
-    keeps the data-flow direct; callers `Path(...)` it at the public
-    boundary if needed (after the sanitiser check, taint is gone)."""
-    root = os.path.realpath(config.RECORDINGS_DIR)
-    try:
-        real = os.path.realpath(candidate)
-    except (OSError, ValueError) as e:
-        raise HTTPException(404, what) from e
-    try:
-        if os.path.commonpath([root, real]) != root:
-            raise HTTPException(404, what)
-    except ValueError as e:
-        raise HTTPException(404, what) from e
-    return real
-
-
 def session_meta_path(session: str) -> Path:
     return config.RECORDINGS_DIR / _safe_part(session, "session") / "session-meta.json"
 
 
 def stripped_dir(session: str) -> Path:
-    candidate = config.RECORDINGS_DIR / _safe_part(session, "session") / "stripped"
-    return Path(_sanitize_under_recordings(candidate, "session not found"))
+    """Build `<RECORDINGS_DIR>/<session>/stripped` after validating the
+    session id against path traversal. The realpath+commonpath check is
+    inlined (rather than calling a helper) so CodeQL's intraprocedural
+    `py/path-injection` sanitiser recognition fires for the downstream
+    callers' filesystem operations on the returned Path."""
+    session = _safe_part(session, "session")
+    candidate = str(config.RECORDINGS_DIR / session / "stripped")
+    root = os.path.realpath(config.RECORDINGS_DIR)
+    real = os.path.realpath(candidate)
+    try:
+        if os.path.commonpath([root, real]) != root:
+            raise HTTPException(404, "session not found")
+    except ValueError as e:
+        raise HTTPException(404, "session not found") from e
+    return Path(real)
 
 
 def read_session_meta(session: str) -> dict[str, Any]:
@@ -112,10 +97,15 @@ def read_session_meta(session: str) -> dict[str, Any]:
 
 def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     p = session_meta_path(session)
-    # Containment check BEFORE any filesystem op — keeps the path-level
-    # sanitizer at the top of the function so neither mkdir nor write_text
-    # ever runs on an escape path. Use the sanitized realpath downstream.
-    real_parent = _sanitize_under_recordings(p.parent, "session not found")
+    # Inline realpath+commonpath sanitiser at the file-access site so
+    # CodeQL's intraprocedural `py/path-injection` recognition fires.
+    root = os.path.realpath(config.RECORDINGS_DIR)
+    real_parent = os.path.realpath(p.parent)
+    try:
+        if os.path.commonpath([root, real_parent]) != root:
+            raise HTTPException(404, "session not found")
+    except ValueError as e:
+        raise HTTPException(404, "session not found") from e
     os.makedirs(real_parent, exist_ok=True)
     sanitized = {
         "label": meta.get("label", "") if isinstance(meta.get("label"), str) else "",
@@ -161,8 +151,15 @@ def resolve_session_dir(session: str) -> Path:
     through — the path-traversal rule lives here, not duplicated in
     each route. Containment is checked BEFORE `is_dir()` so an attacker
     can't probe for the existence of files outside RECORDINGS_DIR."""
-    candidate = config.RECORDINGS_DIR / _safe_part(session, "session")
-    real = _sanitize_under_recordings(candidate, "session not found")
+    session = _safe_part(session, "session")
+    candidate = str(config.RECORDINGS_DIR / session)
+    root = os.path.realpath(config.RECORDINGS_DIR)
+    real = os.path.realpath(candidate)
+    try:
+        if os.path.commonpath([root, real]) != root:
+            raise HTTPException(404, "session not found")
+    except ValueError as e:
+        raise HTTPException(404, "session not found") from e
     if not os.path.isdir(real):
         raise HTTPException(404, "session not found")
     return Path(real)
@@ -196,7 +193,14 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     RECORDINGS_DIR via the suffix-mismatch branch."""
     name = _safe_part(name, "file")
     source_dir = resolve_source_dir(session, source)
-    real = _sanitize_under_recordings(source_dir / name, "not found")
+    candidate = str(source_dir / name)
+    root = os.path.realpath(config.RECORDINGS_DIR)
+    real = os.path.realpath(candidate)
+    try:
+        if os.path.commonpath([root, real]) != root:
+            raise HTTPException(404, "not found")
+    except ValueError as e:
+        raise HTTPException(404, "not found") from e
     if not os.path.isfile(real) or not real.lower().endswith(".wav"):
         raise HTTPException(404, "not found")
     return Path(real)
