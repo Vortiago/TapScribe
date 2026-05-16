@@ -56,6 +56,23 @@ def _safe_part(part: object, what: str = "session") -> str:
     return part
 
 
+def _within_recordings(path: Path) -> bool:
+    """True iff `path` resolves to a location under RECORDINGS_DIR.
+    Equality with RECORDINGS_DIR itself counts as "within" — relevant for
+    the session-folder case where the parent IS the root.
+
+    Used as the path-level sanitizer at every helper that touches the
+    filesystem with a session/name-derived path. Called BEFORE the path
+    is read from / written to, so a malicious value can't leak a
+    file-existence signal even via `Path.is_file()`."""
+    try:
+        resolved = path.resolve()
+    except (OSError, ValueError):
+        return False
+    root = config.RECORDINGS_DIR.resolve()
+    return resolved == root or resolved.is_relative_to(root)
+
+
 def session_meta_path(session: str) -> Path:
     return config.RECORDINGS_DIR / _safe_part(session, "session") / "session-meta.json"
 
@@ -81,12 +98,10 @@ def read_session_meta(session: str) -> dict[str, Any]:
 
 def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     p = session_meta_path(session)
-    # Path-traversal guard: refuse if the resolved session dir isn't under
-    # RECORDINGS_DIR. `assert_within_recordings` covers the strict-descendant
-    # case; the equality branch is the legitimate "session dir IS recordings
-    # root" — which can't happen here but stays correct under refactors.
-    parent = p.parent.resolve()
-    if config.RECORDINGS_DIR.resolve() not in parent.parents and parent != config.RECORDINGS_DIR.resolve():
+    # Containment check BEFORE any filesystem op — keeps the path-level
+    # sanitizer at the top of the function so neither mkdir nor write_text
+    # ever runs on an escape path.
+    if not _within_recordings(p.parent):
         raise HTTPException(404, "session not found")
     p.parent.mkdir(parents=True, exist_ok=True)
     sanitized = {
@@ -129,11 +144,12 @@ def resolve_session_dir(session: str) -> Path:
 
     This is the single seam every session-scoped route handler goes
     through — the path-traversal rule lives here, not duplicated in
-    each route."""
+    each route. Containment is checked BEFORE `is_dir()` so an attacker
+    can't probe for the existence of files outside RECORDINGS_DIR."""
     session_dir = config.RECORDINGS_DIR / _safe_part(session, "session")
-    if not session_dir.is_dir():
+    if not _within_recordings(session_dir):
         raise HTTPException(404, "session not found")
-    if config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents:
+    if not session_dir.is_dir():
         raise HTTPException(404, "session not found")
     return session_dir
 
@@ -161,13 +177,15 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     after validating extension, existence, and that the resolved path
     can't escape RECORDINGS_DIR. 404 on any failure. The single seam
     every WAV-scoped route uses — duplicating the guard inline tends
-    to drift between routes."""
+    to drift between routes. Containment is checked BEFORE `is_file()`
+    so an attacker can't probe for the existence of files outside
+    RECORDINGS_DIR via the suffix-mismatch branch."""
     name = _safe_part(name, "file")
     source_dir = resolve_source_dir(session, source)
     path = source_dir / name
-    if not path.is_file() or path.suffix.lower() != ".wav":
+    if not _within_recordings(path):
         raise HTTPException(404, "not found")
-    if config.RECORDINGS_DIR.resolve() not in path.resolve().parents:
+    if not path.is_file() or path.suffix.lower() != ".wav":
         raise HTTPException(404, "not found")
     return path
 
@@ -178,9 +196,19 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
 
 
 def _read_json_or_none(path: Path) -> Any:
-    """Parse `path` as JSON. Returns None when the file is missing or
-    unparseable — gather_sessions tolerates per-WAV transcripts going
-    stale without breaking the dashboard listing."""
+    """Parse `path` as JSON. Returns None when the file is missing,
+    unparseable, or sits outside RECORDINGS_DIR — `gather_sessions`
+    tolerates per-WAV transcripts going stale without breaking the
+    dashboard listing.
+
+    The containment check is defense-in-depth: every caller already
+    passes a path derived from a validated session, but this second
+    layer makes the safety property local and visible to static
+    analysis, so a future refactor that bypasses the route-level
+    validation can't silently leak the function as an arbitrary
+    file-reader."""
+    if not _within_recordings(path):
+        return None
     if not path.is_file():
         return None
     try:
