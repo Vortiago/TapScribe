@@ -60,18 +60,17 @@ def _safe_part(part: object, what: str = "session") -> str:
 
 def _enforce_within_recordings(path: Path) -> Path:
     """Raise `HTTPException(404)` if `path` resolves outside RECORDINGS_DIR;
-    return `path` otherwise. Chainable inside expressions:
-    `p = _enforce_within_recordings(config.RECORDINGS_DIR / session)`.
+    otherwise return the realpath. **Callers must use the returned value**,
+    not the input — CodeQL's taint analysis only flows the sanitiser
+    property through the realpath expression result, so reusing the
+    pre-sanitisation reference leaves downstream `is_file()`/`is_dir()`
+    calls flagged.
 
-    Uses the `os.path.commonpath([root, candidate]) == root` idiom rather
-    than `Path.is_relative_to(...)` because the former is the canonical
-    path-traversal sanitiser CodeQL's `py/path-injection` query
-    recognises — wrapping `is_relative_to` (or anything else) inside a
-    helper opaque to taint analysis leaves the downstream filesystem
-    calls flagged even though the behaviour is correct.
-
-    `os.path.commonpath` raises `ValueError` for mixed-drive paths on
-    Windows; that case is treated as an escape attempt."""
+    Uses the `os.path.commonpath([root, candidate]) == root` idiom — the
+    canonical path-traversal sanitiser CodeQL's `py/path-injection`
+    query recognises. `os.path.commonpath` raises `ValueError` for
+    mixed-drive paths on Windows; that case is treated as an escape
+    attempt."""
     root = os.path.realpath(config.RECORDINGS_DIR)
     try:
         real = os.path.realpath(path)
@@ -82,7 +81,7 @@ def _enforce_within_recordings(path: Path) -> Path:
             raise HTTPException(404, "not found")
     except ValueError as e:
         raise HTTPException(404, "not found") from e
-    return path
+    return Path(real)
 
 
 def session_meta_path(session: str) -> Path:
@@ -90,7 +89,9 @@ def session_meta_path(session: str) -> Path:
 
 
 def stripped_dir(session: str) -> Path:
-    return config.RECORDINGS_DIR / _safe_part(session, "session") / "stripped"
+    return _enforce_within_recordings(
+        config.RECORDINGS_DIR / _safe_part(session, "session") / "stripped",
+    )
 
 
 def read_session_meta(session: str) -> dict[str, Any]:
@@ -218,6 +219,9 @@ def _read_json_or_none(path: Path) -> Any:
     file-reader."""
     # Inline the os.path.commonpath sanitiser so taint analysis sees the
     # check at the point of file access, not behind a helper boundary.
+    # Use `safe_path` (the realpath) for the subsequent is_file/read_text
+    # calls, NOT the input `path` — CodeQL flows the sanitiser property
+    # through the realpath assignment but not back to the input ref.
     root = os.path.realpath(config.RECORDINGS_DIR)
     try:
         real = os.path.realpath(path)
@@ -225,10 +229,11 @@ def _read_json_or_none(path: Path) -> Any:
             return None
     except (OSError, ValueError):
         return None
-    if not path.is_file():
+    safe_path = Path(real)
+    if not safe_path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(safe_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
