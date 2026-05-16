@@ -12,6 +12,7 @@ isolated between the two sources.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,13 +38,30 @@ if TYPE_CHECKING:
 # Path helpers
 # ---------------------------------------------------------------------------
 
+# Rejects values that would let an HTTP-supplied `session` or `name` escape
+# RECORDINGS_DIR when concatenated into a path. Catches:
+#   - empty strings
+#   - path separators in either direction (`/`, `\`)
+#   - the special directory names `.` and `..` (exact match)
+#   - NUL bytes (POSIX path terminator; some platforms ignore everything after)
+# Applied at the lowest path-building level so every public helper in
+# this module inherits the guard rather than relying on each route to
+# remember it.
+_UNSAFE_PART_RE = re.compile(r"[\\/\x00]|^\.\.?$|^$")
+
+
+def _safe_part(part: object, what: str = "session") -> str:
+    if not isinstance(part, str) or _UNSAFE_PART_RE.search(part):
+        raise HTTPException(404, f"{what} not found")
+    return part
+
 
 def session_meta_path(session: str) -> Path:
-    return config.RECORDINGS_DIR / session / "session-meta.json"
+    return config.RECORDINGS_DIR / _safe_part(session, "session") / "session-meta.json"
 
 
 def stripped_dir(session: str) -> Path:
-    return config.RECORDINGS_DIR / session / "stripped"
+    return config.RECORDINGS_DIR / _safe_part(session, "session") / "stripped"
 
 
 def read_session_meta(session: str) -> dict[str, Any]:
@@ -112,7 +130,7 @@ def resolve_session_dir(session: str) -> Path:
     This is the single seam every session-scoped route handler goes
     through — the path-traversal rule lives here, not duplicated in
     each route."""
-    session_dir = config.RECORDINGS_DIR / session
+    session_dir = config.RECORDINGS_DIR / _safe_part(session, "session")
     if not session_dir.is_dir():
         raise HTTPException(404, "session not found")
     if config.RECORDINGS_DIR.resolve() not in session_dir.resolve().parents:
@@ -120,12 +138,13 @@ def resolve_session_dir(session: str) -> Path:
     return session_dir
 
 
-def resolve_source_dir(session: str, source: str) -> Path:
+def resolve_source_dir(session: str, source: str | None) -> Path:
     """Pick the WAV folder for a transcribe request.
 
     source == 'stripped' → <session>/stripped/  (must exist)
     source in (None, '', 'original') → <session>/
     """
+    session = _safe_part(session, "session")
     session_dir = config.RECORDINGS_DIR / session
     if source == "stripped":
         d = stripped_dir(session)
@@ -143,6 +162,7 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     can't escape RECORDINGS_DIR. 404 on any failure. The single seam
     every WAV-scoped route uses — duplicating the guard inline tends
     to drift between routes."""
+    name = _safe_part(name, "file")
     source_dir = resolve_source_dir(session, source)
     path = source_dir / name
     if not path.is_file() or path.suffix.lower() != ".wav":
