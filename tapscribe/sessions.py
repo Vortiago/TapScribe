@@ -55,6 +55,14 @@ _UNSAFE_PART_RE = re.compile(r"[\\/\x00]|^\.\.?$|^$")
 def _safe_part(part: object, what: str = "session") -> str:
     if not isinstance(part, str) or _UNSAFE_PART_RE.search(part):
         raise HTTPException(404, f"{what} not found")
+    # Defense-in-depth: pathlib's `/` operator treats an absolute argument
+    # as overriding the parent — `Path("D:/rec") / "C:foo"` is `C:foo` on
+    # Windows, escaping RECORDINGS_DIR entirely. The regex above catches
+    # `/`, `\`, and NUL, but on Windows the drive prefix `C:` doesn't go
+    # through any of those. Reject anything pathlib would consider
+    # absolute on the current platform.
+    if Path(part).is_absolute():
+        raise HTTPException(404, f"{what} not found")
     return part
 
 
@@ -64,19 +72,15 @@ def session_meta_path(session: str) -> Path:
 
 def stripped_dir(session: str) -> Path:
     """Build `<RECORDINGS_DIR>/<session>/stripped` after validating the
-    session id against path traversal. The realpath+commonpath check is
-    inlined (rather than calling a helper) so CodeQL's intraprocedural
-    `py/path-injection` sanitiser recognition fires for the downstream
-    callers' filesystem operations on the returned Path."""
+    session id against path traversal. The realpath+startswith check is
+    inlined (the canonical CodeQL-recognised idiom for `py/path-injection`)
+    so callers receive a Path that downstream filesystem operations can
+    use without re-checking."""
     session = _safe_part(session, "session")
-    candidate = str(config.RECORDINGS_DIR / session / "stripped")
     root = os.path.realpath(config.RECORDINGS_DIR)
-    real = os.path.realpath(candidate)
-    try:
-        if os.path.commonpath([root, real]) != root:
-            raise HTTPException(404, "session not found")
-    except ValueError as e:
-        raise HTTPException(404, "session not found") from e
+    real = os.path.realpath(os.path.join(root, session, "stripped"))
+    if real != root and not real.startswith(root + os.sep):
+        raise HTTPException(404, "session not found")
     return Path(real)
 
 
@@ -96,23 +100,18 @@ def read_session_meta(session: str) -> dict[str, Any]:
 
 
 def write_session_meta(session: str, meta: dict[str, Any]) -> None:
-    p = session_meta_path(session)
-    # Inline realpath+commonpath sanitiser at the file-access site so
-    # CodeQL's intraprocedural `py/path-injection` recognition fires.
+    session = _safe_part(session, "session")
+    # Inline realpath+startswith sanitiser at the file-access site.
     root = os.path.realpath(config.RECORDINGS_DIR)
-    real_parent = os.path.realpath(p.parent)
-    try:
-        if os.path.commonpath([root, real_parent]) != root:
-            raise HTTPException(404, "session not found")
-    except ValueError as e:
-        raise HTTPException(404, "session not found") from e
+    real_parent = os.path.realpath(os.path.join(root, session))
+    if real_parent != root and not real_parent.startswith(root + os.sep):
+        raise HTTPException(404, "session not found")
     os.makedirs(real_parent, exist_ok=True)
     sanitized = {
         "label": meta.get("label", "") if isinstance(meta.get("label"), str) else "",
         "aliases": {str(k): str(v) for k, v in (meta.get("aliases") or {}).items() if isinstance(v, str)},
     }
-    real_meta_file = os.path.join(real_parent, p.name)
-    with open(real_meta_file, "w", encoding="utf-8") as fh:
+    with open(os.path.join(real_parent, "session-meta.json"), "w", encoding="utf-8") as fh:
         fh.write(json.dumps(sanitized, indent=2, ensure_ascii=False))
 
 
@@ -147,19 +146,14 @@ def resolve_session_dir(session: str) -> Path:
     """Return `<RECORDINGS_DIR>/<session>` after validating it exists and
     doesn't escape RECORDINGS_DIR. Raises `HTTPException(404)` otherwise.
 
-    This is the single seam every session-scoped route handler goes
-    through — the path-traversal rule lives here, not duplicated in
-    each route. Containment is checked BEFORE `is_dir()` so an attacker
-    can't probe for the existence of files outside RECORDINGS_DIR."""
+    Uses the canonical `os.path.realpath(x).startswith(root + os.sep)`
+    sanitiser pattern that CodeQL's `py/path-injection` query recognises
+    intraprocedurally."""
     session = _safe_part(session, "session")
-    candidate = str(config.RECORDINGS_DIR / session)
     root = os.path.realpath(config.RECORDINGS_DIR)
-    real = os.path.realpath(candidate)
-    try:
-        if os.path.commonpath([root, real]) != root:
-            raise HTTPException(404, "session not found")
-    except ValueError as e:
-        raise HTTPException(404, "session not found") from e
+    real = os.path.realpath(os.path.join(root, session))
+    if real != root and not real.startswith(root + os.sep):
+        raise HTTPException(404, "session not found")
     if not os.path.isdir(real):
         raise HTTPException(404, "session not found")
     return Path(real)
@@ -186,21 +180,16 @@ def resolve_source_dir(session: str, source: str | None) -> Path:
 def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     """Return the resolved WAV path under `<RECORDINGS_DIR>/<session>/...`
     after validating extension, existence, and that the resolved path
-    can't escape RECORDINGS_DIR. 404 on any failure. The single seam
-    every WAV-scoped route uses — duplicating the guard inline tends
-    to drift between routes. Containment is checked BEFORE `is_file()`
-    so an attacker can't probe for the existence of files outside
-    RECORDINGS_DIR via the suffix-mismatch branch."""
+    can't escape RECORDINGS_DIR. 404 on any failure.
+
+    Uses the canonical `os.path.realpath(x).startswith(root + os.sep)`
+    sanitiser pattern recognised by CodeQL's `py/path-injection` query."""
     name = _safe_part(name, "file")
     source_dir = resolve_source_dir(session, source)
-    candidate = str(source_dir / name)
     root = os.path.realpath(config.RECORDINGS_DIR)
-    real = os.path.realpath(candidate)
-    try:
-        if os.path.commonpath([root, real]) != root:
-            raise HTTPException(404, "not found")
-    except ValueError as e:
-        raise HTTPException(404, "not found") from e
+    real = os.path.realpath(os.path.join(str(source_dir), name))
+    if real != root and not real.startswith(root + os.sep):
+        raise HTTPException(404, "not found")
     if not os.path.isfile(real) or not real.lower().endswith(".wav"):
         raise HTTPException(404, "not found")
     return Path(real)
@@ -223,17 +212,17 @@ def _read_json_or_none(path: Path) -> Any:
     analysis, so a future refactor that bypasses the route-level
     validation can't silently leak the function as an arbitrary
     file-reader."""
-    # Inline the realpath + commonpath sanitiser so taint analysis sees
-    # the check at the point of file access, not behind a helper. Use
-    # the realpath string `real` directly in subsequent os.path.* and
-    # open() calls — CodeQL flows the sanitiser property through the
-    # `real` variable but not through a re-wrapped Path.
+    # Inline the realpath + startswith sanitiser (canonical CodeQL
+    # `py/path-injection` form) so taint analysis sees the check at the
+    # point of file access. Use the realpath string `real` directly in
+    # subsequent os.path.* and open() calls — CodeQL flows the sanitiser
+    # property through the `real` variable but not through a re-wrapped Path.
     root = os.path.realpath(config.RECORDINGS_DIR)
     try:
         real = os.path.realpath(path)
-        if os.path.commonpath([root, real]) != root:
-            return None
     except (OSError, ValueError):
+        return None
+    if real != root and not real.startswith(root + os.sep):
         return None
     if not os.path.isfile(real):
         return None
