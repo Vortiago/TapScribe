@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import load_recorder_wav_as_pcm, wav_duration_s
-from .base import TranscriptionResult, TranscriptionSegment, Word, default_language_for
+from .base import TranscriptionResult, TranscriptionSegment, default_language_for
 
 # Used when folding hotwords into the initial prompt.
 _HOTWORDS_FRAMING = "Proper nouns, names, and jargon that may appear: "
@@ -129,31 +129,10 @@ class MlxWhisperTranscriber:
             )
             result = fn(str(path), **kwargs)
 
-        segments: list[TranscriptionSegment] = []
-        for s in result.get("segments", []) or []:
-            text = (s.get("text") or "").strip()
-            words: tuple[Word, ...] | None = None
-            raw_words = s.get("words")
-            if raw_words:
-                words = tuple(
-                    Word(
-                        start=round(float(w.get("start", 0.0)), 2),
-                        end=round(float(w.get("end", 0.0)), 2),
-                        word=w.get("word", ""),
-                        prob=round(float(w.get("probability", 0.0)), 3),
-                    )
-                    for w in raw_words
-                )
-            avg = s.get("avg_logprob")
-            segments.append(
-                TranscriptionSegment(
-                    start=round(float(s.get("start", 0.0)), 2),
-                    end=round(float(s.get("end", 0.0)), 2),
-                    text=text,
-                    avg_logprob=round(float(avg), 3) if avg is not None else None,
-                    words=words,
-                )
-            )
+        segments = [
+            TranscriptionSegment.from_payload(s)
+            for s in (result.get("segments") or [])
+        ]
 
         applied_view = {k: (v if not callable(v) else str(v)) for k, v in kwargs.items()}
         return TranscriptionResult(

@@ -21,12 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from . import hallucinations as hallucinations_mod
-from .text import parse_wav_speaker_slug, parse_wav_start
+from .text import parse_iso, parse_wav_speaker_slug, parse_wav_start
 from .transcribers.base import (
     Transcriber,
     TranscriptionResult,
     TranscriptionSegment,
-    Word,
 )
 
 
@@ -116,12 +115,12 @@ def _to_dict(cached: CachedTranscription) -> dict[str, Any]:
         "language": r.language,
         "language_probability": r.language_probability,
         "duration": r.duration,
-        "segments": [_segment_to_dict(s) for s in r.segments],
+        "segments": [s.to_mapping() for s in r.segments],
         "text": r.text,
         "initial_prompt_used": r.initial_prompt_used,
         "hotwords_used": r.hotwords_used,
         "quality_settings": r.quality_settings,
-        "suppressed_hallucinations": [_segment_to_dict(s) for s in r.suppressed_hallucinations],
+        "suppressed_hallucinations": [s.to_mapping() for s in r.suppressed_hallucinations],
         "transcribed_at": cached.transcribed_at.isoformat(),
         "transcribe_ms": cached.transcribe_ms,
         "source": cached.source,
@@ -133,8 +132,6 @@ def _to_dict(cached: CachedTranscription) -> dict[str, Any]:
 
 
 def _from_dict(data: dict[str, Any]) -> CachedTranscription:
-    segments = tuple(_segment_from_dict(s) for s in data.get("segments", []))
-    suppressed = tuple(_segment_from_dict(s) for s in data.get("suppressed_hallucinations", []))
     result = TranscriptionResult(
         transcriber=data["transcriber"],
         device=data["device"],
@@ -143,64 +140,22 @@ def _from_dict(data: dict[str, Any]) -> CachedTranscription:
         language_probability=float(data.get("language_probability", 0.0) or 0.0),
         duration=float(data.get("duration", 0.0) or 0.0),
         text=data.get("text", ""),
-        segments=segments,
+        segments=tuple(TranscriptionSegment.from_payload(s) for s in data.get("segments", [])),
         initial_prompt_used=data.get("initial_prompt_used", ""),
         hotwords_used=data.get("hotwords_used", ""),
         quality_settings=data.get("quality_settings", {}) or {},
-        suppressed_hallucinations=suppressed,
+        suppressed_hallucinations=tuple(
+            TranscriptionSegment.from_payload(s) for s in data.get("suppressed_hallucinations", [])
+        ),
     )
-    transcribed_at = _parse_iso(data["transcribed_at"])
-    wav_start = _parse_iso(data["wav_start"]) if data.get("wav_start") else None
+    transcribed_at = parse_iso(data["transcribed_at"])
+    if transcribed_at is None:
+        raise ValueError("transcribed_at missing")
     return CachedTranscription(
         result=result,
         transcribed_at=transcribed_at,
         transcribe_ms=int(data.get("transcribe_ms", 0)),
         source=data.get("source", "original"),
-        wav_start=wav_start,
+        wav_start=parse_iso(data.get("wav_start")),
         speaker_name=data.get("speaker_name", ""),
     )
-
-
-def _segment_to_dict(seg: TranscriptionSegment) -> dict[str, Any]:
-    out: dict[str, Any] = {"start": seg.start, "end": seg.end, "text": seg.text}
-    if seg.avg_logprob is not None:
-        out["avg_logprob"] = seg.avg_logprob
-    if seg.words is not None:
-        out["words"] = [
-            {"start": w.start, "end": w.end, "word": w.word, "prob": w.prob}
-            for w in seg.words
-        ]
-    if seg.matched_rule is not None:
-        out["matched_rule"] = seg.matched_rule
-    return out
-
-
-def _segment_from_dict(d: dict[str, Any]) -> TranscriptionSegment:
-    words = None
-    if isinstance(d.get("words"), list):
-        words = tuple(
-            Word(
-                start=float(w.get("start", 0.0)),
-                end=float(w.get("end", 0.0)),
-                word=w.get("word", ""),
-                prob=float(w.get("prob", w.get("probability", 0.0)) or 0.0),
-            )
-            for w in d["words"]
-        )
-    return TranscriptionSegment(
-        start=float(d.get("start", 0.0)),
-        end=float(d.get("end", 0.0)),
-        text=d.get("text", ""),
-        avg_logprob=float(d["avg_logprob"]) if d.get("avg_logprob") is not None else None,
-        words=words,
-        matched_rule=d.get("matched_rule"),
-    )
-
-
-def _parse_iso(s: str) -> datetime:
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
