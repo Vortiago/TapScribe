@@ -1,0 +1,24 @@
+<template id="tpl-cfg-col">
+  <div class="cfg-col">
+    <div class="k">
+      <span data-slot="title"></span>
+      <span class="meta" data-slot="file"></span>
+      <span class="meta" data-slot="count"></span>
+    </div>
+    <div class="v" data-slot="body"></div>
+  </div>
+</template>
+
+<template id="tpl-cfg-empty">
+  <span class="empty" data-slot="msg"></span>
+</template>
+
+<template id="tpl-cfg-hal-prefix">
+  <div class="dim tiny" style="margin-bottom:4px;">
+    matched segments dropped &amp; stashed in <code style="display:inline;">suppressed_hallucinations</code>
+  </div>
+</template>
+
+<template id="tpl-cfg-code">
+  <code data-slot="val"></code>
+</template>

@@ -1,0 +1,230 @@
+<template id="tpl-sess-detail">
+  <div style="display:flex; flex-direction:column; min-width:0;">
+    <div class="sess-name-row">
+      <input class="sess-name" data-sess-name placeholder="give this session a name…">
+      <span class="sess-folder" data-slot="folder"></span>
+      <span class="dim tiny" data-slot="timerange"></span>
+    </div>
+    <div class="sess-detail">
+      <div class="sess-side" data-slot="side"></div>
+      <div class="sess-main" data-slot="merged"></div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-merged-empty">
+  <div class="box">
+    <div class="box-hd"><span>merged transcript</span><span class="spacer"></span><span class="dim tiny">not yet merged</span></div>
+    <div class="box-bd"><div class="empty" style="padding:12px 0;">No merged transcript yet — run <span class="fg">▶ transcribe whole session</span> to merge all WAVs into one chronological timeline.</div></div>
+  </div>
+</template>
+
+<!-- ── Controls box ─────────────────────────────────────────── -->
+<template id="tpl-sess-controls">
+  <div class="box">
+    <div class="box-hd">
+      <span>controls</span>
+      <span class="spacer"></span>
+      <span class="dim tnum" style="font-size:10px;" data-slot="timerange"></span>
+    </div>
+    <div class="box-bd">
+      <div class="ctl-grid">
+        <span class="lbl">model</span>
+        <select class="select" data-model-pick></select>
+
+        <span class="lbl">source</span>
+        <div class="src-row" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;" data-slot="sourceRow"></div>
+
+        <span class="lbl">silence</span>
+        <div class="silence-ctl" style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;" data-slot="silenceCtl"></div>
+
+        <span class="lbl">from</span>
+        <input class="input" data-range-key="from" data-slot="rangeFrom">
+        <span class="lbl">to</span>
+        <input class="input" data-range-key="to" data-slot="rangeTo">
+        <span class="lbl">prompt</span>
+        <textarea class="textarea" rows="2" data-range-key="prompt" data-slot="rangePrompt"></textarea>
+        <span class="lbl">hotwords</span>
+        <input class="input" data-range-key="hotwords" data-slot="rangeHotwords">
+      </div>
+      <div class="action-row" style="margin-top:10px;" data-slot="actions"></div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-source-original">
+  <label class="row tiny" style="gap:4px; cursor:pointer;">
+    <input type="radio" data-source-pick="original">
+    originals <span class="dim" data-slot="count"></span>
+  </label>
+</template>
+
+<template id="tpl-source-stripped">
+  <label class="row tiny" style="gap:4px; cursor:pointer;">
+    <input type="radio" data-source-pick="stripped">
+    stripped <span class="dim" data-slot="meta"></span>
+  </label>
+</template>
+
+<template id="tpl-source-stripped-none">
+  <span class="dim tiny" title="Run silence stripping below to enable this source">stripped: <em>none</em></span>
+</template>
+
+<template id="tpl-silence-stripping">
+  <button class="btn tiny" disabled><span class="spin">⟳</span> stripping…</button>
+</template>
+
+<template id="tpl-silence-existing">
+  <button class="btn tiny" data-strip-run title="Re-run silence stripping on the originals">↻ re-strip</button>
+  <button class="btn tiny ghost" data-strip-remove title="Delete the stripped/ folder (originals are kept)">× remove</button>
+  <span class="dim tiny" data-slot="strippedAt"></span>
+</template>
+
+<template id="tpl-silence-none">
+  <button class="btn tiny" data-strip-run title="Detect silence and write trimmed copies under stripped/. Originals untouched.">✂ strip silence</button>
+  <span class="dim tiny">copies to stripped/, originals untouched</span>
+</template>
+
+<template id="tpl-sess-tx-button">
+  <button class="btn" data-tx-sess></button>
+</template>
+
+<template id="tpl-sess-copy-button">
+  <button class="btn ghost" data-copy-sess>⎘ copy merged</button>
+</template>
+
+<!-- ── Aliases box ──────────────────────────────────────────── -->
+<template id="tpl-sess-aliases">
+  <div class="box">
+    <div class="box-hd"><span>speaker aliases</span><span class="spacer"></span><span class="dim tiny">slug → display name</span></div>
+    <div class="box-bd" data-slot="rows"></div>
+  </div>
+</template>
+
+<template id="tpl-alias-row">
+  <div class="alias-row">
+    <code data-slot="key"></code>
+    <input class="input" data-slot="input">
+  </div>
+</template>
+
+<!-- ── WAV list ─────────────────────────────────────────────── -->
+<template id="tpl-wav-list">
+  <div class="box">
+    <div class="box-hd">
+      <span>wavs</span>
+      <span class="spacer"></span>
+      <span class="dim tnum tiny" data-slot="fileCount"></span>
+    </div>
+    <div class="box-bd flush wav-list" data-slot="list"></div>
+  </div>
+</template>
+
+<template id="tpl-wav-list-empty">
+  <div class="dim small" style="padding:10px;">no wavs yet</div>
+</template>
+
+<template id="tpl-wav-row">
+  <div class="wav-row">
+    <a class="wav-name" href="#" data-slot="name"></a>
+    <span class="wav-num" data-slot="duration"></span>
+    <span data-slot="sizeCell"></span>
+    <span class="row" style="gap:4px;">
+      <a class="btn tiny ghost" download title="Download WAV" data-slot="download">⬇</a>
+      <button class="btn tiny" data-slot="txButton"></button>
+    </span>
+  </div>
+</template>
+
+<template id="tpl-wav-row-stripped">
+  <div class="wav-row strip-sub" style="padding-left:18px; opacity:0.85;">
+    <a class="wav-name" href="#" data-slot="name"><span class="dim">↳</span> stripped</a>
+    <span class="wav-num" data-slot="duration"></span>
+    <span data-slot="sizeCell"></span>
+    <span class="row" style="gap:4px;">
+      <a class="btn tiny ghost" download title="Download stripped WAV" data-slot="download">⬇</a>
+      <button class="btn tiny" data-slot="txButton"></button>
+    </span>
+  </div>
+</template>
+
+<template id="tpl-wav-size-static">
+  <span class="wav-num"><span class="m" data-slot="text"></span></span>
+</template>
+
+<template id="tpl-wav-size-inflight">
+  <span class="wav-num in-flight" data-slot="text"></span>
+</template>
+
+<template id="tpl-wav-tx-busy">
+  <span class="spin">⟳</span> transcribing…
+</template>
+
+<!-- ── Per-WAV expanded transcript ─────────────────────────── -->
+<template id="tpl-expand-tx">
+  <div class="expand-tx">
+    <div class="meta" data-slot="meta"></div>
+    <div class="body" data-slot="body"></div>
+    <details style="margin-top:6px;" data-slot="auditDetails" hidden>
+      <summary class="dim tiny" data-slot="auditSummary"></summary>
+      <table class="tbl audit-tbl" style="margin-top:4px;">
+        <thead><tr><th>time (s)</th><th>text</th><th>matched rule</th></tr></thead>
+        <tbody data-slot="auditRows"></tbody>
+      </table>
+    </details>
+  </div>
+</template>
+
+<template id="tpl-expand-meta-field">
+  <span><span data-slot="label"></span> <span class="fg" data-slot="value"></span></span>
+</template>
+
+<template id="tpl-expand-audit-row">
+  <tr>
+    <td class="muted tnum" data-slot="time"></td>
+    <td class="wrap"><code data-slot="text"></code></td>
+    <td class="muted"><code data-slot="rule"></code></td>
+  </tr>
+</template>
+
+<!-- ── Regex tester ─────────────────────────────────────────── -->
+<template id="tpl-regex-tester">
+  <div class="box">
+    <button class="box-hd" data-rx-toggle style="width:100%; background:transparent; border:0; border-bottom:1px solid var(--hairline-2); cursor:pointer; font-family:inherit; text-align:left;">
+      <span data-slot="toggleLabel"></span>
+      <span class="spacer"></span>
+      <span class="dim tiny">try a candidate hallucination rule against this session</span>
+    </button>
+    <div class="rx-tester" data-slot="body" hidden>
+      <div class="rx-input">
+        <input class="input" data-rx-pattern placeholder="^thanks for watching" data-slot="patternInput">
+        <input class="input" data-rx-flags placeholder="flags" data-slot="flagsInput">
+      </div>
+      <div class="rx-seed dim tiny" style="margin-top:6px;" data-slot="seeds" hidden>
+        existing rules: <span data-slot="seedList"></span>
+      </div>
+      <div class="rx-result" data-slot="result"></div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-regex-seed">
+  <code data-rx-seed title="click to try" data-slot="rule"></code>
+</template>
+
+<template id="tpl-regex-empty"><span class="rx-empty" data-slot="msg"></span></template>
+<template id="tpl-regex-error"><span class="rx-error" data-slot="msg"></span></template>
+
+<template id="tpl-regex-header">
+  <div class="dim tiny" style="margin-bottom:6px;">
+    <span style="color:var(--warn);" data-slot="count"></span>
+    <span data-slot="suffix"></span>
+  </div>
+</template>
+
+<template id="tpl-regex-hit">
+  <span class="rx-hit">
+    <span data-slot="text"></span>
+    <span class="ctx" data-slot="ctx"></span>
+  </span>
+</template>

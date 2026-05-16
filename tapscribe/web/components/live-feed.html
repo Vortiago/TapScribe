@@ -1,0 +1,22 @@
+<template id="tpl-feed-empty">
+  <div class="feed-empty">
+    <div class="ascii">┌──────────────────────┐
+│   ▁ ▂ ▃ ▄ ▅ ▆ ▇ █    │
+│       awaiting       │
+└──────────────────────┘</div>
+    <div>no live transcripts yet</div>
+    <div class="dim tiny" style="margin-top:6px;">speak in the bridged tab — settled lines arrive here</div>
+  </div>
+</template>
+
+<template id="tpl-feed-body">
+  <div class="feed-body"></div>
+</template>
+
+<template id="tpl-feed-line">
+  <div class="line">
+    <span class="ts" data-slot="ts"></span>
+    <span class="who" data-slot="who"></span>
+    <span class="txt" data-slot="txt"></span>
+  </div>
+</template>

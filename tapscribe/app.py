@@ -741,6 +741,7 @@ async def tap(ws: WebSocket):
 DASHBOARD_HTML_PATH = config.WEB_DIR / "dashboard.html"
 DASHBOARD_CSS_PATH = config.WEB_DIR / "dashboard.css"
 DASHBOARD_JS_DIR = config.WEB_DIR / "js"
+DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
 
 
 def _read_dashboard_html() -> str:
@@ -767,7 +768,13 @@ async def dashboard_css():
     return FileResponse(DASHBOARD_CSS_PATH, media_type="text/css")
 
 
-# Dashboard JS modules. StaticFiles handles path-traversal protection and
-# content-type detection — no per-file handler needed.
+# Dashboard JS modules and HTML component templates. StaticFiles handles
+# path-traversal protection and content-type detection.
 if DASHBOARD_JS_DIR.is_dir():
     app.mount("/web/js", StaticFiles(directory=str(DASHBOARD_JS_DIR)), name="web_js")
+if DASHBOARD_COMPONENTS_DIR.is_dir():
+    app.mount(
+        "/web/components",
+        StaticFiles(directory=str(DASHBOARD_COMPONENTS_DIR)),
+        name="web_components",
+    )

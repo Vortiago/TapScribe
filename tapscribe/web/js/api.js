@@ -1,47 +1,22 @@
-// Thin wrappers over the backend's HTTP API. Each function returns the
-// parsed JSON or throws an Error with a useful message.
+// Thin wrappers over the backend's HTTP API. Each helper returns the
+// parsed JSON / text or throws an Error with status + server-provided detail.
 
-async function _jsonOrThrow(r) {
+async function _unwrap(r) {
   if (r.ok) {
     const ct = r.headers.get("content-type") || "";
-    if (ct.includes("application/json")) return r.json();
-    return r.text();
+    return ct.includes("application/json") ? r.json() : r.text();
   }
   let detail = r.statusText;
-  try {
-    const j = await r.json();
-    if (j && j.detail) detail = j.detail;
-  } catch (_) {
-    // body wasn't JSON; keep statusText
-  }
-  throw new Error(r.status + " " + detail);
+  try { detail = (await r.json()).detail || detail; } catch { /* not JSON */ }
+  throw new Error(`${r.status} ${detail}`);
 }
 
-export async function fetchState() {
-  const r = await fetch("/api/state", { cache: "no-store" });
-  if (!r.ok) throw new Error(r.status);
-  return r.json();
-}
+const _body = (body) => ({
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body ?? {}),
+});
 
-export async function postJson(url, body) {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body || {}),
-  });
-  return _jsonOrThrow(r);
-}
-
-export async function putJson(url, body) {
-  const r = await fetch(url, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body || {}),
-  });
-  return _jsonOrThrow(r);
-}
-
-export async function del(url) {
-  const r = await fetch(url, { method: "DELETE" });
-  return _jsonOrThrow(r);
-}
+export const fetchState = () => fetch("/api/state", { cache: "no-store" }).then(_unwrap);
+export const postJson = (url, body) => fetch(url, { method: "POST", ..._body(body) }).then(_unwrap);
+export const putJson  = (url, body) => fetch(url, { method: "PUT",  ..._body(body) }).then(_unwrap);
+export const del      = (url)       => fetch(url, { method: "DELETE" }).then(_unwrap);
