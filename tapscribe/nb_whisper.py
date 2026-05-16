@@ -24,11 +24,11 @@ from pathlib import Path
 # Norwegian-tuned Whisper checkpoints; for batch CPU transcription this is
 # the path.
 NB_WHISPER_REPO_TABLE: dict[str, str] = {
-    "nb-whisper-tiny":   "NbAiLab/nb-whisper-tiny",
-    "nb-whisper-base":   "NbAiLab/nb-whisper-base",
-    "nb-whisper-small":  "NbAiLab/nb-whisper-small",
+    "nb-whisper-tiny": "NbAiLab/nb-whisper-tiny",
+    "nb-whisper-base": "NbAiLab/nb-whisper-base",
+    "nb-whisper-small": "NbAiLab/nb-whisper-small",
     "nb-whisper-medium": "NbAiLab/nb-whisper-medium",
-    "nb-whisper-large":  "NbAiLab/nb-whisper-large",
+    "nb-whisper-large": "NbAiLab/nb-whisper-large",
 }
 
 
@@ -43,6 +43,7 @@ def download_nb_whisper_ct2_dir(model_name: str) -> Path:
     calls return the same local snapshot path instantly.
     """
     from huggingface_hub import snapshot_download
+
     repo = NB_WHISPER_REPO_TABLE.get(model_name, model_name)
     print(f"[tapscribe] fetching ct2/ subdir of {repo} via huggingface_hub…", flush=True)
     # Also pull the root-level preprocessor_config.json — faster-whisper reads
@@ -71,17 +72,19 @@ def download_nb_whisper_ct2_dir(model_name: str) -> Path:
 # with empty/missing lang_ids despite being a multilingual finetune, so Norwegian
 # audio comes back as broken English. We patch lang_ids in on download by mining
 # the `<|xx|>` language tokens out of the bundled tokenizer.json.
-_NON_LANG_SPECIAL_TOKENS = frozenset({
-    "<|endoftext|>",
-    "<|startoftranscript|>",
-    "<|translate|>",
-    "<|transcribe|>",
-    "<|startoflm|>",
-    "<|startofprev|>",
-    "<|nocaptions|>",
-    "<|notimestamps|>",
-    "<|nospeech|>",
-})
+_NON_LANG_SPECIAL_TOKENS = frozenset(
+    {
+        "<|endoftext|>",
+        "<|startoftranscript|>",
+        "<|translate|>",
+        "<|transcribe|>",
+        "<|startoflm|>",
+        "<|startofprev|>",
+        "<|nocaptions|>",
+        "<|notimestamps|>",
+        "<|nospeech|>",
+    }
+)
 
 
 def ensure_nb_whisper_lang_ids(ct2_dir: Path) -> bool:

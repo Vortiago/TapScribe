@@ -23,7 +23,9 @@ def test_generates_cert_and_key_when_missing(tmp_path: Path):
     assert key.is_file()
     # Cert parses, validity covers "now"
     parsed = x509.load_pem_x509_certificate(cert.read_bytes())
-    not_after = parsed.not_valid_after_utc if hasattr(parsed, "not_valid_after_utc") else parsed.not_valid_after
+    not_after = (
+        parsed.not_valid_after_utc if hasattr(parsed, "not_valid_after_utc") else parsed.not_valid_after
+    )
     assert not_after > _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=not_after.tzinfo)
 
 

@@ -24,19 +24,19 @@ _HOTWORDS_FRAMING = "Proper nouns, names, and jargon that may appear: "
 # published WITHOUT the `-mlx` suffix; the naive `whisper-<name>-mlx`
 # pattern would 404. Anything not in this table falls back to that pattern.
 MLX_REPO_TABLE: dict[str, str] = {
-    "tiny.en":         "mlx-community/whisper-tiny.en-mlx",
-    "tiny":            "mlx-community/whisper-tiny-mlx",
-    "base.en":         "mlx-community/whisper-base.en-mlx",
-    "base":            "mlx-community/whisper-base-mlx",
-    "small.en":        "mlx-community/whisper-small.en-mlx",
-    "small":           "mlx-community/whisper-small-mlx",
-    "medium.en":       "mlx-community/whisper-medium.en-mlx",
-    "medium":          "mlx-community/whisper-medium-mlx",
-    "large-v1":        "mlx-community/whisper-large-v1-mlx",
-    "large-v2":        "mlx-community/whisper-large-v2-mlx",
-    "large-v3":        "mlx-community/whisper-large-v3-mlx",
-    "large-v3-turbo":  "mlx-community/whisper-large-v3-turbo",
-    "large":           "mlx-community/whisper-large-mlx",
+    "tiny.en": "mlx-community/whisper-tiny.en-mlx",
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base.en": "mlx-community/whisper-base.en-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small.en": "mlx-community/whisper-small.en-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium.en": "mlx-community/whisper-medium.en-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v1": "mlx-community/whisper-large-v1-mlx",
+    "large-v2": "mlx-community/whisper-large-v2-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "large": "mlx-community/whisper-large-mlx",
     # NB-Whisper (Norwegian-finetuned by Nasjonalbiblioteket) intentionally
     # excluded here: probed HF and there are NO public MLX conversions
     # (NbAiLabBeta/*-mlx, mlx-community/nb-whisper-*-mlx all 404). NB-Whisper
@@ -123,16 +123,12 @@ class MlxWhisperTranscriber:
             result = fn(audio, **kwargs)
         except RuntimeError as e:
             print(
-                f"[tapscribe] mlx pre-decode failed ({e}); falling back to path "
-                "(needs ffmpeg on PATH).",
+                f"[tapscribe] mlx pre-decode failed ({e}); falling back to path (needs ffmpeg on PATH).",
                 flush=True,
             )
             result = fn(str(path), **kwargs)
 
-        segments = [
-            TranscriptionSegment.from_payload(s)
-            for s in (result.get("segments") or [])
-        ]
+        segments = [TranscriptionSegment.from_payload(s) for s in (result.get("segments") or [])]
 
         applied_view = {k: (v if not callable(v) else str(v)) for k, v in kwargs.items()}
         return TranscriptionResult(
@@ -153,4 +149,5 @@ class MlxWhisperTranscriber:
 def _import_mlx_transcribe() -> Callable[..., dict[str, Any]]:
     """Lazy import so tests don't need mlx_whisper installed."""
     import mlx_whisper  # type: ignore
+
     return mlx_whisper.transcribe

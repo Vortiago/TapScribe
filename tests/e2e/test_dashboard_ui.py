@@ -66,6 +66,7 @@ def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
     import tapscribe.app as _app
+
     monkeypatch.setattr(_app, "load_transcriber", _factory)
     _transcribers.clear_cache()
     return fake
@@ -116,16 +117,26 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             assert await page.locator("#liveFeedCount").inner_text() == "0"
             await page.screenshot(path=str(SHOTS_DIR / "01-idle.png"), full_page=True)
 
-            alice_task = asyncio.create_task(stream_wav_via_tap(
-                ws_base_url=ws_base, identity="alice", name="Alice",
-                wav_path=synthetic_wavs["alice"], utterance_id="utt-ui-alice",
-                frame_interval_s=0.025,
-            ))
-            bob_task = asyncio.create_task(stream_wav_via_tap(
-                ws_base_url=ws_base, identity="bob", name="Bob",
-                wav_path=synthetic_wavs["bob"], utterance_id="utt-ui-bob",
-                frame_interval_s=0.025,
-            ))
+            alice_task = asyncio.create_task(
+                stream_wav_via_tap(
+                    ws_base_url=ws_base,
+                    identity="alice",
+                    name="Alice",
+                    wav_path=synthetic_wavs["alice"],
+                    utterance_id="utt-ui-alice",
+                    frame_interval_s=0.025,
+                )
+            )
+            bob_task = asyncio.create_task(
+                stream_wav_via_tap(
+                    ws_base_url=ws_base,
+                    identity="bob",
+                    name="Bob",
+                    wav_path=synthetic_wavs["bob"],
+                    utterance_id="utt-ui-bob",
+                    frame_interval_s=0.025,
+                )
+            )
 
             # Active taps panel must surface both speakers while their
             # WSes are open. Poll cadence is 1 s; allow a couple of ticks.
@@ -266,8 +277,7 @@ async def test_dashboard_with_real_audio_and_whisper(
     fixture_ref = FIXTURES_DIR / "armstrong-en.reference.txt"
     if not fixture_wav.is_file() or not fixture_ref.is_file():
         pytest.skip(
-            f"missing fixture {fixture_wav.name} or its reference — see "
-            "tests/fixtures/audio/README.md",
+            f"missing fixture {fixture_wav.name} or its reference — see tests/fixtures/audio/README.md",
         )
 
     reference_words = _word_tokens(fixture_ref.read_text(encoding="utf-8"))
@@ -312,7 +322,7 @@ async def test_dashboard_with_real_audio_and_whisper(
             # Default model picker is `small.en` (244 MB). tiny.en is in
             # the picker and only 75 MB — better fit for a test that
             # might run on a fresh machine.
-            await page.select_option('[data-model-pick]', "tiny.en")
+            await page.select_option("[data-model-pick]", "tiny.en")
 
             tx_button = page.locator(f'[data-tx-sess="{rec.session_start}"]')
             await tx_button.wait_for(state="visible", timeout=5000)

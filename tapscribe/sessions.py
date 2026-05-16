@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 # Path helpers
 # ---------------------------------------------------------------------------
 
+
 def session_meta_path(session: str) -> Path:
     return config.RECORDINGS_DIR / session / "session-meta.json"
 
@@ -49,44 +50,30 @@ def read_session_meta(session: str) -> dict[str, Any]:
     """Return the per-session metadata dict (operator-editable display label
     and speaker aliases). Missing or unreadable → {} (caller can treat as
     no overrides)."""
-    p = session_meta_path(session)
-    if not p.is_file():
+    data = _read_json_or_none(session_meta_path(session))
+    if not isinstance(data, dict):
         return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return {}
-        out: dict[str, Any] = {}
-        if isinstance(data.get("label"), str):
-            out["label"] = data["label"]
-        if isinstance(data.get("aliases"), dict):
-            out["aliases"] = {
-                str(k): str(v)
-                for k, v in data["aliases"].items()
-                if isinstance(v, str)
-            }
-        return out
-    except (OSError, ValueError):
-        return {}
+    out: dict[str, Any] = {}
+    if isinstance(data.get("label"), str):
+        out["label"] = data["label"]
+    if isinstance(data.get("aliases"), dict):
+        out["aliases"] = {str(k): str(v) for k, v in data["aliases"].items() if isinstance(v, str)}
+    return out
 
 
 def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     p = session_meta_path(session)
     # Path-traversal guard: refuse if the resolved session dir isn't under
-    # RECORDINGS_DIR.
-    if (
-        config.RECORDINGS_DIR.resolve() not in p.parent.resolve().parents
-        and p.parent.resolve() != config.RECORDINGS_DIR.resolve()
-    ):
+    # RECORDINGS_DIR. `assert_within_recordings` covers the strict-descendant
+    # case; the equality branch is the legitimate "session dir IS recordings
+    # root" — which can't happen here but stays correct under refactors.
+    parent = p.parent.resolve()
+    if config.RECORDINGS_DIR.resolve() not in parent.parents and parent != config.RECORDINGS_DIR.resolve():
         raise HTTPException(404, "session not found")
     p.parent.mkdir(parents=True, exist_ok=True)
     sanitized = {
         "label": meta.get("label", "") if isinstance(meta.get("label"), str) else "",
-        "aliases": {
-            str(k): str(v)
-            for k, v in (meta.get("aliases") or {}).items()
-            if isinstance(v, str)
-        },
+        "aliases": {str(k): str(v) for k, v in (meta.get("aliases") or {}).items() if isinstance(v, str)},
     }
     p.write_text(json.dumps(sanitized, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -150,9 +137,94 @@ def resolve_source_dir(session: str, source: str) -> Path:
     raise HTTPException(400, f"unknown source: {source!r} (expected 'original' or 'stripped')")
 
 
+def resolve_wav(session: str, name: str, source: str = "original") -> Path:
+    """Return the resolved WAV path under `<RECORDINGS_DIR>/<session>/...`
+    after validating extension, existence, and that the resolved path
+    can't escape RECORDINGS_DIR. 404 on any failure. The single seam
+    every WAV-scoped route uses — duplicating the guard inline tends
+    to drift between routes."""
+    source_dir = resolve_source_dir(session, source)
+    path = source_dir / name
+    if not path.is_file() or path.suffix.lower() != ".wav":
+        raise HTTPException(404, "not found")
+    if config.RECORDINGS_DIR.resolve() not in path.resolve().parents:
+        raise HTTPException(404, "not found")
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Session listing for /api/state + /sessions
 # ---------------------------------------------------------------------------
+
+
+def _read_json_or_none(path: Path) -> Any:
+    """Parse `path` as JSON. Returns None when the file is missing or
+    unparseable — gather_sessions tolerates per-WAV transcripts going
+    stale without breaking the dashboard listing."""
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _describe_wav(w: Path, stripped_root: Path) -> dict[str, Any]:
+    """One row in the per-session `files` list — original WAV + parsed
+    sidecar transcript + stripped sibling (if any)."""
+    wav_start = parse_wav_start(w.name)
+    dur = round(wav_duration_s(w), 2)
+    wav_start_iso = wav_start.isoformat() if wav_start else None
+    wav_end_iso = (wav_start + timedelta(seconds=dur)).isoformat() if wav_start else None
+    # Pair the original with its stripped sibling (same filename under
+    # <session>/stripped/) so the dashboard can render an indented
+    # sub-row with its own transcribe button.
+    stripped_sibling: dict[str, Any] | None = None
+    stripped_wav = stripped_root / w.name
+    if stripped_wav.is_file():
+        stripped_sibling = {
+            "size": stripped_wav.stat().st_size,
+            "duration_s": round(wav_duration_s(stripped_wav), 2),
+            "transcript": _read_json_or_none(stripped_wav.with_suffix(".json")),
+        }
+    return {
+        "name": w.name,
+        "size": w.stat().st_size,
+        "duration_s": dur,
+        "transcript": _read_json_or_none(w.with_suffix(".json")),
+        "wav_start": wav_start_iso,
+        "wav_end": wav_end_iso,
+        "speaker_name": parse_wav_speaker_slug(w.name),
+        "stripped": stripped_sibling,
+    }
+
+
+def _describe_session(
+    sd: Path,
+    *,
+    jobs: dict[str, Any],
+    current_session: str,
+) -> dict[str, Any]:
+    """Build one entry for the dashboard's session list from `sd`."""
+    stripped_root = stripped_dir(sd.name)
+    wavs = [_describe_wav(w, stripped_root) for w in sorted(sd.glob("*.wav"))]
+    starts = [parse_wav_start(w["name"]) for w in wavs]
+    starts = [s for s in starts if s is not None]
+    earliest = min(starts) if starts else None
+    latest = max(starts) if starts else None
+    return {
+        "session": sd.name,
+        "wav_count": len(wavs),
+        "files": wavs,
+        "is_current": sd.name == current_session,
+        "earliest_iso": earliest.isoformat() if earliest else None,
+        "latest_iso": latest.isoformat() if latest else None,
+        "session_transcript": _read_json_or_none(sd / "session-transcript.json"),
+        "progress": jobs.get(sd.name),
+        "session_meta": read_session_meta(sd.name),
+        "stripped": stripped_stats(sd.name),
+    }
+
 
 def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Walk RECORDINGS_DIR and produce the dashboard's session list.
@@ -165,106 +237,34 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
     `recorder.jobs.snapshot()`. When present, the matching entries on each
     session get a `progress` field.
     """
+    jobs = jobs or {}
     out: list[dict[str, Any]] = []
     seen_names: set[str] = set()
-    jobs = jobs or {}
     for sd in sorted(config.RECORDINGS_DIR.glob("*"), reverse=True):
         if not sd.is_dir():
             continue
         seen_names.add(sd.name)
-        wavs = []
-        earliest = None
-        latest = None
-        stripped_root = stripped_dir(sd.name)
-        for w in sorted(sd.glob("*.wav")):
-            transcript_path = w.with_suffix(".json")
-            transcript = None
-            if transcript_path.exists():
-                try:
-                    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    transcript = None
-            wav_start = parse_wav_start(w.name)
-            dur = round(wav_duration_s(w), 2)
-            wav_end_iso = None
-            wav_start_iso = None
-            if wav_start is not None:
-                wav_start_iso = wav_start.isoformat()
-                wav_end_iso = (wav_start + timedelta(seconds=dur)).isoformat()
-                if earliest is None or wav_start < earliest:
-                    earliest = wav_start
-                if latest is None or wav_start > latest:
-                    latest = wav_start
-            # Pair the original with its stripped sibling (same filename
-            # under <session>/stripped/) so the dashboard can render an
-            # indented sub-row with its own transcribe button.
-            stripped_sibling = None
-            stripped_wav = stripped_root / w.name
-            if stripped_wav.is_file():
-                s_tx_path = stripped_wav.with_suffix(".json")
-                s_tx = None
-                if s_tx_path.exists():
-                    try:
-                        s_tx = json.loads(s_tx_path.read_text(encoding="utf-8"))
-                    except (OSError, ValueError):
-                        s_tx = None
-                stripped_sibling = {
-                    "size": stripped_wav.stat().st_size,
-                    "duration_s": round(wav_duration_s(stripped_wav), 2),
-                    "transcript": s_tx,
-                }
-            wavs.append({
-                "name": w.name,
-                "size": w.stat().st_size,
-                "duration_s": dur,
-                "transcript": transcript,
-                "wav_start": wav_start_iso,
-                "wav_end": wav_end_iso,
-                "speaker_name": parse_wav_speaker_slug(w.name),
-                "stripped": stripped_sibling,
-            })
-
-        session_transcript_path = sd / "session-transcript.json"
-        session_transcript = None
-        if session_transcript_path.exists():
-            try:
-                session_transcript = json.loads(session_transcript_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                session_transcript = None
-
-        progress = jobs.get(sd.name)
-        meta = read_session_meta(sd.name)
-        stripped = stripped_stats(sd.name)
-
-        out.append({
-            "session": sd.name,
-            "wav_count": len(wavs),
-            "files": wavs,
-            "is_current": sd.name == current_session,
-            "earliest_iso": earliest.isoformat() if earliest else None,
-            "latest_iso": latest.isoformat() if latest else None,
-            "session_transcript": session_transcript,
-            "progress": progress,
-            "session_meta": meta,
-            "stripped": stripped,
-        })
+        out.append(_describe_session(sd, jobs=jobs, current_session=current_session))
 
     # If the current session folder hasn't materialised on disk yet (lazy-
     # creation), the loop above missed it. Surface a synthetic entry so the
     # dashboard's sidebar always shows the current session as an anchor.
     if current_session not in seen_names:
-        out.insert(0, {
-            "session": current_session,
-            "wav_count": 0,
-            "files": [],
-            "is_current": True,
-            "earliest_iso": None,
-            "latest_iso": None,
-            "session_transcript": None,
-            "progress": None,
-            "session_meta": read_session_meta(current_session),
-            "stripped": None,
-        })
+        out.insert(
+            0,
+            {
+                "session": current_session,
+                "wav_count": 0,
+                "files": [],
+                "is_current": True,
+                "earliest_iso": None,
+                "latest_iso": None,
+                "session_transcript": None,
+                "progress": None,
+                "session_meta": read_session_meta(current_session),
+                "stripped": None,
+            },
+        )
     return out
 
 
@@ -272,9 +272,16 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
 # Strip-silence (operator-triggered, used by /api/sessions/{session}/strip-silence)
 # ---------------------------------------------------------------------------
 
-def strip_one_wav(src: Path, dst: Path, min_silence_ms: int, pad_ms: int,
-                  threshold_db: float, use_silero: bool,
-                  speech_floor_db: float) -> dict[str, Any]:
+
+def strip_one_wav(
+    src: Path,
+    dst: Path,
+    min_silence_ms: int,
+    pad_ms: int,
+    threshold_db: float,
+    use_silero: bool,
+    speech_floor_db: float,
+) -> dict[str, Any]:
     """Strip silence from one WAV. Returns per-file stats. Used by the
     strip-silence endpoint, which runs this in a worker thread."""
     import numpy as np
@@ -283,8 +290,14 @@ def strip_one_wav(src: Path, dst: Path, min_silence_ms: int, pad_ms: int,
     total = len(samples)
     in_secs = total / _ss.SAMPLE_RATE
     if total == 0:
-        return {"name": src.name, "in_seconds": 0.0, "speech_seconds": 0.0,
-                "segments": 0, "written": False, "reason": "empty"}
+        return {
+            "name": src.name,
+            "in_seconds": 0.0,
+            "speech_seconds": 0.0,
+            "segments": 0,
+            "written": False,
+            "reason": "empty",
+        }
 
     # Whole-file silence gate. Same threshold the transcribe path uses
     # (SILENT_RMS_DBFS_FLOOR). If the original WAV has no sustained signal,
@@ -293,9 +306,14 @@ def strip_one_wav(src: Path, dst: Path, min_silence_ms: int, pad_ms: int,
     # Whisper. Don't write it.
     overall_rms_dbfs = wav_rms_dbfs(src)
     if overall_rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
-        return {"name": src.name, "in_seconds": round(in_secs, 2),
-                "speech_seconds": 0.0, "segments": 0, "written": False,
-                "reason": f"whole-file silent ({overall_rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)"}
+        return {
+            "name": src.name,
+            "in_seconds": round(in_secs, 2),
+            "speech_seconds": 0.0,
+            "segments": 0,
+            "written": False,
+            "reason": f"whole-file silent ({overall_rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)",
+        }
 
     regions = None
     detector = "rms"
@@ -305,22 +323,35 @@ def strip_one_wav(src: Path, dst: Path, min_silence_ms: int, pad_ms: int,
             detector = "silero-vad"
     if regions is None:
         regions = _ss.detect_speech_rms(
-            samples, threshold_db=threshold_db,
-            min_silence_ms=min_silence_ms, pad_ms=pad_ms,
+            samples,
+            threshold_db=threshold_db,
+            min_silence_ms=min_silence_ms,
+            pad_ms=pad_ms,
         )
 
     if not regions:
-        return {"name": src.name, "in_seconds": round(in_secs, 2),
-                "speech_seconds": 0.0, "segments": 0, "written": False,
-                "reason": "no speech detected", "detector": detector}
+        return {
+            "name": src.name,
+            "in_seconds": round(in_secs, 2),
+            "speech_seconds": 0.0,
+            "segments": 0,
+            "written": False,
+            "reason": "no speech detected",
+            "detector": detector,
+        }
 
     pre_filter_count = len(regions)
     regions = _ss.filter_low_energy_regions(samples, regions, floor_dbfs=speech_floor_db)
     if not regions:
-        return {"name": src.name, "in_seconds": round(in_secs, 2),
-                "speech_seconds": 0.0, "segments": 0, "written": False,
-                "reason": f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
-                "detector": detector}
+        return {
+            "name": src.name,
+            "in_seconds": round(in_secs, 2),
+            "speech_seconds": 0.0,
+            "segments": 0,
+            "written": False,
+            "reason": f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
+            "detector": detector,
+        }
 
     out_samples = np.concatenate([samples[s:e] for s, e in regions])
     speech_secs = len(out_samples) / _ss.SAMPLE_RATE

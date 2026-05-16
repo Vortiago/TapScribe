@@ -29,6 +29,7 @@ def _lookup(payload: Any, key: str, default: Any = None) -> Any:
 @dataclass(frozen=True)
 class Word:
     """One token of word-level alignment, when the underlying model emits it."""
+
     start: float
     end: float
     word: str
@@ -57,6 +58,7 @@ class TranscriptionSegment:
     """One decoded segment from a Transcriber. `matched_rule` is populated
     by `hallucinations.apply` when the segment is moved into the
     suppressed list."""
+
     start: float
     end: float
     text: str
@@ -102,13 +104,14 @@ class TranscriptionResult:
     processing. Pipeline steps like `hallucinations.apply` return a new
     `TranscriptionResult` via `dataclasses.replace`.
     """
-    transcriber: str                              # echoes Transcriber.name
+
+    transcriber: str  # echoes Transcriber.name
     device: str
     model: str
     language: str
     language_probability: float
     duration: float
-    text: str                                     # joined raw segment texts
+    text: str  # joined raw segment texts
     segments: tuple[TranscriptionSegment, ...]
     initial_prompt_used: str
     hotwords_used: str
@@ -120,6 +123,7 @@ class TranscriptionResult:
 class Transcriber(Protocol):
     """The protocol every adapter satisfies. Stateful — each instance owns
     one loaded model."""
+
     name: ClassVar[str]
     device: str
     model_name: str

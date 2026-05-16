@@ -14,13 +14,13 @@ strip-silence endpoint, and is also runnable as a CLI via
 
 from __future__ import annotations
 
-import math
 import wave
 from pathlib import Path
 
 import numpy as np
 
-SAMPLE_RATE = 16000
+from .audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
+from .audio import dbfs_from_rms, open_recorder_wav
 
 # Per-region amplitude floor for what counts as actual speech. Below this,
 # regions are usually room noise / HVAC / faint breathing that silero-vad
@@ -46,10 +46,7 @@ def read_wav_int16(path: Path) -> np.ndarray:
 
 
 def write_wav_int16(path: Path, samples: np.ndarray) -> None:
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
+    with open_recorder_wav(path) as w:
         w.writeframes(samples.astype(np.int16).tobytes())
 
 
@@ -68,10 +65,7 @@ def filter_low_energy_regions(samples_int16: np.ndarray, regions, floor_dbfs: fl
         if len(region) == 0:
             continue
         rms = float(np.sqrt((region.astype(np.float32) ** 2).mean()))
-        if rms <= 0:
-            continue
-        dbfs = 20.0 * math.log10(rms / 32768.0)
-        if dbfs >= floor_dbfs:
+        if dbfs_from_rms(rms) >= floor_dbfs:
             out.append((s, e))
     return out
 
@@ -87,7 +81,8 @@ def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms:
     audio = torch.from_numpy(samples_int16).float() / 32768.0
     model = load_silero_vad()
     ts = get_speech_timestamps(
-        audio, model,
+        audio,
+        model,
         sampling_rate=SAMPLE_RATE,
         min_silence_duration_ms=min_silence_ms,
         speech_pad_ms=pad_ms,
@@ -107,8 +102,8 @@ def detect_speech_rms(samples_int16: np.ndarray, threshold_db: float, min_silenc
     n_windows = len(audio) // window_samples
     if n_windows == 0:
         return []
-    audio = audio[:n_windows * window_samples].reshape(n_windows, window_samples)
-    rms = np.sqrt((audio ** 2).mean(axis=1) + 1e-12)
+    audio = audio[: n_windows * window_samples].reshape(n_windows, window_samples)
+    rms = np.sqrt((audio**2).mean(axis=1) + 1e-12)
     db = 20.0 * np.log10(rms + 1e-12)
     is_speech = db > threshold_db
 

@@ -59,9 +59,7 @@ class VoxtralTranscriber:
             dtype = torch.bfloat16
 
         processor = AutoProcessor.from_pretrained(_VOXTRAL_REPO)
-        model = VoxtralForConditionalGeneration.from_pretrained(
-            _VOXTRAL_REPO, torch_dtype=dtype
-        ).to(device)
+        model = VoxtralForConditionalGeneration.from_pretrained(_VOXTRAL_REPO, torch_dtype=dtype).to(device)
         model.eval()
         return cls(model_name=model_name, processor=processor, model=model, device=device)
 
@@ -102,6 +100,7 @@ class VoxtralTranscriber:
         # so tests with mocked torch don't have to provide a stub.
         try:
             import torch  # type: ignore
+
             with torch.no_grad():
                 outputs = self._model.generate(**_inputs_kwargs(inputs), **gen_kwargs)
         except ImportError:

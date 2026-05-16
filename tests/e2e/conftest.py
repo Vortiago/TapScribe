@@ -28,6 +28,7 @@ class RunningRecorder:
     """Bundle of everything an E2E test usually needs: the running
     server, the Recorder instance it owns, and the fake
     whisperlivekit-server its relay points at."""
+
     server: RecorderServer
     recorder: Recorder
     fake_wlk: FakeWlkThread
@@ -44,13 +45,16 @@ class RunningRecorder:
 class _FakeAliveProc:
     """LiveChannel.running() returns True iff `_proc.poll() is None`,
     so any object with a poll-returning-None satisfies it."""
+
     def poll(self):
         return None
 
 
 @pytest.fixture
 def running_recorder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_wlk: FakeWlkThread,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_wlk: FakeWlkThread,
 ) -> Iterator[RunningRecorder]:
     """Build a Recorder under tmp_path, attach it to the global FastAPI
     `app`, and serve it via real uvicorn on a free port. Auth off so

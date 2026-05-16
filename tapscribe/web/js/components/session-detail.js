@@ -417,9 +417,7 @@ export function render(s, host, ctx) {
     `${fmtClock(s.earliest_iso)} → ${fmtClock(s.latest_iso)} · ${s.wav_count || 0} wavs`,
   );
   if (s.is_current) {
-    const rec = document.createElement("span");
-    rec.style.color = "var(--rec)";
-    rec.textContent = "● recording";
+    const rec = Object.assign(document.createElement("span"), { className: "c-rec", textContent: "● recording" });
     trEl.append(" · ", rec);
   }
 

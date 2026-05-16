@@ -1,0 +1,16 @@
+[Unit]
+Description=TapScribe local transcription
+After=network.target
+
+[Service]
+Type=simple
+User=tapscribe
+WorkingDirectory=/opt/tapscribe
+ExecStart=/bin/bash /opt/tapscribe/start.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -63,6 +63,7 @@ def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
     import tapscribe.app as _app
+
     monkeypatch.setattr(_app, "load_transcriber", _factory)
     _transcribers.clear_cache()
     return fake
@@ -98,24 +99,35 @@ async def test_two_bridges_stream_then_session_is_transcribed(
     async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
         # Pace frames so the WSes overlap long enough for /api/state to
         # see both. 40 frames × 25 ms ≈ 1 s of wall clock — plenty.
-        alice_task = asyncio.create_task(stream_wav_via_tap(
-            ws_base_url=ws_base, identity="alice", name="Alice",
-            wav_path=synthetic_wavs["alice"], utterance_id="utt-alice-1",
-            frame_interval_s=0.025,
-        ))
-        bob_task = asyncio.create_task(stream_wav_via_tap(
-            ws_base_url=ws_base, identity="bob", name="Bob",
-            wav_path=synthetic_wavs["bob"], utterance_id="utt-bob-1",
-            frame_interval_s=0.025,
-        ))
+        alice_task = asyncio.create_task(
+            stream_wav_via_tap(
+                ws_base_url=ws_base,
+                identity="alice",
+                name="Alice",
+                wav_path=synthetic_wavs["alice"],
+                utterance_id="utt-alice-1",
+                frame_interval_s=0.025,
+            )
+        )
+        bob_task = asyncio.create_task(
+            stream_wav_via_tap(
+                ws_base_url=ws_base,
+                identity="bob",
+                name="Bob",
+                wav_path=synthetic_wavs["bob"],
+                utterance_id="utt-bob-1",
+                frame_interval_s=0.025,
+            )
+        )
 
         async def _both_active() -> bool:
             resp = await client.get("/api/state")
             ids = {row["identity"] for row in resp.json().get("active", [])}
             return {"alice", "bob"}.issubset(ids)
 
-        assert await wait_until(_both_active, timeout=3.0), \
+        assert await wait_until(_both_active, timeout=3.0), (
             "expected /api/state.active to surface both bridges mid-stream"
+        )
 
         # The fake WlK broadcasts to every connected relay, so each
         # push lands twice in the feed — once per speaker.
@@ -187,8 +199,11 @@ async def test_two_bridges_stream_then_session_is_transcribed(
         before = len(list(rec.session_dir.glob("*.wav")))
         try:
             await stream_wav_via_tap(
-                ws_base_url=ws_base, identity="alice", name="Alice",
-                wav_path=synthetic_wavs["alice"], utterance_id="utt-while-paused",
+                ws_base_url=ws_base,
+                identity="alice",
+                name="Alice",
+                wav_path=synthetic_wavs["alice"],
+                utterance_id="utt-while-paused",
                 frame_interval_s=0.025,
             )
         except websockets.ConnectionClosed:
@@ -207,8 +222,9 @@ async def test_two_bridges_stream_then_session_is_transcribed(
             timeout=30.0,
         )
         assert resp.status_code == 200
-        assert len(fake_transcriber.calls) == prior_calls, \
+        assert len(fake_transcriber.calls) == prior_calls, (
             "second transcribe-session should hit the per-WAV cache"
+        )
 
 
 async def test_session_label_persists_through_meta_endpoint(
@@ -224,8 +240,10 @@ async def test_session_label_persists_through_meta_endpoint(
 
     await stream_wav_via_tap(
         ws_base_url=running_recorder.ws_base_url,
-        identity="alice", name="Alice",
-        wav_path=synthetic_wavs["alice"], utterance_id="utt-label-test",
+        identity="alice",
+        name="Alice",
+        wav_path=synthetic_wavs["alice"],
+        utterance_id="utt-label-test",
     )
     assert await wait_until(lambda: streams_drained(rec), timeout=3.0)
 
@@ -257,6 +275,7 @@ _WORD_RE = re.compile(r"[^\W\d_]+", flags=re.UNICODE)
 @dataclass
 class AudioFixture:
     """One real-audio fixture: a WAV and the text of what it says."""
+
     wav: Path
     reference: str
 
@@ -303,8 +322,7 @@ async def test_pipeline_with_real_whisper(running_recorder: RunningRecorder):
     fixtures = _real_audio_fixtures()
     if not fixtures:
         pytest.skip(
-            "no real-audio fixtures present — add one via "
-            "tests/fixtures/audio/README.md to enable",
+            "no real-audio fixtures present — add one via tests/fixtures/audio/README.md to enable",
         )
 
     rec = running_recorder.recorder
@@ -339,8 +357,7 @@ async def test_pipeline_with_real_whisper(running_recorder: RunningRecorder):
     for fx in fixtures:
         sidecar = sidecars_by_speaker.get(fx.wav.stem)
         assert sidecar is not None, (
-            f"no sidecar for speaker {fx.wav.stem!r} "
-            f"(have: {sorted(sidecars_by_speaker)})"
+            f"no sidecar for speaker {fx.wav.stem!r} (have: {sorted(sidecars_by_speaker)})"
         )
         transcript = sidecar.get("text", "")
         reference_words = _word_tokens(fx.reference)

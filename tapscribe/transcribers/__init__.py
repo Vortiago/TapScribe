@@ -61,19 +61,23 @@ def load_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
 def _build_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
     if model_name.lower().startswith("voxtral"):
         from .voxtral import VoxtralTranscriber
+
         return VoxtralTranscriber.load(model_name)
 
     if model_name.startswith("nb-whisper-"):
         # No public MLX weights for NB-Whisper — fall through to faster-whisper
         # regardless of the operator's MLX preference.
         from .faster_whisper import FasterWhisperTranscriber
+
         return FasterWhisperTranscriber.load(model_name)
 
     if use_mlx:
         from .mlx_whisper import MlxWhisperTranscriber
+
         return MlxWhisperTranscriber.load(model_name)
 
     from .faster_whisper import FasterWhisperTranscriber
+
     return FasterWhisperTranscriber.load(model_name)
 
 

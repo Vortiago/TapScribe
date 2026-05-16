@@ -16,29 +16,12 @@ from __future__ import annotations
 import wave
 from contextlib import suppress
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
+from .audio import open_recorder_wav
 from .live_relay import WlKRelay
 from .recorder import ActiveStream, Recorder, UtteranceRecord
 from .text import clean_meta_tokens, safe_name
-
-
-def _reopen_wav_for_append(path: Path) -> wave.Wave_write:
-    """Reopen an existing 16 kHz mono int16 WAV so subsequent
-    writeframes() append after the existing audio. We read the existing
-    frames, then rewrite them via Wave_write so the resulting file is
-    structurally valid both before and after the resumed segment is
-    appended."""
-    with wave.open(str(path), "rb") as r:
-        existing = r.readframes(r.getnframes())
-    wf = wave.open(str(path), "wb")
-    wf.setnchannels(1)
-    wf.setsampwidth(2)
-    wf.setframerate(16000)
-    if existing:
-        wf.writeframes(existing)
-    return wf
 
 
 class TapFanOut:
@@ -81,8 +64,11 @@ class TapFanOut:
     ) -> TapFanOut:
         self = cls(
             recorder,
-            identity=identity, name=name, utterance_id=utterance_id,
-            do_record=do_record, do_live=do_live,
+            identity=identity,
+            name=name,
+            utterance_id=utterance_id,
+            do_record=do_record,
+            do_live=do_live,
         )
         await self._open()
         return self
@@ -116,23 +102,32 @@ class TapFanOut:
 
         if self._do_record:
             resumed = self._recorder.utterances.try_resume(
-                self._utterance_id, identity=self._identity,
+                self._utterance_id,
+                identity=self._identity,
             )
             if resumed is not None:
                 # Bridge reconnected within the resume window with the
                 # same utterance_id. Append to the existing WAV; preserve
                 # bytes_received and started_at so the merged file looks
-                # like one continuous utterance.
+                # like one continuous utterance. `wave` has no append
+                # mode, so we read the existing frames and rewrite them
+                # through the canonical header so the resulting file
+                # stays structurally valid before AND after the resumed
+                # segment is appended.
                 if self._name and self._name != resumed.name:
                     resumed.name = self._name
-                self._wf = _reopen_wav_for_append(resumed.path)
+                with wave.open(str(resumed.path), "rb") as r:
+                    existing = r.readframes(r.getnframes())
+                wf = open_recorder_wav(resumed.path)
+                if existing:
+                    wf.writeframes(existing)
+                self._wf = wf
                 self._record = resumed
                 self._bytes_received = resumed.bytes_received
                 started_at = resumed.started_at
                 fname = resumed.filename
                 print(
-                    f"[tapscribe] /tap resume -> {fname} "
-                    f"(prior {self._bytes_received} bytes)",
+                    f"[tapscribe] /tap resume -> {fname} (prior {self._bytes_received} bytes)",
                     flush=True,
                 )
             else:
@@ -156,27 +151,25 @@ class TapFanOut:
                     started_at=started_at,
                 )
                 self._recorder.utterances.register_new(record)
-                wf = wave.open(str(fpath), "wb")
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(16000)
-                self._wf = wf
+                self._wf = open_recorder_wav(fpath)
                 self._record = record
                 print(f"[tapscribe] /tap open -> {fname}", flush=True)
         else:
             print(f"[tapscribe] /tap open (record off) for {self._identity}", flush=True)
 
         self._conn_id = self._utterance_id[:8] + "-" + (safe_name(self._identity)[:10] or "unknown")
-        await self._recorder.streams.register(ActiveStream(
-            conn_id=self._conn_id,
-            identity=self._identity,
-            name=self._name,
-            filename=fname,
-            started_at=started_at,
-            bytes_received=0,
-            record=self._do_record,
-            live=self._do_live,
-        ))
+        await self._recorder.streams.register(
+            ActiveStream(
+                conn_id=self._conn_id,
+                identity=self._identity,
+                name=self._name,
+                filename=fname,
+                started_at=started_at,
+                bytes_received=0,
+                record=self._do_record,
+                live=self._do_live,
+            )
+        )
 
         if self._do_live and self._recorder.live.running():
             candidate = WlKRelay(
@@ -197,13 +190,15 @@ class TapFanOut:
         cleaned = clean_meta_tokens(text)
         if not cleaned or not any(c.isalpha() for c in cleaned):
             return
-        self._recorder.transcripts.append({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "identity": self._identity,
-            "name": self._name,
-            "text": cleaned,
-            "session": self._recorder.session_start,
-        })
+        self._recorder.transcripts.append(
+            {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "identity": self._identity,
+                "name": self._name,
+                "text": cleaned,
+                "session": self._recorder.session_start,
+            }
+        )
 
     async def _close(self) -> None:
         # Sync cleanup first: these must run even if the surrounding task

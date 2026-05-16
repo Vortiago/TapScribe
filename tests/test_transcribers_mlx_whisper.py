@@ -46,7 +46,8 @@ def _one_second_wav(path: Path) -> Path:
 def _stub_mlx_response(text: str = "hello world", segments=None, language="en"):
     return {
         "language": language,
-        "segments": segments or [
+        "segments": segments
+        or [
             {"start": 0.0, "end": 1.0, "text": "hello world", "avg_logprob": -0.2},
         ],
         "text": text,

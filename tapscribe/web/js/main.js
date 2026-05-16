@@ -591,9 +591,16 @@ await loadTemplates(
   "/web/components/session-detail.html",
 );
 initComponentCtx();
-tick();
-// 500ms is the sweet spot — fast enough that "active taps" / live-channel
-// state badge changes feel near-instant, slow enough that /api/state isn't
-// doing meaningful CPU work between ticks. Most renders short-circuit on
-// unchanged signatures, so we're not actually re-painting twice per second.
-setInterval(tick, 500);
+
+// Serialised poll loop — awaiting tick() inline ends the setInterval-style
+// re-entrancy that the signature/focus guards exist to paper over, and
+// skipping ticks while hidden avoids needless /api/state calls.
+(async () => {
+  for (;;) {
+    if (document.visibilityState === "visible") await tick();
+    await new Promise((r) => setTimeout(r, 500));
+  }
+})();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") tick();
+});

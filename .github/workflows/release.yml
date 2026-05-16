@@ -1,0 +1,121 @@
+name: Release
+
+# Tag-driven release: pushing a `v*` tag (e.g. `v0.2.0`) builds the wheel
+# + sdist, creates a GitHub release with auto-generated notes from
+# release-drafter, and (once Trusted Publishing is set up) publishes to PyPI.
+#
+# Manual dispatch is also allowed for re-runs from the Actions tab when a
+# tag push didn't trigger (e.g. ring-signed tags from an integration).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # Required for PyPI Trusted Publishing OIDC token; harmless when the
+  # publish step is disabled.
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build wheel + sdist
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Read version from tag
+        id: version
+        run: |
+          ref="${GITHUB_REF#refs/tags/}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          echo "Building TapScribe ${ref#v}"
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Verify distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  github-release:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Draft release notes (release-drafter)
+        id: drafter
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+          tag: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          publish: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach distributions to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/*
+          fail_on_unmatched_files: true
+
+  # TODO(havso): enable PyPI Trusted Publishing once the `tapscribe` project
+  # is claimed on PyPI. Configure the trusted-publisher there with this
+  # workflow file + environment name, then uncomment the job below. We
+  # intentionally do NOT add a token-based fallback — Trusted Publishing or
+  # nothing, per the team-lead decision.
+  #
+  # pypi-publish:
+  #   name: publish to PyPI (trusted publishing)
+  #   needs: build
+  #   runs-on: ubuntu-latest
+  #   environment:
+  #     name: pypi
+  #     url: https://pypi.org/p/tapscribe
+  #   permissions:
+  #     id-token: write
+  #   steps:
+  #     - name: Download dist artifact
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: dist
+  #         path: dist/
+  #     - name: Publish to PyPI
+  #       uses: pypa/gh-action-pypi-publish@release/v1

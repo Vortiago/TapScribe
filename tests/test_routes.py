@@ -66,6 +66,7 @@ def _seed_wav(path: Path, *, amplitude: int = 8000, seconds: float = 1.0) -> Pat
 # /health
 # ---------------------------------------------------------------------------
 
+
 def test_health_returns_ok_with_session_dir(client, recorder_under_test):
     r = client.get("/health")
     assert r.status_code == 200
@@ -74,9 +75,25 @@ def test_health_returns_ok_with_session_dir(client, recorder_under_test):
     assert body["session_dir"] == str(recorder_under_test.session_dir)
 
 
+def test_healthz_returns_documented_shape(client, recorder_under_test):  # noqa: ARG001
+    """Liveness/readiness probe shape — keys present, types right.
+    Values are not pinned (live channel state can be 'stopped' or
+    'starting' depending on lifespan timing)."""
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert isinstance(body["version"], str) and body["version"]
+    assert isinstance(body["recording_enabled"], bool)
+    assert isinstance(body["live_channel_state"], str)
+    assert isinstance(body["active_taps"], int)
+    assert body["active_taps"] >= 0
+
+
 # ---------------------------------------------------------------------------
 # /api/recording/toggle
 # ---------------------------------------------------------------------------
+
 
 def test_recording_toggle_without_body_flips_state(client, recorder_under_test):
     assert recorder_under_test.recording_enabled is True
@@ -99,6 +116,7 @@ def test_recording_toggle_with_explicit_enabled(client, recorder_under_test):
 # /api/new-session
 # ---------------------------------------------------------------------------
 
+
 def test_new_session_rotates_recorder_session(client, recorder_under_test):
     prev = recorder_under_test.session_start
     r = client.post("/api/new-session")
@@ -111,6 +129,7 @@ def test_new_session_rotates_recorder_session(client, recorder_under_test):
 # ---------------------------------------------------------------------------
 # /api/state
 # ---------------------------------------------------------------------------
+
 
 def test_api_state_returns_recorder_view(client, recorder_under_test):
     r = client.get("/api/state")
@@ -131,15 +150,19 @@ def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_t
     WS-open snapshot — otherwise a click PUTs the new pref but the
     button never visually flips."""
     import asyncio
+
     asyncio.get_event_loop().run_until_complete(
-        recorder_under_test.streams.register(ActiveStream(
-            conn_id="abc-bob",
-            identity="bob",
-            name="Bob",
-            filename="bob.wav",
-            started_at=datetime.now(timezone.utc),
-            record=True, live=True,
-        ))
+        recorder_under_test.streams.register(
+            ActiveStream(
+                conn_id="abc-bob",
+                identity="bob",
+                name="Bob",
+                filename="bob.wav",
+                started_at=datetime.now(timezone.utc),
+                record=True,
+                live=True,
+            )
+        )
     )
 
     recorder_under_test.tap_settings.set("bob", record=False, live=False)
@@ -168,6 +191,7 @@ def test_tap_settings_put_updates_pref(client, recorder_under_test):
 # /api/live-transcript
 # ---------------------------------------------------------------------------
 
+
 def test_live_transcript_post_endpoint_is_gone(client):
     """Per ADR-0002, the Bridge no longer POSTs settled lines. The
     Recorder consumes them internally via the WlK relay opened by /tap.
@@ -186,6 +210,7 @@ def test_live_transcript_clear_empties_feed(client, recorder_under_test):
 # ---------------------------------------------------------------------------
 # /api/session-meta
 # ---------------------------------------------------------------------------
+
 
 def test_session_meta_get_returns_empty_for_no_overrides(client, tmp_path: Path, recorder_under_test):  # noqa: ARG001
     session_dir = recorder_under_test.recordings_dir / "fakesession"

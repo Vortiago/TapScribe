@@ -8,12 +8,17 @@ from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegmen
 
 def _result_with(segments: tuple[TranscriptionSegment, ...]) -> TranscriptionResult:
     return TranscriptionResult(
-        transcriber="fake", device="test", model="fake-model",
-        language="en", language_probability=1.0,
+        transcriber="fake",
+        device="test",
+        model="fake-model",
+        language="en",
+        language_probability=1.0,
         duration=segments[-1].end if segments else 0.0,
         text=" ".join(s.text for s in segments),
         segments=segments,
-        initial_prompt_used="", hotwords_used="", quality_settings={},
+        initial_prompt_used="",
+        hotwords_used="",
+        quality_settings={},
     )
 
 
@@ -72,6 +77,53 @@ def test_bad_regex_silently_skipped(tmp_config_dir):
     assert [r["raw"] for r in rules] == ["amara.org"]
 
 
+def test_catastrophic_backtracking_pattern_rejected(tmp_config_dir):
+    """A `(a+)+$` rule against a long no-match input takes seconds on Python's
+    backtracking engine — long enough to wedge a transcribe job. The ReDoS
+    guard must drop the rule at parse time rather than let it compile."""
+    _write_rules(
+        tmp_config_dir / "hallucinations.txt",
+        "re:(a+)+$\namara.org\n",
+    )
+    rules = hallucinations.parse_rules()
+    assert [r["raw"] for r in rules] == ["amara.org"]
+
+
+def test_oversized_regex_pattern_rejected(tmp_config_dir):
+    """A 300-char regex pattern is well over what any real hallucination rule
+    needs. Reject as a precaution; the operator can split into multiple rules
+    if they really need more."""
+    huge = "re:" + ("foo|" * 100)  # > 256 chars
+    _write_rules(tmp_config_dir / "hallucinations.txt", huge + "\namara.org\n")
+    rules = hallucinations.parse_rules()
+    assert [r["raw"] for r in rules] == ["amara.org"]
+
+
+def test_safe_regex_with_nested_groups_is_accepted(tmp_config_dir):
+    """The ReDoS guard must not over-fire — a `(foo|bar)+` is safe (no
+    nested unbounded quantifier on the same body) and is exactly the
+    shape of the real rule in `config/hallucinations.example.txt`."""
+    _write_rules(
+        tmp_config_dir / "hallucinations.txt",
+        r"re:(subscribe|like) to (my|our|this) channel" + "\n",
+    )
+    rules = hallucinations.parse_rules()
+    assert len(rules) == 1
+    assert hallucinations.match("Subscribe to my channel for more", rules) is not None
+
+
+def test_regex_is_safe_helper_returns_false_for_nested_unbounded():
+    """Direct test of the guard helper — all four canonical nested-quantifier
+    shapes are rejected."""
+    from tapscribe.hallucinations import _regex_is_safe
+
+    for bad in ["(a+)+", "(a+)*", "(a*)+", "(a*)*"]:
+        assert not _regex_is_safe(bad), f"expected guard to reject {bad!r}"
+    # Non-nested unbounded is fine.
+    assert _regex_is_safe(r"(a|b)+")
+    assert _regex_is_safe(r"a+b+")
+
+
 def test_match_returns_none_for_empty_text(tmp_config_dir):
     _write_rules(tmp_config_dir / "hallucinations.txt", "amara.org\n")
     rules = hallucinations.parse_rules()
@@ -98,6 +150,7 @@ def test_missing_file_returns_no_rules(tmp_config_dir):
 # ---------------------------------------------------------------------------
 # hallucinations.apply — pipeline post-processor
 # ---------------------------------------------------------------------------
+
 
 def test_apply_with_empty_rules_returns_same_segments():
     seg = TranscriptionSegment(start=0.0, end=1.0, text="hello world")
@@ -153,11 +206,17 @@ def test_apply_carries_forward_existing_suppressed_list(tmp_config_dir):
     keep = TranscriptionSegment(start=1.0, end=2.0, text="hello there")
     drop = TranscriptionSegment(start=2.0, end=3.0, text="hit the bell")
     result = TranscriptionResult(
-        transcriber="fake", device="test", model="fake-model",
-        language="en", language_probability=1.0, duration=3.0,
+        transcriber="fake",
+        device="test",
+        model="fake-model",
+        language="en",
+        language_probability=1.0,
+        duration=3.0,
         text="hello there hit the bell",
         segments=(keep, drop),
-        initial_prompt_used="", hotwords_used="", quality_settings={},
+        initial_prompt_used="",
+        hotwords_used="",
+        quality_settings={},
         suppressed_hallucinations=(earlier,),
     )
     out = hallucinations.apply(result, rules=rules)

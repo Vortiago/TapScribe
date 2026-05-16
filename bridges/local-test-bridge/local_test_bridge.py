@@ -31,6 +31,7 @@ import signal
 import sys
 import threading
 import urllib.parse
+import uuid
 from collections.abc import Iterator
 
 import numpy as np
@@ -59,10 +60,28 @@ def chunk_into_frames(buf: bytes) -> Iterator[bytes]:
 TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap."
 
 
-def build_tap_url(*, host: str, port: int, identity: str, name: str, tls: bool = False) -> str:
-    qs = urllib.parse.urlencode({"identity": identity, "name": name})
+def build_tap_url(
+    *,
+    host: str,
+    port: int,
+    identity: str,
+    name: str,
+    tls: bool = False,
+    utterance_id: str | None = None,
+) -> str:
+    params: dict[str, str] = {"identity": identity, "name": name}
+    if utterance_id:
+        params["utterance_id"] = utterance_id
+    qs = urllib.parse.urlencode(params)
     scheme = "wss" if tls else "ws"
     return f"{scheme}://{host}:{port}/tap?{qs}"
+
+
+def new_utterance_id() -> str:
+    """Mint a fresh per-utterance id. Matches the spacialchat bridge's
+    format (`uuid4().hex`, dashes stripped) for symmetry with how the
+    recorder logs it."""
+    return uuid.uuid4().hex
 
 
 def build_subprotocols(tap_token: str) -> list[str]:
@@ -148,10 +167,14 @@ async def run_tap_session(
     stop_event: asyncio.Event,
     tap_token: str = "",
     tls: bool = False,
+    utterance_id: str | None = None,
 ) -> int:
     """Open one /tap WS and stream queue bytes until stop_event is set or
     the WS dies. Returns the total bytes sent."""
-    url = build_tap_url(host=host, port=port, identity=identity, name=name, tls=tls)
+    url = build_tap_url(
+        host=host, port=port, identity=identity, name=name, tls=tls,
+        utterance_id=utterance_id,
+    )
     subprotocols = build_subprotocols(tap_token)
     print(f"[bridge] connecting → {url}" + (" (with tap-token)" if tap_token else " (no auth)"), flush=True)
     sent = 0
@@ -248,13 +271,18 @@ async def _main(args: argparse.Namespace) -> int:
                 break
 
             if not state["recording"]:
-                # Begin a fresh /tap cycle
+                # Begin a fresh /tap cycle. One ENTER cycle = one
+                # utterance, so we mint a single utterance_id here and
+                # keep it stable through the cycle. If the WS dies and
+                # we add reconnect later, the same id will let the
+                # recorder resume the same WAV instead of fragmenting.
                 state["recording"] = True
                 stop_event = asyncio.Event()
+                utterance_id = new_utterance_id()
                 capture.start()
-                print("[bridge] [recording]")
+                print(f"[bridge] [recording] utterance_id={utterance_id[:8]}…")
 
-                async def _session_done(this_stop=stop_event):
+                async def _session_done(this_stop=stop_event, this_utt=utterance_id):
                     # Default-arg trick captures the current stop_event so a
                     # later cycle's reassignment doesn't leak into this task.
                     await run_tap_session(
@@ -264,6 +292,7 @@ async def _main(args: argparse.Namespace) -> int:
                         stop_event=this_stop,
                         tap_token=args.tap_token,
                         tls=args.tls,
+                        utterance_id=this_utt,
                     )
                     capture.stop()
                     state["recording"] = False

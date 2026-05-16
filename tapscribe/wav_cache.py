@@ -32,13 +32,20 @@ from .transcribers.base import (
 @dataclass(frozen=True)
 class CachedTranscription:
     """The on-disk per-WAV JSON, parsed: a TranscriptionResult plus the
-    write-time envelope (when, source folder, parsed speaker, wav_start)."""
+    write-time envelope (when, source folder, parsed speaker, wav_start)
+    and the on-disk WAV fingerprint (size + mtime) we use to detect that
+    the WAV was rewritten since the transcript was produced — the resume
+    path rewrites the same path with appended audio, so the cache key
+    must be more than just model name."""
+
     result: TranscriptionResult
     transcribed_at: datetime
     transcribe_ms: int
     source: str
     wav_start: datetime | None
     speaker_name: str
+    wav_size: int = 0
+    wav_mtime_ns: int = 0
 
 
 def read_cached(wav_path: Path) -> CachedTranscription | None:
@@ -71,9 +78,15 @@ def cached_transcribe(
 ) -> CachedTranscription:
     """Try the cache; on miss/force/model-mismatch, transcribe + apply +
     write sidecar. Returns the `CachedTranscription`."""
+    size, mtime_ns = _wav_fingerprint(wav_path)
     if not force:
         cached = read_cached(wav_path)
-        if cached is not None and cached.result.model == transcriber.model_name:
+        if (
+            cached is not None
+            and cached.result.model == transcriber.model_name
+            and cached.wav_size == size
+            and cached.wav_mtime_ns == mtime_ns
+        ):
             return cached
 
     started = datetime.now(timezone.utc)
@@ -82,6 +95,11 @@ def cached_transcribe(
     finished = datetime.now(timezone.utc)
 
     wav_start = parse_wav_start(wav_path.name)
+    # Re-stat after transcribe in case the WAV was being written when we
+    # entered (the resume path closes the writer before transcribe runs,
+    # but a future caller might not). Either way the sidecar reflects
+    # what the transcriber actually saw.
+    size, mtime_ns = _wav_fingerprint(wav_path)
     cached = CachedTranscription(
         result=filtered,
         transcribed_at=finished,
@@ -89,14 +107,28 @@ def cached_transcribe(
         source=source,
         wav_start=wav_start,
         speaker_name=parse_wav_speaker_slug(wav_path.name),
+        wav_size=size,
+        wav_mtime_ns=mtime_ns,
     )
     _write_sidecar(wav_path, cached)
     return cached
 
 
+def _wav_fingerprint(wav_path: Path) -> tuple[int, int]:
+    """Cheap content fingerprint: (size, mtime_ns). Both are zero if the
+    file is missing — read_cached returns None on a missing sidecar so
+    that's fine, and a fresh transcribe will overwrite the placeholder."""
+    try:
+        st = wav_path.stat()
+        return st.st_size, st.st_mtime_ns
+    except OSError:
+        return 0, 0
+
+
 # ---------------------------------------------------------------------------
 # Serialization (kept private so callers go through cached_transcribe / read_cached)
 # ---------------------------------------------------------------------------
+
 
 def _write_sidecar(wav_path: Path, cached: CachedTranscription) -> None:
     sidecar = wav_path.with_suffix(".json")
@@ -125,6 +157,8 @@ def _to_dict(cached: CachedTranscription) -> dict[str, Any]:
         "transcribe_ms": cached.transcribe_ms,
         "source": cached.source,
         "speaker_name": cached.speaker_name,
+        "wav_size": cached.wav_size,
+        "wav_mtime_ns": cached.wav_mtime_ns,
     }
     if cached.wav_start is not None:
         out["wav_start"] = cached.wav_start.isoformat()
@@ -158,4 +192,10 @@ def _from_dict(data: dict[str, Any]) -> CachedTranscription:
         source=data.get("source", "original"),
         wav_start=parse_iso(data.get("wav_start")),
         speaker_name=data.get("speaker_name", ""),
+        # Older sidecars don't carry the fingerprint; default to 0 so the
+        # next `cached_transcribe` call sees a mismatch against the live
+        # WAV stat and re-runs. That's a one-time cost; subsequent calls
+        # hit the cache normally.
+        wav_size=int(data.get("wav_size", 0) or 0),
+        wav_mtime_ns=int(data.get("wav_mtime_ns", 0) or 0),
     )

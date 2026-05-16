@@ -24,9 +24,16 @@ class _StubTranscriber:
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
         return TranscriptionResult(
-            transcriber=self.name, device="stub", model=self.model_name,
-            language="en", language_probability=1.0, duration=0.0,
-            text="", segments=(), initial_prompt_used="", hotwords_used="",
+            transcriber=self.name,
+            device="stub",
+            model=self.model_name,
+            language="en",
+            language_probability=1.0,
+            duration=0.0,
+            text="",
+            segments=(),
+            initial_prompt_used="",
+            hotwords_used="",
             quality_settings={},
         )
 

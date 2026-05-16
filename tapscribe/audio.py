@@ -10,6 +10,30 @@ import math
 import wave
 from pathlib import Path
 
+RECORDER_SAMPLE_RATE = 16000
+RECORDER_SAMPLE_WIDTH = 2
+RECORDER_CHANNELS = 1
+
+
+def open_recorder_wav(path: Path) -> wave.Wave_write:
+    """Open `path` for writing in the recorder's canonical format
+    (16 kHz / mono / int16). The caller closes the returned handle —
+    typically via `with` or an explicit `.close()` from a longer-lived
+    owner like TapFanOut."""
+    wf = wave.open(str(path), "wb")
+    wf.setnchannels(RECORDER_CHANNELS)
+    wf.setsampwidth(RECORDER_SAMPLE_WIDTH)
+    wf.setframerate(RECORDER_SAMPLE_RATE)
+    return wf
+
+
+def dbfs_from_rms(rms: float) -> float:
+    """Convert an int16 RMS amplitude to dBFS. Returns -200.0 for silent /
+    zero input so callers get a usable sentinel instead of -inf."""
+    if rms <= 0:
+        return -200.0
+    return 20.0 * math.log10(rms / 32768.0)
+
 
 def wav_duration_s(path: Path) -> float:
     """Return WAV duration in seconds. Returns 0.0 on read errors so callers
@@ -52,9 +76,7 @@ def wav_rms_dbfs(path: Path) -> float:
     if len(samples) == 0:
         return -200.0
     rms = float(np.sqrt((samples.astype(np.float32) ** 2).mean()))
-    if rms <= 0:
-        return -200.0
-    return 20.0 * math.log10(rms / 32768.0)
+    return dbfs_from_rms(rms)
 
 
 def load_recorder_wav_as_pcm(path: Path):
@@ -72,7 +94,11 @@ def load_recorder_wav_as_pcm(path: Path):
         rate = wf.getframerate()
         channels = wf.getnchannels()
         sampwidth = wf.getsampwidth()
-        if rate != 16000 or channels != 1 or sampwidth != 2:
+        if (
+            rate != RECORDER_SAMPLE_RATE
+            or channels != RECORDER_CHANNELS
+            or sampwidth != RECORDER_SAMPLE_WIDTH
+        ):
             raise RuntimeError(
                 f"unexpected WAV format for {path.name}: "
                 f"{rate}Hz/{channels}ch/{sampwidth * 8}-bit "

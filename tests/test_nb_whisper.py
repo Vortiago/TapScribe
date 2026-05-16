@@ -28,9 +28,7 @@ def _write_fake_ct2(tmp_path: Path, *, lang_ids=None, tokenizer_extra=None) -> P
     ]
     if tokenizer_extra:
         added.extend(tokenizer_extra)
-    (ct2 / "tokenizer.json").write_text(
-        json.dumps({"added_tokens": added}), encoding="utf-8"
-    )
+    (ct2 / "tokenizer.json").write_text(json.dumps({"added_tokens": added}), encoding="utf-8")
     return ct2
 
 

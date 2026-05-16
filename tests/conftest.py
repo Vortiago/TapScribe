@@ -49,10 +49,21 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 # Fake whisperlivekit-server (used by /tap and TapFanOut relay tests)
 # ---------------------------------------------------------------------------
 
+
 class FakeWlkThread:
     """Minimal whisperlivekit-server stand-in. Runs its own event loop in
     a daemon thread so synchronous and asyncio callers alike can drive a
     relay against it.
+
+    Shutdown contract: `stop()` signals an in-loop `asyncio.Event` rather
+    than calling `loop.stop()`. The serve coroutine then awaits the event,
+    closes the websocket server + open connections, and returns — at which
+    point `run_until_complete` returns naturally and the loop drains its
+    own pending tasks. Stopping via `loop.stop()` mid-`await` (the prior
+    shape) left the websockets server's close path scheduling tasks onto
+    an already-stopped loop on Python 3.13, which surfaced as
+    PytestUnraisableExceptionWarning noise on every test that touched
+    /tap or the relay.
 
     Lives in conftest.py because both the end-to-end /tap tests and the
     TapFanOut unit tests need to construct a real WlKRelay against
@@ -64,8 +75,8 @@ class FakeWlkThread:
         self._port = _free_port()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server = None
+        self._stop_event: asyncio.Event | None = None
         self._ready = threading.Event()
-        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._lines_acc: list[dict] = []
 
@@ -78,9 +89,9 @@ class FakeWlkThread:
         assert self._ready.wait(timeout=2.0), "fake WlK didn't start"
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        loop, stop_event = self._loop, self._stop_event
+        if loop is not None and stop_event is not None:
+            loop.call_soon_threadsafe(stop_event.set)
         self._thread.join(timeout=2.0)
 
     def push_committed(self, text: str) -> None:
@@ -89,42 +100,57 @@ class FakeWlkThread:
         Mirrors the real WlK wire format: each call appends a new line to
         the cumulative list and broadcasts the FrontData-shaped snapshot.
         See whisperlivekit/timed_objects.py FrontData.to_dict for the
-        source of truth on the keys."""
+        source of truth on the keys.
+
+        Waits for the broadcast to complete on the WlK loop so callers can
+        assert on relay-side state right after — no implicit sleep needed."""
         if self._loop is None:
             return
         idx = len(self._lines_acc)
-        self._lines_acc.append({
-            "text": text, "speaker": 1,
-            "start": float(idx), "end": float(idx) + 1.0,
-        })
-        msg = json.dumps({
-            "status": "active_transcription",
-            "lines": list(self._lines_acc),
-            "buffer_transcription": "",
-            "buffer_diarization": "",
-            "buffer_translation": "",
-            "remaining_time_transcription": 0,
-            "remaining_time_diarization": 0,
-        })
+        self._lines_acc.append(
+            {
+                "text": text,
+                "speaker": 1,
+                "start": float(idx),
+                "end": float(idx) + 1.0,
+            }
+        )
+        msg = json.dumps(
+            {
+                "status": "active_transcription",
+                "lines": list(self._lines_acc),
+                "buffer_transcription": "",
+                "buffer_diarization": "",
+                "buffer_translation": "",
+                "remaining_time_transcription": 0,
+                "remaining_time_diarization": 0,
+            }
+        )
 
         async def _push():
             for c in list(self.connections):
                 with contextlib.suppress(Exception):
                     await c.send(msg)
 
-        asyncio.run_coroutine_threadsafe(_push(), self._loop)
+        fut = asyncio.run_coroutine_threadsafe(_push(), self._loop)
+        with contextlib.suppress(Exception):
+            fut.result(timeout=2.0)
 
     def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._serve())
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._serve())
+        finally:
+            loop.close()
 
     async def _serve(self) -> None:
         self._server = await websockets.serve(self._handler, "localhost", self._port)
+        self._stop_event = asyncio.Event()
         self._ready.set()
         try:
-            while not self._stop.is_set():
-                await asyncio.sleep(0.05)
+            await self._stop_event.wait()
         finally:
             for c in list(self.connections):
                 with contextlib.suppress(Exception):

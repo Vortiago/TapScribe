@@ -1,0 +1,56 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      python-runtime:
+        patterns:
+          - "fastapi"
+          - "uvicorn"
+          - "python-multipart"
+          - "numpy"
+          - "websockets"
+      python-dev:
+        patterns:
+          - "pytest*"
+          - "httpx"
+          - "ruff"
+          - "playwright"
+          - "soundfile"
+          - "scipy"
+          - "sounddevice"
+      python-ml:
+        patterns:
+          - "faster-whisper"
+          - "whisperlivekit"
+          - "mlx-whisper"
+          - "transformers"
+          - "torch"
+          - "silero-vad"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+  - package-ecosystem: "npm"
+    directory: "/bridges/spacialchat-bridge"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps(bridge)"
+      include: "scope"
