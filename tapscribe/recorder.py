@@ -28,6 +28,7 @@ from typing import Literal
 # ActiveStreams — /record WebSocket connections currently writing WAVs
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ActiveStream:
     """One live /record WebSocket. Mutated only via ActiveStreams methods.
@@ -36,6 +37,7 @@ class ActiveStream:
     effect when this WS opened — surfaced here so the dashboard can show
     the operator what's currently happening for this tap without a
     second lookup."""
+
     conn_id: str
     identity: str
     name: str
@@ -83,6 +85,7 @@ class ActiveStreams:
 # TapSettings — per-identity record / live preferences
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TapSetting:
     """Per-identity preferences for an incoming /tap WebSocket.
@@ -92,6 +95,7 @@ class TapSetting:
     captioning. Both default to True. Snapshotted at WS open — toggling
     mid-utterance applies to the next /tap WS for this identity, same
     semantics as the global pause toggle."""
+
     record: bool = True
     live: bool = True
 
@@ -114,7 +118,11 @@ class TapSettings:
         return replace(existing)
 
     def set(
-        self, identity: str, *, record: bool | None = None, live: bool | None = None,
+        self,
+        identity: str,
+        *,
+        record: bool | None = None,
+        live: bool | None = None,
     ) -> TapSetting:
         existing = self._by_identity.get(identity) or TapSetting()
         if record is not None:
@@ -132,9 +140,11 @@ class TapSettings:
 # JobTracker — one in-flight transcribe/strip per session at a time
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class JobState:
     """State for an in-flight session-scoped job (transcribe or strip)."""
+
     session: str
     kind: Literal["transcribe", "strip"]
     current: int
@@ -187,6 +197,7 @@ class JobTracker:
 # LiveTranscripts — bounded deque of settled lines from the Bridge
 # ---------------------------------------------------------------------------
 
+
 class LiveTranscripts:
     """The dashboard's 'live transcripts' panel reads from this. The
     Bridge POSTs settled WhisperLiveKit lines to /api/live-transcript;
@@ -209,12 +220,14 @@ class LiveTranscripts:
 # UtteranceIndex — bridge-supplied utterance_id -> WAV record, for resume
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class UtteranceRecord:
     """One bridge utterance. The bridge keeps `utterance_id` stable across
     reconnects within a single unmuted speech segment, so a /tap WS that
     drops mid-utterance and comes back appends to the same WAV instead
     of producing a second file."""
+
     utterance_id: str
     identity: str
     name: str
@@ -278,9 +291,9 @@ class UtteranceIndex:
     def _prune_expired(self) -> None:
         cutoff = datetime.now(timezone.utc).timestamp() - self.RESUME_WINDOW_SECONDS
         stale = [
-            uid for uid, rec in self._by_id.items()
-            if not rec.open and rec.last_close is not None
-            and rec.last_close.timestamp() < cutoff
+            uid
+            for uid, rec in self._by_id.items()
+            if not rec.open and rec.last_close is not None and rec.last_close.timestamp() < cutoff
         ]
         for uid in stale:
             self._by_id.pop(uid, None)
@@ -290,6 +303,7 @@ class UtteranceIndex:
 # SecretFile — token-shaped secret persisted to disk (auth password, tap token)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SecretFile:
     """A short token-shaped secret persisted to disk. Used by the Recorder
@@ -297,6 +311,7 @@ class SecretFile:
     /tap WebSocket bearer token (`recorder.tap`). Rotated by deleting the
     file and regenerating; the --rotate-password / --rotate-tap-token
     CLI flags call `rotate()` on the corresponding instance."""
+
     value: str
     path: Path
     label: str  # shapes the warning printed when the FS is read-only
@@ -340,6 +355,7 @@ def _read_or_mint_secret(path: Path, *, label: str) -> str:
 # ---------------------------------------------------------------------------
 # Recorder — the running TapScribe instance
 # ---------------------------------------------------------------------------
+
 
 def _utc_session_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
@@ -387,6 +403,7 @@ class Recorder:
         # LiveChannel is constructed here too (imported lazily to break
         # what would otherwise be a circular import via tapscribe.live).
         from .live import LiveChannel
+
         self.live = LiveChannel(config=live_config, use_mlx=use_mlx)
 
     def rotate_session(self) -> tuple[str, str]:

@@ -14,7 +14,9 @@ from tapscribe import audio
 SAMPLE_RATE = 16000
 
 
-def _write_pcm_wav(path: Path, samples: np.ndarray, rate: int = SAMPLE_RATE, channels: int = 1, sampwidth: int = 2) -> None:
+def _write_pcm_wav(
+    path: Path, samples: np.ndarray, rate: int = SAMPLE_RATE, channels: int = 1, sampwidth: int = 2
+) -> None:
     with wave.open(str(path), "wb") as w:
         w.setnchannels(channels)
         w.setsampwidth(sampwidth)

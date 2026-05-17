@@ -17,6 +17,17 @@ from . import config
 from .text import normalise_for_exact, read_text_file
 from .transcribers.base import TranscriptionResult
 
+# ReDoS guard. Python's `re` engine is backtracking and has no compile-time
+# timeout, so a hand-crafted rule like `(a+)+$` can hang an entire transcribe
+# job on a moderately long segment. Two cheap heuristics: cap the pattern
+# length, and reject the canonical catastrophic-backtracking shape — an
+# unbounded quantifier (`+` or `*`) applied to a group that itself ends in
+# an unbounded quantifier (the `+)+`, `+)*`, `*)+`, `*)*` sequences).
+# False positives here are fine; a wedged regex on the post-decode path is
+# the failure mode we actually care about.
+_MAX_REGEX_PATTERN_LEN = 256
+_NESTED_QUANTIFIER_RE = re.compile(r"[+*]\)[+*]")
+
 
 def parse_rules() -> list[dict[str, Any]]:
     """Parse hallucinations.txt into a list of compiled match rules.
@@ -41,6 +52,12 @@ def parse_rules() -> list[dict[str, Any]]:
         lower = s.lower()
         if lower.startswith("re:"):
             pat = s[3:].strip()
+            if not _regex_is_safe(pat):
+                # Reject patterns that are too long or that contain a nested
+                # unbounded-quantifier shape. Skip silently — the rules file
+                # is operator-edited and we'd rather drop a risky rule than
+                # let a transcribe job hang on catastrophic backtracking.
+                continue
             try:
                 rules.append({"raw": s, "kind": "regex", "matcher": re.compile(pat, re.IGNORECASE)})
             except re.error:
@@ -85,6 +102,17 @@ def apply(result: TranscriptionResult, *, rules: list[dict[str, Any]]) -> Transc
         segments=tuple(kept),
         suppressed_hallucinations=tuple(result.suppressed_hallucinations) + tuple(new_suppressed),
     )
+
+
+def _regex_is_safe(pattern: str) -> bool:
+    """Cheap ReDoS triage. Returns False for patterns above the length cap
+    or containing a nested-unbounded-quantifier shape (the canonical
+    catastrophic-backtracking trigger). Exposed for testing."""
+    if len(pattern) > _MAX_REGEX_PATTERN_LEN:
+        return False
+    if _NESTED_QUANTIFIER_RE.search(pattern):
+        return False
+    return True
 
 
 def match(text: str, rules: list[dict[str, Any]]) -> str | None:

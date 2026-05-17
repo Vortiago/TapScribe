@@ -55,10 +55,12 @@ def _alt_names(host: str) -> list[x509.GeneralName]:
 def _generate_pair(cert_path: Path, key_path: Path, host: str) -> None:
     """Write a fresh self-signed cert/key pair to disk (PEM, 0600 on the key)."""
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, "TapScribe self-signed"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "TapScribe"),
-    ])
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, "TapScribe self-signed"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "TapScribe"),
+        ]
+    )
     now = _dt.datetime.now(_dt.timezone.utc)
     cert = (
         x509.CertificateBuilder()
@@ -99,7 +101,11 @@ def _looks_valid(cert_path: Path) -> bool:
         cert = x509.load_pem_x509_certificate(data)
     except (OSError, ValueError):
         return False
-    not_after = cert.not_valid_after_utc if hasattr(cert, "not_valid_after_utc") else cert.not_valid_after.replace(tzinfo=_dt.timezone.utc)
+    not_after = (
+        cert.not_valid_after_utc
+        if hasattr(cert, "not_valid_after_utc")
+        else cert.not_valid_after.replace(tzinfo=_dt.timezone.utc)
+    )
     return not_after > _dt.datetime.now(_dt.timezone.utc)
 
 

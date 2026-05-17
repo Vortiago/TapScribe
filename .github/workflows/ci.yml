@@ -51,7 +51,7 @@ jobs:
           # `cryptography` is needed so test_tls runs (the test itself uses
           # pytest.importorskip, so omitting it just silently skips
           # coverage of the --tls boot path).
-          pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx ruff cryptography
+          pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx hypothesis ruff cryptography
 
       - name: Lint (ruff)
         run: ruff check tapscribe tools tests bridges/local-test-bridge
@@ -77,3 +77,99 @@ jobs:
 
       - name: Run bridge tests (Node built-in runner, no deps)
         run: node --test "bridges/spacialchat-bridge/tests/*.test.js"
+
+  # Dashboard UI E2E with headless Chromium. The synthetic variant
+  # (FakeTranscriber + synthetic WAVs) verifies the active-taps / live
+  # transcripts / merged-session pipeline end-to-end. The
+  # @pytest.mark.real_audio variant streams committed fixtures through a
+  # real faster-whisper — skipped in CI because it pulls a model and
+  # would balloon job time; run locally for the screenshot in README.
+  playwright:
+    name: dashboard UI E2E (synthetic only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install runtime + Playwright
+        run: |
+          python -m pip install --upgrade pip
+          # Same lightweight set as the `test` job, plus playwright. No
+          # faster-whisper — `FakeTranscriber` covers the synthetic path.
+          pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx hypothesis ruff cryptography playwright
+
+      - name: Install Chromium for Playwright
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run synthetic dashboard E2E
+        # -m "not real_audio" skips the real-audio variant; -k '' would
+        # match every test, so we rely on the marker filter alone.
+        run: pytest tests/e2e/test_dashboard_ui.py -q -m "not real_audio"
+
+  # Static security smells in the application code — bandit. Separate
+  # from CodeQL (which runs in its own workflow) because bandit is cheap
+  # and gives PR-level feedback without waiting on the CodeQL pipeline.
+  bandit:
+    name: bandit security lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install bandit
+        # bandit needs the `[toml]` extra to read its `[tool.bandit]`
+        # config out of pyproject.toml — without it, the -c flag below
+        # silently falls back to "no config" and the by-design skips
+        # don't apply.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "bandit[toml]>=1.7"
+
+      - name: Run bandit
+        # `-r` scan tapscribe/ recursively; `-ll` severity-level
+        # medium+ (low-severity is noise from "you used assert" etc.);
+        # `-c pyproject.toml` loads our `[tool.bandit] skips` block.
+        run: bandit -r tapscribe -ll -c pyproject.toml
+
+  # Known-CVE scan of declared Python dependencies via pip-audit. Reads
+  # `pyproject.toml` so dependency floors are honoured. Runs separately
+  # from the test matrix so a fresh CVE doesn't block functional CI.
+  pip-audit:
+    name: pip-audit (dependency CVEs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime dependencies
+        # The pip-audit action can't parse `pyproject.toml` directly (it
+        # expects requirements.txt syntax), so install the runtime deps
+        # into the runner's env and audit what's actually installed. We
+        # skip the heavy `[whisper] / [voxtral] / [mlx]` optional extras
+        # — operators opt into those on a per-deploy basis and the
+        # vulnerability surface that matters for tapscribe-the-server
+        # is the runtime deps only.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run pip-audit
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          # `local: true` audits the packages installed in this runner's
+          # Python environment. Resolved versions, deterministic results.
+          local: true

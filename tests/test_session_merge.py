@@ -42,17 +42,24 @@ def _wav_name(when: datetime, speaker: str, utt: str) -> str:
 class _FixedTranscriber:
     """Returns one canned segment per WAV with `text` set to `wav.name`
     (handy for asserting which WAVs the merge pulled in)."""
+
     name = "fake"
     device = "test-device"
     model_name = "fake-model"
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
         return TranscriptionResult(
-            transcriber=self.name, device=self.device, model=self.model_name,
-            language="en", language_probability=1.0, duration=1.0,
+            transcriber=self.name,
+            device=self.device,
+            model=self.model_name,
+            language="en",
+            language_probability=1.0,
+            duration=1.0,
             text=f"hello from {path.name}",
             segments=(TranscriptionSegment(start=0.0, end=1.0, text=f"hello from {path.name}"),),
-            initial_prompt_used="", hotwords_used="", quality_settings={},
+            initial_prompt_used="",
+            hotwords_used="",
+            quality_settings={},
         )
 
 
@@ -100,7 +107,9 @@ def test_merge_records_skipped_no_cache_when_sidecar_missing(tmp_path: Path):
     session_dir.mkdir()
     wavs = _seed(session_dir, n=2)
     # Only one WAV gets cached; the other is left without a sidecar.
-    cached_transcribe(wavs[0], _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
+    cached_transcribe(
+        wavs[0], _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[]
+    )
 
     selection = select_session_wavs(session_dir)
     transcript = merge_session(selection)
@@ -114,7 +123,9 @@ def test_merge_attaches_absolute_timestamps_to_segments(tmp_path: Path):
     session_dir = tmp_path / "s"
     session_dir.mkdir()
     wavs = _seed(session_dir, n=1)
-    cached_transcribe(wavs[0], _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
+    cached_transcribe(
+        wavs[0], _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[]
+    )
 
     selection = select_session_wavs(session_dir)
     transcript = merge_session(selection)
@@ -130,7 +141,9 @@ def test_merge_computes_speaking_seconds_as_dict_keyed_by_speaker(tmp_path: Path
     session_dir.mkdir()
     wavs = _seed(session_dir, n=3, speakers=["alice", "bob", "alice"])
     for wav in wavs:
-        cached_transcribe(wav, _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
+        cached_transcribe(
+            wav, _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[]
+        )
 
     selection = select_session_wavs(session_dir)
     transcript = merge_session(selection)
@@ -152,16 +165,24 @@ def test_merge_carries_suppressed_segments_with_absolute_timestamps(tmp_path: Pa
     class _SuppressingTranscriber(_FixedTranscriber):
         def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
             return TranscriptionResult(
-                transcriber=self.name, device=self.device, model=self.model_name,
-                language="en", language_probability=1.0, duration=2.0,
+                transcriber=self.name,
+                device=self.device,
+                model=self.model_name,
+                language="en",
+                language_probability=1.0,
+                duration=2.0,
                 text="amara.org",
                 segments=(TranscriptionSegment(start=0.0, end=2.0, text="amara.org"),),
-                initial_prompt_used="", hotwords_used="", quality_settings={},
+                initial_prompt_used="",
+                hotwords_used="",
+                quality_settings={},
             )
 
     cached_transcribe(
-        wav, _SuppressingTranscriber(),
-        initial_prompt=None, hotwords=None,
+        wav,
+        _SuppressingTranscriber(),
+        initial_prompt=None,
+        hotwords=None,
         hallucination_rules=[{"raw": "amara.org", "kind": "substr", "matcher": "amara.org"}],
     )
 
@@ -180,7 +201,9 @@ def test_merge_drops_abs_hms_field_from_wire_shape(tmp_path: Path):
     session_dir = tmp_path / "s"
     session_dir.mkdir()
     wavs = _seed(session_dir, n=1)
-    cached_transcribe(wavs[0], _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
+    cached_transcribe(
+        wavs[0], _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[]
+    )
 
     selection = select_session_wavs(session_dir)
     transcript = merge_session(selection)

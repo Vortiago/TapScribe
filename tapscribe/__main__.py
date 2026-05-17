@@ -25,32 +25,57 @@ def main() -> None:
     )
     p.add_argument("--host", default="localhost", help="Bind address. Use 0.0.0.0 to expose on LAN.")
     p.add_argument("--port", type=int, default=8001)
-    p.add_argument("--live-model", default="tiny.en",
-                   help="WhisperLiveKit model name (tiny.en, small.en, large-v3, ...). Changeable from the dashboard.")
-    p.add_argument("--live-language", default="en",
-                   help="WhisperLiveKit language hint (en, no, auto, ...)")
-    p.add_argument("--live-host", default=None,
-                   help="Bind host for the live channel; defaults to --host.")
+    p.add_argument(
+        "--live-model",
+        default="tiny.en",
+        help="WhisperLiveKit model name (tiny.en, small.en, large-v3, ...). Changeable from the dashboard.",
+    )
+    p.add_argument("--live-language", default="en", help="WhisperLiveKit language hint (en, no, auto, ...)")
+    p.add_argument("--live-host", default=None, help="Bind host for the live channel; defaults to --host.")
     p.add_argument("--live-port", type=int, default=8000)
-    p.add_argument("--no-mlx", action="store_true",
-                   help="Disable MLX for BOTH live and batch even on Apple Silicon (fall back to faster-whisper / CPU).")
-    p.add_argument("--no-auto-live", action="store_true",
-                   help="Don't auto-start the live channel on boot.")
-    p.add_argument("--no-auth", action="store_true",
-                   help="Disable HTTP Basic auth on the dashboard AND the /tap WebSocket token gate. "
-                        "Only safe on a trusted single-user localhost.")
-    p.add_argument("--rotate-password", action="store_true",
-                   help="Delete the persisted password and generate a new one. Invalidates browser sessions.")
-    p.add_argument("--rotate-tap-token", action="store_true",
-                   help="Delete the persisted /tap bearer token and generate a new one. "
-                        "Bridges with the old token will be refused at the WS upgrade.")
-    p.add_argument("--tls", action="store_true",
-                   help="Serve the dashboard + /tap over TLS (https:// and wss://). If --cert/--key "
-                        "are not supplied, a self-signed pair is generated next to .auth-password.")
-    p.add_argument("--cert", default=None,
-                   help="Path to a PEM certificate. Implies --tls. Defaults to .tapscribe-cert.pem.")
-    p.add_argument("--key", default=None,
-                   help="Path to the PEM private key for --cert. Defaults to .tapscribe-key.pem.")
+    p.add_argument(
+        "--no-mlx",
+        action="store_true",
+        help="Disable MLX for BOTH live and batch even on Apple Silicon (fall back to faster-whisper / CPU).",
+    )
+    p.add_argument("--no-auto-live", action="store_true", help="Don't auto-start the live channel on boot.")
+    p.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="Disable HTTP Basic auth on the dashboard AND the /tap WebSocket token gate. "
+        "Only safe on a trusted single-user localhost.",
+    )
+    p.add_argument(
+        "--rotate-password",
+        action="store_true",
+        help="Delete the persisted password and generate a new one. Invalidates browser sessions.",
+    )
+    p.add_argument(
+        "--rotate-tap-token",
+        action="store_true",
+        help="Delete the persisted /tap bearer token and generate a new one. "
+        "Bridges with the old token will be refused at the WS upgrade.",
+    )
+    p.add_argument(
+        "--tls",
+        action="store_true",
+        help="Serve the dashboard + /tap over TLS (https:// and wss://). If --cert/--key "
+        "are not supplied, a self-signed pair is generated next to .auth-password.",
+    )
+    p.add_argument(
+        "--cert",
+        default=None,
+        help="Path to a PEM certificate. Implies --tls. Defaults to .tapscribe-cert.pem.",
+    )
+    p.add_argument(
+        "--key", default=None, help="Path to the PEM private key for --cert. Defaults to .tapscribe-key.pem."
+    )
+    p.add_argument(
+        "--log-json",
+        action="store_true",
+        help="Emit one JSON line per log record instead of uvicorn's plaintext format. "
+        "Useful when piping into journalctl -o json / vector / fluent-bit.",
+    )
     args = p.parse_args()
 
     # Boot-time constants that affect every transcribe-call route the
@@ -83,10 +108,14 @@ def main() -> None:
         recorder.tap.rotate()
 
     app.state.recorder = recorder
+    app.state.log_json = bool(args.log_json)
 
     if args.host == "0.0.0.0":
-        print("[tapscribe] WARNING: binding to 0.0.0.0 exposes the recorder to "
-              "the LAN. Make sure you trust your network.", flush=True)
+        print(
+            "[tapscribe] WARNING: binding to 0.0.0.0 exposes the recorder to "
+            "the LAN. Make sure you trust your network.",
+            flush=True,
+        )
 
     print(
         f"[tapscribe] MLX={'on' if use_mlx else 'off'} "
@@ -127,24 +156,34 @@ def main() -> None:
         from pathlib import Path as _Path
 
         from .tls import ensure_self_signed_cert
+
         cert_path = _Path(args.cert) if args.cert else config.TLS_CERT_FILE
         key_path = _Path(args.key) if args.key else config.TLS_KEY_FILE
         if args.cert or args.key:
             if not (cert_path.is_file() and key_path.is_file()):
-                print(f"[tapscribe] ERROR: --cert/--key set but {cert_path} or {key_path} missing.", flush=True)
+                print(
+                    f"[tapscribe] ERROR: --cert/--key set but {cert_path} or {key_path} missing.", flush=True
+                )
                 raise SystemExit(2)
             pair = type("Pair", (), {"cert_file": cert_path, "key_file": key_path})()
         else:
             pair = ensure_self_signed_cert(cert_path, key_path, host=args.host)
             print(f"[tapscribe] TLS: using self-signed cert at {pair.cert_file}", flush=True)
-            print("[tapscribe]      (first browser visit will show a 'not secure' prompt — accept once.)", flush=True)
+            print(
+                "[tapscribe]      (first browser visit will show a 'not secure' prompt — accept once.)",
+                flush=True,
+            )
         ssl_certfile = str(pair.cert_file)
         ssl_keyfile = str(pair.key_file)
         print(f"[tapscribe] TLS enabled: https://{args.host}:{args.port}/", flush=True)
 
     uvicorn.run(
-        app, host=args.host, port=args.port, log_level="info",
-        ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
     )
 
 
@@ -153,12 +192,14 @@ def _detect_use_mlx() -> bool:
     disabled via the SX_NO_MLX=1 env var."""
     import os
     import platform
+
     if os.environ.get("SX_NO_MLX") == "1":
         return False
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         return False
     try:
         import mlx_whisper  # noqa: F401
+
         return True
     except ImportError:
         return False

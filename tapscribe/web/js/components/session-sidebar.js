@@ -4,21 +4,25 @@
 import { tpl, mount, slot, pick } from "../templates.js";
 import { fmtSessionLabel } from "../formatters.js";
 
-// Bucket sessions by date relative to "now".
+// Bucket sessions by date relative to "now". BUCKET_ORDER fixes the display
+// order independently of Map.groupBy's first-seen insertion order.
+const BUCKET_ORDER = ["Today", "Yesterday", "This week", "Older"];
+
+function bucketOf(session, now) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T/.exec(session);
+  if (!m) return "Older";
+  const day = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00`).getTime();
+  const diff = Math.floor((now - day) / 86400000);
+  if (diff <= 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  if (diff < 7) return "This week";
+  return "Older";
+}
+
 function groupSessions(sessions) {
   const now = Date.now();
-  const groups = { Today: [], Yesterday: [], "This week": [], Older: [] };
-  for (const s of sessions) {
-    const m = /^(\d{4})-(\d{2})-(\d{2})T/.exec(s.session);
-    const day = m ? new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00`).getTime() : null;
-    if (!day) { groups.Older.push(s); continue; }
-    const diff = Math.floor((now - day) / 86400000);
-    if (diff <= 0) groups.Today.push(s);
-    else if (diff === 1) groups.Yesterday.push(s);
-    else if (diff < 7) groups["This week"].push(s);
-    else groups.Older.push(s);
-  }
-  return Object.entries(groups).filter(([, items]) => items.length > 0);
+  const byBucket = Map.groupBy(sessions, (s) => bucketOf(s.session, now));
+  return BUCKET_ORDER.flatMap((name) => byBucket.has(name) ? [[name, byBucket.get(name)]] : []);
 }
 
 export function render(sessions, {

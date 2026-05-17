@@ -80,17 +80,82 @@
     return participant.name || "";
   }
 
+  // Notify the content script when the AudioContext flips state. The
+  // browser auto-suspends AudioContexts on inactive tabs and (per the
+  // autoplay policy) sometimes refuses to leave the suspended state
+  // until the user interacts with the page. While suspended the
+  // AudioWorklet runs no audio through it, so the bridge would silently
+  // capture nothing. Surfacing the state lets the popup / title pill
+  // show a clear error instead of "0 frames sent".
+  function postCtxState(state) {
+    postToContent({ kind: "ctx-state", state });
+  }
+
+  // One-shot user-gesture handler that retries resume(). Browsers only
+  // allow resume() inside a trusted gesture handler; we register the
+  // smallest set of listeners that's likely to fire (mousedown, keydown,
+  // touchstart) and remove them all the moment one of them succeeds.
+  let gestureRetryArmed = false;
+  function armGestureRetry() {
+    if (gestureRetryArmed) return;
+    gestureRetryArmed = true;
+    const handler = () => {
+      if (!audioCtx) return;
+      audioCtx.resume().then(() => {
+        console.log("[tapscribe-bridge/page] AudioContext resumed via user gesture");
+      }).catch((e) => {
+        console.warn("[tapscribe-bridge/page] resume() in gesture handler failed:", e);
+      });
+      // Clear regardless — statechange will rearm us if resume failed.
+      gestureRetryArmed = false;
+      window.removeEventListener("pointerdown", handler, true);
+      window.removeEventListener("keydown", handler, true);
+      window.removeEventListener("touchstart", handler, true);
+    };
+    window.addEventListener("pointerdown", handler, true);
+    window.addEventListener("keydown", handler, true);
+    window.addEventListener("touchstart", handler, true);
+  }
+
   async function ensureAudioGraph() {
     if (audioCtx) {
       await workletReady;
       return audioCtx;
     }
     audioCtx = new AudioContext({ sampleRate: 48000 });
+    audioCtx.addEventListener("statechange", () => {
+      const st = audioCtx.state;
+      console.log("[tapscribe-bridge/page] AudioContext state: " + st);
+      postCtxState(st);
+      // "interrupted" is iOS-specific; treat it like suspended.
+      if (st === "suspended" || st === "interrupted") {
+        // Try a non-gesture resume() first — works on backgrounded tabs
+        // that just went visible again. If the browser refuses, fall
+        // back to the user-gesture path.
+        audioCtx.resume().catch(() => armGestureRetry());
+      }
+    });
     const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
     workletReady = audioCtx.audioWorklet.addModule(url).finally(() => URL.revokeObjectURL(url));
     await workletReady;
+    // Brand-new AudioContexts are often born `suspended` on Chrome
+    // until a user gesture lands. Try once eagerly; the statechange
+    // listener handles the fallback.
+    if (audioCtx.state === "suspended" || audioCtx.state === "interrupted") {
+      audioCtx.resume().catch(() => armGestureRetry());
+    }
+    postCtxState(audioCtx.state);
     return audioCtx;
   }
+
+  // Tab back in focus → if we'd been auto-suspended, try resume eagerly.
+  document.addEventListener("visibilitychange", () => {
+    if (!audioCtx) return;
+    if (document.visibilityState === "visible" &&
+        (audioCtx.state === "suspended" || audioCtx.state === "interrupted")) {
+      audioCtx.resume().catch(() => armGestureRetry());
+    }
+  });
 
   async function tap(participant, mediaStreamTrack) {
     if (taps.has(participant.identity)) return;

@@ -200,6 +200,12 @@
    */
   const channels = new Map();
   let origTitle = null;
+  // Last known state of the page-world AudioContext. "running" is the
+  // happy path; "suspended" / "interrupted" / "closed" mean the worklet
+  // is producing silence and the bridge would silently capture nothing.
+  // Surfaced in the status snapshot and title pill so the operator
+  // notices instead of staring at a stuck "0 frames" counter.
+  let audioContextState = null;
 
   function ensureChannel(identity, name) {
     let ch = channels.get(identity);
@@ -619,6 +625,20 @@
         }
         break;
       }
+      case "ctx-state": {
+        const next = typeof d.state === "string" ? d.state : null;
+        if (audioContextState !== next) {
+          audioContextState = next;
+          if (next && next !== "running") {
+            console.warn(
+              "[tapscribe-bridge] AudioContext is " + next +
+              " — capture is paused until the tab gets a user gesture",
+            );
+          }
+          publishStatus();
+        }
+        break;
+      }
       default: {
         // Unknown kind; ignore.
       }
@@ -643,6 +663,7 @@
       recorderHost,
       recorderPort,
       settingsReady,
+      audioContextState,
       channels: Array.from(channels.entries()).map(([id, ch]) => ({
         identity: id,
         name: ch.name,
@@ -664,7 +685,7 @@
   // skip storage writes when nothing observable changed, so we don't fan
   // out chrome.storage.onChanged events at 2 Hz for no reason.
   function snapshotFingerprint(snap) {
-    return snap.channels.map(c =>
+    return (snap.audioContextState || "") + "::" + snap.channels.map(c =>
       c.identity + "|" + c.tapWs + "|" + c.muted + "|" + c.draining + "|" +
       c.error + "|" + c.framesSent + "|" + c.reconnecting + "|" + c.bufferedFrames,
     ).join(";");
@@ -709,8 +730,17 @@
       if (ch.reconnectTimer !== null) anyReconnecting = true;
     }
 
+    // An AudioContext that's not running means the worklet is producing
+    // no audio at all — overrides any per-channel indicator because the
+    // channel counts are stale-but-not-wrong (the WS may be OPEN with
+    // zero frames flowing through it).
+    const ctxBlocked =
+      audioContextState && audioContextState !== "running";
+
     let suffix;
-    if (firstError) {
+    if (ctxBlocked) {
+      suffix = " [tap PAUSED audio " + audioContextState + "]";
+    } else if (firstError) {
       suffix = " [tap ERR " + firstError + "]";
     } else if (anyReconnecting) {
       suffix = " [tap reconnecting…]";

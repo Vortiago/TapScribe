@@ -1,0 +1,53 @@
+name: CodeQL
+
+# CodeQL static analysis across Python (tapscribe/) and JavaScript (bridges/).
+# Runs on push to main, on PRs, and weekly so a freshly-disclosed CVE gets
+# surfaced even without a code change. Uses the default query suite — we are
+# not tuning rules until the noise level justifies it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 06:17 UTC — staggered off the hour so we don't queue behind
+    # every other repo's "0 6 * * 1" cron.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # config-file declares custom sanitiser models for our
+          # tapscribe.sessions path-traversal helpers; see the file for
+          # the audit rationale. `queries:` moves into the config too.
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

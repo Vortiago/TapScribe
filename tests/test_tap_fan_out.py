@@ -65,8 +65,10 @@ def recorder_with_relay(tmp_path: Path, fake_wlk: FakeWlkThread) -> Recorder:
         recordings_dir=recordings,
         config_dir=config_dir,
         live_config=LiveConfig(
-            model="tiny.en", language="en",
-            host="localhost", port=fake_wlk.port,
+            model="tiny.en",
+            language="en",
+            host="localhost",
+            port=fake_wlk.port,
         ),
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
@@ -140,8 +142,11 @@ async def test_resume_appends_to_existing_wav(recorder: Recorder):
 
     async with await TapFanOut.open(
         recorder,
-        identity="alice", name="Alice", utterance_id=utt,
-        do_record=True, do_live=False,
+        identity="alice",
+        name="Alice",
+        utterance_id=utt,
+        do_record=True,
+        do_live=False,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
         await fan_out.write_frame(PCM_FRAME)
@@ -149,8 +154,11 @@ async def test_resume_appends_to_existing_wav(recorder: Recorder):
     # Bridge reconnects with the same utterance_id.
     async with await TapFanOut.open(
         recorder,
-        identity="alice", name="Alice", utterance_id=utt,
-        do_record=True, do_live=False,
+        identity="alice",
+        name="Alice",
+        utterance_id=utt,
+        do_record=True,
+        do_live=False,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
 
@@ -170,8 +178,11 @@ async def test_do_record_false_skips_wav_but_registers_active_stream(recorder: R
     tap is open and can flip recording back on for the NEXT utterance."""
     async with await TapFanOut.open(
         recorder,
-        identity="alice", name="Alice", utterance_id="utt-no-record",
-        do_record=False, do_live=False,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-no-record",
+        do_record=False,
+        do_live=False,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
 
@@ -191,8 +202,11 @@ async def test_write_frame_advances_active_stream_bytes_received(recorder: Recor
     frame so the operator sees the WS is alive and ingesting audio."""
     async with await TapFanOut.open(
         recorder,
-        identity="alice", name="Alice", utterance_id="utt-bytes",
-        do_record=True, do_live=False,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-bytes",
+        do_record=True,
+        do_live=False,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
         snap1 = await recorder.streams.snapshot()
@@ -205,15 +219,19 @@ async def test_write_frame_advances_active_stream_bytes_received(recorder: Recor
 
 
 async def test_relay_forwards_frames_to_wlk_when_live_running(
-    recorder_with_relay: Recorder, fake_wlk: FakeWlkThread,
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
 ):
     """When do_live=True and the LiveChannel reports running, write_frame
     fans the PCM bytes out to the WlKRelay alongside writing the WAV.
     The fake WlK on the other end of the relay receives the bytes."""
     async with await TapFanOut.open(
         recorder_with_relay,
-        identity="alice", name="Alice", utterance_id="utt-relay",
-        do_record=True, do_live=True,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-relay",
+        do_record=True,
+        do_live=True,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
         await fan_out.write_frame(PCM_FRAME)
@@ -227,7 +245,8 @@ async def test_relay_forwards_frames_to_wlk_when_live_running(
 
 
 async def test_relay_settled_lines_land_in_live_transcripts(
-    recorder_with_relay: Recorder, fake_wlk: FakeWlkThread,
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
 ):
     """Settled lines pushed by WlK during the WS lifetime are consumed by
     the fan-out's relay and appended to recorder.transcripts attributed
@@ -237,8 +256,11 @@ async def test_relay_settled_lines_land_in_live_transcripts(
     relay close-drain."""
     async with await TapFanOut.open(
         recorder_with_relay,
-        identity="alice", name="Alice", utterance_id="utt-relay-settled",
-        do_record=True, do_live=True,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-relay-settled",
+        do_record=True,
+        do_live=True,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
         await asyncio.sleep(0.05)
@@ -264,8 +286,11 @@ async def test_relay_skipped_when_live_channel_not_running(recorder: Recorder):
     blowing up on a missing relay handle."""
     async with await TapFanOut.open(
         recorder,
-        identity="alice", name="Alice", utterance_id="utt-no-relay",
-        do_record=True, do_live=True,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-no-relay",
+        do_record=True,
+        do_live=True,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
 

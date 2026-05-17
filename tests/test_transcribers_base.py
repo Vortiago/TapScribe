@@ -34,15 +34,23 @@ def test_default_language_for_unknown_returns_none():
 class _FakeTranscriber:
     """Used to verify the Transcriber Protocol is structural — any class
     with the right shape satisfies it, no inheritance required."""
+
     name = "fake"
     device = "test"
     model_name = "fake-model"
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
         return TranscriptionResult(
-            transcriber="fake", device="test", model="fake-model",
-            language="en", language_probability=1.0, duration=0.0,
-            text="", segments=(), initial_prompt_used="", hotwords_used="",
+            transcriber="fake",
+            device="test",
+            model="fake-model",
+            language="en",
+            language_probability=1.0,
+            duration=0.0,
+            text="",
+            segments=(),
+            initial_prompt_used="",
+            hotwords_used="",
             quality_settings={},
         )
 
@@ -104,7 +112,9 @@ def test_transcription_result_supports_dataclasses_replace_for_pipeline_steps():
     """The A2 pipeline pattern requires that downstream steps produce a new
     result via dataclasses.replace rather than mutating in place."""
     seg = TranscriptionSegment(start=0.0, end=1.0, text="hello")
-    sup = TranscriptionSegment(start=2.0, end=3.0, text="thanks for watching", matched_rule="exact:thanks for watching")
+    sup = TranscriptionSegment(
+        start=2.0, end=3.0, text="thanks for watching", matched_rule="exact:thanks for watching"
+    )
     r = TranscriptionResult(
         transcriber="faster-whisper",
         device="CPU",

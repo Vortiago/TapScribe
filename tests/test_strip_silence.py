@@ -25,8 +25,7 @@ def _make_speech_silence(speech_lengths_s, silence_lengths_s, amplitude=8000):
             # Square wave is the loudest possible signal at a given amplitude;
             # easy to keep above the -45 dBFS floor without depending on
             # randomness.
-            block = np.tile(np.array([amplitude, -amplitude], dtype=np.int16),
-                            n // 2 + 1)[:n]
+            block = np.tile(np.array([amplitude, -amplitude], dtype=np.int16), n // 2 + 1)[:n]
             chunks.append(block)
         if i < n_silence:
             n = int(silence_lengths_s[i] * ss.SAMPLE_RATE)
@@ -59,10 +58,12 @@ def test_detect_speech_rms_returns_empty_on_silence():
 
 def test_filter_low_energy_regions_drops_quiet_ones():
     sample_count = ss.SAMPLE_RATE
-    samples = np.concatenate([
-        np.tile(np.array([8000, -8000], dtype=np.int16), sample_count // 2),  # ~-12 dBFS
-        np.tile(np.array([200, -200], dtype=np.int16), sample_count // 2),    # quiet
-    ])
+    samples = np.concatenate(
+        [
+            np.tile(np.array([8000, -8000], dtype=np.int16), sample_count // 2),  # ~-12 dBFS
+            np.tile(np.array([200, -200], dtype=np.int16), sample_count // 2),  # quiet
+        ]
+    )
     # Build two regions matching the two halves.
     regions = [(0, sample_count), (sample_count, 2 * sample_count)]
     filtered = ss.filter_low_energy_regions(samples, regions, floor_dbfs=-40.0)
@@ -78,6 +79,7 @@ def test_filter_low_energy_regions_keeps_empty_when_all_below():
 
 def test_read_wav_int16_rejects_wrong_rate(tmp_path):
     import wave
+
     path = tmp_path / "wrong-rate.wav"
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)

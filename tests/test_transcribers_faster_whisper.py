@@ -25,7 +25,12 @@ class _FakeSegment:
     words: list | None = None
 
 
-def _fake_model(segments: list[_FakeSegment], info_language: str = "en", info_lang_prob: float = 0.95, info_duration: float = 1.0):
+def _fake_model(
+    segments: list[_FakeSegment],
+    info_language: str = "en",
+    info_lang_prob: float = 0.95,
+    info_duration: float = 1.0,
+):
     m = MagicMock()
     info = SimpleNamespace(
         language=info_language,
@@ -44,10 +49,12 @@ def test_metadata_properties_reflect_constructor_args():
 
 
 def test_transcribe_returns_typed_result_with_segments(tmp_path: Path):
-    model = _fake_model([
-        _FakeSegment(start=0.0, end=1.0, text="hello", avg_logprob=-0.2),
-        _FakeSegment(start=1.0, end=2.0, text="world", avg_logprob=-0.3),
-    ])
+    model = _fake_model(
+        [
+            _FakeSegment(start=0.0, end=1.0, text="hello", avg_logprob=-0.2),
+            _FakeSegment(start=1.0, end=2.0, text="world", avg_logprob=-0.3),
+        ]
+    )
     t = FasterWhisperTranscriber(model_name="small.en", model=model, device="CPU")
 
     result = t.transcribe(tmp_path / "x.wav", initial_prompt="ctx", hotwords="Acme")

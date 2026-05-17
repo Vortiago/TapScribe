@@ -122,15 +122,23 @@ function renderTaps(status) {
   const age = Math.round((Date.now() - status.ts) / 1000);
   const stale = age > 5;
   const hostLabel = (status.recorderHost || "?") + ":" + (status.recorderPort || "?");
+  // Surface a non-running AudioContext at the top so the operator sees
+  // it before reading the per-channel rows. Suspended is the common
+  // case after a tab background; it usually clears on the next click
+  // anywhere in the SpatialChat tab.
+  const ctxBanner = (status.audioContextState && status.audioContextState !== "running")
+    ? '<div class="status err" style="margin-bottom:6px;">Audio capture paused — AudioContext is <code>' +
+      escapeHtml(status.audioContextState) + '</code>. Click anywhere in the SpatialChat tab to resume.</div>'
+    : '';
   if (!status.channels || status.channels.length === 0) {
     let msg = "Content script is loaded";
     if (!status.settingsReady) msg += " but still loading settings";
     msg += ". No taps yet — either nobody is speaking nearby or the SpatialChat room hasn't connected.";
-    el.innerHTML = '<div>' + escapeHtml(msg) + '</div><div class="meta">last update ' + age + 's ago (recorder: <code>' + escapeHtml(hostLabel) + '</code>)' + (stale ? ' — STALE' : '') + '</div>';
+    el.innerHTML = ctxBanner + '<div>' + escapeHtml(msg) + '</div><div class="meta">last update ' + age + 's ago (recorder: <code>' + escapeHtml(hostLabel) + '</code>)' + (stale ? ' — STALE' : '') + '</div>';
     el.className = "small muted";
     return;
   }
-  let h = '<table><thead><tr><th>Speaker</th><th>/tap</th><th>frames</th><th>state</th></tr></thead><tbody>';
+  let h = ctxBanner + '<table><thead><tr><th>Speaker</th><th>/tap</th><th>frames</th><th>state</th></tr></thead><tbody>';
   for (const c of status.channels) {
     const who = c.name || c.identity.slice(0, 8);
     const tapPill = wsPill(c.tapWs);

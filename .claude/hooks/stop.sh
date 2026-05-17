@@ -1,7 +1,8 @@
 #!/bin/bash
-# Lint gate: fail the turn if `ruff check` finds anything in tapscribe/
-# or tests/. Exit code 2 with output on stderr tells the harness to feed
-# the findings back to Claude so it can fix them before ending the turn.
+# Lint gate: fail the turn if `ruff check` or `ruff format --check`
+# finds anything in tapscribe/ or tests/. Exit code 2 with output on
+# stderr tells the harness to feed the findings back to Claude so it
+# can fix them before ending the turn.
 set -euo pipefail
 
 # Don't loop forever — `stop_hook_active` is set when the hook already
@@ -21,6 +22,15 @@ if ! ruff_out=$(ruff check tapscribe tests 2>&1); then
     echo "ruff check failed — fix the issues below before ending the turn:"
     echo
     echo "$ruff_out"
+  } >&2
+  exit 2
+fi
+
+if ! fmt_out=$(ruff format --check tapscribe tests 2>&1); then
+  {
+    echo "ruff format --check found unformatted files — run \`ruff format tapscribe tests\` and re-stage:"
+    echo
+    echo "$fmt_out"
   } >&2
   exit 2
 fi

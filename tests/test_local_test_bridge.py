@@ -43,8 +43,10 @@ def test_chunk_into_frames_drops_partial_tail():
 
 def test_build_tap_url_includes_identity_and_name():
     url = ltb.build_tap_url(
-        host="localhost", port=8001,
-        identity="alice tester", name="Alice Tester",
+        host="localhost",
+        port=8001,
+        identity="alice tester",
+        name="Alice Tester",
     )
     assert url.startswith("ws://localhost:8001/tap?")
     assert "identity=alice+tester" in url or "identity=alice%20tester" in url

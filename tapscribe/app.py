@@ -54,7 +54,7 @@ from .sessions import (
     gather_sessions,
     read_session_meta,
     resolve_session_dir,
-    resolve_source_dir,
+    resolve_wav,
     strip_one_wav,
     stripped_dir,
     write_session_meta,
@@ -67,6 +67,7 @@ from .wav_cache import cached_transcribe
 # ---------------------------------------------------------------------------
 # Dependency injection — every route reads the Recorder via Depends
 # ---------------------------------------------------------------------------
+
 
 def get_recorder(request: Request) -> Recorder:
     """FastAPI dependency that returns the singleton Recorder attached to
@@ -94,12 +95,14 @@ async def _json_body(req: Request) -> dict[str, Any]:
 # Logging — silence the per-second poll spam
 # ---------------------------------------------------------------------------
 
+
 class _SuppressPollAccess(logging.Filter):
     """Drop uvicorn access logs for the dashboard's per-second poll
     endpoints so the terminal isn't flooded. Real activity (POST
     /api/transcribe, DELETE /api/sessions/..., websocket records) still
     surfaces."""
-    _SILENCED = ("/api/state", "/dashboard.css", "/dashboard.js", "/web/", "/health")
+
+    _SILENCED = ("/api/state", "/dashboard.css", "/dashboard.js", "/web/", "/health", "/healthz")
 
     def filter(self, record):
         msg = record.getMessage()
@@ -113,6 +116,7 @@ class _SuppressPollAccess(logging.Filter):
 # Lifespan: install log filter + (optionally) auto-start the live channel
 # ---------------------------------------------------------------------------
 
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # Install poll-spam filter on the uvicorn access logger. We do this in
@@ -120,6 +124,13 @@ async def _lifespan(app: FastAPI):
     # logger's handlers via dictConfig() during its own boot — anything we
     # add before uvicorn.run() would be dropped.
     logging.getLogger("uvicorn.access").addFilter(_SuppressPollAccess())
+
+    # JSON logging is opt-in via --log-json (set on app.state in __main__).
+    # Same dictConfig race as the poll filter — apply here, not at import.
+    if getattr(app.state, "log_json", False):
+        from .logging_setup import install_json_logging
+
+        install_json_logging()
 
     recorder: Recorder | None = getattr(app.state, "recorder", None)
     if recorder is not None and config.AUTO_START_LIVE:
@@ -147,9 +158,31 @@ app.middleware("http")(auth.basic_auth_middleware)
 # Health + simple listings
 # ---------------------------------------------------------------------------
 
+
 @app.get("/health")
 async def health(recorder: Recorder = Depends(get_recorder)):
     return {"status": "ok", "session_dir": str(recorder.session_dir)}
+
+
+@app.get("/healthz")
+async def healthz(recorder: Recorder = Depends(get_recorder)):
+    """Liveness + readiness probe for monitoring (k8s, systemd watchdog,
+    plain curl). No auth required — must also be exempt in
+    `config.AUTH_EXEMPT_ROUTES`. The richer shape vs `/health` lets an
+    operator alert on meaningful state (recording paused unexpectedly,
+    live channel stuck in `error`) without scraping `/api/state`."""
+    from . import __version__
+
+    active_streams = await recorder.streams.snapshot()
+    return JSONResponse(
+        {
+            "status": "ok",
+            "version": __version__,
+            "recording_enabled": recorder.recording_enabled,
+            "live_channel_state": recorder.live.info.get("state", ""),
+            "active_taps": len(active_streams),
+        }
+    )
 
 
 @app.get("/sessions")
@@ -174,6 +207,7 @@ async def api_new_session(recorder: Recorder = Depends(get_recorder)):
 # ---------------------------------------------------------------------------
 # /api/state — the dashboard's once-per-second polling endpoint
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/state")
 async def api_state(recorder: Recorder = Depends(get_recorder)):
@@ -227,6 +261,7 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
 # Live channel control
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/live/start")
 async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder)):
     """Start the live channel (whisperlivekit-server). If already running
@@ -242,44 +277,24 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     vac = body.get("vac")
     conf = body.get("confidence_validation")
 
-    # vac/confidence_validation are LiveConfig fields — replace wholesale.
-    if vac is not None or conf is not None:
-        from dataclasses import replace as _replace
-        recorder.live.config = _replace(
-            recorder.live.config,
-            vac=bool(vac) if vac is not None else recorder.live.config.vac,
-            confidence_validation=bool(conf) if conf is not None else recorder.live.config.confidence_validation,
-        )
+    if recorder.live.matches(model=model, language=language, vac=vac, conf=conf):
+        return {
+            "ok": True,
+            "msg": "already running with requested config",
+            "state": recorder.live.info["state"],
+        }
 
-    if recorder.live.running():
-        same_model = (not model) or model == recorder.live.config.model
-        same_lang = (not language) or language == recorder.live.config.language
-        # vac/confidence_validation changes always require a restart since
-        # they're CLI flags on the spawned child.
-        same_quality = vac is None and conf is None
-        if same_model and same_lang and same_quality:
-            return {"ok": True, "msg": "already running with requested config", "state": recorder.live.info["state"]}
-
-    # Reflect the upcoming transition in `info` *before* we start tearing
-    # down the old child or fetching weights. Without this, dashboards
-    # polling /api/state during the stop→start window (or during an HF
-    # download inside start()) would render state="stopped" with the
-    # *previous* model selection — making it look like the user's pick
-    # was discarded.
-    recorder.live.info["state"] = "starting"
-    recorder.live.info["last_error"] = ""
-    if model is not None:
-        recorder.live.info["model"] = model
-    if language is not None:
-        recorder.live.info["language"] = language
+    # Announce the transition (replaces vac/conf in config, flips info to
+    # "starting" with the new model/language) BEFORE we tear down the old
+    # child or fetch weights — otherwise dashboards polling /api/state
+    # during the stop→start window would render the previous selection.
+    recorder.live.begin_transition(model=model, language=language, vac=vac, conf=conf)
 
     if recorder.live.running():
         await asyncio.to_thread(recorder.live.stop)
-        # stop() sets state="stopped"; restore the transitional state so
-        # the dashboard stays on "starting" with the new model.
-        recorder.live.info["state"] = "starting"
-        if model is not None:
-            recorder.live.info["model"] = model
+        # stop() sets state="stopped"; re-announce so the dashboard stays
+        # on "starting" with the new model.
+        recorder.live.begin_transition(model=model, language=language)
 
     ok, msg = await asyncio.to_thread(recorder.live.start, model=model, language=language)
     if not ok:
@@ -310,6 +325,7 @@ async def api_live_transcript_clear(recorder: Recorder = Depends(get_recorder)):
 # ---------------------------------------------------------------------------
 # Recording toggle
 # ---------------------------------------------------------------------------
+
 
 @app.put("/api/tap-settings")
 async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_recorder)):
@@ -357,6 +373,7 @@ async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_re
 # Session housekeeping
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/sessions/prune-empty")
 async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
     """Delete every session folder that has zero WAVs, no merged
@@ -386,7 +403,9 @@ async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
 
 @app.post("/api/sessions/{session}/strip-silence")
 async def api_session_strip_silence(
-    session: str, req: Request, recorder: Recorder = Depends(get_recorder),
+    session: str,
+    req: Request,
+    recorder: Recorder = Depends(get_recorder),
 ):
     """Non-destructively strip silence from every WAV in <session>/. Writes
     cleaned copies to <session>/stripped/ (originals untouched)."""
@@ -396,7 +415,9 @@ async def api_session_strip_silence(
     min_silence_ms = int(body.get("min_silence_ms") or 500)
     pad_ms = int(body.get("pad_ms") or 200)
     threshold_db = float(body.get("threshold_db") or -45.0)
-    speech_floor_db = float(body.get("speech_floor_db") if body.get("speech_floor_db") is not None else _ss.SPEECH_RMS_DBFS_FLOOR)
+    speech_floor_db = float(
+        body.get("speech_floor_db") if body.get("speech_floor_db") is not None else _ss.SPEECH_RMS_DBFS_FLOOR
+    )
     use_silero = bool(body.get("use_silero", True))
 
     originals = sorted(session_dir.glob("*.wav"))
@@ -404,10 +425,16 @@ async def api_session_strip_silence(
         raise HTTPException(404, "no WAVs in this session to strip")
 
     # JobTracker.claim() encapsulates the "one job per session" rule.
-    claimed = await recorder.jobs.claim(JobState(
-        session=session, kind="strip", current=0, total=len(originals),
-        started_at=datetime.now(timezone.utc), status="stripping",
-    ))
+    claimed = await recorder.jobs.claim(
+        JobState(
+            session=session,
+            kind="strip",
+            current=0,
+            total=len(originals),
+            started_at=datetime.now(timezone.utc),
+            status="stripping",
+        )
+    )
     if not claimed:
         raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
 
@@ -426,7 +453,11 @@ async def api_session_strip_silence(
             for src in originals:
                 dst = out_dir / src.name
                 try:
-                    results.append(strip_one_wav(src, dst, min_silence_ms, pad_ms, threshold_db, use_silero, speech_floor_db))
+                    results.append(
+                        strip_one_wav(
+                            src, dst, min_silence_ms, pad_ms, threshold_db, use_silero, speech_floor_db
+                        )
+                    )
                 except Exception as e:
                     results.append({"name": src.name, "written": False, "error": str(e)})
             return results
@@ -443,8 +474,8 @@ async def api_session_strip_silence(
 
     print(
         f"[tapscribe] strip-silence {session}: {written}/{len(originals)} wavs, "
-        f"{speech_secs:.1f}s speech of {in_secs:.1f}s ({100*speech_secs/max(in_secs,1e-9):.0f}%), "
-        f"detector={detectors}, took {int((finished-started).total_seconds()*1000)} ms",
+        f"{speech_secs:.1f}s speech of {in_secs:.1f}s ({100 * speech_secs / max(in_secs, 1e-9):.0f}%), "
+        f"detector={detectors}, took {int((finished - started).total_seconds() * 1000)} ms",
         flush=True,
     )
 
@@ -509,19 +540,12 @@ async def api_session_meta_put(session: str, req: Request, recorder: Recorder = 
 # WAV download + transcription
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/wav/{session}/{name}")
 async def get_wav(session: str, name: str, source: str = "original"):
     """Download a WAV. source=stripped pulls from <session>/stripped/."""
-    if source == "stripped":
-        path = stripped_dir(session) / name
-        dl_name = "stripped-" + name
-    else:
-        path = config.RECORDINGS_DIR / session / name
-        dl_name = name
-    if not path.is_file() or path.suffix.lower() != ".wav":
-        raise HTTPException(404, "not found")
-    if config.RECORDINGS_DIR.resolve() not in path.resolve().parents:
-        raise HTTPException(404, "not found")
+    path = resolve_wav(session, name, source)
+    dl_name = ("stripped-" + name) if source == "stripped" else name
     return FileResponse(path, media_type="audio/wav", filename=dl_name)
 
 
@@ -536,12 +560,7 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
     source = body.get("source") or "original"
     if not session or not name:
         raise HTTPException(400, "session and name are required")
-    source_dir = resolve_source_dir(session, source)
-    path = source_dir / name
-    if not path.is_file() or path.suffix.lower() != ".wav":
-        raise HTTPException(404, "not found")
-    if config.RECORDINGS_DIR.resolve() not in path.resolve().parents:
-        raise HTTPException(404, "not found")
+    path = resolve_wav(session, name, source)
     try:
         size = path.stat().st_size
     except OSError:
@@ -555,7 +574,7 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         raise HTTPException(
             422,
             f"original WAV is essentially silent ({rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS) "
-            "— Whisper would hallucinate. Remove or skip this file."
+            "— Whisper would hallucinate. Remove or skip this file.",
         )
 
     transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=recorder.use_mlx)
@@ -564,7 +583,9 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
     rules = hallucinations_mod.parse_rules()
 
     cached = await asyncio.to_thread(
-        cached_transcribe, path, transcriber,
+        cached_transcribe,
+        path,
+        transcriber,
         initial_prompt=initial_prompt,
         hotwords=hotwords,
         hallucination_rules=rules,
@@ -574,7 +595,10 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
 
     # Read the sidecar back as a dict to preserve the wire shape callers expect.
     result_dict = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
-    print(f"[tapscribe] transcribed {name} ({source}) with {model_name} in {cached.transcribe_ms} ms", flush=True)
+    print(
+        f"[tapscribe] transcribed {name} ({source}) with {model_name} in {cached.transcribe_ms} ms",
+        flush=True,
+    )
     return JSONResponse(result_dict)
 
 
@@ -596,7 +620,10 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     # Phase 0: pure selection.
     try:
         selection = select_session_wavs(
-            session_dir, from_iso=from_iso, to_iso=to_iso, source=source,
+            session_dir,
+            from_iso=from_iso,
+            to_iso=to_iso,
+            source=source,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
@@ -609,10 +636,17 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     rules = hallucinations_mod.parse_rules()
     effective_force = force or bool(prompt_override.strip() or hotwords_override.strip())
 
-    claimed = await recorder.jobs.claim(JobState(
-        session=session, kind="transcribe", current=0, total=len(selection.wavs),
-        started_at=datetime.now(timezone.utc), model=model_name, status="running",
-    ))
+    claimed = await recorder.jobs.claim(
+        JobState(
+            session=session,
+            kind="transcribe",
+            current=0,
+            total=len(selection.wavs),
+            started_at=datetime.now(timezone.utc),
+            model=model_name,
+            status="running",
+        )
+    )
     if not claimed:
         raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
 
@@ -621,7 +655,9 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
         for idx, wav in enumerate(selection.wavs):
             await recorder.jobs.update(session, current=idx, current_file=wav.name)
             await asyncio.to_thread(
-                cached_transcribe, wav, transcriber,
+                cached_transcribe,
+                wav,
+                transcriber,
                 initial_prompt=initial_prompt,
                 hotwords=hotwords,
                 hallucination_rules=rules,
@@ -650,6 +686,7 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
 # ---------------------------------------------------------------------------
 # WebSocket: one Bridge utterance per connection
 # ---------------------------------------------------------------------------
+
 
 @app.websocket("/tap")
 async def tap(ws: WebSocket):

@@ -39,7 +39,7 @@ def pick_tap_subprotocol(offered: Iterable[str] | None, expected_token: str) -> 
         proto = proto.strip()
         if not proto.startswith(TAP_SUBPROTOCOL_PREFIX):
             continue
-        offered_token = proto[len(TAP_SUBPROTOCOL_PREFIX):]
+        offered_token = proto[len(TAP_SUBPROTOCOL_PREFIX) :]
         if hmac.compare_digest(offered_token, expected_token):
             return proto
     return None
@@ -73,7 +73,9 @@ async def basic_auth_middleware(request: Request, call_next):
     try:
         decoded = base64.b64decode(auth_header.split(" ", 1)[1].strip(), validate=False).decode("utf-8")
     except Exception:
-        return JSONResponse({"detail": "Malformed Authorization header"}, status_code=401, headers=realm_header)
+        return JSONResponse(
+            {"detail": "Malformed Authorization header"}, status_code=401, headers=realm_header
+        )
     user, _, pw = decoded.partition(":")
 
     # Recorder may not be attached yet (e.g. transient state during boot

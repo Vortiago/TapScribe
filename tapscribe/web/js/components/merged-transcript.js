@@ -79,20 +79,8 @@ function buildMetaStrip(host, t, lowCount) {
     " · via ", coloredSpan("fg", t.transcriber || t.backend || "faster-whisper"),
     " on ", coloredSpan("fg", t.device || "CPU"),
   );
-  if (lowCount > 0) {
-    host.append(" · ");
-    const s = document.createElement("span");
-    s.style.color = "var(--warn)";
-    s.textContent = `${lowCount} low-confidence`;
-    host.appendChild(s);
-  }
-  if (t.suppressed_count > 0) {
-    host.append(" · ");
-    const s = document.createElement("span");
-    s.style.color = "var(--rec)";
-    s.textContent = `${t.suppressed_count} suppressed`;
-    host.appendChild(s);
-  }
+  if (lowCount > 0) host.append(" · ", coloredSpan("c-warn", `${lowCount} low-confidence`));
+  if (t.suppressed_count > 0) host.append(" · ", coloredSpan("c-rec", `${t.suppressed_count} suppressed`));
 }
 
 function coloredSpan(cls, text) {

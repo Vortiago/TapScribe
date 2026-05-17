@@ -8,9 +8,9 @@
     <div class="box-bd" style="padding:10px;">
       <div class="spk-bar" data-slot="spkBar" hidden></div>
       <div class="spk-legend" data-slot="spkLegend" hidden></div>
-      <div class="dim tiny" style="margin-top:6px;" data-slot="metaStrip"></div>
+      <div class="dim tiny mt-s" data-slot="metaStrip"></div>
     </div>
-    <div style="border-top:1px solid var(--hairline-2);">
+    <div class="rule-top">
       <div class="transcript" style="border:0; border-radius:0; max-height:380px;" data-slot="lines"></div>
       <div data-slot="auditWrapper" hidden></div>
     </div>
@@ -45,16 +45,14 @@
 <template id="tpl-merged-seg-lowconf"><span class="seg lowconf" data-slot="lc"><span data-slot="text"></span><span class="conf-chip" data-slot="pct"></span></span></template>
 
 <template id="tpl-audit-wrapper">
-  <div style="border-top:1px solid var(--hairline-2);">
-    <button class="btn ghost tiny" data-toggle-audit
-            style="width:100%; border:0; border-radius:0; justify-content:flex-start; padding:8px 12px; color:var(--fg-2);"
-            data-slot="toggle"></button>
+  <div class="rule-top">
+    <button class="btn ghost tiny audit-toggle" data-toggle-audit data-slot="toggle"></button>
     <div data-slot="table"></div>
   </div>
 </template>
 
 <template id="tpl-audit-table">
-  <table class="tbl audit-tbl" style="border-top:1px solid var(--hairline-2);">
+  <table class="tbl audit-tbl rule-top">
     <thead><tr><th>time</th><th>speaker</th><th>text</th><th>matched rule</th><th>from</th></tr></thead>
     <tbody data-slot="rows"></tbody>
   </table>

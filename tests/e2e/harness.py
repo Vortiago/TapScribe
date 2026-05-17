@@ -50,8 +50,12 @@ class RecorderServer:
         self.host = host
         self.port = port or free_port()
         self._config = uvicorn.Config(
-            app=app, host=host, port=self.port, log_level="warning",
-            access_log=False, lifespan="on",
+            app=app,
+            host=host,
+            port=self.port,
+            log_level="warning",
+            access_log=False,
+            lifespan="on",
         )
         self._server = uvicorn.Server(self._config)
         # Suppress uvicorn's signal handlers so a botched test can't
@@ -137,6 +141,7 @@ def frame_pcm(pcm: bytes) -> list[bytes]:
 @dataclass
 class BridgeRun:
     """Summary of one `stream_wav_via_tap` invocation."""
+
     identity: str
     name: str
     utterance_id: str

@@ -34,8 +34,9 @@ class SessionSelection:
     """Result of `select_session_wavs`. Carries the selected WAV paths
     plus the names that were filtered out, so the merger / caller can
     surface them to the operator."""
+
     session_dir: Path
-    source: str                            # "original" | "stripped"
+    source: str  # "original" | "stripped"
     wavs: tuple[Path, ...]
     skipped_bad: tuple[str, ...]
     skipped_silent: tuple[str, ...]
@@ -72,9 +73,13 @@ def select_session_wavs(
         wav_dir = session_dir / "stripped"
         if not wav_dir.is_dir():
             return SessionSelection(
-                session_dir=session_dir, source=source,
-                wavs=(), skipped_bad=(), skipped_silent=(),
-                from_iso=from_iso, to_iso=to_iso,
+                session_dir=session_dir,
+                source=source,
+                wavs=(),
+                skipped_bad=(),
+                skipped_silent=(),
+                from_iso=from_iso,
+                to_iso=to_iso,
             )
     elif source in (None, "", "original"):
         wav_dir = session_dir
@@ -138,10 +143,12 @@ def select_session_wavs(
 # Merge
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class SessionSegment:
     """One segment in the merged session timeline. `abs_start` /
     `abs_end` are tz-aware datetimes — `wav_start + segment_offset`."""
+
     abs_start: datetime
     abs_end: datetime
     speaker: str
@@ -155,6 +162,7 @@ class SessionSegment:
 class SuppressedSessionSegment:
     """A hallucination-filtered segment surfaced at session level for the
     dashboard's audit table."""
+
     abs_start: datetime
     speaker: str
     text: str
@@ -172,6 +180,7 @@ class SessionTranscript:
       - `abs_hms` is dropped from segments — consumers format from
         `abs_start` (ISO string).
     """
+
     session: str
     model: str
     transcriber: str
@@ -259,10 +268,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
         for seg in cached.result.segments:
             abs_start = wav_start + timedelta(seconds=seg.start)
             abs_end = wav_start + timedelta(seconds=seg.end)
-            low_conf = (
-                seg.avg_logprob is not None
-                and seg.avg_logprob < _LOW_CONFIDENCE_LOGPROB_THRESHOLD
-            )
+            low_conf = seg.avg_logprob is not None and seg.avg_logprob < _LOW_CONFIDENCE_LOGPROB_THRESHOLD
             segments.append(
                 SessionSegment(
                     abs_start=abs_start,

@@ -28,6 +28,7 @@ from tapscribe.live_relay import WlKRelay
 # Fake WhisperLiveKit
 # ---------------------------------------------------------------------------
 
+
 class _FakeWlk:
     """One-connection WS server. Captures every received message and lets
     the test push FrontData-shaped JSON back at will.
@@ -63,19 +64,24 @@ class _FakeWlk:
             await self._server.wait_closed()
 
     async def push_lines_snapshot(
-        self, lines: list[dict[str, Any]], *, buffer_transcription: str = "",
+        self,
+        lines: list[dict[str, Any]],
+        *,
+        buffer_transcription: str = "",
     ) -> None:
         """Emit a FrontData-shaped snapshot. `lines` is the FULL cumulative
         list as the real WlK sends — the relay must dedupe."""
-        msg = json.dumps({
-            "status": "active_transcription",
-            "lines": lines,
-            "buffer_transcription": buffer_transcription,
-            "buffer_diarization": "",
-            "buffer_translation": "",
-            "remaining_time_transcription": 0,
-            "remaining_time_diarization": 0,
-        })
+        msg = json.dumps(
+            {
+                "status": "active_transcription",
+                "lines": lines,
+                "buffer_transcription": buffer_transcription,
+                "buffer_diarization": "",
+                "buffer_translation": "",
+                "remaining_time_transcription": 0,
+                "remaining_time_diarization": 0,
+            }
+        )
         for c in list(self._connections):
             with contextlib.suppress(Exception):
                 await c.send(msg)
@@ -87,10 +93,14 @@ class _FakeWlk:
         lines too. The line's `start`/`end` advance with each call so each
         committed line has a stable identity."""
         idx = len(self._committed_lines)
-        self._committed_lines.append({
-            "text": text, "speaker": 1,
-            "start": float(idx), "end": float(idx) + 1.0,
-        })
+        self._committed_lines.append(
+            {
+                "text": text,
+                "speaker": 1,
+                "start": float(idx),
+                "end": float(idx) + 1.0,
+            }
+        )
         await self.push_lines_snapshot(list(self._committed_lines))
 
     async def _handler(self, ws) -> None:
@@ -124,10 +134,13 @@ async def fake_wlk() -> AsyncIterator[_FakeWlk]:
 # WlKRelay tests
 # ---------------------------------------------------------------------------
 
+
 async def test_relay_connect_then_send_round_trips_bytes(fake_wlk: _FakeWlk):
     lines: list[str] = []
     relay = WlKRelay(
-        host="localhost", port=fake_wlk.port, language="en",
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
         on_settled_line=lines.append,
     )
     assert await relay.connect() is True
@@ -146,7 +159,9 @@ async def test_relay_consumes_lines_into_callback_with_close_drain(fake_wlk: _Fa
     contained it."""
     lines: list[str] = []
     relay = WlKRelay(
-        host="localhost", port=fake_wlk.port, language="en",
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
         on_settled_line=lines.append,
     )
     await relay.connect()
@@ -167,7 +182,9 @@ async def test_relay_dedupes_lines_across_repeated_snapshots(fake_wlk: _FakeWlk)
     snapshots — the dashboard would fill with duplicates."""
     lines: list[str] = []
     relay = WlKRelay(
-        host="localhost", port=fake_wlk.port, language="en",
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
         on_settled_line=lines.append,
     )
     await relay.connect()
@@ -191,7 +208,9 @@ async def test_relay_ignores_lines_without_text(fake_wlk: _FakeWlk):
     LiveTranscripts."""
     lines: list[str] = []
     relay = WlKRelay(
-        host="localhost", port=fake_wlk.port, language="en",
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
         on_settled_line=lines.append,
     )
     await relay.connect()
@@ -222,8 +241,10 @@ async def test_relay_connect_returns_false_on_unreachable_target():
     """When WlK isn't running, connect() returns False without raising.
     The /tap handler relies on this to decide whether to attempt sends."""
     relay = WlKRelay(
-        host="localhost", port=_free_port(),  # nobody's listening
-        language="en", on_settled_line=lambda _t: None,
+        host="localhost",
+        port=_free_port(),  # nobody's listening
+        language="en",
+        on_settled_line=lambda _t: None,
     )
     assert await relay.connect() is False
 
@@ -232,8 +253,10 @@ async def test_relay_send_after_failed_connect_returns_false():
     """send() should be safe to call even when connect failed — caller can
     keep the call site uniform without branching."""
     relay = WlKRelay(
-        host="localhost", port=_free_port(),
-        language="en", on_settled_line=lambda _t: None,
+        host="localhost",
+        port=_free_port(),
+        language="en",
+        on_settled_line=lambda _t: None,
     )
     await relay.connect()
     assert await relay.send(b"\x00" * 10) is False
@@ -243,7 +266,9 @@ async def test_relay_send_returns_false_after_server_closes(fake_wlk: _FakeWlk):
     """If WlK dies mid-stream, send() reports the failure so the /tap
     handler can stop trying without spamming errors."""
     relay = WlKRelay(
-        host="localhost", port=fake_wlk.port, language="en",
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
         on_settled_line=lambda _t: None,
     )
     await relay.connect()
@@ -270,7 +295,9 @@ async def test_relay_close_drains_tail_settled_lines(fake_wlk: _FakeWlk):
     every time."""
     lines: list[str] = []
     relay = WlKRelay(
-        host="localhost", port=fake_wlk.port, language="en",
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
         on_settled_line=lines.append,
         drain_timeout=0.5,
     )
@@ -289,7 +316,9 @@ async def test_relay_emits_finalized_lines_immediately_not_just_on_close(fake_wl
     the bridge disconnects."""
     lines: list[str] = []
     relay = WlKRelay(
-        host="localhost", port=fake_wlk.port, language="en",
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
         on_settled_line=lines.append,
     )
     await relay.connect()

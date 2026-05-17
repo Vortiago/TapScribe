@@ -425,6 +425,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* ── Config card (horizontal three-column) ───────────────────── */
 
 .cfg-grid-h {
+  container-type: inline-size;
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 0;
@@ -468,8 +469,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
     }
   }
 
-  @media (max-width: 900px) {
-    grid-template-columns: 1fr;
+  @container (max-width: 900px) {
+    & {
+      grid-template-columns: 1fr;
+    }
     & > .cfg-col {
       padding: 10px 0;
       border-right: 0;
@@ -487,6 +490,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
   height: clamp(320px, 52vh, 540px);
   flex: 0 0 auto;
 }
+/* The #liveFeedShell wrapper is `display:contents` so its child .feed-body
+   is the actual flex item inside .feed-shell. */
+#liveFeedShell { display: contents; }
 .feed-body {
   flex: 1;
   min-height: 0;
@@ -521,12 +527,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* ── Sessions: grouped sidebar (replaces tab strip) ──────────── */
 
 .sess-shell {
+  container-type: inline-size;
   display: grid;
   grid-template-columns: 260px 1fr;
   min-height: 480px;
-}
-@media (max-width: 900px) {
-  .sess-shell { grid-template-columns: 1fr; }
+
+  @container (max-width: 900px) {
+    & { grid-template-columns: 1fr; }
+  }
 }
 
 .sess-side-list {
@@ -627,14 +635,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .sess-folder { font-family: var(--mono); color: var(--fg-2); font-size: 11px; }
 
 .sess-detail {
+  container-type: inline-size;
   padding: var(--pad-card);
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--gap-m);
   min-width: 0;
-}
-@media (max-width: 1080px) {
-  .sess-detail { grid-template-columns: 1fr; }
+
+  @container (max-width: 1080px) {
+    & { grid-template-columns: 1fr; }
+  }
 }
 .sess-side { display: flex; flex-direction: column; gap: var(--gap-m); min-width: 0; }
 .sess-main { display: flex; flex-direction: column; gap: var(--gap-m); min-width: 0; }
@@ -728,6 +738,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-1);
 }
 
+/* The stripped/ sub-row under each WAV, indented and slightly dimmed so
+   it's visually subordinate to its parent. */
+.wav-row.strip-sub {
+  padding-left: 18px;
+  opacity: 0.85;
+}
+
 /* wav list */
 .wav-list {
   & .wav-row {
@@ -798,12 +815,25 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .muted { color: var(--fg-2); }
 .dim   { color: var(--fg-3); }
 .fg    { color: var(--fg-0); }
+.c-rec  { color: var(--rec); }
+.c-warn { color: var(--warn); }
 .mono  { font-family: var(--mono); }
 .tnum  { font-variant-numeric: tabular-nums; }
 .small { font-size: var(--font-small); }
 .tiny  { font-size: 10.5px; letter-spacing: 0.04em; }
 .row   { display: flex; align-items: center; gap: var(--gap-s); flex-wrap: wrap; }
 .col   { display: flex; flex-direction: column; gap: var(--gap-s); }
+
+/* Utility classes used by template files in lieu of inline styles. */
+.gap-xs    { gap: var(--gap-xs); }
+.mt-s      { margin-top: 6px; }
+.row-click { cursor: pointer; }
+.rule-top  { border-top: 1px solid var(--hairline-2); }
+.stack-col { display: flex; flex-direction: column; min-width: 0; }
+.dot.x6    { width: 6px; height: 6px; }
+.dot.x7    { width: 7px; height: 7px; }
+
+:root { accent-color: var(--info); }
 
 /* Speaker palette — five rotating accents. Any element with
    data-spk="N" or class="who-N" gets --spk-c set to the right hue.
@@ -867,6 +897,30 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
   & code   { font-family: var(--mono); font-size: 10.5px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   & .input { padding: 3px 6px; font-size: 11px; }
+}
+
+/* The clickable .box-hd at the top of the regex tester. Resets the <button>
+   to look like the static .box-hd elsewhere, but full-width + with a
+   bottom divider for the collapsible panel below. */
+button.box-hd {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--hairline-2);
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+/* Hallucination-audit toggle: a flush full-width .btn under the merged
+   transcript that opens/closes the audit table. */
+.audit-toggle {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  justify-content: flex-start;
+  padding: 8px 12px;
+  color: var(--fg-2);
 }
 
 /* ── Regex tester ───────────────────────────────────────────── */

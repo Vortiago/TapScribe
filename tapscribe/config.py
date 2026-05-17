@@ -9,16 +9,24 @@ the codebase and don't change after boot.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
-# BASE_DIR is the repo root (one level up from the tapscribe/ package).
-BASE_DIR: Path = Path(__file__).resolve().parent.parent
+# BASE_DIR defaults to the repo root (one level up from the tapscribe/
+# package) for local dev. Operators running from a pip-installed package
+# (e.g. Docker, systemd) override it via TAPSCRIBE_BASE_DIR so recordings,
+# config, and auth/tls files land in a writable persistent location
+# instead of inside site-packages.
+_DEFAULT_BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR: Path = Path(os.environ.get("TAPSCRIBE_BASE_DIR") or _DEFAULT_BASE_DIR)
 RECORDINGS_DIR: Path = BASE_DIR / "recordings"
 CONFIG_DIR: Path = BASE_DIR / "config"
+# WEB_DIR is always inside the package — it ships with the wheel and is
+# never operator-mutable, so it doesn't follow BASE_DIR.
 WEB_DIR: Path = Path(__file__).resolve().parent / "web"
 
 # Config files. These can be edited at runtime; the recorder re-reads each
@@ -60,13 +68,17 @@ TAP_TOKEN_FILE: Path = BASE_DIR / ".tap-token"
 TLS_CERT_FILE: Path = BASE_DIR / ".tapscribe-cert.pem"
 TLS_KEY_FILE: Path = BASE_DIR / ".tapscribe-key.pem"
 
-# Method-aware routes that bypass auth. /health is for monitors; the
-# live-transcript ingest is exempt because the browser bridge can't
-# easily inject Basic credentials on a fire-and-forget POST.
-AUTH_EXEMPT_ROUTES = frozenset({
-    ("GET", "/health"),
-    ("POST", "/api/live-transcript"),
-})
+# Method-aware routes that bypass auth. /health and /healthz are for
+# monitors (the latter is the richer probe shape); the live-transcript
+# ingest is exempt because the browser bridge can't easily inject Basic
+# credentials on a fire-and-forget POST.
+AUTH_EXEMPT_ROUTES = frozenset(
+    {
+        ("GET", "/health"),
+        ("GET", "/healthz"),
+        ("POST", "/api/live-transcript"),
+    }
+)
 
 # Whether the FastAPI app's lifespan should auto-start the live channel.
 # Flipped off by --no-auto-live.

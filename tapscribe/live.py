@@ -17,7 +17,7 @@ import subprocess
 import sys
 import threading
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,7 @@ class LiveConfig:
     whole value, not poking at fields — the LiveChannel.config attribute
     is swapped wholesale by `start()` when called with overrides.
     """
+
     model: str
     language: str
     host: str
@@ -72,9 +73,12 @@ def build_live_cmd(
     """
     cmd: list[str] = [
         exe,
-        "--lan", config.language,
-        "--host", config.host,
-        "--port", str(config.port),
+        "--lan",
+        config.language,
+        "--host",
+        config.host,
+        "--port",
+        str(config.port),
         "--pcm-input",
     ]
     if not config.vac:
@@ -110,11 +114,12 @@ def build_live_cmd(
 # LiveChannel — owns the whisperlivekit-server child + its supervision
 # ---------------------------------------------------------------------------
 
+
 def _initial_info() -> dict[str, str]:
     return {
         "model": "",
-        "backend": "",       # "mlx-whisper" or "faster-whisper" or ""
-        "device": "",        # human-readable
+        "backend": "",  # "mlx-whisper" or "faster-whisper" or ""
+        "device": "",  # human-readable
         "language": "",
         "host": "",
         "port": "",
@@ -122,7 +127,7 @@ def _initial_info() -> dict[str, str]:
         "last_error": "",
         "pid": "",
         "started_at": "",
-        "vac": "",           # "on" / "off"
+        "vac": "",  # "on" / "off"
         "confidence_validation": "",  # "on" / "off"
     }
 
@@ -155,6 +160,46 @@ class LiveChannel:
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
+    def matches(self, *, model: str | None, language: str | None, vac, conf) -> bool:
+        """True when a running child already satisfies the requested config.
+        `vac` and `conf` are None when the caller doesn't want to change
+        them; they only require a restart when explicitly supplied."""
+        return (
+            self.running()
+            and (not model or model == self.config.model)
+            and (not language or language == self.config.language)
+            and vac is None
+            and conf is None
+        )
+
+    def begin_transition(
+        self,
+        *,
+        model: str | None = None,
+        language: str | None = None,
+        vac: bool | None = None,
+        conf: bool | None = None,
+    ) -> None:
+        """Announce that a (re)start with the supplied overrides is about
+        to happen. Replaces `config` for vac/conf so the next `start()`
+        spawns with the new values, and flips `info` to `state="starting"`
+        with the new model/language reflected — so dashboards polling
+        /api/state during the stop→start window don't see the previous
+        selection. `start()` will overwrite `state` again on success;
+        this method ensures the transition itself is observable."""
+        if vac is not None or conf is not None:
+            self.config = replace(
+                self.config,
+                vac=bool(vac) if vac is not None else self.config.vac,
+                confidence_validation=bool(conf) if conf is not None else self.config.confidence_validation,
+            )
+        self.info["state"] = "starting"
+        self.info["last_error"] = ""
+        if model is not None:
+            self.info["model"] = model
+        if language is not None:
+            self.info["language"] = language
+
     def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]:
         """Spawn whisperlivekit-server with the current (optionally overridden)
         config. Returns (ok, message). Does NOT stop a running process first —
@@ -165,8 +210,7 @@ class LiveChannel:
 
             # Update config with overrides (LiveConfig is frozen — replace).
             if model is not None or language is not None:
-                from dataclasses import replace as _replace
-                self.config = _replace(
+                self.config = replace(
                     self.config,
                     model=model if model is not None else self.config.model,
                     language=language if language is not None else self.config.language,
@@ -194,7 +238,8 @@ class LiveChannel:
                     return False, msg
 
             cmd = build_live_cmd(
-                exe, self.config,
+                exe,
+                self.config,
                 use_mlx=self.use_mlx,
                 nb_whisper_ct2_dir=ct2_dir,
                 init_prompt=read_prompt() or None,
