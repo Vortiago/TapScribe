@@ -80,7 +80,7 @@ jobs:
 
       - name: Draft release notes (release-drafter)
         id: drafter
-        uses: release-drafter/release-drafter@v6
+        uses: release-drafter/release-drafter@v7
         with:
           config-name: release-drafter.yml
           tag: ${{ github.ref_name }}
