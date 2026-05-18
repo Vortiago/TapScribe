@@ -98,7 +98,13 @@ class TapFanOut:
         # should still show a live "audio coming in" indicator for taps
         # that the operator chose not to persist to disk.
         peak = int16_peak_norm(buf)
-        self._level = peak if peak > self._level else self._level * LEVEL_DECAY_PER_FRAME
+        # Peak-hold-with-decay: keep the louder of (this frame's peak,
+        # the previous level decayed by one frame). max() — not a
+        # strict `>` test — so a steady tone whose per-frame peak
+        # equals the prior level stays pinned at that level instead
+        # of leaking down by `LEVEL_DECAY_PER_FRAME` every frame.
+        decayed = self._level * LEVEL_DECAY_PER_FRAME
+        self._level = peak if peak > decayed else decayed
         if self._wf is not None:
             self._wf.writeframes(buf)
             self._bytes_received += len(buf)

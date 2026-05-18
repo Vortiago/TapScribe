@@ -283,6 +283,145 @@ async def test_write_frame_level_decays_between_loud_frames(recorder: Recorder):
     assert decayed < 0.1, "long silence should drain the peak-hold"
 
 
+FIXTURES_AUDIO = Path(__file__).parent / "fixtures" / "audio"
+
+
+def _wav_to_frames(path: Path, frame_bytes: int = 640) -> list[bytes]:
+    """Read a recorder-format WAV (16 kHz mono int16) into 20 ms frames,
+    the same shape the bridge would send. Used by the real-audio
+    integration tests below."""
+    with wave.open(str(path), "rb") as w:
+        assert w.getframerate() == 16000
+        assert w.getnchannels() == 1
+        assert w.getsampwidth() == 2
+        raw = w.readframes(w.getnframes())
+    return [raw[i : i + frame_bytes] for i in range(0, len(raw) - frame_bytes + 1, frame_bytes)]
+
+
+async def test_write_frame_level_tracks_real_speech_wav(recorder: Recorder):
+    """End-to-end: stream a real ~12 s speech recording through
+    TapFanOut frame by frame and verify the per-tap volume meter
+    behaves like a real-world meter would.
+
+    Properties pinned:
+      - level stays in [0.0, 1.0] for every frame (renderer contract).
+      - level exceeds 0.3 at some point (real speech is loud enough
+        to light the meter; if it never did, the dashboard's bar would
+        never leave the silent zone for a perfectly normal speaker).
+      - peak-hold is monotonic w.r.t. raw peak: at every frame the
+        held value is >= the instantaneous peak of that frame (a
+        peak-hold meter never dips below the current sample's peak).
+    """
+    fixture = FIXTURES_AUDIO / "armstrong-en.wav"
+    frames = _wav_to_frames(fixture)
+    assert len(frames) > 500, "expected ~600 frames from a 12 s WAV"
+
+    levels: list[float] = []
+    async with await TapFanOut.open(
+        recorder,
+        identity="armstrong",
+        name="Neil",
+        utterance_id="utt-armstrong",
+        do_record=True,
+        do_live=False,
+    ) as fan_out:
+        for f in frames:
+            await fan_out.write_frame(f)
+            snap = await recorder.streams.snapshot()
+            levels.append(snap[0].level)
+
+    assert len(levels) == len(frames)
+    assert all(0.0 <= L <= 1.0 for L in levels), "level outside [0,1] would break the renderer"
+    assert max(levels) > 0.3, "real speech should peg the meter above the silent zone"
+
+    # Peak-hold check: imported here to avoid making it a hard
+    # dependency at module load.
+    from tapscribe.audio import int16_peak_norm
+
+    for idx, (frame, held) in enumerate(zip(frames, levels, strict=True)):
+        raw = int16_peak_norm(frame)
+        assert held >= raw - 1e-9, f"peak-hold {held:.4f} below instantaneous peak {raw:.4f} at frame {idx}"
+
+
+async def test_write_frame_level_decays_through_silence_after_real_audio(recorder: Recorder, tmp_path: Path):
+    """Drive the meter with a real speech clip, then feed it 600 ms of
+    pure silence. The level must rise above 0.3 during speech (proof
+    the meter was actually engaged) and decay below 0.05 after the
+    silence (proof the peak-hold drains so a quiet speaker eventually
+    reads as quiet). This is exactly the user-facing behaviour: meter
+    fills during speech, fades to dark when the speaker stops."""
+    fixture = FIXTURES_AUDIO / "armstrong-en.wav"
+    frames = _wav_to_frames(fixture)
+    silence_frame = b"\x00" * 640
+    silent_tail = [silence_frame] * 30  # 30 * 20 ms = 600 ms — well past half-life
+
+    peak_during_speech = 0.0
+    final_level_after_silence = 1.0
+
+    async with await TapFanOut.open(
+        recorder,
+        identity="armstrong",
+        name="Neil",
+        utterance_id="utt-armstrong-decay",
+        do_record=True,
+        do_live=False,
+    ) as fan_out:
+        for f in frames:
+            await fan_out.write_frame(f)
+            snap = await recorder.streams.snapshot()
+            peak_during_speech = max(peak_during_speech, snap[0].level)
+        for f in silent_tail:
+            await fan_out.write_frame(f)
+        final_level_after_silence = (await recorder.streams.snapshot())[0].level
+
+    assert peak_during_speech > 0.3, f"meter never lit up during real speech (peak={peak_during_speech:.3f})"
+    assert final_level_after_silence < 0.05, (
+        f"meter failed to decay through 600 ms of silence (final={final_level_after_silence:.4f})"
+    )
+
+
+async def test_write_frame_level_against_synthesised_half_scale_tone(recorder: Recorder, tmp_path: Path):
+    """Numeric pin: a known half-scale 440 Hz sine, written to a WAV and
+    streamed through the recorder, must produce a level near 0.5 on
+    every frame (each 20 ms frame contains ~8.8 sine cycles, so the
+    peak is well-defined). Catches regressions where the meter would
+    average instead of peak-detect, or where normalisation drifts."""
+    import numpy as np
+
+    SAMPLE_RATE = 16000
+    seconds = 0.4
+    t = np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
+    samples = (0.5 * 32767 * np.sin(2 * np.pi * 440.0 * t)).astype(np.int16)
+    wav_path = tmp_path / "half_scale_440hz.wav"
+    with wave.open(str(wav_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(samples.tobytes())
+
+    frames = _wav_to_frames(wav_path)
+    levels: list[float] = []
+    async with await TapFanOut.open(
+        recorder,
+        identity="tone",
+        name="Tone",
+        utterance_id="utt-tone",
+        do_record=True,
+        do_live=False,
+    ) as fan_out:
+        for f in frames:
+            await fan_out.write_frame(f)
+            snap = await recorder.streams.snapshot()
+            levels.append(snap[0].level)
+
+    # After the very first frame the peak-hold should be at ~0.5 and
+    # stay there for the rest of the tone (every frame's instantaneous
+    # peak is also ~0.5, so the hold never decays below it).
+    assert levels[0] == pytest.approx(0.5, abs=0.01)
+    assert min(levels) == pytest.approx(0.5, abs=0.01)
+    assert max(levels) == pytest.approx(0.5, abs=0.01)
+
+
 async def test_write_frame_updates_level_even_when_record_off(recorder: Recorder):
     """The volume meter helps confirm "is audio flowing for this speaker?"
     — that question is just as relevant when the operator has turned the
