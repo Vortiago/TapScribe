@@ -50,14 +50,14 @@ Write-Host "[start] Upgrading pip…"
 # --- Dependencies -----------------------------------------------------------
 Write-Host "[start] Checking installed dependencies…"
 $needInstall = $false
-foreach ($pkg in @("whisperlivekit", "multipart", "fastapi", "uvicorn", "transformers")) {
+foreach ($pkg in @("whisperlivekit", "multipart", "fastapi", "uvicorn", "transformers", "cryptography")) {
     & python -c "import $pkg" 2>$null
     if ($LASTEXITCODE -ne 0) { $needInstall = $true }
 }
 
 if ($needInstall) {
     Write-Host "[start] Installing dependencies — first run pulls PyTorch (several hundred MB)…"
-    & pip install whisperlivekit python-multipart "transformers>=4.46" uvicorn
+    & pip install whisperlivekit python-multipart "transformers>=4.46" uvicorn "cryptography>=42"
 }
 
 # --- Configuration ----------------------------------------------------------

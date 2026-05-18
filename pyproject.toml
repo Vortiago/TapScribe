@@ -30,6 +30,12 @@ dependencies = [
     # supervised WhisperLiveKit child (see tapscribe.live_relay). FastAPI
     # gives us a WS server; this gives us the matching client.
     "websockets>=12",
+    # Required by `--tls` for the self-signed cert path. Pure-wheel on
+    # every platform we support; tiny next to torch/whisperlivekit, and
+    # the bridge needs wss:// for any non-localhost recorder (browsers
+    # block ws:// from https://app.spatial.chat as mixed content), so
+    # TLS is effectively the happy path — not optional enough to gate.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

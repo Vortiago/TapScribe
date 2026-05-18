@@ -99,6 +99,12 @@
 
   function reconnectAllForSettingsChange() {
     for (const [identity, ch] of channels) {
+      // Sticky configuration errors (tls-required, tap-auth-failed)
+      // can only be cleared by a settings change. Drop them so the
+      // next PCM frame redials with the fresh settings.
+      if (ch.error === "tls-required" || ch.error === "tap-auth-failed") {
+        ch.error = null;
+      }
       const hadWs = !!ch.tapWs;
       const hadTimer = ch.reconnectTimer !== null;
       if (!hadWs && !hadTimer) continue;
@@ -139,6 +145,30 @@
     if (tapToken) return new WebSocket(url, [TAP_SUBPROTOCOL_PREFIX + tapToken]);
     return new WebSocket(url);
   };
+
+  // Chrome/Edge treat these origins as "potentially trustworthy", so
+  // ws:// to them is allowed from an https:// page. Anything else gets
+  // blocked by mixed-content policy — `new WebSocket(ws://...)` throws
+  // SecurityError synchronously, which would otherwise escape out of
+  // the PCM handler on every frame and leave /tap stuck at "idle".
+  function isTrustworthyWsHost(host) {
+    if (!host) return false;
+    const h = host.toLowerCase();
+    return (
+      h === "localhost" ||
+      h.endsWith(".localhost") ||
+      h === "127.0.0.1" ||
+      h === "[::1]" ||
+      h === "::1"
+    );
+  }
+
+  function wouldBeMixedContentBlocked() {
+    if (recorderUseTls) return false;
+    if (typeof location === "undefined") return false;
+    if (location.protocol !== "https:") return false;
+    return !isTrustworthyWsHost(recorderHost);
+  }
 
   // Backoff: jittered exponential, capped. Indexed by ch.reconnectAttempt
   // (0 = first retry). The cap matches what feels reasonable for an
@@ -346,6 +376,23 @@
   }
 
   function openTapWs(identity, ch) {
+    // Pre-flight: ws:// to a non-trustworthy host from an https:// page
+    // is blocked by the browser's mixed-content policy. `new WebSocket`
+    // throws SecurityError synchronously here, so detect-and-surface
+    // before we dial. Retrying is pointless until the operator either
+    // enables TLS on the recorder or points the bridge at localhost.
+    if (wouldBeMixedContentBlocked()) {
+      if (ch.error !== "tls-required") {
+        ch.error = "tls-required";
+        console.error(
+          "[tapscribe-bridge] cannot dial ws:// to " + recorderHost +
+          " from " + location.origin + " — enable TLS on the recorder " +
+          "and tick \"Use TLS\" in the popup, or run the recorder on localhost.",
+        );
+        publishStatus();
+      }
+      return;
+    }
     if (!ch.utteranceId) ch.utteranceId = newUtteranceId();
     const url = tapWsUrl(identity, ch.name, ch.utteranceId);
     console.log(
@@ -353,7 +400,20 @@
       " utt=" + ch.utteranceId.slice(0, 8) + " -> " + url,
     );
     ch.framesSent = 0;
-    const ws = openWs(url);
+    let ws;
+    try {
+      ws = openWs(url);
+    } catch (e) {
+      // Defensive: anything that makes `new WebSocket` throw (malformed
+      // url, mixed-content slipping past the pre-flight, exotic browser
+      // policy) lands here instead of escaping the PCM handler.
+      ch.error = "tap-ws-construct-failed";
+      console.error(
+        "[tapscribe-bridge] /tap WS construct failed for " + identity, e,
+      );
+      publishStatus();
+      return;
+    }
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       console.log("[tapscribe-bridge] /tap open for " + identity +

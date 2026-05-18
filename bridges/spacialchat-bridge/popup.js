@@ -85,7 +85,42 @@ async function probeTapToken(host, port, token, signal) {
   });
 }
 
+// Chrome/Edge treat these hosts as "potentially trustworthy", so ws://
+// to them is allowed from an https:// page like app.spatial.chat.
+// Anything else is mixed-content-blocked and the bridge can't dial it
+// even though the popup's own probe (chrome-extension://) succeeds.
+function isTrustworthyWsHost(host) {
+  if (!host) return false;
+  const h = host.toLowerCase();
+  return (
+    h === "localhost" ||
+    h.endsWith(".localhost") ||
+    h === "127.0.0.1" ||
+    h === "::1"
+  );
+}
+
+function renderMixedContentWarning() {
+  const el = $("mixedContentWarn");
+  if (!el) return;
+  const risky = !currentUseTls && !isTrustworthyWsHost(currentHost);
+  if (risky) {
+    el.innerHTML =
+      "<strong>Mixed-content blocked:</strong> the bridge runs inside " +
+      "<code>https://app.spatial.chat</code>, so plain <code>ws://</code> " +
+      "to <code>" + escapeHtml(currentHost) + "</code> will be refused by " +
+      "the browser. Enable TLS on the recorder and tick “Use TLS”, " +
+      "or run the recorder on <code>localhost</code>. The popup's own probe " +
+      "below uses the extension origin and can still say “ok”.";
+    el.className = "status err";
+  } else {
+    el.textContent = "";
+    el.className = "";
+  }
+}
+
 async function probeAll() {
+  renderMixedContentWarning();
   setPill("recorderStatus", null, "checking…");
   setPill("tokenStatus", null, "checking…");
   $("probeMeta").textContent = "Probing " + currentHost + ":" + currentPort + " …";
