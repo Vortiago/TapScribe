@@ -184,6 +184,12 @@
     }
     silentGain.gain.value = 0;
 
+    // Resolve the speaker label now so the FIRST tap-start carries it
+    // (content.js puts ch.name into the /tap URL on the first PCM
+    // frame). A `let` shadows the global `window.name` — a free
+    // reference here would silently pick that up and break the label
+    // all the way through to the dashboard.
+    const name = getDisplayName(participant);
     const entry = { source, worklet, silentGain, name, resolvedName: name || "" };
 
     worklet.port.onmessage = (ev) => {
