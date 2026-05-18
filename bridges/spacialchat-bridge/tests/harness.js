@@ -175,18 +175,45 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
       if (ev === "message") messageHandler = fn;
     },
   };
+  // Minimal element stub good enough for the indicator code path:
+  // accepts arbitrary property writes, has a `style` object so
+  // `el.style.cssText = "…"` works, tracks children for `contains()`,
+  // and `attachShadow()` returns another stub so the indicator's
+  // shadow-root scoping doesn't blow up under the harness.
+  function makeNode() {
+    const kids = [];
+    const node = {
+      style: {},
+      _kids: kids,
+      appendChild(child) { kids.push(child); return child; },
+      contains(child) {
+        if (kids.includes(child)) return true;
+        for (const k of kids) {
+          if (k && typeof k.contains === "function" && k.contains(child)) return true;
+        }
+        return false;
+      },
+      remove() {},
+      setAttribute() {},
+      addEventListener() {},
+      attachShadow() {
+        // Real Shadow DOM hangs the root off the host but it isn't a
+        // regular child. The harness only needs a place to find it, so
+        // stash it on `_shadow` and let the indicator() helper look there.
+        const shadow = makeNode();
+        node._shadow = shadow;
+        return shadow;
+      },
+    };
+    return node;
+  }
   const sandbox = {
     window: fakeWindow,
     document: {
       title: "test",
-      head: { appendChild: () => {} },
-      documentElement: { appendChild: () => {} },
-      createElement: () => ({
-        set src(_v) {},
-        set async(_v) {},
-        set onload(_v) {},
-        remove: () => {},
-      }),
+      head: makeNode(),
+      documentElement: makeNode(),
+      createElement: () => makeNode(),
     },
     // The bridge runs inside the SpatialChat tab, which is always
     // https://. The mixed-content guard checks `location.protocol`
@@ -244,6 +271,30 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     chrome._fireChange({ useTls: { newValue: !!useTls, oldValue: !useTls } });
   }
 
+  // The in-page status pill lives in a shadow root attached to a host
+  // element appended to documentElement. The harness mocks documentElement
+  // and createElement above, so we can find the host by its id and dig
+  // into its (mocked) shadow tree to read the current pill class / label.
+  function indicator() {
+    const root = sandbox.document.documentElement;
+    if (!root || !root._kids) return null;
+    const host = root._kids.find((k) => k && k.id === "__tapscribe_indicator_host__");
+    if (!host) return null;
+    const shadow = host._shadow || host;
+    if (!shadow || !shadow._kids) return { host, kind: null, text: null, title: host.title || null };
+    // shadow._kids = [<style>, <pill>]; pill._kids = [<dot>, <label>]
+    const pill = shadow._kids && shadow._kids.find((k) => k && typeof k.className === "string" && k.className.indexOf("pill") === 0);
+    const label = pill && pill._kids && pill._kids.find((k) => k && k.className === "label");
+    const cls = pill ? pill.className : null;
+    const kind = cls ? cls.replace(/^pill\s+/, "") : null;
+    return {
+      host,
+      kind,
+      text: label ? label.textContent : null,
+      title: host.title || null,
+    };
+  }
+
   return {
     post,
     status,
@@ -252,6 +303,7 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     clock,
     flushMicrotasks,
     flipUseTls,
+    indicator,
   };
 }
 
