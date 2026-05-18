@@ -359,12 +359,19 @@ class LiveChannel:
     def _pump_logs(self, proc: subprocess.Popen) -> None:
         """Drain the child's stdout into `log` (tail) and the recorder's
         own stdout (prefixed). Promote 'starting' → 'running' on the
-        uvicorn-startup signal. On exit, mark 'stopped' or 'error'."""
+        uvicorn-startup signal. On exit, mark 'stopped' or 'error'.
+
+        Filters out whisperlivekit's audio_processor heartbeat
+        ('internal_buffer=…s | lag=…s |') — it fires several times a
+        second per stream, has no timestamp, and drowns the console.
+        """
         promoted = False
         try:
             if proc.stdout is not None:
                 for line in proc.stdout:
                     ln = line.rstrip("\n")
+                    if "whisperlivekit.audio_processor:internal_buffer=" in ln:
+                        continue
                     self.log.append(ln)
                     print(f"[wlk] {ln}", flush=True)
                     if not promoted:
