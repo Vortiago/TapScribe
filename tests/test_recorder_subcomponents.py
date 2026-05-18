@@ -72,6 +72,31 @@ async def test_active_streams_update_bytes_unknown_id_is_noop():
     await streams.update_bytes("unknown", 100)
 
 
+@pytest.mark.asyncio
+async def test_active_streams_update_bytes_carries_level_when_provided():
+    """The dashboard's per-tap volume meter reads `level` off the active
+    stream snapshot, populated by TapFanOut on each PCM frame. Update
+    must accept the new field via the level kwarg and persist it; absent
+    a value, the previous level survives so a transient missing kwarg
+    doesn't reset the meter mid-utterance."""
+    streams = ActiveStreams()
+    await streams.register(
+        ActiveStream(conn_id="a", identity="i", name="n", filename="f", started_at=datetime.now(timezone.utc))
+    )
+    await streams.update_bytes("a", 640, level=0.42)
+    snap = await streams.snapshot()
+    assert snap[0].bytes_received == 640
+    assert snap[0].level == pytest.approx(0.42)
+
+    # A subsequent update without level should not clobber the stored
+    # value — the recorder doesn't always have a fresh level to report
+    # (e.g. resume path before the first new frame).
+    await streams.update_bytes("a", 1280)
+    snap = await streams.snapshot()
+    assert snap[0].bytes_received == 1280
+    assert snap[0].level == pytest.approx(0.42)
+
+
 # ---------------------------------------------------------------------------
 # JobTracker
 # ---------------------------------------------------------------------------

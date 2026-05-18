@@ -18,10 +18,17 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from .audio import open_recorder_wav
+from .audio import int16_peak_norm, open_recorder_wav
 from .live_relay import WlKRelay
 from .recorder import ActiveStream, Recorder, UtteranceRecord
 from .text import clean_meta_tokens, safe_name
+
+# Per-frame decay factor for the volume-meter peak hold. Frames are 20 ms
+# (640 bytes @ 16 kHz mono int16); 0.92 per frame gives a ~165 ms half-life
+# — long enough that the meter doesn't flicker between syllables, short
+# enough that it falls back to silence within a few hundred ms of speech
+# ending. Tuned visually rather than from first principles.
+LEVEL_DECAY_PER_FRAME: float = 0.92
 
 
 class TapFanOut:
@@ -50,6 +57,10 @@ class TapFanOut:
         self._bytes_received: int = 0
         self._relay: WlKRelay | None = None
         self._relay_alive: bool = False
+        # Peak-hold for the dashboard's per-tap volume meter, decayed
+        # per frame (see LEVEL_DECAY_PER_FRAME). Mirrored onto the
+        # ActiveStream row via update_bytes so /api/state surfaces it.
+        self._level: float = 0.0
 
     @classmethod
     async def open(
@@ -80,10 +91,22 @@ class TapFanOut:
         await self._close()
 
     async def write_frame(self, buf: bytes) -> None:
+        # Update the volume-meter peak BEFORE the WAV / relay sends so a
+        # single update_bytes call carries both the new byte count and
+        # the fresh level — one lock acquire instead of two. We update
+        # the meter regardless of `do_record` because the dashboard
+        # should still show a live "audio coming in" indicator for taps
+        # that the operator chose not to persist to disk.
+        peak = int16_peak_norm(buf)
+        self._level = peak if peak > self._level else self._level * LEVEL_DECAY_PER_FRAME
         if self._wf is not None:
             self._wf.writeframes(buf)
             self._bytes_received += len(buf)
-            await self._recorder.streams.update_bytes(self._conn_id, self._bytes_received)
+        await self._recorder.streams.update_bytes(
+            self._conn_id,
+            self._bytes_received,
+            level=self._level,
+        )
         # Best-effort relay. If the relay reports closed/dead we stop
         # trying for the rest of this fan-out — recording continues
         # unaffected. Per ADR-0002 graceful degradation.

@@ -218,6 +218,92 @@ async def test_write_frame_advances_active_stream_bytes_received(recorder: Recor
     assert snap2[0].bytes_received == len(PCM_FRAME) * 3
 
 
+async def test_write_frame_updates_active_stream_level(recorder: Recorder):
+    """The per-tap volume meter is driven by ActiveStream.level. Half-scale
+    PCM (16384 / 32768) must land in the snapshot at ~0.5 so the dashboard
+    can colour the bar correctly. The exact value matters less than that
+    it tracks signal amplitude monotonically — silent → near-zero, loud →
+    near-one."""
+    half_scale = b"\x00\x40" * 320  # 16384 little-endian int16 → 0.5 peak
+    full_scale = b"\xff\x7f" * 320  # 32767 → ~1.0
+    silence = b"\x00\x00" * 320
+
+    async with await TapFanOut.open(
+        recorder,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-level",
+        do_record=True,
+        do_live=False,
+    ) as fan_out:
+        await fan_out.write_frame(silence)
+        snap_silent = await recorder.streams.snapshot()
+        await fan_out.write_frame(half_scale)
+        snap_half = await recorder.streams.snapshot()
+        await fan_out.write_frame(full_scale)
+        snap_full = await recorder.streams.snapshot()
+
+    # A frame of pure silence yields zero peak — the meter stays dark
+    # when the WS is open but nobody is speaking.
+    assert snap_silent[0].level == pytest.approx(0.0)
+    # Half-scale lands at 0.5; the peak-hold is max(peak, decayed prior),
+    # and prior was 0, so we get exactly the new peak.
+    assert snap_half[0].level == pytest.approx(0.5, abs=1e-4)
+    # Full-scale int16 normalised by 32768 is 0.99997…; rounding to 1.0
+    # for the renderer is a frontend choice, not a server-side one.
+    assert snap_full[0].level == pytest.approx(1.0, abs=1e-3)
+
+
+async def test_write_frame_level_decays_between_loud_frames(recorder: Recorder):
+    """Peak-hold with decay: after a loud frame the meter should stay
+    near-full briefly, then fall toward zero as silent frames arrive.
+    Pins the "no flicker between syllables, but does fall back to zero
+    when the speaker stops" behaviour the operator-facing meter relies
+    on."""
+    loud = b"\xff\x7f" * 320
+    silence = b"\x00\x00" * 320
+
+    async with await TapFanOut.open(
+        recorder,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-decay",
+        do_record=True,
+        do_live=False,
+    ) as fan_out:
+        await fan_out.write_frame(loud)
+        first = (await recorder.streams.snapshot())[0].level
+        # 30 frames of silence ≈ 600 ms — well past the ~165 ms half-life,
+        # so the meter must have decayed close to zero by now.
+        for _ in range(30):
+            await fan_out.write_frame(silence)
+        decayed = (await recorder.streams.snapshot())[0].level
+
+    assert first > 0.9, "loud frame should peg the meter near full scale"
+    assert decayed < 0.1, "long silence should drain the peak-hold"
+
+
+async def test_write_frame_updates_level_even_when_record_off(recorder: Recorder):
+    """The volume meter helps confirm "is audio flowing for this speaker?"
+    — that question is just as relevant when the operator has turned the
+    rec toggle off for an identity. The ActiveStream still exists; its
+    level must still update so the dashboard's meter keeps moving."""
+    half_scale = b"\x00\x40" * 320
+    async with await TapFanOut.open(
+        recorder,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-no-rec-meter",
+        do_record=False,
+        do_live=False,
+    ) as fan_out:
+        await fan_out.write_frame(half_scale)
+        snap = await recorder.streams.snapshot()
+
+    assert snap[0].bytes_received == 0  # record off → no bytes counted
+    assert snap[0].level == pytest.approx(0.5, abs=1e-4)
+
+
 async def test_relay_forwards_frames_to_wlk_when_live_running(
     recorder_with_relay: Recorder,
     fake_wlk: FakeWlkThread,

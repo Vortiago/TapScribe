@@ -75,3 +75,36 @@ def test_load_recorder_wav_as_pcm_returns_normalised_float32(tmp_path):
     # 16384 / 32768 = 0.5 exactly
     assert out[1] == pytest.approx(0.5)
     assert out[2] == pytest.approx(-0.5)
+
+
+# ---------------------------------------------------------------------------
+# int16_peak_norm — backs the dashboard's per-tap volume meter
+# ---------------------------------------------------------------------------
+
+
+def test_int16_peak_norm_silence_is_zero():
+    # 20 ms of int16 silence is what the bridge sends when a track is
+    # subscribed but the participant isn't speaking. The meter must read
+    # zero so quiet rows don't show a phantom signal.
+    silence = np.zeros(320, dtype=np.int16).tobytes()
+    assert audio.int16_peak_norm(silence) == 0.0
+
+
+def test_int16_peak_norm_half_scale_is_one_half():
+    samples = np.full(320, 16384, dtype=np.int16)
+    samples[1::2] = -16384
+    assert audio.int16_peak_norm(samples.tobytes()) == pytest.approx(0.5)
+
+
+def test_int16_peak_norm_full_negative_clamps_to_one():
+    # The most-negative int16 value is -32768. Dividing by 32768 makes it
+    # exactly 1.0 — important so the meter saturates cleanly at clipping
+    # instead of overflowing the 0..1 contract the renderer relies on.
+    samples = np.full(320, -32768, dtype=np.int16)
+    assert audio.int16_peak_norm(samples.tobytes()) == pytest.approx(1.0)
+
+
+def test_int16_peak_norm_empty_or_short_returns_zero():
+    assert audio.int16_peak_norm(b"") == 0.0
+    # Single byte can't be an int16 sample.
+    assert audio.int16_peak_norm(b"\x00") == 0.0
