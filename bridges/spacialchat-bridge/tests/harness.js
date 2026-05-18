@@ -295,6 +295,19 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     };
   }
 
+  // Simulate SpatialChat's SPA router wiping documentElement's children
+  // (route change replaces the tree). Used by indicator re-mount tests
+  // to verify the bridge re-appends its host on the next state change.
+  function detachIndicator() {
+    const root = sandbox.document.documentElement;
+    if (root && Array.isArray(root._kids)) {
+      const idx = root._kids.findIndex((k) => k && k.id === "__tapscribe_indicator_host__");
+      if (idx >= 0) root._kids.splice(idx, 1);
+      return idx >= 0;
+    }
+    return false;
+  }
+
   return {
     post,
     status,
@@ -304,6 +317,7 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     flushMicrotasks,
     flipUseTls,
     indicator,
+    detachIndicator,
   };
 }
 

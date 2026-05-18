@@ -110,6 +110,38 @@ def test_int16_peak_norm_empty_or_short_returns_zero():
     assert audio.int16_peak_norm(b"\x00") == 0.0
 
 
+def test_int16_peak_norm_odd_byte_count_truncates_instead_of_crashing():
+    """Bridge sends exactly 640-byte frames, but a malformed wire read,
+    a future framer change, or a test feeding raw bytes could produce
+    an odd byte count. `np.frombuffer` raises on non-multiple-of-2 input;
+    if that exception escaped write_frame it would tear down the whole
+    /tap WebSocket. The function must handle the case gracefully and
+    return a peak based on the largest even prefix."""
+    # 3 bytes = 1 complete int16 sample + 1 stray byte. The complete
+    # sample is 0x4000 (= 16384) little-endian; peak should be 0.5.
+    buf = b"\x00\x40\xff"
+    assert audio.int16_peak_norm(buf) == pytest.approx(0.5)
+    # 641 bytes (one stray trailing byte after 320 samples) must
+    # likewise not raise.
+    samples = np.zeros(320, dtype=np.int16)
+    samples[0] = -32768  # peak == 1.0
+    buf2 = samples.tobytes() + b"\xff"
+    assert audio.int16_peak_norm(buf2) == pytest.approx(1.0)
+
+
+def test_int16_peak_norm_does_not_mutate_input():
+    """np.frombuffer returns a *view* over the input buffer. If we ever
+    accidentally write through that view (e.g. converting to a writeable
+    copy and forgetting to break the alias), we'd corrupt the WAV the
+    recorder is also writing from the same buffer. Pin that the function
+    is read-only."""
+    samples = np.array([100, -200, 16384, -16384], dtype=np.int16)
+    buf = bytes(samples.tobytes())  # immutable bytes copy
+    before = bytes(buf)
+    audio.int16_peak_norm(buf)
+    assert buf == before, "int16_peak_norm must not mutate its input"
+
+
 # ---------------------------------------------------------------------------
 # int16_peak_norm — real-audio coverage
 #

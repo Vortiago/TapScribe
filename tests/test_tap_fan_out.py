@@ -422,6 +422,102 @@ async def test_write_frame_level_against_synthesised_half_scale_tone(recorder: R
     assert max(levels) == pytest.approx(0.5, abs=0.01)
 
 
+async def test_concurrent_streams_have_independent_level_meters(recorder: Recorder):
+    """Two simultaneous TapFanOuts for different speakers must keep
+    separate level state. A loud frame for Alice must not push Bob's
+    meter, and vice-versa — otherwise the dashboard would show Bob's
+    bar moving while only Alice is speaking, which would defeat the
+    whole point of the per-speaker meter."""
+    loud = b"\xff\x7f" * 320  # ~1.0
+    silence = b"\x00\x00" * 320
+
+    async with await TapFanOut.open(
+        recorder,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-alice",
+        do_record=True,
+        do_live=False,
+    ) as alice:
+        async with await TapFanOut.open(
+            recorder,
+            identity="bob",
+            name="Bob",
+            utterance_id="utt-bob",
+            do_record=True,
+            do_live=False,
+        ) as bob:
+            await alice.write_frame(loud)
+            await bob.write_frame(silence)
+
+            snap = {s.identity: s for s in await recorder.streams.snapshot()}
+            # Cross-talk would show as Bob's level rising along with Alice's.
+            assert snap["alice"].level > 0.9, "Alice's loud frame should peg her meter"
+            assert snap["bob"].level == 0.0, (
+                "Bob received a silent frame; his meter must be 0 regardless of Alice"
+            )
+
+            # Now the reverse: loud for Bob, silent for Alice. Alice's
+            # meter should decay (one frame of decay only — still ~92%
+            # of the prior 1.0), Bob's should jump.
+            await alice.write_frame(silence)
+            await bob.write_frame(loud)
+
+            snap = {s.identity: s for s in await recorder.streams.snapshot()}
+            assert snap["bob"].level > 0.9
+            assert snap["alice"].level < snap["bob"].level
+
+
+async def test_level_starts_fresh_on_resume_but_bytes_received_persists(
+    recorder: Recorder,
+):
+    """When a /tap WS reconnects with the same utterance_id (resume after
+    a network blip), the recorder appends to the existing WAV — so
+    bytes_received reflects the WHOLE utterance so far. The volume
+    meter is a short-time peak hold, not a cumulative measure; it
+    must reset to 0 on resume so the new connection starts measuring
+    from the next frame rather than inheriting a stale peak from
+    before the blip.
+
+    Reaching this requires: open utterance with a loud frame, close
+    (level ends near 1.0 on the OLD stream), reopen with the same
+    utterance_id, snapshot before any new frames lands. The meter
+    should read 0.0 even though bytes_received is non-zero."""
+    loud = b"\xff\x7f" * 320
+    utt = "utt-resume-level"
+
+    async with await TapFanOut.open(
+        recorder,
+        identity="alice",
+        name="Alice",
+        utterance_id=utt,
+        do_record=True,
+        do_live=False,
+    ) as fan_out:
+        await fan_out.write_frame(loud)
+        first_snap = (await recorder.streams.snapshot())[0]
+        assert first_snap.level > 0.9
+
+    # Bridge reconnects with the same utterance_id within the resume
+    # window. Recorder appends to the same WAV.
+    async with await TapFanOut.open(
+        recorder,
+        identity="alice",
+        name="Alice",
+        utterance_id=utt,
+        do_record=True,
+        do_live=False,
+    ):
+        # Snapshot BEFORE any new frame arrives.
+        resumed_snap = (await recorder.streams.snapshot())[0]
+
+    # bytes_received survives the resume (we wrote one frame previously);
+    # level does NOT — stale loudness from before the blip must not
+    # be displayed against fresh audio.
+    assert resumed_snap.bytes_received == len(loud), "resume preserves byte count"
+    assert resumed_snap.level == 0.0, "resume must reset the level meter"
+
+
 async def test_write_frame_updates_level_even_when_record_off(recorder: Recorder):
     """The volume meter helps confirm "is audio flowing for this speaker?"
     — that question is just as relevant when the operator has turned the

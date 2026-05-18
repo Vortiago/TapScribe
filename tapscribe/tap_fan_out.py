@@ -194,7 +194,12 @@ class TapFanOut:
                 name=self._name,
                 filename=fname,
                 started_at=started_at,
-                bytes_received=0,
+                # On resume, self._bytes_received already carries the prior
+                # utterance's byte count — register it that way so the
+                # dashboard's counter doesn't visibly drop to zero between
+                # the WS reopen and the first new frame's update_bytes call.
+                # Fresh (non-resumed) utterances have it at the default 0.
+                bytes_received=self._bytes_received,
                 record=self._do_record,
                 live=self._do_live,
             )
