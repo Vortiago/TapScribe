@@ -46,6 +46,13 @@ class ActiveStream:
     bytes_received: int = 0
     record: bool = True
     live: bool = True
+    # Exponentially-decayed peak amplitude of the most recent PCM frames,
+    # 0.0–1.0. Drives the dashboard's per-tap volume meter — operators
+    # use it to confirm sound is actually coming in from a speaker rather
+    # than the WS being open with silence flowing through it. Updated by
+    # `TapFanOut.write_frame` each 20 ms; decays toward zero between
+    # frames so a single loud frame doesn't pin the meter.
+    level: float = 0.0
 
 
 class ActiveStreams:
@@ -68,13 +75,25 @@ class ActiveStreams:
         async with self._lock:
             self._by_id.pop(conn_id, None)
 
-    async def update_bytes(self, conn_id: str, bytes_received: int) -> None:
+    async def update_bytes(
+        self,
+        conn_id: str,
+        bytes_received: int,
+        *,
+        level: float | None = None,
+    ) -> None:
         """No-op when the conn_id is unknown — the WS handler can race
-        against close and call us after the entry's been removed."""
+        against close and call us after the entry's been removed.
+
+        `level` is the per-frame volume-meter sample (0.0–1.0). Passed
+        alongside the byte count so the dashboard's active-streams panel
+        gets both updates from a single lock acquire instead of two."""
         async with self._lock:
             existing = self._by_id.get(conn_id)
             if existing is not None:
                 existing.bytes_received = bytes_received
+                if level is not None:
+                    existing.level = level
 
     async def snapshot(self) -> list[ActiveStream]:
         async with self._lock:

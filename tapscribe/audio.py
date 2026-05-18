@@ -35,6 +35,38 @@ def dbfs_from_rms(rms: float) -> float:
     return 20.0 * math.log10(rms / 32768.0)
 
 
+def int16_peak_norm(buf: bytes) -> float:
+    """Normalised peak amplitude (0.0–1.0) of a 16-bit little-endian PCM
+    buffer. Used by the per-tap volume meter so the dashboard can show a
+    live "audio is coming in" indicator per active stream.
+
+    Returns 0.0 for empty / malformed input — silence and "no buffer" look
+    the same on the meter, which is what an operator wants. We divide by
+    32768 (not 32767) so the most-negative int16 sample maps to 1.0
+    exactly instead of overflowing the bar.
+
+    Odd byte counts are truncated to the largest even prefix instead of
+    raising. The bridge always sends 640-byte (320-sample) frames so
+    this only matters for callers that bypass the wire (tests, future
+    framers, malformed network reads) — but a crash here would tear
+    down the whole `/tap` WebSocket, so we'd rather under-report by
+    one sample than abort the stream."""
+    if len(buf) < 2:
+        return 0.0
+    import numpy as np
+
+    # `np.frombuffer` requires the byte count to be a multiple of the
+    # element size (2 for int16); pass a slice that is.
+    even_len = len(buf) & ~1
+    samples = np.frombuffer(buf[:even_len], dtype=np.int16)
+    if samples.size == 0:
+        return 0.0
+    lo = int(samples.min())
+    hi = int(samples.max())
+    peak = -lo if -lo > hi else hi
+    return peak / 32768.0
+
+
 def wav_duration_s(path: Path) -> float:
     """Return WAV duration in seconds. Returns 0.0 on read errors so callers
     can use this as a cheap is-corrupt check."""

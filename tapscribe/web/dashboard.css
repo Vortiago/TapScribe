@@ -382,6 +382,27 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.stream-row .who .level-meter {
+  margin-top: 4px;
+  height: 4px;
+  background: var(--hairline-2);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+.stream-row .who .level-meter .level-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--fg-3);
+  /* Width transitions smooth the 2 Hz poll cadence so the bar glides
+     between samples instead of stepping; color stays instant so a clip
+     spike isn't visually delayed. */
+  transition: width 180ms linear, background-color 80ms linear;
+}
+.stream-row .who .level-meter[data-zone="silent"] .level-fill { background: var(--fg-3); }
+.stream-row .who .level-meter[data-zone="ok"]     .level-fill { background: var(--ok); }
+.stream-row .who .level-meter[data-zone="hot"]    .level-fill { background: var(--warn); }
+.stream-row .who .level-meter[data-zone="clip"]   .level-fill { background: var(--rec); }
 .stream-row .stats {
   text-align: right;
   font-size: 10.5px;
