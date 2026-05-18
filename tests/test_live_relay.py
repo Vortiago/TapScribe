@@ -309,6 +309,45 @@ async def test_relay_close_drains_tail_settled_lines(fake_wlk: _FakeWlk):
     assert "tail caption" in lines
 
 
+async def test_relay_extracts_remaining_time_into_on_metrics(fake_wlk: _FakeWlk):
+    """WlK's per-tick `remaining_time_transcription` is the only per-tap
+    backlog signal that arrives over the wire (its `lag=`/`internal_buffer=`
+    heartbeat is log-only and not connection-attributable). The relay
+    exposes it both as a `lag_s` attribute and via an `on_metrics` async
+    callback so the dashboard can render a per-tap indicator."""
+    seen: list[float] = []
+
+    async def on_metrics(v: float) -> None:
+        seen.append(v)
+
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lambda _t: None,
+        on_metrics=on_metrics,
+    )
+    await relay.connect()
+    # push_lines_snapshot hard-codes remaining_time_transcription=0; push
+    # a custom payload so we observe a non-zero value.
+    for c in fake_wlk._connections:
+        await c.send(
+            json.dumps(
+                {
+                    "status": "active_transcription",
+                    "lines": [],
+                    "buffer_transcription": "",
+                    "remaining_time_transcription": 1.25,
+                    "remaining_time_diarization": 0,
+                }
+            )
+        )
+    await asyncio.sleep(0.05)
+    assert seen == [1.25]
+    assert relay.lag_s == 1.25
+    await relay.close()
+
+
 async def test_relay_emits_finalized_lines_immediately_not_just_on_close(fake_wlk: _FakeWlk):
     """Sanity guard against a regression where the relay only flushed at
     close: in a multi-line utterance, settled lines must reach the

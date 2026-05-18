@@ -390,6 +390,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
   & .b { color: var(--fg-0); }
   & .m { color: var(--fg-2); }
+  & .lag { color: var(--fg-2); }
+  & .lag.lag-warn { color: #c79a3a; }
+  & .lag.lag-bad  { color: #c44; font-weight: 600; }
 }
 
 .tap-toggles { display: flex; flex-direction: column; gap: 3px; align-items: stretch; }

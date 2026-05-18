@@ -40,6 +40,20 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
     pick(row, "size").textContent = fmtBytes(a.bytes_received || 0);
     pick(row, "dur").textContent = `~${fmtDur(dur)}`;
 
+    // Per-tap lag from the relay (remaining_time_transcription). Hidden
+    // when live is off or the relay hasn't reported yet — there's no
+    // useful value to show in those states.
+    const lagEl = pick(row, "lag");
+    const lag = typeof a.lag_s === "number" ? a.lag_s : null;
+    if (lag === null || !liveOn) {
+      lagEl.hidden = true;
+    } else {
+      lagEl.hidden = false;
+      lagEl.textContent = `lag ${lag.toFixed(1)}s`;
+      lagEl.classList.toggle("lag-warn", lag >= 0.5 && lag < 2);
+      lagEl.classList.toggle("lag-bad", lag >= 2);
+    }
+
     for (const btn of row.querySelectorAll(".tap-toggle")) {
       const which = btn.dataset.toggle;
       const on = which === "record" ? recOn : liveOn;
