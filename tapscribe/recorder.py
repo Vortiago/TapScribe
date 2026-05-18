@@ -53,6 +53,11 @@ class ActiveStream:
     # `TapFanOut.write_frame` each 20 ms; decays toward zero between
     # frames so a single loud frame doesn't pin the meter.
     level: float = 0.0
+    # Latest `remaining_time_transcription` (seconds) WlK reported for
+    # this tap's relay. None until the first FrontData arrives or when
+    # live is off; surfaced in /api/state so the dashboard can render a
+    # per-row backlog indicator.
+    lag_s: float | None = None
 
 
 class ActiveStreams:
@@ -94,6 +99,14 @@ class ActiveStreams:
                 existing.bytes_received = bytes_received
                 if level is not None:
                     existing.level = level
+
+    async def update_lag(self, conn_id: str, lag_s: float | None) -> None:
+        """Same race semantics as update_bytes: harmless when the conn_id
+        has already been removed."""
+        async with self._lock:
+            existing = self._by_id.get(conn_id)
+            if existing is not None:
+                existing.lag_s = lag_s
 
     async def snapshot(self) -> list[ActiveStream]:
         async with self._lock:

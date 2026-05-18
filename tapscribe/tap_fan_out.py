@@ -243,10 +243,16 @@ class TapFanOut:
                 port=self._recorder.live.config.port,
                 language=self._recorder.live.config.language,
                 on_settled_line=self._on_settled_line,
+                on_metrics=self._on_metrics,
             )
             if await candidate.connect():
                 self._relay = candidate
                 self._relay_alive = True
+
+    async def _on_metrics(self, lag_s: float) -> None:
+        """Push the relay's latest reported lag to this tap's row so the
+        dashboard can render a per-tap backlog indicator."""
+        await self._recorder.streams.update_lag(self._conn_id, lag_s)
 
     def _maybe_schedule_relay_reconnect(self) -> None:
         """Kick off a background relay reconnect if none is pending and
@@ -283,6 +289,7 @@ class TapFanOut:
             port=cfg.port,
             language=cfg.language,
             on_settled_line=self._on_settled_line,
+            on_metrics=self._on_metrics,
         )
         if await candidate.connect():
             self._relay = candidate

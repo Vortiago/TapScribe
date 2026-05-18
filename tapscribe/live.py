@@ -110,6 +110,17 @@ def build_live_cmd(
     return cmd
 
 
+def _is_console_worthy(ln: str) -> bool:
+    """True for lines the operator should see in the recorder's stdout
+    (warnings, errors, tracebacks). Everything else is kept in the
+    in-memory deque only — the dashboard log dialog reads it from there
+    via /api/live/log."""
+    stripped = ln.lstrip()
+    if stripped.startswith(("WARNING:", "ERROR:", "CRITICAL:", "Traceback")):
+        return True
+    return ":WARNING:" in ln or ":ERROR:" in ln or ":CRITICAL:" in ln
+
+
 # ---------------------------------------------------------------------------
 # LiveChannel — owns the whisperlivekit-server child + its supervision
 # ---------------------------------------------------------------------------
@@ -359,14 +370,28 @@ class LiveChannel:
     def _pump_logs(self, proc: subprocess.Popen) -> None:
         """Drain the child's stdout into `log` (tail) and the recorder's
         own stdout (prefixed). Promote 'starting' → 'running' on the
-        uvicorn-startup signal. On exit, mark 'stopped' or 'error'."""
+        uvicorn-startup signal. On exit, mark 'stopped' or 'error'.
+
+        Filters out whisperlivekit's audio_processor heartbeat
+        ('internal_buffer=…s | lag=…s |') — it fires several times a
+        second per stream, has no timestamp, and drowns the console.
+
+        Only WARNING/ERROR/Traceback lines are forwarded to the recorder's
+        stdout; everything else stays in the 200-line deque, exposed via
+        GET /api/live/log and the dashboard's log dialog. Spawn/stop
+        breadcrumbs that the operator actually needs in the console are
+        printed by `start()`/`stop()` directly.
+        """
         promoted = False
         try:
             if proc.stdout is not None:
                 for line in proc.stdout:
                     ln = line.rstrip("\n")
+                    if "whisperlivekit.audio_processor:internal_buffer=" in ln:
+                        continue
                     self.log.append(ln)
-                    print(f"[wlk] {ln}", flush=True)
+                    if _is_console_worthy(ln):
+                        print(f"[wlk] {ln}", flush=True)
                     if not promoted:
                         low = ln.lower()
                         if "uvicorn running" in low or "application startup complete" in low:

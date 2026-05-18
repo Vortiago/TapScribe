@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -56,12 +56,14 @@ class WlKRelay:
         port: int,
         language: str,
         on_settled_line: Callable[[str], None],
+        on_metrics: Callable[[float], Awaitable[None]] | None = None,
         drain_timeout: float = 1.0,
     ):
         self._host = host
         self._port = port
         self._language = language
         self._on_settled_line = on_settled_line
+        self._on_metrics = on_metrics
         self._drain_timeout = drain_timeout
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._consumer: asyncio.Task | None = None
@@ -71,6 +73,12 @@ class WlKRelay:
         # in-flight tail); on close-drain we also emit the tail.
         self._emitted_count: int = 0
         self._last_snapshot: list[dict] = []
+        # Latest `remaining_time_transcription` value WlK reported on this
+        # connection. Whisperlivekit's internal `lag=`/`internal_buffer=`
+        # heartbeat is log-only and has no connection id; this field is
+        # the only per-tap lag signal that arrives over the wire. Stale
+        # between snapshots (WlK emits one every few hundred ms).
+        self.lag_s: float | None = None
 
     async def connect(self) -> bool:
         """Open the relay. Returns False on any failure — callers branch
@@ -150,6 +158,12 @@ class WlKRelay:
                     continue
                 if not isinstance(data, dict):
                     continue
+                raw_lag = data.get("remaining_time_transcription")
+                if isinstance(raw_lag, (int, float)):
+                    self.lag_s = float(raw_lag)
+                    if self._on_metrics is not None:
+                        with contextlib.suppress(Exception):
+                            await self._on_metrics(self.lag_s)
                 snapshot = data.get("lines")
                 if not isinstance(snapshot, list):
                     continue

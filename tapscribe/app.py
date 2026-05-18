@@ -310,6 +310,18 @@ async def api_live_stop(recorder: Recorder = Depends(get_recorder)):
     return {"ok": True, "msg": msg, "state": recorder.live.info["state"]}
 
 
+@app.get("/api/live/log")
+async def api_live_log(recorder: Recorder = Depends(get_recorder)):
+    """Full WhisperLiveKit log tail (up to 200 lines) — the source for
+    the dashboard's log dialog. /api/state only sends a small preview
+    so the once-per-second poll stays cheap; this endpoint is requested
+    on demand when the operator opens the dialog."""
+    return {
+        "log": list(recorder.live.log),
+        "state": recorder.live.info.get("state", ""),
+    }
+
+
 @app.delete("/api/live-transcript")
 async def api_live_transcript_clear(recorder: Recorder = Depends(get_recorder)):
     """Clear the live transcript feed (the dashboard's "clear" button).

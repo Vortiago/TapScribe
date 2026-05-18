@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tapscribe.live import LiveConfig, build_live_cmd
+from tapscribe.live import LiveConfig, _is_console_worthy, build_live_cmd
 
 EXE = "/path/to/whisperlivekit-server"
 DEFAULT_CFG = LiveConfig(model="tiny.en", language="en", host="localhost", port=8000)
@@ -104,3 +104,44 @@ def test_argv_contains_host_port_and_language():
     # WhisperLiveKit's `--lan <language>` flag carries the language code.
     assert "--lan" in cmd
     assert cmd[cmd.index("--lan") + 1] == "en"
+
+
+# ---------------------------------------------------------------------------
+# _is_console_worthy — _pump_logs classifier
+# ---------------------------------------------------------------------------
+#
+# The dashboard log dialog reads the full WlK output from
+# /api/live/log; only warnings / errors / tracebacks reach the
+# recorder's stdout. Keeping this predicate honest matters because the
+# point of the change is that the console stops being unreadable but
+# real problems still surface there immediately.
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "WARNING:whisperlivekit:audio dropouts on tap-3",
+        "ERROR:whisperlivekit.diarizer:cuda OOM",
+        "CRITICAL:whisperlivekit:unrecoverable",
+        "Traceback (most recent call last):",
+        "  ERROR:whisperlivekit:fell back to cpu",  # leading whitespace ok
+        "ERROR:    Application startup failed.",  # uvicorn-style
+    ],
+)
+def test_console_worthy_lines_pass_through(line: str):
+    assert _is_console_worthy(line) is True
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "INFO:whisperlivekit.audio_processor:internal_buffer=0.00s | lag=0.00s |",
+        "INFO:whisperlivekit:loading model",
+        "INFO:     Started server process [1234]",
+        "DEBUG:whisperlivekit:tick",
+        "",
+        "some unrelated line without a level",
+    ],
+)
+def test_non_warning_lines_are_filtered(line: str):
+    assert _is_console_worthy(line) is False
