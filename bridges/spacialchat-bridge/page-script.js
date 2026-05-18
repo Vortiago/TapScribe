@@ -213,6 +213,15 @@
     console.log("[tapscribe-bridge/page] tapping " + participant.identity + " (" + (name || "no-name") + ")");
   }
 
+  // Tear down every channel we know about — both audio-tapped and
+  // presence-only — and emit tap-stop to content for each so the /tap
+  // WS is closed on the recorder side. Used when LiveKit hands us a
+  // room-wide teardown (disconnected event, window.room swap, polling
+  // detected the room is no longer connected).
+  function cleanupAllTaps() {
+    for (const id of Array.from(announced)) untap(id);
+  }
+
   function untap(identity) {
     const t = taps.get(identity);
     if (t) {
@@ -304,8 +313,7 @@
 
     room.on("disconnected", () => {
       console.warn("[tapscribe-bridge/page] room disconnected; tearing down taps");
-      // Clear both tapped and presence-only entries from the popup.
-      for (const id of Array.from(announced)) untap(id);
+      cleanupAllTaps();
     });
 
     // Iterate existing publications already in place at attach time.
@@ -363,7 +371,7 @@
           // Old room got swapped out under us — drop its taps before
           // binding to the new one so we don't keep stale forwarders alive.
           console.log("[tapscribe-bridge/page] window.room replaced; rebinding to new instance");
-          for (const id of Array.from(taps.keys())) untap(id);
+          cleanupAllTaps();
         } else {
           console.log("[tapscribe-bridge/page] window.room connected; attaching listeners");
         }
@@ -375,9 +383,21 @@
         }
       }
     } else if (attachedRoom && attachedRoom.state !== "connected") {
-      // Previously-attached room dropped; clear the reference so a fresh
-      // connection re-triggers the attach branch above.
-      attachedRoom = null;
+      // Previously-attached room dropped. Belt-and-braces with the
+      // "disconnected" event handler: if the user leaves the spatial
+      // chat room (or SpatialChat nulls window.room before the event
+      // fires) we still need to close every /tap WS so the recorder
+      // isn't left holding stale streams.
+      //
+      // Only tear down on terminal "disconnected" — "reconnecting"
+      // is transient and LiveKit will restore the same room instance
+      // with the same participants. Tearing down taps then would
+      // churn /tap WSes for every blip.
+      if (attachedRoom.state === "disconnected") {
+        console.log("[tapscribe-bridge/page] room disconnected; cleaning up taps");
+        cleanupAllTaps();
+        attachedRoom = null;
+      }
     }
   }
   // Run immediately so we attach as soon as the room is up, then keep watching.
