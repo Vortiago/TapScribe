@@ -40,6 +40,28 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
     pick(row, "size").textContent = fmtBytes(a.bytes_received || 0);
     pick(row, "dur").textContent = `~${fmtDur(dur)}`;
 
+    // Volume meter — peak amplitude of recent PCM, 0.0–1.0 from
+    // `int16_peak_norm` on the server side, peak-held over ~200 ms.
+    // Quiet (<5%) shows muted gray so a silent-but-open WS doesn't look
+    // like it's actively streaming; the green→amber→red colour shifts
+    // come from CSS via the data-zone attribute. Below ~1% we treat as
+    // silent and snap the bar to zero width so it doesn't show a
+    // confusing sliver under near-silent rooms.
+    const level = Math.max(0, Math.min(1, Number(a.level) || 0));
+    const meter = pick(row, "meter");
+    const fill = pick(row, "meterFill");
+    const pct = level < 0.01 ? 0 : Math.round(level * 100);
+    fill.style.width = pct + "%";
+    let zone = "silent";
+    if (level >= 0.85) zone = "clip";
+    else if (level >= 0.6) zone = "hot";
+    else if (level >= 0.05) zone = "ok";
+    meter.dataset.zone = zone;
+    meter.setAttribute(
+      "aria-label",
+      `volume ${pct}% (${zone})`,
+    );
+
     // Per-tap lag from the relay (remaining_time_transcription). Hidden
     // when live is off or the relay hasn't reported yet — there's no
     // useful value to show in those states.

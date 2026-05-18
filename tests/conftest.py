@@ -89,9 +89,22 @@ class FakeWlkThread:
         assert self._ready.wait(timeout=2.0), "fake WlK didn't start"
 
     def stop(self) -> None:
+        # Idempotent: tests that simulate a WlK restart call stop() to
+        # tear down the original fake, then the fixture's teardown
+        # calls it again on exit. Without this guard the second call
+        # crashes with "Event loop is closed" because serve() already
+        # returned and the loop is shut down.
+        if not self._thread.is_alive():
+            return
         loop, stop_event = self._loop, self._stop_event
         if loop is not None and stop_event is not None:
-            loop.call_soon_threadsafe(stop_event.set)
+            try:
+                loop.call_soon_threadsafe(stop_event.set)
+            except RuntimeError:
+                # Loop closed between the is_alive check and here —
+                # extremely narrow race, but the thread is on its way
+                # out either way.
+                pass
         self._thread.join(timeout=2.0)
 
     def push_committed(self, text: str) -> None:

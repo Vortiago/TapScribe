@@ -143,6 +143,33 @@ def test_api_state_returns_recorder_view(client, recorder_under_test):
     assert isinstance(body["live_feed"], list)
 
 
+def test_api_state_active_rows_include_level_for_the_dashboard_meter(client, recorder_under_test):
+    """The dashboard's per-tap volume meter reads `level` off each entry
+    in /api/state's `active` list. The JSON contract MUST include the
+    field — if a future refactor switches to a manual dict instead of
+    asdict() and forgets `level`, the meter silently stops moving
+    without any backend error. Pin it explicitly."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(
+        recorder_under_test.streams.register(
+            ActiveStream(
+                conn_id="abc-meter",
+                identity="meter-test",
+                name="Meter",
+                filename="meter.wav",
+                started_at=datetime.now(timezone.utc),
+                level=0.73,
+            )
+        )
+    )
+
+    body = client.get("/api/state").json()
+    row = next(a for a in body["active"] if a["identity"] == "meter-test")
+    assert "level" in row, "/api/state must expose `level` for the dashboard meter"
+    assert row["level"] == pytest.approx(0.73)
+
+
 def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_test):
     """The per-row rec/live toggles render their state from the active
     entry's record/live fields. Those must follow the *current*

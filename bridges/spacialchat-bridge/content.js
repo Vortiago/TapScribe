@@ -25,6 +25,10 @@
 //   - Publish a status snapshot to chrome.storage so the popup can show
 //     per-speaker state without needing DevTools, and update the tab
 //     title with a tiny tx/state indicator.
+//   - Render a small in-page status pill on the SpatialChat tab itself
+//     so the operator can tell at a glance whether audio is flowing
+//     without clicking the popup or watching the tab title — green
+//     "streaming", yellow "reconnecting", red "refresh needed", etc.
 //
 // Wire contract (see bridges/README.md):
 //   ws://<recorder-host>:8001/tap?identity=<id>&name=<display>&utterance_id=<uuid>
@@ -58,9 +62,11 @@
       "[tapscribe-bridge] recorder: " + (recorderUseTls ? "wss://" : "ws://") +
       recorderHost + ":" + recorderPort + " (tap-token " + (tapToken ? "set" : "MISSING") + ")",
     );
+    try { publishStatus(); } catch (e) { /* indicator may not be ready yet */ }
   }).catch((e) => {
     settingsReady = true; // fall back to default rather than block forever
     console.warn("[tapscribe-bridge] could not read recorder settings; using defaults", e);
+    try { publishStatus(); } catch (e2) { /* ignore */ }
   });
 
   // Re-pick up popup edits without a tab reload. We update the in-memory
@@ -705,6 +711,203 @@
     }
   });
 
+  // ---- In-page status pill --------------------------------------------------
+  // A fixed-position pill rendered on the SpatialChat page itself, so the
+  // operator can see "is audio flowing right now?" without opening the
+  // popup or staring at the tab title. Lives in a shadow root so the
+  // page's CSS can't restyle or hide it. The host element is appended to
+  // <html> rather than <body> so SpatialChat's SPA router (which often
+  // swaps <body>'s subtree) doesn't blow it away on route changes.
+  const INDICATOR_HOST_ID = "__tapscribe_indicator_host__";
+  let indicatorHost = null;
+  let indicatorPill = null;
+  let indicatorDot = null;
+  let indicatorLabel = null;
+
+  function buildIndicator() {
+    let host, pill, dot, label;
+    try {
+      host = document.createElement("div");
+      host.id = INDICATOR_HOST_ID;
+      // `all:initial` resets every inherited property from the page so
+      // SpatialChat's global CSS can't reach in and recolor / resize us.
+      host.style.cssText =
+        "all:initial;position:fixed;bottom:12px;right:12px;z-index:2147483647;";
+      const shadow = host.attachShadow
+        ? host.attachShadow({ mode: "open" })
+        : host;
+      const style = document.createElement("style");
+      style.textContent =
+        ".pill{display:flex;align-items:center;gap:6px;padding:5px 10px;" +
+        "background:rgba(20,20,20,0.85);color:#fff;border-radius:14px;" +
+        "font:12px/1.2 system-ui,-apple-system,Segoe UI,sans-serif;" +
+        "box-shadow:0 2px 6px rgba(0,0,0,0.25);user-select:none;cursor:default}" +
+        ".dot{display:inline-block;width:8px;height:8px;border-radius:50%;" +
+        "background:#888;flex:0 0 8px}" +
+        ".pill.ok .dot{background:#2c2}" +
+        ".pill.warn .dot{background:#fa3}" +
+        ".pill.err .dot{background:#e44}";
+      pill = document.createElement("div");
+      pill.className = "pill idle";
+      dot = document.createElement("span");
+      dot.className = "dot";
+      label = document.createElement("span");
+      label.className = "label";
+      label.textContent = "TapScribe";
+      pill.appendChild(dot);
+      pill.appendChild(label);
+      shadow.appendChild(style);
+      shadow.appendChild(pill);
+    } catch (e) {
+      return false;
+    }
+    indicatorHost = host;
+    indicatorPill = pill;
+    indicatorDot = dot;
+    indicatorLabel = label;
+    return true;
+  }
+
+  function ensureIndicatorMounted() {
+    if (typeof document === "undefined") return false;
+    const root = document.documentElement;
+    if (!root) return false;
+    if (
+      indicatorHost &&
+      typeof root.contains === "function" &&
+      root.contains(indicatorHost)
+    ) {
+      return true;
+    }
+    if (!indicatorHost && !buildIndicator()) return false;
+    try {
+      root.appendChild(indicatorHost);
+    } catch (e) {
+      return false;
+    }
+    return true;
+  }
+
+  function setIndicator(kind, text, tooltip) {
+    if (!ensureIndicatorMounted()) return;
+    if (indicatorPill) indicatorPill.className = "pill " + kind;
+    if (indicatorLabel) indicatorLabel.textContent = "TapScribe: " + text;
+    if (indicatorHost) indicatorHost.title = tooltip || "";
+  }
+
+  function errorTooltip(err) {
+    if (err === "tap-auth-failed") {
+      return "Recorder rejected the tap token. Open the popup and re-paste " +
+        "the token from the recorder's startup banner.";
+    }
+    if (err === "tls-required") {
+      return "Mixed-content blocked: enable TLS on the recorder and tick " +
+        "\"Use TLS\" in the popup, or run the recorder on localhost.";
+    }
+    if (err === "buffer-overflow") {
+      return "Recorder dropped the connection mid-utterance and we couldn't " +
+        "reconnect in time. Trailing audio was lost.";
+    }
+    if (err === "recorder-unreachable") {
+      return "Recorder isn't responding. Use the popup's \"Test connection\" " +
+        "to diagnose.";
+    }
+    if (err === "drain-timeout") {
+      return "Recorder didn't come back within the drain window; trailing " +
+        "audio after mute was dropped.";
+    }
+    if (err === "backpressure") {
+      return "Send queue is backing up — the recorder may be overloaded.";
+    }
+    if (err === "tap-send-failed") {
+      return "WebSocket send() threw; retrying via reconnect.";
+    }
+    if (err === "tap-ws-construct-failed") {
+      return "Browser refused to open the WebSocket. Check the popup's " +
+        "host / port / TLS settings.";
+    }
+    if (typeof err === "string" && err.indexOf("tap-ws-closed-") === 0) {
+      return "WebSocket closed unexpectedly (" + err + "). Reconnecting…";
+    }
+    return err || "";
+  }
+
+  function updateIndicator() {
+    if (!settingsReady) {
+      setIndicator("idle", "loading…", "Loading bridge settings…");
+      return;
+    }
+    if (audioContextState === "failed") {
+      setIndicator(
+        "err",
+        "refresh tab",
+        "Audio capture failed to initialise. Reload the SpatialChat tab.",
+      );
+      return;
+    }
+    if (audioContextState && audioContextState !== "running") {
+      setIndicator(
+        "err",
+        "audio " + audioContextState,
+        "Audio capture is paused. Click anywhere in the SpatialChat tab to resume.",
+      );
+      return;
+    }
+    let openTaps = 0;
+    let total = 0;
+    let firstError = null;
+    let anyReconnecting = false;
+    let anyDraining = false;
+    let anyMuted = false;
+    for (const [, ch] of channels) {
+      total++;
+      if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) openTaps++;
+      if (ch.error && !firstError) firstError = ch.error;
+      if (ch.reconnectTimer !== null) anyReconnecting = true;
+      if (ch.draining) anyDraining = true;
+      if (ch.muted) anyMuted = true;
+    }
+    if (firstError) {
+      setIndicator("err", firstError, errorTooltip(firstError));
+      return;
+    }
+    if (anyReconnecting) {
+      setIndicator(
+        "warn",
+        "reconnecting…",
+        "Lost the recorder connection — retrying with backoff. " +
+          "If this never clears, refresh the SpatialChat tab.",
+      );
+      return;
+    }
+    if (anyDraining) {
+      setIndicator("warn", "draining", "Flushing trailing audio after mute.");
+      return;
+    }
+    if (openTaps > 0) {
+      const noun = openTaps === 1 ? " stream" : " streams";
+      setIndicator(
+        "ok",
+        openTaps + noun,
+        "Live audio is reaching the recorder.",
+      );
+      return;
+    }
+    if (total > 0 && anyMuted) {
+      setIndicator(
+        "idle",
+        "muted",
+        "Speakers are tapped but currently muted.",
+      );
+      return;
+    }
+    setIndicator(
+      "idle",
+      "idle",
+      "No remote speakers detected yet. The bridge will start when someone speaks.",
+    );
+  }
+
   // ---- Status publishing + title indicator ----------------------------------
   function stripSuffix(t) { return t.replace(/ \[tap [^\]]*\]$/, ""); }
 
@@ -757,6 +960,9 @@
   // tick. chrome.storage.set can reject in odd states (extension
   // reloading, quota) — swallow.
   function publishStatus() {
+    try {
+      updateIndicator();
+    } catch (e) { /* ignore — indicator is best-effort */ }
     try {
       const snap = buildStatusSnapshot();
       const fp = snapshotFingerprint(snap);
