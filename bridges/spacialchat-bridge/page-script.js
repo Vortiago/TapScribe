@@ -161,18 +161,27 @@
     if (taps.has(participant.identity)) return;
     if (!mediaStreamTrack || mediaStreamTrack.readyState !== "live") return;
 
-    let ctx;
+    // Every step from here through `new AudioWorkletNode` can throw
+    // synchronously (CSP blocks blob: worklet, addModule rejects,
+    // MediaStream ctor on a stopped track, worklet name not registered
+    // after a prior addModule failure). Without a single envelope,
+    // those throws escape into LiveKit's trackSubscribed handler and
+    // the bridge dies silently with no signal to the popup — same
+    // class of bug as the ws://-from-https:// SecurityError.
+    let ctx, source, worklet, silentGain;
     try {
       ctx = await ensureAudioGraph();
+      source = ctx.createMediaStreamSource(new MediaStream([mediaStreamTrack]));
+      worklet = new AudioWorkletNode(ctx, "tapscribe-resampler");
+      silentGain = ctx.createGain();
     } catch (e) {
-      console.error("[tapscribe-bridge/page] failed to set up AudioContext/worklet:", e);
+      console.error("[tapscribe-bridge/page] tap setup failed for " + participant.identity, e);
+      // Re-use the ctx-state channel so the popup banner fires. The
+      // exact failure ends up in DevTools; the popup just needs to
+      // stop showing "no taps" with zero context.
+      postCtxState("failed");
       return;
     }
-
-    const name = getDisplayName(participant);
-    const source = ctx.createMediaStreamSource(new MediaStream([mediaStreamTrack]));
-    const worklet = new AudioWorkletNode(ctx, "tapscribe-resampler");
-    const silentGain = ctx.createGain();
     silentGain.gain.value = 0;
 
     const entry = { source, worklet, silentGain, name, resolvedName: name || "" };

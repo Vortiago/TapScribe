@@ -158,12 +158,17 @@ function renderTaps(status) {
   const stale = age > 5;
   const hostLabel = (status.recorderHost || "?") + ":" + (status.recorderPort || "?");
   // Surface a non-running AudioContext at the top so the operator sees
-  // it before reading the per-channel rows. Suspended is the common
-  // case after a tab background; it usually clears on the next click
-  // anywhere in the SpatialChat tab.
-  const ctxBanner = (status.audioContextState && status.audioContextState !== "running")
+  // it before reading the per-channel rows. Suspended/interrupted is
+  // the common case after a tab background — clears on the next click
+  // in the SpatialChat tab. "failed" means tap setup threw (CSP,
+  // addModule reject, ...); no click will fix it, point at DevTools.
+  const ctxState = status.audioContextState;
+  const ctxHint = ctxState === "failed"
+    ? "see DevTools console on the SpatialChat tab for the error"
+    : "click anywhere in the SpatialChat tab to resume";
+  const ctxBanner = (ctxState && ctxState !== "running")
     ? '<div class="status err" style="margin-bottom:6px;">Audio capture paused — AudioContext is <code>' +
-      escapeHtml(status.audioContextState) + '</code>. Click anywhere in the SpatialChat tab to resume.</div>'
+      escapeHtml(ctxState) + '</code>. ' + ctxHint + '.</div>'
     : '';
   if (!status.channels || status.channels.length === 0) {
     let msg = "Content script is loaded";
