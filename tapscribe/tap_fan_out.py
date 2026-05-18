@@ -13,6 +13,8 @@ vocabulary used throughout.
 
 from __future__ import annotations
 
+import asyncio
+import time
 import wave
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -29,6 +31,20 @@ from .text import clean_meta_tokens, safe_name
 # enough that it falls back to silence within a few hundred ms of speech
 # ending. Tuned visually rather than from first principles.
 LEVEL_DECAY_PER_FRAME: float = 0.92
+
+# Minimum seconds between in-fan-out relay reconnect attempts. The relay
+# can die mid-utterance for two reasons we want to recover from
+# transparently — without forcing the bridge to drop and re-open /tap:
+#   1. WhisperLiveKit child crashed.
+#   2. Operator clicked Apply (restart) on the dashboard to swap the
+#      model / language; the recorder stopped the old child and started
+#      a new one (possibly with a different config).
+# At 20 ms frames that's 50 candidate reconnect points per second per
+# stream — without backoff we'd hammer a still-starting WlK. One second
+# leaves a small audio gap during restart but is responsive enough that
+# the operator sees captions resume within ~1 cycle past WlK's ready
+# time. Lowered to ~0 in tests to keep the suite quick.
+RELAY_RECONNECT_BACKOFF_S: float = 1.0
 
 
 class TapFanOut:
@@ -57,6 +73,16 @@ class TapFanOut:
         self._bytes_received: int = 0
         self._relay: WlKRelay | None = None
         self._relay_alive: bool = False
+        # Backoff bookkeeping for transparent relay reconnection across
+        # WhisperLiveKit restarts (model swap, child crash). The task
+        # handle lets _close cancel an in-flight attempt cleanly; the
+        # monotonic timestamp + attempt counter implement the backoff.
+        # `_relay_reconnect_attempts` is also read by tests as a way to
+        # verify the backoff actually coalesces bursts of frames into a
+        # single connect attempt.
+        self._relay_reconnect_task: asyncio.Task | None = None
+        self._relay_last_attempt_at: float = 0.0
+        self._relay_reconnect_attempts: int = 0
         # Peak-hold for the dashboard's per-tap volume meter, decayed
         # per frame (see LEVEL_DECAY_PER_FRAME). Mirrored onto the
         # ActiveStream row via update_bytes so /api/state surfaces it.
@@ -113,13 +139,19 @@ class TapFanOut:
             self._bytes_received,
             level=self._level,
         )
-        # Best-effort relay. If the relay reports closed/dead we stop
-        # trying for the rest of this fan-out — recording continues
-        # unaffected. Per ADR-0002 graceful degradation.
+        # Best-effort relay with transparent reconnect across WhisperLiveKit
+        # restarts. If the relay is alive, forward the frame. If it died
+        # (operator clicked Apply (restart) on the dashboard, or the WlK
+        # child crashed) but LiveChannel is back up, schedule a rebuild
+        # so frames start flowing again without the bridge having to
+        # drop and re-open /tap. Recording to disk continues unaffected
+        # regardless — per ADR-0002 graceful degradation.
         if self._relay_alive:
             assert self._relay is not None
             if not await self._relay.send(buf):
                 self._relay_alive = False
+        elif self._do_live and self._recorder.live.running():
+            self._maybe_schedule_relay_reconnect()
 
     # ------------------------------------------------------------------
     # Lifecycle internals
@@ -216,6 +248,51 @@ class TapFanOut:
                 self._relay = candidate
                 self._relay_alive = True
 
+    def _maybe_schedule_relay_reconnect(self) -> None:
+        """Kick off a background relay reconnect if none is pending and
+        we're outside the backoff window. Synchronous (no await) so
+        write_frame keeps moving — the actual connect happens in a task
+        so a slow / unreachable WlK can't stall the frame stream."""
+        if self._relay_reconnect_task is not None and not self._relay_reconnect_task.done():
+            return
+        now = time.monotonic()
+        if now - self._relay_last_attempt_at < RELAY_RECONNECT_BACKOFF_S:
+            return
+        self._relay_last_attempt_at = now
+        self._relay_reconnect_attempts += 1
+        self._relay_reconnect_task = asyncio.create_task(self._reconnect_relay())
+
+    async def _reconnect_relay(self) -> None:
+        """Rebuild the WlK relay using the recorder's CURRENT live
+        config — so a model / language / port change applied via the
+        dashboard takes effect for already-open /tap WebSockets too.
+
+        The stale relay is closed first; failures there are swallowed
+        because the connection is already known-dead. A connect failure
+        on the new attempt just leaves _relay_alive=False; the backoff
+        guard in _maybe_schedule_relay_reconnect rate-limits retries
+        until WlK comes up."""
+        stale = self._relay
+        self._relay = None
+        if stale is not None:
+            with suppress(Exception):
+                await stale.close()
+        cfg = self._recorder.live.config
+        candidate = WlKRelay(
+            host=cfg.host,
+            port=cfg.port,
+            language=cfg.language,
+            on_settled_line=self._on_settled_line,
+        )
+        if await candidate.connect():
+            self._relay = candidate
+            self._relay_alive = True
+            print(
+                f"[tapscribe] /tap relay reconnected for {self._identity} "
+                f"-> {cfg.host}:{cfg.port} (model={cfg.model}, lang={cfg.language})",
+                flush=True,
+            )
+
     def _on_settled_line(self, text: str) -> None:
         """Settled-line consumer for the WlKRelay. Cleans Whisper
         meta-tokens (e.g. `<|nospeech|>`), drops letterless residues,
@@ -262,6 +339,15 @@ class TapFanOut:
             )
         else:
             print(f"[tapscribe] /tap closed (record off) for {self._identity}", flush=True)
+        # Cancel any in-flight reconnect attempt before we close the
+        # current relay — otherwise the task could land a fresh relay
+        # right after we tried to close it, leaving a stray WS to the
+        # WlK child after the fan-out has gone away.
+        if self._relay_reconnect_task is not None and not self._relay_reconnect_task.done():
+            self._relay_reconnect_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._relay_reconnect_task
+        self._relay_reconnect_task = None
         if self._relay is not None:
             await self._relay.close()  # drains tail captions per Q2
         await self._recorder.streams.remove(self._conn_id)

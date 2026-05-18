@@ -619,3 +619,250 @@ async def test_relay_skipped_when_live_channel_not_running(recorder: Recorder):
     assert len(wavs) == 1
     with wave.open(str(wavs[0]), "rb") as w:
         assert w.getnframes() == 320
+
+
+# ---------------------------------------------------------------------------
+# Live-channel restart: the relay must transparently reconnect
+# ---------------------------------------------------------------------------
+#
+# User scenario: operator changes the WhisperLiveKit model on the dashboard
+# and clicks "Apply (restart)". The recorder kills the old WlK child, spawns
+# a new one (possibly different model / language), and the new child is
+# ready a few seconds later. Currently-open /tap WebSockets must NOT be
+# disrupted — the bridge knows nothing about WlK and shouldn't have to
+# reconnect. The TapFanOut owns the WlK relay; it's responsible for
+# noticing the relay went dead and rebuilding it against whatever WlK
+# the recorder is now running.
+# ---------------------------------------------------------------------------
+
+
+async def _drain_wlk_received(wlk: FakeWlkThread, expected_min_bytes: int, timeout_s: float = 1.5) -> bytes:
+    """Wait until the fake WlK's `received` buffer reaches at least
+    `expected_min_bytes` total bytes, or `timeout_s` seconds elapse.
+    Returns the concatenated received bytes."""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        total = sum(len(c) for c in wlk.received)
+        if total >= expected_min_bytes:
+            break
+        await asyncio.sleep(0.02)
+    return b"".join(wlk.received)
+
+
+async def test_relay_auto_reconnects_after_live_channel_restart(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+    tmp_path: Path,
+):
+    """The headline test for live-channel-restart resilience.
+
+    Steps:
+      1. Open a /tap fan-out; the relay connects to fake WlK A.
+      2. Stream some frames — they arrive at A.
+      3. Simulate "operator clicks Apply (restart)": stop A entirely, then
+         bring up a SECOND fake WlK B on a different port, and rewrite
+         recorder.live.config to point at B. This is functionally the
+         same as a same-port restart but lets us assert on two
+         independent fakes without port-reuse flakiness.
+      4. Continue streaming frames on the SAME /tap WS (the bridge
+         doesn't reconnect).
+      5. Within a couple of seconds, frames must start arriving at B,
+         and the live transcript callback wired through the rebuilt
+         relay must still attribute settled lines to the original
+         identity / name.
+
+    Failing means an operator who changes models loses live captions
+    for all currently-talking speakers until each of them mutes and
+    unmutes — the exact bug the user reported."""
+    from dataclasses import replace
+
+    from tapscribe import tap_fan_out as tfo
+
+    # Shrink the per-fan-out reconnect backoff so the test doesn't sit
+    # waiting full production-cadence seconds between attempts.
+    original_backoff = tfo.RELAY_RECONNECT_BACKOFF_S
+    tfo.RELAY_RECONNECT_BACKOFF_S = 0.05
+
+    wlk_b: FakeWlkThread | None = None
+    try:
+        async with await TapFanOut.open(
+            recorder_with_relay,
+            identity="alice",
+            name="Alice",
+            utterance_id="utt-restart",
+            do_record=True,
+            do_live=True,
+        ) as fan_out:
+            # Phase 1: frames flow to WlK A.
+            await fan_out.write_frame(PCM_FRAME)
+            await fan_out.write_frame(PCM_FRAME)
+            received_a = await _drain_wlk_received(fake_wlk, len(PCM_FRAME) * 2)
+            assert PCM_FRAME * 2 in received_a, "phase 1: frames must reach the original WlK"
+
+            # Phase 2: operator clicks Apply (restart). Tear down A and
+            # bring up B on a fresh port.
+            fake_wlk.stop()
+            wlk_b = FakeWlkThread()
+            wlk_b.start()
+            recorder_with_relay.live.config = replace(
+                recorder_with_relay.live.config,
+                model="new-model",
+                language="nb",
+                port=wlk_b.port,
+            )
+
+            # Phase 3: keep streaming on the same /tap WS. The first frame
+            # will detect the dead relay and kick off a reconnect; give the
+            # background task room to land, then stream a few more.
+            await fan_out.write_frame(PCM_FRAME)
+            await asyncio.sleep(0.3)  # let reconnect task finish
+            for _ in range(5):
+                await fan_out.write_frame(PCM_FRAME)
+                await asyncio.sleep(0.02)
+
+            received_b = await _drain_wlk_received(wlk_b, len(PCM_FRAME))
+            assert len(received_b) > 0, (
+                "phase 3: relay never reconnected to the restarted WlK — "
+                "live captions would silently stop for this speaker until "
+                "the bridge re-opens /tap (i.e. user mutes/unmutes or "
+                "refreshes the tab)"
+            )
+
+            # Phase 4: a settled line pushed by the NEW WlK must reach
+            # the original fan-out's identity via the rebuilt relay's
+            # on_settled_line callback.
+            wlk_b.push_committed("hello after restart")
+            wlk_b.push_committed("second line settles the first")
+            await asyncio.sleep(0.15)
+            snap = recorder_with_relay.transcripts.snapshot()
+            our_lines = [e for e in snap if e["identity"] == "alice"]
+            assert any("hello after restart" in e["text"] for e in our_lines), (
+                "captions from the new WlK must be attributed to the original speaker"
+            )
+    finally:
+        tfo.RELAY_RECONNECT_BACKOFF_S = original_backoff
+        if wlk_b is not None:
+            wlk_b.stop()
+
+
+async def test_relay_reconnect_attempts_respect_backoff(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+):
+    """When the relay is dead and LiveChannel reports running, write_frame
+    must NOT fire a fresh reconnect attempt on every single 20 ms frame
+    — that would mean ~50 connect attempts per second per stream against
+    a still-starting WlK. The backoff guard limits attempts to one per
+    `RELAY_RECONNECT_BACKOFF_S` window per stream."""
+    from tapscribe import tap_fan_out as tfo
+
+    original_backoff = tfo.RELAY_RECONNECT_BACKOFF_S
+    # Long enough that 10 fast frames clearly fit inside one window.
+    tfo.RELAY_RECONNECT_BACKOFF_S = 5.0
+
+    try:
+        async with await TapFanOut.open(
+            recorder_with_relay,
+            identity="alice",
+            name="Alice",
+            utterance_id="utt-backoff",
+            do_record=True,
+            do_live=True,
+        ) as fan_out:
+            # Kill the relay by stopping WlK; subsequent send() returns
+            # False, fan_out sets _relay_alive=False.
+            fake_wlk.stop()
+            await fan_out.write_frame(PCM_FRAME)
+            await asyncio.sleep(0.05)
+            # Now the relay is known-dead. Fire a burst of frames; only
+            # ONE reconnect task should be scheduled because backoff is
+            # 5s and the burst takes ~50 ms.
+            for _ in range(10):
+                await fan_out.write_frame(PCM_FRAME)
+                await asyncio.sleep(0.005)
+
+            # The internal counter `_relay_reconnect_attempts` (we add
+            # this in the impl) must be exactly 1 for the burst.
+            assert getattr(fan_out, "_relay_reconnect_attempts", None) == 1, (
+                "backoff window should coalesce burst of frames into one reconnect attempt"
+            )
+    finally:
+        tfo.RELAY_RECONNECT_BACKOFF_S = original_backoff
+
+
+async def test_relay_reconnect_picks_up_new_config(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+    tmp_path: Path,
+):
+    """When LiveChannel.config is swapped (operator changed model /
+    language), a relay reconnect must read the NEW config — otherwise
+    the model change wouldn't actually take effect for currently-open
+    taps even after reconnect."""
+    from dataclasses import replace
+
+    from tapscribe import tap_fan_out as tfo
+
+    original_backoff = tfo.RELAY_RECONNECT_BACKOFF_S
+    tfo.RELAY_RECONNECT_BACKOFF_S = 0.05
+
+    wlk_b: FakeWlkThread | None = None
+    try:
+        async with await TapFanOut.open(
+            recorder_with_relay,
+            identity="alice",
+            name="Alice",
+            utterance_id="utt-newcfg",
+            do_record=True,
+            do_live=True,
+        ) as fan_out:
+            await fan_out.write_frame(PCM_FRAME)
+            await asyncio.sleep(0.05)
+            assert fan_out._relay is not None
+            assert fan_out._relay._language == recorder_with_relay.live.config.language
+
+            # Swap config to a new language + port (new WlK instance).
+            fake_wlk.stop()
+            wlk_b = FakeWlkThread()
+            wlk_b.start()
+            recorder_with_relay.live.config = replace(
+                recorder_with_relay.live.config,
+                language="nb",
+                port=wlk_b.port,
+            )
+
+            # Force the relay into a known-dead state. We could rely on
+            # the WS close from fake_wlk.stop() propagating naturally,
+            # but that races against websockets' close detection; for a
+            # config-introspection test we want determinism. The
+            # production reconnect path is the same either way — it
+            # branches on `_relay_alive`, not on how the death was
+            # discovered.
+            fan_out._relay_alive = False
+
+            # Trigger reconnect. Pump several frames + an explicit sleep
+            # so the background _reconnect_relay task has time to close
+            # the stale relay and finish the new connect handshake.
+            for _ in range(5):
+                await fan_out.write_frame(PCM_FRAME)
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)
+
+            # The rebuilt relay must reflect the NEW config — language
+            # gets baked into the WlK WS URL, so reading the wrong field
+            # at reconnect time would route audio at the right port but
+            # request the wrong-language model on the recorder restart.
+            assert fan_out._relay is not None, "relay should be rebuilt after config swap"
+            assert fan_out._relay._language == "nb", (
+                "rebuilt relay must use the current (post-restart) language, "
+                "not the language captured at fan-out open"
+            )
+            assert fan_out._relay._port == wlk_b.port, (
+                "rebuilt relay must use the current (post-restart) port"
+            )
+    finally:
+        tfo.RELAY_RECONNECT_BACKOFF_S = original_backoff
+        if wlk_b is not None:
+            wlk_b.stop()
