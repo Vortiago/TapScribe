@@ -340,23 +340,39 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border: 1px solid color-mix(in srgb, var(--rec) 25%, transparent);
   word-break: break-word;
 }
-.live-log {
-  margin-top: 6px;
+.live-log-row { margin-top: 6px; }
+.live-log-row .dim { color: var(--fg-2); margin-left: 4px; }
 
-  & summary { cursor: pointer; font-size: 10.5px; color: var(--fg-2); letter-spacing: 0.04em; }
-  & pre {
-    margin: 4px 0 0;
-    max-height: 160px;
-    overflow: auto;
-    font-family: var(--mono);
-    font-size: 10.5px;
-    background: var(--bg-0);
-    border: 1px solid var(--hairline-2);
-    border-radius: 3px;
-    padding: 6px 8px;
-    white-space: pre-wrap;
-    color: var(--fg-1);
-  }
+.live-log-dialog {
+  width: min(900px, 92vw);
+  max-height: 80vh;
+  padding: 0;
+  border: 1px solid var(--hairline-1, var(--hairline-2));
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--fg-1);
+}
+.live-log-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.live-log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hairline-2);
+
+  & h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--fg-0); }
+  & .spacer { flex: 1; }
+}
+.live-log-pre {
+  margin: 0;
+  padding: 10px 14px;
+  max-height: calc(80vh - 50px);
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg-0);
+  white-space: pre-wrap;
+  color: var(--fg-1);
 }
 
 /* ── Active taps ─────────────────────────────────────────────── */

@@ -19,10 +19,24 @@
 
   <div class="live-err" data-slot="lastError" hidden></div>
 
-  <details class="live-log" data-slot="logBlock" hidden>
-    <summary><span data-slot="logSummary"></span></summary>
-    <pre data-slot="log"></pre>
-  </details>
+  <div class="live-log-row" data-slot="logRow" hidden>
+    <button class="btn tiny" id="liveLogBtn" type="button">
+      view logs <span class="dim" data-slot="logCount"></span>
+    </button>
+  </div>
+</template>
+
+<template id="tpl-live-log-dialog">
+  <dialog class="live-log-dialog" id="liveLogDialog">
+    <header class="live-log-head">
+      <h3>WhisperLiveKit logs</h3>
+      <span class="dim tiny" data-slot="status"></span>
+      <span class="spacer"></span>
+      <button class="btn tiny" id="liveLogRefreshBtn" type="button">refresh</button>
+      <button class="btn tiny" id="liveLogCloseBtn" type="button">close</button>
+    </header>
+    <pre class="live-log-pre" data-slot="pre"></pre>
+  </dialog>
 </template>
 
 <template id="tpl-live-actions-starting">
