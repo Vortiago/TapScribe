@@ -124,6 +124,89 @@ test("4401 close does not schedule a reconnect", async () => {
   assert.equal(ch.error, "tap-auth-failed", "auth failure surfaces in status");
 });
 
+test("ws:// to a non-trustworthy host from https:// is refused with tls-required, not silently thrown", async () => {
+  // Chrome/Edge block `new WebSocket("ws://macmini:8001/...")` from an
+  // https:// page as mixed content — the constructor throws
+  // SecurityError synchronously. Before the guard, that throw escaped
+  // the PCM handler on every frame and left /tap stuck at "idle" with
+  // no clue why. The bridge must now:
+  //   1. Detect this configuration up front and not even dial.
+  //   2. Surface "tls-required" so the popup pill turns red.
+  //   3. NOT construct a FakeWebSocket (the real one would have thrown).
+  const b = createBridge({
+    settings: { recorderHost: "macmini", recorderPort: 8001, useTls: false, tapToken: "tok" },
+  });
+  await ready(b);
+  setupChannel(b);
+
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  assert.equal(b.openSockets().length, 0, "no WS attempted when mixed-content-blocked");
+
+  const ch = b.status().channels.find((c) => c.identity === "u1");
+  assert.equal(ch.error, "tls-required", "tls-required surfaces in status");
+  assert.equal(ch.tapWs, null, "tapWs stays null so popup pill stays 'idle'");
+});
+
+test("localhost is exempt from the mixed-content guard", async () => {
+  // Loopback (localhost, 127.0.0.1, ::1) is a "potentially trustworthy
+  // origin" — Chrome and Edge both allow ws:// to it even from https://.
+  // The bridge mustn't slap tls-required on dev setups against a local
+  // recorder.
+  for (const host of ["localhost", "127.0.0.1", "::1", "foo.localhost"]) {
+    const b = createBridge({ settings: { recorderHost: host, useTls: false } });
+    await ready(b);
+    setupChannel(b);
+    b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+    assert.equal(
+      b.openSockets().length, 1,
+      "WS dialed against trustworthy host " + host,
+    );
+    const ch = b.status().channels.find((c) => c.identity === "u1");
+    assert.equal(ch.error, null, "no tls-required against " + host);
+  }
+});
+
+test("wss:// to a remote host is exempt from the mixed-content guard", async () => {
+  // The guard targets ws://-from-https:// specifically. wss:// is fine
+  // from https:// — the operator who turned on --tls on a remote
+  // recorder is exactly the case we want to unblock.
+  const b = createBridge({
+    settings: { recorderHost: "macmini", recorderPort: 8001, useTls: true, tapToken: "tok" },
+  });
+  await ready(b);
+  setupChannel(b);
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  assert.equal(b.openSockets().length, 1, "wss:// dialed without complaint");
+  assert.ok(b.lastSocket().url.startsWith("wss://"), "scheme is wss");
+});
+
+test("flipping Use TLS on clears the sticky tls-required error so the bridge redials", async () => {
+  // The mixed-content guard sets ch.error = "tls-required" and skips
+  // the dial. When the operator fixes the config (ticks Use TLS in the
+  // popup) the storage-change handler should drop the sticky error so
+  // the next PCM frame redials against the new scheme — same recovery
+  // pattern as fixing a 4401 tap token.
+  const b = createBridge({
+    settings: { recorderHost: "macmini", recorderPort: 8001, useTls: false, tapToken: "tok" },
+  });
+  await ready(b);
+  setupChannel(b);
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  assert.equal(b.openSockets().length, 0);
+  assert.equal(
+    b.status().channels.find((c) => c.identity === "u1").error,
+    "tls-required",
+  );
+
+  // Operator ticks "Use TLS" in the popup. chrome.storage.onChanged
+  // fires; the bridge clears the sticky error and the next PCM frame
+  // should redial — this time over wss://.
+  b.flipUseTls(true);
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  assert.equal(b.openSockets().length, 1, "redial after settings change");
+  assert.ok(b.lastSocket().url.startsWith("wss://"));
+});
+
 test("forwarded frame body is the same bytes the page-script sent", async () => {
   // Sanity-check: the bridge doesn't mutate / reframe / pad PCM. Whatever
   // page-script.js posts goes through verbatim. A regression that wrapped

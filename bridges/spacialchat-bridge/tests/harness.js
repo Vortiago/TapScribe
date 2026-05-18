@@ -145,14 +145,22 @@ function makeChromeMock(initialSettings) {
       },
     },
     _writes: writes,
+    _fireChange: (changes) => {
+      for (const fn of changeListeners) {
+        try { fn(changes, "local"); } catch (e) { /* surface via assert */ }
+      }
+    },
   };
 }
 
-function createBridge({ settings = {} } = {}) {
+function createBridge({ settings = {}, location: locationOverride } = {}) {
   FakeWebSocket.reset();
   const clock = createClock();
   const chrome = makeChromeMock({
-    recorderHost: "rec.test",
+    // Default to localhost so the mixed-content guard (ws:// from
+    // https:// blocked unless host is trustworthy) doesn't fire in the
+    // wire-contract tests. Tests for the guard itself override this.
+    recorderHost: "localhost",
     recorderPort: 9999,
     tapToken: "tok",
     useTls: false,
@@ -180,7 +188,16 @@ function createBridge({ settings = {} } = {}) {
         remove: () => {},
       }),
     },
-    location: { href: "https://app.spatial.chat/test" },
+    // The bridge runs inside the SpatialChat tab, which is always
+    // https://. The mixed-content guard checks `location.protocol`
+    // and `location.origin`, so populate both. Tests can override
+    // via `createBridge({ location: { ... } })` to simulate other
+    // origins (e.g. a localhost dev page that allows ws://).
+    location: locationOverride || {
+      href: "https://app.spatial.chat/test",
+      protocol: "https:",
+      origin: "https://app.spatial.chat",
+    },
     chrome,
     WebSocket: FakeWebSocket,
     crypto: { randomUUID: () => "u-" + Math.random().toString(36).slice(2) },
@@ -220,6 +237,13 @@ function createBridge({ settings = {} } = {}) {
     return last.bridgeStatus || null;
   }
 
+  // Simulate the operator changing settings in the popup — fires the
+  // chrome.storage.onChanged listener the content script registered at
+  // boot. Matches the real shape: `{ key: { newValue, oldValue } }`.
+  function flipUseTls(useTls) {
+    chrome._fireChange({ useTls: { newValue: !!useTls, oldValue: !useTls } });
+  }
+
   return {
     post,
     status,
@@ -227,6 +251,7 @@ function createBridge({ settings = {} } = {}) {
     lastSocket: () => FakeWebSocket._all[FakeWebSocket._all.length - 1],
     clock,
     flushMicrotasks,
+    flipUseTls,
   };
 }
 
