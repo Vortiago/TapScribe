@@ -3,7 +3,7 @@
 // sessions browser only when something structural changed so user scroll +
 // inputs survive across ticks.
 
-import { cssEscape } from "./formatters.js";
+import { cssEscape, fmtClock } from "./formatters.js";
 import { fetchState, postJson, putJson, del } from "./api.js";
 import { loadTemplates } from "./templates.js";
 import { aliasOf } from "./speakers.js";
@@ -515,25 +515,85 @@ The source folder will be deleted. The target's merged transcript (if any) will 
     await refresh();
   }
 
-  async function copyMerged(session) {
+  async function copyMerged(session, btn) {
     if (!lastJson) return;
     const s = lastJson.sessions.find((x) => x.session === session);
-    if (!s || !s.session_transcript || !s.session_transcript.plain_text) {
+    if (!s || !s.session_transcript) {
       alert("No merged transcript yet for this session.");
       return;
     }
+    // Rebuild the text from segments so display-name aliases match what the
+    // user sees on screen — the backend's `plain_text` uses raw speaker keys.
+    const aliases = effectiveMeta(s).aliases || {};
+    const segs = s.session_transcript.segments || [];
+    const lines = [];
+    for (const seg of segs) {
+      const text = seg.text || "";
+      if (!text) continue;
+      const speaker = aliasOf(seg.speaker || "", aliases);
+      let line = `[${fmtClock(seg.abs_start)}] ${speaker}: ${text}`;
+      if (seg.low_confidence) line += " [uncertain]";
+      lines.push(line);
+    }
+    const out = lines.join("\n") || s.session_transcript.plain_text || "";
+    if (!out) {
+      alert("No merged transcript yet for this session.");
+      return;
+    }
+
+    // Non-secure context (LAN http://): `navigator.clipboard` is gated, so
+    // the await would reject and any `window.open` in the catch is past the
+    // user-gesture window and gets popup-blocked. Open the fallback tab
+    // synchronously inside the click handler instead.
+    const haveClipboard = window.isSecureContext
+      && typeof navigator.clipboard?.writeText === "function";
+    if (!haveClipboard) {
+      openTranscriptTab(out, btn);
+      return;
+    }
+
     try {
-      await navigator.clipboard.writeText(s.session_transcript.plain_text);
+      await navigator.clipboard.writeText(out);
+      flashButton(btn, "✓ copied");
     } catch (e) {
+      // Past the user gesture — popup will likely be blocked. Try once,
+      // then fall back to a prompt() the user can select-copy from.
       const w = window.open("", "_blank");
       if (w) {
-        w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
-        w.document.body.style.whiteSpace = "pre-wrap";
-        w.document.body.textContent = s.session_transcript.plain_text;
+        populateTranscriptTab(w, out);
+        flashButton(btn, "↗ opened in new tab");
       } else {
-        alert("Copy failed (clipboard blocked).");
+        window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", out);
       }
     }
+  }
+
+  function openTranscriptTab(text, btn) {
+    const w = window.open("", "_blank");
+    if (w) {
+      populateTranscriptTab(w, text);
+      flashButton(btn, "↗ opened in new tab");
+    } else {
+      window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", text);
+    }
+  }
+
+  function populateTranscriptTab(w, text) {
+    w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
+    w.document.body.style.whiteSpace = "pre-wrap";
+    w.document.body.textContent = text;
+  }
+
+  function flashButton(btn, label) {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = label;
+    btn.classList.add("just-completed");
+    setTimeout(() => {
+      btn.classList.remove("just-completed");
+      // Only restore if the button hasn't been re-rendered to something else.
+      if (btn.textContent === label) btn.textContent = prev;
+    }, 1500);
   }
 
   // ---- Top-bar actions ----------------------------------------------------

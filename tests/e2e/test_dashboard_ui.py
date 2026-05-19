@@ -107,7 +107,10 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             pytest.skip(f"Chromium not available: {e}")
             return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
         try:
-            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            context = await browser.new_context(
+                viewport={"width": 1400, "height": 900},
+                permissions=["clipboard-read", "clipboard-write"],
+            )
             page = await context.new_page()
             # The dashboard polls /api/state every second so it's never
             # network-idle — wait on DOM ready instead.
@@ -250,6 +253,62 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             legend_text = await legend.inner_text()
             assert "Alice" in legend_text and "Bob" in legend_text
             await page.screenshot(path=str(SHOTS_DIR / "05-merged-transcript.png"), full_page=True)
+
+            # ⎘ copy merged must copy the speaker display names (aliases
+            # applied) — what the user sees on screen — not the raw
+            # speaker keys from the backend's `plain_text`. Set an alias
+            # and verify the clipboard reflects it.
+            await page.evaluate(
+                """
+                async (sess) => {
+                  const r = await fetch('/api/session-meta/' + encodeURIComponent(sess), {
+                    method: 'PUT',
+                    headers: {'content-type': 'application/json'},
+                    body: JSON.stringify({label: '', aliases: {Alice: 'Ms. Smith', Bob: 'Mr. Jones'}}),
+                  });
+                  if (!r.ok) throw new Error('PUT session-meta: ' + r.status);
+                }
+                """,
+                rec.session_start,
+            )
+            # Wait for the new aliases to render in the merged transcript.
+            await page.wait_for_function(
+                """
+                () => {
+                  const t = document.querySelector('.sess-main .transcript')?.innerText || '';
+                  return t.includes('Ms. Smith: ') && t.includes('Mr. Jones: ');
+                }
+                """,
+                timeout=5000,
+            )
+            copy_btn = page.locator(f'[data-copy-sess="{rec.session_start}"]')
+            await copy_btn.click()
+            clipboard = await page.evaluate("() => navigator.clipboard.readText()")
+            assert "Ms. Smith: " in clipboard and "Mr. Jones: " in clipboard, (
+                f"copy merged didn't apply aliases: {clipboard!r}"
+            )
+            # The raw speaker keys ("Alice" / "Bob" in the FakeTranscriber
+            # wiring) must not survive aliasing — otherwise the button is
+            # copying backend `plain_text` and ignoring the user's aliases.
+            assert "Alice: " not in clipboard and "Bob: " not in clipboard, (
+                f"copy merged leaked raw speaker keys: {clipboard!r}"
+            )
+            # The click must give visible confirmation — otherwise the user
+            # has no way to tell the silent clipboard write happened. The
+            # button briefly swaps to "✓ copied" with the `just-completed`
+            # flash animation.
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const b = document.querySelector(
+                    '[data-copy-sess="{rec.session_start}"]',
+                  );
+                  return b && b.textContent.trim() === '✓ copied'
+                      && b.classList.contains('just-completed');
+                }}
+                """,
+                timeout=2000,
+            )
         finally:
             await browser.close()
 
@@ -304,7 +363,10 @@ async def test_dashboard_with_real_audio_and_whisper(
             pytest.skip(f"Chromium not available: {e}")
             return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
         try:
-            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            context = await browser.new_context(
+                viewport={"width": 1400, "height": 900},
+                permissions=["clipboard-read", "clipboard-write"],
+            )
             page = await context.new_page()
             await page.goto(running_recorder.base_url, wait_until="domcontentloaded")
 
