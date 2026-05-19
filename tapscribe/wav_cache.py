@@ -142,6 +142,7 @@ def _to_dict(cached: CachedTranscription) -> dict[str, Any]:
     r = cached.result
     out: dict[str, Any] = {
         "transcriber": r.transcriber,
+        "backend": r.backend,
         "device": r.device,
         "model": r.model,
         "language": r.language,
@@ -168,6 +169,8 @@ def _to_dict(cached: CachedTranscription) -> dict[str, Any]:
 def _from_dict(data: dict[str, Any]) -> CachedTranscription:
     result = TranscriptionResult(
         transcriber=data["transcriber"],
+        # backend was added later — legacy sidecars without it load with "".
+        backend=data.get("backend", ""),
         device=data["device"],
         model=data["model"],
         language=data.get("language", "?"),

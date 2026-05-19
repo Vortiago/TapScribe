@@ -62,7 +62,9 @@ def test_metadata_properties_reflect_constructor_args():
     )
     assert t.name == "mlx-whisper"
     assert t.model_name == "small.en"
-    assert "Apple Silicon" in t.device
+    # Hardware-only device label; backend identifies the library separately.
+    assert t.device == "Apple Silicon GPU"
+    assert t.backend == "mlx-whisper"
 
 
 def test_transcribe_returns_typed_result(tmp_path: Path):
@@ -81,6 +83,8 @@ def test_transcribe_returns_typed_result(tmp_path: Path):
     result = t.transcribe(_one_second_wav(tmp_path / "x.wav"), initial_prompt="ctx")
     assert isinstance(result, TranscriptionResult)
     assert result.transcriber == "mlx-whisper"
+    assert result.backend == "mlx-whisper"
+    assert result.device == "Apple Silicon GPU"
     assert result.model == "small.en"
     assert len(result.segments) == 1
     assert result.segments[0].text == "hello world"

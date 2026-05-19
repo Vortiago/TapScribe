@@ -62,7 +62,8 @@ class MlxWhisperTranscriber:
     """
 
     name: ClassVar[str] = "mlx-whisper"
-    device: str = "Apple Silicon GPU (MLX)"
+    backend: ClassVar[str] = "mlx-whisper"
+    device: str = "Apple Silicon GPU"
 
     def __init__(
         self,
@@ -133,6 +134,7 @@ class MlxWhisperTranscriber:
         applied_view = {k: (v if not callable(v) else str(v)) for k, v in kwargs.items()}
         return TranscriptionResult(
             transcriber=self.name,
+            backend=self.backend,
             device=self.device,
             model=self.model_name,
             language=result.get("language", "?"),

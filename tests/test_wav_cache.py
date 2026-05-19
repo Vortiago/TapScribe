@@ -30,6 +30,7 @@ def _wav(path: Path) -> Path:
 
 class _StubTranscriber:
     name = "fake"
+    backend = "fake-backend"
     device = "test-device"
     model_name = "fake-model"
     call_count = 0
@@ -38,6 +39,7 @@ class _StubTranscriber:
         _StubTranscriber.call_count += 1
         return TranscriptionResult(
             transcriber=self.name,
+            backend=self.backend,
             device=self.device,
             model=self.model_name,
             language="en",
@@ -73,6 +75,49 @@ def test_cached_transcribe_runs_transcriber_on_miss_and_writes_sidecar(tmp_path:
     data = json.loads(sidecar.read_text(encoding="utf-8"))
     assert data["transcriber"] == "fake"
     assert data["model"] == "fake-model"
+    assert data["backend"] == "fake-backend"
+
+
+def test_sidecar_round_trips_backend_field(tmp_path: Path):
+    """`backend` must persist through the JSON sidecar so the dashboard can
+    render it for transcripts loaded after a restart."""
+    wav = _wav(tmp_path / "x.wav")
+    cached_transcribe(wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
+    re_read = read_cached(wav)
+    assert re_read is not None
+    assert re_read.result.backend == "fake-backend"
+
+
+def test_legacy_sidecar_without_backend_field_loads_with_empty_backend(tmp_path: Path):
+    """Older sidecars predate the backend field — they should still load
+    (rather than crash) and surface backend as the empty string. The
+    dashboard renders that as `?`."""
+    wav = _wav(tmp_path / "x.wav")
+    legacy = {
+        "transcriber": "fake",
+        # no "backend" key — this is the legacy shape
+        "device": "test-device",
+        "model": "fake-model",
+        "language": "en",
+        "language_probability": 1.0,
+        "duration": 1.0,
+        "segments": [],
+        "text": "",
+        "initial_prompt_used": "",
+        "hotwords_used": "",
+        "quality_settings": {},
+        "suppressed_hallucinations": [],
+        "transcribed_at": "2026-05-01T00:00:00+00:00",
+        "transcribe_ms": 10,
+        "source": "original",
+        "speaker_name": "",
+        "wav_size": wav.stat().st_size,
+        "wav_mtime_ns": wav.stat().st_mtime_ns,
+    }
+    wav.with_suffix(".json").write_text(json.dumps(legacy), encoding="utf-8")
+    re_read = read_cached(wav)
+    assert re_read is not None
+    assert re_read.result.backend == ""
 
 
 def test_cached_transcribe_returns_cached_without_calling_transcriber_on_hit(tmp_path: Path):

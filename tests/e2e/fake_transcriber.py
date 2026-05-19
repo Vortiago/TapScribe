@@ -32,6 +32,7 @@ class FakeTranscriber:
     """
 
     name: ClassVar[str] = "fake-whisper"
+    backend: ClassVar[str] = "fake-backend"
 
     def __init__(self, *, text_by_speaker: dict[str, str], model_name: str = "fake-small.en"):
         self.text_by_speaker = text_by_speaker
@@ -58,6 +59,7 @@ class FakeTranscriber:
         )
         return TranscriptionResult(
             transcriber=self.name,
+            backend=self.backend,
             device=self.device,
             model=self.model_name,
             language="en",

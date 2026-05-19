@@ -63,7 +63,21 @@ def test_metadata_properties_reflect_constructor_args():
     )
     assert t.name == "voxtral"
     assert t.model_name == "voxtral-mini"
-    assert "CPU" in t.device or "cpu" in t.device  # human-readable form
+    # Hardware-only device label; backend identifies the library separately.
+    assert t.device == "CPU"
+    assert t.backend == "hf-transformers"
+
+
+def test_cuda_constructor_uses_cuda_device_label_with_hf_backend():
+    processor, model = _voxtral_mocks()
+    t = VoxtralTranscriber(
+        model_name="voxtral-mini",
+        processor=processor,
+        model=model,
+        device="cuda",
+    )
+    assert t.device == "CUDA"
+    assert t.backend == "hf-transformers"
 
 
 def test_transcribe_returns_single_segment_with_full_text(tmp_path: Path):
@@ -79,14 +93,46 @@ def test_transcribe_returns_single_segment_with_full_text(tmp_path: Path):
 
     assert isinstance(result, TranscriptionResult)
     assert result.transcriber == "voxtral"
+    assert result.backend == "hf-transformers"
+    assert result.device == "CPU"
     assert result.model == "voxtral-mini"
     assert result.text == "this is the transcript"
+    # Single-sentence output → one segment spanning the WAV.
     assert len(result.segments) == 1
     seg = result.segments[0]
     assert seg.text == "this is the transcript"
     assert seg.start == 0.0
     # Single segment covers the WAV duration
     assert seg.end > 0
+
+
+def test_transcribe_splits_multi_sentence_output_into_segments(tmp_path: Path):
+    """Voxtral returns one text blob per WAV. For a readable merged
+    transcript, the adapter sentence-splits and interpolates timestamps —
+    otherwise a 60-second utterance becomes one giant unbroken paragraph
+    at the merge level."""
+    processor, model = _voxtral_mocks(decoded_text="Hello there. How are you? I am fine.")
+    t = VoxtralTranscriber(
+        model_name="voxtral-mini",
+        processor=processor,
+        model=model,
+        device="cpu",
+    )
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav)
+
+    assert [s.text for s in result.segments] == [
+        "Hello there.",
+        "How are you?",
+        "I am fine.",
+    ]
+    # Adjacency invariant: timestamps cover the WAV without gaps/overlap.
+    for a, b in zip(result.segments, result.segments[1:], strict=False):
+        assert a.end == b.start
+    assert result.segments[0].start == 0.0
+    assert result.segments[-1].end == result.duration
+    # The joined text is preserved on the result for downstream use.
+    assert result.text == "Hello there. How are you? I am fine."
 
 
 def test_transcribe_uses_transcription_request_with_audio_path(tmp_path: Path):
@@ -105,6 +151,24 @@ def test_transcribe_uses_transcription_request_with_audio_path(tmp_path: Path):
     assert "model_id" in kwargs
     # No language hint for a plain "voxtral-*" model name (auto-detect).
     assert "language" not in kwargs
+
+
+def test_transcribe_records_language_auto_when_no_hint(tmp_path: Path):
+    """Voxtral doesn't return a detected language in its response payload.
+    When we don't pass a hint, the dashboard should still surface what
+    happened — `language="auto"` (we let Voxtral auto-detect) rather than
+    `"?"` (we have no idea), so the operator can tell the field is
+    populated and not just missing data."""
+    processor, model = _voxtral_mocks()
+    t = VoxtralTranscriber(
+        model_name="voxtral-mini",
+        processor=processor,
+        model=model,
+        device="cpu",
+    )
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav)
+    assert result.language == "auto"
 
 
 def test_transcribe_drops_prompt_and_hotwords_but_records_them(tmp_path: Path):

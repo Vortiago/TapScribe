@@ -9,11 +9,73 @@ cleanly.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import wav_duration_s
 from .base import TranscriptionResult, TranscriptionSegment, default_language_for
+
+# Sentence boundary: a terminator (`.`, `!`, `?`) followed by whitespace.
+# Lookbehind keeps the terminator with the preceding sentence. The negative
+# lookbehind `(?<!\.\.)` skips the final dot of an ellipsis (`...`) — that's
+# internal punctuation, not a sentence end. `What?!` still splits because
+# the position behind `!` is `?!`, not `..`.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?<!\.\.)\s+")
+
+
+def split_voxtral_text_into_segments(text: str, *, duration: float) -> tuple[TranscriptionSegment, ...]:
+    """Sentence-split Voxtral's free-form output and interpolate timestamps.
+
+    Voxtral returns one text blob per WAV with no per-token timing. Without
+    splitting, the merged transcript renders a 60-second utterance as one
+    unreadable paragraph. We split on `.`, `!`, `?` (followed by
+    whitespace), then allocate each sentence a share of the WAV's duration
+    proportional to its character count.
+
+    Timestamps are approximate (off by seconds within a WAV) — fine for a
+    chat-style merged view, not for subtitle alignment. Will be replaced
+    with real timestamps once HF transformers issue #41999 lands.
+
+    Invariants:
+      - Adjacent: `segments[i].end == segments[i+1].start`.
+      - The first segment starts at 0.0; the last ends exactly at
+        `duration` (rounding leftover is absorbed by the last segment).
+      - Empty/whitespace input returns an empty tuple.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ()
+
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(stripped) if s.strip()]
+    if not sentences:
+        return ()
+
+    if len(sentences) == 1 or duration <= 0:
+        # One sentence — or no measurable duration to allocate across.
+        # Either way, every sentence collapses to [0, duration].
+        end = max(0.0, duration)
+        return tuple(TranscriptionSegment(start=0.0, end=end, text=s) for s in sentences)
+
+    total_chars = sum(len(s) for s in sentences)
+    segments: list[TranscriptionSegment] = []
+    cursor = 0.0
+    for i, sent in enumerate(sentences):
+        if i == len(sentences) - 1:
+            # Last sentence ends exactly at `duration` to absorb rounding.
+            end = duration
+        else:
+            end = cursor + (len(sent) / total_chars) * duration
+        segments.append(
+            TranscriptionSegment(
+                start=round(cursor, 2),
+                end=round(end, 2),
+                text=sent,
+            )
+        )
+        cursor = end
+    return tuple(segments)
+
 
 # Currently only Voxtral Mini is realistic for local CPU use; other Voxtral
 # sizes can be added later by branching on model_name in load().
@@ -24,17 +86,15 @@ class VoxtralTranscriber:
     """A Voxtral model wrapped to satisfy the `Transcriber` Protocol."""
 
     name: ClassVar[str] = "voxtral"
+    backend: ClassVar[str] = "hf-transformers"
 
     def __init__(self, *, model_name: str, processor: Any, model: Any, device: str):
         self.model_name = model_name
         self._processor = processor
         self._model = model
         self._raw_device = device
-        # Surface the same human-readable device label the dashboard expects.
-        if device == "cpu":
-            self.device = "CPU (HF transformers; NOT MLX)"
-        else:
-            self.device = f"{device.upper()} (HF transformers; NOT MLX)"
+        # Hardware-only label; the library name lives on `backend`.
+        self.device = "CPU" if device == "cpu" else device.upper()
 
     @classmethod
     def load(cls, model_name: str) -> VoxtralTranscriber:
@@ -115,17 +175,22 @@ class VoxtralTranscriber:
         gen_ids = outputs[:, prompt_len:]
         text = self._processor.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
 
-        dur = wav_duration_s(path)
-        seg = TranscriptionSegment(start=0.0, end=round(dur, 2), text=text)
+        dur = round(wav_duration_s(path), 2)
+        segments = split_voxtral_text_into_segments(text, duration=dur)
         return TranscriptionResult(
             transcriber=self.name,
+            backend=self.backend,
             device=self.device,
             model=self.model_name,
-            language=language or "?",
+            # Voxtral doesn't echo a detected language in its response; record
+            # the hint we sent, or "auto" when we let it auto-detect. Distinct
+            # from "?" (genuinely unknown) so the UI never shows a populated
+            # field as if it were missing.
+            language=language or "auto",
             language_probability=0.0,
-            duration=round(dur, 2),
+            duration=dur,
             text=text,
-            segments=(seg,),
+            segments=segments,
             initial_prompt_used=initial_prompt or "",
             hotwords_used=hotwords or "",
             quality_settings=dict(gen_kwargs),

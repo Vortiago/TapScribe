@@ -44,12 +44,14 @@ class _FixedTranscriber:
     (handy for asserting which WAVs the merge pulled in)."""
 
     name = "fake"
+    backend = "fake-backend"
     device = "test-device"
     model_name = "fake-model"
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
         return TranscriptionResult(
             transcriber=self.name,
+            backend=self.backend,
             device=self.device,
             model=self.model_name,
             language="en",
@@ -166,6 +168,7 @@ def test_merge_carries_suppressed_segments_with_absolute_timestamps(tmp_path: Pa
         def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
             return TranscriptionResult(
                 transcriber=self.name,
+                backend=self.backend,
                 device=self.device,
                 model=self.model_name,
                 language="en",

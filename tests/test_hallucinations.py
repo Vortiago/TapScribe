@@ -9,6 +9,7 @@ from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegmen
 def _result_with(segments: tuple[TranscriptionSegment, ...]) -> TranscriptionResult:
     return TranscriptionResult(
         transcriber="fake",
+        backend="fake-backend",
         device="test",
         model="fake-model",
         language="en",
@@ -207,6 +208,7 @@ def test_apply_carries_forward_existing_suppressed_list(tmp_config_dir):
     drop = TranscriptionSegment(start=2.0, end=3.0, text="hit the bell")
     result = TranscriptionResult(
         transcriber="fake",
+        backend="fake-backend",
         device="test",
         model="fake-model",
         language="en",
