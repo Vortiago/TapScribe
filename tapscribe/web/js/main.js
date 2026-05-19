@@ -3,7 +3,7 @@
 // sessions browser only when something structural changed so user scroll +
 // inputs survive across ticks.
 
-import { cssEscape } from "./formatters.js";
+import { cssEscape, fmtClock } from "./formatters.js";
 import { fetchState, postJson, putJson, del } from "./api.js";
 import { loadTemplates } from "./templates.js";
 import { aliasOf } from "./speakers.js";
@@ -496,18 +496,36 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
   async function copyMerged(session) {
     if (!lastJson) return;
     const s = lastJson.sessions.find((x) => x.session === session);
-    if (!s || !s.session_transcript || !s.session_transcript.plain_text) {
+    if (!s || !s.session_transcript) {
+      alert("No merged transcript yet for this session.");
+      return;
+    }
+    // Rebuild the text from segments so display-name aliases match what the
+    // user sees on screen — the backend's `plain_text` uses raw speaker keys.
+    const aliases = effectiveMeta(s).aliases || {};
+    const segs = s.session_transcript.segments || [];
+    const lines = [];
+    for (const seg of segs) {
+      const text = seg.text || "";
+      if (!text) continue;
+      const speaker = aliasOf(seg.speaker || "", aliases);
+      let line = `[${fmtClock(seg.abs_start)}] ${speaker}: ${text}`;
+      if (seg.low_confidence) line += " [uncertain]";
+      lines.push(line);
+    }
+    const out = lines.join("\n") || s.session_transcript.plain_text || "";
+    if (!out) {
       alert("No merged transcript yet for this session.");
       return;
     }
     try {
-      await navigator.clipboard.writeText(s.session_transcript.plain_text);
+      await navigator.clipboard.writeText(out);
     } catch (e) {
       const w = window.open("", "_blank");
       if (w) {
         w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
         w.document.body.style.whiteSpace = "pre-wrap";
-        w.document.body.textContent = s.session_transcript.plain_text;
+        w.document.body.textContent = out;
       } else {
         alert("Copy failed (clipboard blocked).");
       }
