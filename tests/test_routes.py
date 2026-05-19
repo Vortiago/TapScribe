@@ -540,13 +540,12 @@ def test_api_transcribe_returns_freshly_written_transcript(client, recorder_unde
     cache and returns the wire JSON. With the multi-cache layout there
     is no `<wav>.json` to read back; the route must serve the primary
     that cached_transcribe just promoted."""
-    from tapscribe import transcribers as _transcribers
-
     fake = TranscriberStub(backend="fake-backend", model="fake-small.en", text="route transcript")
-    monkeypatch.setattr(_transcribers, "load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
-    import tapscribe.app as _app
-
-    monkeypatch.setattr(_app, "load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    # Patch both the canonical binding and the local rebinding in app.py
+    # (which does `from .transcribers import load_transcriber` at module
+    # load, so a later patch on the source package wouldn't reach it).
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
     sd = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])

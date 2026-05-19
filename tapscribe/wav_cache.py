@@ -21,6 +21,7 @@ CONTEXT.md "Per-WAV transcript cache" for the layout.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from dataclasses import dataclass
@@ -362,10 +363,12 @@ def _migrate_legacy_if_needed(wav_path: Path) -> None:
         return
     parsed = _read_entry(legacy)
     if parsed is None:
-        try:
+        # Best-effort cleanup of a corrupt legacy sidecar. If unlink fails
+        # (Windows file lock, perms) the file stays put — subsequent reads
+        # will keep returning None from `_read_entry`, which is the same
+        # behavior as before this PR, so the failure is non-fatal.
+        with contextlib.suppress(OSError):
             legacy.unlink()
-        except OSError:
-            pass
         return
     d.mkdir(parents=True, exist_ok=True)
     key = _entry_key(parsed.result.backend, parsed.result.model)
