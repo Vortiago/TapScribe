@@ -165,6 +165,7 @@ class TapFanOut:
             resumed = self._recorder.utterances.try_resume(
                 self._utterance_id,
                 identity=self._identity,
+                session_dir=self._recorder.session_dir,
             )
             if resumed is not None:
                 # Bridge reconnected within the resume window with the

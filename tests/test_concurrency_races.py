@@ -370,15 +370,9 @@ async def test_hallucinations_malformed_input_handling(
     test loudly. The good `amara.org` rule survives every flavour of
     malformed neighbour.
 
-    Stanza 2: non-UTF-8 bytes in the file. `tapscribe.text.read_text_file`
-    catches OSError but NOT UnicodeDecodeError (a ValueError subclass),
-    so a single bad byte raises out of `parse_rules()` and propagates
-    into every transcribe job.
-
-    *** AUDIT FINDING (do not fix here — Track C is tests-only) ***
-    `tapscribe/text.py::read_text_file` should also catch
-    UnicodeDecodeError and return "" — same contract as the OSError
-    fallback — so a malformed bytes paste is a "no rules apply" no-op
+    Stanza 2: non-UTF-8 bytes in the file. `read_text_file` catches
+    UnicodeDecodeError and returns "" (same contract as the OSError
+    fallback), so a malformed bytes paste is a "no rules apply" no-op
     rather than a wedged pipeline."""
     # ---- Stanza 1: mixed bad + good rules in valid UTF-8 ----
     (tmp_config_dir / "hallucinations.txt").write_text(
@@ -402,9 +396,9 @@ async def test_hallucinations_malformed_input_handling(
     )
     assert hallucinations.match("Subtitles by Amara.org", rules) == "amara.org"
 
-    # ---- Stanza 2: non-UTF-8 bytes — pins the crashing behaviour
-    # so the audit-flagged read_text_file gap is documented in the
-    # test suite. ----
+    # ---- Stanza 2: non-UTF-8 bytes — the bad file reads as empty
+    # (read_text_file catches UnicodeDecodeError), so parse_rules
+    # returns no rules rather than raising into every transcribe job. ----
     (tmp_config_dir / "hallucinations.txt").write_bytes(b"valid line\n\xff\xfe\xfd not utf-8\namara.org\n")
-    with pytest.raises(UnicodeDecodeError):
-        hallucinations.parse_rules()
+    rules = hallucinations.parse_rules()
+    assert rules == [], f"expected no rules from a non-UTF-8 file, got {[r['raw'] for r in rules]}"

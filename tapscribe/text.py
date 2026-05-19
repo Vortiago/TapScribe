@@ -29,12 +29,18 @@ _LEADING_PUNCT_RE = re.compile(r"^[\s.,;:!?\"'‘’“”…\-]+")
 
 def read_text_file(path: Path) -> str:
     """Read a small text config file. Returns "" on any failure so callers
-    can treat "missing" and "unreadable" identically."""
+    can treat "missing" and "unreadable" identically.
+
+    UnicodeDecodeError is treated the same way: a config file written in
+    a non-UTF-8 encoding (e.g. Windows-1252 from Notepad) reads as empty
+    rather than raising into every transcribe job. The operator's file
+    is effectively "no rules" until they re-save it as UTF-8.
+    """
     try:
         return path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         return ""
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return ""
 
 
