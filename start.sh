@@ -132,6 +132,12 @@ python -c "import whisperlivekit" >/dev/null 2>&1 || NEED_INSTALL=1
 python -c "import multipart" >/dev/null 2>&1 || NEED_INSTALL=1
 python -c "import fastapi" >/dev/null 2>&1 || NEED_INSTALL=1
 python -c "from transformers import VoxtralForConditionalGeneration" >/dev/null 2>&1 || NEED_INSTALL=1
+# mistral-common is a runtime dep of transformers' Voxtral processor: its
+# apply_transcription_request() references TranscriptionRequest which is
+# imported conditionally via is_mistral_common_available(). Without the
+# package, Voxtral runs crash with `NameError: TranscriptionRequest`
+# deep inside transformers — not a clean ImportError.
+python -c "import mistral_common" >/dev/null 2>&1 || NEED_INSTALL=1
 python -c "import cryptography" >/dev/null 2>&1 || NEED_INSTALL=1
 if [ "$USE_MLX" -eq 1 ]; then
     python -c "import mlx_whisper" >/dev/null 2>&1 || NEED_INSTALL=1
@@ -139,7 +145,7 @@ fi
 
 if [ "$NEED_INSTALL" -eq 1 ]; then
     echo "[start] Installing dependencies — this can take a few minutes the first time (PyTorch is large)..."
-    BASE_PKGS=(whisperlivekit python-multipart "transformers>=4.46" uvicorn "cryptography>=42")
+    BASE_PKGS=(whisperlivekit python-multipart "transformers>=4.46" "mistral-common>=1.5" uvicorn "cryptography>=42")
     if [ "$USE_MLX" -eq 1 ]; then
         BASE_PKGS+=(mlx-whisper)
     fi

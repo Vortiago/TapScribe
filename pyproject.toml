@@ -43,7 +43,7 @@ dependencies = [
 # optional so a CI / docs install doesn't pull in PyTorch + CUDA.
 whisper = ["faster-whisper>=1.0", "whisperlivekit>=0.1"]
 mlx = ["mlx-whisper>=0.5; sys_platform == 'darwin' and platform_machine == 'arm64'"]
-voxtral = ["transformers>=4.46", "torch>=2.1"]
+voxtral = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
 vad = ["silero-vad>=5.0", "torch>=2.1"]
 dev = [
     "pytest>=8",

@@ -50,14 +50,19 @@ Write-Host "[start] Upgrading pip…"
 # --- Dependencies -----------------------------------------------------------
 Write-Host "[start] Checking installed dependencies…"
 $needInstall = $false
-foreach ($pkg in @("whisperlivekit", "multipart", "fastapi", "uvicorn", "transformers", "cryptography")) {
+# mistral_common is a runtime dep of transformers' Voxtral processor:
+# apply_transcription_request() references TranscriptionRequest which is
+# imported conditionally via is_mistral_common_available(). Without the
+# package, Voxtral runs crash with `NameError: TranscriptionRequest`
+# deep inside transformers — not a clean ImportError.
+foreach ($pkg in @("whisperlivekit", "multipart", "fastapi", "uvicorn", "transformers", "mistral_common", "cryptography")) {
     & python -c "import $pkg" 2>$null
     if ($LASTEXITCODE -ne 0) { $needInstall = $true }
 }
 
 if ($needInstall) {
     Write-Host "[start] Installing dependencies — first run pulls PyTorch (several hundred MB)…"
-    & pip install whisperlivekit python-multipart "transformers>=4.46" uvicorn "cryptography>=42"
+    & pip install whisperlivekit python-multipart "transformers>=4.46" "mistral-common>=1.5" uvicorn "cryptography>=42"
 }
 
 # --- Configuration ----------------------------------------------------------
