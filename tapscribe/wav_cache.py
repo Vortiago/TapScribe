@@ -99,22 +99,25 @@ def read_cached(wav_path: Path) -> CachedTranscription | None:
     pointer is missing or stale, we fall back to the newest-mtime
     sidecar. When only a legacy `<wav>.json` exists, it is the primary
     by definition."""
-    target = primary_sidecar_path(wav_path)
+    target = _primary_sidecar_path(wav_path)
     if target is None:
         return None
     return _read_entry(target)
 
 
-def primary_sidecar_path(wav_path: Path) -> Path | None:
-    """Return the on-disk path of the primary transcript sidecar, or
-    None if no transcript is cached. Used by the dashboard listing —
-    which still wants the raw JSON dict — without going through the
-    `CachedTranscription` parse/round-trip."""
-    d = _transcripts_dir(wav_path)
-    if d.is_dir():
-        return _resolve_primary(d)
-    legacy = _legacy_sidecar(wav_path)
-    return legacy if legacy.is_file() else None
+def read_primary_payload(wav_path: Path) -> dict[str, Any] | None:
+    """Return the primary transcript as the raw on-disk JSON dict, or
+    None. Bypasses the `CachedTranscription` dataclass build so the
+    dashboard hot path can stream sidecars to the wire without an
+    intermediate parse/serialize round-trip."""
+    target = _primary_sidecar_path(wav_path)
+    if target is None:
+        return None
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
@@ -130,6 +133,44 @@ def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
         return out
     legacy = _read_entry(_legacy_sidecar(wav_path))
     return [legacy] if legacy is not None else []
+
+
+def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
+    """Compact per-(backend, model) listing for dashboards. One walk,
+    one parse per entry: returns `{"backend", "model", "is_primary",
+    "transcribe_ms"?}` dicts ready for the wire. Single-sidecar legacy
+    WAVs return a one-element list with `is_primary=True`."""
+    d = _transcripts_dir(wav_path)
+    if d.is_dir():
+        sidecars = sorted(d.glob("*.json"))
+        if not sidecars:
+            return []
+        primary = _primary_filename(d, sidecars)
+        out: list[dict[str, Any]] = []
+        for sidecar in sidecars:
+            entry = _read_entry(sidecar)
+            if entry is None:
+                continue
+            item: dict[str, Any] = {
+                "backend": entry.result.backend,
+                "model": entry.result.model,
+                "is_primary": sidecar.name == primary,
+            }
+            if entry.transcribe_ms:
+                item["transcribe_ms"] = entry.transcribe_ms
+            out.append(item)
+        return out
+    legacy = _read_entry(_legacy_sidecar(wav_path))
+    if legacy is None:
+        return []
+    item: dict[str, Any] = {
+        "backend": legacy.result.backend,
+        "model": legacy.result.model,
+        "is_primary": True,
+    }
+    if legacy.transcribe_ms:
+        item["transcribe_ms"] = legacy.transcribe_ms
+    return [item]
 
 
 def set_primary_transcript(wav_path: Path, *, backend: str, model: str) -> None:
@@ -247,9 +288,27 @@ def _read_entry_for(wav_path: Path, *, backend: str, model: str) -> CachedTransc
     return None
 
 
-def _resolve_primary(transcripts_dir: Path) -> Path | None:
-    """Locate the primary sidecar inside an existing transcripts dir.
-    Honors `_primary` when valid; otherwise falls back to newest mtime."""
+def _primary_sidecar_path(wav_path: Path) -> Path | None:
+    """The on-disk path of the primary sidecar for this WAV, or None
+    if no transcript is cached. Picks the new-layout primary when the
+    `<wav>.transcripts/` directory exists, otherwise the legacy
+    `<wav>.json`."""
+    d = _transcripts_dir(wav_path)
+    if d.is_dir():
+        name = _primary_filename(d)
+        return d / name if name else None
+    legacy = _legacy_sidecar(wav_path)
+    return legacy if legacy.is_file() else None
+
+
+def _primary_filename(transcripts_dir: Path, sidecars: list[Path] | None = None) -> str | None:
+    """The filename (just the leaf, not the full path) of the primary
+    sidecar inside `transcripts_dir`. Honors `_primary` when valid;
+    otherwise falls back to the newest-mtime sidecar.
+
+    `sidecars` may be supplied by a caller that already globbed the
+    directory to share the syscall — important on the dashboard hot
+    path."""
     pointer = transcripts_dir / _PRIMARY_POINTER
     if pointer.is_file():
         try:
@@ -259,12 +318,13 @@ def _resolve_primary(transcripts_dir: Path) -> Path | None:
         if key:
             candidate = transcripts_dir / f"{key}.json"
             if candidate.is_file():
-                return candidate
-    sidecars = list(transcripts_dir.glob("*.json"))
+                return candidate.name
+    if sidecars is None:
+        sidecars = list(transcripts_dir.glob("*.json"))
     if not sidecars:
         return None
-    sidecars.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
-    return sidecars[0]
+    newest = max(sidecars, key=lambda p: p.stat().st_mtime_ns)
+    return newest.name
 
 
 def _write_entry(

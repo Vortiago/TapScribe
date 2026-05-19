@@ -265,3 +265,48 @@ def fake_wlk() -> Iterator[FakeWlkThread]:
         yield wlk
     finally:
         wlk.stop()
+
+
+# ---------------------------------------------------------------------------
+# Lightweight transcriber stub — shared across route + cache tests
+# ---------------------------------------------------------------------------
+
+
+class TranscriberStub:
+    """A minimal Transcriber-protocol stub. Returns one canned segment per
+    `transcribe()` call. Parameterise `backend`, `model`, and `text` to
+    distinguish multiple stubs in the same test."""
+
+    name = "fake"
+    device = "test-device"
+
+    def __init__(
+        self,
+        *,
+        backend: str = "fake-backend",
+        model: str = "fake-model",
+        text: str | None = None,
+    ) -> None:
+        self.backend = backend
+        self.model_name = model
+        self._text = text if text is not None else f"text from {backend} {model}"
+        self.calls: list[Path] = []
+
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+        from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
+
+        self.calls.append(path)
+        return TranscriptionResult(
+            transcriber=self.name,
+            backend=self.backend,
+            device=self.device,
+            model=self.model_name,
+            language="en",
+            language_probability=1.0,
+            duration=1.0,
+            text=self._text,
+            segments=(TranscriptionSegment(start=0.0, end=1.0, text=self._text),),
+            initial_prompt_used=initial_prompt or "",
+            hotwords_used=hotwords or "",
+            quality_settings={},
+        )
