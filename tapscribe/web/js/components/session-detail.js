@@ -524,8 +524,10 @@ function wire(host, s, sessKey, ctx) {
     const source = absorbPick.value;
     if (!source) return;
     // Reset the dropdown immediately so a refused merge doesn't leave it
-    // pinned to the failed choice.
+    // pinned to the failed choice. Blur too — otherwise the focused-input
+    // guard in renderSessionsIfChanged blocks the post-merge re-render.
     absorbPick.value = "";
+    absorbPick.blur();
     ctx.onAbsorbSession(absorbPick.dataset.absorbTarget, source);
   });
 
