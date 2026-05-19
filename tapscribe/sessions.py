@@ -15,6 +15,7 @@ import json
 import os
 import os.path
 import re
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -429,4 +430,112 @@ def strip_one_wav(
         "segments_filtered_below_floor": pre_filter_count - len(regions),
         "written": True,
         "detector": detector,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Session absorb — fold one session's WAVs into another
+# ---------------------------------------------------------------------------
+
+
+def absorb_session(target: str, source: str) -> dict[str, Any]:
+    """Move every WAV (and its `<name>.json` sidecar) from `source` into
+    `target`, fold the source's `session-meta.json` aliases into the
+    target's (target wins on key conflict), invalidate the target's merged
+    transcript, and delete the source folder.
+
+    Per-WAV filenames embed timestamps + UUIDs so cross-session collisions
+    are essentially impossible, but we still refuse the merge rather than
+    silently overwrite if any do collide.
+
+    Pre-flight checks the route handler performs first (current-session
+    refusal, in-flight-job refusal) live in the route; this function is
+    purely the filesystem operation. Raises `HTTPException` on validation
+    failures so the route doesn't have to translate exceptions.
+    """
+    if target == source:
+        raise HTTPException(400, "target and source must differ")
+
+    target_dir = resolve_session_dir(target)
+    source_dir = resolve_session_dir(source)
+
+    src_wavs = sorted(source_dir.glob("*.wav"))
+    src_stripped_dir = source_dir / "stripped"
+    src_stripped_wavs = sorted(src_stripped_dir.glob("*.wav")) if src_stripped_dir.is_dir() else []
+
+    # Refuse the merge rather than silently overwrite. Caller can rename
+    # the colliding files manually if they really mean it.
+    collisions: list[str] = []
+    for w in src_wavs:
+        if (target_dir / w.name).exists():
+            collisions.append(w.name)
+    tgt_stripped_dir = target_dir / "stripped"
+    for w in src_stripped_wavs:
+        if (tgt_stripped_dir / w.name).exists():
+            collisions.append(f"stripped/{w.name}")
+    if collisions:
+        raise HTTPException(409, f"filename collision(s) between sessions: {', '.join(collisions[:5])}")
+
+    moved_wavs: list[str] = []
+    moved_stripped: list[str] = []
+
+    # Move originals + their sidecars.
+    for w in src_wavs:
+        shutil.move(str(w), str(target_dir / w.name))
+        sidecar = w.with_suffix(".json")
+        if sidecar.is_file():
+            shutil.move(str(sidecar), str(target_dir / sidecar.name))
+        moved_wavs.append(w.name)
+
+    # Move stripped/ siblings. If the target has no stripped/ yet, create
+    # it; if both sides have stripped/, files merge in (the collision check
+    # above already guarantees no overwrites).
+    if src_stripped_wavs:
+        tgt_stripped_dir.mkdir(parents=True, exist_ok=True)
+        for w in src_stripped_wavs:
+            shutil.move(str(w), str(tgt_stripped_dir / w.name))
+            sidecar = w.with_suffix(".json")
+            if sidecar.is_file():
+                shutil.move(str(sidecar), str(tgt_stripped_dir / sidecar.name))
+            moved_stripped.append(w.name)
+
+    # Merge speaker aliases. Target wins on conflict; source fills in keys
+    # the target doesn't already have. Target's label is preserved as-is.
+    tgt_meta = read_session_meta(target)
+    src_meta = read_session_meta(source)
+    src_aliases = src_meta.get("aliases") or {}
+    tgt_aliases = dict(tgt_meta.get("aliases") or {})
+    aliases_added: list[str] = []
+    for k, v in src_aliases.items():
+        if k not in tgt_aliases:
+            tgt_aliases[k] = v
+            aliases_added.append(k)
+    if aliases_added or tgt_meta:
+        write_session_meta(target, {
+            "label": tgt_meta.get("label", "") or "",
+            "aliases": tgt_aliases,
+        })
+
+    # The target's merged transcript predates the just-moved WAVs, so it's
+    # now stale. Drop it so the operator's next "transcribe whole session"
+    # rebuilds against the fuller WAV set.
+    tgt_transcript = target_dir / "session-transcript.json"
+    transcript_invalidated = tgt_transcript.exists()
+    if transcript_invalidated:
+        try:
+            tgt_transcript.unlink()
+        except OSError:
+            pass
+
+    # Source folder is now expected to hold only metadata files (session-meta,
+    # session-transcript) and an empty stripped/ at most. Wipe the whole tree.
+    shutil.rmtree(source_dir)
+
+    return {
+        "target": target,
+        "source": source,
+        "wavs_moved": len(moved_wavs),
+        "stripped_moved": len(moved_stripped),
+        "aliases_added": aliases_added,
+        "transcript_invalidated": transcript_invalidated,
     }

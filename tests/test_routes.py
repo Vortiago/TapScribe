@@ -262,3 +262,163 @@ def test_session_meta_put_persists_label(client, recorder_under_test):
 def test_session_meta_404s_for_nonexistent_session(client):
     r = client.get("/api/session-meta/nonexistent")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /api/sessions/{target}/absorb
+# ---------------------------------------------------------------------------
+
+
+def _seed_session(root: Path, name: str, wavs: list[str]) -> Path:
+    sd = root / name
+    sd.mkdir(parents=True)
+    for w in wavs:
+        _seed_wav(sd / w)
+    return sd
+
+
+def test_absorb_moves_wavs_and_sidecars_and_deletes_source(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = _seed_session(root, "src", [
+        "20260101T010000Z__alice__def.wav",
+        "20260101T010500Z__bob__ghi.wav",
+    ])
+    # Drop a sidecar on one source WAV so we can verify it follows.
+    (source / "20260101T010000Z__alice__def.wav").with_suffix(".json").write_text("{}")
+
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["wavs_moved"] == 2
+    assert body["stripped_moved"] == 0
+
+    assert not source.exists()
+    moved = sorted(p.name for p in target.glob("*.wav"))
+    assert moved == [
+        "20260101T000000Z__alice__abc.wav",
+        "20260101T010000Z__alice__def.wav",
+        "20260101T010500Z__bob__ghi.wav",
+    ]
+    assert (target / "20260101T010000Z__alice__def.json").is_file()
+
+
+def test_absorb_moves_stripped_subfolder(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    (source / "stripped").mkdir()
+    _seed_wav(source / "stripped" / "20260101T010000Z__alice__def.wav")
+
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 200, r.text
+    assert r.json()["stripped_moved"] == 1
+    assert (target / "stripped" / "20260101T010000Z__alice__def.wav").is_file()
+    assert not source.exists()
+
+
+def test_absorb_merges_aliases_with_target_winning(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "tgt", [])
+    _seed_session(root, "src", [])
+    client.put("/api/session-meta/tgt", json={
+        "label": "kickoff",
+        "aliases": {"alice": "Alice T", "shared": "Target Says"},
+    })
+    client.put("/api/session-meta/src", json={
+        "label": "ignored",
+        "aliases": {"bob": "Bob S", "shared": "Source Says"},
+    })
+
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 200, r.text
+    assert set(r.json()["aliases_added"]) == {"bob"}
+
+    meta = client.get("/api/session-meta/tgt").json()
+    assert meta["label"] == "kickoff"
+    assert meta["aliases"] == {"alice": "Alice T", "bob": "Bob S", "shared": "Target Says"}
+
+
+def test_absorb_invalidates_target_merged_transcript(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    (target / "session-transcript.json").write_text('{"stale": true}')
+
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 200, r.text
+    assert r.json()["transcript_invalidated"] is True
+    assert not (target / "session-transcript.json").exists()
+
+
+def test_absorb_refuses_when_source_is_current_session(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "tgt", [])
+    cur = recorder_under_test.session_start
+    _seed_session(root, cur, [])
+    r = client.post("/api/sessions/tgt/absorb", json={"source": cur})
+    assert r.status_code == 409
+    assert "current session" in r.json()["detail"]
+
+
+def test_absorb_allows_target_to_be_current_session(client, recorder_under_test):
+    """The whole point of merge-after-restart: roll a previous session
+    into the new one the operator is recording into right now."""
+    root = recorder_under_test.recordings_dir
+    cur = recorder_under_test.session_start
+    _seed_session(root, cur, [])
+    _seed_session(root, "prev", ["20260101T010000Z__alice__def.wav"])
+    r = client.post(f"/api/sessions/{cur}/absorb", json={"source": "prev"})
+    assert r.status_code == 200, r.text
+    assert (root / cur / "20260101T010000Z__alice__def.wav").is_file()
+
+
+def test_absorb_refuses_self(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "tgt", [])
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "tgt"})
+    assert r.status_code == 400
+
+
+def test_absorb_refuses_missing_source(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "tgt", [])
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "nope"})
+    assert r.status_code == 404
+
+
+def test_absorb_refuses_filename_collision(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    src = _seed_session(root, "src", ["20260101T000000Z__alice__abc.wav"])
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 409
+    # Source must be untouched on a refused merge.
+    assert src.exists()
+    assert (src / "20260101T000000Z__alice__abc.wav").is_file()
+
+
+def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
+    import asyncio
+    from datetime import datetime
+    from datetime import timezone as _tz
+
+    from tapscribe.recorder import JobState
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "tgt", [])
+    _seed_session(root, "src", [])
+    asyncio.get_event_loop().run_until_complete(
+        recorder_under_test.jobs.claim(
+            JobState(
+                session="src",
+                kind="transcribe",
+                current=0,
+                total=1,
+                started_at=datetime.now(_tz.utc),
+            )
+        )
+    )
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 409
