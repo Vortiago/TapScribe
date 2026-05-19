@@ -31,7 +31,13 @@ def main() -> None:
         help="WhisperLiveKit model name (tiny.en, small.en, large-v3, ...). Changeable from the dashboard.",
     )
     p.add_argument("--live-language", default="en", help="WhisperLiveKit language hint (en, no, auto, ...)")
-    p.add_argument("--live-host", default=None, help="Bind host for the live channel; defaults to --host.")
+    p.add_argument(
+        "--live-host",
+        default=None,
+        help="Bind host for the live channel. Defaults to 127.0.0.1 — WhisperLiveKit "
+        "is internal (only the recorder's live_relay talks to it), so exposing it "
+        "on the LAN serves no purpose and just widens the attack surface.",
+    )
     p.add_argument(
         "--live-port",
         type=int,
@@ -97,7 +103,7 @@ def main() -> None:
     live_config = LiveConfig(
         model=args.live_model,
         language=args.live_language,
-        host=args.live_host or args.host,
+        host=args.live_host or "127.0.0.1",
         port=args.live_port,
     )
 
