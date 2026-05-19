@@ -63,7 +63,14 @@ from .sessions import (
 from .tap_fan_out import TapFanOut
 from .text import read_hotwords, read_prompt
 from .transcribers import load_transcriber
+from .transcribers.catalog import REGISTRY, available_backends
 from .wav_cache import cached_transcribe
+
+
+def _available_backends_snapshot() -> frozenset[str]:
+    """`available_backends()` returns the cached set; expose as plain set
+    of strings for the JSON serialiser."""
+    return frozenset(str(k) for k in available_backends())
 
 # ---------------------------------------------------------------------------
 # Dependency injection — every route reads the Recorder via Depends
@@ -238,7 +245,9 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
         "live_feed": recorder.transcripts.snapshot(),
         "live_info": dict(recorder.live.info),
         "live_log": list(recorder.live.log)[-30:],
-        "mlx_available": recorder.use_mlx,
+        "mlx_available": recorder.use_mlx,  # back-compat for the dashboard ribbon
+        "backend": recorder.backend,
+        "available_backends": sorted(_available_backends_snapshot()),
         "recording_enabled": recorder.recording_enabled,
         "prompt": {
             "path": str(config.PROMPT_FILE),
@@ -320,6 +329,33 @@ async def api_live_log(recorder: Recorder = Depends(get_recorder)):
     return {
         "log": list(recorder.live.log),
         "state": recorder.live.info.get("state", ""),
+    }
+
+
+@app.get("/api/models")
+async def api_models(context: str = "batch"):
+    """List every model the registry knows about, filtered by context.
+
+    Drives the dashboard's batch + live model pickers (each calls with
+    `?context=batch` and `?context=live` respectively). The response also
+    includes the operator's available backends so the UI can gray out
+    backend chips for kinds that aren't installed on this machine.
+
+    Response shape:
+      {
+        "context": "batch" | "live",
+        "available_backends": ["cpu", "cuda", ...],
+        "models": [ {model_id, family, display_name, description,
+                     languages, contexts, backends, inputs, available}, ... ]
+      }
+    """
+    if context not in ("batch", "live"):
+        raise HTTPException(400, f"context must be 'batch' or 'live' (got {context!r})")
+    entries = REGISTRY.for_context(context)  # type: ignore[arg-type]
+    return {
+        "context": context,
+        "available_backends": sorted(_available_backends_snapshot()),
+        "models": [e.to_mapping() for e in entries],
     }
 
 
@@ -633,9 +669,17 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
             "— Whisper would hallucinate. Remove or skip this file.",
         )
 
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=recorder.use_mlx)
+    # Per-call backend override — when the dashboard's backend chip
+    # differs from the Recorder's default. Falls back to the Recorder's
+    # preference if the body didn't carry one.
+    backend_override = (body.get("backend") or "").strip() or recorder.backend
+    transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
     initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
     hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
+    # Canary's per-call language fields ride alongside prompt/hotwords. Empty
+    # string → adapter falls back to its own "en" default.
+    source_lang = (body.get("source_lang") or "").strip() or None
+    target_lang = (body.get("target_lang") or "").strip() or None
     rules = hallucinations_mod.parse_rules()
 
     cached = await asyncio.to_thread(
@@ -644,6 +688,8 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         transcriber,
         initial_prompt=initial_prompt,
         hotwords=hotwords,
+        source_lang=source_lang,
+        target_lang=target_lang,
         hallucination_rules=rules,
         force=True,  # explicit per-WAV transcribe always re-runs
         source=source,
@@ -686,9 +732,12 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     if not selection.wavs:
         raise HTTPException(404, "no usable WAVs in the given range")
 
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, use_mlx=recorder.use_mlx)
+    backend_override = (body.get("backend") or "").strip() or recorder.backend
+    transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
     initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
     hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
+    source_lang = (body.get("source_lang") or "").strip() or None
+    target_lang = (body.get("target_lang") or "").strip() or None
     rules = hallucinations_mod.parse_rules()
     effective_force = force or bool(prompt_override.strip() or hotwords_override.strip())
 
@@ -716,6 +765,8 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
                 transcriber,
                 initial_prompt=initial_prompt,
                 hotwords=hotwords,
+                source_lang=source_lang,
+                target_lang=target_lang,
                 hallucination_rules=rules,
                 force=effective_force,
                 source=selection.source,

@@ -50,7 +50,14 @@ def main() -> None:
     p.add_argument(
         "--no-mlx",
         action="store_true",
-        help="Disable MLX for BOTH live and batch even on Apple Silicon (fall back to faster-whisper / CPU).",
+        help="Disable MLX for BOTH live and batch even on Apple Silicon (back-compat alias for --backend=cpu).",
+    )
+    p.add_argument(
+        "--backend",
+        choices=("auto", "mlx", "cuda", "cpu"),
+        default="auto",
+        help="Default backend preference. `auto` picks MLX on Apple Silicon, CUDA on NVIDIA, "
+        "CPU otherwise. The dashboard's backend chip can override per-job.",
     )
     p.add_argument("--no-auto-live", action="store_true", help="Don't auto-start the live channel on boot.")
     p.add_argument(
@@ -93,10 +100,14 @@ def main() -> None:
     args = p.parse_args()
 
     # Boot-time constants that affect every transcribe-call route the
-    # Recorder hands out. `use_mlx` is per-Recorder; `AUTH_ENABLED` and
-    # `AUTO_START_LIVE` are still module-level since they're security/boot
-    # toggles that don't change at runtime.
-    use_mlx = _detect_use_mlx() and not args.no_mlx
+    # Recorder hands out. `backend` is the per-Recorder preference;
+    # `AUTH_ENABLED` and `AUTO_START_LIVE` are still module-level since
+    # they're security/boot toggles that don't change at runtime.
+    # --no-mlx is the legacy alias: it folds into --backend by forcing
+    # `cpu` over whatever `auto` would have chosen on Apple Silicon.
+    backend_pref = args.backend
+    if args.no_mlx and backend_pref == "auto":
+        backend_pref = "cpu"
     config.AUTH_ENABLED = not args.no_auth
     config.AUTO_START_LIVE = not args.no_auto_live
 
@@ -111,7 +122,7 @@ def main() -> None:
         recordings_dir=config.RECORDINGS_DIR,
         config_dir=config.CONFIG_DIR,
         live_config=live_config,
-        use_mlx=use_mlx,
+        backend=backend_pref,
         auth_password_file=config.AUTH_PASSWORD_FILE,
         tap_token_file=config.TAP_TOKEN_FILE,
     )
@@ -131,11 +142,21 @@ def main() -> None:
             flush=True,
         )
 
+    from .transcribers.catalog import available_backends, resolve_backend_preference
+
+    avail = sorted(available_backends())
+    try:
+        resolved = resolve_backend_preference(backend_pref)
+    except RuntimeError as e:
+        # Operator picked an unavailable kind explicitly — surface the
+        # error before uvicorn starts so they see it instead of catching
+        # it on the first transcribe call.
+        print(f"[tapscribe] FATAL: {e}", flush=True)
+        raise SystemExit(2) from e
+
     print(
-        f"[tapscribe] MLX={'on' if use_mlx else 'off'} "
-        f"(batch={'mlx-whisper' if use_mlx else 'faster-whisper'}, "
-        f"live={'mlx-whisper' if use_mlx else 'faster-whisper'}). "
-        f"Auto-start live: {config.AUTO_START_LIVE}.",
+        f"[tapscribe] backend preference={backend_pref} (resolves to {resolved} on this machine). "
+        f"Available backends: {avail}. Auto-start live: {config.AUTO_START_LIVE}.",
         flush=True,
     )
 
@@ -199,24 +220,6 @@ def main() -> None:
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
     )
-
-
-def _detect_use_mlx() -> bool:
-    """True on Apple Silicon with mlx-whisper importable, unless explicitly
-    disabled via the SX_NO_MLX=1 env var."""
-    import os
-    import platform
-
-    if os.environ.get("SX_NO_MLX") == "1":
-        return False
-    if platform.system() != "Darwin" or platform.machine() != "arm64":
-        return False
-    try:
-        import mlx_whisper  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
 
 
 if __name__ == "__main__":

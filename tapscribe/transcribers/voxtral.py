@@ -97,7 +97,11 @@ class VoxtralTranscriber:
         self.device = "CPU" if device == "cpu" else device.upper()
 
     @classmethod
-    def load(cls, model_name: str) -> VoxtralTranscriber:
+    def load(cls, model_name: str, *, kind: str = "auto") -> VoxtralTranscriber:
+        """Load the HF Voxtral model. `kind` is the resolved BackendKind
+        from the registry ("cuda" / "cpu"); "auto" falls back to the
+        legacy probe (cuda if available else cpu). MLX never reaches
+        here — the registry routes it to `MlxVoxtralTranscriber`."""
         import importlib.util
 
         # transformers' Voxtral processor imports TranscriptionRequest from
@@ -124,11 +128,16 @@ class VoxtralTranscriber:
         )
 
         print(f"[tapscribe] loading Voxtral model from HuggingFace: {_VOXTRAL_REPO}", flush=True)
-        device = "cpu"
-        dtype = torch.float32
-        if torch.cuda.is_available():
-            device = "cuda"
-            dtype = torch.bfloat16
+        if kind == "cuda":
+            device, dtype = "cuda", torch.bfloat16
+        elif kind == "cpu":
+            device, dtype = "cpu", torch.float32
+        else:
+            # "auto" — legacy probe, matches pre-registry behaviour.
+            if torch.cuda.is_available():
+                device, dtype = "cuda", torch.bfloat16
+            else:
+                device, dtype = "cpu", torch.float32
 
         processor = AutoProcessor.from_pretrained(_VOXTRAL_REPO)
         model = VoxtralForConditionalGeneration.from_pretrained(_VOXTRAL_REPO, torch_dtype=dtype).to(device)
@@ -141,6 +150,8 @@ class VoxtralTranscriber:
         *,
         initial_prompt: str | None = None,
         hotwords: str | None = None,
+        source_lang: str | None = None,
+        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Voxtral doesn't translate
     ) -> TranscriptionResult:
         # Voxtral exposes a purpose-built transcription request that bypasses
         # the chat-template path (which ships broken on some transformers
@@ -148,7 +159,7 @@ class VoxtralTranscriber:
         # takes language + audio only, so initial_prompt and hotwords have
         # nowhere to go and are dropped. They're still recorded on the result
         # for parity with other transcribers' bookkeeping.
-        language = default_language_for(self.model_name)
+        language = source_lang or default_language_for(self.model_name)
         request_kwargs: dict[str, Any] = {"audio": str(path), "model_id": _VOXTRAL_REPO}
         if language:
             request_kwargs["language"] = language
@@ -194,6 +205,7 @@ class VoxtralTranscriber:
             initial_prompt_used=initial_prompt or "",
             hotwords_used=hotwords or "",
             quality_settings=dict(gen_kwargs),
+            source_language=source_lang or "",
         )
 
 

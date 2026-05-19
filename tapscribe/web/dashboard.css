@@ -996,3 +996,49 @@ button.box-hd {
     &:hover { color: var(--info); }
   }
 }
+
+/* Backend chip row above the model select. Each chip is a small button;
+   the active one gets emphasized, the disabled ones are dimmed. */
+.backend-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.backend-chip {
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  font-size: 11px;
+
+  &.active {
+    background: color-mix(in srgb, var(--info) 18%, transparent);
+    color: var(--info);
+    border-color: var(--info);
+  }
+  &.disabled,
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+
+/* Dynamic per-model inputs (textarea/text/select) sit in a 2-column grid
+   beneath the main controls grid. Keep the spacing consistent with the
+   from/to rows above. */
+.model-inputs {
+  margin-top: 6px;
+}
+
+/* Translation badge in the merged-transcript header. Small pill shape so
+   it's spotted without dominating the heading. */
+.translate-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--info) 14%, transparent);
+  color: var(--info);
+  font-size: 10.5px;
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+}

@@ -1,11 +1,19 @@
-"""WhisperLiveKit child-process management — `LiveChannel` class.
+"""Live-transcription channel — protocol + WhisperLiveKit implementation.
 
-The Recorder holds one `LiveChannel` instance. The class encapsulates
+The Recorder holds one `LiveChannel` (the Protocol). Today the only
+concrete implementation is `WhisperLiveKitChannel`, which encapsulates
 the subprocess.Popen handle, the threading lock guarding spawn/kill,
 the log-pump tail, and the human-readable state dict the dashboard
-displays. `build_live_cmd` is the pure argv builder (testable as data);
-the class wires the surrounding orchestration (find the exe, download
-NB-Whisper weights, spawn, drain stdout, update INFO).
+displays.
+
+A future PR adds a `ParakeetLiveChannel` that wraps `parakeet-mlx` in
+a rolling-chunk pseudo-streaming loop — same Protocol surface, same
+Recorder consumer code, different streaming engine. Today's split
+makes that follow-up a one-file addition with no Recorder change.
+
+`build_live_cmd` is the pure argv builder for WhisperLiveKit (testable
+as data); the class wires the surrounding orchestration (find the exe,
+download NB-Whisper weights, spawn, drain stdout, update INFO).
 """
 
 from __future__ import annotations
@@ -22,10 +30,52 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from .nb_whisper import download_nb_whisper_ct2_dir
 from .text import read_prompt
+
+
+@runtime_checkable
+class LiveChannel(Protocol):
+    """The interface every live-transcription engine satisfies.
+
+    Concrete implementations today: `WhisperLiveKitChannel`. The
+    Recorder consumes this Protocol (not the concrete class) so a
+    future `ParakeetLiveChannel` slots in as a drop-in.
+
+    Attributes the dashboard reads via `/api/state`:
+      * `info`  — dict mirrored into the response payload
+      * `log`   — bounded deque of recent log lines
+      * `use_mlx` — whether the engine is configured to use MLX (the
+                    dashboard ribbon's "mlx available" hint)
+      * `config` — LiveConfig (model, language, etc.) — replaced
+                   wholesale via `begin_transition` / `start`
+    """
+
+    info: dict[str, str]
+    log: deque[str]
+    use_mlx: bool
+    config: LiveConfig
+
+    def running(self) -> bool: ...
+
+    def matches(self, *, model: str | None, language: str | None, vac, conf) -> bool: ...
+
+    def begin_transition(
+        self,
+        *,
+        model: str | None = None,
+        language: str | None = None,
+        vac: bool | None = None,
+        conf: bool | None = None,
+    ) -> None: ...
+
+    def start(
+        self, *, model: str | None = None, language: str | None = None
+    ) -> tuple[bool, str]: ...
+
+    def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]: ...
 
 
 @dataclass(frozen=True)
@@ -209,8 +259,10 @@ def _initial_info() -> dict[str, str]:
     }
 
 
-class LiveChannel:
+class WhisperLiveKitChannel:
     """Owns one supervised whisperlivekit-server child process.
+    Concrete `LiveChannel` (Protocol) implementation backing the existing
+    `whisperlivekit-server` integration.
 
     `info` is a dict mirrored into `/api/state` so the dashboard can
     render the live-channel panel. `log` is a 200-entry deque of the

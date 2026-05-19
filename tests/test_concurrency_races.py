@@ -321,7 +321,7 @@ async def test_live_channel_rapid_restart_settles_to_one_child(
             self._alive_event.wait(timeout=timeout or 1.0)
             return 0
 
-    monkeypatch.setattr(live_mod.LiveChannel, "_find_exe", staticmethod(lambda: "/fake/wlk"))
+    monkeypatch.setattr(live_mod.WhisperLiveKitChannel, "_find_exe", staticmethod(lambda: "/fake/wlk"))
     monkeypatch.setattr(live_mod.subprocess, "Popen", _StubProc)
 
     # On POSIX, LiveChannel.stop() terminates the child via

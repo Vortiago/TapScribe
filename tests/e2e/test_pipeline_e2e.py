@@ -58,7 +58,7 @@ def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
     binding."""
     fake = FakeTranscriber(text_by_speaker=FAKE_TEXT_BY_SPEAKER)
 
-    def _factory(model_name: str, *, use_mlx: bool) -> FakeTranscriber:  # noqa: ARG001
+    def _factory(model_name: str, **_kwargs) -> FakeTranscriber:  # noqa: ARG001
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)

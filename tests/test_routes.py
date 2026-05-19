@@ -63,6 +63,73 @@ def _seed_wav(path: Path, *, amplitude: int = 8000, seconds: float = 1.0) -> Pat
 
 
 # ---------------------------------------------------------------------------
+# /api/models
+# ---------------------------------------------------------------------------
+
+
+def test_api_models_default_context_is_batch(client):
+    r = client.get("/api/models")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["context"] == "batch"
+    assert isinstance(body["available_backends"], list)
+    assert isinstance(body["models"], list)
+    # Batch context includes Parakeet + Canary (the new families).
+    ids = {m["model_id"] for m in body["models"]}
+    assert "parakeet-tdt-0.6b-v3" in ids
+    assert "canary-1b-v2" in ids
+
+
+def test_api_models_live_context_excludes_parakeet_and_canary(client):
+    r = client.get("/api/models?context=live")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["context"] == "live"
+    ids = {m["model_id"] for m in body["models"]}
+    assert "parakeet-tdt-0.6b-v3" not in ids
+    assert "canary-1b-v2" not in ids
+    # Whisper variants ARE live-eligible.
+    assert "tiny.en" in ids
+
+
+def test_api_models_rejects_unknown_context(client):
+    r = client.get("/api/models?context=transcode")
+    assert r.status_code == 400
+
+
+def test_api_models_emits_select_input_for_canary(client):
+    r = client.get("/api/models")
+    canary = next(m for m in r.json()["models"] if m["model_id"] == "canary-1b-v2")
+    inputs_by_name = {i["name"]: i for i in canary["inputs"]}
+    assert inputs_by_name["source_lang"]["type"] == "select"
+    assert inputs_by_name["target_lang"]["type"] == "select"
+    # English option present with the right value.
+    opts = inputs_by_name["source_lang"]["options"]
+    assert any(o["value"] == "en" and o["label"] == "English" for o in opts)
+
+
+def test_api_models_emits_text_inputs_for_whisper(client):
+    r = client.get("/api/models")
+    whisper = next(m for m in r.json()["models"] if m["model_id"] == "small.en")
+    names = {i["name"] for i in whisper["inputs"]}
+    assert names == {"initial_prompt", "hotwords"}
+
+
+def test_api_models_emits_no_inputs_for_parakeet(client):
+    r = client.get("/api/models")
+    pk = next(m for m in r.json()["models"] if m["model_id"] == "parakeet-tdt-0.6b-v3")
+    assert pk["inputs"] == []
+
+
+def test_api_state_carries_backend_preference_and_available_backends(client):
+    r = client.get("/api/state")
+    body = r.json()
+    assert "backend" in body
+    assert "available_backends" in body
+    assert isinstance(body["available_backends"], list)
+
+
+# ---------------------------------------------------------------------------
 # /health
 # ---------------------------------------------------------------------------
 

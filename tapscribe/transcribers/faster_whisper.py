@@ -26,20 +26,43 @@ class FasterWhisperTranscriber:
         self.device = device
 
     @classmethod
-    def load(cls, model_name: str) -> FasterWhisperTranscriber:
+    def load(cls, model_name: str, *, kind: str = "cpu") -> FasterWhisperTranscriber:
+        """Load the underlying CTranslate2 model.
+
+        `kind` is the resolved BackendKind from the registry — "cpu" or
+        "cuda". CUDA uses `float16` compute (the canonical fast path on
+        consumer NVIDIA cards); CPU uses `int8` (small, fast enough, and
+        what we shipped before the backend split). Other kinds (`mlx`)
+        never reach this loader — the registry routes them elsewhere.
+        """
         from faster_whisper import WhisperModel  # type: ignore
+
+        if kind == "cuda":
+            ct_device = "cuda"
+            compute_type = "float16"
+            device_label = "CUDA"
+        else:
+            ct_device = "cpu"
+            compute_type = "int8"
+            device_label = "CPU"
 
         if model_name.startswith("nb-whisper-"):
             ct2_dir = download_nb_whisper_ct2_dir(model_name)
-            print(f"[tapscribe] loading faster-whisper from {ct2_dir}", flush=True)
-            model = WhisperModel(str(ct2_dir), device="cpu", compute_type="int8")
+            print(
+                f"[tapscribe] loading faster-whisper ({ct_device}/{compute_type}) from {ct2_dir}",
+                flush=True,
+            )
+            model = WhisperModel(str(ct2_dir), device=ct_device, compute_type=compute_type)
         else:
-            print(f"[tapscribe] loading faster-whisper model: {model_name}", flush=True)
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+            print(
+                f"[tapscribe] loading faster-whisper ({ct_device}/{compute_type}) model: {model_name}",
+                flush=True,
+            )
+            model = WhisperModel(model_name, device=ct_device, compute_type=compute_type)
         return cls(
             model_name=model_name,
             model=model,
-            device="CPU",
+            device=device_label,
         )
 
     def transcribe(
@@ -48,9 +71,15 @@ class FasterWhisperTranscriber:
         *,
         initial_prompt: str | None = None,
         hotwords: str | None = None,
+        source_lang: str | None = None,
+        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Whisper doesn't translate
     ) -> TranscriptionResult:
+        # source_lang from the registry's SelectInput overrides the model-name
+        # heuristic; `default_language_for` remains the fallback so legacy
+        # callers (and adapters with no language SelectInput) keep working.
+        language = source_lang or default_language_for(self.model_name)
         common = dict(
-            language=default_language_for(self.model_name),
+            language=language,
             beam_size=5,
             patience=2.0,
             vad_filter=True,
@@ -92,4 +121,5 @@ class FasterWhisperTranscriber:
             initial_prompt_used=initial_prompt or "",
             hotwords_used=hotwords or "",
             quality_settings=applied_view,
+            source_language=source_lang or "",
         )

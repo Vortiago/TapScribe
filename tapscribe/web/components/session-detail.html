@@ -30,6 +30,9 @@
     </div>
     <div class="box-bd">
       <div class="ctl-grid">
+        <span class="lbl">backend</span>
+        <div class="row gap-xs backend-chips" data-slot="backendChips"></div>
+
         <span class="lbl">model</span>
         <select class="select" data-model-pick></select>
 
@@ -43,14 +46,39 @@
         <input class="input" data-range-key="from" data-slot="rangeFrom">
         <span class="lbl">to</span>
         <input class="input" data-range-key="to" data-slot="rangeTo">
-        <span class="lbl">prompt</span>
-        <textarea class="textarea" rows="2" data-range-key="prompt" data-slot="rangePrompt"></textarea>
-        <span class="lbl">hotwords</span>
-        <input class="input" data-range-key="hotwords" data-slot="rangeHotwords">
       </div>
+      <!-- Dynamic per-model inputs (initial_prompt, hotwords, source_lang,
+           target_lang, …) live here. The renderer reads the selected
+           model's `inputs` tuple from the registry and renders rows of
+           the right kind. -->
+      <div class="ctl-grid model-inputs" data-slot="modelInputs"></div>
       <div class="action-row" style="margin-top:10px;" data-slot="actions"></div>
     </div>
   </div>
+</template>
+
+<!-- One backend chip — clickable button that toggles the operator's
+     backend preference. Disabled when the backend isn't available on
+     this machine. -->
+<template id="tpl-backend-chip">
+  <button class="btn tiny backend-chip" type="button" data-backend-chip></button>
+</template>
+
+<!-- Dynamic input row — text/textarea — for the model's `inputs` tuple. -->
+<template id="tpl-input-text">
+  <span class="lbl" data-slot="label"></span>
+  <input class="input" data-input-name type="text">
+</template>
+
+<template id="tpl-input-textarea">
+  <span class="lbl" data-slot="label"></span>
+  <textarea class="textarea" rows="2" data-input-name></textarea>
+</template>
+
+<!-- Dynamic input row — select — for Canary's source_lang / target_lang. -->
+<template id="tpl-input-select">
+  <span class="lbl" data-slot="label"></span>
+  <select class="select" data-input-name></select>
 </template>
 
 <template id="tpl-source-original">

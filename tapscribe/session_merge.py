@@ -201,6 +201,12 @@ class SessionTranscript:
     suppressed: tuple[SuppressedSessionSegment, ...]
     plain_text: str
     low_confidence_count: int
+    # Translation-aware fields: only Canary populates `target_language`,
+    # and only when the operator picked a target_lang different from
+    # source_lang. The dashboard renders a translation badge whenever
+    # `target_language` is non-empty.
+    source_language: str = ""
+    target_language: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -225,6 +231,8 @@ class SessionTranscript:
             "suppressed_count": len(self.suppressed),
             "plain_text": self.plain_text,
             "low_confidence_count": self.low_confidence_count,
+            "source_language": self.source_language,
+            "target_language": self.target_language,
         }
 
 
@@ -254,6 +262,13 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     backend_label = ""
     device_label = ""
     model_label = ""
+    # First non-empty source_language / target_language seen across the
+    # session's sidecars wins. For a multi-Canary session with mixed
+    # source langs this is an oversimplification, but the per-WAV JSON
+    # still carries the real value — the session-level fields are just
+    # the merged-transcript badge hint.
+    source_language_label = ""
+    target_language_label = ""
 
     for wav in selection.wavs:
         cached = read_cached(wav)
@@ -265,6 +280,10 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
             backend_label = cached.result.backend
             device_label = cached.result.device
             model_label = cached.result.model
+        if not source_language_label and cached.result.source_language:
+            source_language_label = cached.result.source_language
+        if not target_language_label and cached.result.target_language:
+            target_language_label = cached.result.target_language
 
         wav_start = cached.wav_start or datetime.fromtimestamp(wav.stat().st_mtime, tz=timezone.utc)
         speaker = cached.speaker_name or "<anon>"
@@ -339,6 +358,8 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
         suppressed=tuple(suppressed),
         plain_text=plain_text,
         low_confidence_count=low_confidence_count,
+        source_language=source_language_label,
+        target_language=target_language_label,
     )
 
 

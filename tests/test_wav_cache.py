@@ -35,7 +35,15 @@ class _StubTranscriber:
     model_name = "fake-model"
     call_count = 0
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+    def transcribe(
+        self,
+        path,  # noqa: ARG002
+        *,
+        initial_prompt=None,
+        hotwords=None,
+        source_lang=None,
+        target_lang=None,
+    ):
         _StubTranscriber.call_count += 1
         return TranscriptionResult(
             transcriber=self.name,
@@ -50,6 +58,8 @@ class _StubTranscriber:
             initial_prompt_used=initial_prompt or "",
             hotwords_used=hotwords or "",
             quality_settings={},
+            source_language=source_lang or "",
+            target_language=(target_lang or "") if (target_lang and target_lang != source_lang) else "",
         )
 
 

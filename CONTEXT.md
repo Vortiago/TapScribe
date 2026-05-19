@@ -23,31 +23,139 @@ introduced by the candidate-#5 refactor will be `Recorder`.
 ## Transcriber
 
 The protocol-level abstraction for "something that can transcribe one WAV":
-`transcribe(path, prompt, hotwords) -> TranscriptionResult`.
+`transcribe(path, *, initial_prompt, hotwords, source_lang, target_lang) -> TranscriptionResult`.
 
 Concrete implementations:
-- `FasterWhisperTranscriber` — faster-whisper / CTranslate2 on CPU. Also
-  serves NB-Whisper checkpoints (the `nb-whisper-*` family loads via the
-  same backend on its `ct2/` weights).
+- `FasterWhisperTranscriber` — faster-whisper / CTranslate2 on CPU **or
+  CUDA** (compute_type=int8 / float16 respectively). Also serves
+  NB-Whisper checkpoints (the `nb-whisper-*` family loads via the same
+  backend on its `ct2/` weights).
 - `MlxWhisperTranscriber` — mlx-whisper on Apple Silicon GPU.
-- `VoxtralTranscriber` — Mistral Voxtral via HuggingFace transformers.
+- `VoxtralTranscriber` — Mistral Voxtral via HuggingFace transformers
+  (CUDA / CPU).
+- `MlxVoxtralTranscriber` — Voxtral via the `mlx-voxtral` community
+  port.
+- `MlxParakeetTranscriber` — NVIDIA Parakeet TDT 0.6B via
+  `parakeet-mlx` (Apple Silicon).
+- `ParakeetTranscriber` — NVIDIA Parakeet TDT 0.6B via the HF
+  transformers `AutoModelForTDT` pipeline (CUDA / CPU).
+- `MlxCanaryTranscriber` — NVIDIA Canary 1B v2 via `mlx-audio` (Apple
+  Silicon). Supports translation + 25 EU langs.
+- `CanaryTranscriber` — NVIDIA Canary 1B v2 via NeMo Toolkit
+  (CUDA / CPU).
 
-Each Transcriber declares its `device` and `name` (`"faster-whisper"`,
-`"mlx-whisper"`, `"voxtral"`); these strings appear in result JSON under
-the `"transcriber"` key and on the dashboard.
+Each Transcriber declares its `device`, `name`, and `backend`. The
+`name` is the family label (`"faster-whisper"`, `"mlx-whisper"`,
+`"voxtral"`, `"parakeet"`, `"canary"`) — the same string lands in
+result JSON under `"transcriber"`. The `backend` field
+(`"faster-whisper"`, `"mlx-whisper"`, `"hf-transformers"`,
+`"mlx-voxtral"`, `"parakeet-mlx"`, `"parakeet-hf"`, `"canary-mlx"`,
+`"canary-nemo"`) disambiguates which runtime did the work.
 
-Note: there is also a **live transcriber** — the `whisperlivekit-server`
-child process the Recorder supervises for streaming captions. It is not
-a `Transcriber` in the protocol sense (no `transcribe(path, …)` call);
+Note: there is also a **LiveChannel** (a Protocol — see below) — the
+`whisperlivekit-server` child process the Recorder supervises for
+streaming captions, wrapped by `WhisperLiveKitChannel`. It is not a
+`Transcriber` in the protocol sense (no `transcribe(path, …)` call);
 when precision matters, say "the live channel" or "the WhisperLiveKit
 child" rather than "the live Transcriber."
+
+## TranscriberRegistry
+
+The single declarative source of truth for every model TapScribe knows
+about. Lives in `tapscribe/transcribers/catalog.py` as the module-level
+`REGISTRY` instance.
+
+Each entry (`ModelEntry`) declares:
+- `model_id` — canonical short name (e.g. `parakeet-tdt-0.6b-v3`)
+- `family` — one of `whisper`, `nb-whisper`, `voxtral`, `parakeet`,
+  `canary`. Drives `<optgroup>` labelling in the dashboard.
+- `languages` — ISO codes, or `("auto",)` for auto-detecting models
+- `contexts` — frozenset of `"batch"` / `"live"` — gates which
+  picker shows the model
+- `backends` — tuple of `BackendBinding(kinds, loader)` entries, walked
+  in order on `resolve()`
+- `inputs` — tuple of `ModelInput`s (see below) the dashboard renders
+  for this model
+
+The factory `load_transcriber(model_name, *, backend)` consults the
+registry: it picks the first backend binding whose `kinds` contains
+the resolved `BackendKind`, then calls its `loader(model_id, kind)`.
+
+Adding a new model = one new `ModelEntry` in `_DEFAULT_ENTRIES`.
+Adding a new family of models = one input tuple + one bindings tuple,
+both reusable across all variants of the family.
+
+## BackendKind / BackendPreference / available_backends
+
+`BackendKind = Literal["mlx", "cuda", "cpu"]` — the concrete
+hardware/runtime kinds a model can resolve to.
+
+`BackendPreference = Literal["auto", "mlx", "cuda", "cpu"]` — what
+the *operator* picks (the dashboard's backend-chip row). `auto`
+resolves at call time by walking `("mlx", "cuda", "cpu")` and
+returning the first kind that's both **available on this machine**
+AND **supported by the model**. This keeps NB-Whisper (no MLX
+weights) silently routing to CPU on Apple Silicon under `auto`
+while still failing loudly when the operator explicitly asks for
+MLX on a model that doesn't support it.
+
+`available_backends()` probes the runtime once (importable `mlx`,
+`torch.cuda.is_available()`) and caches the result; `/api/state`
+and `/api/models` surface it so the dashboard can gray out chips
+for backends not installed on the server.
+
+## ModelInput — TextInput / SelectInput
+
+The per-model UI form-field declarations the registry attaches to
+each `ModelEntry`. The dashboard reads them from `/api/models` and
+renders form fields accordingly; the `/api/transcribe` and
+`/api/transcribe-session` routes forward only the values the
+registry says the adapter accepts. Adapters that don't consume a
+given input ignore the kwarg but echo the value into the result's
+audit fields (`initial_prompt_used`, `hotwords_used`,
+`source_language`).
+
+Two kinds today:
+- `TextInput(name, label, kind="text"|"textarea", placeholder,
+  description)` — for `initial_prompt` and `hotwords`.
+- `SelectInput(name, label, options, default, description)` —
+  for Canary's `source_lang` and `target_lang` dropdowns.
+
+`ModelInput = TextInput | SelectInput` is the union. New input
+kinds are added by extending the union, adding a renderer in
+`web/js/components/session-detail.js`, and giving them a
+discriminator value in `to_mapping()`.
+
+## LiveChannel · WhisperLiveKitChannel
+
+`LiveChannel` is now a runtime-checkable Protocol declared in
+`tapscribe/live.py`. The Recorder holds one `LiveChannel` instance
+(typed by Protocol); the concrete implementation today is
+`WhisperLiveKitChannel`, which encapsulates the supervised
+`whisperlivekit-server` child process — same code that used to live
+in the unsuffixed `LiveChannel` class.
+
+A follow-up PR will add `ParakeetLiveChannel` (rolling-chunk
+pseudo-streaming on `parakeet-mlx` / NeMo) without touching the
+Recorder. That's the whole point of the seam.
+
+The dashboard's live-channel picker reads `/api/models?context=live`,
+which excludes Parakeet/Canary while only true-streaming families
+(Whisper, NB-Whisper, Voxtral) light up.
 
 ## TranscriptionResult
 
 The frozen-dataclass return value of `Transcriber.transcribe(...)`. Carries
 the segments, the joined plain text, the metadata about which transcriber
 + model + device produced it, and the inputs that were in effect
-(`initial_prompt_used`, `hotwords_used`, `quality_settings`).
+(`initial_prompt_used`, `hotwords_used`, `source_language`,
+`target_language`, `quality_settings`).
+
+`source_language` records the language the model was told to expect
+(or auto-detected); `target_language` is non-empty only when a
+translation-capable adapter (Canary today) was asked to translate
+(`source_lang != target_lang`). The dashboard renders a translation
+badge whenever `target_language` is non-empty.
 
 Post-processors (currently just `hallucinations.apply`, possibly future
 PII / phrase-replacement steps) consume a `TranscriptionResult` and

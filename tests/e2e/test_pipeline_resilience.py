@@ -49,7 +49,7 @@ def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
     `tapscribe.app` so the route handler sees the fake."""
     fake = FakeTranscriber(text_by_speaker={"Alice": "alice line one", "Bob": "bob line"})
 
-    def _factory(model_name: str, *, use_mlx: bool) -> FakeTranscriber:  # noqa: ARG001
+    def _factory(model_name: str, **_kwargs) -> FakeTranscriber:  # noqa: ARG001
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)

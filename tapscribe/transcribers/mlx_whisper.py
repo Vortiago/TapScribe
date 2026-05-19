@@ -90,6 +90,8 @@ class MlxWhisperTranscriber:
         *,
         initial_prompt: str | None = None,
         hotwords: str | None = None,
+        source_lang: str | None = None,
+        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Whisper doesn't translate
     ) -> TranscriptionResult:
         # Fold hotwords into the prompt with a clearly-marked framing line.
         # Keeps the joined value distinguishable from real prose context.
@@ -103,7 +105,7 @@ class MlxWhisperTranscriber:
 
         kwargs: dict[str, Any] = dict(
             path_or_hf_repo=self._hf_repo,
-            language=default_language_for(self.model_name),
+            language=source_lang or default_language_for(self.model_name),
             initial_prompt=prompt_arg,
             condition_on_previous_text=False,
             word_timestamps=True,
@@ -145,6 +147,7 @@ class MlxWhisperTranscriber:
             initial_prompt_used=effective_prompt or "",
             hotwords_used=hotwords or "",
             quality_settings=applied_view,
+            source_language=source_lang or "",
         )
 
 

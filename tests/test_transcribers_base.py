@@ -40,7 +40,7 @@ class _FakeTranscriber:
     device = "test"
     model_name = "fake-model"
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
         return TranscriptionResult(
             transcriber="fake",
             backend="fake-backend",
