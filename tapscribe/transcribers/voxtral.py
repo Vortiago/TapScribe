@@ -24,9 +24,7 @@ from .base import TranscriptionResult, TranscriptionSegment, default_language_fo
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?<!\.\.)\s+")
 
 
-def split_voxtral_text_into_segments(
-    text: str, *, duration: float
-) -> tuple[TranscriptionSegment, ...]:
+def split_voxtral_text_into_segments(text: str, *, duration: float) -> tuple[TranscriptionSegment, ...]:
     """Sentence-split Voxtral's free-form output and interpolate timestamps.
 
     Voxtral returns one text blob per WAV with no per-token timing. Without
@@ -57,9 +55,7 @@ def split_voxtral_text_into_segments(
         # One sentence — or no measurable duration to allocate across.
         # Either way, every sentence collapses to [0, duration].
         end = max(0.0, duration)
-        return tuple(
-            TranscriptionSegment(start=0.0, end=end, text=s) for s in sentences
-        )
+        return tuple(TranscriptionSegment(start=0.0, end=end, text=s) for s in sentences)
 
     total_chars = sum(len(s) for s in sentences)
     segments: list[TranscriptionSegment] = []
@@ -79,6 +75,7 @@ def split_voxtral_text_into_segments(
         )
         cursor = end
     return tuple(segments)
+
 
 # Currently only Voxtral Mini is realistic for local CPU use; other Voxtral
 # sizes can be added later by branching on model_name in load().

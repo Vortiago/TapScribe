@@ -40,9 +40,7 @@ def test_text_without_terminator_is_one_segment():
 
 
 def test_three_sentences_split_on_terminators():
-    segs = split_voxtral_text_into_segments(
-        "Hi. How are you? Fine!", duration=10.0
-    )
+    segs = split_voxtral_text_into_segments("Hi. How are you? Fine!", duration=10.0)
     assert [s.text for s in segs] == ["Hi.", "How are you?", "Fine!"]
 
 
@@ -84,16 +82,12 @@ def test_zero_duration_yields_zero_length_segments_not_a_crash():
 
 
 def test_mixed_punctuation_keeps_terminators_with_their_sentences():
-    segs = split_voxtral_text_into_segments(
-        "Wait... what? No way!", duration=6.0
-    )
+    segs = split_voxtral_text_into_segments("Wait... what? No way!", duration=6.0)
     # Ellipsis isn't a sentence boundary on its own — the '.' before the
     # space after 'what?' splits, and so does the space after 'way!'.
     assert [s.text for s in segs] == ["Wait... what?", "No way!"]
 
 
 def test_extra_whitespace_between_sentences_is_normalized():
-    segs = split_voxtral_text_into_segments(
-        "First.    Second.\n\tThird.", duration=9.0
-    )
+    segs = split_voxtral_text_into_segments("First.    Second.\n\tThird.", duration=9.0)
     assert [s.text for s in segs] == ["First.", "Second.", "Third."]

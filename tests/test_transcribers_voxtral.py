@@ -111,9 +111,7 @@ def test_transcribe_splits_multi_sentence_output_into_segments(tmp_path: Path):
     transcript, the adapter sentence-splits and interpolates timestamps —
     otherwise a 60-second utterance becomes one giant unbroken paragraph
     at the merge level."""
-    processor, model = _voxtral_mocks(
-        decoded_text="Hello there. How are you? I am fine."
-    )
+    processor, model = _voxtral_mocks(decoded_text="Hello there. How are you? I am fine.")
     t = VoxtralTranscriber(
         model_name="voxtral-mini",
         processor=processor,

@@ -82,9 +82,7 @@ def test_transcribe_returns_single_segment_with_full_text(tmp_path: Path):
 
 def test_transcribe_splits_multi_sentence_output_into_segments(tmp_path: Path):
     """Same sentence-splitting contract as the HF voxtral adapter."""
-    processor, model = _mlx_voxtral_mocks(
-        decoded_text="Hello there. How are you? I am fine."
-    )
+    processor, model = _mlx_voxtral_mocks(decoded_text="Hello there. How are you? I am fine.")
     t = MlxVoxtralTranscriber(model_name="voxtral-mini", processor=processor, model=model)
     wav = _one_second_wav(tmp_path / "x.wav")
     result = t.transcribe(wav)
