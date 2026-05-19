@@ -298,7 +298,8 @@ async def loaded_bridge(fake_tap_server: FakeTapServer) -> AsyncIterator[LoadedE
                 # bridge's in-page pill to mount on documentElement (PR #33
                 # contract): every test relies on the pill being there.
                 await page.wait_for_function(
-                    "typeof window.__tsTest === 'object'", timeout=5000,
+                    "typeof window.__tsTest === 'object'",
+                    timeout=5000,
                 )
                 await page.wait_for_function(
                     "!!document.getElementById('__tapscribe_indicator_host__')",
@@ -602,8 +603,7 @@ async def test_pcm_frames_carry_resolved_display_name_after_sidebar_rerender(
     conn = fake_tap_server.connection_for("carol-id")
     assert conn is not None
     assert conn.name == "Carol", (
-        f"/tap was dialed with name={conn.name!r} — display-name resolution "
-        "broken; #35-style regression"
+        f"/tap was dialed with name={conn.name!r} — display-name resolution broken; #35-style regression"
     )
     assert len(conn.frames) > 0
 
@@ -628,8 +628,7 @@ async def test_pcm_frames_carry_resolved_display_name_after_sidebar_rerender(
             break
         await asyncio.sleep(0.05)
     assert len(conn.frames) >= target, (
-        f"expected {target} frames after sidebar rerender, "
-        f"got {len(conn.frames)}"
+        f"expected {target} frames after sidebar rerender, got {len(conn.frames)}"
     )
     # Critical assertion: the WS url's name= query param doesn't change
     # mid-utterance (URL is locked at WS-open time). What we're really
@@ -674,8 +673,7 @@ async def test_popup_token_rotation_triggers_reconnect_with_new_subprotocol(
     # interesting assertion is the SECOND connection's subprotocol after
     # the rotation, below.
     assert first.subprotocol in (None, ""), (
-        f"pre-rotation no-token connection should have no subprotocol, "
-        f"got {first.subprotocol!r}"
+        f"pre-rotation no-token connection should have no subprotocol, got {first.subprotocol!r}"
     )
 
     # Operator pastes a new token into the popup. Switch the server's
@@ -702,9 +700,7 @@ async def test_popup_token_rotation_triggers_reconnect_with_new_subprotocol(
         if await has_new_connection():
             break
         await asyncio.sleep(0.1)
-    assert await has_new_connection(), (
-        "bridge must redial after a tap-token rotation in storage"
-    )
+    assert await has_new_connection(), "bridge must redial after a tap-token rotation in storage"
 
     second = [c for c in fake_tap_server.connections if c.identity == "dave-id"][-1]
     assert second is not first
@@ -716,8 +712,7 @@ async def test_popup_token_rotation_triggers_reconnect_with_new_subprotocol(
     # Same utterance — utterance_id must be preserved across the
     # settings-induced redial so the Recorder appends to the same WAV.
     assert second.utterance_id == first.utterance_id, (
-        "utterance_id must persist across a settings-change redial "
-        "(one utterance = one WAV invariant)"
+        "utterance_id must persist across a settings-change redial (one utterance = one WAV invariant)"
     )
 
 
@@ -780,9 +775,7 @@ async def test_mute_drain_reconnect_continues_same_utterance(
         if await has_drain_connection():
             break
         await asyncio.sleep(0.1)
-    assert await has_drain_connection(), (
-        "bridge must reconnect during drain so trailing PCM can flush"
-    )
+    assert await has_drain_connection(), "bridge must reconnect during drain so trailing PCM can flush"
     drain_conn = [c for c in fake_tap_server.connections if c.identity == "ellie-id"][-1]
     assert drain_conn is not first
 
@@ -792,8 +785,7 @@ async def test_mute_drain_reconnect_continues_same_utterance(
     # utterance_id on the drain reconnect would silently fragment
     # the WAV.
     assert drain_conn.utterance_id == initial_utt, (
-        f"drain reconnect must reuse utterance_id={initial_utt!r}, "
-        f"got {drain_conn.utterance_id!r}"
+        f"drain reconnect must reuse utterance_id={initial_utt!r}, got {drain_conn.utterance_id!r}"
     )
 
     # The drain WS should land at least one frame (the buffered tail)
@@ -809,12 +801,8 @@ async def test_mute_drain_reconnect_continues_same_utterance(
         if await drain_closed_cleanly():
             break
         await asyncio.sleep(0.1)
-    assert await drain_closed_cleanly(), (
-        "drain WS should close cleanly once tail flushed"
-    )
+    assert await drain_closed_cleanly(), "drain WS should close cleanly once tail flushed"
     # close_code 1000 == clean close; that's the Recorder's "end of
     # utterance" signal. A non-clean close here would mean drain
     # buffer was discarded.
-    assert drain_conn.close_code == 1000, (
-        f"drain WS must close cleanly (1000), got {drain_conn.close_code}"
-    )
+    assert drain_conn.close_code == 1000, f"drain WS must close cleanly (1000), got {drain_conn.close_code}"

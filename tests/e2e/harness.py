@@ -120,9 +120,7 @@ class RecorderServer:
                 self._build_server(free_port())
                 continue
             raise RuntimeError("uvicorn didn't report started within timeout")
-        raise RuntimeError(
-            f"uvicorn failed to bind after {attempts} port-retry attempts: {last_error!r}"
-        )
+        raise RuntimeError(f"uvicorn failed to bind after {attempts} port-retry attempts: {last_error!r}")
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._server is not None:
