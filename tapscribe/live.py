@@ -10,9 +10,11 @@ NB-Whisper weights, spawn, drain stdout, update INFO).
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -108,6 +110,44 @@ def build_live_cmd(
         cmd.extend(["--init-prompt", init_prompt])
 
     return cmd
+
+
+def _probe_port_free(host: str, port: int) -> str | None:
+    """Bind a throwaway socket to (host, port). Return None if the port
+    is free, else a human-readable diagnostic.
+
+    Called as a fail-fast preflight before spawning whisperlivekit-server.
+    Without this, an occupied port surfaces 10-30s later as a cryptic
+    `[wlk] ERROR: [Errno 48] ...` after the child finally tries to bind —
+    by which time bridges have already opened /tap WS connections that
+    can't be transcribed live. The usual culprit is a leftover
+    whisperlivekit-server from a previous crash or SIGKILL (the
+    recorder's lifespan cleanup only runs on graceful shutdown).
+    """
+    fam = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(fam, socket.SOCK_STREAM)
+    try:
+        s.bind((host, port))
+        return None
+    except OSError as e:
+        if e.errno in (errno.EADDRINUSE, errno.EACCES):
+            if os.name == "nt":
+                find_cmd = f"`netstat -ano | findstr :{port}` then `taskkill /PID <pid> /F`"
+            else:
+                # `lsof -i :PORT` (no LISTEN filter) catches both listeners
+                # AND TIME_WAIT sockets — the latter are invisible to
+                # `lsof | grep LISTEN` but still block a fresh bind for up
+                # to ~60s on macOS after a previous process exited.
+                find_cmd = f"`lsof -i :{port}` (shows listeners AND TIME_WAIT)"
+            return (
+                f"port {port} on {host} is already in use. Likely causes: "
+                f"(a) a leftover whisperlivekit-server from a previous crash — find with {find_cmd} "
+                f"and kill it; (b) a recently-killed process is still in TIME_WAIT — wait ~60s "
+                f"and retry; (c) set SX_PORT_WLK to a free port (e.g. 8010) and restart."
+            )
+        return f"unable to probe live-channel port {port} on {host}: {e}"
+    finally:
+        s.close()
 
 
 def _is_console_worthy(ln: str) -> bool:
@@ -234,6 +274,13 @@ class LiveChannel:
                 self.info["last_error"] = msg
                 print(f"[tapscribe] {msg}", flush=True)
                 return False, msg
+
+            port_err = _probe_port_free(self.config.host, self.config.port)
+            if port_err is not None:
+                self.info["state"] = "error"
+                self.info["last_error"] = port_err
+                print(f"[tapscribe] cannot start whisperlivekit-server: {port_err}", flush=True)
+                return False, port_err
 
             # Pre-resolve NB-Whisper weights if needed. Real I/O (HF fetch)
             # so it stays out of the pure build_live_cmd.

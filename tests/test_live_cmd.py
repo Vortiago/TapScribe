@@ -7,11 +7,19 @@ fails loudly.
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from tapscribe.live import LiveConfig, _is_console_worthy, build_live_cmd
+from tapscribe.live import (
+    LiveChannel,
+    LiveConfig,
+    _is_console_worthy,
+    _probe_port_free,
+    build_live_cmd,
+)
 
 EXE = "/path/to/whisperlivekit-server"
 DEFAULT_CFG = LiveConfig(model="tiny.en", language="en", host="localhost", port=8000)
@@ -145,3 +153,58 @@ def test_console_worthy_lines_pass_through(line: str):
 )
 def test_non_warning_lines_are_filtered(line: str):
     assert _is_console_worthy(line) is False
+
+
+# ---------------------------------------------------------------------------
+# _probe_port_free — preflight before spawning the WLK child
+# ---------------------------------------------------------------------------
+
+
+def test_probe_returns_none_for_free_port():
+    # Bind ephemerally to discover a port, release it, then probe.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    assert _probe_port_free("127.0.0.1", port) is None
+
+
+def test_probe_returns_diagnostic_when_port_taken():
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        msg = _probe_port_free("127.0.0.1", port)
+        assert msg is not None
+        # Diagnostic must name the port AND give the operator an actionable
+        # hint — without that, the user is back to the cryptic [Errno 48].
+        assert str(port) in msg
+        assert "already in use" in msg
+    finally:
+        holder.close()
+
+
+def test_start_fails_fast_when_port_in_use():
+    """LiveChannel.start must NOT Popen if the WLK port is occupied —
+    otherwise the child crashes 10-30s later with the same cryptic
+    errno after bridges have already opened /tap WS connections."""
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        cfg = LiveConfig(model="tiny.en", language="en", host="127.0.0.1", port=port)
+        chan = LiveChannel(config=cfg, use_mlx=False)
+        with (
+            patch.object(LiveChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
+            patch("tapscribe.live.subprocess.Popen") as popen,
+        ):
+            ok, msg = chan.start()
+        assert ok is False
+        assert "already in use" in msg
+        assert chan.info["state"] == "error"
+        assert chan.info["last_error"] == msg
+        popen.assert_not_called()
+    finally:
+        holder.close()
