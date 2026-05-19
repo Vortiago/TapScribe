@@ -38,7 +38,7 @@ import json
 from collections.abc import Awaitable, Callable
 
 import websockets
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 
 class WlKRelay:
@@ -82,11 +82,19 @@ class WlKRelay:
 
     async def connect(self) -> bool:
         """Open the relay. Returns False on any failure — callers branch
-        on this rather than catching, so the /tap handler stays tidy."""
+        on this rather than catching, so the /tap handler stays tidy.
+
+        The exception list intentionally covers both transport-level
+        problems (OSError, timeout) AND handshake-level rejections
+        (InvalidHandshake — InvalidStatus, InvalidUpgrade, etc.).
+        Without InvalidHandshake, an HTTP 5xx from a half-down WlK (e.g.
+        port held by a process that won't speak WebSockets) escapes the
+        relay, crashes the /tap ASGI handler, and the recording-vs-live
+        independence invariant breaks."""
         url = f"ws://{self._host}:{self._port}/asr?language={self._language}"
         try:
             self._ws = await websockets.connect(url, open_timeout=2.0)
-        except (OSError, asyncio.TimeoutError, ConnectionClosed) as e:
+        except (OSError, asyncio.TimeoutError, ConnectionClosed, InvalidHandshake) as e:
             print(f"[tapscribe] WlK relay connect failed: {e}", flush=True)
             return False
         self._consumer = asyncio.create_task(self._consume())

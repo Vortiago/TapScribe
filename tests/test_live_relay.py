@@ -304,6 +304,65 @@ async def test_relay_connect_returns_false_on_unreachable_target():
     assert await relay.connect() is False
 
 
+async def test_relay_connect_returns_false_on_http_handshake_rejection():
+    """If WlK's port is held by something that speaks HTTP but not
+    WebSockets (e.g. a half-down WlK returning 5xx, or a
+    misconfigured proxy), the websockets handshake raises
+    InvalidStatus — a subclass of InvalidHandshake, NOT of OSError.
+    connect() must still return False rather than letting it escape,
+    or the /tap ASGI handler crashes and breaks the recording-vs-live
+    independence invariant."""
+    import socket as _socket
+    from contextlib import suppress
+
+    # Plain HTTP server that returns 503 to any request — the cheapest
+    # way to stage "port is bound by something that won't speak WS".
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    sock.bind(("localhost", 0))
+    sock.listen(1)
+    port = sock.getsockname()[1]
+
+    stop = asyncio.Event()
+
+    async def serve_503() -> None:
+        loop = asyncio.get_running_loop()
+        sock.setblocking(False)
+        while not stop.is_set():
+            try:
+                conn, _ = await loop.sock_accept(sock)
+            except (OSError, asyncio.CancelledError):
+                return
+            with suppress(Exception):
+                # Read the request line + headers, then reply 503.
+                conn.setblocking(False)
+                with suppress(asyncio.TimeoutError, OSError):
+                    await asyncio.wait_for(loop.sock_recv(conn, 4096), timeout=0.5)
+                await loop.sock_sendall(
+                    conn,
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+            with suppress(Exception):
+                conn.close()
+
+    server_task = asyncio.create_task(serve_503())
+    try:
+        relay = WlKRelay(
+            host="localhost",
+            port=port,
+            language="en",
+            on_settled_line=lambda _t: None,
+        )
+        assert await relay.connect() is False
+    finally:
+        stop.set()
+        with suppress(Exception):
+            sock.close()
+        with suppress(asyncio.CancelledError, Exception):
+            server_task.cancel()
+            await server_task
+
+
 async def test_relay_send_after_failed_connect_returns_false():
     """send() should be safe to call even when connect failed — caller can
     keep the call site uniform without branching."""
