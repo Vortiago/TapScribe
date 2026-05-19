@@ -46,11 +46,7 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
 import websockets  # noqa: E402
 from playwright.async_api import async_playwright  # noqa: E402
 
-# Track D owns the `browser_e2e` marker registration in tests/e2e/conftest.py.
-# Until it lands, applying the marker here would fail under `--strict-markers`
-# in pyproject.toml — so we leave the marker off and rely on file-path
-# selection (`pytest tests/e2e/test_bridge_extension_e2e.py`) for now.
-# Re-add `pytestmark = pytest.mark.browser_e2e` once Track D registers it.
+pytestmark = pytest.mark.browser_e2e
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
