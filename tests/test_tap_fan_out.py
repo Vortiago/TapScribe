@@ -778,8 +778,7 @@ async def test_relay_auto_reconnects_after_live_channel_restart(
             # Event-based: wait until the first line reaches LiveTranscripts.
             await _wait_for(
                 lambda: any(
-                    "hello after restart" in e["text"]
-                    for e in recorder_with_relay.transcripts.snapshot()
+                    "hello after restart" in e["text"] for e in recorder_with_relay.transcripts.snapshot()
                 )
             )
             snap = recorder_with_relay.transcripts.snapshot()

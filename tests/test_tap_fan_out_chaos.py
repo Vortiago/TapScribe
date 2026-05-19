@@ -276,13 +276,10 @@ async def test_resume_across_session_rotation_pins_current_behaviour(
         # invariant in its strict form — the new session has its own WAV
         # and the old session's WAV is untouched.
         assert len(wavs_b) == 1, (
-            f"expected exactly one fresh WAV in session B after rotation, "
-            f"got {[w.name for w in wavs_b]}"
+            f"expected exactly one fresh WAV in session B after rotation, got {[w.name for w in wavs_b]}"
         )
         # Old session unchanged.
         assert len(wavs_a_after) == 1
         assert wavs_a_after[0] == original_wav_path
         with wave.open(str(original_wav_path), "rb") as w:
-            assert w.getnframes() == original_frames, (
-                "session-A WAV was modified by a session-B reconnect"
-            )
+            assert w.getnframes() == original_frames, "session-A WAV was modified by a session-B reconnect"

@@ -183,9 +183,7 @@ class suppress_all:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        return exc_type is not None and issubclass(
-            exc_type, (Exception, asyncio.CancelledError)
-        )
+        return exc_type is not None and issubclass(exc_type, (Exception, asyncio.CancelledError))
 
 
 # ---------------------------------------------------------------------------
@@ -244,9 +242,7 @@ async def test_active_stream_concurrent_update_and_remove_is_safe(
     # Final state: the stream is gone, and no updates after remove
     # re-registered it.
     final = await r.streams.snapshot()
-    assert final == [], (
-        f"expected empty registry after concurrent update/remove, got {final}"
-    )
+    assert final == [], f"expected empty registry after concurrent update/remove, got {final}"
 
 
 # ---------------------------------------------------------------------------
@@ -347,9 +343,7 @@ async def test_live_channel_rapid_restart_settles_to_one_child(
     )
     # Every prior spawn should have been terminated by a stop() call.
     for old in spawned[:-1]:
-        assert old in terminated, (
-            f"prior spawn pid={old.pid} was not terminated before being replaced"
-        )
+        assert old in terminated, f"prior spawn pid={old.pid} was not terminated before being replaced"
 
     # Clean up: stop the surviving proc so the test doesn't leave a
     # "running" LiveChannel behind.
@@ -411,10 +405,6 @@ async def test_hallucinations_malformed_input_handling(
     # ---- Stanza 2: non-UTF-8 bytes — pins the crashing behaviour
     # so the audit-flagged read_text_file gap is documented in the
     # test suite. ----
-    (tmp_config_dir / "hallucinations.txt").write_bytes(
-        b"valid line\n\xff\xfe\xfd not utf-8\namara.org\n"
-    )
+    (tmp_config_dir / "hallucinations.txt").write_bytes(b"valid line\n\xff\xfe\xfd not utf-8\namara.org\n")
     with pytest.raises(UnicodeDecodeError):
         hallucinations.parse_rules()
-
-
