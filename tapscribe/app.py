@@ -51,6 +51,7 @@ from .audio import wav_duration_s, wav_rms_dbfs
 from .recorder import JobState, Recorder
 from .session_merge import merge_session, select_session_wavs
 from .sessions import (
+    absorb_session,
     gather_sessions,
     read_session_meta,
     resolve_session_dir,
@@ -518,6 +519,49 @@ async def api_session_stripped_delete(session: str, recorder: Recorder = Depends
         raise HTTPException(500, f"delete failed: {e}") from e
     print(f"[tapscribe] removed stripped/ from session: {session}", flush=True)
     return {"ok": True, "deleted": True}
+
+
+@app.post("/api/sessions/{target}/absorb")
+async def api_session_absorb(
+    target: str,
+    req: Request,
+    recorder: Recorder = Depends(get_recorder),
+):
+    """Fold another session into this one. The named `target` keeps its
+    identity (folder, label, aliases); the source session's WAVs + sidecars
+    are moved in, source aliases fill any gaps in target's, and the source
+    folder is deleted.
+
+    Refuses if the source is the currently-recording session — rotate
+    first if you want to absorb the live one into a previous folder.
+    Refuses if either side has an in-flight transcribe / strip job.
+    """
+    body = await _json_body(req)
+    source = body.get("source") or ""
+    if not isinstance(source, str) or not source:
+        raise HTTPException(400, "source session id required")
+    if source == target:
+        raise HTTPException(400, "cannot absorb a session into itself")
+    if source == recorder.session_start:
+        raise HTTPException(
+            409,
+            "cannot absorb the current session — rotate to a new one first, "
+            "then absorb the now-previous folder into the target",
+        )
+    # Both sides must exist before we even look at jobs.
+    resolve_session_dir(target)
+    resolve_session_dir(source)
+    if recorder.jobs.get(target) is not None or recorder.jobs.get(source) is not None:
+        raise HTTPException(409, "a transcribe or strip job is in flight on one of these sessions")
+
+    summary = absorb_session(target, source)
+    print(
+        f"[tapscribe] absorbed {source} into {target}: "
+        f"{summary['wavs_moved']} wavs, {summary['stripped_moved']} stripped, "
+        f"+{len(summary['aliases_added'])} aliases",
+        flush=True,
+    )
+    return {"ok": True, **summary}
 
 
 @app.delete("/api/sessions/{session}")

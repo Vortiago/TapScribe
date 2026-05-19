@@ -370,6 +370,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         localMeta[sk] = { label: cur.label || "", aliases };
         persistSessionMeta(sk);
       },
+      onAbsorbSession: (target, source) => absorbSession(target, source),
       onRxToggle: (sk) => { rxOpen = !rxOpen; rxOwnerSession = sk; lastSessionsSig = ""; tick(); },
       onRxPatternInput: (sk, v) => { rxPattern = v; rxOwnerSession = sk; updateRegexResult(s); },
       onRxFlagsInput: (sk, v) => { rxFlags = v; rxOwnerSession = sk; updateRegexResult(s); },
@@ -482,6 +483,27 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       const detector = Array.isArray(summary.detector) ? summary.detector.join(", ") : summary.detector;
       alert(`Stripped ${summary.files_written}/${summary.files_processed} WAVs · ${Math.round(summary.speech_seconds)}s speech of ${Math.round(summary.in_seconds)}s (${pct}%) · detector ${detector}`);
     }
+  }
+
+  async function absorbSession(target, source) {
+    const sessions = lastJson?.sessions || [];
+    const labelOf = (id) => {
+      const s = sessions.find((x) => x.session === id);
+      const lbl = s ? effectiveMeta(s).label : "";
+      return lbl ? `"${lbl}" (${id})` : id;
+    };
+    const srcSess = sessions.find((x) => x.session === source);
+    const wavCount = srcSess ? srcSess.wav_count : 0;
+    const msg = `Move all ${wavCount} WAV${wavCount === 1 ? "" : "s"} from ${labelOf(source)} into ${labelOf(target)}?
+
+The source folder will be deleted. The target's merged transcript (if any) will be cleared so you can re-run it on the combined audio. Speaker aliases on the target are kept; source aliases fill in any names the target doesn't already have.`;
+    if (!confirm(msg)) return;
+    try { await postJson(`/api/sessions/${encodeURIComponent(target)}/absorb`, { source }); }
+    catch (e) { alert(`Merge failed: ${e}`); return; }
+    forgetSession(source);
+    // The selected session is the *target*; ensure we stay on it.
+    selectedSessionId = target;
+    await refresh();
   }
 
   async function removeStripped(session) {

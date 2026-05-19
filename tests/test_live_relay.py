@@ -304,40 +304,46 @@ async def test_relay_connect_returns_false_on_unreachable_target():
     assert await relay.connect() is False
 
 
-async def test_relay_connect_returns_false_on_503_from_degraded_wlk():
-    """WhisperLiveKit returns HTTP 503 on the /asr upgrade handshake while
-    it's loading models or recovering from a crash. The `websockets` lib
-    surfaces that as `InvalidStatus`, which is NOT an OSError /
-    TimeoutError / ConnectionClosed — so an earlier connect() narrowly
-    caught only the first three and let `InvalidStatus` propagate up
-    through the /tap WS handler. Pin the contract: any handshake-phase
-    failure must return False, never raise.
+async def test_relay_connect_returns_false_on_http_handshake_rejection():
+    """If WlK's port is held by something that speaks HTTP but not
+    WebSockets (e.g. a half-down WlK returning 5xx, or a
+    misconfigured proxy), the websockets handshake raises
+    InvalidStatus — a subclass of InvalidHandshake, NOT of OSError.
+    connect() must still return False rather than letting it escape,
+    or the /tap ASGI handler crashes and breaks the recording-vs-live
+    independence invariant."""
+    import threading
 
-    Regression for the race in `test_wlk_crash_mid_utterance_…` where
-    `fake_wlk.terminate()` lands while a /tap's relay.connect() is
-    mid-handshake on slower CI matrix combos (windows-py3.11)."""
+    # Plain HTTP listener that returns 503 to any request — the cheapest
+    # way to stage "port is bound by something that won't speak WS".
+    # Sync sockets in a daemon thread keep the test free of asyncio
+    # task-cancellation cleanup.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("localhost", 0))
+    sock.listen(1)
+    sock.settimeout(0.1)
+    port = sock.getsockname()[1]
+    stop_event = threading.Event()
 
-    async def _serve_503(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        # Read until end of headers (CRLF CRLF) so the client's GET
-        # request is fully drained, then reply 503 and close.
-        try:
-            buf = b""
-            while b"\r\n\r\n" not in buf:
-                chunk = await asyncio.wait_for(reader.read(1024), timeout=1.0)
-                if not chunk:
-                    break
-                buf += chunk
-            writer.write(
-                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            await writer.drain()
-        finally:
-            writer.close()
+    def serve_503() -> None:
+        while not stop_event.is_set():
+            try:
+                conn, _ = sock.accept()
+            except (TimeoutError, OSError):
+                continue
             with contextlib.suppress(Exception):
-                await writer.wait_closed()
+                conn.settimeout(0.5)
+                with contextlib.suppress(socket.timeout, OSError):
+                    conn.recv(4096)
+                conn.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            with contextlib.suppress(Exception):
+                conn.close()
 
-    server = await asyncio.start_server(_serve_503, "localhost", 0)
-    port = server.sockets[0].getsockname()[1]
+    thread = threading.Thread(target=serve_503, daemon=True)
+    thread.start()
     try:
         relay = WlKRelay(
             host="localhost",
@@ -347,8 +353,10 @@ async def test_relay_connect_returns_false_on_503_from_degraded_wlk():
         )
         assert await relay.connect() is False
     finally:
-        server.close()
-        await server.wait_closed()
+        stop_event.set()
+        with contextlib.suppress(Exception):
+            sock.close()
+        thread.join(timeout=2.0)
 
 
 async def test_relay_send_after_failed_connect_returns_false():

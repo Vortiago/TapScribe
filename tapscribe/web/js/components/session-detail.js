@@ -421,6 +421,27 @@ export function render(s, host, ctx) {
     trEl.append(" · ", rec);
   }
 
+  // Absorb-into picker: lets the operator merge another session's WAVs
+  // into this one. Hidden when there's nothing to merge from (only this
+  // session exists, or every other session is the current one).
+  const absorbHost = pick(frag, "absorb");
+  const mergeCandidates = (ctx.lastJson?.sessions || []).filter(
+    (other) => other.session !== sessKey && !other.is_current,
+  );
+  if (mergeCandidates.length) {
+    const absorbFrag = tpl("tpl-sess-absorb");
+    const sel = absorbFrag.querySelector("[data-absorb-pick]");
+    sel.dataset.absorbTarget = sessKey;
+    for (const other of mergeCandidates) {
+      const otherMeta = ctx.effectiveMeta(other);
+      const label = otherMeta.label
+        ? `${otherMeta.label} (${other.wav_count || 0}w)`
+        : `${other.session} (${other.wav_count || 0}w)`;
+      sel.add(new Option(label, other.session));
+    }
+    absorbHost.appendChild(absorbFrag);
+  }
+
   // Side column
   const side = pick(frag, "side");
   side.appendChild(buildControls(s, sessKey, ctx));
@@ -497,6 +518,18 @@ function wire(host, s, sessKey, ctx) {
     el.addEventListener("input", () =>
       ctx.onAliasEdit(el.dataset.aliasSess, el.dataset.aliasKey, el.value));
   }
+
+  const absorbPick = host.querySelector("[data-absorb-pick]");
+  absorbPick?.addEventListener("change", () => {
+    const source = absorbPick.value;
+    if (!source) return;
+    // Reset the dropdown immediately so a refused merge doesn't leave it
+    // pinned to the failed choice. Blur too — otherwise the focused-input
+    // guard in renderSessionsIfChanged blocks the post-merge re-render.
+    absorbPick.value = "";
+    absorbPick.blur();
+    ctx.onAbsorbSession(absorbPick.dataset.absorbTarget, source);
+  });
 
   host.querySelector("[data-rx-toggle]")?.addEventListener("click", () => ctx.onRxToggle(sessKey));
   host.querySelector("[data-rx-pattern]")?.addEventListener("input", (e) =>
