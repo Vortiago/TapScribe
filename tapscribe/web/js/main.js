@@ -338,6 +338,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       onTranscribeSession: transcribeSession,
       onCopyMerged: copyMerged,
       onTranscribeWav: transcribeWav,
+      onPickPrimary: pickPrimaryTranscript,
       onToggleWav: (wk, sess) => {
         // Stripped sub-row keys carry "@stripped" so they don't collide.
         const stripped = wk.endsWith("@stripped");
@@ -445,6 +446,22 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     const key = `${session}/${name}${source === "stripped" ? "@stripped" : ""}`;
     return withInflight(wavInflight, wavJustDone, key, "Transcribe",
       () => postJson("/api/transcribe", { session, name, model: batchModel, source }));
+  }
+
+  async function pickPrimaryTranscript(session, name, backend, model, source) {
+    try {
+      await putJson(
+        `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/primary`,
+        { backend, model, source },
+      );
+    } catch (e) {
+      alert(`Pick primary failed: ${e.message || e}`);
+      return;
+    }
+    // Force the next /api/state tick to re-render the session — the polling
+    // diff would otherwise skip it because we keep the same expandedWav.
+    lastSessionsSig = "";
+    tick();
   }
 
   async function transcribeSession(session) {

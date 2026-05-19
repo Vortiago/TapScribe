@@ -25,7 +25,12 @@ const MODEL_OPTS = [
 // Build the inline-transcript fragment shown when the user clicks a WAV row
 // or its stripped sub-row. Kept here (not in merged-transcript.js) because
 // it renders the per-WAV transcript record, not the session-merged one.
-function buildExpandTx(t) {
+//
+// `picker` (optional): { transcripts, wavKey, source } — when more than one
+// (backend, model) is cached for this WAV, renders a row of pills so the
+// operator can flip the primary. Wired by data-tx-pick-* attributes; the
+// listener lives in `wire()`.
+function buildExpandTx(t, picker) {
   const frag = tpl("tpl-expand-tx");
   const metaHost = pick(frag, "meta");
   const fields = [
@@ -40,6 +45,30 @@ function buildExpandTx(t) {
     metaHost.appendChild(slot(tpl("tpl-expand-meta-field"), { label: k, value: v }));
   }
   pick(frag, "body").textContent = t.text || "";
+
+  // Only show the picker when there's a real choice — one cached transcript
+  // means no UI needed.
+  if (picker && (picker.transcripts || []).length > 1) {
+    const pickerHost = pick(frag, "picker");
+    pickerHost.hidden = false;
+    const pills = pick(frag, "pickerPills");
+    for (const tx of picker.transcripts) {
+      const btn = tpl("tpl-tx-pick-pill").firstElementChild;
+      btn.textContent = `${tx.backend || "?"} · ${tx.model || "?"}`;
+      btn.dataset.txPickWav = picker.wavKey;
+      btn.dataset.txPickSource = picker.source;
+      btn.dataset.txPickBackend = tx.backend || "";
+      btn.dataset.txPickModel = tx.model || "";
+      if (tx.is_primary) {
+        btn.classList.add("ok");
+        btn.disabled = true;
+        btn.title = "current primary";
+      } else {
+        btn.title = "click to make this the primary transcript";
+      }
+      pills.appendChild(btn);
+    }
+  }
 
   const sup = t.suppressed_hallucinations || [];
   if (sup.length) {
@@ -265,7 +294,13 @@ function buildWavRow(f, sessKey, ctx) {
   // fragment of (row, expand?) keeps both at the same level under wav-list.
   const out = document.createDocumentFragment();
   out.appendChild(frag);
-  if (open && f.transcript) out.appendChild(buildExpandTx(f.transcript));
+  if (open && f.transcript) {
+    out.appendChild(buildExpandTx(f.transcript, {
+      transcripts: f.transcripts || [],
+      wavKey,
+      source: "original",
+    }));
+  }
 
   // Stripped sub-row — only when strip-silence has produced a sibling.
   if (f.stripped) appendStrippedSub(out, f, wavKey, dlHref, ctx);
@@ -319,7 +354,13 @@ function appendStrippedSub(host, f, wavKey, dlHref, ctx) {
   }
 
   host.appendChild(frag);
-  if (sOpen && sTx) host.appendChild(buildExpandTx(sTx));
+  if (sOpen && sTx) {
+    host.appendChild(buildExpandTx(sTx, {
+      transcripts: f.stripped.transcripts || [],
+      wavKey,
+      source: "stripped",
+    }));
+  }
 }
 
 function buildWavList(s, sessKey, ctx) {
@@ -487,6 +528,19 @@ function wire(host, s, sessKey, ctx) {
     a.addEventListener("click", (e) => {
       e.preventDefault();
       ctx.onToggleWav(a.dataset.toggleWav, s);
+    });
+  }
+  for (const btn of host.querySelectorAll("[data-tx-pick-wav]")) {
+    btn.addEventListener("click", () => {
+      const wk = btn.dataset.txPickWav;
+      const idx = wk.indexOf("/");
+      ctx.onPickPrimary(
+        wk.slice(0, idx),                    // session
+        wk.slice(idx + 1),                   // name
+        btn.dataset.txPickBackend,
+        btn.dataset.txPickModel,
+        btn.dataset.txPickSource || "original",
+      );
     });
   }
   for (const el of host.querySelectorAll("[data-range-key]")) {

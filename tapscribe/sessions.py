@@ -26,7 +26,7 @@ from . import config
 from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
 from .text import parse_wav_speaker_slug, parse_wav_start
-from .wav_cache import primary_sidecar_path
+from .wav_cache import primary_sidecar_path, read_all_cached, read_cached
 
 if TYPE_CHECKING:
     pass
@@ -238,7 +238,7 @@ def _read_json_or_none(path: Path) -> Any:
 def _describe_wav(w: Path, stripped_root: Path) -> dict[str, Any]:
     """One row in the per-session `files` list — original WAV + parsed
     sidecar transcript (the primary, when multiple are cached) +
-    stripped sibling (if any)."""
+    `transcripts` listing for the picker UI + stripped sibling."""
     wav_start = parse_wav_start(w.name)
     dur = round(wav_duration_s(w), 2)
     wav_start_iso = wav_start.isoformat() if wav_start else None
@@ -254,6 +254,7 @@ def _describe_wav(w: Path, stripped_root: Path) -> dict[str, Any]:
             "size": stripped_wav.stat().st_size,
             "duration_s": round(wav_duration_s(stripped_wav), 2),
             "transcript": _read_json_or_none(stripped_sidecar) if stripped_sidecar else None,
+            "transcripts": _list_cached_transcripts(stripped_wav),
         }
     primary = primary_sidecar_path(w)
     return {
@@ -261,11 +262,34 @@ def _describe_wav(w: Path, stripped_root: Path) -> dict[str, Any]:
         "size": w.stat().st_size,
         "duration_s": dur,
         "transcript": _read_json_or_none(primary) if primary else None,
+        "transcripts": _list_cached_transcripts(w),
         "wav_start": wav_start_iso,
         "wav_end": wav_end_iso,
         "speaker_name": parse_wav_speaker_slug(w.name),
         "stripped": stripped_sibling,
     }
+
+
+def _list_cached_transcripts(wav: Path) -> list[dict[str, Any]]:
+    """Return the compact listing of cached transcripts for the WAV
+    picker UI: one entry per (backend, model) with an `is_primary` flag.
+    Empty list if nothing's cached."""
+    entries = read_all_cached(wav)
+    if not entries:
+        return []
+    primary = read_cached(wav)
+    primary_key = (primary.result.backend, primary.result.model) if primary is not None else None
+    listing: list[dict[str, Any]] = []
+    for e in entries:
+        item: dict[str, Any] = {
+            "backend": e.result.backend,
+            "model": e.result.model,
+            "is_primary": (e.result.backend, e.result.model) == primary_key,
+        }
+        if e.transcribe_ms:
+            item["transcribe_ms"] = e.transcribe_ms
+        listing.append(item)
+    return listing
 
 
 def _describe_session(

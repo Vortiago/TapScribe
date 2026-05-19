@@ -63,7 +63,7 @@ from .sessions import (
 from .tap_fan_out import TapFanOut
 from .text import read_hotwords, read_prompt
 from .transcribers import load_transcriber
-from .wav_cache import cached_transcribe, primary_sidecar_path
+from .wav_cache import cached_transcribe, primary_sidecar_path, set_primary_transcript
 
 # ---------------------------------------------------------------------------
 # Dependency injection — every route reads the Recorder via Depends
@@ -603,6 +603,35 @@ async def get_wav(session: str, name: str, source: str = "original"):
     path = resolve_wav(session, name, source)
     dl_name = ("stripped-" + name) if source == "stripped" else name
     return FileResponse(path, media_type="audio/wav", filename=dl_name)
+
+
+@app.put("/api/wav/{session}/{name}/primary")
+async def api_set_primary(
+    session: str,
+    name: str,
+    req: Request,
+    recorder: Recorder = Depends(get_recorder),  # noqa: ARG001
+):
+    """Point the primary cached transcript at the given (backend, model).
+    Used by the per-WAV picker UI to flip which transcript merge_session
+    and the dashboard surface, without re-running anything.
+
+    Body: `{"backend": "faster-whisper", "model": "small.en", "source"?: "original"|"stripped"}`.
+    """
+    body = await _json_body(req)
+    backend = body.get("backend")
+    model = body.get("model")
+    if not isinstance(backend, str) or not backend:
+        raise HTTPException(400, "backend required")
+    if not isinstance(model, str) or not model:
+        raise HTTPException(400, "model required")
+    source = body.get("source") or "original"
+    path = resolve_wav(session, name, source)
+    try:
+        await asyncio.to_thread(set_primary_transcript, path, backend=backend, model=model)
+    except FileNotFoundError as e:
+        raise HTTPException(422, str(e)) from e
+    return {"ok": True, "primary": {"backend": backend, "model": model}}
 
 
 @app.post("/api/transcribe")
