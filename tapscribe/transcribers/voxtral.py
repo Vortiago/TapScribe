@@ -38,6 +38,25 @@ class VoxtralTranscriber:
 
     @classmethod
     def load(cls, model_name: str) -> VoxtralTranscriber:
+        import importlib.util
+
+        # transformers' Voxtral processor imports TranscriptionRequest from
+        # mistral_common conditionally (`if is_mistral_common_available()`),
+        # so without the package every apply_transcription_request() call
+        # blows up with `NameError: TranscriptionRequest` deep in the
+        # transformers stack — not a clean ImportError. Catch that here so
+        # the operator sees an actionable "pip install" hint. Run this
+        # before the torch / transformers imports so the test can exercise
+        # the branch without those heavyweight deps installed.
+        if importlib.util.find_spec("mistral_common") is None:
+            raise RuntimeError(
+                "Voxtral requires the `mistral-common` package "
+                "(transformers' Voxtral processor uses it for "
+                "TranscriptionRequest). Install with:\n"
+                "    pip install 'mistral-common>=1.5'\n"
+                "or re-run start.sh / start.ps1 which now installs it."
+            )
+
         import torch  # type: ignore
         from transformers import (  # type: ignore
             AutoProcessor,

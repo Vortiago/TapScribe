@@ -170,6 +170,28 @@ def test_transcribe_forwards_language_hint_for_nb_model_names(tmp_path: Path):
     assert result.language == "no"
 
 
+def test_load_fails_fast_with_actionable_error_when_mistral_common_missing(monkeypatch):
+    # transformers' Voxtral processor uses TranscriptionRequest, imported
+    # conditionally from mistral_common. Without that package every
+    # transcribe() call dies with `NameError: TranscriptionRequest` deep
+    # inside transformers — opaque to anyone who hasn't seen it before.
+    # Verify load() preflights find_spec and raises a clear, actionable
+    # error instead.
+    import importlib.util as importlib_util
+
+    real_find_spec = importlib_util.find_spec
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name == "mistral_common":
+            return None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib_util, "find_spec", fake_find_spec)
+
+    with pytest.raises(RuntimeError, match="mistral-common"):
+        VoxtralTranscriber.load("voxtral-mini")
+
+
 def test_apply_transcription_request_signature_matches_real_upstream():
     # Schema canary. MagicMock will accept any call, so a kwarg rename in
     # transformers (e.g. `audio` → `audio_input`, `model_id` removed)
