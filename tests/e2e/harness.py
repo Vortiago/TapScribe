@@ -35,10 +35,13 @@ from tapscribe.recorder import Recorder
 
 def free_port() -> int:
     """Borrow an unused localhost port. There's a tiny race vs the bind
-    below, but uvicorn binds within tens of ms of this call."""
+    below; `RecorderServer.start()` retries on collision to absorb it."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("localhost", 0))
         return s.getsockname()[1]
+
+
+_PORT_RETRY_ATTEMPTS = 5
 
 
 class RecorderServer:
@@ -48,11 +51,20 @@ class RecorderServer:
     def __init__(self, app: Any, *, host: str = "localhost", port: int | None = None) -> None:
         self.app = app
         self.host = host
+        # A caller-supplied port disables retry — we honour it as-is.
+        self._fixed_port = port is not None
         self.port = port or free_port()
+        self._thread: threading.Thread | None = None
+        self._server: uvicorn.Server | None = None
+        self._bind_error: BaseException | None = None
+        self._build_server(self.port)
+
+    def _build_server(self, port: int) -> None:
+        self.port = port
         self._config = uvicorn.Config(
-            app=app,
-            host=host,
-            port=self.port,
+            app=self.app,
+            host=self.host,
+            port=port,
             log_level="warning",
             access_log=False,
             lifespan="on",
@@ -61,7 +73,6 @@ class RecorderServer:
         # Suppress uvicorn's signal handlers so a botched test can't
         # hijack the runner's SIGINT/SIGTERM.
         self._server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
-        self._thread: threading.Thread | None = None
 
     @property
     def base_url(self) -> str:
@@ -71,18 +82,51 @@ class RecorderServer:
     def ws_base_url(self) -> str:
         return f"ws://{self.host}:{self.port}"
 
+    def _run_server(self) -> None:
+        """Thread target: wrap server.run() so an OSError during bind
+        (port collision) becomes a recoverable signal for `start()`
+        rather than an uncatchable exception in a daemon thread."""
+        assert self._server is not None
+        try:
+            self._server.run()
+        except OSError as e:
+            self._bind_error = e
+
     def start(self, *, ready_timeout: float = 5.0) -> None:
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-        self._thread.start()
-        deadline = time.time() + ready_timeout
-        while time.time() < deadline:
-            if getattr(self._server, "started", False):
-                return
-            time.sleep(0.02)
-        raise RuntimeError("uvicorn didn't report started within timeout")
+        # free_port() can race with another process grabbing the same
+        # port between release and uvicorn's bind. Retry on OSError with
+        # a fresh port — caller-supplied ports skip the retry loop.
+        attempts = 1 if self._fixed_port else _PORT_RETRY_ATTEMPTS
+        last_error: BaseException | None = None
+        for _ in range(attempts):
+            assert self._server is not None
+            self._bind_error = None
+            self._thread = threading.Thread(target=self._run_server, daemon=True)
+            self._thread.start()
+            deadline = time.time() + ready_timeout
+            while time.time() < deadline:
+                if self._bind_error is not None:
+                    break
+                if getattr(self._server, "started", False):
+                    return
+                if not self._thread.is_alive():
+                    break
+                time.sleep(0.02)
+            if self._bind_error is not None:
+                last_error = self._bind_error
+                self._thread.join(timeout=1.0)
+                if self._fixed_port:
+                    raise last_error
+                self._build_server(free_port())
+                continue
+            raise RuntimeError("uvicorn didn't report started within timeout")
+        raise RuntimeError(
+            f"uvicorn failed to bind after {attempts} port-retry attempts: {last_error!r}"
+        )
 
     def stop(self, *, timeout: float = 3.0) -> None:
-        self._server.should_exit = True
+        if self._server is not None:
+            self._server.should_exit = True
         if self._thread is not None:
             self._thread.join(timeout=timeout)
 
