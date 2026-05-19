@@ -493,7 +493,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     await refresh();
   }
 
-  async function copyMerged(session) {
+  async function copyMerged(session, btn) {
     if (!lastJson) return;
     const s = lastJson.sessions.find((x) => x.session === session);
     if (!s || !s.session_transcript) {
@@ -518,18 +518,60 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       alert("No merged transcript yet for this session.");
       return;
     }
+
+    // Non-secure context (LAN http://): `navigator.clipboard` is gated, so
+    // the await would reject and any `window.open` in the catch is past the
+    // user-gesture window and gets popup-blocked. Open the fallback tab
+    // synchronously inside the click handler instead.
+    const haveClipboard = window.isSecureContext
+      && typeof navigator.clipboard?.writeText === "function";
+    if (!haveClipboard) {
+      openTranscriptTab(out, btn);
+      return;
+    }
+
     try {
       await navigator.clipboard.writeText(out);
+      flashButton(btn, "✓ copied");
     } catch (e) {
+      // Past the user gesture — popup will likely be blocked. Try once,
+      // then fall back to a prompt() the user can select-copy from.
       const w = window.open("", "_blank");
       if (w) {
-        w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
-        w.document.body.style.whiteSpace = "pre-wrap";
-        w.document.body.textContent = out;
+        populateTranscriptTab(w, out);
+        flashButton(btn, "↗ opened in new tab");
       } else {
-        alert("Copy failed (clipboard blocked).");
+        window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", out);
       }
     }
+  }
+
+  function openTranscriptTab(text, btn) {
+    const w = window.open("", "_blank");
+    if (w) {
+      populateTranscriptTab(w, text);
+      flashButton(btn, "↗ opened in new tab");
+    } else {
+      window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", text);
+    }
+  }
+
+  function populateTranscriptTab(w, text) {
+    w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
+    w.document.body.style.whiteSpace = "pre-wrap";
+    w.document.body.textContent = text;
+  }
+
+  function flashButton(btn, label) {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = label;
+    btn.classList.add("just-completed");
+    setTimeout(() => {
+      btn.classList.remove("just-completed");
+      // Only restore if the button hasn't been re-rendered to something else.
+      if (btn.textContent === label) btn.textContent = prev;
+    }, 1500);
   }
 
   // ---- Top-bar actions ----------------------------------------------------

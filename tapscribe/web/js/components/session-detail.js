@@ -446,7 +446,7 @@ function wire(host, s, sessKey, ctx) {
     btn.addEventListener("click", () => ctx.onTranscribeSession(btn.dataset.txSess));
   }
   for (const btn of host.querySelectorAll("[data-copy-sess]")) {
-    btn.addEventListener("click", () => ctx.onCopyMerged(btn.dataset.copySess));
+    btn.addEventListener("click", (e) => ctx.onCopyMerged(btn.dataset.copySess, e.currentTarget));
   }
   for (const btn of host.querySelectorAll("[data-tx-wav]")) {
     btn.addEventListener("click", (e) => {

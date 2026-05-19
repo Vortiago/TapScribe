@@ -293,6 +293,22 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             assert "Alice: " not in clipboard and "Bob: " not in clipboard, (
                 f"copy merged leaked raw speaker keys: {clipboard!r}"
             )
+            # The click must give visible confirmation — otherwise the user
+            # has no way to tell the silent clipboard write happened. The
+            # button briefly swaps to "✓ copied" with the `just-completed`
+            # flash animation.
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const b = document.querySelector(
+                    '[data-copy-sess="{rec.session_start}"]',
+                  );
+                  return b && b.textContent.trim() === '✓ copied'
+                      && b.classList.contains('just-completed');
+                }}
+                """,
+                timeout=2000,
+            )
         finally:
             await browser.close()
 
