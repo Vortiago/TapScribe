@@ -4,6 +4,7 @@
       <input class="sess-name" data-sess-name placeholder="give this session a name…">
       <span class="sess-folder" data-slot="folder"></span>
       <span class="dim tiny" data-slot="timerange"></span>
+      <span data-slot="absorb"></span>
     </div>
     <div class="sess-detail">
       <div class="sess-side" data-slot="side"></div>
@@ -83,6 +84,14 @@
 <template id="tpl-silence-none">
   <button class="btn tiny" data-strip-run title="Detect silence and write trimmed copies under stripped/. Originals untouched.">✂ strip silence</button>
   <span class="dim tiny">copies to stripped/, originals untouched</span>
+</template>
+
+<template id="tpl-sess-absorb">
+  <span class="row gap-xs" title="Move every WAV from another session into this one. Useful when a backend restart split one meeting across two folders.">
+    <select class="select tiny" data-absorb-pick>
+      <option value="">⇇ merge in…</option>
+    </select>
+  </span>
 </template>
 
 <template id="tpl-sess-tx-button">

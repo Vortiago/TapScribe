@@ -304,6 +304,61 @@ async def test_relay_connect_returns_false_on_unreachable_target():
     assert await relay.connect() is False
 
 
+async def test_relay_connect_returns_false_on_http_handshake_rejection():
+    """If WlK's port is held by something that speaks HTTP but not
+    WebSockets (e.g. a half-down WlK returning 5xx, or a
+    misconfigured proxy), the websockets handshake raises
+    InvalidStatus — a subclass of InvalidHandshake, NOT of OSError.
+    connect() must still return False rather than letting it escape,
+    or the /tap ASGI handler crashes and breaks the recording-vs-live
+    independence invariant."""
+    import threading
+
+    # Plain HTTP listener that returns 503 to any request — the cheapest
+    # way to stage "port is bound by something that won't speak WS".
+    # Sync sockets in a daemon thread keep the test free of asyncio
+    # task-cancellation cleanup.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("localhost", 0))
+    sock.listen(1)
+    sock.settimeout(0.1)
+    port = sock.getsockname()[1]
+    stop_event = threading.Event()
+
+    def serve_503() -> None:
+        while not stop_event.is_set():
+            try:
+                conn, _ = sock.accept()
+            except (TimeoutError, OSError):
+                continue
+            with contextlib.suppress(Exception):
+                conn.settimeout(0.5)
+                with contextlib.suppress(socket.timeout, OSError):
+                    conn.recv(4096)
+                conn.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            with contextlib.suppress(Exception):
+                conn.close()
+
+    thread = threading.Thread(target=serve_503, daemon=True)
+    thread.start()
+    try:
+        relay = WlKRelay(
+            host="localhost",
+            port=port,
+            language="en",
+            on_settled_line=lambda _t: None,
+        )
+        assert await relay.connect() is False
+    finally:
+        stop_event.set()
+        with contextlib.suppress(Exception):
+            sock.close()
+        thread.join(timeout=2.0)
+
+
 async def test_relay_send_after_failed_connect_returns_false():
     """send() should be safe to call even when connect failed — caller can
     keep the call site uniform without branching."""
