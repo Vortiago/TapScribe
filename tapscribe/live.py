@@ -221,6 +221,14 @@ class LiveChannel:
     def __init__(self, *, config: LiveConfig, use_mlx: bool):
         self.config = config
         self.use_mlx = use_mlx
+        # Remember whether the operator asked for an ephemeral port (port=0)
+        # at construction time. After the first spawn we mutate config.port
+        # to the actually-picked number — but on the NEXT start() (e.g. the
+        # dashboard's stop-then-start "Apply model" flow) we want a FRESH
+        # ephemeral port, not to reuse the prior one which is now sitting
+        # in TIME_WAIT for ~60s. Without this flag, restarts would hit the
+        # exact bug ephemeral defaults were meant to fix.
+        self._ephemeral_port = config.port == 0
         self.info: dict[str, str] = _initial_info()
         self.log: deque[str] = deque(maxlen=200)
         self._lock = threading.Lock()
@@ -301,12 +309,13 @@ class LiveChannel:
                 print(f"[tapscribe] {msg}", flush=True)
                 return False, msg
 
-            # port=0 means "pick an ephemeral port now". WLK is internal —
-            # only `live_relay` connects to it inside the recorder — so a
-            # stable port has no external consumer. Allocating fresh avoids
-            # the most common breakage: port 8000 left in TIME_WAIT (or
-            # held by a leftover WLK) after a hard kill.
-            if self.config.port == 0:
+            # Ephemeral mode: pick a NEW free port on every start, not just
+            # the first one. WLK is internal — only `live_relay` connects
+            # to it inside the recorder — so the port has no external
+            # consumer that would care about it being stable. Re-picking
+            # avoids the dashboard "Apply model" restart hitting TIME_WAIT
+            # on the previous spawn's port.
+            if self._ephemeral_port:
                 picked = _pick_ephemeral_port(self.config.host)
                 self.config = replace(self.config, port=picked)
 

@@ -228,6 +228,54 @@ def test_start_with_port_zero_picks_ephemeral_port():
     assert captured["cmd"][captured["cmd"].index("--port") + 1] == str(chan.config.port)
 
 
+def test_restart_in_ephemeral_mode_picks_a_fresh_port():
+    """A LiveChannel constructed with port=0 must re-allocate on every
+    start(), not just the first. Otherwise the dashboard's stop→start
+    "Apply model" path reuses the port whose listening socket is now in
+    TIME_WAIT, which is the exact bug ephemeral defaults were meant to
+    avoid."""
+    cfg = LiveConfig(model="tiny.en", language="en", host="127.0.0.1", port=0)
+    chan = LiveChannel(config=cfg, use_mlx=False)
+    ports_seen: list[int] = []
+
+    def fake_popen(cmd, **kwargs):
+        ports_seen.append(int(cmd[cmd.index("--port") + 1]))
+
+        class _Stdout:
+            def __iter__(self):
+                return iter(())
+
+        class _P:
+            pid = 0
+            stdout = _Stdout()
+            _alive = True
+
+            def poll(self):
+                return None if self._alive else 0
+
+            def wait(self, timeout=None):
+                self._alive = False
+                return 0
+
+        return _P()
+
+    with (
+        patch.object(LiveChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
+        patch("tapscribe.live.subprocess.Popen", side_effect=fake_popen),
+    ):
+        chan.start()
+        # Mark the proc as dead so the next start() proceeds; we don't
+        # actually call stop() because it would try to SIGTERM a fake.
+        if chan._proc is not None:
+            chan._proc._alive = False  # type: ignore[attr-defined]
+        chan.start()
+
+    assert len(ports_seen) == 2
+    assert ports_seen[0] != ports_seen[1], (
+        f"second start reused port {ports_seen[0]} instead of allocating fresh"
+    )
+
+
 def test_start_fails_fast_when_port_in_use():
     """LiveChannel.start must NOT Popen if the WLK port is occupied —
     otherwise the child crashes 10-30s later with the same cryptic
