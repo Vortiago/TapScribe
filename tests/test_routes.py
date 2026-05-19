@@ -409,6 +409,194 @@ def test_absorb_refuses_filename_collision(client, recorder_under_test):
     assert (src / "20260101T000000Z__alice__abc.wav").is_file()
 
 
+def test_api_transcribe_returns_freshly_written_transcript(client, recorder_under_test, monkeypatch):
+    """The single-WAV transcribe route writes a new sidecar via the
+    cache and returns the wire JSON. With the multi-cache layout there
+    is no `<wav>.json` to read back; the route must serve the primary
+    that cached_transcribe just promoted."""
+    from tapscribe import transcribers as _transcribers
+    from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
+
+    class _Fake:
+        name = "fake-whisper"
+        backend = "fake-backend"
+        device = "fake-cpu"
+        model_name = "fake-small.en"
+
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+            return TranscriptionResult(
+                transcriber=self.name,
+                backend=self.backend,
+                device=self.device,
+                model=self.model_name,
+                language="en",
+                language_probability=1.0,
+                duration=1.0,
+                text="route transcript",
+                segments=(TranscriptionSegment(start=0.0, end=1.0, text="route transcript"),),
+                initial_prompt_used="",
+                hotwords_used="",
+                quality_settings={},
+            )
+
+    fake = _Fake()
+    monkeypatch.setattr(_transcribers, "load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    import tapscribe.app as _app
+
+    monkeypatch.setattr(_app, "load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
+
+    r = client.post(
+        "/api/transcribe",
+        json={"session": "s", "name": "20260101T010000Z__alice__abc.wav", "model": "fake-small.en"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["text"] == "route transcript"
+    assert body["backend"] == "fake-backend"
+    assert body["model"] == "fake-small.en"
+    # Sidecar lives in the new layout, not at <wav>.json.
+    wav = sd / "20260101T010000Z__alice__abc.wav"
+    assert not wav.with_suffix(".json").is_file()
+    assert wav.with_suffix(".transcripts").is_dir()
+
+
+def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_test):
+    """The dashboard reads each WAV's transcript out of /api/state's
+    `sessions[*].files[*].transcript`. With the new multi-cache layout,
+    that field must surface the *primary* transcript so flipping the
+    primary on disk shows up on the next poll."""
+    from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
+    from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
+
+    class _Stub:
+        name = "fake"
+        device = "test-device"
+
+        def __init__(self, *, backend: str, model: str, text: str) -> None:
+            self.backend = backend
+            self.model_name = model
+            self.text = text
+
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+            return TranscriptionResult(
+                transcriber=self.name,
+                backend=self.backend,
+                device=self.device,
+                model=self.model_name,
+                language="en",
+                language_probability=1.0,
+                duration=1.0,
+                text=self.text,
+                segments=(TranscriptionSegment(start=0.0, end=1.0, text=self.text),),
+                initial_prompt_used="",
+                hotwords_used="",
+                quality_settings={},
+            )
+
+    root = recorder_under_test.recordings_dir
+    session = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
+    wav = session / "20260101T010000Z__alice__abc.wav"
+
+    cached_transcribe(
+        wav,
+        _Stub(backend="faster-whisper", model="small.en", text="whisper text"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+    )
+    cached_transcribe(
+        wav,
+        _Stub(backend="mlx-voxtral", model="voxtral-mini", text="voxtral text"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+    )
+
+    # Default primary is the most-recent write (voxtral).
+    body = client.get("/api/state").json()
+    s = next(s for s in body["sessions"] if s["session"] == "s")
+    file_row = next(f for f in s["files"] if f["name"] == wav.name)
+    assert file_row["transcript"] is not None
+    assert file_row["transcript"]["text"] == "voxtral text"
+    assert file_row["transcript"]["backend"] == "mlx-voxtral"
+
+    # Flip primary back to whisper; the dashboard sees the change.
+    set_primary_transcript(wav, backend="faster-whisper", model="small.en")
+    body = client.get("/api/state").json()
+    s = next(s for s in body["sessions"] if s["session"] == "s")
+    file_row = next(f for f in s["files"] if f["name"] == wav.name)
+    assert file_row["transcript"]["text"] == "whisper text"
+    assert file_row["transcript"]["backend"] == "faster-whisper"
+
+
+def test_absorb_moves_new_layout_transcripts_directory(client, recorder_under_test):
+    """The source WAV may have multiple cached transcripts under the new
+    `<wav>.transcripts/` layout. Absorb must move that directory into
+    the target alongside the WAV."""
+    from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
+    from tapscribe.wav_cache import cached_transcribe, read_all_cached
+
+    class _Stub:
+        name = "fake"
+        device = "test-device"
+
+        def __init__(self, *, backend: str, model: str) -> None:
+            self.backend = backend
+            self.model_name = model
+
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+            return TranscriptionResult(
+                transcriber=self.name,
+                backend=self.backend,
+                device=self.device,
+                model=self.model_name,
+                language="en",
+                language_probability=1.0,
+                duration=1.0,
+                text="t",
+                segments=(TranscriptionSegment(start=0.0, end=1.0, text="t"),),
+                initial_prompt_used="",
+                hotwords_used="",
+                quality_settings={},
+            )
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    src_wav = source / "20260101T010000Z__alice__def.wav"
+
+    # Seed two cached transcripts via the cache API.
+    cached_transcribe(
+        src_wav,
+        _Stub(backend="faster-whisper", model="small.en"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+    )
+    cached_transcribe(
+        src_wav,
+        _Stub(backend="mlx-voxtral", model="voxtral-mini"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+    )
+
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 200, r.text
+
+    moved_wav = root / "tgt" / "20260101T010000Z__alice__def.wav"
+    assert moved_wav.is_file()
+    entries = read_all_cached(moved_wav)
+    backends_models = {(e.result.backend, e.result.model) for e in entries}
+    assert backends_models == {
+        ("faster-whisper", "small.en"),
+        ("mlx-voxtral", "voxtral-mini"),
+    }
+
+
 def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
     import asyncio
     from datetime import datetime

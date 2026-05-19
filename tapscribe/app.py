@@ -63,7 +63,7 @@ from .sessions import (
 from .tap_fan_out import TapFanOut
 from .text import read_hotwords, read_prompt
 from .transcribers import load_transcriber
-from .wav_cache import cached_transcribe
+from .wav_cache import cached_transcribe, primary_sidecar_path
 
 # ---------------------------------------------------------------------------
 # Dependency injection — every route reads the Recorder via Depends
@@ -649,8 +649,14 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         source=source,
     )
 
-    # Read the sidecar back as a dict to preserve the wire shape callers expect.
-    result_dict = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    # Read the freshly-written sidecar back as a dict to preserve the
+    # wire shape callers expect. The cache may live under either layout
+    # (legacy <wav>.json or <wav>.transcripts/<key>.json), so resolve
+    # via primary_sidecar_path rather than hardcoding either path.
+    sidecar = primary_sidecar_path(path)
+    if sidecar is None:
+        raise HTTPException(500, "cached_transcribe completed but no sidecar landed on disk")
+    result_dict = json.loads(sidecar.read_text(encoding="utf-8"))
     print(
         f"[tapscribe] transcribed {name} ({source}) with {model_name} in {cached.transcribe_ms} ms",
         flush=True,

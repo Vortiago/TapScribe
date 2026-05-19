@@ -26,6 +26,7 @@ from . import config
 from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
 from .text import parse_wav_speaker_slug, parse_wav_start
+from .wav_cache import primary_sidecar_path
 
 if TYPE_CHECKING:
     pass
@@ -236,7 +237,8 @@ def _read_json_or_none(path: Path) -> Any:
 
 def _describe_wav(w: Path, stripped_root: Path) -> dict[str, Any]:
     """One row in the per-session `files` list — original WAV + parsed
-    sidecar transcript + stripped sibling (if any)."""
+    sidecar transcript (the primary, when multiple are cached) +
+    stripped sibling (if any)."""
     wav_start = parse_wav_start(w.name)
     dur = round(wav_duration_s(w), 2)
     wav_start_iso = wav_start.isoformat() if wav_start else None
@@ -247,16 +249,18 @@ def _describe_wav(w: Path, stripped_root: Path) -> dict[str, Any]:
     stripped_sibling: dict[str, Any] | None = None
     stripped_wav = stripped_root / w.name
     if stripped_wav.is_file():
+        stripped_sidecar = primary_sidecar_path(stripped_wav)
         stripped_sibling = {
             "size": stripped_wav.stat().st_size,
             "duration_s": round(wav_duration_s(stripped_wav), 2),
-            "transcript": _read_json_or_none(stripped_wav.with_suffix(".json")),
+            "transcript": _read_json_or_none(stripped_sidecar) if stripped_sidecar else None,
         }
+    primary = primary_sidecar_path(w)
     return {
         "name": w.name,
         "size": w.stat().st_size,
         "duration_s": dur,
-        "transcript": _read_json_or_none(w.with_suffix(".json")),
+        "transcript": _read_json_or_none(primary) if primary else None,
         "wav_start": wav_start_iso,
         "wav_end": wav_end_iso,
         "speaker_name": parse_wav_speaker_slug(w.name),
@@ -438,6 +442,18 @@ def strip_one_wav(
 # ---------------------------------------------------------------------------
 
 
+def _move_sidecars_with_wav(src_wav: Path, dst_wav: Path) -> None:
+    """Carry whichever cache layout the source uses to the WAV's new
+    home — the legacy `<wav>.json` file, the new `<wav>.transcripts/`
+    directory, or both. Either may be absent."""
+    legacy = src_wav.with_suffix(".json")
+    if legacy.is_file():
+        shutil.move(str(legacy), str(dst_wav.with_suffix(".json")))
+    transcripts = src_wav.with_suffix(".transcripts")
+    if transcripts.is_dir():
+        shutil.move(str(transcripts), str(dst_wav.with_suffix(".transcripts")))
+
+
 def absorb_session(target: str, source: str) -> dict[str, Any]:
     """Move every WAV (and its `<name>.json` sidecar) from `source` into
     `target`, fold the source's `session-meta.json` aliases into the
@@ -479,12 +495,12 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     moved_wavs: list[str] = []
     moved_stripped: list[str] = []
 
-    # Move originals + their sidecars.
+    # Move originals + their sidecars. A WAV may carry either a legacy
+    # `<wav>.json` (one transcript) or a `<wav>.transcripts/` directory
+    # (one per cached backend+model); both layouts must follow the WAV.
     for w in src_wavs:
         shutil.move(str(w), str(target_dir / w.name))
-        sidecar = w.with_suffix(".json")
-        if sidecar.is_file():
-            shutil.move(str(sidecar), str(target_dir / sidecar.name))
+        _move_sidecars_with_wav(w, target_dir / w.name)
         moved_wavs.append(w.name)
 
     # Move stripped/ siblings. If the target has no stripped/ yet, create
@@ -494,9 +510,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         tgt_stripped_dir.mkdir(parents=True, exist_ok=True)
         for w in src_stripped_wavs:
             shutil.move(str(w), str(tgt_stripped_dir / w.name))
-            sidecar = w.with_suffix(".json")
-            if sidecar.is_file():
-                shutil.move(str(sidecar), str(tgt_stripped_dir / sidecar.name))
+            _move_sidecars_with_wav(w, tgt_stripped_dir / w.name)
             moved_stripped.append(w.name)
 
     # Merge speaker aliases. Target wins on conflict; source fills in keys
