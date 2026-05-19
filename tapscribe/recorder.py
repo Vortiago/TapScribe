@@ -287,9 +287,7 @@ class UtteranceIndex:
     def __init__(self) -> None:
         self._by_id: dict[str, UtteranceRecord] = {}
 
-    def try_resume(
-        self, utterance_id: str, *, identity: str, session_dir: Path
-    ) -> UtteranceRecord | None:
+    def try_resume(self, utterance_id: str, *, identity: str, session_dir: Path) -> UtteranceRecord | None:
         """Return the existing record marked open=True if resumable, else
         None. Caller is expected to reopen the WAV for append.
 
