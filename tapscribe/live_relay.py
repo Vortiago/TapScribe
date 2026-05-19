@@ -38,7 +38,7 @@ import json
 from collections.abc import Awaitable, Callable
 
 import websockets
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
 
 class WlKRelay:
@@ -86,7 +86,19 @@ class WlKRelay:
         url = f"ws://{self._host}:{self._port}/asr?language={self._language}"
         try:
             self._ws = await websockets.connect(url, open_timeout=2.0)
-        except (OSError, asyncio.TimeoutError, ConnectionClosed) as e:
+        except (
+            OSError,
+            asyncio.TimeoutError,
+            ConnectionClosed,
+            # `InvalidStatus` is what WhisperLiveKit raises while it's
+            # degraded (HTTP 503 from the /asr upgrade handshake), and
+            # `InvalidHandshake` is the umbrella for any other handshake-
+            # phase failure. Either is a "no relay this time" — caller
+            # branches on the bool, so we must not let it surface as an
+            # unhandled exception in the /tap WS handler.
+            InvalidStatus,
+            InvalidHandshake,
+        ) as e:
             print(f"[tapscribe] WlK relay connect failed: {e}", flush=True)
             return False
         self._consumer = asyncio.create_task(self._consume())

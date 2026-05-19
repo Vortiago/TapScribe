@@ -304,6 +304,53 @@ async def test_relay_connect_returns_false_on_unreachable_target():
     assert await relay.connect() is False
 
 
+async def test_relay_connect_returns_false_on_503_from_degraded_wlk():
+    """WhisperLiveKit returns HTTP 503 on the /asr upgrade handshake while
+    it's loading models or recovering from a crash. The `websockets` lib
+    surfaces that as `InvalidStatus`, which is NOT an OSError /
+    TimeoutError / ConnectionClosed — so an earlier connect() narrowly
+    caught only the first three and let `InvalidStatus` propagate up
+    through the /tap WS handler. Pin the contract: any handshake-phase
+    failure must return False, never raise.
+
+    Regression for the race in `test_wlk_crash_mid_utterance_…` where
+    `fake_wlk.terminate()` lands while a /tap's relay.connect() is
+    mid-handshake on slower CI matrix combos (windows-py3.11)."""
+
+    async def _serve_503(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Read until end of headers (CRLF CRLF) so the client's GET
+        # request is fully drained, then reply 503 and close.
+        try:
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+                if not chunk:
+                    break
+                buf += chunk
+            writer.write(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    server = await asyncio.start_server(_serve_503, "localhost", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        relay = WlKRelay(
+            host="localhost",
+            port=port,
+            language="en",
+            on_settled_line=lambda _t: None,
+        )
+        assert await relay.connect() is False
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 async def test_relay_send_after_failed_connect_returns_false():
     """send() should be safe to call even when connect failed — caller can
     keep the call site uniform without branching."""
