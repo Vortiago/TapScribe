@@ -105,6 +105,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
             pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -301,6 +302,7 @@ async def test_dashboard_with_real_audio_and_whisper(
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
             pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()

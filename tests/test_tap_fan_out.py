@@ -371,7 +371,6 @@ async def test_write_frame_level_decays_through_silence_after_real_audio(recorde
     silent_tail = [silence_frame] * 30  # 30 * 20 ms = 600 ms — well past half-life
 
     peak_during_speech = 0.0
-    final_level_after_silence = 1.0
 
     async with await TapFanOut.open(
         recorder,

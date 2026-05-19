@@ -324,6 +324,19 @@ async def test_live_channel_rapid_restart_settles_to_one_child(
     monkeypatch.setattr(live_mod.LiveChannel, "_find_exe", staticmethod(lambda: "/fake/wlk"))
     monkeypatch.setattr(live_mod.subprocess, "Popen", _StubProc)
 
+    # On POSIX, LiveChannel.stop() terminates the child via
+    # os.killpg(pid, SIGTERM) rather than proc.terminate(). Route that
+    # path back into the stub so `terminated` is populated on every
+    # platform, not just Windows where the else-branch hits proc.terminate.
+    def _fake_killpg(pid, _sig):
+        for sp in spawned:
+            if sp.pid == pid and sp._alive:
+                sp.terminate()
+                return
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(live_mod.os, "killpg", _fake_killpg, raising=False)
+
     # 5 back-to-back start-with-different-model calls. Each one is a
     # restart because the model changes, so it exercises the full
     # stop()→start() sequence the API handler runs.
