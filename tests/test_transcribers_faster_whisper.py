@@ -48,6 +48,28 @@ def test_metadata_properties_reflect_constructor_args():
     assert t.device == "CPU (CTranslate2)"
 
 
+def test_load_sets_hardware_only_device_and_backend_label(monkeypatch):
+    """The adapter's `load()` must surface `device` as hardware-only ('CPU')
+    and `backend` as the library identifier ('faster-whisper'), so the
+    dashboard can render them in separate columns without parsing strings."""
+    # faster_whisper isn't necessarily installed in CI; inject a stub module.
+    import sys
+    import types
+
+    fake_fw = types.ModuleType("faster_whisper")
+
+    class _FakeWhisperModel:
+        def __init__(self, *a, **kw):
+            pass
+
+    fake_fw.WhisperModel = _FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+    t = FasterWhisperTranscriber.load("small.en")
+    assert t.device == "CPU"
+    assert t.backend == "faster-whisper"
+
+
 def test_transcribe_returns_typed_result_with_segments(tmp_path: Path):
     model = _fake_model(
         [
@@ -61,6 +83,7 @@ def test_transcribe_returns_typed_result_with_segments(tmp_path: Path):
 
     assert isinstance(result, TranscriptionResult)
     assert result.transcriber == "faster-whisper"
+    assert result.backend == "faster-whisper"
     assert result.device == "CPU"
     assert result.model == "small.en"
     assert result.language == "en"

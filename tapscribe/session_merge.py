@@ -184,6 +184,7 @@ class SessionTranscript:
     session: str
     model: str
     transcriber: str
+    backend: str
     device: str
     source: str
     from_iso: str | None
@@ -206,6 +207,7 @@ class SessionTranscript:
             "session": self.session,
             "model": self.model,
             "transcriber": self.transcriber,
+            "backend": self.backend,
             "device": self.device,
             "source": self.source,
             "from_iso": self.from_iso,
@@ -249,6 +251,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     # *should* be uniform across a session; we surface the first non-empty
     # values on the merged transcript.
     transcriber_name = ""
+    backend_label = ""
     device_label = ""
     model_label = ""
 
@@ -259,6 +262,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
             continue
         if not transcriber_name:
             transcriber_name = cached.result.transcriber
+            backend_label = cached.result.backend
             device_label = cached.result.device
             model_label = cached.result.model
 
@@ -318,6 +322,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
         session=selection.session_dir.name,
         model=model_label,
         transcriber=transcriber_name,
+        backend=backend_label,
         device=device_label,
         source=selection.source,
         from_iso=selection.from_iso,

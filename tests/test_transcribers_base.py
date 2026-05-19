@@ -36,12 +36,14 @@ class _FakeTranscriber:
     with the right shape satisfies it, no inheritance required."""
 
     name = "fake"
+    backend = "fake-backend"
     device = "test"
     model_name = "fake-model"
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
         return TranscriptionResult(
             transcriber="fake",
+            backend="fake-backend",
             device="test",
             model="fake-model",
             language="en",
@@ -91,6 +93,7 @@ def test_transcription_result_is_frozen_and_carries_segments():
     seg = TranscriptionSegment(start=0.0, end=1.0, text="hello")
     r = TranscriptionResult(
         transcriber="faster-whisper",
+        backend="faster-whisper",
         device="CPU",
         model="small.en",
         language="en",
@@ -104,8 +107,35 @@ def test_transcription_result_is_frozen_and_carries_segments():
     )
     assert r.segments == (seg,)
     assert r.suppressed_hallucinations == ()  # default
+    assert r.backend == "faster-whisper"
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.model = "changed"  # type: ignore[misc]
+
+
+def test_transcription_result_backend_and_device_are_independent_fields():
+    """`backend` (library) and `device` (hardware) are orthogonal — the
+    dashboard renders them in separate columns, so the dataclass must let
+    them carry distinct values."""
+    seg = TranscriptionSegment(start=0.0, end=1.0, text="x")
+    r = TranscriptionResult(
+        transcriber="mlx-whisper",
+        backend="mlx-whisper",
+        device="Apple Silicon GPU",
+        model="large-v3",
+        language="en",
+        language_probability=0.95,
+        duration=1.0,
+        text="x",
+        segments=(seg,),
+        initial_prompt_used="",
+        hotwords_used="",
+        quality_settings={},
+    )
+    # Neither field carries the other's information mixed in.
+    assert r.backend == "mlx-whisper"
+    assert r.device == "Apple Silicon GPU"
+    assert "MLX" not in r.device  # device is hardware-only
+    assert "GPU" not in r.backend  # backend is library-only
 
 
 def test_transcription_result_supports_dataclasses_replace_for_pipeline_steps():
@@ -117,6 +147,7 @@ def test_transcription_result_supports_dataclasses_replace_for_pipeline_steps():
     )
     r = TranscriptionResult(
         transcriber="faster-whisper",
+        backend="faster-whisper",
         device="CPU",
         model="small.en",
         language="en",

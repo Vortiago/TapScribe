@@ -24,17 +24,15 @@ class VoxtralTranscriber:
     """A Voxtral model wrapped to satisfy the `Transcriber` Protocol."""
 
     name: ClassVar[str] = "voxtral"
+    backend: ClassVar[str] = "hf-transformers"
 
     def __init__(self, *, model_name: str, processor: Any, model: Any, device: str):
         self.model_name = model_name
         self._processor = processor
         self._model = model
         self._raw_device = device
-        # Surface the same human-readable device label the dashboard expects.
-        if device == "cpu":
-            self.device = "CPU (HF transformers; NOT MLX)"
-        else:
-            self.device = f"{device.upper()} (HF transformers; NOT MLX)"
+        # Hardware-only label; the library name lives on `backend`.
+        self.device = "CPU" if device == "cpu" else device.upper()
 
     @classmethod
     def load(cls, model_name: str) -> VoxtralTranscriber:
@@ -119,9 +117,14 @@ class VoxtralTranscriber:
         seg = TranscriptionSegment(start=0.0, end=round(dur, 2), text=text)
         return TranscriptionResult(
             transcriber=self.name,
+            backend=self.backend,
             device=self.device,
             model=self.model_name,
-            language=language or "?",
+            # Voxtral doesn't echo a detected language in its response; record
+            # the hint we sent, or "auto" when we let it auto-detect. Distinct
+            # from "?" (genuinely unknown) so the UI never shows a populated
+            # field as if it were missing.
+            language=language or "auto",
             language_probability=0.0,
             duration=round(dur, 2),
             text=text,

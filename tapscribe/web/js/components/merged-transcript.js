@@ -76,7 +76,7 @@ function buildSpkBar(frag, speakers, speakingByName, aliases) {
 function buildMetaStrip(host, t, lowCount) {
   host.append(
     "merged at ", coloredSpan("fg", fmtClock(t.transcribed_at)),
-    " · via ", coloredSpan("fg", t.transcriber || t.backend || "faster-whisper"),
+    " · via ", coloredSpan("fg", t.backend || t.transcriber || "faster-whisper"),
     " on ", coloredSpan("fg", t.device || "CPU"),
   );
   if (lowCount > 0) host.append(" · ", coloredSpan("c-warn", `${lowCount} low-confidence`));

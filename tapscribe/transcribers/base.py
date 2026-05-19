@@ -106,7 +106,8 @@ class TranscriptionResult:
     """
 
     transcriber: str  # echoes Transcriber.name
-    device: str
+    backend: str  # library/framework: "faster-whisper", "mlx-whisper", "hf-transformers", "mlx-voxtral"
+    device: str  # hardware only: "CPU", "Apple Silicon GPU", "CUDA"
     model: str
     language: str
     language_probability: float
@@ -125,6 +126,7 @@ class Transcriber(Protocol):
     one loaded model."""
 
     name: ClassVar[str]
+    backend: str
     device: str
     model_name: str
 

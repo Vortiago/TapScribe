@@ -19,12 +19,14 @@ class _StubTranscriber:
 
     def __init__(self, name: str, model_name: str):
         self.name = name
+        self.backend = "stub-backend"
         self.device = "stub"
         self.model_name = model_name
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
         return TranscriptionResult(
             transcriber=self.name,
+            backend="stub-backend",
             device="stub",
             model=self.model_name,
             language="en",
@@ -43,6 +45,7 @@ def _stub_adapters(monkeypatch):
     """Replace every adapter's `.load()` with a stub. Also clears the
     factory cache before each test."""
     from tapscribe.transcribers import faster_whisper as fw
+    from tapscribe.transcribers import mlx_voxtral as mxv
     from tapscribe.transcribers import mlx_whisper as mx
     from tapscribe.transcribers import voxtral as vx
 
@@ -59,7 +62,12 @@ def _stub_adapters(monkeypatch):
     monkeypatch.setattr(
         vx.VoxtralTranscriber,
         "load",
-        classmethod(lambda cls, name: _StubTranscriber("voxtral", name)),
+        classmethod(lambda cls, name: _StubTranscriber("voxtral-hf", name)),
+    )
+    monkeypatch.setattr(
+        mxv.MlxVoxtralTranscriber,
+        "load",
+        classmethod(lambda cls, name: _StubTranscriber("voxtral-mlx", name)),
     )
     transcribers.clear_cache()
     yield
@@ -85,9 +93,18 @@ def test_dispatches_to_faster_whisper_for_nb_whisper_even_when_mlx_enabled():
     assert t.model_name == "nb-whisper-medium"
 
 
-def test_dispatches_to_voxtral_for_voxtral_models():
+def test_dispatches_to_hf_voxtral_when_mlx_disabled():
     t = transcribers.load_transcriber("voxtral-mini", use_mlx=False)
-    assert t.name == "voxtral"
+    assert t.name == "voxtral-hf"
+
+
+def test_dispatches_to_mlx_voxtral_when_mlx_enabled():
+    """Voxtral has a community MLX port (mzbac/mlx.voxtral). When the
+    operator has MLX on, batch transcribes go through it instead of
+    HF transformers — same routing rule as Whisper."""
+    t = transcribers.load_transcriber("voxtral-mini", use_mlx=True)
+    assert t.name == "voxtral-mlx"
+    assert t.model_name == "voxtral-mini"
 
 
 def test_caches_per_model_name_use_mlx_combo():

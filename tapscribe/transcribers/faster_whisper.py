@@ -18,6 +18,7 @@ class FasterWhisperTranscriber:
     `Transcriber` Protocol."""
 
     name: ClassVar[str] = "faster-whisper"
+    backend: ClassVar[str] = "faster-whisper"
 
     def __init__(self, *, model_name: str, model: Any, device: str):
         self.model_name = model_name
@@ -38,7 +39,7 @@ class FasterWhisperTranscriber:
         return cls(
             model_name=model_name,
             model=model,
-            device="CPU (CTranslate2; NOT MLX)",
+            device="CPU",
         )
 
     def transcribe(
@@ -80,6 +81,7 @@ class FasterWhisperTranscriber:
         applied_view = {k: (v if not callable(v) else str(v)) for k, v in applied.items()}
         return TranscriptionResult(
             transcriber=self.name,
+            backend=self.backend,
             device=self.device,
             model=self.model_name,
             language=info.language,

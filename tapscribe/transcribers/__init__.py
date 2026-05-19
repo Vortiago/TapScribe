@@ -40,7 +40,8 @@ def load_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
     """Return a cached stateful `Transcriber` for `model_name`.
 
     Routing rules:
-      voxtral-*     → VoxtralTranscriber
+      voxtral-*     → MlxVoxtralTranscriber if use_mlx else
+                      VoxtralTranscriber (HF transformers)
       nb-whisper-*  → FasterWhisperTranscriber (NB-Whisper has no public
                       MLX weights; use_mlx is ignored for this prefix)
       anything else → MlxWhisperTranscriber if use_mlx else
@@ -60,6 +61,10 @@ def load_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
 
 def _build_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
     if model_name.lower().startswith("voxtral"):
+        if use_mlx:
+            from .mlx_voxtral import MlxVoxtralTranscriber
+
+            return MlxVoxtralTranscriber.load(model_name)
         from .voxtral import VoxtralTranscriber
 
         return VoxtralTranscriber.load(model_name)
