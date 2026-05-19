@@ -5,14 +5,6 @@ produces one free-form text response per WAV. Because each WAV the
 recorder writes is already one mute-to-mute utterance, mapping that to
 a single `TranscriptionSegment` covering the whole duration works
 cleanly.
-
-Routed via `processor.apply_transcription_request(...)` — the purpose-built
-Voxtral transcription path. The chat-template path is avoided because the
-upstream tokenizer's `chat_template` is unset in current transformers
-releases, which raises `ValueError: Cannot use chat template functions`.
-Consequence: `initial_prompt` and `hotwords` are accepted for protocol
-parity but not actually forwarded to the model — there is no hook for
-them on the transcription-request path.
 """
 
 from __future__ import annotations
@@ -110,7 +102,7 @@ class VoxtralTranscriber:
             transcriber=self.name,
             device=self.device,
             model=self.model_name,
-            language=language or "auto",
+            language=language or "?",
             language_probability=0.0,
             duration=round(dur, 2),
             text=text,

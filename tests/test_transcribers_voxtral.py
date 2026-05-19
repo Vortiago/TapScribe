@@ -100,9 +100,6 @@ def test_transcribe_uses_transcription_request_with_audio_path(tmp_path: Path):
     wav = _one_second_wav(tmp_path / "x.wav")
     t.transcribe(wav)
 
-    # Voxtral is routed through apply_transcription_request (not the
-    # chat-template path) because the tokenizer's chat_template is unset
-    # in current transformers releases.
     kwargs = processor.apply_transcription_request.call_args.kwargs
     assert kwargs["audio"] == str(wav)
     assert "model_id" in kwargs
@@ -170,7 +167,6 @@ def test_transcribe_forwards_language_hint_for_nb_model_names(tmp_path: Path):
 
     kwargs = processor.apply_transcription_request.call_args.kwargs
     assert kwargs.get("language") == "no"
-    # And the result reflects the same hint rather than "auto".
     assert result.language == "no"
 
 
@@ -181,15 +177,10 @@ def test_apply_transcription_request_signature_matches_real_upstream():
     # production. When transformers is installed, inspect the real
     # signature and assert each kwarg we send is still a valid parameter.
     # When transformers isn't installed (CI without the voxtral extra),
-    # skip — the other tests still cover call shape against the mock.
-    try:
-        from transformers.models.voxtral.processing_voxtral import (  # type: ignore
-            VoxtralProcessor,
-        )
-    except ImportError:
-        pytest.skip("transformers not installed; signature canary skipped")
-
-    sig = inspect.signature(VoxtralProcessor.apply_transcription_request)
+    # importorskip yields the skip — the other tests still cover call
+    # shape against the mock.
+    proc_mod = pytest.importorskip("transformers.models.voxtral.processing_voxtral")
+    sig = inspect.signature(proc_mod.VoxtralProcessor.apply_transcription_request)
     params = set(sig.parameters.keys())
     # These are the kwargs voxtral.py builds and forwards. If upstream
     # renames any of them, fail here instead of at the user's first run.
