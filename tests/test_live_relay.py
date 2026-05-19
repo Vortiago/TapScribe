@@ -25,6 +25,56 @@ import websockets
 from tapscribe.live_relay import WlKRelay
 
 # ---------------------------------------------------------------------------
+# Test wait helpers — event-based replacements for "await asyncio.sleep(...)"
+# ---------------------------------------------------------------------------
+
+
+class _SignalList(list):
+    """A list that exposes an asyncio.Event firing whenever entries land,
+    so tests can `await wait_count(n)` instead of `await asyncio.sleep(...)`.
+
+    Used in place of bare `lines: list[str] = []` collectors. The relay's
+    `on_settled_line` callback runs synchronously from inside the consumer
+    task, so signalling the event in `append` is sufficient — the test
+    coroutine resumes as soon as the consumer hands us the new line.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._event = asyncio.Event()
+
+    def append(self, item) -> None:  # type: ignore[override]
+        super().append(item)
+        self._event.set()
+
+    async def wait_count(self, n: int, *, timeout: float = 1.0) -> None:
+        """Block until the list has at least `n` items, or raise TimeoutError."""
+
+        async def _wait() -> None:
+            while len(self) < n:
+                self._event.clear()
+                if len(self) >= n:
+                    return
+                await self._event.wait()
+
+        await asyncio.wait_for(_wait(), timeout=timeout)
+
+
+async def _wait_for(predicate, *, timeout: float = 1.0, interval: float = 0.005) -> None:
+    """Poll-based fallback for state that doesn't have a natural event hook
+    (e.g. `fake_wlk.received` is mutated by the fake server's own loop in
+    a different thread — we can't intercept the append cheaply). Tight
+    polling interval so tests don't burn real wall time when the condition
+    flips quickly."""
+
+    async def _wait() -> None:
+        while not predicate():
+            await asyncio.sleep(interval)
+
+    await asyncio.wait_for(_wait(), timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
 # Fake WhisperLiveKit
 # ---------------------------------------------------------------------------
 
@@ -145,8 +195,9 @@ async def test_relay_connect_then_send_round_trips_bytes(fake_wlk: _FakeWlk):
     )
     assert await relay.connect() is True
     assert await relay.send(b"\x00\x01" * 320) is True  # one 20 ms PCM frame
-    # Allow the fake server's handler to receive the bytes
-    await asyncio.sleep(0.05)
+    # Wait for the fake server's handler to receive the bytes (event-based
+    # via the fake's own connection list — see _wait_for above).
+    await _wait_for(lambda: fake_wlk.received == [b"\x00\x01" * 320])
     assert fake_wlk.received == [b"\x00\x01" * 320]
     await relay.close()
 
@@ -157,7 +208,7 @@ async def test_relay_consumes_lines_into_callback_with_close_drain(fake_wlk: _Fa
     line appears after it or the relay closes — ensuring each settled
     line is emitted exactly once regardless of how many snapshots
     contained it."""
-    lines: list[str] = []
+    lines = _SignalList()
     relay = WlKRelay(
         host="localhost",
         port=fake_wlk.port,
@@ -167,20 +218,21 @@ async def test_relay_consumes_lines_into_callback_with_close_drain(fake_wlk: _Fa
     await relay.connect()
     await fake_wlk.push_committed("hello world")
     await fake_wlk.push_committed("second line")
-    await asyncio.sleep(0.05)
+    # Event-based: wait until the first finalized line has reached the callback.
+    await lines.wait_count(1)
     # After two snapshots, "hello world" is finalized (a newer line
     # exists after it); "second line" is still the tail.
-    assert lines == ["hello world"]
+    assert list(lines) == ["hello world"]
     await relay.close()
     # close() drains: the remaining tail line gets emitted.
-    assert lines == ["hello world", "second line"]
+    assert list(lines) == ["hello world", "second line"]
 
 
 async def test_relay_dedupes_lines_across_repeated_snapshots(fake_wlk: _FakeWlk):
     """WlK re-sends the full lines list on every tick. The relay must
     NOT re-emit a line just because it appeared in three consecutive
     snapshots — the dashboard would fill with duplicates."""
-    lines: list[str] = []
+    lines = _SignalList()
     relay = WlKRelay(
         host="localhost",
         port=fake_wlk.port,
@@ -194,11 +246,13 @@ async def test_relay_dedupes_lines_across_repeated_snapshots(fake_wlk: _FakeWlk)
         {"text": "third (in-flight)", "speaker": 1, "start": 2.0, "end": 3.0},
     ]
     # The same snapshot delivered three times should yield each
-    # finalized line exactly once.
+    # finalized line exactly once. After the first push the two
+    # non-tail lines should land; the subsequent pushes are de-duped.
     for _ in range(3):
         await fake_wlk.push_lines_snapshot(base)
-        await asyncio.sleep(0.02)
-    assert lines == ["first", "second"]
+    # Wait for the two non-tail lines to make it through the consumer.
+    await lines.wait_count(2)
+    assert list(lines) == ["first", "second"]
     await relay.close()
 
 
@@ -206,7 +260,7 @@ async def test_relay_ignores_lines_without_text(fake_wlk: _FakeWlk):
     """WlK can emit speaker-only / silence segments with empty text.
     Those should be skipped rather than appending empty strings to
     LiveTranscripts."""
-    lines: list[str] = []
+    lines = _SignalList()
     relay = WlKRelay(
         host="localhost",
         port=fake_wlk.port,
@@ -230,10 +284,11 @@ async def test_relay_ignores_lines_without_text(fake_wlk: _FakeWlk):
     for c in fake_wlk._connections:
         await c.send(json.dumps({"foo": "bar"}))
         await c.send("not even json {{{")
-    await asyncio.sleep(0.05)
+    # Event-based: wait until the one expected finalized line has landed.
+    await lines.wait_count(1)
     # Empty-text entries are skipped; only "real line" makes it through
     # (the in-flight "newer" tail is held until close).
-    assert lines == ["real line"]
+    assert list(lines) == ["real line"]
     await relay.close()
 
 
@@ -273,7 +328,9 @@ async def test_relay_send_returns_false_after_server_closes(fake_wlk: _FakeWlk):
     )
     await relay.connect()
     await fake_wlk.stop()
-    # Give the server time to actually close the connection
+    # Give the server time to actually close the connection.
+    # real-time timeout test — sleep is intentional (closure propagation
+    # over a TCP socket is a real-clock event with no in-process hook).
     await asyncio.sleep(0.05)
     # The first send may succeed (buffered) or fail; one or two more should
     # definitely fail. Loop until we observe the closure.
@@ -282,6 +339,7 @@ async def test_relay_send_returns_false_after_server_closes(fake_wlk: _FakeWlk):
         if await relay.send(b"\x00" * 10) is False:
             failed = True
             break
+        # real-time timeout test — sleep is intentional (backoff between retries).
         await asyncio.sleep(0.02)
     assert failed
     await relay.close()
@@ -316,9 +374,11 @@ async def test_relay_extracts_remaining_time_into_on_metrics(fake_wlk: _FakeWlk)
     exposes it both as a `lag_s` attribute and via an `on_metrics` async
     callback so the dashboard can render a per-tap indicator."""
     seen: list[float] = []
+    metric_event = asyncio.Event()
 
     async def on_metrics(v: float) -> None:
         seen.append(v)
+        metric_event.set()
 
     relay = WlKRelay(
         host="localhost",
@@ -342,7 +402,8 @@ async def test_relay_extracts_remaining_time_into_on_metrics(fake_wlk: _FakeWlk)
                 }
             )
         )
-    await asyncio.sleep(0.05)
+    # Event-based: the consumer fires on_metrics from inside _consume.
+    await asyncio.wait_for(metric_event.wait(), timeout=1.0)
     assert seen == [1.25]
     assert relay.lag_s == 1.25
     await relay.close()
@@ -353,7 +414,7 @@ async def test_relay_emits_finalized_lines_immediately_not_just_on_close(fake_wl
     close: in a multi-line utterance, settled lines must reach the
     dashboard's live-transcripts feed in real time, not all at once when
     the bridge disconnects."""
-    lines: list[str] = []
+    lines = _SignalList()
     relay = WlKRelay(
         host="localhost",
         port=fake_wlk.port,
@@ -364,7 +425,8 @@ async def test_relay_emits_finalized_lines_immediately_not_just_on_close(fake_wl
     await fake_wlk.push_committed("one")
     await fake_wlk.push_committed("two")
     await fake_wlk.push_committed("three")
-    await asyncio.sleep(0.05)
+    # Event-based: wait for both finalized lines to land at the callback.
+    await lines.wait_count(2)
     # Without close: "one" and "two" are finalized, "three" is the tail.
-    assert lines == ["one", "two"]
+    assert list(lines) == ["one", "two"]
     await relay.close()
