@@ -95,7 +95,7 @@ filterwarnings = [
 ]
 markers = [
     "real_audio: end-to-end test that streams real audio fixtures and runs a real Whisper backend. Skipped unless tests/fixtures/audio/ is populated and faster-whisper is installed.",
-    "chaos: slow / timing-sensitive chaos tests; may be flaky on overloaded CI. Opt out with -m 'not chaos'.",
+    "chaos: race-condition / error-recovery test exercising background tasks, abnormal close paths, or repeated rapid mutations. Opt out with -m 'not chaos'.",
     "browser_e2e: requires Playwright + Chromium (`pip install -e .[dev] && python -m playwright install chromium`). Opt out with -m 'not browser_e2e'.",
 ]
 
