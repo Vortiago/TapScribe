@@ -72,11 +72,32 @@ def test_transcribe_returns_single_segment_with_full_text(tmp_path: Path):
     assert result.device == "Apple Silicon GPU"
     assert result.model == "voxtral-mini"
     assert result.text == "this is the transcript"
+    # Single-sentence output → one segment spanning the WAV.
     assert len(result.segments) == 1
     seg = result.segments[0]
     assert seg.text == "this is the transcript"
     assert seg.start == 0.0
     assert seg.end > 0
+
+
+def test_transcribe_splits_multi_sentence_output_into_segments(tmp_path: Path):
+    """Same sentence-splitting contract as the HF voxtral adapter."""
+    processor, model = _mlx_voxtral_mocks(
+        decoded_text="Hello there. How are you? I am fine."
+    )
+    t = MlxVoxtralTranscriber(model_name="voxtral-mini", processor=processor, model=model)
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav)
+    assert [s.text for s in result.segments] == [
+        "Hello there.",
+        "How are you?",
+        "I am fine.",
+    ]
+    for a, b in zip(result.segments, result.segments[1:], strict=False):
+        assert a.end == b.start
+    assert result.segments[0].start == 0.0
+    assert result.segments[-1].end == result.duration
+    assert result.text == "Hello there. How are you? I am fine."
 
 
 def test_transcribe_calls_apply_transcrition_request_with_typo_method_name(tmp_path: Path):

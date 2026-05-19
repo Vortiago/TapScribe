@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import wav_duration_s
-from .base import TranscriptionResult, TranscriptionSegment, default_language_for
+from .base import TranscriptionResult, default_language_for
+from .voxtral import split_voxtral_text_into_segments
 
 # Quantised MLX builds live under mlx-community. Default to bf16 — full
 # quality with the MLX speedup; users on tight RAM can swap to 4bit/8bit
@@ -96,8 +97,10 @@ class MlxVoxtralTranscriber:
         text_value = self._processor.decode(gen_ids, skip_special_tokens=True)
         text = (text_value or "").strip()
 
-        dur = wav_duration_s(path)
-        seg = TranscriptionSegment(start=0.0, end=round(dur, 2), text=text)
+        dur = round(wav_duration_s(path), 2)
+        # Sentence-split with interpolated timestamps — shared with the HF
+        # adapter so both backends yield the same readable merged transcript.
+        segments = split_voxtral_text_into_segments(text, duration=dur)
         return TranscriptionResult(
             transcriber=self.name,
             backend=self.backend,
@@ -107,9 +110,9 @@ class MlxVoxtralTranscriber:
             # we sent, or "auto" when we let it auto-detect.
             language=language or "auto",
             language_probability=0.0,
-            duration=round(dur, 2),
+            duration=dur,
             text=text,
-            segments=(seg,),
+            segments=segments,
             initial_prompt_used=initial_prompt or "",
             hotwords_used=hotwords or "",
             quality_settings=dict(gen_kwargs),
