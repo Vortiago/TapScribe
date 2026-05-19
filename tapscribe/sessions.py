@@ -528,6 +528,10 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         try:
             tgt_transcript.unlink()
         except OSError:
+            # Best-effort: the WAVs are already moved at this point, so
+            # raising would leave the merge half-applied (WAVs in target,
+            # source still on disk, transcript still stale). The transcript
+            # will be overwritten on the next ▶ transcribe whole session.
             pass
 
     # Source folder is now expected to hold only metadata files (session-meta,
