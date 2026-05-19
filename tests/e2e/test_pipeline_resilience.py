@@ -332,9 +332,7 @@ async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
     assert await wait_until(lambda: streams_drained(rec), timeout=3.0)
 
     wavs_after = list(rec.session_dir.glob("*.wav"))
-    assert len(wavs_after) == 1, (
-        f"expected the original WAV unchanged, got {[w.name for w in wavs_after]}"
-    )
+    assert len(wavs_after) == 1, f"expected the original WAV unchanged, got {[w.name for w in wavs_after]}"
     assert wavs_after[0].name == first_wav.name
     with wave.open(str(first_wav), "rb") as w:
         assert w.getnframes() == len(first_chunk) * 320, (

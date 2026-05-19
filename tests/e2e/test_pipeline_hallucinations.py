@@ -153,9 +153,7 @@ async def test_hallucination_filter_moves_match_to_suppressed(
 
     # The line must NOT appear in plain_text.
     plain_text = merged["plain_text"]
-    assert HALLUCINATION_LINE not in plain_text, (
-        f"hallucination line leaked into plain_text:\n{plain_text}"
-    )
+    assert HALLUCINATION_LINE not in plain_text, f"hallucination line leaked into plain_text:\n{plain_text}"
 
     # Bob's real content must still come through — the filter is
     # surgical, not a session-level kill switch.
