@@ -287,12 +287,25 @@ class UtteranceIndex:
     def __init__(self) -> None:
         self._by_id: dict[str, UtteranceRecord] = {}
 
-    def try_resume(self, utterance_id: str, *, identity: str) -> UtteranceRecord | None:
+    def try_resume(self, utterance_id: str, *, identity: str, session_dir: Path) -> UtteranceRecord | None:
         """Return the existing record marked open=True if resumable, else
-        None. Caller is expected to reopen the WAV for append."""
+        None. Caller is expected to reopen the WAV for append.
+
+        `session_dir` is the Recorder's current session folder. A record
+        whose WAV lives in a different folder (Recorder rotated session
+        between the original open and the resume attempt) is dropped from
+        the index and reported as not-resumable — appending across a
+        session rotation would put the resumed audio in a session the
+        operator is no longer looking at.
+        """
         self._prune_expired()
         rec = self._by_id.get(utterance_id)
         if rec is None or rec.open or rec.identity != identity:
+            return None
+        if rec.path.parent != session_dir:
+            # Record belongs to a previous session. Drop it so a fresh
+            # registration for the same utterance_id won't collide.
+            self._by_id.pop(utterance_id, None)
             return None
         if not rec.path.exists():
             # File was deleted (e.g. operator wiped the session dir).

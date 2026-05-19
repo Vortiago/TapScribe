@@ -70,15 +70,21 @@ class FakeWlkThread:
     something that speaks the WlK wire shape."""
 
     def __init__(self) -> None:
+        # `received` is the flat aggregate across all connections — kept
+        # so existing single-conn callers (`b"".join(fake_wlk.received)`)
+        # keep working unchanged. Per-connection state lives in the
+        # parallel lists `connections` / `received_by_connection` /
+        # `_lines_acc_by_connection`, indexed in connect order.
         self.received: list[bytes] = []
         self.connections: list = []
+        self.received_by_connection: list[list[bytes]] = []
+        self._lines_acc_by_connection: list[list[dict]] = []
         self._port = _free_port()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server = None
         self._stop_event: asyncio.Event | None = None
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
-        self._lines_acc: list[dict] = []
 
     @property
     def port(self) -> int:
@@ -107,7 +113,46 @@ class FakeWlkThread:
                 pass
         self._thread.join(timeout=2.0)
 
-    def push_committed(self, text: str) -> None:
+    def terminate(self) -> None:
+        """Simulate a WhisperLiveKit child crash: yank the server out
+        from under any open relay without a graceful drain.
+
+        `stop()` triggers the stop_event and lets the serve coroutine
+        close connections cooperatively. `terminate()` short-circuits
+        that: it forces sockets shut from the WlK loop's thread before
+        signalling stop, so any open relay sees an abrupt close rather
+        than a polite goodbye. Crash/restart tests need that shape.
+        Idempotent and safe to follow with a teardown `stop()`."""
+        if not self._thread.is_alive():
+            return
+        loop = self._loop
+
+        async def _kill():
+            # Force-close every open connection without awaiting their
+            # close handshake, then close the listening server.
+            for c in list(self.connections):
+                with contextlib.suppress(Exception):
+                    transport = getattr(c, "transport", None)
+                    if transport is not None:
+                        transport.abort()
+                    else:
+                        await c.close(code=1011)
+            if self._server is not None:
+                self._server.close()
+            if self._stop_event is not None:
+                self._stop_event.set()
+
+        if loop is not None:
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_kill(), loop)
+                with contextlib.suppress(Exception):
+                    fut.result(timeout=2.0)
+            except RuntimeError:
+                # Loop already closed; nothing to do.
+                pass
+        self._thread.join(timeout=2.0)
+
+    def push_committed(self, text: str, *, connection_index: int | None = None) -> None:
         """Schedule a settled-line broadcast on the WlK loop's thread.
 
         Mirrors the real WlK wire format: each call appends a new line to
@@ -115,35 +160,50 @@ class FakeWlkThread:
         See whisperlivekit/timed_objects.py FrontData.to_dict for the
         source of truth on the keys.
 
+        With `connection_index=None` (default) the line is broadcast to
+        every connected relay, with each relay's own cumulative line
+        list advanced independently — the legacy single-conn behaviour
+        is the N=1 case of this. Pass an int to push to a single
+        specific connection (in connect order) for tests that need to
+        diverge the two relays.
+
         Waits for the broadcast to complete on the WlK loop so callers can
         assert on relay-side state right after — no implicit sleep needed."""
         if self._loop is None:
             return
-        idx = len(self._lines_acc)
-        self._lines_acc.append(
-            {
-                "text": text,
-                "speaker": 1,
-                "start": float(idx),
-                "end": float(idx) + 1.0,
-            }
-        )
-        msg = json.dumps(
-            {
-                "status": "active_transcription",
-                "lines": list(self._lines_acc),
-                "buffer_transcription": "",
-                "buffer_diarization": "",
-                "buffer_translation": "",
-                "remaining_time_transcription": 0,
-                "remaining_time_diarization": 0,
-            }
-        )
+
+        if connection_index is None:
+            targets = list(range(len(self.connections)))
+        else:
+            targets = [connection_index]
 
         async def _push():
-            for c in list(self.connections):
+            for i in targets:
+                if i < 0 or i >= len(self.connections):
+                    continue
+                acc = self._lines_acc_by_connection[i]
+                idx = len(acc)
+                acc.append(
+                    {
+                        "text": text,
+                        "speaker": 1,
+                        "start": float(idx),
+                        "end": float(idx) + 1.0,
+                    }
+                )
+                msg = json.dumps(
+                    {
+                        "status": "active_transcription",
+                        "lines": list(acc),
+                        "buffer_transcription": "",
+                        "buffer_diarization": "",
+                        "buffer_translation": "",
+                        "remaining_time_transcription": 0,
+                        "remaining_time_diarization": 0,
+                    }
+                )
                 with contextlib.suppress(Exception):
-                    await c.send(msg)
+                    await self.connections[i].send(msg)
 
         fut = asyncio.run_coroutine_threadsafe(_push(), self._loop)
         with contextlib.suppress(Exception):
@@ -173,13 +233,22 @@ class FakeWlkThread:
 
     async def _handler(self, ws) -> None:
         self.connections.append(ws)
+        per_conn_received: list[bytes] = []
+        self.received_by_connection.append(per_conn_received)
+        self._lines_acc_by_connection.append([])
         try:
             async for msg in ws:
                 if isinstance(msg, bytes):
                     self.received.append(msg)
+                    per_conn_received.append(msg)
         finally:
             if ws in self.connections:
-                self.connections.remove(ws)
+                idx = self.connections.index(ws)
+                # Keep parallel lists aligned: drop this connection's
+                # per-conn state alongside its slot in `connections`.
+                self.connections.pop(idx)
+                self.received_by_connection.pop(idx)
+                self._lines_acc_by_connection.pop(idx)
 
 
 def _free_port() -> int:

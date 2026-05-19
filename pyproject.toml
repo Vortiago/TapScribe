@@ -92,9 +92,18 @@ filterwarnings = [
     "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
     "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
     "ignore:remove second argument of ws_handler:DeprecationWarning",
+    # Python 3.10 asyncio quirk: _SSLProtocolTransport.__del__ can raise
+    # ResourceWarning during GC even when uvicorn / httpx tore the
+    # transport down cleanly. Pytest re-raises the unraisable as a
+    # PytestUnraisableExceptionWarning. Fixed in 3.11+. Narrow filter
+    # matches the SSL transport message only — drop when 3.10 is gone.
+    "ignore:unclosed transport.*_SSLProtocolTransport:ResourceWarning",
+    "ignore:.*_SSLProtocolTransport:pytest.PytestUnraisableExceptionWarning",
 ]
 markers = [
     "real_audio: end-to-end test that streams real audio fixtures and runs a real Whisper backend. Skipped unless tests/fixtures/audio/ is populated and faster-whisper is installed.",
+    "chaos: race-condition / error-recovery test exercising background tasks, abnormal close paths, or repeated rapid mutations. Opt out with -m 'not chaos'.",
+    "browser_e2e: requires Playwright + Chromium (`pip install -e .[dev] && python -m playwright install chromium`). Opt out with -m 'not browser_e2e'.",
 ]
 
 [tool.ruff]

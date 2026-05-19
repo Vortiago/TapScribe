@@ -1,0 +1,30 @@
+<!doctype html>
+<!--
+  Mock SpatialChat page for the bridge E2E tests.
+
+  This page only exists to give the bridge's content.js + page-script.js
+  a realistic surface to attach to. We must serve at app.spatial.chat
+  (intercepted by Playwright's `page.route`) because the manifest's
+  content_scripts.matches restricts injection to that origin.
+
+  The page exposes a tiny LiveKit-shaped facade via `window.room` plus a
+  `window.__tsTest` driver the test uses to fire trackSubscribed /
+  trackMuted / participantDisconnected / disconnected events, just like
+  page-script.test.js's vm-isolated tests but here against a real
+  Chromium + the actual extension running in the isolated world.
+-->
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Mock SpatialChat</title>
+  </head>
+  <body>
+    <div id="root">Mock SpatialChat page</div>
+    <!-- The space-side-bar-room-user class hook is what page-script.js
+         queries to resolve display names from Vue 2 props. We seed it
+         per-test from __tsTest.setSidebarUser() so the getDisplayName()
+         path is exercised end-to-end. -->
+    <div id="sidebar"></div>
+    <script src="./mock-room.js"></script>
+  </body>
+</html>

@@ -17,6 +17,7 @@ relay path stays exercised by test_tap_endpoint.py.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import wave
 from pathlib import Path
 
@@ -30,6 +31,20 @@ from tests.conftest import FakeWlkThread
 # A 20 ms frame of audible-ish PCM at 16 kHz mono int16 — 320 samples / 640 bytes.
 # Real bridges send frames this size (see CONTEXT.md "Bridge" wire contract).
 PCM_FRAME = b"\x10\x00" * 320
+
+
+async def _wait_for(predicate, *, timeout: float = 2.0, interval: float = 0.005) -> None:
+    """Event-style wait for state mutated outside the test coroutine
+    (fake WlK lives on its own thread loop; the relay's reconnect runs
+    in a background task). Wraps a tight poll inside `asyncio.wait_for`
+    so the test fails loudly on a stuck condition instead of hanging
+    until the suite timeout."""
+
+    async def _wait() -> None:
+        while not predicate():
+            await asyncio.sleep(interval)
+
+    await asyncio.wait_for(_wait(), timeout=timeout)
 
 
 @pytest.fixture
@@ -356,7 +371,6 @@ async def test_write_frame_level_decays_through_silence_after_real_audio(recorde
     silent_tail = [silence_frame] * 30  # 30 * 20 ms = 600 ms — well past half-life
 
     peak_during_speech = 0.0
-    final_level_after_silence = 1.0
 
     async with await TapFanOut.open(
         recorder,
@@ -556,9 +570,9 @@ async def test_relay_forwards_frames_to_wlk_when_live_running(
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
         await fan_out.write_frame(PCM_FRAME)
-        # The relay sends asynchronously over a real WS; give the fake
-        # server's loop a chance to receive before we close the relay.
-        await asyncio.sleep(0.15)
+        # Event-based: wait for the relay to round-trip both frames into
+        # the fake server's received buffer before we tear down the relay.
+        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 2)
 
     # The fake WlK records every bytes frame it received from the relay.
     received = b"".join(fake_wlk.received)
@@ -568,6 +582,7 @@ async def test_relay_forwards_frames_to_wlk_when_live_running(
 async def test_relay_settled_lines_land_in_live_transcripts(
     recorder_with_relay: Recorder,
     fake_wlk: FakeWlkThread,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Settled lines pushed by WlK during the WS lifetime are consumed by
     the fan-out's relay and appended to recorder.transcripts attributed
@@ -575,6 +590,17 @@ async def test_relay_settled_lines_land_in_live_transcripts(
     in-flight tail until a newer line arrives or the relay closes —
     pushing two lines surfaces the first immediately and the second on
     relay close-drain."""
+    # Wrap recorder.transcripts.append so we get an event each time the
+    # fan-out's _on_settled_line callback lands a line.
+    append_event = asyncio.Event()
+    original_append = recorder_with_relay.transcripts.append
+
+    def _signalling_append(entry):
+        original_append(entry)
+        append_event.set()
+
+    monkeypatch.setattr(recorder_with_relay.transcripts, "append", _signalling_append)
+
     async with await TapFanOut.open(
         recorder_with_relay,
         identity="alice",
@@ -584,13 +610,19 @@ async def test_relay_settled_lines_land_in_live_transcripts(
         do_live=True,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
-        await asyncio.sleep(0.05)
+        # Wait for the frame to round-trip into the fake WlK before
+        # pushing settled lines, so the fake's connection list is live.
+        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
         fake_wlk.push_committed("hello from WlK")
         fake_wlk.push_committed("second from WlK")
-        await asyncio.sleep(0.2)
+        # Event-based: wait until at least the first finalized line has
+        # been appended to LiveTranscripts. The tail flushes on close below.
+        await asyncio.wait_for(append_event.wait(), timeout=2.0)
 
-    # Give the relay's drain a tick to flush the tail.
-    await asyncio.sleep(0.1)
+    # Event-based: the drain on relay close flushes the tail, so the
+    # second line is appended after __aexit__ runs. Wait until both
+    # lines are visible in the snapshot.
+    await _wait_for(lambda: len(recorder_with_relay.transcripts.snapshot()) >= 2)
     snap = recorder_with_relay.transcripts.snapshot()
     texts = [e["text"] for e in snap]
     assert "hello from WlK" in texts
@@ -713,14 +745,21 @@ async def test_relay_auto_reconnects_after_live_channel_restart(
                 port=wlk_b.port,
             )
 
-            # Phase 3: keep streaming on the same /tap WS. The first frame
-            # will detect the dead relay and kick off a reconnect; give the
-            # background task room to land, then stream a few more.
-            await fan_out.write_frame(PCM_FRAME)
-            await asyncio.sleep(0.3)  # let reconnect task finish
+            # Phase 3: keep streaming on the same /tap WS. The first
+            # frame to detect the dead relay (after the TCP close
+            # propagates through websockets) kicks off a reconnect task;
+            # drive frames until that task is scheduled, then await it
+            # directly instead of sleeping for "long enough".
+            async def _drive_until_reconnect_scheduled() -> None:
+                while fan_out._relay_reconnect_task is None:
+                    await fan_out.write_frame(PCM_FRAME)
+                    await asyncio.sleep(0.005)
+
+            await asyncio.wait_for(_drive_until_reconnect_scheduled(), timeout=2.0)
+            with contextlib.suppress(Exception):
+                await fan_out._relay_reconnect_task
             for _ in range(5):
                 await fan_out.write_frame(PCM_FRAME)
-                await asyncio.sleep(0.02)
 
             received_b = await _drain_wlk_received(wlk_b, len(PCM_FRAME))
             assert len(received_b) > 0, (
@@ -735,7 +774,12 @@ async def test_relay_auto_reconnects_after_live_channel_restart(
             # on_settled_line callback.
             wlk_b.push_committed("hello after restart")
             wlk_b.push_committed("second line settles the first")
-            await asyncio.sleep(0.15)
+            # Event-based: wait until the first line reaches LiveTranscripts.
+            await _wait_for(
+                lambda: any(
+                    "hello after restart" in e["text"] for e in recorder_with_relay.transcripts.snapshot()
+                )
+            )
             snap = recorder_with_relay.transcripts.snapshot()
             our_lines = [e for e in snap if e["identity"] == "alice"]
             assert any("hello after restart" in e["text"] for e in our_lines), (
@@ -774,13 +818,22 @@ async def test_relay_reconnect_attempts_respect_backoff(
             # Kill the relay by stopping WlK; subsequent send() returns
             # False, fan_out sets _relay_alive=False.
             fake_wlk.stop()
-            await fan_out.write_frame(PCM_FRAME)
-            await asyncio.sleep(0.05)
+            # Drive write_frames until the relay is marked dead — the WS
+            # close has to propagate through the websockets library before
+            # send() reports the failure, which is a real-clock event.
+            for _ in range(20):
+                await fan_out.write_frame(PCM_FRAME)
+                if not fan_out._relay_alive:
+                    break
+                await asyncio.sleep(0.005)
+            assert not fan_out._relay_alive, "relay should be marked dead after WlK stops"
             # Now the relay is known-dead. Fire a burst of frames; only
             # ONE reconnect task should be scheduled because backoff is
             # 5s and the burst takes ~50 ms.
             for _ in range(10):
                 await fan_out.write_frame(PCM_FRAME)
+                # real-time timeout test — sleep is intentional (pacing
+                # the burst to ensure it fits inside one backoff window).
                 await asyncio.sleep(0.005)
 
             # The internal counter `_relay_reconnect_attempts` (we add
@@ -819,7 +872,8 @@ async def test_relay_reconnect_picks_up_new_config(
             do_live=True,
         ) as fan_out:
             await fan_out.write_frame(PCM_FRAME)
-            await asyncio.sleep(0.05)
+            # _relay is established by TapFanOut.open() (synchronously, as
+            # part of _open) — no wait needed before asserting on it.
             assert fan_out._relay is not None
             assert fan_out._relay._language == recorder_with_relay.live.config.language
 
@@ -842,13 +896,17 @@ async def test_relay_reconnect_picks_up_new_config(
             # discovered.
             fan_out._relay_alive = False
 
-            # Trigger reconnect. Pump several frames + an explicit sleep
-            # so the background _reconnect_relay task has time to close
-            # the stale relay and finish the new connect handshake.
-            for _ in range(5):
+            # Trigger reconnect. The first write_frame schedules the
+            # background _reconnect_relay task; await it directly instead
+            # of sleeping for "long enough".
+            await fan_out.write_frame(PCM_FRAME)
+            await _wait_for(lambda: fan_out._relay_reconnect_task is not None)
+            with contextlib.suppress(Exception):
+                await fan_out._relay_reconnect_task
+            # Drive a few more frames so a successful reconnect can
+            # actually send something through the rebuilt relay.
+            for _ in range(4):
                 await fan_out.write_frame(PCM_FRAME)
-                await asyncio.sleep(0.05)
-            await asyncio.sleep(0.2)
 
             # The rebuilt relay must reflect the NEW config — language
             # gets baked into the WlK WS URL, so reading the wrong field

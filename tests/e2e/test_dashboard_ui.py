@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 import re
 from pathlib import Path
 
@@ -104,6 +105,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
             pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -300,6 +302,7 @@ async def test_dashboard_with_real_audio_and_whisper(
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
             pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -331,26 +334,42 @@ async def test_dashboard_with_real_audio_and_whisper(
             # Real Whisper on CPU + a model-download-if-uncached step can
             # easily take 60+ s on first run. After the transcript
             # arrives the dashboard renders it on its next 1 s poll
-            # tick — bound the wait generously. Two checks: at least one
-            # reference anchor word appears (content), and every segment
-            # `<div>` renders on a single visual line (layout — `.transcript`
-            # uses `white-space: pre-wrap`, so stray template whitespace
-            # would silently split each segment across multiple lines).
-            await page.wait_for_function(
-                f"""
-                () => {{
-                  const region = document.querySelector('.sess-main .transcript');
-                  if (!region) return false;
-                  const text = region.textContent.toLowerCase();
-                  if (text.length < 8) return false;
-                  const refWords = {sorted(reference_words)!r};
-                  if (!refWords.some((w) => text.includes(w))) return false;
-                  const lines = Array.from(region.querySelectorAll(':scope > div'));
-                  return lines.length > 0 && lines.every((l) => !l.innerText.includes('\\n'));
-                }}
-                """,
-                timeout=300000,
-            )
+            # tick — bound the wait at ~90 s by default (tiny.en on CPU
+            # comfortably fits), overridable for slower hardware via
+            # TAPSCRIBE_E2E_WHISPER_TIMEOUT_S. On timeout, raise with
+            # the model and elapsed wait so a CI flake points at the
+            # real culprit (model swap? cold-start download?) instead
+            # of a bare Playwright TimeoutError. Two checks: at least
+            # one reference anchor word appears (content), and every
+            # segment `<div>` renders on a single visual line (layout —
+            # `.transcript` uses `white-space: pre-wrap`, so stray
+            # template whitespace would silently split each segment
+            # across multiple lines).
+            whisper_model = "tiny.en"
+            timeout_s = float(os.environ.get("TAPSCRIBE_E2E_WHISPER_TIMEOUT_S", "90"))
+            try:
+                await page.wait_for_function(
+                    f"""
+                    () => {{
+                      const region = document.querySelector('.sess-main .transcript');
+                      if (!region) return false;
+                      const text = region.textContent.toLowerCase();
+                      if (text.length < 8) return false;
+                      const refWords = {sorted(reference_words)!r};
+                      if (!refWords.some((w) => text.includes(w))) return false;
+                      const lines = Array.from(region.querySelectorAll(':scope > div'));
+                      return lines.length > 0 && lines.every((l) => !l.innerText.includes('\\n'));
+                    }}
+                    """,
+                    timeout=int(timeout_s * 1000),
+                )
+            except Exception as e:
+                raise AssertionError(
+                    f"real-Whisper transcript never rendered: model={whisper_model!r}, "
+                    f"waited {timeout_s:.0f}s "
+                    f"(override via TAPSCRIBE_E2E_WHISPER_TIMEOUT_S). "
+                    f"underlying error: {type(e).__name__}: {e}"
+                ) from e
 
             await page.screenshot(
                 path=str(SHOTS_DIR / "06-real-audio-transcript.png"),
