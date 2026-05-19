@@ -64,7 +64,7 @@ if ($needInstall) {
 $Model = if ($env:SX_MODEL) { $env:SX_MODEL } else { "tiny.en" }
 $LangCode = if ($env:SX_LANG) { $env:SX_LANG } else { "en" }
 $PortRec = if ($env:SX_PORT_REC) { $env:SX_PORT_REC } else { "8001" }
-$PortWlk = if ($env:SX_PORT_WLK) { $env:SX_PORT_WLK } else { "8000" }
+$PortWlk = if ($env:SX_PORT_WLK) { $env:SX_PORT_WLK } else { "" }
 if ($env:SX_HOST) {
     $BindHost = $env:SX_HOST
 } elseif ($Lan) {
@@ -78,11 +78,18 @@ if ($NoMlx)      { $ExtraArgs += "--no-mlx" }
 if ($NoAutoLive) { $ExtraArgs += "--no-auto-live" }
 if ($NoAuth)     { $ExtraArgs += "--no-auth" }
 if ($Tls)        { $ExtraArgs += "--tls" }
+if ($PortWlk) {
+    $ExtraArgs += "--live-port"
+    $ExtraArgs += $PortWlk
+    $LiveLabel = "ws://${BindHost}:${PortWlk}/asr"
+} else {
+    $LiveLabel = "ephemeral (internal; recorder chooses a free port each start)"
+}
 
 Write-Host ""
 Write-Host "[start] Launching TapScribe…"
 Write-Host "        Dashboard       http://${BindHost}:${PortRec}/"
-Write-Host "        Live channel    ws://${BindHost}:${PortWlk}/asr"
+Write-Host "        Live channel    $LiveLabel"
 Write-Host "        (first launch can take 10–30s while torch/transformers import — be patient)"
 Write-Host ""
 
@@ -91,5 +98,4 @@ Write-Host ""
     --port $PortRec `
     --live-model $Model `
     --live-language $LangCode `
-    --live-port $PortWlk `
     @ExtraArgs

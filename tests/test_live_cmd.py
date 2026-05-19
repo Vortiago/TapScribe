@@ -7,11 +7,19 @@ fails loudly.
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from tapscribe.live import LiveConfig, _is_console_worthy, build_live_cmd
+from tapscribe.live import (
+    LiveChannel,
+    LiveConfig,
+    _is_console_worthy,
+    _probe_port_free,
+    build_live_cmd,
+)
 
 EXE = "/path/to/whisperlivekit-server"
 DEFAULT_CFG = LiveConfig(model="tiny.en", language="en", host="localhost", port=8000)
@@ -145,3 +153,149 @@ def test_console_worthy_lines_pass_through(line: str):
 )
 def test_non_warning_lines_are_filtered(line: str):
     assert _is_console_worthy(line) is False
+
+
+# ---------------------------------------------------------------------------
+# _probe_port_free — preflight before spawning the WLK child
+# ---------------------------------------------------------------------------
+
+
+def test_probe_returns_none_for_free_port():
+    # Bind ephemerally to discover a port, release it, then probe.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    assert _probe_port_free("127.0.0.1", port) is None
+
+
+def test_probe_returns_diagnostic_when_port_taken():
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        msg = _probe_port_free("127.0.0.1", port)
+        assert msg is not None
+        # Diagnostic must name the port AND give the operator an actionable
+        # hint — without that, the user is back to the cryptic [Errno 48].
+        assert str(port) in msg
+        assert "already in use" in msg
+    finally:
+        holder.close()
+
+
+def test_start_with_port_zero_picks_ephemeral_port():
+    """Default --live-port is 0 because WLK is internal; LiveChannel
+    must allocate a real free port at spawn time, not pass 0 through to
+    whisperlivekit-server (which would either fail or pick its own,
+    leaving config.port stale for `live_relay` to use)."""
+    cfg = LiveConfig(model="tiny.en", language="en", host="127.0.0.1", port=0)
+    chan = LiveChannel(config=cfg, use_mlx=False)
+
+    captured: dict = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+
+        class _Stdout:
+            def __iter__(self):
+                return iter(())
+
+        class _P:
+            pid = 12345
+            stdout = _Stdout()
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+        return _P()
+
+    with (
+        patch.object(LiveChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
+        patch("tapscribe.live.subprocess.Popen", side_effect=fake_popen),
+    ):
+        ok, _ = chan.start()
+    assert ok is True
+    # config.port was rewritten to a real port the kernel handed us, and
+    # the argv reflects the same number.
+    assert chan.config.port != 0
+    assert chan.config.port > 0
+    assert "--port" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--port") + 1] == str(chan.config.port)
+
+
+def test_restart_in_ephemeral_mode_picks_a_fresh_port():
+    """A LiveChannel constructed with port=0 must re-allocate on every
+    start(), not just the first. Otherwise the dashboard's stop→start
+    "Apply model" path reuses the port whose listening socket is now in
+    TIME_WAIT, which is the exact bug ephemeral defaults were meant to
+    avoid."""
+    cfg = LiveConfig(model="tiny.en", language="en", host="127.0.0.1", port=0)
+    chan = LiveChannel(config=cfg, use_mlx=False)
+    ports_seen: list[int] = []
+
+    def fake_popen(cmd, **kwargs):
+        ports_seen.append(int(cmd[cmd.index("--port") + 1]))
+
+        class _Stdout:
+            def __iter__(self):
+                return iter(())
+
+        class _P:
+            pid = 0
+            stdout = _Stdout()
+            _alive = True
+
+            def poll(self):
+                return None if self._alive else 0
+
+            def wait(self, timeout=None):
+                self._alive = False
+                return 0
+
+        return _P()
+
+    with (
+        patch.object(LiveChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
+        patch("tapscribe.live.subprocess.Popen", side_effect=fake_popen),
+    ):
+        chan.start()
+        # Mark the proc as dead so the next start() proceeds; we don't
+        # actually call stop() because it would try to SIGTERM a fake.
+        if chan._proc is not None:
+            chan._proc._alive = False  # type: ignore[attr-defined]
+        chan.start()
+
+    assert len(ports_seen) == 2
+    assert ports_seen[0] != ports_seen[1], (
+        f"second start reused port {ports_seen[0]} instead of allocating fresh"
+    )
+
+
+def test_start_fails_fast_when_port_in_use():
+    """LiveChannel.start must NOT Popen if the WLK port is occupied —
+    otherwise the child crashes 10-30s later with the same cryptic
+    errno after bridges have already opened /tap WS connections."""
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        cfg = LiveConfig(model="tiny.en", language="en", host="127.0.0.1", port=port)
+        chan = LiveChannel(config=cfg, use_mlx=False)
+        with (
+            patch.object(LiveChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
+            patch("tapscribe.live.subprocess.Popen") as popen,
+        ):
+            ok, msg = chan.start()
+        assert ok is False
+        assert "already in use" in msg
+        assert chan.info["state"] == "error"
+        assert chan.info["last_error"] == msg
+        popen.assert_not_called()
+    finally:
+        holder.close()

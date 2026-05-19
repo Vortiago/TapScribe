@@ -10,9 +10,11 @@ NB-Whisper weights, spawn, drain stdout, update INFO).
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -110,6 +112,70 @@ def build_live_cmd(
     return cmd
 
 
+def _probe_port_free(host: str, port: int) -> str | None:
+    """Bind a throwaway socket to (host, port). Return None if the port
+    is free, else a human-readable diagnostic.
+
+    Called as a fail-fast preflight before spawning whisperlivekit-server.
+    Without this, an occupied port surfaces 10-30s later as a cryptic
+    `[wlk] ERROR: [Errno 48] ...` after the child finally tries to bind —
+    by which time bridges have already opened /tap WS connections that
+    can't be transcribed live. The usual culprit is a leftover
+    whisperlivekit-server from a previous crash or SIGKILL (the
+    recorder's lifespan cleanup only runs on graceful shutdown).
+    """
+    fam = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(fam, socket.SOCK_STREAM)
+    try:
+        s.bind((host, port))
+        return None
+    except OSError as e:
+        if e.errno in (errno.EADDRINUSE, errno.EACCES):
+            if os.name == "nt":
+                find_cmd = f"`netstat -ano | findstr :{port}` then `taskkill /PID <pid> /F`"
+            else:
+                # `lsof -i :PORT` (no LISTEN filter) catches both listeners
+                # AND TIME_WAIT sockets — the latter are invisible to
+                # `lsof | grep LISTEN` but still block a fresh bind for up
+                # to ~60s on macOS after a previous process exited.
+                find_cmd = f"`lsof -i :{port}` (shows listeners AND TIME_WAIT)"
+            return (
+                f"port {port} on {host} is already in use. Likely causes: "
+                f"(a) a leftover whisperlivekit-server from a previous crash — find with {find_cmd} "
+                f"and kill it; (b) a recently-killed process is still in TIME_WAIT — wait ~60s "
+                f"and retry; (c) set SX_PORT_WLK to a free port (e.g. 8010) and restart."
+            )
+        return f"unable to probe live-channel port {port} on {host}: {e}"
+    finally:
+        s.close()
+
+
+def _pick_ephemeral_port(host: str) -> int:
+    """Ask the kernel for a free TCP port on `host` and immediately
+    release it, returning the number. Used by LiveChannel when the
+    configured port is 0 (the default) — WhisperLiveKit is an internal
+    detail of the recorder (only `live_relay` connects to it; bridges
+    talk to /tap on the recorder, not to WLK), so a stable well-known
+    port has no value and just causes EADDRINUSE collisions with stale
+    sockets from prior runs.
+
+    Race: between this socket closing and whisperlivekit-server's
+    uvicorn binding (~10-30s while the model loads), another process
+    could in theory grab the port. In practice the kernel avoids
+    recently-used ephemeral ports for new allocations, so the window is
+    very small; if it does happen, _probe_port_free's diagnostic
+    surfaces it immediately. Caller can also pin a port explicitly via
+    SX_PORT_WLK / --live-port.
+    """
+    fam = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(fam, socket.SOCK_STREAM)
+    try:
+        s.bind((host, 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
 def _is_console_worthy(ln: str) -> bool:
     """True for lines the operator should see in the recorder's stdout
     (warnings, errors, tracebacks). Everything else is kept in the
@@ -155,6 +221,14 @@ class LiveChannel:
     def __init__(self, *, config: LiveConfig, use_mlx: bool):
         self.config = config
         self.use_mlx = use_mlx
+        # Remember whether the operator asked for an ephemeral port (port=0)
+        # at construction time. After the first spawn we mutate config.port
+        # to the actually-picked number — but on the NEXT start() (e.g. the
+        # dashboard's stop-then-start "Apply model" flow) we want a FRESH
+        # ephemeral port, not to reuse the prior one which is now sitting
+        # in TIME_WAIT for ~60s. Without this flag, restarts would hit the
+        # exact bug ephemeral defaults were meant to fix.
+        self._ephemeral_port = config.port == 0
         self.info: dict[str, str] = _initial_info()
         self.log: deque[str] = deque(maxlen=200)
         self._lock = threading.Lock()
@@ -234,6 +308,23 @@ class LiveChannel:
                 self.info["last_error"] = msg
                 print(f"[tapscribe] {msg}", flush=True)
                 return False, msg
+
+            # Ephemeral mode: pick a NEW free port on every start, not just
+            # the first one. WLK is internal — only `live_relay` connects
+            # to it inside the recorder — so the port has no external
+            # consumer that would care about it being stable. Re-picking
+            # avoids the dashboard "Apply model" restart hitting TIME_WAIT
+            # on the previous spawn's port.
+            if self._ephemeral_port:
+                picked = _pick_ephemeral_port(self.config.host)
+                self.config = replace(self.config, port=picked)
+
+            port_err = _probe_port_free(self.config.host, self.config.port)
+            if port_err is not None:
+                self.info["state"] = "error"
+                self.info["last_error"] = port_err
+                print(f"[tapscribe] cannot start whisperlivekit-server: {port_err}", flush=True)
+                return False, port_err
 
             # Pre-resolve NB-Whisper weights if needed. Real I/O (HF fetch)
             # so it stays out of the pure build_live_cmd.
