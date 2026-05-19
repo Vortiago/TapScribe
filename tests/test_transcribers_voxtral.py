@@ -32,7 +32,7 @@ def _voxtral_mocks(decoded_text: str = "hello world"):
     fake_inputs.input_ids = MagicMock()
     fake_inputs.input_ids.shape = (1, 5)
     fake_inputs.to.return_value = fake_inputs
-    processor.apply_chat_template.return_value = fake_inputs
+    processor.apply_transcription_request.return_value = fake_inputs
     processor.batch_decode.return_value = [decoded_text]
 
     model = MagicMock()
@@ -81,7 +81,7 @@ def test_transcribe_returns_single_segment_with_full_text(tmp_path: Path):
     assert seg.end > 0
 
 
-def test_transcribe_folds_context_and_hotwords_into_instruction(tmp_path: Path):
+def test_transcribe_uses_transcription_request_with_audio_path(tmp_path: Path):
     processor, model = _voxtral_mocks()
     t = VoxtralTranscriber(
         model_name="voxtral-mini",
@@ -90,11 +90,34 @@ def test_transcribe_folds_context_and_hotwords_into_instruction(tmp_path: Path):
         device="cpu",
     )
     wav = _one_second_wav(tmp_path / "x.wav")
-    t.transcribe(wav, initial_prompt="weekly engineering planning meeting", hotwords="Acme, Patricia")
+    t.transcribe(wav)
 
-    conv = processor.apply_chat_template.call_args.args[0]
-    text_block = next(c for c in conv[0]["content"] if c["type"] == "text")
-    assert "weekly engineering planning meeting" in text_block["text"]
-    assert "Acme, Patricia" in text_block["text"]
-    # The anti-summarisation framing is always present
-    assert "Transcribe the audio verbatim" in text_block["text"]
+    # Voxtral is routed through apply_transcription_request (not the
+    # chat-template path) because the tokenizer's chat_template is unset
+    # in current transformers releases.
+    kwargs = processor.apply_transcription_request.call_args.kwargs
+    assert kwargs["audio"] == str(wav)
+    assert "model_id" in kwargs
+    # No language hint for a plain "voxtral-*" model name (auto-detect).
+    assert "language" not in kwargs
+
+
+def test_transcribe_drops_prompt_and_hotwords_but_records_them(tmp_path: Path):
+    processor, model = _voxtral_mocks()
+    t = VoxtralTranscriber(
+        model_name="voxtral-mini",
+        processor=processor,
+        model=model,
+        device="cpu",
+    )
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav, initial_prompt="weekly planning", hotwords="Acme, Patricia")
+
+    # apply_transcription_request has no hook for prompt/hotwords, so they
+    # must not appear in the call kwargs — they're recorded on the result
+    # only for protocol parity with the other transcribers.
+    kwargs = processor.apply_transcription_request.call_args.kwargs
+    assert "weekly planning" not in str(kwargs)
+    assert "Acme" not in str(kwargs)
+    assert result.initial_prompt_used == "weekly planning"
+    assert result.hotwords_used == "Acme, Patricia"

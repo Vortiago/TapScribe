@@ -5,6 +5,14 @@ produces one free-form text response per WAV. Because each WAV the
 recorder writes is already one mute-to-mute utterance, mapping that to
 a single `TranscriptionSegment` covering the whole duration works
 cleanly.
+
+Routed via `processor.apply_transcription_request(...)` — the purpose-built
+Voxtral transcription path. The chat-template path is avoided because the
+upstream tokenizer's `chat_template` is unset in current transformers
+releases, which raises `ValueError: Cannot use chat template functions`.
+Consequence: `initial_prompt` and `hotwords` are accepted for protocol
+parity but not actually forwarded to the model — there is no hook for
+them on the transcription-request path.
 """
 
 from __future__ import annotations
@@ -13,18 +21,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import wav_duration_s
-from .base import TranscriptionResult, TranscriptionSegment
+from .base import TranscriptionResult, TranscriptionSegment, default_language_for
 
 # Currently only Voxtral Mini is realistic for local CPU use; other Voxtral
 # sizes can be added later by branching on model_name in load().
 _VOXTRAL_REPO = "mistralai/Voxtral-Mini-3B-2507"
-
-_INSTRUCTION_BASE = (
-    "Transcribe the audio verbatim into text. "
-    "Do not add commentary, summarisation, translation, or interpretation. "
-    "Do not describe the audio. Output only the spoken words. "
-    "Use punctuation and casing that matches the speech."
-)
 
 
 class VoxtralTranscriber:
@@ -70,24 +71,17 @@ class VoxtralTranscriber:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
     ) -> TranscriptionResult:
-        # Build the instruction. Voxtral is helpfulness-tuned and will drift
-        # into summarising if not pinned to verbatim output.
-        instruction = _INSTRUCTION_BASE
-        if initial_prompt:
-            instruction += " Context for this conversation: " + initial_prompt
-        if hotwords:
-            instruction += " Proper nouns and jargon that may appear (use these spellings): " + hotwords
-
-        conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "audio", "path": str(path)},
-                    {"type": "text", "text": instruction},
-                ],
-            }
-        ]
-        inputs = self._processor.apply_chat_template(conversation, return_tensors="pt").to(self._raw_device)
+        # Voxtral exposes a purpose-built transcription request that bypasses
+        # the chat-template path (which ships broken on some transformers
+        # releases — tokenizer.chat_template unset). The trade-off: this path
+        # takes language + audio only, so initial_prompt and hotwords have
+        # nowhere to go and are dropped. They're still recorded on the result
+        # for parity with other transcribers' bookkeeping.
+        language = default_language_for(self.model_name)
+        request_kwargs: dict[str, Any] = {"audio": str(path), "model_id": _VOXTRAL_REPO}
+        if language:
+            request_kwargs["language"] = language
+        inputs = self._processor.apply_transcription_request(**request_kwargs).to(self._raw_device)
 
         gen_kwargs: dict[str, Any] = dict(
             max_new_tokens=2048,
@@ -116,7 +110,7 @@ class VoxtralTranscriber:
             transcriber=self.name,
             device=self.device,
             model=self.model_name,
-            language="auto",
+            language=language or "auto",
             language_probability=0.0,
             duration=round(dur, 2),
             text=text,
