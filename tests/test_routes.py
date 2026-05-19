@@ -280,10 +280,14 @@ def _seed_session(root: Path, name: str, wavs: list[str]) -> Path:
 def test_absorb_moves_wavs_and_sidecars_and_deletes_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    source = _seed_session(root, "src", [
-        "20260101T010000Z__alice__def.wav",
-        "20260101T010500Z__bob__ghi.wav",
-    ])
+    source = _seed_session(
+        root,
+        "src",
+        [
+            "20260101T010000Z__alice__def.wav",
+            "20260101T010500Z__bob__ghi.wav",
+        ],
+    )
     # Drop a sidecar on one source WAV so we can verify it follows.
     (source / "20260101T010000Z__alice__def.wav").with_suffix(".json").write_text("{}")
 
@@ -322,14 +326,20 @@ def test_absorb_merges_aliases_with_target_winning(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     _seed_session(root, "tgt", [])
     _seed_session(root, "src", [])
-    client.put("/api/session-meta/tgt", json={
-        "label": "kickoff",
-        "aliases": {"alice": "Alice T", "shared": "Target Says"},
-    })
-    client.put("/api/session-meta/src", json={
-        "label": "ignored",
-        "aliases": {"bob": "Bob S", "shared": "Source Says"},
-    })
+    client.put(
+        "/api/session-meta/tgt",
+        json={
+            "label": "kickoff",
+            "aliases": {"alice": "Alice T", "shared": "Target Says"},
+        },
+    )
+    client.put(
+        "/api/session-meta/src",
+        json={
+            "label": "ignored",
+            "aliases": {"bob": "Bob S", "shared": "Source Says"},
+        },
+    )
 
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 200, r.text

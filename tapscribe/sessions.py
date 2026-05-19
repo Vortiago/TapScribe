@@ -511,10 +511,13 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
             tgt_aliases[k] = v
             aliases_added.append(k)
     if aliases_added or tgt_meta:
-        write_session_meta(target, {
-            "label": tgt_meta.get("label", "") or "",
-            "aliases": tgt_aliases,
-        })
+        write_session_meta(
+            target,
+            {
+                "label": tgt_meta.get("label", "") or "",
+                "aliases": tgt_aliases,
+            },
+        )
 
     # The target's merged transcript predates the just-moved WAVs, so it's
     # now stale. Drop it so the operator's next "transcribe whole session"
