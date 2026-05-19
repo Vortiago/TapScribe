@@ -150,6 +150,32 @@ def _probe_port_free(host: str, port: int) -> str | None:
         s.close()
 
 
+def _pick_ephemeral_port(host: str) -> int:
+    """Ask the kernel for a free TCP port on `host` and immediately
+    release it, returning the number. Used by LiveChannel when the
+    configured port is 0 (the default) — WhisperLiveKit is an internal
+    detail of the recorder (only `live_relay` connects to it; bridges
+    talk to /tap on the recorder, not to WLK), so a stable well-known
+    port has no value and just causes EADDRINUSE collisions with stale
+    sockets from prior runs.
+
+    Race: between this socket closing and whisperlivekit-server's
+    uvicorn binding (~10-30s while the model loads), another process
+    could in theory grab the port. In practice the kernel avoids
+    recently-used ephemeral ports for new allocations, so the window is
+    very small; if it does happen, _probe_port_free's diagnostic
+    surfaces it immediately. Caller can also pin a port explicitly via
+    SX_PORT_WLK / --live-port.
+    """
+    fam = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(fam, socket.SOCK_STREAM)
+    try:
+        s.bind((host, 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
 def _is_console_worthy(ln: str) -> bool:
     """True for lines the operator should see in the recorder's stdout
     (warnings, errors, tracebacks). Everything else is kept in the
@@ -274,6 +300,15 @@ class LiveChannel:
                 self.info["last_error"] = msg
                 print(f"[tapscribe] {msg}", flush=True)
                 return False, msg
+
+            # port=0 means "pick an ephemeral port now". WLK is internal —
+            # only `live_relay` connects to it inside the recorder — so a
+            # stable port has no external consumer. Allocating fresh avoids
+            # the most common breakage: port 8000 left in TIME_WAIT (or
+            # held by a leftover WLK) after a hard kill.
+            if self.config.port == 0:
+                picked = _pick_ephemeral_port(self.config.host)
+                self.config = replace(self.config, port=picked)
 
             port_err = _probe_port_free(self.config.host, self.config.port)
             if port_err is not None:

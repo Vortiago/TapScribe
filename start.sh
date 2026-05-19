@@ -28,7 +28,8 @@
 #
 # Configurable via env vars:
 #   SX_HOST       bind address (default localhost, overridden by --lan to 0.0.0.0)
-#   SX_PORT_WLK   WhisperLiveKit port (default 8000)
+#   SX_PORT_WLK   WhisperLiveKit port (default: ephemeral — WLK is internal,
+#                 only the recorder talks to it; pin only if you have a reason)
 #   SX_PORT_REC   recorder port (default 8001)
 #   SX_MODEL      Initial live Whisper model (default tiny.en; switch live from dashboard)
 #   SX_LANG       language hint (default en)
@@ -148,7 +149,7 @@ fi
 # --- Configuration ----------------------------------------------------------
 MODEL="${SX_MODEL:-tiny.en}"
 LANG="${SX_LANG:-en}"
-PORT_WLK="${SX_PORT_WLK:-8000}"
+PORT_WLK="${SX_PORT_WLK:-}"
 PORT_REC="${SX_PORT_REC:-8001}"
 
 if [ "$LAN" -eq 1 ]; then
@@ -190,9 +191,16 @@ fi
 
 # --- Launch -----------------------------------------------------------------
 echo ""
+if [ -n "$PORT_WLK" ]; then
+    EXTRA_ARGS+=(--live-port "$PORT_WLK")
+    LIVE_LABEL="ws://$HOST:$PORT_WLK/asr  (managed from dashboard)"
+else
+    LIVE_LABEL="ephemeral (internal; recorder chooses a free port each start)"
+fi
+
 echo "[start] Launching TapScribe (which will spawn whisperlivekit-server as a child)..."
 echo "        Dashboard       http://$HOST:$PORT_REC/"
-echo "        Live channel    ws://$HOST:$PORT_WLK/asr  (managed from dashboard)"
+echo "        Live channel    $LIVE_LABEL"
 echo "        Backend         $BACKEND_LABEL"
 echo "        Initial model   $MODEL  (lang=$LANG; change from the dashboard or via SX_MODEL=…)"
 echo ""
@@ -202,7 +210,6 @@ python -m tapscribe \
     --port "$PORT_REC" \
     --live-model "$MODEL" \
     --live-language "$LANG" \
-    --live-port "$PORT_WLK" \
     "${EXTRA_ARGS[@]}" &
 REC_PID=$!
 
@@ -226,8 +233,9 @@ if [ "$LAN" -eq 1 ]; then
         echo "          (could not auto-detect; check System Settings → Network)"
     fi
     echo ""
-    echo "[start] Make sure ports $PORT_WLK and $PORT_REC are reachable through"
-    echo "        your firewall."
+    echo "[start] Make sure port $PORT_REC is reachable through your firewall."
+    echo "        (WhisperLiveKit binds an internal-only loopback port; bridges"
+    echo "        and dashboard clients only ever talk to the recorder.)"
 fi
 echo ""
 

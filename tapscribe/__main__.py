@@ -32,7 +32,15 @@ def main() -> None:
     )
     p.add_argument("--live-language", default="en", help="WhisperLiveKit language hint (en, no, auto, ...)")
     p.add_argument("--live-host", default=None, help="Bind host for the live channel; defaults to --host.")
-    p.add_argument("--live-port", type=int, default=8000)
+    p.add_argument(
+        "--live-port",
+        type=int,
+        default=0,
+        help="Bind port for the live channel. 0 (default) = pick a free ephemeral "
+        "port at spawn time. WhisperLiveKit is internal — only the recorder talks "
+        "to it — so a stable well-known port is rarely useful, and a fixed 8000 "
+        "is the most common cause of `EADDRINUSE` after a hard-killed prior run.",
+    )
     p.add_argument(
         "--no-mlx",
         action="store_true",

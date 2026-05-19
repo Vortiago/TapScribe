@@ -185,6 +185,49 @@ def test_probe_returns_diagnostic_when_port_taken():
         holder.close()
 
 
+def test_start_with_port_zero_picks_ephemeral_port():
+    """Default --live-port is 0 because WLK is internal; LiveChannel
+    must allocate a real free port at spawn time, not pass 0 through to
+    whisperlivekit-server (which would either fail or pick its own,
+    leaving config.port stale for `live_relay` to use)."""
+    cfg = LiveConfig(model="tiny.en", language="en", host="127.0.0.1", port=0)
+    chan = LiveChannel(config=cfg, use_mlx=False)
+
+    captured: dict = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+
+        class _Stdout:
+            def __iter__(self):
+                return iter(())
+
+        class _P:
+            pid = 12345
+            stdout = _Stdout()
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+        return _P()
+
+    with (
+        patch.object(LiveChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
+        patch("tapscribe.live.subprocess.Popen", side_effect=fake_popen),
+    ):
+        ok, _ = chan.start()
+    assert ok is True
+    # config.port was rewritten to a real port the kernel handed us, and
+    # the argv reflects the same number.
+    assert chan.config.port != 0
+    assert chan.config.port > 0
+    assert "--port" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--port") + 1] == str(chan.config.port)
+
+
 def test_start_fails_fast_when_port_in_use():
     """LiveChannel.start must NOT Popen if the WLK port is occupied —
     otherwise the child crashes 10-30s later with the same cryptic
