@@ -19,7 +19,7 @@ through a Transcriber.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -249,7 +249,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     `cached_transcribe` on each selected WAV beforehand if they want
     a full merge.
     """
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
 
     segments: list[SessionSegment] = []
     suppressed: list[SuppressedSessionSegment] = []
@@ -285,7 +285,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
         if not target_language_label and cached.result.target_language:
             target_language_label = cached.result.target_language
 
-        wav_start = cached.wav_start or datetime.fromtimestamp(wav.stat().st_mtime, tz=timezone.utc)
+        wav_start = cached.wav_start or datetime.fromtimestamp(wav.stat().st_mtime, tz=UTC)
         speaker = cached.speaker_name or "<anon>"
 
         for seg in cached.result.segments:
@@ -336,7 +336,7 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     plain_text = "\n".join(plain_lines)
     low_confidence_count = sum(1 for s in segments if s.low_confidence)
 
-    finished = datetime.now(timezone.utc)
+    finished = datetime.now(UTC)
     return SessionTranscript(
         session=selection.session_dir.name,
         model=model_label,

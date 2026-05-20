@@ -17,7 +17,7 @@ import asyncio
 import time
 import wave
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .audio import int16_peak_norm, open_recorder_wav
 from .live_relay import WlKRelay
@@ -189,7 +189,7 @@ class TapFanOut:
     # ------------------------------------------------------------------
 
     async def _open(self) -> None:
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         fname = "(record off)"
 
         if self._do_record:
@@ -367,7 +367,7 @@ class TapFanOut:
             return
         self._recorder.transcripts.append(
             {
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "identity": self._identity,
                 "name": self._name,
                 "text": cleaned,

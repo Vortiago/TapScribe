@@ -9,7 +9,7 @@ is loaded.
 from __future__ import annotations
 
 import wave
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -269,7 +269,7 @@ def test_api_state_active_rows_include_level_for_the_dashboard_meter(client, rec
                 identity="meter-test",
                 name="Meter",
                 filename="meter.wav",
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
                 level=0.73,
             )
         )
@@ -294,7 +294,7 @@ def test_api_state_active_rows_include_buffer_transcription(client, recorder_und
                 identity="buf-test",
                 name="Buf",
                 filename="buf.wav",
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
                 buffer_transcription="words in flight",
             )
         )
@@ -384,7 +384,7 @@ def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_t
                 identity="bob",
                 name="Bob",
                 filename="bob.wav",
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
                 record=True,
                 live=True,
             )
@@ -860,7 +860,6 @@ def test_absorb_moves_new_layout_transcripts_directory(client, recorder_under_te
 def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
     import asyncio
     from datetime import datetime
-    from datetime import timezone as _tz
 
     from tapscribe.recorder import JobState
 
@@ -874,7 +873,7 @@ def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
                 kind="transcribe",
                 current=0,
                 total=1,
-                started_at=datetime.now(_tz.utc),
+                started_at=datetime.now(UTC),
             )
         )
     )

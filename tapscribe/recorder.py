@@ -20,7 +20,7 @@ import os
 import secrets
 from collections import deque
 from dataclasses import dataclass, fields, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -356,13 +356,13 @@ class UtteranceIndex:
             return
         rec.open = False
         rec.bytes_received = bytes_received
-        rec.last_close = datetime.now(timezone.utc)
+        rec.last_close = datetime.now(UTC)
 
     def snapshot(self) -> dict[str, UtteranceRecord]:
         return dict(self._by_id)
 
     def _prune_expired(self) -> None:
-        cutoff = datetime.now(timezone.utc).timestamp() - self.RESUME_WINDOW_SECONDS
+        cutoff = datetime.now(UTC).timestamp() - self.RESUME_WINDOW_SECONDS
         stale = [
             uid
             for uid, rec in self._by_id.items()
@@ -431,7 +431,7 @@ def _read_or_mint_secret(path: Path, *, label: str) -> str:
 
 
 def _utc_session_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
 
 
 class Recorder:

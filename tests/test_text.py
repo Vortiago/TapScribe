@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -62,7 +62,7 @@ def test_clean_meta_tokens_keeps_brackets_word():
 def test_parse_wav_start_round_trips_iso():
     name = "2026-05-12T09-19-55Z_alice_ident01_abcdef01.wav"
     parsed = text.parse_wav_start(name)
-    assert parsed == datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    assert parsed == datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
 
 
 def test_parse_wav_start_returns_none_for_garbage():
@@ -84,7 +84,7 @@ def test_build_recorder_wav_name_round_trips_through_parsers():
     parse_wav_speaker_slug — that's the contract that lets the
     strip-silence splitter and the live recorder share filename
     conventions."""
-    when = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    when = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     name = text.build_recorder_wav_name(when, "alice_smith", "ident01")
     assert text.parse_wav_start(name) == when
     assert text.parse_wav_speaker_slug(name) == "alice_smith"
@@ -95,7 +95,7 @@ def test_build_recorder_wav_name_strips_path_separators_from_slugs():
     """`/` and `\\` would let a slug escape its directory if interpolated
     raw. The helper passes both slugs through `safe_name`, so the
     resulting filename is always a single path component."""
-    when = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    when = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     name = text.build_recorder_wav_name(when, "../etc/passwd", "id/with/slash")
     assert "/" not in name
     assert "\\" not in name

@@ -101,7 +101,7 @@ class WlKRelay:
         url = f"ws://{self._host}:{self._port}/asr?language={self._language}"
         try:
             self._ws = await websockets.connect(url, open_timeout=2.0)
-        except (OSError, asyncio.TimeoutError, ConnectionClosed, InvalidHandshake) as e:
+        except (TimeoutError, OSError, ConnectionClosed, InvalidHandshake) as e:
             print(f"[tapscribe] WlK relay connect failed: {e}", flush=True)
             return False
         self._consumer = asyncio.create_task(self._consume())
@@ -143,7 +143,7 @@ class WlKRelay:
             if self._consumer is not None:
                 try:
                     await asyncio.wait_for(self._consumer, timeout=self._drain_timeout)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
+                except (TimeoutError, asyncio.CancelledError):
                     self._consumer.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await self._consumer

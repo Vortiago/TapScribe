@@ -8,7 +8,7 @@ unit-testable without the FastAPI app or any real model.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -35,7 +35,7 @@ async def test_active_streams_register_appears_in_snapshot():
         identity="alice",
         name="Alice",
         filename="x.wav",
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
     await streams.register(s)
     snap = await streams.snapshot()
@@ -48,7 +48,7 @@ async def test_active_streams_register_appears_in_snapshot():
 async def test_active_streams_remove_drops_entry():
     streams = ActiveStreams()
     await streams.register(
-        ActiveStream(conn_id="a", identity="i", name="n", filename="f", started_at=datetime.now(timezone.utc))
+        ActiveStream(conn_id="a", identity="i", name="n", filename="f", started_at=datetime.now(UTC))
     )
     await streams.remove("a")
     assert (await streams.snapshot()) == []
@@ -58,7 +58,7 @@ async def test_active_streams_remove_drops_entry():
 async def test_active_streams_update_bytes_increments():
     streams = ActiveStreams()
     await streams.register(
-        ActiveStream(conn_id="a", identity="i", name="n", filename="f", started_at=datetime.now(timezone.utc))
+        ActiveStream(conn_id="a", identity="i", name="n", filename="f", started_at=datetime.now(UTC))
     )
     await streams.update_bytes("a", 640)
     snap = await streams.snapshot()
@@ -81,7 +81,7 @@ async def test_active_streams_update_bytes_carries_level_when_provided():
     doesn't reset the meter mid-utterance."""
     streams = ActiveStreams()
     await streams.register(
-        ActiveStream(conn_id="a", identity="i", name="n", filename="f", started_at=datetime.now(timezone.utc))
+        ActiveStream(conn_id="a", identity="i", name="n", filename="f", started_at=datetime.now(UTC))
     )
     await streams.update_bytes("a", 640, level=0.42)
     snap = await streams.snapshot()
@@ -111,7 +111,7 @@ async def test_active_streams_update_buffer_transcription_persists_text():
             identity="i",
             name="n",
             filename="f",
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
     )
     snap = await streams.snapshot()
@@ -154,7 +154,7 @@ async def test_active_streams_update_gate_open_persists_state():
             identity="i",
             name="n",
             filename="f",
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
     )
     # Default — gate closed (no audio forwarded yet).
@@ -188,7 +188,7 @@ async def test_active_streams_apply_rejects_unknown_field():
             identity="i",
             name="n",
             filename="f",
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
     )
     with pytest.raises(AttributeError):
@@ -204,7 +204,7 @@ async def test_active_streams_apply_rejects_unknown_field():
 async def test_job_tracker_claim_returns_true_when_free():
     tracker = JobTracker()
     state = JobState(
-        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(timezone.utc)
+        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC)
     )
     assert await tracker.claim(state) is True
 
@@ -215,10 +215,10 @@ async def test_job_tracker_claim_returns_false_when_already_claimed():
     route handler."""
     tracker = JobTracker()
     state = JobState(
-        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(timezone.utc)
+        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC)
     )
     await tracker.claim(state)
-    second = JobState(session="s1", kind="strip", current=0, total=3, started_at=datetime.now(timezone.utc))
+    second = JobState(session="s1", kind="strip", current=0, total=3, started_at=datetime.now(UTC))
     assert await tracker.claim(second) is False
 
 
@@ -226,7 +226,7 @@ async def test_job_tracker_claim_returns_false_when_already_claimed():
 async def test_job_tracker_release_allows_reclaim():
     tracker = JobTracker()
     state = JobState(
-        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(timezone.utc)
+        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC)
     )
     await tracker.claim(state)
     await tracker.release("s1")
@@ -237,7 +237,7 @@ async def test_job_tracker_release_allows_reclaim():
 async def test_job_tracker_update_modifies_fields():
     tracker = JobTracker()
     state = JobState(
-        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(timezone.utc)
+        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC)
     )
     await tracker.claim(state)
     await tracker.update("s1", current=3, current_file="x.wav")

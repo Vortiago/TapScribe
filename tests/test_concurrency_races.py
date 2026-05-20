@@ -14,6 +14,7 @@ failure rather than a console warning.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -217,14 +218,14 @@ async def test_active_stream_concurrent_update_and_remove_is_safe(
         catches stray tasks / unawaited coroutines)."""
     r = _build_recorder(tmp_path)
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     stream = ActiveStream(
         conn_id="conn-1",
         identity="alice",
         name="Alice",
         filename="x.wav",
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
     await r.streams.register(stream)
 

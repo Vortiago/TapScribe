@@ -9,7 +9,7 @@ path end-to-end without spinning up any real model.
 from __future__ import annotations
 
 import wave
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -66,7 +66,7 @@ class _FixedTranscriber:
 
 
 def _seed(session_dir: Path, n: int = 2, speakers: list[str] | None = None) -> list[Path]:
-    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     speakers = speakers or ["alice"] * n
     paths = []
     for i in range(n):
@@ -133,8 +133,8 @@ def test_merge_attaches_absolute_timestamps_to_segments(tmp_path: Path):
     transcript = merge_session(selection)
     seg = transcript.segments[0]
     # WAV starts at base; segment offset 0 → abs_start equals wav_start
-    assert seg.abs_start == datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
-    assert seg.abs_end == datetime(2026, 5, 12, 9, 19, 56, tzinfo=timezone.utc)
+    assert seg.abs_start == datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
+    assert seg.abs_end == datetime(2026, 5, 12, 9, 19, 56, tzinfo=UTC)
 
 
 def test_merge_computes_speaking_seconds_as_dict_keyed_by_speaker(tmp_path: Path):
@@ -161,7 +161,7 @@ def test_merge_carries_suppressed_segments_with_absolute_timestamps(tmp_path: Pa
     session-level suppressed list with absolute timestamps."""
     session_dir = tmp_path / "s"
     session_dir.mkdir()
-    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     wav = _wav(session_dir / _wav_name(base, "alice", "u00000001"))
 
     class _SuppressingTranscriber(_FixedTranscriber):

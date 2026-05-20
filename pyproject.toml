@@ -7,15 +7,13 @@ name = "tapscribe"
 version = "0.1.0"
 description = "Local-first transcription recorder + operator dashboard built on Whisper."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
@@ -115,13 +113,6 @@ filterwarnings = [
     "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
     "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
     "ignore:remove second argument of ws_handler:DeprecationWarning",
-    # Python 3.10 asyncio quirk: _SSLProtocolTransport.__del__ can raise
-    # ResourceWarning during GC even when uvicorn / httpx tore the
-    # transport down cleanly. Pytest re-raises the unraisable as a
-    # PytestUnraisableExceptionWarning. Fixed in 3.11+. Narrow filter
-    # matches the SSL transport message only — drop when 3.10 is gone.
-    "ignore:unclosed transport.*_SSLProtocolTransport:ResourceWarning",
-    "ignore:.*_SSLProtocolTransport:pytest.PytestUnraisableExceptionWarning",
     # silero-vad ships its model as a TorchScript .jit file; torch 2.6
     # deprecated jit.load. Tracked at github.com/snakers4/silero-vad —
     # remove when silero migrates to torch.export.
@@ -135,7 +126,7 @@ markers = [
 
 [tool.ruff]
 line-length = 110
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

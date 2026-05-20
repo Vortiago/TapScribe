@@ -25,7 +25,7 @@ import contextlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -234,7 +234,7 @@ def cached_transcribe(
         ):
             return existing
 
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     raw = transcriber.transcribe(
         wav_path,
         initial_prompt=initial_prompt,
@@ -243,7 +243,7 @@ def cached_transcribe(
         target_lang=target_lang,
     )
     filtered = hallucinations_mod.apply(raw, rules=hallucination_rules)
-    finished = datetime.now(timezone.utc)
+    finished = datetime.now(UTC)
 
     wav_start = parse_wav_start(wav_path.name)
     # Re-stat after transcribe in case the WAV was being written when we

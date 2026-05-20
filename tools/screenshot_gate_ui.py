@@ -19,7 +19,7 @@ import asyncio
 import socket
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
@@ -57,7 +57,7 @@ async def _seed_state(recorder: Recorder) -> None:
     recorder.live._proc = _AliveProc()  # type: ignore[assignment]
     recorder.live.info["state"] = "running"
     recorder.live.info["pid"] = "12345"
-    recorder.live.info["started_at"] = datetime.now(timezone.utc).isoformat()
+    recorder.live.info["started_at"] = datetime.now(UTC).isoformat()
 
     # Seed three taps so each of the three buffer-line states is on
     # screen at once for the screenshot.
@@ -67,7 +67,7 @@ async def _seed_state(recorder: Recorder) -> None:
             identity="alice",
             name="Alice Example",
             filename="alice.wav",
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             bytes_received=320_000,
             level=0.45,
             lag_s=0.4,
@@ -83,7 +83,7 @@ async def _seed_state(recorder: Recorder) -> None:
             identity="bob",
             name="Bob Example",
             filename="bob.wav",
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             bytes_received=180_000,
             level=0.32,
             lag_s=0.1,
@@ -99,7 +99,7 @@ async def _seed_state(recorder: Recorder) -> None:
             identity="carol",
             name="Carol Example",
             filename="carol.wav",
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             bytes_received=90_000,
             level=0.0,
             lag_s=None,

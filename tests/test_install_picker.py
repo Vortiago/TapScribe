@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import io
 import json
-import re
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -354,27 +354,11 @@ def test_handle_key_digit_jumps_and_toggles():
 
 
 def _extras_block(extra_name: str) -> list[str]:
-    """Pull one `[project.optional-dependencies]` entry out of pyproject.toml.
-    Hand-parsed via regex because tomllib is 3.11+ and TapScribe still
-    supports 3.10 — keeping the test runnable on every CI matrix row."""
-    text = (REPO_ROOT / "pyproject.toml").read_text()
-    pattern = re.compile(
-        rf"^{re.escape(extra_name)}\s*=\s*\[(.*?)\]",
-        re.MULTILINE | re.DOTALL,
-    )
-    m = pattern.search(text)
-    assert m, f"could not find `{extra_name} = [...]` in pyproject.toml"
-    raw = m.group(1)
-    out: list[str] = []
-    for line in raw.splitlines():
-        line = line.strip().rstrip(",")
-        if not line or line.startswith("#"):
-            continue
-        # Strip surrounding quotes (single or double).
-        if line[0] in ("'", '"') and line[-1] in ("'", '"'):
-            line = line[1:-1]
-        out.append(line)
-    return out
+    """Pull one `[project.optional-dependencies]` entry out of pyproject.toml."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    extras = data["project"]["optional-dependencies"]
+    assert extra_name in extras, f"no `{extra_name}` extra in pyproject.toml"
+    return list(extras[extra_name])
 
 
 def _requirement_for(extras_lines: list[str], project_name: str) -> Requirement:
