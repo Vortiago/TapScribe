@@ -172,6 +172,10 @@ def build_live_cmd(
     # WLK's own defaults apply otherwise. Pairs (e.g. trimming strategy +
     # threshold) are independently optional — WLK accepts the strategy
     # alone and falls back to its default threshold.
+    #
+    # Flag names match WhisperLiveKit's CLI verbatim — note the mixed
+    # dash/underscore convention (`--min-chunk-size` vs `--buffer_trimming`).
+    # That's how WLK ships them; don't normalize or the child rejects argv.
     if config.min_chunk_size is not None:
         cmd.extend(["--min-chunk-size", str(config.min_chunk_size)])
     if config.buffer_trimming is not None:

@@ -164,6 +164,10 @@ def test_split_filenames_are_unique_when_regions_share_a_second(tmp_path: Path):
 
     written = sorted(out_dir.glob("*.wav"))
     names = [w.name for w in written]
+    # The detector must actually have produced two regions for the
+    # uniqueness assertion to mean anything — guard against a parameter
+    # change that quietly collapses the test to one region.
+    assert len(names) >= 2, f"expected at least 2 regions, got {names}"
     assert len(names) == len(set(names)), f"duplicate filenames: {names}"
 
 

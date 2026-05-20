@@ -25,7 +25,7 @@ from fastapi import HTTPException
 from . import config
 from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
-from .text import parse_wav_speaker_slug, parse_wav_start
+from .text import build_recorder_wav_name, parse_wav_speaker_slug, parse_wav_start
 from .wav_cache import cache_listing, read_primary_payload
 
 if TYPE_CHECKING:
@@ -235,29 +235,21 @@ def _read_json_or_none(path: Path) -> Any:
         return None
 
 
-def _describe_wav(w: Path, stripped_root: Path) -> dict[str, Any]:
+def _describe_wav(w: Path) -> dict[str, Any]:
     """One row in the per-session `files` list — original WAV + parsed
     sidecar transcript (the primary, when multiple are cached) +
-    `transcripts` listing for the picker UI + stripped sibling. The
-    cache reads go through `wav_cache.read_primary_payload` and
-    `cache_listing` so a session with many WAVs doesn't re-walk each
-    transcripts dir multiple times per poll tick."""
+    `transcripts` listing for the picker UI. The cache reads go through
+    `wav_cache.read_primary_payload` and `cache_listing` so a session
+    with many WAVs doesn't re-walk each transcripts dir multiple times
+    per poll tick.
+
+    Stripped region WAVs are surfaced session-wide via `stripped_stats`,
+    not as per-original sub-rows — strip-silence now produces N regions
+    per source so the 1:1 sibling shape no longer applies."""
     wav_start = parse_wav_start(w.name)
     dur = round(wav_duration_s(w), 2)
     wav_start_iso = wav_start.isoformat() if wav_start else None
     wav_end_iso = (wav_start + timedelta(seconds=dur)).isoformat() if wav_start else None
-    # Pair the original with its stripped sibling (same filename under
-    # <session>/stripped/) so the dashboard can render an indented
-    # sub-row with its own transcribe button.
-    stripped_sibling: dict[str, Any] | None = None
-    stripped_wav = stripped_root / w.name
-    if stripped_wav.is_file():
-        stripped_sibling = {
-            "size": stripped_wav.stat().st_size,
-            "duration_s": round(wav_duration_s(stripped_wav), 2),
-            "transcript": read_primary_payload(stripped_wav),
-            "transcripts": cache_listing(stripped_wav),
-        }
     return {
         "name": w.name,
         "size": w.stat().st_size,
@@ -267,7 +259,6 @@ def _describe_wav(w: Path, stripped_root: Path) -> dict[str, Any]:
         "wav_start": wav_start_iso,
         "wav_end": wav_end_iso,
         "speaker_name": parse_wav_speaker_slug(w.name),
-        "stripped": stripped_sibling,
     }
 
 
@@ -278,8 +269,7 @@ def _describe_session(
     current_session: str,
 ) -> dict[str, Any]:
     """Build one entry for the dashboard's session list from `sd`."""
-    stripped_root = stripped_dir(sd.name)
-    wavs = [_describe_wav(w, stripped_root) for w in sorted(sd.glob("*.wav"))]
+    wavs = [_describe_wav(w) for w in sorted(sd.glob("*.wav"))]
     starts = [parse_wav_start(w["name"]) for w in wavs]
     starts = [s for s in starts if s is not None]
     earliest = min(starts) if starts else None
@@ -446,7 +436,7 @@ def strip_one_wav(
         region_samples = samples[start_sample:end_sample]
         offset_s = start_sample / _ss.SAMPLE_RATE
         region_start = origin + timedelta(seconds=offset_s)
-        fname = _build_region_filename(region_start, speaker_slug, ident_slug)
+        fname = build_recorder_wav_name(region_start, speaker_slug, ident_slug)
         _ss.write_wav_int16(out_dir / fname, region_samples)
         regions_written.append(fname)
         speech_samples += len(region_samples)
@@ -467,28 +457,15 @@ def _split_filename_components(name: str) -> tuple[str, str]:
     """Pull `<speaker_slug>` and `<ident>` out of a recorder filename so
     we can stitch them back into the per-region output names.
 
-    Recorder format: `<iso>_<speaker_slug>_<ident>_<utt>.wav`. `<ident>` is
-    always exactly `parts[-2]` of the stem; `<speaker_slug>` is whatever
-    sits between the timestamp and `<ident>` (already recovered by
-    `parse_wav_speaker_slug`). Falls back to safe defaults when the input
-    doesn't follow the convention so a hand-dropped WAV still produces
-    workable output names.
+    Falls back to safe defaults when the input doesn't follow the
+    `<iso>_<speaker_slug>_<ident>_<utt>.wav` convention so a hand-dropped
+    WAV still produces workable output names.
     """
     speaker = parse_wav_speaker_slug(name) or "anon"
     stem = name.rsplit(".", 1)[0]
     parts = stem.split("_")
     ident = parts[-2] if len(parts) >= 4 else "unknown"
     return speaker, ident
-
-
-def _build_region_filename(region_start: datetime, speaker_slug: str, ident_slug: str) -> str:
-    """Mint a recorder-shaped filename for one stripped region. The trailing
-    8-char uuid makes filenames unique even when two regions land in the
-    same wall-clock second (the recorder's stamp is second-resolution)."""
-    from uuid import uuid4
-
-    stamp = region_start.strftime("%Y-%m-%dT%H-%M-%SZ")
-    return f"{stamp}_{speaker_slug}_{ident_slug}_{uuid4().hex[:8]}.wav"
 
 
 # ---------------------------------------------------------------------------

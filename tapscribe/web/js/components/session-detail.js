@@ -396,60 +396,7 @@ function buildWavRow(f, sessKey, ctx) {
   const out = document.createDocumentFragment();
   out.appendChild(frag);
   if (open && f.transcript) out.appendChild(buildExpandTx(f.transcript));
-
-  // Stripped sub-row — only when strip-silence has produced a sibling.
-  if (f.stripped) appendStrippedSub(out, f, wavKey, dlHref, ctx);
   return out;
-}
-
-function appendStrippedSub(host, f, wavKey, dlHref, ctx) {
-  const stripKey = `${wavKey}@stripped`;
-  const sBusy = ctx.wavInflight.has(stripKey);
-  const sOpen = ctx.expandedWav === stripKey;
-  const sTx = f.stripped.transcript;
-
-  const frag = tpl("tpl-wav-row-stripped");
-  const row = frag.firstElementChild;
-  if (sBusy) row.classList.add("in-flight");
-  if (ctx.wavJustDone.has(stripKey)) row.classList.add("just-completed");
-
-  const nameEl = pick(row, "name");
-  nameEl.dataset.toggleWav = stripKey;
-  nameEl.title = `${f.name} (stripped)${sTx ? "\n\nClick to expand the transcript." : ""}`;
-  if (sTx) nameEl.classList.add("has-tx");
-
-  pick(row, "duration").textContent = fmtDur(f.stripped.duration_s);
-
-  const sizeHost = pick(row, "sizeCell");
-  if (sBusy) {
-    const cell = tpl("tpl-wav-size-inflight");
-    const span = cell.firstElementChild;
-    span.dataset.elapsedFor = stripKey;
-    span.textContent = `transcribing… ${fmtElapsedShort((Date.now() - ctx.wavInflight.get(stripKey)) / 1000)}`;
-    sizeHost.replaceWith(cell);
-  } else {
-    const cell = tpl("tpl-wav-size-static");
-    let text = fmtBytes(f.stripped.size);
-    if (sTx?.transcribe_ms != null) text += ` · took ${fmtMs(sTx.transcribe_ms)}`;
-    pick(cell, "text").textContent = text;
-    sizeHost.replaceWith(cell);
-  }
-
-  pick(row, "download").href = `${dlHref}?source=stripped`;
-  const txBtn = pick(row, "txButton");
-  // Stripped sub-row's transcribe button uses the SAME wavKey as the
-  // original (no "@stripped"), but its data-tx-source flags the source.
-  txBtn.dataset.txWav = wavKey;
-  txBtn.dataset.txSource = "stripped";
-  if (sBusy) {
-    txBtn.disabled = true;
-    txBtn.replaceChildren(tpl("tpl-wav-tx-busy"));
-  } else {
-    txBtn.textContent = sTx ? "re-tx" : "transcribe";
-  }
-
-  host.appendChild(frag);
-  if (sOpen && sTx) host.appendChild(buildExpandTx(sTx));
 }
 
 function buildWavList(s, sessKey, ctx) {

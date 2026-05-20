@@ -118,8 +118,8 @@ def test_buffer_trimming_strategy_alone_emits_only_the_strategy_flag():
 
 def test_max_context_tokens_only_passed_when_set():
     """Raising max context tokens lets the decoder condition on more prior
-    text — usually better continuations, more compute per tick. Default 0
-    (== don't emit) means WLK's own default applies."""
+    text — usually better continuations, more compute per tick. Default
+    None (== don't emit the flag) means WLK's own default applies."""
     cfg_default = LiveConfig(model="tiny.en", language="en", host="h", port=8000)
     cfg_tuned = LiveConfig(model="tiny.en", language="en", host="h", port=8000, max_context_tokens=128)
     assert "--max-context-tokens" not in build_live_cmd(EXE, cfg_default, use_mlx=False)
