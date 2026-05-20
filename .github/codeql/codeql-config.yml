@@ -40,3 +40,17 @@ query-filters:
   # and bandit's broader path-related checks still run.
   - exclude:
       id: py/path-injection
+
+  # py/ineffectual-statement fires on the bare `...` (Ellipsis literal)
+  # bodies of `typing.Protocol` methods — see `LiveChannel` in
+  # `tapscribe/live.py`. The `...`-as-method-body shape is the canonical
+  # Python idiom for declaring abstract method signatures on Protocols
+  # (PEP 544); CodeQL's heuristic doesn't recognise the Protocol context
+  # and treats each `...` as a useless expression. We hit this on every
+  # method of the LiveChannel Protocol; the alternative (raise
+  # NotImplementedError) is more code without behavioural benefit since
+  # Protocols are never instantiated. Filtering this rule has no
+  # security implication — a genuinely dead statement elsewhere is also
+  # silenced, but bandit + manual review cover that gap.
+  - exclude:
+      id: py/ineffectual-statement
