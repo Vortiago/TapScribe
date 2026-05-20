@@ -730,7 +730,18 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
     body = client.get("/api/state").json()
     s = next(s for s in body["sessions"] if s["session"] == "s")
     row = next(f for f in s["files"] if f["name"] == wav.name)
-    assert row["transcripts"] == [{"backend": "faster-whisper", "model": "small.en", "is_primary": True}]
+    # Compare the contract fields only — wav_cache.transcripts_listing
+    # optionally surfaces `transcribe_ms` when the underlying transcribe
+    # call ran for >0 ms (Windows / loaded CI). That's a perf detail,
+    # not part of the legacy-sidecar wire contract this test pins.
+    listing = row["transcripts"]
+    assert len(listing) == 1
+    entry = listing[0]
+    assert {"backend": entry["backend"], "model": entry["model"], "is_primary": entry["is_primary"]} == {
+        "backend": "faster-whisper",
+        "model": "small.en",
+        "is_primary": True,
+    }
 
 
 def test_api_transcribe_returns_freshly_written_transcript(client, recorder_under_test, monkeypatch):
