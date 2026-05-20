@@ -325,6 +325,50 @@ def test_api_state_exposes_live_supports_native_vad(client):
     assert body.get("live_supports_native_vad") is True
 
 
+def test_live_start_rejects_invalid_gate_kind(client):
+    """The dashboard is the only sanctioned source for gate_kind, but
+    a stale or hand-crafted POST that doesn't pass "tapscribe" /
+    "backend" must surface as a 400 — not a 500 from a downstream
+    ValueError. CodeQL treats Request.json() as untrusted input."""
+    r = client.post("/api/live/start", json={"gate_kind": "backendd"})
+    assert r.status_code == 400, r.text
+    assert "gate_kind" in r.text
+
+
+def test_live_start_rejects_backend_gate_kind_when_unsupported(client, recorder_under_test, monkeypatch):
+    """A stale dashboard might POST gate_kind=backend to a future
+    channel without a native VAD. UI auto-greys but isn't enforced —
+    server-side validation prevents it from silently bypassing the
+    only working gate."""
+    monkeypatch.setattr(recorder_under_test.live, "supports_native_vad", False, raising=False)
+    r = client.post("/api/live/start", json={"gate_kind": "backend"})
+    assert r.status_code == 400, r.text
+    assert "native" in r.text.lower() or "supports" in r.text.lower()
+
+
+def test_live_start_rejects_out_of_range_gate_knobs(client):
+    """HTML min/max are client-side hints. Server must clamp / reject
+    so a malicious or stale client can't push the gate into nonsense
+    (negative thresholds, year-long hangovers)."""
+    for bad in (
+        {"gate_speech_threshold": -0.1},
+        {"gate_speech_threshold": 1.5},
+        {"gate_hangover_ms": -50},
+        {"gate_hangover_ms": 10**7},  # ~3 hours
+        {"gate_pre_roll_ms": -1},
+        {"gate_pre_roll_ms": 10**7},
+    ):
+        r = client.post("/api/live/start", json=bad)
+        assert r.status_code == 400, f"{bad!r} returned {r.status_code}: {r.text}"
+
+
+def test_live_start_rejects_unparseable_gate_knobs(client):
+    """Numeric fields with non-numeric strings must surface as 400,
+    not a 500 from `float("hello")`."""
+    r = client.post("/api/live/start", json={"gate_speech_threshold": "loud"})
+    assert r.status_code == 400, r.text
+
+
 def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_test):
     """The per-row rec/live toggles render their state from the active
     entry's record/live fields. Those must follow the *current*

@@ -143,6 +143,36 @@ The dashboard's live-channel picker reads `/api/models?context=live`,
 which excludes Parakeet/Canary while only true-streaming families
 (Whisper, NB-Whisper, Voxtral) light up.
 
+Each `LiveChannel` declares a class attribute
+`supports_native_vad: bool` so the dashboard (and the `/api/live/start`
+boundary check) can refuse `gate_kind="backend"` against channels
+that have no native VAD to defer to. `WhisperLiveKitChannel` is
+True; the planned `ParakeetLiveChannel` will be False.
+
+## SpeechGate · gate_kind
+
+Per-`/tap` Silero-backed speech gate sitting between
+`TapFanOut.write_frame` and the live relay. Holds a pre-roll ring
+buffer and forwards PCM to WlK only during detected speech bursts —
+recovers the leading consonants of each utterance that WlK's own
+`--vac` was eating.
+
+Operator-facing knob is `LiveConfig.gate_kind`
+(`Literal["tapscribe", "backend"]`, default `"tapscribe"`), which
+replaces the old `vac: bool` field — `vac=True` ↔ `gate_kind="backend"`,
+`vac=False` ↔ `gate_kind="tapscribe"`. The dashboard's "speech filter"
+selector binds to this. Three knobs are tunable from the same panel:
+`gate_speech_threshold` (Silero probability), `gate_hangover_ms`
+(VAD silence-to-close), `gate_pre_roll_ms` (audio replayed on open).
+
+**Migration note for existing operators**: the default flips behaviour
+— with `gate_kind="tapscribe"` (default), WlK runs with `--no-vac` and
+TapScribe's gate is the only thing deciding speech vs. silence. To
+keep the old behaviour, set `gate_kind="backend"` via the dashboard
+or POST `/api/live/start` with `{"gate_kind": "backend"}`. The flip
+is intentional — `tapscribe` recovers leading/trailing words that
+`--vac` was eating; see PR #51.
+
 ## TranscriptionResult
 
 The frozen-dataclass return value of `Transcriber.transcribe(...)`. Carries

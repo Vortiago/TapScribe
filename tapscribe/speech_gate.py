@@ -105,6 +105,11 @@ class SpeechGate:
 
         emitted: list[bytes] = []
         opened_during_this_frame = False
+        # Today a single feed() runs VAD at most once (640 B/frame ≤
+        # 1024 B/chunk); if frame size ever grows, two transitions
+        # in one feed are possible and the open/close handling below
+        # would need to consider the order of events, not just the
+        # final state.
         while len(self._sample_buf) >= VAD_CHUNK_BYTES:
             chunk = bytes(self._sample_buf[:VAD_CHUNK_BYTES])
             del self._sample_buf[:VAD_CHUNK_BYTES]

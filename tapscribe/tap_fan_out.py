@@ -80,6 +80,12 @@ class TapFanOut:
         # ActiveStream on transitions (not at the 50 Hz frame rate).
         self._gate: SpeechGate | None = None
         self._gate_open_last: bool = False
+        # Strong refs to the buffer-forward tasks fired from
+        # `_on_buffer` so a failure inside them surfaces immediately
+        # rather than as a GC-time "Task exception was never
+        # retrieved" log. Race-wise we accept latest-wins ordering
+        # under heavy load — the field is a cosmetic in-flight hint.
+        self._buffer_tasks: set[asyncio.Task] = set()
         # Backoff bookkeeping for transparent relay reconnection across
         # WhisperLiveKit restarts (model swap, child crash). The task
         # handle lets _close cancel an in-flight attempt cleanly; the
@@ -272,11 +278,14 @@ class TapFanOut:
         """Forward the relay's latest `buffer_transcription` to the
         active stream so the dashboard's per-tap in-flight indicator
         can render it. The relay invokes this synchronously from its
-        consumer task; we hop onto the loop so the consumer doesn't
-        block on the ActiveStreams lock."""
-        asyncio.get_running_loop().create_task(
+        consumer task; we spawn a tracked task so the consumer doesn't
+        block on the ActiveStreams lock and any failure surfaces
+        instead of being swallowed at GC time."""
+        task = asyncio.get_running_loop().create_task(
             self._recorder.streams.update_buffer_transcription(self._conn_id, text)
         )
+        self._buffer_tasks.add(task)
+        task.add_done_callback(self._buffer_tasks.discard)
 
     def _maybe_schedule_relay_reconnect(self) -> None:
         """Kick off a background relay reconnect if none is pending and

@@ -176,6 +176,25 @@ async def test_active_streams_update_gate_open_unknown_id_is_noop():
     await streams.update_gate_open("nobody-home", True)
 
 
+@pytest.mark.asyncio
+async def test_active_streams_apply_rejects_unknown_field():
+    """The `_apply` helper that backs every update_* method must
+    reject typo'd kwargs at runtime so a misspelt field name doesn't
+    silently set a phantom attribute on the dataclass."""
+    streams = ActiveStreams()
+    await streams.register(
+        ActiveStream(
+            conn_id="t1",
+            identity="i",
+            name="n",
+            filename="f",
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    with pytest.raises(AttributeError):
+        await streams._apply("t1", gate_oppen=True)  # noqa: SLF001
+
+
 # ---------------------------------------------------------------------------
 # JobTracker
 # ---------------------------------------------------------------------------

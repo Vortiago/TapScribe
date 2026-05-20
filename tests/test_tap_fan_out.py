@@ -759,6 +759,36 @@ async def test_backend_gate_kind_passes_all_frames_without_a_gate(
         await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 3)
 
 
+async def test_gate_construction_failure_falls_back_to_passthrough(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """If build_gate_for_config raises (Silero missing, bad config),
+    the /tap must keep working with passthrough — losing the gate is
+    a degraded experience, but a dropped tap is unacceptable."""
+    from dataclasses import replace as dc_replace
+
+    recorder_with_relay.live.config = dc_replace(recorder_with_relay.live.config, gate_kind="tapscribe")
+
+    def _exploding_factory(*args, **kwargs):
+        raise RuntimeError("silero unavailable")
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _exploding_factory)
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-gate-fail",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        await fan_out.write_frame(PCM_FRAME)
+        # Passthrough — frame reaches WlK despite the gate exploding.
+        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
+
+
 async def test_gate_open_state_propagates_to_active_stream(
     recorder_with_relay: Recorder,
     monkeypatch: pytest.MonkeyPatch,

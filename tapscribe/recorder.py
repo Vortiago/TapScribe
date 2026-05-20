@@ -19,7 +19,7 @@ import asyncio
 import os
 import secrets
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -68,6 +68,9 @@ class ActiveStream:
     gate_open: bool = False
 
 
+_ACTIVE_STREAM_FIELDS = frozenset(f.name for f in fields(ActiveStream))
+
+
 class ActiveStreams:
     """Encapsulates the active-WS dict + its asyncio.Lock.
 
@@ -91,7 +94,13 @@ class ActiveStreams:
     async def _apply(self, conn_id: str, **fields) -> None:
         """Set one or more fields on the ActiveStream with `conn_id`.
         No-op when the conn_id is unknown — the WS handler can race
-        against close() and call us after the entry's been removed."""
+        against close() and call us after the entry's been removed.
+
+        Typo'd field names raise `AttributeError` rather than silently
+        setting a phantom attribute on the dataclass."""
+        for k in fields:
+            if k not in _ACTIVE_STREAM_FIELDS:
+                raise AttributeError(f"ActiveStream has no field {k!r}")
         async with self._lock:
             existing = self._by_id.get(conn_id)
             if existing is None:
