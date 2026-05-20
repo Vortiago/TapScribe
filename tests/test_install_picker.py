@@ -245,6 +245,98 @@ def test_render_with_empty_selection_explains_consequences():
     assert "nothing" in text or "empty" in text
 
 
+def test_render_shows_backend_per_family():
+    """Operators on Apple Silicon need to see, per row, that Whisper /
+    Parakeet pull MLX while Voxtral stays CPU-only — that's the whole
+    point of the per-family backend annotation."""
+    sel = install_picker.Selection(families={"whisper"})
+    text = install_picker.render(sel, _caps(mlx=True))
+    # The backend label appears on its own indented line per family.
+    assert "Backend: MLX + CPU" in text  # whisper, parakeet
+    assert "Backend: CPU" in text  # voxtral row (no MLX path)
+    # Voxtral specifically calls out that no MLX adapter exists yet.
+    assert "no MLX adapter" in text
+
+
+def test_render_with_cursor_marks_current_row():
+    sel = install_picker.Selection(families={"whisper"})
+    text = install_picker.render(sel, _caps(), cursor=1)
+    # The leading column on row 2 (voxtral) carries the `>` cursor.
+    voxtral_line = next(line for line in text.splitlines() if "2. Voxtral" in line)
+    assert voxtral_line.lstrip().startswith(">")
+    # Arrow-mode controls hint is shown instead of the numbered block.
+    assert "↑/↓" in text
+    assert "<numbers>" not in text
+
+
+def test_family_backend_label_apple_silicon():
+    apple = _caps(mlx=True)
+    by_key = {f.key: f for f in install_picker.FAMILIES}
+    assert install_picker.family_backend_label(by_key["whisper"], apple) == "MLX + CPU"
+    assert install_picker.family_backend_label(by_key["voxtral"], apple) == "CPU"
+    assert install_picker.family_backend_label(by_key["parakeet"], apple) == "MLX + CPU"
+    # Canary's MLX is via an env-marker inside the cpu_cuda extra; we
+    # still want to advertise the MLX path on Apple Silicon.
+    assert install_picker.family_backend_label(by_key["canary"], apple) == "MLX + CPU"
+
+
+def test_family_backend_label_cuda_box():
+    cuda = _caps(cuda=True)
+    by_key = {f.key: f for f in install_picker.FAMILIES}
+    assert install_picker.family_backend_label(by_key["voxtral"], cuda) == "CUDA"
+    assert install_picker.family_backend_label(by_key["parakeet"], cuda) == "CUDA"
+
+
+def test_family_backend_label_plain_cpu():
+    cpu = _caps()
+    for fam in install_picker.FAMILIES:
+        assert install_picker.family_backend_label(fam, cpu) == "CPU"
+
+
+# ── Arrow-key UI dispatch ────────────────────────────────────────────
+
+
+def test_can_use_arrow_keys_false_for_stringio():
+    """StringIO has no fileno() and isn't a TTY — must drop to numbered."""
+    assert install_picker._can_use_arrow_keys(io.StringIO(), io.StringIO()) is False
+
+
+def test_handle_key_arrow_navigation_and_toggle():
+    sel = install_picker.Selection(families={"whisper"})
+    cursor = [0]
+    # Down + space toggles voxtral (family #2).
+    assert install_picker._handle_key("down", sel, cursor) is None
+    assert cursor == [1]
+    assert install_picker._handle_key("space", sel, cursor) is None
+    assert "voxtral" in sel.families
+    # Up wraps modularly to the last row.
+    cursor[0] = 0
+    install_picker._handle_key("up", sel, cursor)
+    assert cursor == [len(install_picker.FAMILIES) - 1]
+    # Enter / q have the expected sentinels.
+    assert install_picker._handle_key("enter", sel, cursor) == "confirm"
+    assert install_picker._handle_key("q", sel, cursor) == "quit"
+    assert install_picker._handle_key("esc", sel, cursor) == "quit"
+
+
+def test_handle_key_a_and_r_shortcuts():
+    sel = install_picker.Selection(families={"whisper"})
+    install_picker._handle_key("a", sel, [0])
+    assert sel.families == {f.key for f in install_picker.FAMILIES}
+    install_picker._handle_key("a", sel, [0])
+    assert sel.families == set()
+    install_picker._handle_key("r", sel, [0])
+    assert sel.families == {f.key for f in install_picker.FAMILIES if f.default_selected}
+
+
+def test_handle_key_digit_jumps_and_toggles():
+    sel = install_picker.Selection(families=set())
+    cursor = [0]
+    install_picker._handle_key("3", sel, cursor)
+    assert cursor == [2]
+    assert "parakeet" in sel.families
+
+
 # ── detect_caps ─────────────────────────────────────────────────────
 
 

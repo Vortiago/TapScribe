@@ -7,8 +7,9 @@ upgraded. The picker:
   1. Detects this machine (Apple Silicon? CUDA via `nvidia-smi`?).
   2. Loads the previous selection from `.tapscribe-install.json`, if any;
      falls back to a minimal default (whisper only) on first run.
-  3. Renders a checkbox-style menu so the operator can toggle families
-     by number and hit Enter to launch with the current selection.
+  3. Renders a checkbox-style menu. On a real TTY the operator navigates
+     with arrow keys (↑/↓) and toggles with Space; otherwise we fall back
+     to numbered toggles for piped / CI invocations.
   4. Writes the chosen selection back to `.tapscribe-install.json`.
   5. Runs `pip install -e ".[…]"` with the resolved extras.
 
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess  # nosec B404 — we run pip with a fixed argv list, no shell.
 import sys
@@ -49,6 +51,11 @@ class FamilyDef:
     MLX is available too. Extras with `sys_platform`/`platform_machine`
     markers are still safe to list everywhere — pip skips them on the
     wrong platform.
+
+    `mlx_via_env_marker` is True when the family's CPU/CUDA extra
+    bundles an MLX-only package gated by a sys_platform env marker (so
+    pip pulls it in on Apple Silicon without us adding a separate extra
+    — currently only Canary).
     """
 
     key: str
@@ -58,6 +65,7 @@ class FamilyDef:
     extras_cpu_cuda: tuple[str, ...]
     extras_mlx: tuple[str, ...]
     default_selected: bool = False
+    mlx_via_env_marker: bool = False
 
 
 FAMILIES: tuple[FamilyDef, ...] = (
@@ -104,6 +112,7 @@ FAMILIES: tuple[FamilyDef, ...] = (
         # The `canary` extra already lists `mlx-audio` with a Darwin/arm64
         # env marker, so a single extra covers both runtimes.
         extras_mlx=(),
+        mlx_via_env_marker=True,
     ),
 )
 
@@ -222,8 +231,34 @@ def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
     return out
 
 
+def family_backend_label(fam: FamilyDef, caps: MachineCaps) -> str:
+    """Human-readable summary of which runtime(s) this family will install
+    on the current machine. Shown next to each row so the operator can
+    tell at a glance whether they'll get CPU, CUDA, or MLX packages."""
+    backends: list[str] = []
+    if caps.mlx and (fam.extras_mlx or fam.mlx_via_env_marker):
+        backends.append("MLX")
+    if fam.extras_cpu_cuda:
+        # All current cpu_cuda extras pull torch (or faster-whisper, which
+        # has optional CUDA via CTranslate2), so CUDA acceleration is
+        # available whenever nvidia-smi reports a device.
+        backends.append("CUDA" if caps.cuda else "CPU")
+    return " + ".join(backends) if backends else "—"
+
+
+def family_extras_preview(fam: FamilyDef, caps: MachineCaps) -> list[str]:
+    """The extras THIS family contributes, given caps. Used in the picker
+    to show operators which `[...]` tokens map to which family."""
+    out = list(fam.extras_cpu_cuda)
+    if caps.mlx:
+        for extra in fam.extras_mlx:
+            if extra not in out:
+                out.append(extra)
+    return out
+
+
 # ---------------------------------------------------------------------------
-# Interactive picker.
+# Rendering.
 # ---------------------------------------------------------------------------
 
 
@@ -238,32 +273,59 @@ def _format_caps_line(caps: MachineCaps) -> str:
     return " · ".join(parts)
 
 
-def render(selection: Selection, caps: MachineCaps) -> str:
-    """Return the picker as a string. Pure — easy to snapshot in tests."""
+def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None) -> str:
+    """Return the picker as a string. Pure — easy to snapshot in tests.
+
+    When `cursor` is set, the corresponding row is highlighted with a
+    `>` marker and the controls block describes arrow-key navigation;
+    when `cursor` is None, we render the numbered-fallback help block.
+    """
     lines: list[str] = []
     lines.append("TapScribe install picker")
-    lines.append("=" * 40)
+    lines.append("=" * 60)
     lines.append(f"Machine: {_format_caps_line(caps)}")
     lines.append("")
     lines.append("Model families to install:")
     for idx, fam in enumerate(FAMILIES, start=1):
         mark = "x" if fam.key in selection.families else " "
-        lines.append(f"  [{mark}] {idx}. {fam.label}  ({fam.size_hint})")
+        arrow = ">" if cursor is not None and cursor == idx - 1 else " "
+        lines.append(f"{arrow} [{mark}] {idx}. {fam.label}  ({fam.size_hint})")
         lines.append(f"          {fam.description}")
-    lines.append("")
+        backend = family_backend_label(fam, caps)
+        extras_preview = family_extras_preview(fam, caps)
+        suffix = ""
+        if fam.key == "voxtral" and caps.mlx:
+            suffix = "  — no MLX adapter on PyPI yet"
+        if extras_preview:
+            lines.append(
+                f"          Backend: {backend}   extras: [{', '.join(extras_preview)}]{suffix}"
+            )
+        else:
+            lines.append(f"          Backend: {backend}{suffix}")
+        lines.append("")
     extras = resolve_extras(selection, caps)
     if extras:
         lines.append(f"Will install:  pip install -e '.[{','.join(extras)}]'")
     else:
         lines.append("Will install:  (nothing — base package only; the dashboard will be empty)")
     lines.append("")
-    lines.append("Commands:")
-    lines.append("  <numbers>   toggle items (e.g. '2,4' or '2 4')")
-    lines.append("  a           toggle all")
-    lines.append("  r           reset to defaults")
-    lines.append("  Enter       confirm and install")
-    lines.append("  q           quit without launching")
+    if cursor is None:
+        lines.append("Commands:")
+        lines.append("  <numbers>   toggle items (e.g. '2,4' or '2 4')")
+        lines.append("  a           toggle all")
+        lines.append("  r           reset to defaults")
+        lines.append("  Enter       confirm and install")
+        lines.append("  q           quit without launching")
+    else:
+        lines.append("↑/↓ move · Space toggle · a all · r reset · Enter install · q quit")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Numbered (fallback) interactive loop. Used when stdin/stdout isn't a real
+# TTY (CI, piped, tests with StringIO) so the picker still works without
+# raw-mode keyboard input.
+# ---------------------------------------------------------------------------
 
 
 def _parse_command(raw: str, selection: Selection) -> str:
@@ -314,12 +376,10 @@ def _parse_command(raw: str, selection: Selection) -> str:
     return " · ".join(parts) if parts else "(no change)"
 
 
-def interactive_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream_out) -> bool:
-    """Drive the picker until the operator confirms or quits.
-
-    Returns True on confirm, False on quit. Selection is mutated in
-    place. Streams are explicit so tests can pass StringIO.
-    """
+def _numbered_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream_out) -> bool:
+    """The original line-buffered numbered picker. Kept as the fallback
+    for non-TTY contexts — CI, piped invocations, and the unit tests
+    (which pass StringIO)."""
     status: str | None = None
     while True:
         print(render(selection, caps), file=stream_out)
@@ -340,6 +400,246 @@ def interactive_loop(selection: Selection, caps: MachineCaps, *, stream_in, stre
         if result == "quit":
             return False
         status = result
+
+
+# ---------------------------------------------------------------------------
+# Arrow-key interactive loop. Uses termios raw mode on POSIX and msvcrt
+# on Windows. Renders the menu in-place via ANSI escapes.
+# ---------------------------------------------------------------------------
+
+
+def _toggle(selection: Selection, key: str) -> None:
+    if key in selection.families:
+        selection.families.discard(key)
+    else:
+        selection.families.add(key)
+
+
+def _read_key_posix(fd: int) -> str:
+    """Read one keystroke from a POSIX raw-mode terminal. Returns one of
+    the symbolic names handled by `_arrow_key_loop` (see _handle_key) or
+    a single lowercase character."""
+    import select
+
+    try:
+        ch = os.read(fd, 1)
+    except OSError:
+        return "eof"
+    if not ch:
+        return "eof"
+    if ch == b"\x1b":
+        # ESC: could be a lone Esc or the start of an escape sequence.
+        # Wait briefly for follow-on bytes; if none arrive, treat as Esc.
+        rlist, _, _ = select.select([fd], [], [], 0.05)
+        if not rlist:
+            return "esc"
+        rest = os.read(fd, 16)
+        if rest.startswith(b"[A") or rest.startswith(b"OA"):
+            return "up"
+        if rest.startswith(b"[B") or rest.startswith(b"OB"):
+            return "down"
+        if rest.startswith(b"[C") or rest.startswith(b"OC"):
+            return "right"
+        if rest.startswith(b"[D") or rest.startswith(b"OD"):
+            return "left"
+        return "esc"
+    if ch in (b"\r", b"\n"):
+        return "enter"
+    if ch == b" ":
+        return "space"
+    if ch == b"\t":
+        return "tab"
+    if ch == b"\x03":
+        return "ctrl-c"
+    if ch == b"\x04":
+        return "ctrl-d"
+    if ch == b"\x7f":
+        return "backspace"
+    try:
+        return ch.decode("utf-8", errors="replace").lower()
+    except UnicodeDecodeError:
+        return "esc"
+
+
+def _read_key_windows() -> str:
+    import msvcrt  # type: ignore[import-not-found]  # Windows-only stdlib module.
+
+    ch = msvcrt.getch()
+    if ch in (b"\x00", b"\xe0"):
+        ch2 = msvcrt.getch()
+        return {b"H": "up", b"P": "down", b"K": "left", b"M": "right"}.get(ch2, "esc")
+    if ch in (b"\r", b"\n"):
+        return "enter"
+    if ch == b" ":
+        return "space"
+    if ch == b"\t":
+        return "tab"
+    if ch == b"\x03":
+        return "ctrl-c"
+    if ch == b"\x1b":
+        return "esc"
+    try:
+        return ch.decode("utf-8", errors="replace").lower()
+    except UnicodeDecodeError:
+        return "esc"
+
+
+def _enable_windows_vt() -> None:
+    """Best-effort enable ANSI escape processing on Windows 10+ consoles.
+    No-op (and swallowed) on older / non-Windows shells — the worst case
+    is the picker prints raw escape codes, which is ugly but not fatal."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes  # noqa: PLC0415 — only needed on this branch.
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except OSError:
+        pass
+
+
+def _handle_key(
+    key: str, selection: Selection, cursor_box: list[int]
+) -> str | None:
+    """Dispatch one keystroke against `selection` / `cursor_box`. Returns
+    `"confirm"`, `"quit"`, or `None` to keep looping."""
+    if key in ("up", "k"):
+        cursor_box[0] = (cursor_box[0] - 1) % len(FAMILIES)
+    elif key in ("down", "j"):
+        cursor_box[0] = (cursor_box[0] + 1) % len(FAMILIES)
+    elif key in ("home",):
+        cursor_box[0] = 0
+    elif key in ("end",):
+        cursor_box[0] = len(FAMILIES) - 1
+    elif key in ("space", "x"):
+        _toggle(selection, FAMILIES[cursor_box[0]].key)
+    elif key == "enter":
+        return "confirm"
+    elif key in ("q", "esc", "ctrl-c", "ctrl-d", "eof"):
+        return "quit"
+    elif key == "a":
+        if selection.families == {f.key for f in FAMILIES}:
+            selection.families = set()
+        else:
+            selection.families = {f.key for f in FAMILIES}
+    elif key == "r":
+        selection.families = {f.key for f in FAMILIES if f.default_selected}
+    elif len(key) == 1 and key.isdigit():
+        n = int(key)
+        if 1 <= n <= len(FAMILIES):
+            cursor_box[0] = n - 1
+            _toggle(selection, FAMILIES[n - 1].key)
+    return None
+
+
+def _arrow_key_loop(
+    selection: Selection, caps: MachineCaps, *, stream_in, stream_out
+) -> bool:
+    """Drive the picker with arrow keys + spacebar. Caller has already
+    confirmed both streams are real TTYs."""
+    cursor_box = [0]
+    # Pre-position cursor on the first selected row, if any — feels less
+    # arbitrary than always starting at the top.
+    for i, fam in enumerate(FAMILIES):
+        if fam.key in selection.families:
+            cursor_box[0] = i
+            break
+
+    def paint() -> None:
+        # Clear screen + home + hide cursor, then redraw.
+        stream_out.write("\x1b[2J\x1b[H\x1b[?25l")
+        stream_out.write(render(selection, caps, cursor=cursor_box[0]))
+        stream_out.write("\n")
+        stream_out.flush()
+
+    def restore_terminal() -> None:
+        stream_out.write("\x1b[?25h\n")
+        stream_out.flush()
+
+    if sys.platform == "win32":
+        _enable_windows_vt()
+        try:
+            while True:
+                paint()
+                key = _read_key_windows()
+                action = _handle_key(key, selection, cursor_box)
+                if action == "confirm":
+                    return True
+                if action == "quit":
+                    return False
+        finally:
+            restore_terminal()
+
+    # POSIX: switch the controlling terminal into cbreak mode so we get
+    # one keystroke at a time without losing Ctrl+C signal handling.
+    import termios  # noqa: PLC0415 — POSIX-only.
+    import tty  # noqa: PLC0415 — POSIX-only.
+
+    fd = stream_in.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            paint()
+            key = _read_key_posix(fd)
+            action = _handle_key(key, selection, cursor_box)
+            if action == "confirm":
+                return True
+            if action == "quit":
+                return False
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+        restore_terminal()
+
+
+def _can_use_arrow_keys(stream_in, stream_out) -> bool:
+    """True iff both streams are real TTYs AND we have a way to read raw
+    keystrokes on this platform. StringIO and piped invocations come out
+    False here, dropping us into the numbered fallback."""
+    try:
+        if not (stream_in.isatty() and stream_out.isatty()):
+            return False
+    except (AttributeError, ValueError):
+        return False
+    try:
+        stream_in.fileno()
+    except (AttributeError, OSError, ValueError):
+        return False
+    if sys.platform == "win32":
+        try:
+            import msvcrt  # type: ignore[import-not-found]  # noqa: F401,PLC0415
+        except ImportError:
+            return False
+        return True
+    try:
+        import termios  # noqa: F401,PLC0415
+        import tty  # noqa: F401,PLC0415
+    except ImportError:
+        return False
+    return True
+
+
+def interactive_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream_out) -> bool:
+    """Drive the picker until the operator confirms or quits.
+
+    Returns True on confirm, False on quit. Selection is mutated in
+    place. On a real TTY we use the arrow-key UI; otherwise the
+    line-buffered numbered fallback (kept so CI / piped invocations and
+    unit tests with StringIO still work).
+    """
+    if _can_use_arrow_keys(stream_in, stream_out):
+        try:
+            return _arrow_key_loop(selection, caps, stream_in=stream_in, stream_out=stream_out)
+        except (OSError, ImportError) as exc:
+            # Terminal didn't let us into raw mode (rare; usually means
+            # we lost the controlling tty). Fall back cleanly.
+            print(f"(arrow-key UI unavailable: {exc}; falling back to numbered prompt)",
+                  file=stream_out)
+    return _numbered_loop(selection, caps, stream_in=stream_in, stream_out=stream_out)
 
 
 # ---------------------------------------------------------------------------

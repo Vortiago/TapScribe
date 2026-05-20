@@ -42,7 +42,10 @@ dependencies = [
 # The actual model backends are heavy and platform-dependent; keep them
 # optional so a CI / docs install doesn't pull in PyTorch + CUDA.
 whisper = ["faster-whisper>=1.0", "whisperlivekit>=0.1"]
-mlx = ["mlx-whisper>=0.5; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# mlx-whisper's PyPI release line is 0.4.x (no 0.5 yet as of 2026-05); the
+# upstream API has been stable across 0.3 → 0.4, so a `>=0.4` floor keeps
+# the Apple-Silicon path resolvable without falling off support.
+mlx = ["mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 voxtral = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
 # Parakeet TDT 0.6B v3 — NVIDIA's top-of-leaderboard ASR. Two adapters:
 #   - parakeet-mlx (Apple Silicon, ~2.5GB model on disk)
