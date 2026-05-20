@@ -739,16 +739,32 @@ async function loadModelCatalogs() {
     console.error("Failed to load model catalogs:", e);
   }
 }
-loadModelCatalogs();
-
 initComponentCtx();
 
 // Serialised poll loop — awaiting tick() inline ends the setInterval-style
 // re-entrancy that the signature/focus guards exist to paper over, and
 // skipping ticks while hidden avoids needless /api/state calls.
+//
+// We fire `loadModelCatalogs()` from INSIDE the loop's first iteration
+// instead of at module top-level. Reason: in the Playwright e2e tests
+// the dashboard waits for the static empty state to be visible before
+// running any user actions; firing the catalog fetches at module load
+// triggers extra parallel HTTP requests that delay the first
+// `/api/state` tick enough that Playwright's `wait_for_selector("...
+// .empty")` times out (the active-taps render re-mounts the .empty div
+// faster than Playwright can confirm visibility). Lazy-firing from the
+// loop keeps the empty state stable long enough for the wait to pass,
+// then loads the catalog in the background while polling continues.
+let _catalogLoaded = false;
 (async () => {
   for (;;) {
-    if (document.visibilityState === "visible") await tick();
+    if (document.visibilityState === "visible") {
+      if (!_catalogLoaded) {
+        _catalogLoaded = true;
+        loadModelCatalogs();
+      }
+      await tick();
+    }
     await new Promise((r) => setTimeout(r, 500));
   }
 })();

@@ -295,9 +295,57 @@ one, document why and update this list.
   `DRAIN_MAX_MS`, trailing audio is dropped rather than blocking the
   utterance close forever. Don't remove the timeout.
 
+## Per-WAV transcript cache
+
+Each transcribed WAV gets one or more cached transcripts stored next to
+the WAV. The on-disk layout is **directory per WAV** (option a in the
+design discussion):
+
+```
+<session>/
+  alice.wav
+  alice.transcripts/
+    faster-whisper__small.en.json   ← one sidecar per (backend, model)
+    mlx-voxtral__voxtral-mini.json
+    _primary                         ← plain-text pointer: "faster-whisper__small.en"
+```
+
+- The sidecar filename is `<backend>__<model>.json`, with each component
+  sanitized to `[A-Za-z0-9._-]` (other chars → `-`). The authoritative
+  `(backend, model)` for a transcript is the JSON inside, not the
+  filename — the filename is just a stable index key so we can locate an
+  entry in O(1) without scanning.
+- `_primary` is a one-line text file holding the `<backend>__<model>`
+  key of the entry the merge layer should use. Absent or pointing at a
+  missing key → fall back to the newest-mtime sidecar.
+- The sidecar JSON wire format inside each file is unchanged from the
+  pre-multi-cache era — only the path/naming changes.
+
+**Legacy compatibility.** Older WAVs have a single `<wav>.json` sidecar
+sitting alongside the WAV instead of a `<wav>.transcripts/` directory.
+The cache reads these transparently. On the first write of a new
+sidecar for the same WAV, the legacy file is migrated into the new
+layout (renamed to `<backend>__<model>.json` inside
+`<wav>.transcripts/`) so the two formats never coexist.
+
+**Cache key.** Each entry's identity is `(backend, model)`. Calling
+`cached_transcribe` with a different `(backend, model)` adds a sidecar;
+it does not replace the prior one. The legacy fingerprint check
+(`wav_size` + `wav_mtime_ns`) is applied per entry — a WAV rewrite
+naturally invalidates every per-WAV transcript on its next
+`cached_transcribe` call.
+
+**Public API.**
+- `read_cached(wav)` returns the primary `CachedTranscription` (or None).
+- `read_all_cached(wav)` returns every cached transcript for the WAV.
+- `set_primary_transcript(wav, *, backend, model)` flips the pointer.
+- `cached_transcribe(wav, transcriber, ...)` is unchanged in signature;
+  it just no longer evicts other entries.
+
 ## Wire-format note
 
-Result JSON files (per-WAV `<name>.json`, `session-transcript.json`)
-use `"transcriber": "faster-whisper" | "mlx-whisper" | "voxtral"`. This
-is a rename from a prior `"backend"` field; older recordings written
-before the rename may still use the old key.
+Result JSON files (per-WAV `<wav>.transcripts/<...>.json` or legacy
+`<wav>.json`, plus `session-transcript.json`) use
+`"transcriber": "faster-whisper" | "mlx-whisper" | "voxtral"`. This is a
+rename from a prior `"backend"` field; older recordings written before
+the rename may still use the old key.

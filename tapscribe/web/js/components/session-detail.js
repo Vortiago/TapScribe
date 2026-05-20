@@ -280,15 +280,17 @@ function buildModelInputs(host, ctx, modelEntry, sessKey) {
 }
 
 // `tpl()` returns a DocumentFragment whose children are the two row
-// elements (label + field). We need them as separate nodes so the
-// caller can append them into the ctl-grid in order.
+// elements (label + field). We snapshot them as an array so the caller
+// can append each into the live ctl-grid individually — appendChild
+// moves the node out of the fragment, so by the time the caller is
+// done, the fragment is empty.
+//
+// Critical: snapshot via `Array.from(frag.children)` rather than
+// looping on `frag.firstChild` (the loop never terminates unless the
+// child is detached, which yields an infinite-push and a RangeError
+// when the array length overflows V8's max).
 function collectInputNodes(frag) {
-  const nodes = [];
-  while (frag.firstChild) nodes.push(frag.firstChild);
-  // After the loop, `nodes` is [labelEl, fieldEl] in document order. We
-  // detach each node from the fragment so the caller can append them
-  // into the live grid without dragging an empty fragment along.
-  return nodes;
+  return Array.from(frag.children);
 }
 
 function buildControls(s, sessKey, ctx) {
