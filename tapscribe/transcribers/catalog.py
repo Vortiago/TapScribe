@@ -92,6 +92,36 @@ def set_available_backends_for_testing(kinds: frozenset[BackendKind] | None) -> 
     _AVAILABLE_BACKENDS_CACHE = kinds
 
 
+# ---------------------------------------------------------------------------
+# Adapter-module availability — does this install have the right Python
+# packages to run a given binding? Drives the UI filter so the dashboard
+# doesn't advertise Voxtral / Parakeet / Canary on installs where the
+# operator told the install picker to skip them.
+# ---------------------------------------------------------------------------
+
+
+_INSTALLED_MODULES_OVERRIDE: frozenset[str] | None = None
+
+
+def _is_module_available(name: str) -> bool:
+    """True iff `name` is importable. The test override hook
+    (`set_installed_modules_for_testing`) replaces the probe with a
+    fixed set so tests can pretend e.g. `parakeet_mlx` is uninstalled
+    without touching the real environment."""
+    if _INSTALLED_MODULES_OVERRIDE is not None:
+        return name in _INSTALLED_MODULES_OVERRIDE
+    import importlib.util
+
+    return importlib.util.find_spec(name) is not None
+
+
+def set_installed_modules_for_testing(names: frozenset[str] | None) -> None:
+    """Override what `_is_module_available` reports. `None` re-enables
+    real probing. Use `frozenset()` to simulate "nothing installed"."""
+    global _INSTALLED_MODULES_OVERRIDE
+    _INSTALLED_MODULES_OVERRIDE = names
+
+
 # `auto` resolves to the first kind in this list that's available. MLX first
 # (cheapest, lowest-latency on Apple Silicon), then CUDA, then CPU.
 _AUTO_RESOLUTION_ORDER: tuple[BackendKind, ...] = ("mlx", "cuda", "cpu")
@@ -284,10 +314,29 @@ class BackendBinding:
     parakeet-mlx handles only MLX). The registry's `resolve()` walks an
     entry's `backends` tuple in order and picks the first binding whose
     `kinds` contains the resolved `BackendKind`.
+
+    `probe_module` is the top-level package whose presence indicates this
+    binding's adapter dependency is installed (e.g. `"faster_whisper"`,
+    `"mlx_whisper"`, `"nemo"`). The registry uses `find_spec(probe_module)`
+    to decide whether the binding is usable on this install — drives
+    `ModelEntry.is_installed()` so `/api/models` can hide families the
+    operator didn't pick during the install picker.
     """
 
     kinds: frozenset[BackendKind]
     loader: Callable[[str, BackendKind], Transcriber]
+    # Empty string = no probe; the binding is treated as always-installed.
+    # Used by tests that construct hypothetical bindings whose loader is
+    # a no-op lambda; the real registry below sets this for every binding.
+    probe_module: str = ""
+
+    def is_installed(self) -> bool:
+        """True iff `probe_module` is importable (or empty, meaning "no
+        probe required" — see the field docstring). Cheap — uses
+        `find_spec` so the heavy adapter module never actually loads."""
+        if not self.probe_module:
+            return True
+        return _is_module_available(self.probe_module)
 
 
 @dataclass(frozen=True)
@@ -335,6 +384,20 @@ class ModelEntry:
         for b in self.backends:
             out |= b.kinds
         return frozenset(out)
+
+    def is_installed(self) -> bool:
+        """True iff at least one of this entry's bindings has an importable
+        adapter AND a kind this machine can serve. Drives the `/api/models`
+        filter so families the operator left out of the install picker
+        don't clutter the dropdowns. `available=False` placeholders
+        ("coming soon") are always reported as not-installed."""
+        if not self.available:
+            return False
+        avail_kinds = available_backends()
+        for b in self.backends:
+            if (b.kinds & avail_kinds) and b.is_installed():
+                return True
+        return False
 
     def to_mapping(self) -> dict:
         """JSON-friendly view used by `GET /api/models`."""
@@ -386,8 +449,18 @@ class TranscriberRegistry:
             raise KeyError(f"model_id={model_id!r} not in registry. Known: {sorted(self._by_id)!r}")
         return entry
 
-    def for_context(self, context: Context) -> tuple[ModelEntry, ...]:
-        return tuple(e for e in self._entries if e.supports_context(context))
+    def for_context(
+        self, context: Context, *, only_installed: bool = False
+    ) -> tuple[ModelEntry, ...]:
+        """Entries valid for `context`. With `only_installed=True`, also
+        drops entries whose adapter modules aren't importable on this
+        install or whose backends aren't available on this machine — the
+        filter `/api/models` applies so the dashboard reflects what the
+        install picker actually pulled in."""
+        out = tuple(e for e in self._entries if e.supports_context(context))
+        if only_installed:
+            out = tuple(e for e in out if e.is_installed())
+        return out
 
     def resolve(self, model_id: str, preference: BackendPreference) -> ResolvedBinding:
         """Pick the loader for `model_id` given a backend preference.
@@ -449,33 +522,45 @@ class TranscriberRegistry:
 # Whisper-family bindings: faster-whisper handles cpu + cuda (we lean on the
 # adapter to pick the right device + compute_type); mlx-whisper handles mlx.
 _WHISPER_BACKENDS: tuple[BackendBinding, ...] = (
-    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_mlx_whisper),
-    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_faster_whisper),
+    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_mlx_whisper, probe_module="mlx_whisper"),
+    BackendBinding(
+        kinds=frozenset({"cuda", "cpu"}),
+        loader=_load_faster_whisper,
+        probe_module="faster_whisper",
+    ),
 )
 
 
 # NB-Whisper: no MLX weights exist publicly, so we drop the MLX binding and
 # rely on faster-whisper for both CPU and CUDA.
 _NB_WHISPER_BACKENDS: tuple[BackendBinding, ...] = (
-    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_faster_whisper),
+    BackendBinding(
+        kinds=frozenset({"cuda", "cpu"}),
+        loader=_load_faster_whisper,
+        probe_module="faster_whisper",
+    ),
 )
 
 
 _VOXTRAL_BACKENDS: tuple[BackendBinding, ...] = (
-    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_voxtral_mlx),
-    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_voxtral_hf),
+    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_voxtral_mlx, probe_module="mlx_voxtral"),
+    BackendBinding(
+        kinds=frozenset({"cuda", "cpu"}),
+        loader=_load_voxtral_hf,
+        probe_module="transformers",
+    ),
 )
 
 
 _PARAKEET_BACKENDS: tuple[BackendBinding, ...] = (
-    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_parakeet_mlx),
-    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_parakeet_hf),
+    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_parakeet_mlx, probe_module="parakeet_mlx"),
+    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_parakeet_hf, probe_module="nemo"),
 )
 
 
 _CANARY_BACKENDS: tuple[BackendBinding, ...] = (
-    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_canary_mlx),
-    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_canary_nemo),
+    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_canary_mlx, probe_module="mlx_audio"),
+    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_canary_nemo, probe_module="nemo"),
 )
 
 

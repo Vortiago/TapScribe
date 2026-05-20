@@ -7,6 +7,7 @@
 #   .\start.ps1 -NoAutoLive              # boot without starting the live channel
 #   .\start.ps1 -NoAuth                  # disable dashboard auth + /tap token gate (DEV ONLY)
 #   .\start.ps1 -Tls                     # serve https:// + wss:// (auto self-signed)
+#   .\start.ps1 -NonInteractive          # skip the install picker prompt; use the saved selection
 
 [CmdletBinding()]
 param(
@@ -14,7 +15,8 @@ param(
     [switch]$NoMlx,
     [switch]$NoAutoLive,
     [switch]$NoAuth,
-    [switch]$Tls
+    [switch]$Tls,
+    [switch]$NonInteractive
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,22 +49,18 @@ $env:PYTHONUNBUFFERED = "1"
 Write-Host "[start] Upgrading pip…"
 & python -m pip install --upgrade pip
 
-# --- Dependencies -----------------------------------------------------------
-Write-Host "[start] Checking installed dependencies…"
-$needInstall = $false
-# mistral_common is a runtime dep of transformers' Voxtral processor:
-# apply_transcription_request() references TranscriptionRequest which is
-# imported conditionally via is_mistral_common_available(). Without the
-# package, Voxtral runs crash with `NameError: TranscriptionRequest`
-# deep inside transformers — not a clean ImportError.
-foreach ($pkg in @("whisperlivekit", "multipart", "fastapi", "uvicorn", "transformers", "mistral_common", "cryptography")) {
-    & python -c "import $pkg" 2>$null
-    if ($LASTEXITCODE -ne 0) { $needInstall = $true }
-}
-
-if ($needInstall) {
-    Write-Host "[start] Installing dependencies — first run pulls PyTorch (several hundred MB)…"
-    & pip install whisperlivekit python-multipart "transformers>=4.46" "mistral-common>=1.5" uvicorn "cryptography>=42"
+# --- Install picker ---------------------------------------------------------
+# Hands the install decision to tools/install_picker.py: prompts the
+# operator for which model families (Whisper / Voxtral / Parakeet /
+# Canary) to install, pre-checks the saved selection so re-runs are one
+# keystroke, then runs `pip install -e ".[…]"` for the resolved extras.
+$PickerArgs = @()
+if ($NoMlx)           { $PickerArgs += "--no-mlx" }
+if ($NonInteractive)  { $PickerArgs += "--non-interactive" }
+& python tools\install_picker.py @PickerArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "[start] install picker failed; aborting."
+    exit 1
 }
 
 # --- Configuration ----------------------------------------------------------

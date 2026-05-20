@@ -27,6 +27,27 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+# ---------------------------------------------------------------------------
+# Install-probe override — by default, pretend every registry probe module
+# is importable so /api/models tests (which assert the full catalog is
+# exposed) keep working in CI envs that don't install nemo / parakeet-mlx
+# / mlx-audio. Tests that specifically exercise the "uninstalled families
+# get filtered" logic call set_installed_modules_for_testing themselves.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _force_all_probes_installed():
+    from tapscribe.transcribers.catalog import REGISTRY, set_installed_modules_for_testing
+
+    probes = {b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module}
+    set_installed_modules_for_testing(frozenset(probes))
+    try:
+        yield
+    finally:
+        set_installed_modules_for_testing(None)
+
+
 @pytest.fixture
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Point the package's CONFIG_DIR + the three config files at a tmpdir.

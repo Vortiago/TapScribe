@@ -8,6 +8,7 @@
 #   bash start.sh --no-auto-live          # boot the recorder without starting the live channel
 #   bash start.sh --no-auth               # disable dashboard auth + /tap token gate (DEV ONLY; insecure on LAN)
 #   bash start.sh --tls                   # serve https:// + wss:// (auto self-signed if no cert provided)
+#   bash start.sh --non-interactive       # skip the install picker prompt; use the saved selection
 #   SX_MODEL=small.en bash start.sh       # initial live model; changeable from the dashboard
 #
 # Dashboard auth: a password is generated on first run, persisted to
@@ -17,10 +18,13 @@
 # It will:
 #   1. Find a Python 3.10+
 #   2. Create a venv at ./.venv if missing
-#   3. pip install whisperlivekit + python-multipart + transformers if missing
-#   4. On Apple Silicon: also install mlx-whisper, used for BOTH the live channel
-#      (~50% faster than CPU faster-whisper) AND the batch Transcribe buttons
-#      (~3-5x faster than CPU faster-whisper).
+#   3. Launch tools/install_picker.py — interactive checkbox prompt that
+#      asks which model families (Whisper / Voxtral / Parakeet / Canary)
+#      to install. Pre-checks the previous selection from
+#      .tapscribe-install.json so re-runs are one keystroke (Enter).
+#   4. The picker runs `pip install -e ".[…]"` for the chosen extras.
+#      On Apple Silicon the MLX-flavoured extras are added automatically
+#      (mlx-whisper / parakeet-mlx / …) — `--no-mlx` opts out.
 #   5. Launch the TapScribe recorder (port 8001) — which then spawns
 #      whisperlivekit-server (port 8000) as a child you can stop/start/reconfigure
 #      from the dashboard.
@@ -47,6 +51,7 @@ NO_MLX=0
 NO_AUTO_LIVE=0
 NO_AUTH=0
 TLS=0
+NON_INTERACTIVE=0
 for a in "$@"; do
     case "$a" in
         --lan) LAN=1 ;;
@@ -54,8 +59,9 @@ for a in "$@"; do
         --no-auto-live) NO_AUTO_LIVE=1 ;;
         --no-auth) NO_AUTH=1 ;;
         --tls) TLS=1 ;;
+        --non-interactive) NON_INTERACTIVE=1 ;;
         -h|--help)
-            sed -n '2,30p' "$0"
+            sed -n '2,32p' "$0"
             exit 0
             ;;
         *) echo "[start] Unknown argument: $a"; exit 1 ;;
@@ -126,30 +132,23 @@ source .venv/bin/activate
 
 python -m pip install --quiet --upgrade pip
 
-# --- Dependencies -----------------------------------------------------------
-NEED_INSTALL=0
-python -c "import whisperlivekit" >/dev/null 2>&1 || NEED_INSTALL=1
-python -c "import multipart" >/dev/null 2>&1 || NEED_INSTALL=1
-python -c "import fastapi" >/dev/null 2>&1 || NEED_INSTALL=1
-python -c "from transformers import VoxtralForConditionalGeneration" >/dev/null 2>&1 || NEED_INSTALL=1
-# mistral-common is a runtime dep of transformers' Voxtral processor: its
-# apply_transcription_request() references TranscriptionRequest which is
-# imported conditionally via is_mistral_common_available(). Without the
-# package, Voxtral runs crash with `NameError: TranscriptionRequest`
-# deep inside transformers — not a clean ImportError.
-python -c "import mistral_common" >/dev/null 2>&1 || NEED_INSTALL=1
-python -c "import cryptography" >/dev/null 2>&1 || NEED_INSTALL=1
-if [ "$USE_MLX" -eq 1 ]; then
-    python -c "import mlx_whisper" >/dev/null 2>&1 || NEED_INSTALL=1
+# --- Install picker ---------------------------------------------------------
+# Hands the install decision to tools/install_picker.py: prompts the
+# operator for which model families (Whisper / Voxtral / Parakeet /
+# Canary) to install, pre-checks the saved selection so re-runs are one
+# keystroke, then runs `pip install -e ".[…]"` for the resolved extras.
+# `--no-mlx` propagates so the picker also skips the MLX-flavoured
+# extras on Apple Silicon.
+PICKER_ARGS=()
+if [ "$NO_MLX" -eq 1 ]; then
+    PICKER_ARGS+=(--no-mlx)
 fi
-
-if [ "$NEED_INSTALL" -eq 1 ]; then
-    echo "[start] Installing dependencies — this can take a few minutes the first time (PyTorch is large)..."
-    BASE_PKGS=(whisperlivekit python-multipart "transformers>=4.46" "mistral-common>=1.5" uvicorn "cryptography>=42")
-    if [ "$USE_MLX" -eq 1 ]; then
-        BASE_PKGS+=(mlx-whisper)
-    fi
-    pip install "${BASE_PKGS[@]}"
+if [ "$NON_INTERACTIVE" -eq 1 ]; then
+    PICKER_ARGS+=(--non-interactive)
+fi
+if ! python tools/install_picker.py "${PICKER_ARGS[@]}"; then
+    echo "[start] install picker failed; aborting." >&2
+    exit 1
 fi
 
 # --- Configuration ----------------------------------------------------------

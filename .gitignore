@@ -19,6 +19,9 @@ recordings/
 .tap-token
 .tapscribe-cert.pem
 .tapscribe-key.pem
+# Install-picker state — operator's chosen model families. Pre-checked on
+# next run so re-launching is one Enter keystroke.
+.tapscribe-install.json
 
 # OS / editor
 .DS_Store

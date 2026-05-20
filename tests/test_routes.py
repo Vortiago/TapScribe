@@ -124,6 +124,34 @@ def test_api_models_emits_no_inputs_for_parakeet(client):
     assert pk["inputs"] == []
 
 
+def test_api_models_hides_families_whose_adapters_are_not_installed(client):
+    """The install picker can pull in only some family extras (e.g.
+    Whisper but not Parakeet). The /api/models filter mirrors that so
+    the dashboard's dropdowns don't advertise models that would fail
+    to lazy-import."""
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+
+    # Simulate "only the whisper-family adapters installed" — drops
+    # nemo / parakeet_mlx / mlx_audio / mlx_voxtral / transformers.
+    set_installed_modules_for_testing(frozenset({"faster_whisper", "mlx_whisper"}))
+    try:
+        r = client.get("/api/models?context=batch")
+        assert r.status_code == 200
+        ids = {m["model_id"] for m in r.json()["models"]}
+        assert "tiny.en" in ids  # whisper survives
+        assert "nb-whisper-medium" in ids  # nb-whisper rides on faster_whisper
+        assert "voxtral-mini" not in ids
+        assert "parakeet-tdt-0.6b-v3" not in ids
+        assert "canary-1b-v2" not in ids
+    finally:
+        # Restore the conftest default ("all probes installed") so other
+        # client-using tests aren't affected.
+        from tapscribe.transcribers.catalog import REGISTRY
+
+        probes = {b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module}
+        set_installed_modules_for_testing(frozenset(probes))
+
+
 def test_api_state_carries_backend_preference_and_available_backends(client):
     r = client.get("/api/state")
     body = r.json()
