@@ -458,6 +458,144 @@ def test_handle_key_digit_jumps_and_toggles():
     assert sel.choices["parakeet"].enabled is True
 
 
+# ── _classify_byte / _read_key_posix (raw-mode keystroke parsing) ────
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (b"\r", "enter"),
+        (b"\n", "enter"),
+        (b" ", "space"),
+        (b"\t", "tab"),
+        (b"\x03", "ctrl-c"),
+        (b"\x04", "ctrl-d"),
+        (b"\x7f", "backspace"),
+        (b"\x1b", "esc"),
+        (b"a", "a"),
+        (b"Q", "q"),  # case-folded
+        (b"\xff", "esc"),  # invalid UTF-8 byte falls back to esc
+    ],
+)
+def test_classify_byte_symbolic_mapping(raw, expected):
+    assert install_picker._classify_byte(raw) == expected
+
+
+def _patch_posix_reader(monkeypatch, byte_stream: list[bytes], *, has_followup: bool = True) -> None:
+    """Wire `os.read` + `select.select` so `_read_key_posix` consumes
+    bytes from `byte_stream` in order. `has_followup=False` simulates
+    'no more bytes after ESC', so a lone Esc resolves correctly."""
+    it = iter(byte_stream)
+    monkeypatch.setattr(install_picker.os, "read", lambda fd, n: next(it, b""))
+    import select
+
+    monkeypatch.setattr(
+        select,
+        "select",
+        lambda r, w, x, t: ([0], [], []) if has_followup else ([], [], []),
+    )
+
+
+@pytest.mark.parametrize(
+    "bytes_in, expected",
+    [
+        ([b"\x1b", b"[A"], "up"),
+        ([b"\x1b", b"[B"], "down"),
+        ([b"\x1b", b"[C"], "right"),
+        ([b"\x1b", b"[D"], "left"),
+        ([b"\x1b", b"OA"], "up"),  # alt application-mode encoding
+    ],
+)
+def test_read_key_posix_decodes_arrow_escape_sequences(monkeypatch, bytes_in, expected):
+    """The whole point of arrow-key UX — guard against a regression in
+    the ESC-[A/B/C/D parsing."""
+    _patch_posix_reader(monkeypatch, bytes_in, has_followup=True)
+    assert install_picker._read_key_posix(0) == expected
+
+
+def test_read_key_posix_lone_esc_returns_esc_after_timeout(monkeypatch):
+    """When select() times out waiting for follow-on bytes, ESC alone
+    means 'quit' — not 'start of unknown sequence'."""
+    _patch_posix_reader(monkeypatch, [b"\x1b"], has_followup=False)
+    assert install_picker._read_key_posix(0) == "esc"
+
+
+def test_read_key_posix_returns_eof_on_empty_read(monkeypatch):
+    monkeypatch.setattr(install_picker.os, "read", lambda fd, n: b"")
+    assert install_picker._read_key_posix(0) == "eof"
+
+
+def test_read_key_posix_returns_eof_on_oserror(monkeypatch):
+    def boom(fd, n):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(install_picker.os, "read", boom)
+    assert install_picker._read_key_posix(0) == "eof"
+
+
+def test_read_key_posix_passes_plain_chars_through_classify(monkeypatch):
+    monkeypatch.setattr(install_picker.os, "read", lambda fd, n: b"a")
+    assert install_picker._read_key_posix(0) == "a"
+
+
+# ── _drive_picker (orchestration loop) ───────────────────────────────
+
+
+def _scripted_reader(keys: list[str]):
+    """Build a `read_key` callable that returns `keys` in order, then
+    yields 'eof' forever — so a forgotten 'enter' in a test ends the
+    loop instead of looping infinitely."""
+    it = iter(keys)
+    return lambda: next(it, "eof")
+
+
+def test_drive_picker_confirms_on_enter():
+    sel = Selection.defaults_for(_caps())
+    paints: list[int] = []
+    result = install_picker._drive_picker(
+        sel, _caps(), paint=paints.append, read_key=_scripted_reader(["enter"])
+    )
+    assert result is True
+    assert len(paints) == 1
+
+
+def test_drive_picker_quits_on_q():
+    sel = Selection.defaults_for(_caps())
+    result = install_picker._drive_picker(
+        sel, _caps(), paint=lambda _c: None, read_key=_scripted_reader(["q"])
+    )
+    assert result is False
+
+
+def test_drive_picker_routes_keys_through_handle_key():
+    """End-to-end: a scripted keystroke sequence mutates the Selection
+    the same way calling _handle_key directly would. This is the
+    closest thing to a real arrow-key UI test that runs without a TTY."""
+    sel = Selection.defaults_for(_apple_caps())
+    sel.choices["whisper"] = FamilyChoice(enabled=True, backend=BACKEND_CPU)
+    result = install_picker._drive_picker(
+        sel,
+        _apple_caps(),
+        paint=lambda _c: None,
+        # ↓ toggle voxtral (#2), then walk back up to whisper and
+        # cycle its backend MLX→Both→CPU+1 to land on MLX, then confirm.
+        read_key=_scripted_reader(["down", "space", "up", "right", "enter"]),
+    )
+    assert result is True
+    assert sel.choices["voxtral"].enabled is True
+    assert sel.choices["whisper"].backend == BACKEND_MLX
+
+
+def test_drive_picker_pre_positions_cursor_on_first_enabled_row():
+    """Cursor lands on Voxtral when Whisper is off but Voxtral is on —
+    operators returning to the picker see their actual current state."""
+    sel = Selection()
+    sel.choices["voxtral"] = FamilyChoice(enabled=True)
+    paints: list[int] = []
+    install_picker._drive_picker(sel, _caps(), paint=paints.append, read_key=_scripted_reader(["enter"]))
+    assert paints == [1]  # voxtral's index
+
+
 # ── pyproject extras: pip resolution regression ─────────────────────
 
 

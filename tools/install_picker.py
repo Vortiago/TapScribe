@@ -569,11 +569,13 @@ _SYMBOLIC_BYTES: dict[bytes, str] = {
 
 def _classify_byte(ch: bytes) -> str:
     """Map one raw byte to a symbolic key name, falling back to a
-    lowercase decoded char (or "esc" if the byte isn't UTF-8)."""
+    lowercase decoded char (or "esc" if the byte isn't UTF-8 — strict
+    decode so an invalid byte doesn't trickle through to `_handle_key`
+    as the replacement character)."""
     if ch in _SYMBOLIC_BYTES:
         return _SYMBOLIC_BYTES[ch]
     try:
-        return ch.decode("utf-8", errors="replace").lower()
+        return ch.decode("utf-8").lower()
     except UnicodeDecodeError:
         return "esc"
 
@@ -633,13 +635,19 @@ def _enable_windows_vt() -> None:
         mode = ctypes.c_ulong()
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             kernel32.SetConsoleMode(handle, mode.value | 0x0004)
-    except OSError:
-        # Pre-Windows-10 consoles don't expose Get/SetConsoleMode and
-        # the call raises OSError. Swallowing is intentional: without
-        # VT processing the picker prints raw escape codes (ugly), but
-        # the operator can still confirm/quit, so the picker shouldn't
-        # crash the bring-up over a cosmetic terminal-feature probe.
-        pass
+    except OSError as exc:
+        # Pre-Windows-10 consoles don't expose Get/SetConsoleMode and the
+        # call raises OSError. Without VT processing the picker prints
+        # raw escape codes (ugly), but the operator can still confirm/
+        # quit, so the picker shouldn't crash the bring-up over a
+        # cosmetic terminal-feature probe — surface a one-line hint
+        # instead so the garbled output isn't mysterious.
+        print(
+            f"[install-picker] note: couldn't enable ANSI escapes on this console "
+            f"({type(exc).__name__}); arrow-key UI may render as raw escape codes. "
+            "Re-run on Windows Terminal / PowerShell 7+ for a clean UI.",
+            file=sys.stderr,
+        )
 
 
 def _cycle_backend(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps, *, direction: int) -> None:
@@ -701,9 +709,18 @@ def _handle_key(
     return None
 
 
-def _arrow_key_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream_out) -> bool:
-    """Drive the picker with arrow keys + space + ←/→. Caller has already
-    confirmed both streams are real TTYs."""
+def _drive_picker(
+    selection: Selection,
+    caps: MachineCaps,
+    *,
+    paint,
+    read_key,
+) -> bool:
+    """Pure dispatch loop: paint, read keystroke, handle, repeat. Caller
+    is responsible for setting up the terminal (raw mode, VT processing)
+    and tearing it down. Split out from `_arrow_key_loop` so the
+    keystroke→state-mutation pipeline is testable without termios /
+    msvcrt — tests inject a scripted `read_key` and a no-op `paint`."""
     cursor_box = [0]
     # Pre-position cursor on the first enabled row, if any — feels less
     # arbitrary than always starting at the top.
@@ -711,11 +728,24 @@ def _arrow_key_loop(selection: Selection, caps: MachineCaps, *, stream_in, strea
         if selection.choices.get(fam.key, FamilyChoice()).enabled:
             cursor_box[0] = i
             break
+    while True:
+        paint(cursor_box[0])
+        key = read_key()
+        action = _handle_key(key, selection, cursor_box, caps)
+        if action == "confirm":
+            return True
+        if action == "quit":
+            return False
 
-    def paint() -> None:
+
+def _arrow_key_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream_out) -> bool:
+    """Drive the picker with arrow keys + space + ←/→. Caller has already
+    confirmed both streams are real TTYs."""
+
+    def paint(cursor: int) -> None:
         # Clear screen + home + hide cursor, then redraw.
         stream_out.write("\x1b[2J\x1b[H\x1b[?25l")
-        stream_out.write(render(selection, caps, cursor=cursor_box[0]))
+        stream_out.write(render(selection, caps, cursor=cursor))
         stream_out.write("\n")
         stream_out.flush()
 
@@ -726,14 +756,7 @@ def _arrow_key_loop(selection: Selection, caps: MachineCaps, *, stream_in, strea
     if sys.platform == "win32":
         _enable_windows_vt()
         try:
-            while True:
-                paint()
-                key = _read_key_windows()
-                action = _handle_key(key, selection, cursor_box, caps)
-                if action == "confirm":
-                    return True
-                if action == "quit":
-                    return False
+            return _drive_picker(selection, caps, paint=paint, read_key=_read_key_windows)
         finally:
             restore_terminal()
 
@@ -746,14 +769,12 @@ def _arrow_key_loop(selection: Selection, caps: MachineCaps, *, stream_in, strea
     old_attrs = termios.tcgetattr(fd)
     try:
         tty.setcbreak(fd)
-        while True:
-            paint()
-            key = _read_key_posix(fd)
-            action = _handle_key(key, selection, cursor_box, caps)
-            if action == "confirm":
-                return True
-            if action == "quit":
-                return False
+        return _drive_picker(
+            selection,
+            caps,
+            paint=paint,
+            read_key=lambda: _read_key_posix(fd),
+        )
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
         restore_terminal()
@@ -798,9 +819,12 @@ def interactive_loop(selection: Selection, caps: MachineCaps, *, stream_in, stre
             return _arrow_key_loop(selection, caps, stream_in=stream_in, stream_out=stream_out)
         except (OSError, ImportError) as exc:
             # Terminal didn't let us into raw mode (rare; usually means
-            # we lost the controlling tty). Fall back cleanly.
+            # we lost the controlling tty). Fall back cleanly — only
+            # name the exception class so the operator sees something
+            # legible instead of a tcsetattr errno repr.
             print(
-                f"(arrow-key UI unavailable: {exc}; falling back to numbered prompt)",
+                "(arrow-key UI unavailable on this terminal "
+                f"[{type(exc).__name__}]; falling back to numbered prompt)",
                 file=stream_out,
             )
     return _numbered_loop(selection, caps, stream_in=stream_in, stream_out=stream_out)
