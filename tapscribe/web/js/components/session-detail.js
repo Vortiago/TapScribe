@@ -282,7 +282,11 @@ function buildModelInputs(host, ctx, modelEntry, sessKey) {
       const resetBtn = row.querySelector("[data-meta-reset]");
       if (resetBtn) {
         resetBtn.dataset.sessId = sessKey;
-        resetBtn.dataset.metaKey = metaKey;
+        // Use a distinct attribute (NOT `data-meta-key`) so the textarea's
+        // input-event listener doesn't double-bind to this button. The
+        // wiring loop below uses `data-meta-reset-key` for buttons and
+        // `data-meta-key` for textareas — disjoint, no false matches.
+        resetBtn.dataset.metaResetKey = metaKey;
       }
       // Append label + the row body as separate ctl-grid cells so they
       // align with the other label/value rows.
@@ -628,7 +632,7 @@ function wire(host, s, sessKey, ctx) {
   }
   for (const btn of host.querySelectorAll("[data-meta-reset]")) {
     btn.addEventListener("click", () =>
-      ctx.onMetaOverrideEdit(btn.dataset.sessId, btn.dataset.metaKey, ""));
+      ctx.onMetaOverrideEdit(btn.dataset.sessId, btn.dataset.metaResetKey, ""));
   }
 
   for (const r of host.querySelectorAll("[data-source-pick]")) {

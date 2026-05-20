@@ -66,10 +66,10 @@
       init prompt
       <span class="dim tnum" data-slot="initPromptCount"></span>
     </summary>
-    <textarea class="textarea" rows="3" id="liveInitPromptText" placeholder="context fed to whisperlivekit-server as --init-prompt on next restart"></textarea>
+    <textarea class="textarea" rows="3" id="liveInitPromptText" data-cfg-key="live-prompt" placeholder="context fed to whisperlivekit-server as --init-prompt on next restart"></textarea>
     <div class="action-row mt-xs">
-      <button class="btn tiny" id="liveInitPromptSave" type="button">save</button>
-      <span class="dim tiny" data-slot="initPromptStatus"></span>
+      <button class="btn tiny" id="liveInitPromptSave" type="button" data-cfg-key="live-prompt">save</button>
+      <span class="dim tiny" data-slot="initPromptStatus" data-cfg-key="live-prompt"></span>
     </div>
   </details>
 </template>

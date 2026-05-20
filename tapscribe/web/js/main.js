@@ -202,6 +202,14 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
           ).join(","),
           meta.label || "",
           aliasSig,
+          // Per-session prompt/hotwords overrides feed the badged rows
+          // in session controls and the "N sessions override this"
+          // footer on the default config panel. Multi-tab editing and
+          // external session-meta.json writes are only visible to the
+          // dashboard if these are part of the signature. Capped on
+          // the server at MAX_CONFIG_TEXT_LEN so the join stays cheap.
+          meta.prompt || "",
+          meta.hotwords || "",
           stripSig,
           srcPick,
           stripping,

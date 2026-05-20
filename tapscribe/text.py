@@ -77,20 +77,19 @@ def read_hotwords() -> str:
 MAX_CONFIG_TEXT_LEN: int = 4000
 
 
-def _write_text_file_atomic(path: Path, content: str) -> None:
+def atomic_write_text(path: Path, content: str) -> None:
     """Write `content` to `path` via tempfile + os.replace so a crashed
-    write never leaves a half-written file on disk. CRLF is normalised
-    to LF so the Whisper CLI doesn't see literal `\\r` in the prompt."""
-    normalised = content.replace("\r\n", "\n").replace("\r", "\n")
+    write never leaves a half-written file on disk. Caller is responsible
+    for whatever serialisation produced `content` (raw text, JSON, …).
+
+    Shared by `_write_text_file_atomic` (prompt/hotwords files, with CRLF
+    normalisation) and `tapscribe.sessions.write_session_meta` (JSON, no
+    normalisation needed because json.dumps escapes any literal CR)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=path.parent,
-    )
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(normalised)
+            f.write(content)
         os.replace(tmp, path)
     except Exception:
         # Best-effort cleanup of the half-written tempfile. The unlink
@@ -104,9 +103,21 @@ def _write_text_file_atomic(path: Path, content: str) -> None:
         raise
 
 
-def _validate_config_text(content: str) -> str:
+def _write_text_file_atomic(path: Path, content: str) -> None:
+    """Atomic write of a config text file. CRLF is normalised to LF so
+    the Whisper CLI doesn't see literal `\\r` in the prompt."""
+    normalised = content.replace("\r\n", "\n").replace("\r", "\n")
+    atomic_write_text(path, normalised)
+
+
+def validate_config_text(content: str) -> str:
     """Reject oversize input (see MAX_CONFIG_TEXT_LEN). Returns the
-    content unchanged on success so callers can chain."""
+    content unchanged on success so callers can chain.
+
+    Shared by the global config writers AND by
+    `tapscribe.sessions.write_session_meta` so per-session prompt /
+    hotwords overrides can't bypass the cap by persisting through the
+    session-meta API instead of /api/config/{key}."""
     if len(content) > MAX_CONFIG_TEXT_LEN:
         raise ValueError(f"config text exceeds {MAX_CONFIG_TEXT_LEN}-char cap (got {len(content)} chars)")
     return content
@@ -114,18 +125,18 @@ def _validate_config_text(content: str) -> str:
 
 def write_prompt(content: str) -> None:
     """Persist the batch initial prompt to prompt.txt. Atomic; oversize input rejected."""
-    _write_text_file_atomic(config.PROMPT_FILE, _validate_config_text(content))
+    _write_text_file_atomic(config.PROMPT_FILE, validate_config_text(content))
 
 
 def write_live_prompt(content: str) -> None:
     """Persist the live-channel init prompt to live-prompt.txt. Atomic;
     oversize input rejected."""
-    _write_text_file_atomic(config.LIVE_PROMPT_FILE, _validate_config_text(content))
+    _write_text_file_atomic(config.LIVE_PROMPT_FILE, validate_config_text(content))
 
 
 def write_hotwords(content: str) -> None:
     """Persist the hotwords list to hotwords.txt. Atomic; oversize input rejected."""
-    _write_text_file_atomic(config.HOTWORDS_FILE, _validate_config_text(content))
+    _write_text_file_atomic(config.HOTWORDS_FILE, validate_config_text(content))
 
 
 def normalise_for_exact(text: str) -> str:

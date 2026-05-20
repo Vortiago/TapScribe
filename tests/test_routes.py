@@ -623,6 +623,26 @@ def test_session_meta_preserves_label_when_setting_prompt(client, recorder_under
     assert meta["prompt"] == "context"
 
 
+def test_session_meta_rejects_oversize_prompt(client, recorder_under_test):
+    """Symmetric with PUT /api/config/{key}: the 4000-char cap exists to
+    fail loudly at the boundary instead of letting a pasted transcript
+    silently land on every batch job as `initial_prompt=`. The same cap
+    must apply to session-meta overrides — otherwise a buggy client (or
+    a curious operator) can paste a megabyte into session-meta.json and
+    bypass the global guardrail."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    r = client.put("/api/session-meta/fakesession", json={"prompt": "x" * 5000})
+    assert r.status_code == 400
+
+
+def test_session_meta_rejects_oversize_hotwords(client, recorder_under_test):
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    r = client.put("/api/session-meta/fakesession", json={"hotwords": "x" * 5000})
+    assert r.status_code == 400
+
+
 def test_api_state_sessions_include_meta_prompt_and_hotwords(client, recorder_under_test):
     """The dashboard renders the override badge in the session-detail
     pane off the meta block. /api/state's per-session entry must surface

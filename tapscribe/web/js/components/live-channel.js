@@ -27,16 +27,22 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   mlxEl.textContent = mlxAvail ? "mlx available" : "cpu only";
 
   // Don't rebuild while the user is editing — would close their <select>,
-  // wipe a slider value they're typing, or wipe their in-progress
-  // init-prompt edit.
+  // wipe a slider value they're typing, wipe their in-progress
+  // init-prompt edit, or (if an init-prompt save is in flight) detach
+  // the status element the awaiting putJson will try to write to.
+  // The dataset.cfgKey check covers the init-prompt textarea AND its
+  // save button + status span so a click-then-poll-tick race can't
+  // tear the DOM out from under the save handler.
   const focused = document.activeElement;
   const editableIds = new Set([
     "liveModelSelect", "liveLangInput",
     "liveGateKindSelect",
     "liveGateThreshold", "liveGateHangover", "liveGatePreRoll",
-    "liveInitPromptText",
   ]);
-  if (focused && editableIds.has(focused.id)) return;
+  if (focused) {
+    if (editableIds.has(focused.id)) return;
+    if (focused.dataset && focused.dataset.cfgKey && bodyEl.contains(focused)) return;
+  }
 
   const lp = j.live_prompt || {};
   const sup = j.inputs_support || { live_prompt: true };

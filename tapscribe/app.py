@@ -843,7 +843,15 @@ def _effective_batch_prompt_hotwords(session: str) -> tuple[str | None, str | No
     """Override chain for batch transcribe jobs: session-meta → global
     config files. Returns (initial_prompt, hotwords), each None when
     both layers are empty so the adapter receives no value (vs. the
-    empty string, which some backends would treat as a real prompt)."""
+    empty string, which some backends would treat as a real prompt).
+
+    Limitation: an empty session-meta override falls back to the global
+    default — there's no way for a session to assert "specifically NO
+    prompt, even though a global is set." If an operator needs that
+    today the workaround is to clear the global prompt; a future
+    sentinel value (e.g. a `null` override that's distinct from the
+    empty string) could express it explicitly without touching the
+    global."""
     meta = read_session_meta(session)
     prompt = (meta.get("prompt") or "").strip() or (read_prompt() or "").strip()
     hotwords = (meta.get("hotwords") or "").strip() or (read_hotwords() or "").strip()
@@ -947,6 +955,13 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     source_lang = (body.get("source_lang") or "").strip() or None
     target_lang = (body.get("target_lang") or "").strip() or None
     rules = hallucinations_mod.parse_rules()
+    # No `effective_force = force or bool(prompt/hotwords_override)` here:
+    # the cache match key in `cached_transcribe` now includes
+    # initial_prompt_used + hotwords_used, so a meta change automatically
+    # misses the cache. As a side benefit this re-runs only the WAVs
+    # whose cached entry doesn't match — the old `effective_force` path
+    # forced every file in the session, even ones already transcribed
+    # under the new prompt by a prior /api/transcribe call.
     effective_force = force
 
     claimed = await recorder.jobs.claim(
