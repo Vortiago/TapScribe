@@ -13,6 +13,13 @@
 </template>
 
 <template id="tpl-stream-row">
+  <!--
+    Wrap the row + its in-flight buffer line in one container so the
+    pair lays out (and screenshots / queries) as a single unit. The
+    .stream-row itself still owns the fixed-grid layout; .stream-buffer
+    is positioned beneath via the wrapper's natural block flow.
+  -->
+ <div class="stream-row-wrap">
   <div class="stream-row">
     <span class="dot rec" title="receiving"></span>
     <div class="who">
@@ -35,4 +42,16 @@
       <div><span class="lag" data-slot="lag" hidden></span></div>
     </div>
   </div>
+  <!--
+    In-flight hypothesis text (buffer_transcription from WlK). Shown
+    as a muted italic line BELOW the row so it doesn't disrupt the
+    fixed-width tap layout. Hidden when empty (live off, gate closed,
+    or text just committed). Operators see what the model is currently
+    transcribing before it commits to the chat log.
+  -->
+  <div class="stream-buffer" data-slot="bufferRow" hidden>
+    <span class="dim tiny">⟳</span>
+    <span class="buffer-text" data-slot="bufferText"></span>
+  </div>
+ </div>
 </template>

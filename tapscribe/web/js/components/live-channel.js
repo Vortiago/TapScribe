@@ -20,17 +20,27 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   const li = j.live_info || {};
   const log = j.live_log || [];
   const state = li.state || "stopped";
+  const supportsNativeVad = j.live_supports_native_vad !== false;
 
   stateEl.textContent = state;
   mlxEl.textContent = mlxAvail ? "mlx available" : "cpu only";
 
-  // Don't rebuild while the user is editing — would close their <select>.
+  // Don't rebuild while the user is editing — would close their <select>
+  // or wipe the slider value they're in the middle of typing.
   const focused = document.activeElement;
-  if (focused && (focused.id === "liveModelSelect" || focused.id === "liveLangInput")) return;
+  const editableIds = new Set([
+    "liveModelSelect", "liveLangInput",
+    "liveGateKindSelect",
+    "liveGateThreshold", "liveGateHangover", "liveGatePreRoll",
+  ]);
+  if (focused && editableIds.has(focused.id)) return;
 
   const sig = [
     state, li.model || "", li.language || "", li.pid || "", li.host || "",
     li.port || "", li.backend || "", li.device || "", li.last_error || "",
+    li.gate_kind || "", li.gate_speech_threshold || "",
+    li.gate_hangover_ms || "", li.gate_pre_roll_ms || "",
+    supportsNativeVad ? "1" : "0",
     log.length, log.length ? log[log.length - 1] : "",
     // include catalog length so a server-restart-driven catalog refresh
     // forces a re-render of the model options.
@@ -86,10 +96,39 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   }
   langInput.value = li.language || "en";
 
+  // Speech-gate form: kind selector + three knob inputs. The "backend"
+  // option is greyed out (disabled) when the current LiveChannel has
+  // no native VAD — picking it would be a no-op since there's nothing
+  // backend-side to defer gating to.
+  const gateSel = frag.querySelector("#liveGateKindSelect");
+  if (gateSel) {
+    gateSel.value = li.gate_kind || "tapscribe";
+    const backendOpt = gateSel.querySelector('option[value="backend"]');
+    if (backendOpt) {
+      backendOpt.disabled = !supportsNativeVad;
+      backendOpt.textContent = supportsNativeVad
+        ? "Backend native VAD"
+        : "Backend native VAD (not supported)";
+    }
+  }
+  const threshEl = frag.querySelector("#liveGateThreshold");
+  if (threshEl) threshEl.value = li.gate_speech_threshold || "0.50";
+  const hangEl = frag.querySelector("#liveGateHangover");
+  if (hangEl) hangEl.value = li.gate_hangover_ms || "400";
+  const prerollEl = frag.querySelector("#liveGatePreRoll");
+  if (prerollEl) prerollEl.value = li.gate_pre_roll_ms || "300";
+
   const starting = state === "starting";
   const running = starting || state === "running";
   // While starting, lock the form so the user can't queue another change.
-  if (starting) { sel.disabled = true; langInput.disabled = true; }
+  if (starting) {
+    sel.disabled = true;
+    langInput.disabled = true;
+    if (gateSel) gateSel.disabled = true;
+    if (threshEl) threshEl.disabled = true;
+    if (hangEl) hangEl.disabled = true;
+    if (prerollEl) prerollEl.disabled = true;
+  }
 
   const actionsHost = pick(frag, "actions");
   const actionsTpl = starting ? "tpl-live-actions-starting"
@@ -134,10 +173,26 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   });
 }
 
-export const formValues = () => ({
-  model: document.getElementById("liveModelSelect")?.value ?? null,
-  language: document.getElementById("liveLangInput")?.value.trim() ?? null,
-});
+export const formValues = () => {
+  // Read the gate knobs only when they have a value (so "Apply" with
+  // untouched sliders doesn't force a restart over identical numbers).
+  // The server-side `matches()` check uses the same null-means-unchanged
+  // semantics for these fields.
+  const numOrNull = (id) => {
+    const el = document.getElementById(id);
+    if (!el || el.value === "") return null;
+    const n = Number(el.value);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    model: document.getElementById("liveModelSelect")?.value ?? null,
+    language: document.getElementById("liveLangInput")?.value.trim() ?? null,
+    gate_kind: document.getElementById("liveGateKindSelect")?.value ?? null,
+    gate_speech_threshold: numOrNull("liveGateThreshold"),
+    gate_hangover_ms: numOrNull("liveGateHangover"),
+    gate_pre_roll_ms: numOrNull("liveGatePreRoll"),
+  };
+};
 
 
 // ── Log dialog ──────────────────────────────────────────────────────

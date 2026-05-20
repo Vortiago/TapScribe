@@ -281,6 +281,50 @@ def test_api_state_active_rows_include_level_for_the_dashboard_meter(client, rec
     assert row["level"] == pytest.approx(0.73)
 
 
+def test_api_state_active_rows_include_buffer_transcription(client, recorder_under_test):
+    """The dashboard's per-tap in-flight indicator reads
+    `buffer_transcription` off each entry. JSON contract pin so an
+    asdict refactor that drops the new field surfaces immediately."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(
+        recorder_under_test.streams.register(
+            ActiveStream(
+                conn_id="abc-buf",
+                identity="buf-test",
+                name="Buf",
+                filename="buf.wav",
+                started_at=datetime.now(timezone.utc),
+                buffer_transcription="words in flight",
+            )
+        )
+    )
+
+    body = client.get("/api/state").json()
+    row = next(a for a in body["active"] if a["identity"] == "buf-test")
+    assert row.get("buffer_transcription") == "words in flight"
+
+
+def test_api_state_live_info_carries_gate_config(client, recorder_under_test):
+    """The dashboard's gate-kind dropdown + sliders read live_info to
+    seed their default values. gate_kind / gate_speech_threshold /
+    gate_hangover_ms / gate_pre_roll_ms must all be present."""
+    body = client.get("/api/state").json()
+    li = body["live_info"]
+    assert li.get("gate_kind") in ("tapscribe", "backend")
+    assert li.get("gate_speech_threshold")  # non-empty string
+    assert li.get("gate_hangover_ms")
+    assert li.get("gate_pre_roll_ms")
+
+
+def test_api_state_exposes_live_supports_native_vad(client):
+    """The dashboard greys out the "backend" gate_kind option when the
+    current LiveChannel implementation has no native VAD. WhisperLiveKit
+    has --vac, so this is True for the default channel."""
+    body = client.get("/api/state").json()
+    assert body.get("live_supports_native_vad") is True
+
+
 def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_test):
     """The per-row rec/live toggles render their state from the active
     entry's record/live fields. Those must follow the *current*

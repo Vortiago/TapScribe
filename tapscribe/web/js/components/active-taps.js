@@ -83,6 +83,23 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
       btn.dataset.state = on ? "1" : "0";
       btn.classList.toggle("on", on);
     }
+
+    // In-flight buffer (uncommitted hypothesis from the relay's
+    // on_buffer callback). Empty / missing → row stays hidden so
+    // taps without live data don't show a phantom indicator.
+    const bufRow = pick(node, "bufferRow");
+    const bufText = pick(node, "bufferText");
+    const buf = (a.buffer_transcription || "").trim();
+    if (bufRow && bufText) {
+      if (buf && liveOn) {
+        bufRow.hidden = false;
+        bufText.textContent = buf;
+      } else {
+        bufRow.hidden = true;
+        bufText.textContent = "";
+      }
+    }
+
     frag.appendChild(node);
   }
   bodyEl.replaceChildren(frag);

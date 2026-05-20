@@ -8,6 +8,45 @@
     <input class="input" id="liveLangInput" size="6">
   </div>
 
+  <!--
+    Speech gate: chooses which layer does silence gating before audio
+    reaches the live ASR backend.
+      - tapscribe: our Silero-backed SpeechGate with pre-roll (recovers
+        leading consonants). Backend's native VAD is disabled.
+      - backend:   defer to backend's native VAD (today's behaviour;
+        kept as an A/B escape hatch). Greys out when the current
+        LiveChannel has no native VAD (live_supports_native_vad=false).
+  -->
+  <div class="live-row">
+    <span class="lbl">gate</span>
+    <select class="select" id="liveGateKindSelect">
+      <option value="tapscribe">TapScribe (Silero + pre-roll)</option>
+      <option value="backend">Backend native VAD</option>
+    </select>
+  </div>
+
+  <!--
+    Gate knobs (only meaningful when gate_kind=tapscribe). Operators
+    tune speech threshold (Silero probability gate), hangover (silence
+    duration before close), and pre-roll (audio replayed on open) to
+    match their mic environment without restarting via config edits.
+  -->
+  <div class="live-row gate-knob-row">
+    <span class="lbl">threshold</span>
+    <input class="input" type="number" id="liveGateThreshold" step="0.05" min="0" max="1" size="4">
+    <span class="dim tiny">speech prob</span>
+  </div>
+  <div class="live-row gate-knob-row">
+    <span class="lbl">hangover</span>
+    <input class="input" type="number" id="liveGateHangover" step="50" min="0" max="5000" size="5">
+    <span class="dim tiny">ms silence → close</span>
+  </div>
+  <div class="live-row gate-knob-row">
+    <span class="lbl">pre-roll</span>
+    <input class="input" type="number" id="liveGatePreRoll" step="20" min="0" max="2000" size="5">
+    <span class="dim tiny">ms replayed on open</span>
+  </div>
+
   <div class="action-row mt-s" data-slot="actions"></div>
 
   <div class="live-meta">

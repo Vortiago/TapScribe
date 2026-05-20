@@ -383,6 +383,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   align-items: center;
   gap: 10px;
   padding: 7px 0;
+  /* Border is on the wrapping .stream-row-wrap so the in-flight
+     buffer line sits inside the same divider; legacy single-row
+     callers without a wrapper still get a row-level border. */
+}
+:not(.stream-row-wrap) > .stream-row {
   border-bottom: 1px solid var(--hairline-2);
 }
 .stream-row:last-child { border-bottom: 0; }
@@ -460,6 +465,47 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-3);
   font-size: 11px;
   font-style: italic;
+}
+
+/*
+ * Wrapper around each .stream-row plus its in-flight buffer line —
+ * keeps the pair grouped so border/padding apply once and the buffer
+ * visually attaches to the row above it.
+ */
+.stream-row-wrap {
+  border-bottom: 1px solid var(--hairline-2);
+}
+.stream-row-wrap:last-child { border-bottom: 0; }
+
+/*
+ * In-flight (uncommitted) hypothesis text shown below each /tap row.
+ * Source: WlK's buffer_transcription, surfaced via the relay's
+ * on_buffer callback → ActiveStream.buffer_transcription. Muted +
+ * italic so the eye-line is "this hasn't committed to the chat log
+ * yet, it might change."
+ */
+.stream-buffer {
+  padding: 2px 8px 6px 22px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--fg-3);
+  line-height: 1.3;
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+
+  & .buffer-text { color: var(--fg-2); }
+}
+
+/*
+ * Gate-knob rows in the live-channel panel. Slightly indented + smaller
+ * label so the three rows visually group as sub-settings of the
+ * gate-kind selector above them.
+ */
+.gate-knob-row {
+  padding-left: 12px;
+
+  & .lbl { font-size: 11px; color: var(--fg-2); }
 }
 
 /* ── Config card (horizontal three-column) ───────────────────── */
