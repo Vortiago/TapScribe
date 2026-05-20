@@ -9,42 +9,38 @@
   </div>
 
   <!--
-    Speech gate: chooses which layer does silence gating before audio
-    reaches the live ASR backend.
-      - tapscribe: our Silero-backed SpeechGate with pre-roll (recovers
-        leading consonants). Backend's native VAD is disabled.
-      - backend:   defer to backend's native VAD (today's behaviour;
-        kept as an A/B escape hatch). Greys out when the current
-        LiveChannel has no native VAD (live_supports_native_vad=false).
+    Speech filter: who decides "this is speech, send it to be
+    transcribed" vs "this is silence, don't bother". See README
+    "Speech filter" section for the operator-facing explanation;
+    in code: gate_kind="tapscribe" runs our own Silero gate with
+    pre-roll, "backend" defers to the model's built-in VAD.
   -->
   <div class="live-row">
-    <span class="lbl">gate</span>
+    <span class="lbl">speech filter</span>
     <select class="select" id="liveGateKindSelect">
-      <option value="tapscribe">TapScribe (Silero + pre-roll)</option>
-      <option value="backend">Backend native VAD</option>
+      <option value="tapscribe">TapScribe (recommended)</option>
+      <option value="backend">Transcription engine</option>
     </select>
   </div>
 
   <!--
-    Gate knobs (only meaningful when gate_kind=tapscribe). Operators
-    tune speech threshold (Silero probability gate), hangover (silence
-    duration before close), and pre-roll (audio replayed on open) to
-    match their mic environment without restarting via config edits.
+    Knobs for the TapScribe speech filter. Labels kept plain so an
+    operator without VAD background can still tune them on the box.
   -->
   <div class="live-row gate-knob-row">
-    <span class="lbl">threshold</span>
+    <span class="lbl">voice threshold</span>
     <input class="input" type="number" id="liveGateThreshold" step="0.05" min="0" max="1" size="4">
-    <span class="dim tiny">speech prob</span>
+    <span class="dim tiny">0–1, lower picks up quieter voices</span>
   </div>
   <div class="live-row gate-knob-row">
-    <span class="lbl">hangover</span>
+    <span class="lbl">pause length</span>
     <input class="input" type="number" id="liveGateHangover" step="50" min="0" max="5000" size="5">
-    <span class="dim tiny">ms silence → close</span>
+    <span class="dim tiny">ms of silence to end a sentence</span>
   </div>
   <div class="live-row gate-knob-row">
-    <span class="lbl">pre-roll</span>
+    <span class="lbl">lead-in</span>
     <input class="input" type="number" id="liveGatePreRoll" step="20" min="0" max="2000" size="5">
-    <span class="dim tiny">ms replayed on open</span>
+    <span class="dim tiny">ms kept before speech starts</span>
   </div>
 
   <div class="action-row mt-s" data-slot="actions"></div>

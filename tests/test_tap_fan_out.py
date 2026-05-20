@@ -759,6 +759,60 @@ async def test_backend_gate_kind_passes_all_frames_without_a_gate(
         await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 3)
 
 
+async def test_gate_open_state_propagates_to_active_stream(
+    recorder_with_relay: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When the SpeechGate transitions open or closed, the per-tap
+    ActiveStream.gate_open must follow. The dashboard's status-line
+    rendering relies on this — operators see ⟳ vs ⏸ from this flag."""
+    from dataclasses import replace as dc_replace
+
+    from tapscribe.speech_gate import SpeechGate
+
+    recorder_with_relay.live.config = dc_replace(
+        recorder_with_relay.live.config, gate_kind="tapscribe", gate_pre_roll_ms=0
+    )
+
+    # VAD queue: open on call #1, then close on call #2.
+    def _open_then_close(*args, **kwargs):
+        events = [{"start": 0}, None, {"end": 0}]
+
+        def analyze(chunk):
+            return events.pop(0) if events else None
+
+        return SpeechGate(vad=analyze, pre_roll_ms=0)
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _open_then_close)
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-gate-state",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        # Initially closed.
+        snap = await recorder_with_relay.streams.snapshot()
+        assert snap[0].gate_open is False
+
+        # Frame 1 (640 buffered, no VAD run yet).
+        await fan_out.write_frame(PCM_FRAME)
+        # Frame 2 (1280 buffered → VAD runs → start). Gate flips open.
+        await fan_out.write_frame(PCM_FRAME)
+        snap = await recorder_with_relay.streams.snapshot()
+        assert snap[0].gate_open is True
+
+        # Frames 3, 4 keep it open (VAD call #2 returns None).
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out.write_frame(PCM_FRAME)
+        # Frame 5 fires VAD call #3 → end. Gate flips closed.
+        await fan_out.write_frame(PCM_FRAME)
+        snap = await recorder_with_relay.streams.snapshot()
+        assert snap[0].gate_open is False
+
+
 async def test_relay_buffer_transcription_updates_active_stream(
     recorder_with_relay: Recorder,
     fake_wlk: FakeWlkThread,

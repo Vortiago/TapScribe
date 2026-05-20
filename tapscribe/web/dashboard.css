@@ -496,6 +496,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
   & .buffer-text { color: var(--fg-2); }
 }
+/* Active hypothesis — Whisper is currently transcribing this. */
+.stream-buffer.buf-active .buffer-text { color: var(--fg-1); }
+.stream-buffer.buf-active .buffer-icon { color: var(--ok, #2a8); }
+/* Listening — audio is reaching the model but nothing transcribed yet. */
+.stream-buffer.buf-listening .buffer-text { color: var(--fg-2); }
+.stream-buffer.buf-listening .buffer-icon { color: var(--ok, #2a8); }
+/* Quiet — gate is closed; the model isn't being fed any audio right now. */
+.stream-buffer.buf-quiet .buffer-text,
+.stream-buffer.buf-quiet .buffer-icon { color: var(--fg-3); }
 
 /*
  * Gate-knob rows in the live-channel panel. Slightly indented + smaller

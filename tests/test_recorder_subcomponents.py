@@ -141,6 +141,41 @@ async def test_active_streams_update_buffer_transcription_unknown_id_is_noop():
     await streams.update_buffer_transcription("nobody-home", "should not raise")
 
 
+@pytest.mark.asyncio
+async def test_active_streams_update_gate_open_persists_state():
+    """The dashboard's per-tap row shows whether TapScribe is actively
+    forwarding audio (gate open) or filtering silence (gate closed).
+    The flag must round-trip via the dataclass field and be settable
+    via the dedicated update method."""
+    streams = ActiveStreams()
+    await streams.register(
+        ActiveStream(
+            conn_id="g1",
+            identity="i",
+            name="n",
+            filename="f",
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    # Default — gate closed (no audio forwarded yet).
+    snap = await streams.snapshot()
+    assert snap[0].gate_open is False
+
+    await streams.update_gate_open("g1", True)
+    snap = await streams.snapshot()
+    assert snap[0].gate_open is True
+
+    await streams.update_gate_open("g1", False)
+    snap = await streams.snapshot()
+    assert snap[0].gate_open is False
+
+
+@pytest.mark.asyncio
+async def test_active_streams_update_gate_open_unknown_id_is_noop():
+    streams = ActiveStreams()
+    await streams.update_gate_open("nobody-home", True)
+
+
 # ---------------------------------------------------------------------------
 # JobTracker
 # ---------------------------------------------------------------------------

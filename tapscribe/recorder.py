@@ -66,6 +66,14 @@ class ActiveStream:
     # whenever WlK's buffer is clean (text just committed, no audio
     # in flight, or live is off).
     buffer_transcription: str = ""
+    # True while TapScribe's SpeechGate is currently forwarding audio
+    # to the live backend (mid-burst, including pre-roll and hangover).
+    # False while filtering silence. Drives the per-tap status line on
+    # the dashboard: operators can tell at a glance whether the gate
+    # is letting audio through or holding it back. Only meaningful when
+    # gate_kind="tapscribe"; in "backend" mode the recorder doesn't
+    # know what the backend's own VAD is doing, so this stays False.
+    gate_open: bool = False
 
 
 class ActiveStreams:
@@ -115,6 +123,16 @@ class ActiveStreams:
             existing = self._by_id.get(conn_id)
             if existing is not None:
                 existing.lag_s = lag_s
+
+    async def update_gate_open(self, conn_id: str, gate_open: bool) -> None:
+        """Same race semantics as the other update_* methods. Called
+        by TapFanOut on each gate transition (open↔closed) — the
+        per-frame check in write_frame skips this call when the value
+        hasn't changed, so we don't hammer the lock at 50 Hz/tap."""
+        async with self._lock:
+            existing = self._by_id.get(conn_id)
+            if existing is not None:
+                existing.gate_open = gate_open
 
     async def update_buffer_transcription(self, conn_id: str, text: str) -> None:
         """Same race semantics as update_lag: harmless when the conn_id

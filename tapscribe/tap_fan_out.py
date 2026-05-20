@@ -80,6 +80,11 @@ class TapFanOut:
         # `tapscribe.tap_fan_out.build_gate_for_config` to inject a
         # deterministic fake VAD without loading Silero.
         self._gate: SpeechGate | None = None
+        # Mirror of `self._gate.is_open` from the last frame, so
+        # write_frame can detect transitions and only push to the
+        # ActiveStream when the value actually changed (avoids a lock
+        # acquire on every 20 ms frame).
+        self._gate_open_last: bool = False
         # Backoff bookkeeping for transparent relay reconnection across
         # WhisperLiveKit restarts (model swap, child crash). The task
         # handle lets _close cancel an in-flight attempt cleanly; the
@@ -154,6 +159,13 @@ class TapFanOut:
         # through and the backend's own VAD does the gating.
         if self._gate is not None:
             frames_to_send = self._gate.feed(buf)
+            # Surface gate transitions to the dashboard. Skip the lock
+            # acquire when the value hasn't changed — otherwise we'd
+            # hit the ActiveStreams mutex 50× per second per /tap.
+            current_open = self._gate.is_open
+            if current_open != self._gate_open_last:
+                self._gate_open_last = current_open
+                await self._recorder.streams.update_gate_open(self._conn_id, current_open)
         else:
             frames_to_send = (buf,)
 

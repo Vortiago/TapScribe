@@ -59,6 +59,8 @@ async def _seed_state(recorder: Recorder) -> None:
     recorder.live.info["pid"] = "12345"
     recorder.live.info["started_at"] = datetime.now(timezone.utc).isoformat()
 
+    # Seed three taps so each of the three buffer-line states is on
+    # screen at once for the screenshot.
     await recorder.streams.register(
         ActiveStream(
             conn_id="conn-alice",
@@ -70,6 +72,7 @@ async def _seed_state(recorder: Recorder) -> None:
             level=0.45,
             lag_s=0.4,
             buffer_transcription="could you reinstall the database",
+            gate_open=True,
             record=True,
             live=True,
         )
@@ -82,9 +85,26 @@ async def _seed_state(recorder: Recorder) -> None:
             filename="bob.wav",
             started_at=datetime.now(timezone.utc),
             bytes_received=180_000,
-            level=0.0,
+            level=0.32,
             lag_s=0.1,
             buffer_transcription="",
+            gate_open=True,
+            record=True,
+            live=True,
+        )
+    )
+    await recorder.streams.register(
+        ActiveStream(
+            conn_id="conn-carol",
+            identity="carol",
+            name="Carol Example",
+            filename="carol.wav",
+            started_at=datetime.now(timezone.utc),
+            bytes_received=90_000,
+            level=0.0,
+            lag_s=None,
+            buffer_transcription="",
+            gate_open=False,
             record=True,
             live=True,
         )
@@ -157,7 +177,7 @@ async def main() -> None:
             # so all panels render with the seeded state.
             await page.wait_for_selector("#liveGateKindSelect", timeout=5_000)
             await page.wait_for_function(
-                "document.querySelectorAll('.stream-row').length >= 2",
+                "document.querySelectorAll('.stream-row').length >= 3",
                 timeout=5_000,
             )
             # Brief settle so the buffer-transcription row's hidden→shown
@@ -199,18 +219,27 @@ async def main() -> None:
                 path=str(SHOTS_DIR / "02-live-channel-gate-controls.png")
             )
 
-            # 3) Tap-row crop showing the in-flight buffer_transcription
-            #    line beneath Alice's row.
-            alice_row = await page.query_selector(
-                ".stream-row-wrap:has(.fg:text('Alice Example'))"
+            # 3) Active-taps card crop — shows all three status-line
+            #    states stacked: ⟳ <text> (Alice), ⟳ listening… (Bob),
+            #    ⏸ quiet (Carol).
+            taps_card = await page.evaluate_handle(
+                """() => {
+                    const wrap = document.querySelector('.stream-row-wrap');
+                    if (!wrap) return null;
+                    let el = wrap;
+                    while (el && el.parentElement) {
+                        if (el.matches('section, article, aside')) return el;
+                        el = el.parentElement;
+                    }
+                    return wrap.closest('section, article, aside, div');
+                }"""
             )
-            if alice_row is None:
-                alice_row = await page.query_selector("section.card:has(.stream-row-wrap)")
-            assert alice_row is not None
-            # Screenshot the row + its associated buffer line (template
-            # wraps both in the same root .stream-row template fragment).
-            await alice_row.screenshot(
-                path=str(SHOTS_DIR / "03-tap-row-with-in-flight-buffer.png")
+            taps_card_el = taps_card.as_element()
+            if taps_card_el is None:
+                taps_card_el = await page.query_selector(".stream-row-wrap")
+            assert taps_card_el is not None
+            await taps_card_el.screenshot(
+                path=str(SHOTS_DIR / "03-tap-rows-three-status-states.png")
             )
 
             # 4) Flip the gate selector to "backend" to show the

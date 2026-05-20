@@ -49,8 +49,15 @@
     or text just committed). Operators see what the model is currently
     transcribing before it commits to the chat log.
   -->
+  <!--
+    Status line for the live transcription pipeline. One of three states:
+      ⟳ <text>       — model is currently transcribing this hypothesis
+      ⟳ listening…   — audio is reaching the model but nothing transcribed yet
+      ⏸ quiet        — no speech detected; gate is holding audio back
+    Hidden when LIVE is off, or when there's nothing meaningful to show.
+  -->
   <div class="stream-buffer" data-slot="bufferRow" hidden>
-    <span class="dim tiny">⟳</span>
+    <span class="buffer-icon dim tiny" data-slot="bufferIcon">⟳</span>
     <span class="buffer-text" data-slot="bufferText"></span>
   </div>
  </div>
