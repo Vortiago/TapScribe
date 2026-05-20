@@ -8,9 +8,11 @@ relay path is fully exercised.
 
 from __future__ import annotations
 
+import sys as _sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import Path as _Path
 
 import pytest
 
@@ -18,7 +20,11 @@ from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
-from tests.conftest import FakeWlkThread
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+from conftest import (
+    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # NeMo ships an installed `tests` package — explicit sys.path insertion picks up the project's tests/conftest.py
+)
 
 from .harness import RecorderServer
 

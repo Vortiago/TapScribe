@@ -15,13 +15,15 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from conftest import (
+    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path; a `from tests.X import` form collides with NeMo's installed top-level `tests` package
+)
 from fastapi.testclient import TestClient
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
-from tests.conftest import FakeWlkThread
 
 # ---------------------------------------------------------------------------
 # Fixtures (the `fake_wlk` fixture is shared via conftest.py so the

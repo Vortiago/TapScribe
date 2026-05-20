@@ -95,6 +95,17 @@ NB-Whisper's "always faster-whisper regardless of MLX" rule is
 unaffected; that's routing logic inside `load_transcriber`, not a
 question about where `use_mlx` lives.
 
+**Amendment (ADR-0003 follow-on)**: `use_mlx: bool` has widened to
+`backend: Literal["auto","mlx","cuda","cpu"]` on the `Recorder` and on
+`load_transcriber(model_name, *, backend)`. The cache key correspondingly
+shifted to `(model_name, resolved_kind)` where `resolved_kind` is one
+of `mlx`/`cuda`/`cpu` (the operator's `auto` preference resolved against
+the registry's BackendBindings). The "per-call, not per-process"
+property is preserved; CUDA simply becomes the third value the kwarg
+can take, alongside MLX and CPU. The old `use_mlx` field stays as a
+read-only property on `Recorder` so any not-yet-migrated caller keeps
+working without crashing.
+
 ## Consequences
 
 - Tests gain a real seam for route-level testing without monkeypatching.

@@ -44,6 +44,26 @@ dependencies = [
 whisper = ["faster-whisper>=1.0", "whisperlivekit>=0.1"]
 mlx = ["mlx-whisper>=0.5; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 voxtral = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
+# Parakeet TDT 0.6B v3 — NVIDIA's top-of-leaderboard ASR. Two adapters:
+#   - parakeet-mlx (Apple Silicon, ~2.5GB model on disk)
+#   - parakeet (NeMo Toolkit, runs on CUDA or CPU — official NVIDIA
+#     integration; released `transformers` packages don't yet have
+#     the `parakeet_tdt` model type mapping, so NeMo is the path).
+parakeet-mlx = [
+    "parakeet-mlx>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+parakeet = [
+    "nemo_toolkit[asr]>=2.5",
+    "torch>=2.1",
+]
+# Canary 1B v2 — NVIDIA's translation-capable multilingual ASR. NeMo
+# Toolkit is large (~PyTorch + Lightning + Hydra); on Apple Silicon the
+# mlx-audio package provides a lighter alternative.
+canary = [
+    "nemo_toolkit[asr]>=2.5",
+    "torch>=2.1",
+    "mlx-audio>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 vad = ["silero-vad>=5.0", "torch>=2.1"]
 dev = [
     "pytest>=8",

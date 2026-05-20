@@ -202,6 +202,8 @@ def cached_transcribe(
     initial_prompt: str | None,
     hotwords: str | None,
     hallucination_rules: list[dict[str, Any]],
+    source_lang: str | None = None,
+    target_lang: str | None = None,
     force: bool = False,
     source: str = "original",
 ) -> CachedTranscription:
@@ -209,17 +211,37 @@ def cached_transcribe(
     transcriber.model_name)`. On miss/force/fingerprint-mismatch, runs
     the transcriber, applies the hallucination filter, and writes a new
     entry without evicting any other entry. Returns the fresh
-    `CachedTranscription`."""
+    `CachedTranscription`.
+
+    Translation-aware: `source_lang` / `target_lang` are forwarded to
+    the Transcriber. For Canary, a cached entry produced for
+    source=en/target=es must not be served when the caller now wants
+    target=fr — so the cache hit also requires matching language pair.
+    Whisper / Voxtral / Parakeet ignore these kwargs, and their cached
+    entries have empty source/target_language, so the match is trivially
+    "both empty" for those backends."""
     backend = transcriber.backend
     model = transcriber.model_name
     size, mtime_ns = _wav_fingerprint(wav_path)
     if not force:
         existing = _read_entry_for(wav_path, backend=backend, model=model)
-        if existing is not None and existing.wav_size == size and existing.wav_mtime_ns == mtime_ns:
+        if (
+            existing is not None
+            and existing.wav_size == size
+            and existing.wav_mtime_ns == mtime_ns
+            and (existing.result.source_language or "") == (source_lang or "")
+            and (existing.result.target_language or "") == (target_lang or "")
+        ):
             return existing
 
     started = datetime.now(timezone.utc)
-    raw = transcriber.transcribe(wav_path, initial_prompt=initial_prompt, hotwords=hotwords)
+    raw = transcriber.transcribe(
+        wav_path,
+        initial_prompt=initial_prompt,
+        hotwords=hotwords,
+        source_lang=source_lang,
+        target_lang=target_lang,
+    )
     filtered = hallucinations_mod.apply(raw, rules=hallucination_rules)
     finished = datetime.now(timezone.utc)
 
@@ -403,6 +425,8 @@ def _to_dict(cached: CachedTranscription) -> dict[str, Any]:
         "text": r.text,
         "initial_prompt_used": r.initial_prompt_used,
         "hotwords_used": r.hotwords_used,
+        "source_language": r.source_language,
+        "target_language": r.target_language,
         "quality_settings": r.quality_settings,
         "suppressed_hallucinations": [s.to_mapping() for s in r.suppressed_hallucinations],
         "transcribed_at": cached.transcribed_at.isoformat(),
@@ -435,6 +459,10 @@ def _from_dict(data: dict[str, Any]) -> CachedTranscription:
         suppressed_hallucinations=tuple(
             TranscriptionSegment.from_payload(s) for s in data.get("suppressed_hallucinations", [])
         ),
+        # source/target_language land later than the rest of the schema — legacy
+        # sidecars without them load with the empty-string default.
+        source_language=data.get("source_language", "") or "",
+        target_language=data.get("target_language", "") or "",
     )
     transcribed_at = parse_iso(data["transcribed_at"])
     if transcribed_at is None:

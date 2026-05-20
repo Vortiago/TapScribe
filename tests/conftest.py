@@ -292,7 +292,7 @@ class TranscriberStub:
         self._text = text if text is not None else f"text from {backend} {model}"
         self.calls: list[Path] = []
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
         from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 
         self.calls.append(path)

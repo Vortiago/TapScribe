@@ -163,6 +163,18 @@ export function render(t, meta, { showAudit }) {
   pick(frag, "headerMeta").textContent =
     `${t.wav_count || 0} wavs · ${(t.segments || []).length} seg · took ${fmtMs(t.transcribe_ms)} · model ${t.model || "?"}`;
 
+  // Translation badge: Canary entries set `target_language` to something
+  // non-empty when the operator asked for translation (source != target).
+  // Show a small inline badge so the user can't mistake translated output
+  // for raw transcription.
+  if (t.target_language) {
+    const badge = pick(frag, "translateBadge");
+    badge.hidden = false;
+    const src = t.source_language || t.language || "?";
+    badge.textContent = ` → translated ${src} → ${t.target_language}`;
+    badge.title = "Output language differs from input — this is a translation, not a verbatim transcript.";
+  }
+
   buildSpkBar(frag, speakers, speakingByName, aliases);
   buildMetaStrip(pick(frag, "metaStrip"), t, lowCount);
 

@@ -4,17 +4,19 @@
 
 import { tpl, mount, pick } from "../templates.js";
 
-const LIVE_MODELS = [
-  "tiny.en", "base.en", "small.en", "medium.en",
-  "large-v3", "large-v3-turbo",
-  "nb-whisper-tiny", "nb-whisper-base", "nb-whisper-small",
-  "nb-whisper-medium", "nb-whisper-large",
+// Display labels for model families — used as <optgroup> labels in the live
+// model select. Mirrors session-detail.js's FAMILY_LABELS but trimmed to
+// the families that have live-eligible models today.
+const LIVE_FAMILY_LABELS = [
+  ["whisper", "Whisper"],
+  ["nb-whisper", "NB-Whisper (Norwegian)"],
+  ["voxtral", "Voxtral (Mistral)"],
 ];
 
 let lastSig = "";
 let logDialogPoll = null;
 
-export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction }) {
+export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCatalog }) {
   const li = j.live_info || {};
   const log = j.live_log || [];
   const state = li.state || "stopped";
@@ -30,6 +32,9 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction }) {
     state, li.model || "", li.language || "", li.pid || "", li.host || "",
     li.port || "", li.backend || "", li.device || "", li.last_error || "",
     log.length, log.length ? log[log.length - 1] : "",
+    // include catalog length so a server-restart-driven catalog refresh
+    // forces a re-render of the model options.
+    (liveCatalog?.models || []).length,
   ].join("§");
   if (sig === lastSig) return;
   lastSig = sig;
@@ -38,10 +43,46 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction }) {
   const sel = frag.querySelector("#liveModelSelect");
   const langInput = frag.querySelector("#liveLangInput");
   const currentModel = li.model || "tiny.en";
-  const models = LIVE_MODELS.includes(currentModel) ? LIVE_MODELS : [...LIVE_MODELS, currentModel];
+
+  // Group live-eligible models by family (Whisper / NB-Whisper / …). If
+  // the currently-running model isn't in the catalog (operator pinned an
+  // unrecognised name via --live-model), surface it as an "Other" entry
+  // so the dropdown still reflects what's actually running.
+  const models = liveCatalog?.models || [];
+  const byFamily = new Map();
   for (const m of models) {
-    const opt = new Option(m, m, false, m === currentModel);
-    sel.add(opt);
+    if (!byFamily.has(m.family)) byFamily.set(m.family, []);
+    byFamily.get(m.family).push(m);
+  }
+  let foundCurrent = false;
+  for (const [fam, label] of LIVE_FAMILY_LABELS) {
+    const entries = byFamily.get(fam);
+    if (!entries?.length) continue;
+    const group = document.createElement("optgroup");
+    group.label = label;
+    for (const m of entries) {
+      const opt = new Option(m.display_name, m.model_id, false, m.model_id === currentModel);
+      group.appendChild(opt);
+      if (m.model_id === currentModel) foundCurrent = true;
+    }
+    sel.appendChild(group);
+    byFamily.delete(fam);
+  }
+  if (byFamily.size) {
+    const group = document.createElement("optgroup");
+    group.label = "Other";
+    for (const [, entries] of byFamily) {
+      for (const m of entries) {
+        group.appendChild(new Option(m.display_name, m.model_id, false, m.model_id === currentModel));
+        if (m.model_id === currentModel) foundCurrent = true;
+      }
+    }
+    sel.appendChild(group);
+  }
+  if (!foundCurrent && currentModel) {
+    // Operator-pinned model not in the catalog — keep it visible so they
+    // see what's actually running, prefixed to make the gap obvious.
+    sel.add(new Option(`${currentModel} (unregistered)`, currentModel, false, true));
   }
   langInput.value = li.language || "en";
 

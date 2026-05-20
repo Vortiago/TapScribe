@@ -1,92 +1,92 @@
 """Transcribers — the stateful adapters that turn one WAV into text.
 
 A `Transcriber` instance is one loaded model (faster-whisper / mlx-whisper /
-Voxtral) holding its own model object, model name, and device label. The
-factory `load_transcriber(name, *, use_mlx)` lazily imports the right
-adapter module and caches by `(model_name, use_mlx)`.
+Voxtral / Parakeet / Canary) holding its own model object, model name,
+and device label. The factory `load_transcriber(name, *, backend)`
+consults the `TranscriberRegistry` (see `tapscribe.transcribers.catalog`)
+to pick the right adapter, then caches by `(model_name, resolved_kind)`.
 
 The protocol-level contract is policy-free: callers resolve prompt /
-hotwords / hallucination rules and pass them in. Post-processing (notably
-the hallucination filter) composes on top of `transcribe()` via pure
-functions — see `tapscribe.hallucinations.apply`.
+hotwords / source/target language / hallucination rules and pass them
+in. Post-processing (notably the hallucination filter) composes on top
+of `transcribe()` via pure functions — see `tapscribe.hallucinations.apply`.
 """
 
 from __future__ import annotations
 
 from .base import (
+    BackendKind,
+    BackendPreference,
+    ModelInput,
+    SelectInput,
+    TextInput,
     Transcriber,
     TranscriptionResult,
     TranscriptionSegment,
     Word,
 )
+from .catalog import REGISTRY, TranscriberRegistry
 
 __all__ = [
+    "BackendKind",
+    "BackendPreference",
+    "ModelInput",
+    "REGISTRY",
+    "SelectInput",
+    "TextInput",
     "Transcriber",
+    "TranscriberRegistry",
     "TranscriptionResult",
     "TranscriptionSegment",
     "Word",
-    "load_transcriber",
     "clear_cache",
+    "load_transcriber",
 ]
 
 
-# Cache keyed by (model_name, use_mlx). Multi-language sessions hold several
-# entries — `nb-whisper-medium` for Norwegian, a Voxtral or large-v3 for
-# other speakers — without double-loading shared models.
-_cache: dict[tuple[str, bool], Transcriber] = {}
+# Cache keyed by (model_name, resolved_kind). Multi-language sessions hold
+# several entries — `nb-whisper-medium` on CPU for Norwegian, `parakeet-…`
+# on CUDA for English — without double-loading shared models. The cache
+# key uses the resolved kind (`mlx` / `cuda` / `cpu`) rather than the
+# operator's preference, because two different preferences that resolve
+# to the same kind should share one loaded model.
+_cache: dict[tuple[str, BackendKind], Transcriber] = {}
 
 
-def load_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
+def load_transcriber(
+    model_name: str,
+    *,
+    backend: BackendPreference = "auto",
+    registry: TranscriberRegistry | None = None,
+) -> Transcriber:
     """Return a cached stateful `Transcriber` for `model_name`.
 
-    Routing rules:
-      voxtral-*     → MlxVoxtralTranscriber if use_mlx else
-                      VoxtralTranscriber (HF transformers)
-      nb-whisper-*  → FasterWhisperTranscriber (NB-Whisper has no public
-                      MLX weights; use_mlx is ignored for this prefix)
-      anything else → MlxWhisperTranscriber if use_mlx else
-                      FasterWhisperTranscriber
+    The registry decides which adapter handles each model on each
+    backend (see `tapscribe.transcribers.catalog.REGISTRY` for the
+    canonical table). `backend` is the operator's preference; the
+    registry resolves it into one of `mlx` / `cuda` / `cpu` based on
+    what's available on this machine and what the model supports.
 
-    Heavy adapter modules are imported lazily so booting TapScribe never
-    pulls in PyTorch unless Voxtral is actually requested.
+    `registry` is injected only by tests; production passes None and
+    gets the module-level singleton.
+
+    Heavy adapter modules are imported lazily (via the registry's
+    loader thunks) so booting TapScribe never pulls in PyTorch / MLX /
+    NeMo unless an operator actually picks that backend.
     """
-    key = (model_name, use_mlx)
+    reg = registry or REGISTRY
+    resolved = reg.resolve(model_name, preference=backend)
+    key = (model_name, resolved.kind)
     cached = _cache.get(key)
     if cached is not None:
         return cached
-    transcriber = _build_transcriber(model_name, use_mlx=use_mlx)
+    transcriber = resolved.loader(model_name, resolved.kind)
     _cache[key] = transcriber
     return transcriber
 
 
-def _build_transcriber(model_name: str, *, use_mlx: bool) -> Transcriber:
-    if model_name.lower().startswith("voxtral"):
-        if use_mlx:
-            from .mlx_voxtral import MlxVoxtralTranscriber
-
-            return MlxVoxtralTranscriber.load(model_name)
-        from .voxtral import VoxtralTranscriber
-
-        return VoxtralTranscriber.load(model_name)
-
-    if model_name.startswith("nb-whisper-"):
-        # No public MLX weights for NB-Whisper — fall through to faster-whisper
-        # regardless of the operator's MLX preference.
-        from .faster_whisper import FasterWhisperTranscriber
-
-        return FasterWhisperTranscriber.load(model_name)
-
-    if use_mlx:
-        from .mlx_whisper import MlxWhisperTranscriber
-
-        return MlxWhisperTranscriber.load(model_name)
-
-    from .faster_whisper import FasterWhisperTranscriber
-
-    return FasterWhisperTranscriber.load(model_name)
-
-
 def clear_cache() -> None:
     """Drop all cached transcribers. Mostly for tests; also useful when an
-    operator flips MLX at runtime and wants old MLX-loaded models GC'd."""
+    operator flips the backend preference at runtime and wants old
+    instances GC'd."""
     _cache.clear()

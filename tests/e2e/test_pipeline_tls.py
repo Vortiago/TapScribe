@@ -18,12 +18,14 @@ from __future__ import annotations
 import asyncio
 import socket
 import ssl
+import sys as _sys
 import threading
 import time
 import wave
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import Path as _Path
 from urllib.parse import urlencode
 
 import httpx
@@ -36,7 +38,11 @@ from tapscribe.app import app, get_recorder
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 from tapscribe.tls import ensure_self_signed_cert
-from tests.conftest import FakeWlkThread
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+from conftest import (
+    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # NeMo's installed `tests` package collides with our tests/; explicit sys.path picks up the project's conftest.py
+)
 
 from .harness import (
     SAMPLE_RATE,

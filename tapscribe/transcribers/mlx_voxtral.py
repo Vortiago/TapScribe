@@ -74,11 +74,13 @@ class MlxVoxtralTranscriber:
         *,
         initial_prompt: str | None = None,
         hotwords: str | None = None,
+        source_lang: str | None = None,
+        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Voxtral doesn't translate
     ) -> TranscriptionResult:
         # apply_transcrition_request mirrors HF's apply_transcription_request
         # (typo preserved); prompt + hotwords have no place in this call so
         # we drop them but record them on the result for protocol parity.
-        language = default_language_for(self.model_name)
+        language = source_lang or default_language_for(self.model_name)
         request_kwargs: dict[str, Any] = {"audio": str(path), "model_id": _MLX_VOXTRAL_REPO}
         if language:
             request_kwargs["language"] = language
@@ -116,6 +118,7 @@ class MlxVoxtralTranscriber:
             initial_prompt_used=initial_prompt or "",
             hotwords_used=hotwords or "",
             quality_settings=dict(gen_kwargs),
+            source_language=source_lang or "",
         )
 
 

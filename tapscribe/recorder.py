@@ -408,7 +408,14 @@ def _utc_session_id() -> str:
 
 class Recorder:
     """One per Python process. Composes the five sub-components and the
-    small flags (session metadata, recording toggle, use_mlx)."""
+    small flags (session metadata, recording toggle, backend preference).
+
+    `backend` is the operator's preference (`auto` / `mlx` / `cuda` /
+    `cpu`); the registry-driven factory in `tapscribe.transcribers`
+    resolves it per model. `use_mlx` remains as a back-compat property
+    derived from `backend` so older callers / tests don't break — see
+    the property below.
+    """
 
     def __init__(
         self,
@@ -416,13 +423,29 @@ class Recorder:
         recordings_dir: Path,
         config_dir: Path,
         live_config,  # tapscribe.live.LiveConfig; imported lazily to avoid cycles
-        use_mlx: bool,
+        backend: str = "auto",
         auth_password_file: Path,
         tap_token_file: Path | None = None,
+        use_mlx: bool | None = None,
     ):
         self.recordings_dir = recordings_dir
         self.config_dir = config_dir
-        self.use_mlx = use_mlx
+        # Back-compat: tests and earlier callers pass `use_mlx=` directly.
+        # If both are supplied, `backend` wins. Translate use_mlx into the
+        # equivalent preference so the registry sees a uniform field.
+        if use_mlx is not None and backend == "auto":
+            backend = "mlx" if use_mlx else "cpu"
+        self.backend: str = backend
+
+        # Pre-warm the backend-detection cache. The first call imports
+        # torch (~1-3 s on a CUDA box for the cuda probe) and we don't
+        # want that latency happening inside a `/api/state` request
+        # handler — it would make the dashboard's first poll appear to
+        # hang and the e2e tests time out on otherwise-correct DOM
+        # assertions.
+        from .transcribers.catalog import available_backends
+
+        available_backends()
 
         # Session lifecycle (simple state — single-writer, no lock needed).
         self.session_start: str = _utc_session_id()
@@ -447,9 +470,38 @@ class Recorder:
 
         # LiveChannel is constructed here too (imported lazily to break
         # what would otherwise be a circular import via tapscribe.live).
-        from .live import LiveChannel
+        # LiveChannel still receives a `use_mlx`-style bool because the
+        # WhisperLiveKit CLI only has a binary `--backend mlx-whisper`
+        # flag — the broader 4-value preference matters only for batch
+        # adapters that have CUDA variants. `derived_use_mlx` is True iff
+        # the operator's chosen backend resolves to MLX.
+        from .live import LiveChannel, WhisperLiveKitChannel
 
-        self.live = LiveChannel(config=live_config, use_mlx=use_mlx)
+        # `self.live` is typed as the `LiveChannel` Protocol so future
+        # adapters slot in without a recorder change; today we always
+        # instantiate the WhisperLiveKit-backed implementation.
+        self.live: LiveChannel = WhisperLiveKitChannel(config=live_config, use_mlx=self.use_mlx)
+
+    @property
+    def use_mlx(self) -> bool:
+        """Back-compat shim: True iff the chosen backend is `mlx` or
+        `auto` resolving to MLX. Callers that need the full 4-value
+        preference should use `self.backend` directly.
+
+        The shim deliberately treats `auto` as "depends on the machine"
+        — which lines up with the pre-refactor behaviour (`use_mlx` was
+        set to `_detect_use_mlx() and not args.no_mlx`).
+        """
+        if self.backend == "mlx":
+            return True
+        if self.backend == "auto":
+            try:
+                from .transcribers.catalog import resolve_backend_preference
+
+                return resolve_backend_preference("auto") == "mlx"
+            except Exception:  # noqa: BLE001 — never let the shim crash a caller
+                return False
+        return False
 
     def rotate_session(self) -> tuple[str, str]:
         """Rotate to a fresh session ID. Returns (previous, current).

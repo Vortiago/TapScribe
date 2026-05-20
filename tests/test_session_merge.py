@@ -48,7 +48,7 @@ class _FixedTranscriber:
     device = "test-device"
     model_name = "fake-model"
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
         return TranscriptionResult(
             transcriber=self.name,
             backend=self.backend,
@@ -165,7 +165,7 @@ def test_merge_carries_suppressed_segments_with_absolute_timestamps(tmp_path: Pa
     wav = _wav(session_dir / _wav_name(base, "alice", "u00000001"))
 
     class _SuppressingTranscriber(_FixedTranscriber):
-        def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
             return TranscriptionResult(
                 transcriber=self.name,
                 backend=self.backend,
@@ -227,7 +227,7 @@ class _StubB(_FixedTranscriber):
     device = "test-device"
     model_name = "stub-b-model"
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
         return TranscriptionResult(
             transcriber=self.name,
             backend=self.backend,

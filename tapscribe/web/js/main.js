@@ -69,6 +69,12 @@ let showAudit = true;            // whether to show the suppressed-audit table
 const rangeState = {};           // per-session form state (from/to/prompt/hotwords)
 let sessionFilter = "";          // sidebar filter query
 let batchModel = "small.en";     // dashboard-wide batch transcribe model (Controls box)
+let batchBackend = "auto";       // dashboard-wide backend preference; chips drive this
+// Catalog of every model registered server-side, filtered to batch context.
+// Loaded once on dashboard boot; `available_backends` tells the chip row
+// which backends to gray out. Shape mirrors GET /api/models?context=batch.
+let modelCatalog = { context: "batch", available_backends: [], models: [] };
+let liveModelCatalog = { context: "live", available_backends: [], models: [] };
 const localMeta = {};            // per-session optimistic meta cache (label + aliases)
 const metaSaveTimers = new Map();// debounce timers for PUT /api/session-meta
 let rxPattern = "";              // regex tester pattern (per-currently-selected-session)
@@ -145,7 +151,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       lastJson = j;
       ribbon.renderStatus(j, ribbonCtx);
       ribbon.renderRecPill(ribbonCtx, j.recording_enabled !== false);
-      liveChannel.render(j, { ...liveChannelCtx, mlxAvail: !!j.mlx_available });
+      liveChannel.render(j, { ...liveChannelCtx, mlxAvail: !!j.mlx_available, liveCatalog: liveModelCatalog });
       activeTaps.render(j, activeTapsCtx);
       liveFeed.render(j, liveFeedCtx);
       configCard.render(j, configCardCtx);
@@ -223,7 +229,8 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       + "::" + (rxOpen ? "1" : "0")
       + "::" + (rxOwnerSession || "")
       + "::" + rxPattern + "::" + rxFlags
-      + "::" + batchModel;
+      + "::" + batchModel
+      + "::" + batchBackend;
     if (sig === lastSessionsSig) return;
 
     // Don't clobber active text inputs / textareas / selects in the detail
@@ -319,6 +326,8 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       // state
       lastJson,
       batchModel,
+      batchBackend,
+      modelCatalog,
       sourcePick,
       sessInflight,
       sessJustDone,
@@ -338,7 +347,6 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       onTranscribeSession: transcribeSession,
       onCopyMerged: copyMerged,
       onTranscribeWav: transcribeWav,
-      onPickPrimary: pickPrimaryTranscript,
       onToggleWav: (wk, sess) => {
         // Stripped sub-row keys carry "@stripped" so they don't collide.
         const stripped = wk.endsWith("@stripped");
@@ -354,7 +362,16 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         rangeState[sk] = rangeState[sk] || {};
         rangeState[sk][k] = v;
       },
-      onModelChange: (v) => { batchModel = v; },
+      onModelChange: (v) => { batchModel = v; lastSessionsSig = ""; tick(); },
+      onBackendChange: (v) => {
+        batchBackend = v;
+        // The selected model may not be valid on the new backend — leave
+        // it; the model select will filter on next render and the user
+        // can pick a compatible one. Force a re-render so the chip
+        // active-state updates immediately.
+        lastSessionsSig = "";
+        tick();
+      },
       onSourcePick: (sk, v) => { sourcePick.set(sk, v); },
       onStripRun: stripSession,
       onStripRemove: removeStripped,
@@ -402,6 +419,17 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       rangeState[sk] = rangeState[sk] || {};
       rangeState[sk][k] = el.value;
     }
+    // Dynamic per-model inputs use [data-input-name] (the input's
+    // registry name — `initial_prompt`, `hotwords`, `source_lang`,
+    // `target_lang`) and live in the currently-open session detail.
+    // sessId is read off the parent .sess-detail container.
+    for (const el of document.querySelectorAll("[data-input-name]")) {
+      const sk = el.dataset.sessId;
+      if (!sk) continue;
+      const k = el.dataset.inputName;
+      rangeState[sk] = rangeState[sk] || {};
+      rangeState[sk][k] = el.value;
+    }
   }
 
   // Lightweight per-tick update: bump the elapsed timer on each in-flight
@@ -444,24 +472,19 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     // Key inflight/justDone by source so original and stripped sub-rows can
     // each show a spinner without colliding.
     const key = `${session}/${name}${source === "stripped" ? "@stripped" : ""}`;
+    const rng = rangeState[session] || {};
     return withInflight(wavInflight, wavJustDone, key, "Transcribe",
-      () => postJson("/api/transcribe", { session, name, model: batchModel, source }));
-  }
-
-  async function pickPrimaryTranscript(session, name, backend, model, source) {
-    try {
-      await putJson(
-        `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/primary`,
-        { backend, model, source },
-      );
-    } catch (e) {
-      alert(`Pick primary failed: ${e.message || e}`);
-      return;
-    }
-    // Force the next /api/state tick to re-render the session — the polling
-    // diff would otherwise skip it because we keep the same expandedWav.
-    lastSessionsSig = "";
-    tick();
+      () => postJson("/api/transcribe", {
+        session, name, source,
+        model: batchModel,
+        backend: batchBackend,
+        // Forward all registry-declared inputs from the session's rangeState.
+        // Adapters that don't consume a given field ignore it.
+        prompt: rng.initial_prompt || "",
+        hotwords: rng.hotwords || "",
+        source_lang: rng.source_lang || "",
+        target_lang: rng.target_lang || "",
+      }));
   }
 
   async function transcribeSession(session) {
@@ -474,10 +497,13 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     const payload = {
       session,
       model: batchModel,
+      backend: batchBackend,
       from_iso: (rng.from || "").trim(),
       to_iso: (rng.to || "").trim(),
-      prompt: rng.prompt || "",
+      prompt: rng.initial_prompt || "",
       hotwords: rng.hotwords || "",
+      source_lang: rng.source_lang || "",
+      target_lang: rng.target_lang || "",
       source: effectiveSource(session),
       force: !!s?.session_transcript,
     };
@@ -689,14 +715,56 @@ await loadTemplates(
   "/web/components/session-sidebar.html",
   "/web/components/session-detail.html",
 );
+
+// Fetch the model catalog once at boot for the batch + live pickers.
+// The catalog only changes on a server restart (TranscriberRegistry is
+// static at boot), so re-fetching every tick would be wasteful. If a
+// future feature adds dynamic model installation we'll add a refresh.
+//
+// Non-blocking: dashboard initialises immediately with the empty default
+// catalog so the poll loop starts running. Once the fetch resolves the
+// dropdowns get populated on the next render tick. This matters for the
+// Playwright e2e tests, where blocking on a fetch at module-import time
+// would deadlock dashboard boot against the test driver's first action.
+async function loadModelCatalogs() {
+  try {
+    const [batchRes, liveRes] = await Promise.all([
+      fetch("/api/models?context=batch", { cache: "no-store" }),
+      fetch("/api/models?context=live", { cache: "no-store" }),
+    ]);
+    if (batchRes.ok) modelCatalog = await batchRes.json();
+    if (liveRes.ok) liveModelCatalog = await liveRes.json();
+    lastSessionsSig = "";  // force the next tick to re-render with real models
+  } catch (e) {
+    console.error("Failed to load model catalogs:", e);
+  }
+}
 initComponentCtx();
 
 // Serialised poll loop — awaiting tick() inline ends the setInterval-style
 // re-entrancy that the signature/focus guards exist to paper over, and
 // skipping ticks while hidden avoids needless /api/state calls.
+//
+// We fire `loadModelCatalogs()` from INSIDE the loop's first iteration
+// instead of at module top-level. Reason: in the Playwright e2e tests
+// the dashboard waits for the static empty state to be visible before
+// running any user actions; firing the catalog fetches at module load
+// triggers extra parallel HTTP requests that delay the first
+// `/api/state` tick enough that Playwright's `wait_for_selector("...
+// .empty")` times out (the active-taps render re-mounts the .empty div
+// faster than Playwright can confirm visibility). Lazy-firing from the
+// loop keeps the empty state stable long enough for the wait to pass,
+// then loads the catalog in the background while polling continues.
+let _catalogLoaded = false;
 (async () => {
   for (;;) {
-    if (document.visibilityState === "visible") await tick();
+    if (document.visibilityState === "visible") {
+      if (!_catalogLoaded) {
+        _catalogLoaded = true;
+        loadModelCatalogs();
+      }
+      await tick();
+    }
     await new Promise((r) => setTimeout(r, 500));
   }
 })();

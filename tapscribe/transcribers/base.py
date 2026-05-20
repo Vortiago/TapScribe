@@ -1,22 +1,33 @@
-"""Transcriber protocol + result dataclasses.
+"""Transcriber protocol + result dataclasses + model-input types.
 
 These types form the boundary that every adapter (faster-whisper, mlx,
-Voxtral) talks across. Frozen dataclasses keep pipeline composition
-honest — `dataclasses.replace` is the only way a post-processor like
-`hallucinations.apply` can extend a result.
+Voxtral, Parakeet, Canary) talks across. Frozen dataclasses keep pipeline
+composition honest — `dataclasses.replace` is the only way a
+post-processor like `hallucinations.apply` can extend a result.
 
 `Word` and `TranscriptionSegment` carry their own marshaling: every
 adapter and the sidecar cache build them through the same
 `from_payload` factory (which works with either dict or attribute-style
 decoder output) and serialise them through `to_mapping`. Decoder
 adapters never hand-roll the field-by-field wiring.
+
+`TextInput` / `SelectInput` describe the per-model UI form fields the
+`TranscriberRegistry` declares. The dashboard reads those declarations
+from `/api/models` and renders form fields accordingly; the API call
+forwards only the values the registry says the model accepts.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
+
+# Hardware/runtime kinds the registry can route to. "auto" is a *preference*
+# the operator selects; the registry resolves it into one of the concrete
+# kinds at load_transcriber time based on what's importable on this box.
+BackendKind = Literal["mlx", "cuda", "cpu"]
+BackendPreference = Literal["auto", "mlx", "cuda", "cpu"]
 
 
 def _lookup(payload: Any, key: str, default: Any = None) -> Any:
@@ -103,10 +114,15 @@ class TranscriptionResult:
     Carries the segments and per-call metadata. Raw — before any post-
     processing. Pipeline steps like `hallucinations.apply` return a new
     `TranscriptionResult` via `dataclasses.replace`.
+
+    `language` (the existing field) is the source language as the model
+    saw it — kept for back-compat with cached sidecar JSONs. Adapters
+    that support translation (Canary) also populate `source_language` /
+    `target_language`; everything else leaves them empty.
     """
 
     transcriber: str  # echoes Transcriber.name
-    backend: str  # library/framework: "faster-whisper", "mlx-whisper", "hf-transformers", "mlx-voxtral"
+    backend: str  # library/framework: "faster-whisper", "mlx-whisper", "parakeet-mlx", "canary-nemo", etc.
     device: str  # hardware only: "CPU", "Apple Silicon GPU", "CUDA"
     model: str
     language: str
@@ -118,12 +134,91 @@ class TranscriptionResult:
     hotwords_used: str
     quality_settings: dict[str, Any]
     suppressed_hallucinations: tuple[TranscriptionSegment, ...] = field(default_factory=tuple)
+    # Translation-capable adapters (Canary today) record the source vs
+    # output language explicitly. Empty string = adapter doesn't deal in
+    # translation; `language` carries the only language info.
+    source_language: str = ""
+    target_language: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Per-model UI input declarations
+# ---------------------------------------------------------------------------
+#
+# The TranscriberRegistry attaches a tuple of `ModelInput`s to every entry.
+# The dashboard renders form fields from those tuples (`/api/models`), and
+# the transcribe routes forward only the values the registry says the
+# adapter accepts. Adding a new field type (e.g. checkbox) means widening
+# the union here and updating the renderer — adapters get no new burden.
+
+
+@dataclass(frozen=True)
+class TextInput:
+    """A free-text field (single line or multi-line textarea).
+
+    `name` is both the form-field id on the wire and the kwarg name on
+    `transcribe()`. Today: `initial_prompt`, `hotwords`.
+    """
+
+    name: str
+    label: str
+    kind: Literal["text", "textarea"] = "text"
+    placeholder: str = ""
+    description: str = ""
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "type": "text",
+            "name": self.name,
+            "label": self.label,
+            "kind": self.kind,
+            "placeholder": self.placeholder,
+            "description": self.description,
+        }
+
+
+@dataclass(frozen=True)
+class SelectInput:
+    """A dropdown (closed enum of choices).
+
+    `options` is a tuple of `(value, label)` pairs. `default` must be one
+    of the option values. Used today for Canary's `source_lang` /
+    `target_lang`; future use: explicit Whisper language pin.
+    """
+
+    name: str
+    label: str
+    options: tuple[tuple[str, str], ...]
+    default: str
+    description: str = ""
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "type": "select",
+            "name": self.name,
+            "label": self.label,
+            "options": [{"value": v, "label": label} for v, label in self.options],
+            "default": self.default,
+            "description": self.description,
+        }
+
+
+# Discriminated union of every input kind the dashboard knows how to render.
+ModelInput = TextInput | SelectInput
 
 
 @runtime_checkable
 class Transcriber(Protocol):
     """The protocol every adapter satisfies. Stateful — each instance owns
-    one loaded model."""
+    one loaded model.
+
+    `transcribe()` accepts a generous superset of kwargs so the same call
+    site can dispatch any registry-declared adapter. Each adapter consumes
+    the ones it understands and silently echoes the rest into the result's
+    `initial_prompt_used` / `hotwords_used` / `source_language` /
+    `target_language` for audit parity — no adapter ever raises on an
+    unfamiliar kwarg.
+    """
 
     name: ClassVar[str]
     backend: str
@@ -136,6 +231,8 @@ class Transcriber(Protocol):
         *,
         initial_prompt: str | None = None,
         hotwords: str | None = None,
+        source_lang: str | None = None,
+        target_lang: str | None = None,
     ) -> TranscriptionResult: ...
 
 

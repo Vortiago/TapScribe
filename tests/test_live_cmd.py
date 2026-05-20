@@ -14,12 +14,15 @@ from unittest.mock import patch
 import pytest
 
 from tapscribe.live import (
-    LiveChannel,
     LiveConfig,
+    WhisperLiveKitChannel,
     _is_console_worthy,
     _probe_port_free,
     build_live_cmd,
 )
+
+# Back-compat alias so the pre-refactor test names still read naturally.
+LiveChannel = WhisperLiveKitChannel
 
 EXE = "/path/to/whisperlivekit-server"
 DEFAULT_CFG = LiveConfig(model="tiny.en", language="en", host="localhost", port=8000)

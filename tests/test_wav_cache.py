@@ -37,7 +37,7 @@ class _StubTranscriber:
     model_name = "fake-model"
     call_count = 0
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
         _StubTranscriber.call_count += 1
         return TranscriptionResult(
             transcriber=self.name,
@@ -297,7 +297,7 @@ class _StubByKey:
         self.text = text or f"hello from {backend} {model}"
         self.call_count = 0
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
         self.call_count += 1
         return TranscriptionResult(
             transcriber=self.name,

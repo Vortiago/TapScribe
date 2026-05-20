@@ -9,28 +9,39 @@
 import { tpl, mount, slot, pick } from "../templates.js";
 import { fmtBytes, fmtClock, fmtDur, fmtElapsedShort, fmtMs, truncMid } from "../formatters.js";
 
-const MODEL_OPTS = [
-  ["tiny.en", "tiny.en (Whisper, English, fast)"],
-  ["small.en", "small.en (Whisper, English)"],
-  ["medium.en", "medium.en (Whisper, English, better)"],
-  ["large-v3", "large-v3 (Whisper, multilingual incl. Norwegian, slow)"],
-  ["nb-whisper-tiny", "nb-whisper-tiny (NB-AiLab, Norwegian-tuned, fastest)"],
-  ["nb-whisper-base", "nb-whisper-base (NB-AiLab, Norwegian-tuned, fast)"],
-  ["nb-whisper-small", "nb-whisper-small (NB-AiLab, Norwegian-tuned)"],
-  ["nb-whisper-medium", "nb-whisper-medium (NB-AiLab, Norwegian-tuned, better)"],
-  ["nb-whisper-large", "nb-whisper-large (NB-AiLab, Norwegian-tuned, slow)"],
-  ["voxtral-mini", "voxtral-mini (Mistral 3B, EN/ES/FR/PT/HI/DE/NL/IT — no Norwegian)"],
+// Display labels for backend kinds — appears in the chip row above the model
+// select. "auto" is always rendered; the others are disabled when the
+// server-reported `available_backends` doesn't list them.
+const BACKEND_LABELS = {
+  auto: "auto",
+  mlx: "mlx",
+  cuda: "cuda",
+  cpu: "cpu",
+};
+
+// Display labels for model families — used as <optgroup> labels in the model
+// select. Order here drives the group order in the dropdown.
+const FAMILY_LABELS = [
+  ["whisper", "Whisper"],
+  ["nb-whisper", "NB-Whisper (Norwegian)"],
+  ["voxtral", "Voxtral (Mistral)"],
+  ["parakeet", "Parakeet (NVIDIA)"],
+  ["canary", "Canary (NVIDIA, translation)"],
 ];
+
+// Return the catalog entries that can run on the operator's chosen backend.
+// "auto" passes everything through; explicit kinds filter to models that
+// declare a binding for the chosen kind.
+function filterCatalogByBackend(catalog, backend) {
+  const models = catalog.models || [];
+  if (backend === "auto") return models;
+  return models.filter((m) => (m.backends || []).includes(backend));
+}
 
 // Build the inline-transcript fragment shown when the user clicks a WAV row
 // or its stripped sub-row. Kept here (not in merged-transcript.js) because
 // it renders the per-WAV transcript record, not the session-merged one.
-//
-// `picker` (optional): { transcripts, wavKey, source } — when more than one
-// (backend, model) is cached for this WAV, renders a row of pills so the
-// operator can flip the primary. Wired by data-tx-pick-* attributes; the
-// listener lives in `wire()`.
-function buildExpandTx(t, picker) {
+function buildExpandTx(t) {
   const frag = tpl("tpl-expand-tx");
   const metaHost = pick(frag, "meta");
   const fields = [
@@ -45,30 +56,6 @@ function buildExpandTx(t, picker) {
     metaHost.appendChild(slot(tpl("tpl-expand-meta-field"), { label: k, value: v }));
   }
   pick(frag, "body").textContent = t.text || "";
-
-  // Only show the picker when there's a real choice — one cached transcript
-  // means no UI needed.
-  if (picker && (picker.transcripts || []).length > 1) {
-    const pickerHost = pick(frag, "picker");
-    pickerHost.hidden = false;
-    const pills = pick(frag, "pickerPills");
-    for (const tx of picker.transcripts) {
-      const btn = tpl("tpl-tx-pick-pill").firstElementChild;
-      btn.textContent = `${tx.backend || "?"} · ${tx.model || "?"}`;
-      btn.dataset.txPickWav = picker.wavKey;
-      btn.dataset.txPickSource = picker.source;
-      btn.dataset.txPickBackend = tx.backend || "";
-      btn.dataset.txPickModel = tx.model || "";
-      if (tx.is_primary) {
-        btn.classList.add("ok");
-        btn.disabled = true;
-        btn.title = "current primary";
-      } else {
-        btn.title = "click to make this the primary transcript";
-      }
-      pills.appendChild(btn);
-    }
-  }
 
   const sup = t.suppressed_hallucinations || [];
   if (sup.length) {
@@ -188,15 +175,133 @@ function buildActionRow(host, s, sessKey, ctx) {
   }
 }
 
+function buildBackendChips(host, ctx) {
+  const available = new Set(ctx.modelCatalog?.available_backends || []);
+  for (const kind of ["auto", "mlx", "cuda", "cpu"]) {
+    const chip = tpl("tpl-backend-chip").firstElementChild;
+    chip.textContent = BACKEND_LABELS[kind];
+    chip.dataset.backendChip = kind;
+    // "auto" is always pickable; explicit kinds disabled when the server
+    // reports they're not present on this machine. Grayed-out chips
+    // still render so the operator sees what's possible if they install
+    // the missing extras.
+    if (kind !== "auto" && !available.has(kind)) {
+      chip.classList.add("disabled");
+      chip.disabled = true;
+      chip.title = `${kind} not available on this server`;
+    }
+    if (kind === ctx.batchBackend) chip.classList.add("active");
+    host.appendChild(chip);
+  }
+}
+
+// Build the model select from the catalog, grouping options by family and
+// only showing models that can run on the currently-selected backend.
+function buildModelSelect(sel, ctx) {
+  const candidates = filterCatalogByBackend(ctx.modelCatalog, ctx.batchBackend);
+  // Group entries by family preserving FAMILY_LABELS order; unknown families
+  // get an "Other" optgroup so a typo in the catalog doesn't drop options.
+  const byFamily = new Map();
+  for (const m of candidates) {
+    const fam = m.family || "other";
+    if (!byFamily.has(fam)) byFamily.set(fam, []);
+    byFamily.get(fam).push(m);
+  }
+  for (const [fam, label] of FAMILY_LABELS) {
+    const entries = byFamily.get(fam);
+    if (!entries?.length) continue;
+    const group = document.createElement("optgroup");
+    group.label = label;
+    for (const m of entries) {
+      const txt = m.description ? `${m.display_name} — ${m.description}` : m.display_name;
+      group.appendChild(new Option(txt, m.model_id, false, m.model_id === ctx.batchModel));
+    }
+    sel.appendChild(group);
+    byFamily.delete(fam);
+  }
+  if (byFamily.size) {
+    const group = document.createElement("optgroup");
+    group.label = "Other";
+    for (const [, entries] of byFamily) {
+      for (const m of entries) {
+        group.appendChild(new Option(m.display_name, m.model_id, false, m.model_id === ctx.batchModel));
+      }
+    }
+    sel.appendChild(group);
+  }
+  // If the currently-batch-selected model is gone (filtered out by the
+  // backend), default to the first available one so the user sees a
+  // valid pick rather than an empty select.
+  if (sel.options.length && sel.value !== ctx.batchModel) {
+    // Fall through — the select shows whatever browser default option is
+    // active. We don't mutate ctx here; the change event will when the
+    // user explicitly picks.
+  }
+}
+
+// Render the per-model dynamic input rows (textarea/text/select). Each row
+// is rendered into the modelInputs ctl-grid alongside the backend chips
+// and the model select. Input values are captured into `ctx.rangeState`
+// keyed by the input's registry name — main.js reads them on submit.
+function buildModelInputs(host, ctx, modelEntry, sessKey) {
+  host.replaceChildren();
+  if (!modelEntry) return;
+  const rng = ctx.rangeState[sessKey] || {};
+  for (const input of modelEntry.inputs || []) {
+    if (input.type === "text") {
+      const tplId = input.kind === "textarea" ? "tpl-input-textarea" : "tpl-input-text";
+      const fragNodes = collectInputNodes(tpl(tplId));
+      const labelEl = fragNodes[0];
+      const fieldEl = fragNodes[1];
+      labelEl.textContent = input.label;
+      fieldEl.dataset.inputName = input.name;
+      fieldEl.dataset.sessId = sessKey;
+      fieldEl.placeholder = input.placeholder || "";
+      if (input.description) fieldEl.title = input.description;
+      fieldEl.value = rng[input.name] || "";
+      host.appendChild(labelEl);
+      host.appendChild(fieldEl);
+    } else if (input.type === "select") {
+      const fragNodes = collectInputNodes(tpl("tpl-input-select"));
+      const labelEl = fragNodes[0];
+      const sel = fragNodes[1];
+      labelEl.textContent = input.label;
+      sel.dataset.inputName = input.name;
+      sel.dataset.sessId = sessKey;
+      if (input.description) sel.title = input.description;
+      const current = rng[input.name] || input.default || (input.options[0]?.value ?? "");
+      for (const opt of input.options || []) {
+        sel.add(new Option(opt.label, opt.value, false, opt.value === current));
+      }
+      host.appendChild(labelEl);
+      host.appendChild(sel);
+    }
+  }
+}
+
+// `tpl()` returns a DocumentFragment whose children are the two row
+// elements (label + field). We snapshot them as an array so the caller
+// can append each into the live ctl-grid individually — appendChild
+// moves the node out of the fragment, so by the time the caller is
+// done, the fragment is empty.
+//
+// Critical: snapshot via `Array.from(frag.children)` rather than
+// looping on `frag.firstChild` (the loop never terminates unless the
+// child is detached, which yields an infinite-push and a RangeError
+// when the array length overflows V8's max).
+function collectInputNodes(frag) {
+  return Array.from(frag.children);
+}
+
 function buildControls(s, sessKey, ctx) {
   const frag = tpl("tpl-sess-controls");
   pick(frag, "timerange").textContent =
     `${fmtClock(s.earliest_iso)} → ${fmtClock(s.latest_iso)}`;
 
+  buildBackendChips(pick(frag, "backendChips"), ctx);
+
   const sel = frag.querySelector("[data-model-pick]");
-  for (const [v, label] of MODEL_OPTS) {
-    sel.add(new Option(label, v, false, v === ctx.batchModel));
-  }
+  buildModelSelect(sel, ctx);
 
   buildSourceRow(pick(frag, "sourceRow"), s, sessKey, ctx);
   buildSilenceCtl(pick(frag, "silenceCtl"), s, sessKey, ctx);
@@ -210,14 +315,10 @@ function buildControls(s, sessKey, ctx) {
   toEl.dataset.sessId = sessKey;
   toEl.placeholder = s.latest_iso || "optional ISO timestamp";
   toEl.value = rng.to || "";
-  const promptEl = pick(frag, "rangePrompt");
-  promptEl.dataset.sessId = sessKey;
-  promptEl.placeholder = "meeting context — overrides prompt.txt for this job";
-  promptEl.value = rng.prompt || "";
-  const hwEl = pick(frag, "rangeHotwords");
-  hwEl.dataset.sessId = sessKey;
-  hwEl.placeholder = "e.g. Acme Inc., Patricia Lin";
-  hwEl.value = rng.hotwords || "";
+
+  // Render dynamic input rows from the selected model's `inputs` tuple.
+  const currentEntry = (ctx.modelCatalog?.models || []).find((m) => m.model_id === ctx.batchModel);
+  buildModelInputs(pick(frag, "modelInputs"), ctx, currentEntry, sessKey);
 
   buildActionRow(pick(frag, "actions"), s, sessKey, ctx);
   return frag;
@@ -294,13 +395,7 @@ function buildWavRow(f, sessKey, ctx) {
   // fragment of (row, expand?) keeps both at the same level under wav-list.
   const out = document.createDocumentFragment();
   out.appendChild(frag);
-  if (open && f.transcript) {
-    out.appendChild(buildExpandTx(f.transcript, {
-      transcripts: f.transcripts || [],
-      wavKey,
-      source: "original",
-    }));
-  }
+  if (open && f.transcript) out.appendChild(buildExpandTx(f.transcript));
 
   // Stripped sub-row — only when strip-silence has produced a sibling.
   if (f.stripped) appendStrippedSub(out, f, wavKey, dlHref, ctx);
@@ -354,13 +449,7 @@ function appendStrippedSub(host, f, wavKey, dlHref, ctx) {
   }
 
   host.appendChild(frag);
-  if (sOpen && sTx) {
-    host.appendChild(buildExpandTx(sTx, {
-      transcripts: f.stripped.transcripts || [],
-      wavKey,
-      source: "stripped",
-    }));
-  }
+  if (sOpen && sTx) host.appendChild(buildExpandTx(sTx));
 }
 
 function buildWavList(s, sessKey, ctx) {
@@ -530,25 +619,29 @@ function wire(host, s, sessKey, ctx) {
       ctx.onToggleWav(a.dataset.toggleWav, s);
     });
   }
-  for (const btn of host.querySelectorAll("[data-tx-pick-wav]")) {
-    btn.addEventListener("click", () => {
-      const wk = btn.dataset.txPickWav;
-      const idx = wk.indexOf("/");
-      ctx.onPickPrimary(
-        wk.slice(0, idx),                    // session
-        wk.slice(idx + 1),                   // name
-        btn.dataset.txPickBackend,
-        btn.dataset.txPickModel,
-        btn.dataset.txPickSource || "original",
-      );
-    });
-  }
   for (const el of host.querySelectorAll("[data-range-key]")) {
     el.addEventListener("input", () => ctx.onRangeEdit(el.dataset.sessId, el.dataset.rangeKey, el.value));
   }
 
   const modelPick = host.querySelector("[data-model-pick]");
   modelPick?.addEventListener("change", () => ctx.onModelChange(modelPick.value));
+
+  // Backend chips: each one carries the kind in `data-backend-chip`.
+  for (const chip of host.querySelectorAll("[data-backend-chip]")) {
+    chip.addEventListener("click", () => {
+      if (chip.disabled) return;
+      ctx.onBackendChange(chip.dataset.backendChip);
+    });
+  }
+
+  // Dynamic input rows: capture changes into rangeState so the next
+  // submit (transcribe / transcribe-session) sees the operator's pick.
+  for (const el of host.querySelectorAll("[data-input-name]")) {
+    el.addEventListener("input", () => ctx.onRangeEdit(el.dataset.sessId, el.dataset.inputName, el.value));
+    if (el.tagName === "SELECT") {
+      el.addEventListener("change", () => ctx.onRangeEdit(el.dataset.sessId, el.dataset.inputName, el.value));
+    }
+  }
 
   for (const r of host.querySelectorAll("[data-source-pick]")) {
     r.addEventListener("change", () => {

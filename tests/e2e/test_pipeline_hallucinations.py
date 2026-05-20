@@ -76,7 +76,7 @@ def hallucinating_fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTrans
         }
     )
 
-    def _factory(model_name: str, *, use_mlx: bool) -> FakeTranscriber:  # noqa: ARG001
+    def _factory(model_name: str, **_kwargs) -> FakeTranscriber:  # noqa: ARG001
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
@@ -178,7 +178,7 @@ SPEAKERS = [
 def many_speaker_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
     fake = FakeTranscriber(text_by_speaker={name: text for _, name, text in SPEAKERS})
 
-    def _factory(model_name: str, *, use_mlx: bool) -> FakeTranscriber:  # noqa: ARG001
+    def _factory(model_name: str, **_kwargs) -> FakeTranscriber:  # noqa: ARG001
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)

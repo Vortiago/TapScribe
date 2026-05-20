@@ -22,11 +22,13 @@ import wave
 from pathlib import Path
 
 import pytest
+from conftest import (
+    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # NeMo ships an installed `tests` package — collides with our project's tests/ dir
+)
 
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 from tapscribe.tap_fan_out import TapFanOut
-from tests.conftest import FakeWlkThread
 
 # A 20 ms frame of audible-ish PCM at 16 kHz mono int16 — 320 samples / 640 bytes.
 # Real bridges send frames this size (see CONTEXT.md "Bridge" wire contract).
