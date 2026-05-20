@@ -92,13 +92,15 @@ def atomic_write_text(path: Path, content: str) -> None:
             f.write(content)
         os.replace(tmp, path)
     except Exception:
-        # Best-effort cleanup of the half-written tempfile. The unlink
-        # itself can fail (file already gone if the write raised before
-        # the fd was flushed, or the dir was yanked out); ignoring that
-        # is safe because the outer `raise` propagates the real error.
+        # Best-effort cleanup of the half-written tempfile, then re-raise
+        # the real error. See the inner OSError handler for why ignoring
+        # an unlink failure here is safe.
         try:
             os.unlink(tmp)
         except OSError:
+            # Tempfile already gone (e.g. the write raised before the fd
+            # was flushed, or the dir was removed) — nothing to clean up,
+            # and the outer `raise` below propagates the original error.
             pass
         raise
 
