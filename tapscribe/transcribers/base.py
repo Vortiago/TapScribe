@@ -236,6 +236,48 @@ class Transcriber(Protocol):
     ) -> TranscriptionResult: ...
 
 
+def build_transcription_result(
+    adapter: Transcriber,
+    *,
+    text: str,
+    segments: tuple[TranscriptionSegment, ...],
+    duration: float,
+    language: str,
+    language_probability: float = 0.0,
+    initial_prompt: str | None = None,
+    hotwords: str | None = None,
+    source_lang: str | None = None,
+    target_lang: str | None = None,
+    quality_settings: dict[str, Any] | None = None,
+) -> TranscriptionResult:
+    """Build a `TranscriptionResult` with the audit-field boilerplate
+    centralised. Reads `transcriber`/`backend`/`device`/`model` off the
+    adapter; rounds `language_probability` and `duration` to the
+    canonical precision; coerces None prompt/hotwords/source_lang into
+    "" (the wire format never carries None for these); and sets
+    `target_language` only when it differs from `source_lang` — the
+    "translation badge" invariant the dashboard's UI depends on.
+
+    Adapters call it with just the engine-specific parts; the
+    constructor is the one place that knows the audit shape."""
+    return TranscriptionResult(
+        transcriber=adapter.name,
+        backend=adapter.backend,
+        device=adapter.device,
+        model=adapter.model_name,
+        language=language,
+        language_probability=round(float(language_probability or 0.0), 3),
+        duration=round(float(duration or 0.0), 2),
+        text=text,
+        segments=segments,
+        initial_prompt_used=initial_prompt or "",
+        hotwords_used=hotwords or "",
+        quality_settings=quality_settings if quality_settings is not None else {},
+        source_language=source_lang or "",
+        target_language=(target_lang or "") if (target_lang and target_lang != (source_lang or "")) else "",
+    )
+
+
 def default_language_for(model_name: str) -> str | None:
     """Pick a language hint from the model name.
 

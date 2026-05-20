@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import load_recorder_wav_as_pcm, wav_duration_s
-from .base import TranscriptionResult, TranscriptionSegment, default_language_for
+from .base import (
+    TranscriptionResult,
+    TranscriptionSegment,
+    build_transcription_result,
+    default_language_for,
+)
 
 # Used when folding hotwords into the initial prompt.
 _HOTWORDS_FRAMING = "Proper nouns, names, and jargon that may appear: "
@@ -134,20 +139,16 @@ class MlxWhisperTranscriber:
         segments = [TranscriptionSegment.from_payload(s) for s in (result.get("segments") or [])]
 
         applied_view = {k: (v if not callable(v) else str(v)) for k, v in kwargs.items()}
-        return TranscriptionResult(
-            transcriber=self.name,
-            backend=self.backend,
-            device=self.device,
-            model=self.model_name,
-            language=result.get("language", "?"),
-            language_probability=0.0,
-            duration=round(wav_duration_s(path), 2),
+        return build_transcription_result(
+            self,
             text=" ".join(s.text for s in segments).strip(),
             segments=tuple(segments),
-            initial_prompt_used=effective_prompt or "",
-            hotwords_used=hotwords or "",
+            duration=wav_duration_s(path),
+            language=result.get("language", "?"),
+            initial_prompt=effective_prompt,
+            hotwords=hotwords,
+            source_lang=source_lang,
             quality_settings=applied_view,
-            source_language=source_lang or "",
         )
 
 

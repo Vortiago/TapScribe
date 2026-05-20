@@ -967,7 +967,7 @@ def test_api_transcribe_uses_session_meta_prompt_when_set(client, recorder_under
 
     fake = _Spy(backend="fake-backend", model="fake-small.en")
     monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
-    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
     _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
@@ -996,7 +996,7 @@ def test_api_transcribe_falls_back_to_global_when_session_meta_empty(
 
     fake = _Spy(backend="fake-backend", model="fake-small.en")
     monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
-    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
     _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
@@ -1038,7 +1038,7 @@ def test_api_transcribe_session_re_runs_when_session_meta_prompt_changes(
 
     fake = _Spy(backend="fake-backend", model="fake-small.en")
     monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
-    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
     _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
@@ -1073,7 +1073,7 @@ def test_api_transcribe_session_re_runs_when_session_meta_hotwords_change(
 
     fake = _Spy(backend="fake-backend", model="fake-small.en")
     monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
-    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
     _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
@@ -1103,7 +1103,7 @@ def test_api_transcribe_session_re_uses_cache_when_prompt_unchanged(client, reco
 
     fake = _Spy(backend="fake-backend", model="fake-small.en")
     monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
-    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
     _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
@@ -1126,11 +1126,12 @@ def test_api_transcribe_returns_freshly_written_transcript(client, recorder_unde
     is no `<wav>.json` to read back; the route must serve the primary
     that cached_transcribe just promoted."""
     fake = TranscriberStub(backend="fake-backend", model="fake-small.en", text="route transcript")
-    # Patch both the canonical binding and the local rebinding in app.py
-    # (which does `from .transcribers import load_transcriber` at module
-    # load, so a later patch on the source package wouldn't reach it).
+    # Patch both the canonical binding and the local rebinding in
+    # batch_transcribe (which does `from .transcribers import load_transcriber`
+    # at module load, so a later patch on the source package alone
+    # wouldn't reach it).
     monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
-    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
     sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])

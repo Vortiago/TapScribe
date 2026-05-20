@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import wav_duration_s
-from .base import TranscriptionResult, TranscriptionSegment, default_language_for
+from .base import (
+    TranscriptionResult,
+    TranscriptionSegment,
+    build_transcription_result,
+    default_language_for,
+)
 
 # Sentence boundary: a terminator (`.`, `!`, `?`) followed by whitespace.
 # Lookbehind keeps the terminator with the preceding sentence. The negative
@@ -188,24 +193,20 @@ class VoxtralTranscriber:
 
         dur = round(wav_duration_s(path), 2)
         segments = split_voxtral_text_into_segments(text, duration=dur)
-        return TranscriptionResult(
-            transcriber=self.name,
-            backend=self.backend,
-            device=self.device,
-            model=self.model_name,
-            # Voxtral doesn't echo a detected language in its response; record
-            # the hint we sent, or "auto" when we let it auto-detect. Distinct
-            # from "?" (genuinely unknown) so the UI never shows a populated
-            # field as if it were missing.
-            language=language or "auto",
-            language_probability=0.0,
-            duration=dur,
+        # Voxtral doesn't echo a detected language in its response; record
+        # the hint we sent, or "auto" when we let it auto-detect. Distinct
+        # from "?" (genuinely unknown) so the UI never shows a populated
+        # field as if it were missing.
+        return build_transcription_result(
+            self,
             text=text,
             segments=segments,
-            initial_prompt_used=initial_prompt or "",
-            hotwords_used=hotwords or "",
+            duration=dur,
+            language=language or "auto",
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            source_lang=source_lang,
             quality_settings=dict(gen_kwargs),
-            source_language=source_lang or "",
         )
 
 

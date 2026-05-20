@@ -383,6 +383,42 @@ naturally invalidates every per-WAV transcript on its next
 - `cached_transcribe(wav, transcriber, ...)` is unchanged in signature;
   it just no longer evicts other entries.
 
+## Batch transcription
+
+The orchestrator that drives a `Transcriber` across either one WAV or
+a session-range of WAVs, applying the per-session prompt/hotwords
+overrides, hallucination filtering, and the cache layer. Lives in
+`tapscribe/batch_transcribe.py` and is the layer the `/api/transcribe`
+and `/api/transcribe-session` route handlers delegate to.
+
+Two entry points:
+
+- `transcribe_one(recorder, BatchOneRequest) -> dict` — one WAV. Runs
+  the silent-WAV pre-check (RMS-floor against the *original*) so the
+  operator gets fast feedback on noise files, forces a fresh transcribe
+  through the cache, then returns the freshly-written sidecar's raw
+  JSON dict.
+- `transcribe_session(recorder, BatchSessionRequest) -> dict` — every
+  WAV in the supplied `from_iso`/`to_iso` range. Claims a `JobTracker`
+  slot (one transcribe/strip in flight per session), loops with progress
+  updates, then merges via `merge_session` and writes both
+  `session-transcript.json` and `.txt`. No per-WAV silence pre-check —
+  the session loop transcribes everything in range.
+
+Both forms share a `TranscriberInvocation` envelope (initial_prompt,
+hotwords, source_lang, target_lang, hallucination_rules) resolved once
+per request. The prompt/hotwords resolution layers session-meta over
+the global config files (`config/prompt.txt`, `config/hotwords.txt`);
+an empty session-meta override falls back to the global default.
+
+The module never raises `HTTPException`. It raises domain errors
+(`WavTooQuiet`, `WavUnreadable`, `SessionBusy`, `NoUsableWavs`, base
+`BatchTranscribeError`) and the route handlers map those to HTTP codes.
+This keeps the module FastAPI-free so the same orchestrator can drive
+a CLI batch, a queue worker, or future per-region re-transcribes
+without re-implementing the chain. The request value objects
+(`BatchOneRequest`, `BatchSessionRequest`) are the test surface.
+
 ## Wire-format note
 
 Result JSON files (per-WAV `<wav>.transcripts/<...>.json` or legacy

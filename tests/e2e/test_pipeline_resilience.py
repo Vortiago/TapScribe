@@ -46,16 +46,16 @@ from .harness import (
 def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
     """Identical wiring to the headline E2E test — load_transcriber is
     patched both on the canonical module and on the local binding inside
-    `tapscribe.app` so the route handler sees the fake."""
+    `tapscribe.batch_transcribe` so the orchestrator sees the fake."""
     fake = FakeTranscriber(text_by_speaker={"Alice": "alice line one", "Bob": "bob line"})
 
     def _factory(model_name: str, **_kwargs) -> FakeTranscriber:  # noqa: ARG001
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
-    import tapscribe.app as _app
+    import tapscribe.batch_transcribe as _bt
 
-    monkeypatch.setattr(_app, "load_transcriber", _factory)
+    monkeypatch.setattr(_bt, "load_transcriber", _factory)
     _transcribers.clear_cache()
     return fake
 

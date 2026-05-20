@@ -23,7 +23,6 @@ The big-picture route map:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import shutil
 from contextlib import asynccontextmanager
@@ -47,9 +46,18 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, config
 from . import hallucinations as hallucinations_mod
 from . import strip_silence as _ss
-from .audio import wav_duration_s, wav_rms_dbfs
+from .batch_transcribe import (
+    BatchOneRequest,
+    BatchSessionRequest,
+    InvalidRange,
+    NoUsableWavs,
+    SessionBusy,
+    WavTooQuiet,
+    WavUnreadable,
+    transcribe_one,
+    transcribe_session,
+)
 from .recorder import JobState, Recorder
-from .session_merge import merge_session, select_session_wavs
 from .sessions import (
     absorb_session,
     gather_sessions,
@@ -70,9 +78,8 @@ from .text import (
     write_live_prompt,
     write_prompt,
 )
-from .transcribers import load_transcriber
 from .transcribers.catalog import REGISTRY, available_backends
-from .wav_cache import cached_transcribe, read_primary_payload, set_primary_transcript
+from .wav_cache import set_primary_transcript
 
 
 def _available_backends_snapshot() -> frozenset[str]:
@@ -839,178 +846,71 @@ async def api_set_primary(
     return {"ok": True, "primary": {"backend": backend, "model": model}}
 
 
-def _effective_batch_prompt_hotwords(session: str) -> tuple[str | None, str | None]:
-    """Override chain for batch transcribe jobs: session-meta → global
-    config files. Returns (initial_prompt, hotwords), each None when
-    both layers are empty so the adapter receives no value (vs. the
-    empty string, which some backends would treat as a real prompt).
-
-    Limitation: an empty session-meta override falls back to the global
-    default — there's no way for a session to assert "specifically NO
-    prompt, even though a global is set." If an operator needs that
-    today the workaround is to clear the global prompt; a future
-    sentinel value (e.g. a `null` override that's distinct from the
-    empty string) could express it explicitly without touching the
-    global."""
-    meta = read_session_meta(session)
-    prompt = (meta.get("prompt") or "").strip() or (read_prompt() or "").strip()
-    hotwords = (meta.get("hotwords") or "").strip() or (read_hotwords() or "").strip()
-    return (prompt or None), (hotwords or None)
-
-
 @app.post("/api/transcribe")
 async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await req.json()
     session = body.get("session") or ""
     name = body.get("name") or ""
-    model_name = body.get("model") or "small.en"
-    source = body.get("source") or "original"
     if not session or not name:
         raise HTTPException(400, "session and name are required")
-    path = resolve_wav(session, name, source)
-    try:
-        size = path.stat().st_size
-    except OSError:
-        size = 0
-    if size < 64 or wav_duration_s(path) <= 0.0:
-        raise HTTPException(422, "empty or unreadable WAV (size=" + str(size) + " bytes)")
-    # Silence detection always reads the ORIGINAL, not the per-source file.
-    original_path = config.RECORDINGS_DIR / session / name
-    rms_dbfs = wav_rms_dbfs(original_path)
-    if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
-        raise HTTPException(
-            422,
-            f"original WAV is essentially silent ({rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS) "
-            "— Whisper would hallucinate. Remove or skip this file.",
-        )
-
-    # Per-call backend override — when the dashboard's backend chip
-    # differs from the Recorder's default. Falls back to the Recorder's
-    # preference if the body didn't carry one.
-    backend_override = (body.get("backend") or "").strip() or recorder.backend
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
-    initial_prompt, hotwords = _effective_batch_prompt_hotwords(session)
-    # Canary's per-call language fields ride alongside prompt/hotwords. Empty
-    # string → adapter falls back to its own "en" default.
-    source_lang = (body.get("source_lang") or "").strip() or None
-    target_lang = (body.get("target_lang") or "").strip() or None
-    rules = hallucinations_mod.parse_rules()
-
-    cached = await asyncio.to_thread(
-        cached_transcribe,
-        path,
-        transcriber,
-        initial_prompt=initial_prompt,
-        hotwords=hotwords,
-        source_lang=source_lang,
-        target_lang=target_lang,
-        hallucination_rules=rules,
-        force=True,  # explicit per-WAV transcribe always re-runs
+    source = body.get("source") or "original"
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    request = BatchOneRequest(
+        session=session,
+        name=name,
         source=source,
+        model=body.get("model") or "small.en",
+        # Per-call backend override — falls back to the Recorder's
+        # preference when the body didn't carry one.
+        backend=(body.get("backend") or "").strip() or recorder.backend,
+        # Canary's per-call language fields ride alongside prompt/hotwords.
+        # Empty → adapter falls back to its own default.
+        source_lang=(body.get("source_lang") or "").strip() or None,
+        target_lang=(body.get("target_lang") or "").strip() or None,
     )
-
-    # Return the freshly-written sidecar's raw JSON dict to preserve the
-    # wire shape callers expect. read_primary_payload resolves whichever
-    # cache layout actually landed (legacy or new-layout) without the
-    # route needing to know.
-    result_dict = read_primary_payload(path)
-    if result_dict is None:
-        raise HTTPException(500, "cached_transcribe completed but no sidecar landed on disk")
+    try:
+        payload = await transcribe_one(recorder, request)
+    except WavUnreadable as e:
+        raise HTTPException(422, str(e)) from e
+    except WavTooQuiet as e:
+        raise HTTPException(422, str(e)) from e
     print(
-        f"[tapscribe] transcribed {name} ({source}) with {model_name} in {cached.transcribe_ms} ms",
+        f"[tapscribe] transcribed {request.name} ({request.source}) with {request.model}",
         flush=True,
     )
-    return JSONResponse(result_dict)
+    return JSONResponse(payload)
 
 
 @app.post("/api/transcribe-session")
 async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await req.json()
     session = body.get("session") or ""
-    model_name = body.get("model") or "small.en"
-    from_iso = body.get("from_iso") or None
-    to_iso = body.get("to_iso") or None
-    force = bool(body.get("force"))
-    source = body.get("source") or "original"
     if not session:
         raise HTTPException(400, "session is required")
-    session_dir = resolve_session_dir(session)
-
-    # Phase 0: pure selection.
-    try:
-        selection = select_session_wavs(
-            session_dir,
-            from_iso=from_iso,
-            to_iso=to_iso,
-            source=source,
-        )
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from e
-    if not selection.wavs:
-        raise HTTPException(404, "no usable WAVs in the given range")
-
-    backend_override = (body.get("backend") or "").strip() or recorder.backend
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
-    initial_prompt, hotwords = _effective_batch_prompt_hotwords(session)
-    source_lang = (body.get("source_lang") or "").strip() or None
-    target_lang = (body.get("target_lang") or "").strip() or None
-    rules = hallucinations_mod.parse_rules()
-    # No `effective_force = force or bool(prompt/hotwords_override)` here:
-    # the cache match key in `cached_transcribe` now includes
-    # initial_prompt_used + hotwords_used, so a meta change automatically
-    # misses the cache. As a side benefit this re-runs only the WAVs
-    # whose cached entry doesn't match — the old `effective_force` path
-    # forced every file in the session, even ones already transcribed
-    # under the new prompt by a prior /api/transcribe call.
-    effective_force = force
-
-    claimed = await recorder.jobs.claim(
-        JobState(
-            session=session,
-            kind="transcribe",
-            current=0,
-            total=len(selection.wavs),
-            started_at=datetime.now(UTC),
-            model=model_name,
-            status="running",
-        )
+    source = body.get("source") or "original"
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    request = BatchSessionRequest(
+        session=session,
+        source=source,
+        model=body.get("model") or "small.en",
+        backend=(body.get("backend") or "").strip() or recorder.backend,
+        from_iso=body.get("from_iso") or None,
+        to_iso=body.get("to_iso") or None,
+        force=bool(body.get("force")),
+        source_lang=(body.get("source_lang") or "").strip() or None,
+        target_lang=(body.get("target_lang") or "").strip() or None,
     )
-    if not claimed:
-        raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
-
     try:
-        # Phase 1: ensure every selected WAV is transcribed (cache-aware).
-        for idx, wav in enumerate(selection.wavs):
-            await recorder.jobs.update(session, current=idx, current_file=wav.name)
-            await asyncio.to_thread(
-                cached_transcribe,
-                wav,
-                transcriber,
-                initial_prompt=initial_prompt,
-                hotwords=hotwords,
-                source_lang=source_lang,
-                target_lang=target_lang,
-                hallucination_rules=rules,
-                force=effective_force,
-                source=selection.source,
-            )
-
-        # Phase 2: pure read-and-build merge.
-        transcript = merge_session(selection)
-        merged = transcript.to_dict()
-        if not merged.get("model"):
-            merged["model"] = model_name
-
-        out_path = session_dir / "session-transcript.json"
-        out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-        (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
-
-        return JSONResponse(merged)
-    except Exception as e:
-        await recorder.jobs.update(session, status="error: " + str(e))
-        raise
-    finally:
-        await recorder.jobs.release(session)
+        merged = await transcribe_session(recorder, request)
+    except InvalidRange as e:
+        raise HTTPException(400, str(e)) from e
+    except NoUsableWavs as e:
+        raise HTTPException(404, str(e)) from e
+    except SessionBusy as e:
+        raise HTTPException(409, str(e)) from e
+    return JSONResponse(merged)
 
 
 # ---------------------------------------------------------------------------
