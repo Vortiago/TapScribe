@@ -1,25 +1,25 @@
-"""TapScribe install picker — interactive selection of model families to
-install, persisted across runs.
+"""TapScribe install picker — interactive selection of model families AND
+backends to install, persisted across runs.
 
 Called by `start.sh` / `start.ps1` after the venv exists and pip has been
-upgraded. The picker:
+upgraded. For each model family (Whisper / Voxtral / Parakeet / Canary)
+the operator picks:
 
-  1. Detects this machine (Apple Silicon? CUDA via `nvidia-smi`?).
-  2. Loads the previous selection from `.tapscribe-install.json`, if any;
-     falls back to a minimal default (whisper only) on first run.
-  3. Renders a checkbox-style menu. On a real TTY the operator navigates
-     with arrow keys (↑/↓) and toggles with Space; otherwise we fall back
-     to numbered toggles for piped / CI invocations.
-  4. Writes the chosen selection back to `.tapscribe-install.json`.
-  5. Runs `pip install -e ".[…]"` with the resolved extras.
+  - whether to install it at all (Space toggle), AND
+  - which runtime backend to install:
+      • CPU/CUDA  — torch / faster-whisper / NeMo (auto-uses CUDA when
+        nvidia-smi reports a device, else CPU)
+      • MLX       — Apple Silicon GPU (only offered on Darwin/arm64)
+      • Both      — install both so the catalog can switch at runtime
+
+Backend choices map to per-family atomic extras in `pyproject.toml`
+(e.g. `whisper-cpu`, `whisper-mlx`, plus a shared `whisper-live` for
+the live-socket server). The picker composes the final
+`pip install -e ".[…]"` argv from those atoms.
 
 Stdlib-only by design: this file runs before the operator has agreed to
 install anything, and certainly before TapScribe's runtime deps exist in
 the venv. Don't import third-party modules here.
-
-The set of known families mirrors `pyproject.toml`'s optional-dependencies
-groups and `tapscribe.transcribers.catalog`'s family list — kept in
-manual sync since this module must run without importing tapscribe.
 """
 
 from __future__ import annotations
@@ -35,37 +35,55 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = REPO_ROOT / ".tapscribe-install.json"
+STATE_VERSION = 2  # bump when the on-disk schema changes
+
+# Backend key sentinels — used both in the FamilyDef declarations and in
+# persisted state, so spelling matters.
+BACKEND_CPU = "cpu"  # CPU or CUDA — same install, runtime picks
+BACKEND_MLX = "mlx"  # Apple Silicon GPU
+BACKEND_BOTH = "both"  # install both atomic backends so the catalog can pick
 
 
 # ---------------------------------------------------------------------------
-# Family catalog — what the picker lets the operator toggle.
+# Family + backend catalog.
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BackendDef:
+    """One per-machine backend choice within a family.
+
+    `extras` are the pyproject extras to install when this backend is
+    picked. `key` is one of the BACKEND_* sentinels above and is what
+    gets persisted in `.tapscribe-install.json`.
+    """
+
+    key: str
+    label: str  # e.g. "CPU/CUDA", "MLX"
+    extras: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class FamilyDef:
     """One row in the picker.
 
-    `extras_cpu_cuda` are the pyproject extras to install when the
-    operator's machine has CPU and/or CUDA; `extras_mlx` are added when
-    MLX is available too. Extras with `sys_platform`/`platform_machine`
-    markers are still safe to list everywhere — pip skips them on the
-    wrong platform.
-
-    `mlx_via_env_marker` is True when the family's CPU/CUDA extra
-    bundles an MLX-only package gated by a sys_platform env marker (so
-    pip pulls it in on Apple Silicon without us adding a separate extra
-    — currently only Canary).
+    `shared_extras` get installed regardless of which backend the
+    operator chose (e.g. whisperlivekit is needed for the live socket
+    server on both CPU and MLX). `backends` lists the optional runtimes
+    in machine-natural order — CPU first, MLX second — and the picker
+    filters them down to whatever's actually available on the host.
     """
 
     key: str
     label: str
     description: str
     size_hint: str
-    extras_cpu_cuda: tuple[str, ...]
-    extras_mlx: tuple[str, ...]
+    backends: tuple[BackendDef, ...]
+    shared_extras: tuple[str, ...] = ()
     default_selected: bool = False
-    mlx_via_env_marker: bool = False
+
+    def has_mlx(self) -> bool:
+        return any(b.key == BACKEND_MLX for b in self.backends)
 
 
 FAMILIES: tuple[FamilyDef, ...] = (
@@ -76,9 +94,15 @@ FAMILIES: tuple[FamilyDef, ...] = (
             "OpenAI Whisper + NB-AiLab's Norwegian-tuned variants. "
             "Powers the live caption channel. Recommended baseline."
         ),
-        size_hint="~150 MB CPU, +~50 MB MLX",
-        extras_cpu_cuda=("whisper",),
-        extras_mlx=("mlx",),
+        size_hint="~150 MB CPU / ~80 MB MLX",
+        # whisperlivekit is the live-socket server — the recorder spawns
+        # it whether MLX or faster-whisper drives transcription, so it's
+        # shared between both backends.
+        shared_extras=("whisper-live",),
+        backends=(
+            BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("whisper-cpu",)),
+            BackendDef(key=BACKEND_MLX, label="MLX", extras=("whisper-mlx",)),
+        ),
         default_selected=True,
     ),
     FamilyDef(
@@ -86,33 +110,27 @@ FAMILIES: tuple[FamilyDef, ...] = (
         label="Voxtral (Mistral)",
         description=("Mistral Voxtral 3B audio LLM. Batch + live. Pulls PyTorch + transformers."),
         size_hint="~2 GB",
-        extras_cpu_cuda=("voxtral",),
-        # No published MLX-voxtral PyPI extra yet — the catalog probes for
-        # `mlx_voxtral` but `pyproject.toml` doesn't list it. Operators
-        # who want it install it manually.
-        extras_mlx=(),
+        backends=(BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("voxtral-cpu",)),),
     ),
     FamilyDef(
         key="parakeet",
         label="Parakeet (NVIDIA)",
         description=("NVIDIA Parakeet TDT 0.6B v3 — 25 EU langs, top of HF Open ASR. Batch only."),
-        size_hint="~1.5 GB",
-        extras_cpu_cuda=("parakeet",),
-        extras_mlx=("parakeet-mlx",),
+        size_hint="~1.5 GB CPU / ~2.5 GB MLX",
+        backends=(
+            BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("parakeet-cpu",)),
+            BackendDef(key=BACKEND_MLX, label="MLX", extras=("parakeet-mlx",)),
+        ),
     ),
     FamilyDef(
         key="canary",
         label="Canary (NVIDIA)",
-        description=(
-            "NVIDIA Canary 1B v2 — translation + 25 EU langs. Batch only. "
-            "MLX adapter is bundled in the same extra."
+        description=("NVIDIA Canary 1B v2 — translation + 25 EU langs. Batch only."),
+        size_hint="~2 GB CPU / ~500 MB MLX",
+        backends=(
+            BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("canary-cpu",)),
+            BackendDef(key=BACKEND_MLX, label="MLX", extras=("canary-mlx",)),
         ),
-        size_hint="~2 GB",
-        extras_cpu_cuda=("canary",),
-        # The `canary` extra already lists `mlx-audio` with a Darwin/arm64
-        # env marker, so a single extra covers both runtimes.
-        extras_mlx=(),
-        mlx_via_env_marker=True,
     ),
 )
 
@@ -127,13 +145,13 @@ _FAMILIES_BY_KEY: dict[str, FamilyDef] = {f.key: f for f in FAMILIES}
 
 @dataclass(frozen=True)
 class MachineCaps:
-    """What `start.sh`/`.ps1`-equivalent introspection turns up. The picker
-    uses this both for the human-readable header AND to decide which
-    extras a given family selection translates to."""
+    """What `start.sh`/`.ps1`-equivalent introspection turns up. Drives
+    both the human-readable header AND which backend choices the picker
+    surfaces per family."""
 
     os_name: str  # "Darwin" / "Linux" / "Windows"
     arch: str  # "arm64" / "x86_64" / etc.
-    mlx: bool  # Apple Silicon — we'll install MLX-flavoured extras
+    mlx: bool  # Apple Silicon — MLX backends become selectable
     cuda: bool  # `nvidia-smi` exit zero — best-effort signal
 
 
@@ -141,7 +159,7 @@ def detect_caps(*, force_no_mlx: bool = False) -> MachineCaps:
     """Probe the host. CUDA detection is `nvidia-smi`-based since we have
     no torch yet at picker time; it'll false-negative on machines with
     a GPU but no driver tooling, which is the right way to err — the
-    operator can opt-in by toggling Voxtral/Parakeet anyway."""
+    operator can still pick CPU/CUDA explicitly."""
     os_name = platform.system() or "unknown"
     arch = platform.machine() or "unknown"
     mlx = (not force_no_mlx) and os_name == "Darwin" and arch == "arm64"
@@ -166,39 +184,139 @@ def _which(cmd: str) -> str | None:
     return which(cmd)
 
 
+def _backend_available(backend: BackendDef, caps: MachineCaps) -> bool:
+    """Whether this machine can install this backend. CPU/CUDA is always
+    available; MLX needs Apple Silicon."""
+    if backend.key == BACKEND_MLX:
+        return caps.mlx
+    return True
+
+
+def available_backends(fam: FamilyDef, caps: MachineCaps) -> list[BackendDef]:
+    """Backends a family can offer on this machine, in declaration order."""
+    return [b for b in fam.backends if _backend_available(b, caps)]
+
+
+def natural_backend_key(fam: FamilyDef, caps: MachineCaps) -> str:
+    """The default backend choice on first install / when the saved
+    choice is unavailable. Apple Silicon → MLX where the family supports
+    it; everywhere else → CPU."""
+    if caps.mlx and fam.has_mlx():
+        return BACKEND_MLX
+    return BACKEND_CPU
+
+
+def cycleable_backend_keys(fam: FamilyDef, caps: MachineCaps) -> list[str]:
+    """The values ←/→ will rotate through for this family on this
+    machine. When only one backend is available we don't offer a "Both"
+    cycle option — there's nothing to combine."""
+    avail = [b.key for b in available_backends(fam, caps)]
+    if len(avail) >= 2:
+        return [*avail, BACKEND_BOTH]
+    return avail
+
+
 # ---------------------------------------------------------------------------
 # Persistence.
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class Selection:
-    """The operator's choices, persisted across runs.
+class FamilyChoice:
+    """One row's persisted state.
 
-    `families` is the set of family keys the operator has ticked.
-    Backends are derived from `MachineCaps` at install time; we don't
-    persist them because the right answer depends on the current
-    hardware (e.g. moving a checkout between a laptop and a workstation).
+    `enabled` = is this family ticked? `backend` is one of `BACKEND_CPU`
+    / `BACKEND_MLX` / `BACKEND_BOTH`; stale choices (e.g. "mlx" loaded
+    on a Linux box) are silently downgraded at install-time, not on
+    load — so moving the checkout back to Apple Silicon restores the
+    MLX preference instead of losing it.
     """
 
-    families: set[str] = field(default_factory=set)
+    enabled: bool = False
+    backend: str = BACKEND_CPU
+
+
+@dataclass
+class Selection:
+    """The operator's choices, persisted across runs."""
+
+    choices: dict[str, FamilyChoice] = field(default_factory=dict)
+
+    def for_family(self, family_key: str) -> FamilyChoice:
+        """Return (and lazily create) the choice for `family_key`. Mutating
+        the returned object mutates the Selection."""
+        return self.choices.setdefault(family_key, FamilyChoice())
 
     @classmethod
-    def load(cls, path: Path) -> Selection:
+    def defaults_for(cls, caps: MachineCaps) -> Selection:
+        out = cls()
+        for fam in FAMILIES:
+            out.choices[fam.key] = FamilyChoice(
+                enabled=fam.default_selected,
+                backend=natural_backend_key(fam, caps),
+            )
+        return out
+
+    @classmethod
+    def load(cls, path: Path, caps: MachineCaps) -> Selection:
         if not path.exists():
-            return cls(families={f.key for f in FAMILIES if f.default_selected})
+            return cls.defaults_for(caps)
         try:
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
-            return cls(families={f.key for f in FAMILIES if f.default_selected})
+            return cls.defaults_for(caps)
+        if isinstance(data, dict) and data.get("version") == STATE_VERSION:
+            return cls._load_v2(data, caps)
+        # Older "families: [...]" format — migrate it onto v2 with the
+        # natural backend for the current machine. Operators who picked
+        # Whisper on Apple Silicon under v1 always got the "both"
+        # behaviour, so preserve that.
+        if isinstance(data, dict) and "families" in data:
+            return cls._load_v1(data, caps)
+        return cls.defaults_for(caps)
+
+    @classmethod
+    def _load_v1(cls, data: dict, caps: MachineCaps) -> Selection:
         raw = data.get("families", [])
-        # Drop unknown keys so a stale state file from a future version
-        # doesn't crash the picker.
-        families = {k for k in raw if k in _FAMILIES_BY_KEY}
-        return cls(families=families)
+        old_enabled = {k for k in raw if k in _FAMILIES_BY_KEY}
+        out = cls()
+        for fam in FAMILIES:
+            on = fam.key in old_enabled
+            # v1 always installed both atomic backends on Apple Silicon
+            # when a family was ticked — preserve that explicitly so the
+            # migration doesn't silently shrink the install.
+            if on and caps.mlx and fam.has_mlx():
+                backend = BACKEND_BOTH
+            else:
+                backend = natural_backend_key(fam, caps)
+            out.choices[fam.key] = FamilyChoice(enabled=on, backend=backend)
+        return out
+
+    @classmethod
+    def _load_v2(cls, data: dict, caps: MachineCaps) -> Selection:
+        choices_raw = data.get("choices", {}) or {}
+        out = cls()
+        for fam in FAMILIES:
+            raw = choices_raw.get(fam.key, {}) or {}
+            enabled = bool(raw.get("enabled", False))
+            backend = raw.get("backend", "")
+            if backend not in (BACKEND_CPU, BACKEND_MLX, BACKEND_BOTH):
+                backend = natural_backend_key(fam, caps)
+            out.choices[fam.key] = FamilyChoice(enabled=enabled, backend=backend)
+        return out
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps({"families": sorted(self.families)}, indent=2) + "\n")
+        body = {
+            "version": STATE_VERSION,
+            "choices": {
+                fam.key: {
+                    "enabled": self.choices.get(fam.key, FamilyChoice()).enabled,
+                    "backend": self.choices.get(fam.key, FamilyChoice()).backend,
+                }
+                for fam in FAMILIES
+            },
+        }
+        path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -206,54 +324,61 @@ class Selection:
 # ---------------------------------------------------------------------------
 
 
-def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
-    """Turn a family selection into the pyproject extras to install.
+def effective_backends(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps) -> list[BackendDef]:
+    """Filter the operator's requested backend down to what this machine
+    can actually install. A stale MLX choice on a Linux box silently
+    downgrades to CPU/CUDA — we don't bother prompting because the user
+    can change it from the picker if they want."""
+    avail = available_backends(fam, caps)
+    if not avail:
+        return []
+    if choice.backend == BACKEND_BOTH:
+        return avail
+    matched = next((b for b in avail if b.key == choice.backend), None)
+    if matched is not None:
+        return [matched]
+    return [avail[0]]
 
-    Always picks `extras_cpu_cuda` (since CPU is always available, even
-    when CUDA isn't — faster-whisper happily runs CPU-only). Adds
-    `extras_mlx` for MLX-capable machines. Order is stable so the
-    install command is reproducible and easy to compare across runs.
-    """
+
+def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
+    """Turn the selection into the pyproject extras to install. Order is
+    stable (family-declaration × shared-then-backends) so the install
+    command is reproducible across runs."""
     out: list[str] = []
     seen: set[str] = set()
+
+    def add(extra: str) -> None:
+        if extra not in seen:
+            out.append(extra)
+            seen.add(extra)
+
     for fam in FAMILIES:
-        if fam.key not in selection.families:
+        choice = selection.choices.get(fam.key)
+        if not choice or not choice.enabled:
             continue
-        for extra in fam.extras_cpu_cuda:
-            if extra not in seen:
-                out.append(extra)
-                seen.add(extra)
-        if caps.mlx:
-            for extra in fam.extras_mlx:
-                if extra not in seen:
-                    out.append(extra)
-                    seen.add(extra)
+        for extra in fam.shared_extras:
+            add(extra)
+        for be in effective_backends(fam, choice, caps):
+            for extra in be.extras:
+                add(extra)
     return out
 
 
-def family_backend_label(fam: FamilyDef, caps: MachineCaps) -> str:
-    """Human-readable summary of which runtime(s) this family will install
-    on the current machine. Shown next to each row so the operator can
-    tell at a glance whether they'll get CPU, CUDA, or MLX packages."""
-    backends: list[str] = []
-    if caps.mlx and (fam.extras_mlx or fam.mlx_via_env_marker):
-        backends.append("MLX")
-    if fam.extras_cpu_cuda:
-        # All current cpu_cuda extras pull torch (or faster-whisper, which
-        # has optional CUDA via CTranslate2), so CUDA acceleration is
-        # available whenever nvidia-smi reports a device.
-        backends.append("CUDA" if caps.cuda else "CPU")
-    return " + ".join(backends) if backends else "—"
-
-
-def family_extras_preview(fam: FamilyDef, caps: MachineCaps) -> list[str]:
-    """The extras THIS family contributes, given caps. Used in the picker
-    to show operators which `[...]` tokens map to which family."""
-    out = list(fam.extras_cpu_cuda)
-    if caps.mlx:
-        for extra in fam.extras_mlx:
-            if extra not in out:
+def family_extras_preview(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps) -> list[str]:
+    """The extras this single family contributes given a choice + caps —
+    used by the renderer to show operators which `[...]` tokens map to
+    which row."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for extra in fam.shared_extras:
+        if extra not in seen:
+            out.append(extra)
+            seen.add(extra)
+    for be in effective_backends(fam, choice, caps):
+        for extra in be.extras:
+            if extra not in seen:
                 out.append(extra)
+                seen.add(extra)
     return out
 
 
@@ -273,13 +398,39 @@ def _format_caps_line(caps: MachineCaps) -> str:
     return " · ".join(parts)
 
 
+def _render_backend_row(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps) -> str:
+    """One-line summary of the backend selector for `fam`.
+
+    Cases:
+      • only CPU/CUDA available → "Backend: CPU/CUDA (only option)"
+      • CPU+MLX available, choice = cpu/mlx/both → radio row
+      • no backends (shouldn't happen) → explanatory fallback
+    """
+    avail = available_backends(fam, caps)
+    if not avail:
+        return "Backend: (none available on this machine)"
+    if len(avail) == 1:
+        return f"Backend: {avail[0].label} (only option on this machine)"
+
+    cuda_hint = " (CUDA via torch)" if caps.cuda else ""
+    parts: list[str] = []
+    for be in avail:
+        marker = "●" if choice.backend == be.key else "○"
+        label = be.label
+        if be.key == BACKEND_CPU and cuda_hint:
+            label = f"{label}{cuda_hint}"
+        parts.append(f"{marker} {label}")
+    both_marker = "●" if choice.backend == BACKEND_BOTH else "○"
+    parts.append(f"{both_marker} Both")
+    return "Backend: " + "   ".join(parts)
+
+
 def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None) -> str:
     """Return the picker as a string. Pure — easy to snapshot in tests.
 
     When `cursor` is set, the corresponding row is highlighted with a
-    `>` marker and the controls block describes arrow-key navigation;
-    when `cursor` is None, we render the numbered-fallback help block.
-    """
+    `>` marker and the help block describes arrow-key navigation;
+    when `cursor` is None, we render the numbered-fallback help."""
     lines: list[str] = []
     lines.append("TapScribe install picker")
     lines.append("=" * 60)
@@ -287,21 +438,20 @@ def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None
     lines.append("")
     lines.append("Model families to install:")
     for idx, fam in enumerate(FAMILIES, start=1):
-        mark = "x" if fam.key in selection.families else " "
+        choice = selection.choices.get(fam.key) or FamilyChoice()
+        mark = "x" if choice.enabled else " "
         arrow = ">" if cursor is not None and cursor == idx - 1 else " "
         lines.append(f"{arrow} [{mark}] {idx}. {fam.label}  ({fam.size_hint})")
         lines.append(f"          {fam.description}")
-        backend = family_backend_label(fam, caps)
-        extras_preview = family_extras_preview(fam, caps)
-        suffix = ""
-        if fam.key == "voxtral" and caps.mlx:
-            suffix = "  — no MLX adapter on PyPI yet"
-        if extras_preview:
-            lines.append(
-                f"          Backend: {backend}   extras: [{', '.join(extras_preview)}]{suffix}"
-            )
+        lines.append(f"          {_render_backend_row(fam, choice, caps)}")
+        if choice.enabled:
+            extras = family_extras_preview(fam, choice, caps)
+            if extras:
+                lines.append(f"          Installs: [{', '.join(extras)}]")
+            else:
+                lines.append("          Installs: (nothing — no backend available)")
         else:
-            lines.append(f"          Backend: {backend}{suffix}")
+            lines.append("          (not selected)")
         lines.append("")
     extras = resolve_extras(selection, caps)
     if extras:
@@ -316,15 +466,18 @@ def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None
         lines.append("  r           reset to defaults")
         lines.append("  Enter       confirm and install")
         lines.append("  q           quit without launching")
+        lines.append("  (backend choice needs the arrow-key UI — re-run on a real TTY to switch)")
     else:
-        lines.append("↑/↓ move · Space toggle · a all · r reset · Enter install · q quit")
+        lines.append("↑/↓ row · ←/→ backend · Space toggle · a all · r reset · Enter install · q quit")
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # Numbered (fallback) interactive loop. Used when stdin/stdout isn't a real
 # TTY (CI, piped, tests with StringIO) so the picker still works without
-# raw-mode keyboard input.
+# raw-mode keyboard input. Backend choice is NOT toggleable here — operators
+# in piped contexts just get whatever they picked last or the machine
+# default, since there's no clean line-grammar for "set row 1's backend".
 # ---------------------------------------------------------------------------
 
 
@@ -338,18 +491,15 @@ def _parse_command(raw: str, selection: Selection) -> str:
     if cmd in ("q", "quit", "exit"):
         return "quit"
     if cmd == "a":
-        # Toggle all: if everything's already on, turn everything off;
-        # otherwise turn everything on. Mirrors how checkbox "select all"
-        # toggles in most UIs.
-        if selection.families == {f.key for f in FAMILIES}:
-            selection.families = set()
-        else:
-            selection.families = {f.key for f in FAMILIES}
+        # Toggle all enable flags. Backend choices are left as-is.
+        all_on = all(selection.choices.get(f.key, FamilyChoice()).enabled for f in FAMILIES)
+        for f in FAMILIES:
+            selection.for_family(f.key).enabled = not all_on
         return "toggled all"
     if cmd == "r":
-        selection.families = {f.key for f in FAMILIES if f.default_selected}
+        for f in FAMILIES:
+            selection.for_family(f.key).enabled = f.default_selected
         return "reset to defaults"
-    # Numbers (comma or whitespace separated)
     tokens = [t for t in cmd.replace(",", " ").split() if t]
     toggled: list[str] = []
     bad: list[str] = []
@@ -363,10 +513,8 @@ def _parse_command(raw: str, selection: Selection) -> str:
             bad.append(tok)
             continue
         fam = FAMILIES[n - 1]
-        if fam.key in selection.families:
-            selection.families.discard(fam.key)
-        else:
-            selection.families.add(fam.key)
+        ch = selection.for_family(fam.key)
+        ch.enabled = not ch.enabled
         toggled.append(fam.label)
     parts: list[str] = []
     if toggled:
@@ -377,9 +525,9 @@ def _parse_command(raw: str, selection: Selection) -> str:
 
 
 def _numbered_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream_out) -> bool:
-    """The original line-buffered numbered picker. Kept as the fallback
-    for non-TTY contexts — CI, piped invocations, and the unit tests
-    (which pass StringIO)."""
+    """The line-buffered numbered picker. Kept as the fallback for non-TTY
+    contexts — CI, piped invocations, and the unit tests (which pass
+    StringIO)."""
     status: str | None = None
     while True:
         print(render(selection, caps), file=stream_out)
@@ -408,17 +556,10 @@ def _numbered_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream
 # ---------------------------------------------------------------------------
 
 
-def _toggle(selection: Selection, key: str) -> None:
-    if key in selection.families:
-        selection.families.discard(key)
-    else:
-        selection.families.add(key)
-
-
 def _read_key_posix(fd: int) -> str:
     """Read one keystroke from a POSIX raw-mode terminal. Returns one of
-    the symbolic names handled by `_arrow_key_loop` (see _handle_key) or
-    a single lowercase character."""
+    the symbolic names handled by `_handle_key` or a single lowercase
+    character."""
     import select
 
     try:
@@ -486,8 +627,8 @@ def _read_key_windows() -> str:
 
 def _enable_windows_vt() -> None:
     """Best-effort enable ANSI escape processing on Windows 10+ consoles.
-    No-op (and swallowed) on older / non-Windows shells — the worst case
-    is the picker prints raw escape codes, which is ugly but not fatal."""
+    No-op (and swallowed) on older / non-Windows shells — worst case the
+    picker prints raw escape codes, which is ugly but not fatal."""
     if sys.platform != "win32":
         return
     try:
@@ -502,50 +643,73 @@ def _enable_windows_vt() -> None:
         pass
 
 
+def _cycle_backend(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps, *, direction: int) -> None:
+    """Step the active backend by `direction` (-1 or +1) through the
+    cycleable backends for `fam`. No-op when the family has only one
+    backend on this machine."""
+    keys = cycleable_backend_keys(fam, caps)
+    if not keys:
+        return
+    if choice.backend not in keys:
+        choice.backend = keys[0]
+        return
+    i = (keys.index(choice.backend) + direction) % len(keys)
+    choice.backend = keys[i]
+
+
 def _handle_key(
-    key: str, selection: Selection, cursor_box: list[int]
+    key: str,
+    selection: Selection,
+    cursor_box: list[int],
+    caps: MachineCaps,
 ) -> str | None:
     """Dispatch one keystroke against `selection` / `cursor_box`. Returns
     `"confirm"`, `"quit"`, or `None` to keep looping."""
+    fam = FAMILIES[cursor_box[0]]
     if key in ("up", "k"):
         cursor_box[0] = (cursor_box[0] - 1) % len(FAMILIES)
     elif key in ("down", "j"):
         cursor_box[0] = (cursor_box[0] + 1) % len(FAMILIES)
-    elif key in ("home",):
+    elif key == "left":
+        _cycle_backend(fam, selection.for_family(fam.key), caps, direction=-1)
+    elif key == "right":
+        _cycle_backend(fam, selection.for_family(fam.key), caps, direction=+1)
+    elif key == "home":
         cursor_box[0] = 0
-    elif key in ("end",):
+    elif key == "end":
         cursor_box[0] = len(FAMILIES) - 1
     elif key in ("space", "x"):
-        _toggle(selection, FAMILIES[cursor_box[0]].key)
+        ch = selection.for_family(fam.key)
+        ch.enabled = not ch.enabled
     elif key == "enter":
         return "confirm"
     elif key in ("q", "esc", "ctrl-c", "ctrl-d", "eof"):
         return "quit"
     elif key == "a":
-        if selection.families == {f.key for f in FAMILIES}:
-            selection.families = set()
-        else:
-            selection.families = {f.key for f in FAMILIES}
+        all_on = all(selection.choices.get(f.key, FamilyChoice()).enabled for f in FAMILIES)
+        for f in FAMILIES:
+            selection.for_family(f.key).enabled = not all_on
     elif key == "r":
-        selection.families = {f.key for f in FAMILIES if f.default_selected}
+        defaults = Selection.defaults_for(caps)
+        selection.choices = defaults.choices
     elif len(key) == 1 and key.isdigit():
         n = int(key)
         if 1 <= n <= len(FAMILIES):
             cursor_box[0] = n - 1
-            _toggle(selection, FAMILIES[n - 1].key)
+            target = FAMILIES[n - 1]
+            ch = selection.for_family(target.key)
+            ch.enabled = not ch.enabled
     return None
 
 
-def _arrow_key_loop(
-    selection: Selection, caps: MachineCaps, *, stream_in, stream_out
-) -> bool:
-    """Drive the picker with arrow keys + spacebar. Caller has already
+def _arrow_key_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream_out) -> bool:
+    """Drive the picker with arrow keys + space + ←/→. Caller has already
     confirmed both streams are real TTYs."""
     cursor_box = [0]
-    # Pre-position cursor on the first selected row, if any — feels less
+    # Pre-position cursor on the first enabled row, if any — feels less
     # arbitrary than always starting at the top.
     for i, fam in enumerate(FAMILIES):
-        if fam.key in selection.families:
+        if selection.choices.get(fam.key, FamilyChoice()).enabled:
             cursor_box[0] = i
             break
 
@@ -566,7 +730,7 @@ def _arrow_key_loop(
             while True:
                 paint()
                 key = _read_key_windows()
-                action = _handle_key(key, selection, cursor_box)
+                action = _handle_key(key, selection, cursor_box, caps)
                 if action == "confirm":
                     return True
                 if action == "quit":
@@ -586,7 +750,7 @@ def _arrow_key_loop(
         while True:
             paint()
             key = _read_key_posix(fd)
-            action = _handle_key(key, selection, cursor_box)
+            action = _handle_key(key, selection, cursor_box, caps)
             if action == "confirm":
                 return True
             if action == "quit":
@@ -628,17 +792,18 @@ def interactive_loop(selection: Selection, caps: MachineCaps, *, stream_in, stre
 
     Returns True on confirm, False on quit. Selection is mutated in
     place. On a real TTY we use the arrow-key UI; otherwise the
-    line-buffered numbered fallback (kept so CI / piped invocations and
-    unit tests with StringIO still work).
-    """
+    numbered fallback (kept so CI / piped invocations and unit tests
+    with StringIO still work)."""
     if _can_use_arrow_keys(stream_in, stream_out):
         try:
             return _arrow_key_loop(selection, caps, stream_in=stream_in, stream_out=stream_out)
         except (OSError, ImportError) as exc:
             # Terminal didn't let us into raw mode (rare; usually means
             # we lost the controlling tty). Fall back cleanly.
-            print(f"(arrow-key UI unavailable: {exc}; falling back to numbered prompt)",
-                  file=stream_out)
+            print(
+                f"(arrow-key UI unavailable: {exc}; falling back to numbered prompt)",
+                file=stream_out,
+            )
     return _numbered_loop(selection, caps, stream_in=stream_in, stream_out=stream_out)
 
 
@@ -649,8 +814,9 @@ def interactive_loop(selection: Selection, caps: MachineCaps, *, stream_in, stre
 
 def build_pip_argv(extras: list[str], *, python: str = sys.executable) -> list[str]:
     """Argv for the install. `python -m pip install -e ".[a,b,c]"` keeps
-    us inside the current venv. Always editable so source-tree edits land
-    immediately; the operator's TapScribe is a checkout, not a release."""
+    us inside the current venv. Always editable so source-tree edits
+    land immediately; the operator's TapScribe is a checkout, not a
+    release."""
     spec = "."
     if extras:
         spec = f".[{','.join(extras)}]"
@@ -659,7 +825,7 @@ def build_pip_argv(extras: list[str], *, python: str = sys.executable) -> list[s
 
 def run_install(extras: list[str], *, dry_run: bool = False) -> int:
     """Execute the install. `dry_run` skips the subprocess (used by tests
-    and by `--print-install-command` in the CLI)."""
+    and by `--dry-run` in the CLI)."""
     argv = build_pip_argv(extras)
     print(f"[install-picker] Running: {' '.join(argv)}", flush=True)
     if dry_run:
@@ -676,8 +842,9 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="install_picker",
         description=(
-            "Interactive picker for which TapScribe model families to install. "
-            "Persists the selection to .tapscribe-install.json and runs pip."
+            "Interactive picker for which TapScribe model families and "
+            "backends to install. Persists the selection to "
+            ".tapscribe-install.json and runs pip."
         ),
     )
     p.add_argument(
@@ -699,22 +866,16 @@ def main(argv: list[str] | None = None) -> int:
 
     caps = detect_caps(force_no_mlx=args.no_mlx)
     first_run = not STATE_FILE.exists()
-    selection = Selection.load(STATE_FILE)
+    selection = Selection.load(STATE_FILE, caps)
 
-    # Non-interactive: still requires a TTY to be polite to CI / piped
-    # invocations. Operators in unattended contexts pass --non-interactive
-    # explicitly.
     interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
     if interactive:
         if first_run:
-            # Heads-up for operators upgrading from a TapScribe that
-            # always installed Voxtral as part of start.sh's hard-coded
-            # base set. The default selection is whisper-only now —
-            # surface that so they don't silently lose Voxtral.
             print(
-                "[install-picker] First run on this checkout. Previous versions of "
-                "start.sh installed Whisper + Voxtral; the picker now defaults to "
-                "Whisper only. Tick Voxtral (option 2) below if you used it.",
+                "[install-picker] First run on this checkout. The picker now lets "
+                "you choose a backend (CPU/CUDA vs MLX vs Both) per family — use "
+                "←/→ on each row. Default is whichever backend is fastest on this "
+                "machine.",
                 flush=True,
             )
         confirmed = interactive_loop(selection, caps, stream_in=sys.stdin, stream_out=sys.stdout)
@@ -722,9 +883,16 @@ def main(argv: list[str] | None = None) -> int:
             print("[install-picker] aborted by operator.", file=sys.stderr)
             return 1
     else:
+        summary = (
+            ", ".join(
+                f"{k}={selection.choices[k].backend}"
+                for k in sorted(selection.choices)
+                if selection.choices[k].enabled
+            )
+            or "(none)"
+        )
         print(
-            f"[install-picker] non-interactive mode — using saved selection: "
-            f"{sorted(selection.families) or '(none)'}",
+            f"[install-picker] non-interactive mode — using saved selection: {summary}",
             flush=True,
         )
 

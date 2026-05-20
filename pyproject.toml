@@ -39,27 +39,56 @@ dependencies = [
 [project.optional-dependencies]
 # The actual model backends are heavy and platform-dependent; keep them
 # optional so a CI / docs install doesn't pull in PyTorch + CUDA.
-whisper = ["faster-whisper>=1.0", "whisperlivekit>=0.1"]
-# mlx-whisper's PyPI release line is 0.4.x (no 0.5 yet as of 2026-05); the
-# upstream API has been stable across 0.3 → 0.4, so a `>=0.4` floor keeps
-# the Apple-Silicon path resolvable without falling off support.
-mlx = ["mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'"]
-voxtral = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
-# Parakeet TDT 0.6B v3 — NVIDIA's top-of-leaderboard ASR. Two adapters:
-#   - parakeet-mlx (Apple Silicon, ~2.5GB model on disk)
-#   - parakeet (NeMo Toolkit, runs on CUDA or CPU — official NVIDIA
-#     integration; released `transformers` packages don't yet have
-#     the `parakeet_tdt` model type mapping, so NeMo is the path).
+#
+# The picker (tools/install_picker.py) composes per-family backend
+# selections from these atomic extras: each family has a "shared" extra
+# (always installed when the family is on) plus one or two backend-
+# specific extras (CPU/CUDA and/or MLX) which the operator can opt into
+# independently. Keep the family/backend split explicit here so a stray
+# `pip install -e .[canary-mlx]` on a Linux box doesn't drag in NeMo.
+
+# --- Whisper / NB-Whisper ---------------------------------------------------
+# Live channel needs whisperlivekit no matter which backend drives it;
+# faster-whisper covers the CPU/CUDA path; mlx-whisper covers Apple
+# Silicon. mlx-whisper's PyPI release line tops out at 0.4.x — a `>=0.5`
+# floor is unsatisfiable, so don't tighten this without checking PyPI.
+whisper-live = ["whisperlivekit>=0.1"]
+whisper-cpu = ["faster-whisper>=1.0"]
+whisper-mlx = ["mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+# --- Voxtral (Mistral) ------------------------------------------------------
+# CPU/CUDA only — no published MLX adapter on PyPI as of 2026-05.
+voxtral-cpu = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
+
+# --- Parakeet TDT 0.6B v3 ---------------------------------------------------
+# Two independent adapters; no shared piece between them.
+parakeet-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
 parakeet-mlx = [
     "parakeet-mlx>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
-parakeet = [
-    "nemo_toolkit[asr]>=2.5",
-    "torch>=2.1",
+
+# --- Canary 1B v2 -----------------------------------------------------------
+# NeMo for CPU/CUDA; mlx-audio for Apple Silicon. The `mlx-audio` package
+# stays env-marker-gated so installing `canary-mlx` on Linux is a no-op
+# rather than a resolver failure.
+canary-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
+canary-mlx = ["mlx-audio>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+# --- Convenience aliases (back-compat) --------------------------------------
+# Older docs, the Dockerfile, and the test-skip messages reference these
+# umbrella extras. They expand to whichever backend best fits a "default
+# install" on the target platform — pip's env markers make the MLX
+# packages no-op on non-Apple-Silicon hosts, so listing both is safe.
+whisper = [
+    "whisperlivekit>=0.1",
+    "faster-whisper>=1.0",
+    "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
-# Canary 1B v2 — NVIDIA's translation-capable multilingual ASR. NeMo
-# Toolkit is large (~PyTorch + Lightning + Hydra); on Apple Silicon the
-# mlx-audio package provides a lighter alternative.
+mlx = [
+    "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+voxtral = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
+parakeet = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
 canary = [
     "nemo_toolkit[asr]>=2.5",
     "torch>=2.1",
