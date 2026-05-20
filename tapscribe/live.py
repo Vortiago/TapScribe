@@ -125,8 +125,8 @@ class LiveConfig:
     # Operator-tunable thresholds for the TapScribe gate. Consumed by
     # SpeechGate (NOT by build_live_cmd / WlK).
     gate_speech_threshold: float = 0.5  # Silero speech probability gate
-    gate_hangover_ms: int = 400         # post-speech silence before close
-    gate_pre_roll_ms: int = 300         # ring buffer flushed on open
+    gate_hangover_ms: int = 400  # post-speech silence before close
+    gate_pre_roll_ms: int = 300  # ring buffer flushed on open
     confidence_validation: bool = True
     # Forwarded to whisperlivekit-server when set — see build_live_cmd.
     min_chunk_size: float | None = None
@@ -424,9 +424,7 @@ class WhisperLiveKitChannel:
         replacements: dict[str, Any] = {}
         if gate_kind is not None:
             if gate_kind not in ("tapscribe", "backend"):
-                raise ValueError(
-                    f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}"
-                )
+                raise ValueError(f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
             replacements["gate_kind"] = gate_kind
         if conf is not None:
             replacements["confidence_validation"] = bool(conf)

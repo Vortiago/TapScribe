@@ -300,9 +300,7 @@ class TapFanOut:
         `create_task` to avoid coupling consumer latency to the
         ActiveStreams lock acquisition."""
         loop = asyncio.get_event_loop()
-        loop.create_task(
-            self._recorder.streams.update_buffer_transcription(self._conn_id, text)
-        )
+        loop.create_task(self._recorder.streams.update_buffer_transcription(self._conn_id, text))
 
     def _maybe_schedule_relay_reconnect(self) -> None:
         """Kick off a background relay reconnect if none is pending and

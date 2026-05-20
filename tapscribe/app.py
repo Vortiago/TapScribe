@@ -249,9 +249,7 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
         # Class-level capability of the current LiveChannel. Dashboard
         # uses this to grey out the "backend" gate_kind option for
         # channels (e.g. future Parakeet) without native VAD support.
-        "live_supports_native_vad": bool(
-            getattr(recorder.live, "supports_native_vad", False)
-        ),
+        "live_supports_native_vad": bool(getattr(recorder.live, "supports_native_vad", False)),
         "mlx_available": recorder.use_mlx,  # back-compat for the dashboard ribbon
         "backend": recorder.backend,
         "available_backends": sorted(_available_backends_snapshot()),

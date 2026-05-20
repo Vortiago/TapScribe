@@ -107,7 +107,10 @@ async def test_active_streams_update_buffer_transcription_persists_text():
     streams = ActiveStreams()
     await streams.register(
         ActiveStream(
-            conn_id="a", identity="i", name="n", filename="f",
+            conn_id="a",
+            identity="i",
+            name="n",
+            filename="f",
             started_at=datetime.now(timezone.utc),
         )
     )

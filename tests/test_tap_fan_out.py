@@ -661,6 +661,7 @@ async def test_tapscribe_gate_blocks_silence_from_reaching_relay(
     def _never_starts(*args, **kwargs):
         def analyze(chunk):
             return None
+
         return SpeechGate(vad=analyze, pre_roll_ms=0)
 
     monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _never_starts)
@@ -743,9 +744,7 @@ async def test_backend_gate_kind_passes_all_frames_without_a_gate(
     behaviour preserved as the operator-facing escape hatch)."""
     from dataclasses import replace as dc_replace
 
-    recorder_with_relay.live.config = dc_replace(
-        recorder_with_relay.live.config, gate_kind="backend"
-    )
+    recorder_with_relay.live.config = dc_replace(recorder_with_relay.live.config, gate_kind="backend")
 
     async with await TapFanOut.open(
         recorder_with_relay,
@@ -771,9 +770,7 @@ async def test_relay_buffer_transcription_updates_active_stream(
     gate's own state machine."""
     from dataclasses import replace as dc_replace
 
-    recorder_with_relay.live.config = dc_replace(
-        recorder_with_relay.live.config, gate_kind="backend"
-    )
+    recorder_with_relay.live.config = dc_replace(recorder_with_relay.live.config, gate_kind="backend")
 
     async with await TapFanOut.open(
         recorder_with_relay,
