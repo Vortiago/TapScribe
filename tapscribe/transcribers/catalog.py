@@ -449,9 +449,7 @@ class TranscriberRegistry:
             raise KeyError(f"model_id={model_id!r} not in registry. Known: {sorted(self._by_id)!r}")
         return entry
 
-    def for_context(
-        self, context: Context, *, only_installed: bool = False
-    ) -> tuple[ModelEntry, ...]:
+    def for_context(self, context: Context, *, only_installed: bool = False) -> tuple[ModelEntry, ...]:
         """Entries valid for `context`. With `only_installed=True`, also
         drops entries whose adapter modules aren't importable on this
         install or whose backends aren't available on this machine — the
