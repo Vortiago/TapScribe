@@ -141,9 +141,7 @@ def test_split_filename_preserves_speaker_slug(tmp_path: Path):
     written = sorted(out_dir.glob("*.wav"))
     assert written, "expected at least one region WAV"
     for w in written:
-        assert parse_wav_speaker_slug(w.name) == "bob", (
-            f"{w.name}: lost speaker slug 'bob'"
-        )
+        assert parse_wav_speaker_slug(w.name) == "bob", f"{w.name}: lost speaker slug 'bob'"
 
 
 def test_split_filenames_are_unique_when_regions_share_a_second(tmp_path: Path):
