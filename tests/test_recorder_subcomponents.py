@@ -203,9 +203,7 @@ async def test_active_streams_apply_rejects_unknown_field():
 @pytest.mark.asyncio
 async def test_job_tracker_claim_returns_true_when_free():
     tracker = JobTracker()
-    state = JobState(
-        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC)
-    )
+    state = JobState(session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC))
     assert await tracker.claim(state) is True
 
 
@@ -214,9 +212,7 @@ async def test_job_tracker_claim_returns_false_when_already_claimed():
     """The 'one job per session' rule lives in JobTracker, not in each
     route handler."""
     tracker = JobTracker()
-    state = JobState(
-        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC)
-    )
+    state = JobState(session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC))
     await tracker.claim(state)
     second = JobState(session="s1", kind="strip", current=0, total=3, started_at=datetime.now(UTC))
     assert await tracker.claim(second) is False
@@ -225,9 +221,7 @@ async def test_job_tracker_claim_returns_false_when_already_claimed():
 @pytest.mark.asyncio
 async def test_job_tracker_release_allows_reclaim():
     tracker = JobTracker()
-    state = JobState(
-        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC)
-    )
+    state = JobState(session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC))
     await tracker.claim(state)
     await tracker.release("s1")
     assert await tracker.claim(state) is True
@@ -236,9 +230,7 @@ async def test_job_tracker_release_allows_reclaim():
 @pytest.mark.asyncio
 async def test_job_tracker_update_modifies_fields():
     tracker = JobTracker()
-    state = JobState(
-        session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC)
-    )
+    state = JobState(session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC))
     await tracker.claim(state)
     await tracker.update("s1", current=3, current_file="x.wav")
     got = tracker.get("s1")
