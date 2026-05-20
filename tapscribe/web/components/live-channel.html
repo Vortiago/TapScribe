@@ -8,6 +8,41 @@
     <input class="input" id="liveLangInput" size="6">
   </div>
 
+  <!--
+    Speech filter: who decides "this is speech, send it to be
+    transcribed" vs "this is silence, don't bother". See README
+    "Speech filter" section for the operator-facing explanation;
+    in code: gate_kind="tapscribe" runs our own Silero gate with
+    pre-roll, "backend" defers to the model's built-in VAD.
+  -->
+  <div class="live-row">
+    <span class="lbl">speech filter</span>
+    <select class="select" id="liveGateKindSelect">
+      <option value="tapscribe">TapScribe (recommended)</option>
+      <option value="backend">Transcription engine</option>
+    </select>
+  </div>
+
+  <!--
+    Knobs for the TapScribe speech filter. Labels kept plain so an
+    operator without VAD background can still tune them on the box.
+  -->
+  <div class="live-row gate-knob-row">
+    <span class="lbl">voice threshold</span>
+    <input class="input" type="number" id="liveGateThreshold" step="0.05" min="0" max="1" size="4">
+    <span class="dim tiny">0–1, lower picks up quieter voices</span>
+  </div>
+  <div class="live-row gate-knob-row">
+    <span class="lbl">pause length</span>
+    <input class="input" type="number" id="liveGateHangover" step="50" min="0" max="5000" size="5">
+    <span class="dim tiny">ms of silence to end a sentence</span>
+  </div>
+  <div class="live-row gate-knob-row">
+    <span class="lbl">lead-in</span>
+    <input class="input" type="number" id="liveGatePreRoll" step="20" min="0" max="2000" size="5">
+    <span class="dim tiny">ms kept before speech starts</span>
+  </div>
+
   <div class="action-row mt-s" data-slot="actions"></div>
 
   <div class="live-meta">

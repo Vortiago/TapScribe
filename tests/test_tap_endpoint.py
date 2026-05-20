@@ -48,7 +48,16 @@ def recorder_with_fake_wlk(
     r = Recorder(
         recordings_dir=tmp_path / "recordings",
         config_dir=tmp_path / "config",
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=fake_wlk.port),
+        # Relay-focused tests use near-silent synthetic PCM that real
+        # Silero would block — pin gate_kind="backend" so they exercise
+        # the relay end-to-end without the gate eating their bytes.
+        live_config=LiveConfig(
+            model="tiny.en",
+            language="en",
+            host="localhost",
+            port=fake_wlk.port,
+            gate_kind="backend",
+        ),
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
     )

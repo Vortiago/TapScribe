@@ -52,11 +52,91 @@ def test_mlx_backend_only_appended_when_use_mlx_true():
     assert mlx_cmd[mlx_cmd.index("--backend") + 1] == "mlx-whisper"
 
 
-def test_no_vac_flag_only_appended_when_vac_disabled():
-    cfg_vac_on = LiveConfig(model="tiny.en", language="en", host="h", port=8000, vac=True)
-    cfg_vac_off = LiveConfig(model="tiny.en", language="en", host="h", port=8000, vac=False)
-    assert "--no-vac" not in build_live_cmd(EXE, cfg_vac_on, use_mlx=False)
-    assert "--no-vac" in build_live_cmd(EXE, cfg_vac_off, use_mlx=False)
+def test_no_vac_flag_appended_when_gate_kind_is_tapscribe():
+    """gate_kind="tapscribe" means TapScribe runs its own SpeechGate
+    and WlK's native VAC must be off — translated to the --no-vac
+    flag here at argv construction time."""
+    cfg_backend = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_kind="backend")
+    cfg_tapscribe = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_kind="tapscribe")
+    assert "--no-vac" not in build_live_cmd(EXE, cfg_backend, use_mlx=False)
+    assert "--no-vac" in build_live_cmd(EXE, cfg_tapscribe, use_mlx=False)
+
+
+def test_gate_kind_default_is_tapscribe():
+    """Operators who don't override get the TapScribe-side gate by default."""
+    cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000)
+    assert cfg.gate_kind == "tapscribe"
+    assert "--no-vac" in build_live_cmd(EXE, cfg, use_mlx=False)
+
+
+def test_matches_returns_false_when_only_a_gate_knob_differs():
+    """`matches()` is the request-coalescing fast path on /api/live/start
+    — if a operator nudges only `gate_hangover_ms`, we MUST restart
+    the channel rather than no-op'ing back "already running with
+    requested config". Otherwise sliders look broken from the UI."""
+    cfg = LiveConfig(
+        model="tiny.en",
+        language="en",
+        host="h",
+        port=8000,
+        gate_speech_threshold=0.5,
+        gate_hangover_ms=400,
+        gate_pre_roll_ms=300,
+    )
+    chan = LiveChannel(config=cfg, use_mlx=False)
+
+    class _Alive:
+        def poll(self):
+            return None
+
+    chan._proc = _Alive()
+
+    base = dict(model=None, language=None, gate_kind=None, conf=None)
+    assert chan.matches(**base) is True
+    assert chan.matches(**base, gate_speech_threshold=0.7) is False
+    assert chan.matches(**base, gate_hangover_ms=600) is False
+    assert chan.matches(**base, gate_pre_roll_ms=500) is False
+    # Knobs equal to current config still force a restart — matches
+    # treats "explicitly supplied" as a restart request regardless of
+    # equality (operators rarely re-submit the exact same value). Pin
+    # the contract so a future "skip restart if value matches"
+    # optimisation is at least an opt-in change.
+    assert chan.matches(**base, gate_speech_threshold=0.5) is False
+
+
+def test_whisper_live_kit_channel_supports_native_vad():
+    """The dashboard reads `supports_native_vad` to decide whether to
+    surface the "backend" gate_kind option. WhisperLiveKit has --vac
+    / --no-vac, so True. (Future ParakeetLiveChannel without a native
+    VAD will be False; that test lives with its own implementation.)
+    """
+    cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000)
+    chan = LiveChannel(config=cfg, use_mlx=False)
+    assert chan.supports_native_vad is True
+
+
+def test_gate_knobs_are_independent_of_build_live_cmd():
+    """gate_speech_threshold / gate_hangover_ms / gate_pre_roll_ms are
+    consumed by the TapScribe-side SpeechGate, NOT by WlK. They must
+    not appear in the WlK argv regardless of their values."""
+    cfg = LiveConfig(
+        model="tiny.en",
+        language="en",
+        host="h",
+        port=8000,
+        gate_speech_threshold=0.7,
+        gate_hangover_ms=600,
+        gate_pre_roll_ms=500,
+    )
+    cmd = build_live_cmd(EXE, cfg, use_mlx=False)
+    # No leakage of TapScribe-side knobs into the WlK child's argv.
+    assert "--threshold" not in cmd
+    assert "--gate-threshold" not in cmd
+    assert "--hangover-ms" not in cmd
+    assert "--pre-roll-ms" not in cmd
+    assert "0.7" not in cmd
+    assert "600" not in cmd
+    assert "500" not in cmd
 
 
 def test_confidence_validation_flag_only_appended_when_enabled():

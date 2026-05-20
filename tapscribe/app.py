@@ -100,6 +100,36 @@ async def _json_body(req: Request) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
+def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | None:
+    """Parse an optional numeric body field with range enforcement.
+    None / missing → returned unchanged so the downstream "field not
+    supplied" semantics still work. Anything else must round-trip
+    through `float()` and land in [lo, hi]; otherwise raise 400."""
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, f"{field} must be a number, got {raw!r}") from e
+    if not (lo <= value <= hi):
+        raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
+    return value
+
+
+def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
+    if raw is None:
+        return None
+    try:
+        # Accept JSON numerics (which arrive as float in some clients)
+        # by routing through float→int — rejects "3.5" implicitly.
+        value = int(raw)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, f"{field} must be an integer, got {raw!r}") from e
+    if not (lo <= value <= hi):
+        raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Logging — silence the per-second poll spam
 # ---------------------------------------------------------------------------
@@ -246,6 +276,7 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
         "live_feed": recorder.transcripts.snapshot(),
         "live_info": dict(recorder.live.info),
         "live_log": list(recorder.live.log)[-30:],
+        "live_supports_native_vad": bool(getattr(recorder.live, "supports_native_vad", False)),
         "mlx_available": recorder.use_mlx,  # back-compat for the dashboard ribbon
         "backend": recorder.backend,
         "available_backends": sorted(_available_backends_snapshot()),
@@ -285,21 +316,60 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     body = await _json_body(req)
     model = (body.get("model") or "").strip() or None
     language = (body.get("language") or "").strip() or None
-    vac = body.get("vac")
     conf = body.get("confidence_validation")
 
-    if recorder.live.matches(model=model, language=language, vac=vac, conf=conf):
+    # Boundary validation. CodeQL treats Request.json() as untrusted
+    # input; the dashboard's HTML min/max attributes are only client-
+    # side hints. Anything that fails the checks here returns 400 —
+    # don't let it surface deeper as a ValueError 500.
+    gate_kind_raw = body.get("gate_kind")
+    gate_kind = (gate_kind_raw or "").strip() or None
+    if gate_kind is not None and gate_kind not in ("tapscribe", "backend"):
+        raise HTTPException(400, f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
+    if gate_kind == "backend" and not getattr(recorder.live, "supports_native_vad", False):
+        # Stale-dashboard guard: a future Parakeet / Canary live channel
+        # has no native VAD, so "backend" gating would silently leave
+        # no gate at all. UI auto-greys this, but old clients won't.
+        raise HTTPException(
+            400,
+            "current live channel has no native VAD; gate_kind='backend' is not supported",
+        )
+
+    gate_speech_threshold = _parse_bounded_float(
+        body.get("gate_speech_threshold"), "gate_speech_threshold", lo=0.0, hi=1.0
+    )
+    gate_hangover_ms = _parse_bounded_int(body.get("gate_hangover_ms"), "gate_hangover_ms", lo=0, hi=10_000)
+    gate_pre_roll_ms = _parse_bounded_int(body.get("gate_pre_roll_ms"), "gate_pre_roll_ms", lo=0, hi=5_000)
+
+    if recorder.live.matches(
+        model=model,
+        language=language,
+        gate_kind=gate_kind,
+        conf=conf,
+        gate_speech_threshold=gate_speech_threshold,
+        gate_hangover_ms=gate_hangover_ms,
+        gate_pre_roll_ms=gate_pre_roll_ms,
+    ):
         return {
             "ok": True,
             "msg": "already running with requested config",
             "state": recorder.live.info["state"],
         }
 
-    # Announce the transition (replaces vac/conf in config, flips info to
-    # "starting" with the new model/language) BEFORE we tear down the old
-    # child or fetch weights — otherwise dashboards polling /api/state
-    # during the stop→start window would render the previous selection.
-    recorder.live.begin_transition(model=model, language=language, vac=vac, conf=conf)
+    # Announce the transition (replaces gate config + conf in LiveConfig,
+    # flips info to "starting" with the new model/language) BEFORE we
+    # tear down the old child or fetch weights — otherwise dashboards
+    # polling /api/state during the stop→start window would render the
+    # previous selection.
+    recorder.live.begin_transition(
+        model=model,
+        language=language,
+        gate_kind=gate_kind,
+        conf=conf,
+        gate_speech_threshold=gate_speech_threshold,
+        gate_hangover_ms=gate_hangover_ms,
+        gate_pre_roll_ms=gate_pre_roll_ms,
+    )
 
     if recorder.live.running():
         await asyncio.to_thread(recorder.live.stop)

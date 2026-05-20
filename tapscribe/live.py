@@ -30,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from .nb_whisper import download_nb_whisper_ct2_dir
 from .text import read_prompt
@@ -57,18 +57,34 @@ class LiveChannel(Protocol):
     log: deque[str]
     use_mlx: bool
     config: LiveConfig
+    # True when the backend has its own native VAD that can be enabled/
+    # disabled. WhisperLiveKit does (via --vac / --no-vac), so True.
+    # Future Parakeet / Canary live channels that don't run their own
+    # VAD will set this False — the dashboard then greys out the
+    # "backend" option for gate_kind, since picking it would be a no-op.
+    supports_native_vad: bool
 
     def running(self) -> bool: ...
 
-    def matches(self, *, model: str | None, language: str | None, vac, conf) -> bool: ...
+    def matches(
+        self,
+        *,
+        model: str | None,
+        language: str | None,
+        gate_kind: str | None,
+        conf: bool | None,
+    ) -> bool: ...
 
     def begin_transition(
         self,
         *,
         model: str | None = None,
         language: str | None = None,
-        vac: bool | None = None,
+        gate_kind: str | None = None,
         conf: bool | None = None,
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
     ) -> None: ...
 
     def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]: ...
@@ -95,7 +111,22 @@ class LiveConfig:
     language: str
     host: str
     port: int
-    vac: bool = True
+    # Which layer runs speech gating.
+    #   "tapscribe" → TapScribe's own SpeechGate (Silero) sits in front
+    #                 of the relay; WlK runs with --no-vac. Recovers
+    #                 leading consonants via pre-roll and is backend-
+    #                 agnostic (future Parakeet / Canary live channels
+    #                 plug into the same gate). Default.
+    #   "backend"  → defer to the backend's native VAD (--vac on for WlK).
+    #                 No pre-roll, no leading-word recovery — kept as an
+    #                 escape hatch for A/B comparison and for backends
+    #                 whose native VAD is good enough.
+    gate_kind: Literal["tapscribe", "backend"] = "tapscribe"
+    # Operator-tunable thresholds for the TapScribe gate. Consumed by
+    # SpeechGate (NOT by build_live_cmd / WlK).
+    gate_speech_threshold: float = 0.5  # Silero speech probability gate
+    gate_hangover_ms: int = 400  # post-speech silence before close
+    gate_pre_roll_ms: int = 300  # ring buffer flushed on open
     confidence_validation: bool = True
     # Forwarded to whisperlivekit-server when set — see build_live_cmd.
     min_chunk_size: float | None = None
@@ -142,7 +173,12 @@ def build_live_cmd(
         str(config.port),
         "--pcm-input",
     ]
-    if not config.vac:
+    # gate_kind=="tapscribe" means our own SpeechGate is gating PCM
+    # before it reaches WlK, so WlK's native VAC must be off. The
+    # operator-tunable gate knobs (gate_speech_threshold, gate_*_ms)
+    # are consumed by SpeechGate on the TapScribe side — they do NOT
+    # appear in WlK's argv.
+    if config.gate_kind == "tapscribe":
         cmd.append("--no-vac")
     if config.confidence_validation:
         cmd.append("--confidence-validation")
@@ -280,7 +316,13 @@ def _initial_info() -> dict[str, str]:
         "last_error": "",
         "pid": "",
         "started_at": "",
-        "vac": "",  # "on" / "off"
+        # gate_kind = "tapscribe" | "backend" — which layer runs speech
+        # gating. Surfaced in /api/state so the dashboard's gate-kind
+        # selector reflects the active config.
+        "gate_kind": "",
+        "gate_speech_threshold": "",
+        "gate_hangover_ms": "",
+        "gate_pre_roll_ms": "",
         "confidence_validation": "",  # "on" / "off"
     }
 
@@ -319,20 +361,43 @@ class WhisperLiveKitChannel:
         self.info["port"] = str(config.port)
         self.info["backend"] = "mlx-whisper" if use_mlx else "faster-whisper"
         self.info["device"] = "Apple Silicon GPU" if use_mlx else "CPU"
+        # Seed gate info too so the dashboard's selector / sliders show
+        # the right values before the first start().
+        self.info["gate_kind"] = config.gate_kind
+        self.info["gate_speech_threshold"] = f"{config.gate_speech_threshold:.2f}"
+        self.info["gate_hangover_ms"] = str(config.gate_hangover_ms)
+        self.info["gate_pre_roll_ms"] = str(config.gate_pre_roll_ms)
+        self.info["confidence_validation"] = "on" if config.confidence_validation else "off"
+
+    supports_native_vad: bool = True  # --vac / --no-vac flag exists
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def matches(self, *, model: str | None, language: str | None, vac, conf) -> bool:
+    def matches(
+        self,
+        *,
+        model: str | None,
+        language: str | None,
+        gate_kind: str | None,
+        conf: bool | None,
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
+    ) -> bool:
         """True when a running child already satisfies the requested config.
-        `vac` and `conf` are None when the caller doesn't want to change
-        them; they only require a restart when explicitly supplied."""
+        Optional args are None when the caller doesn't want to change them;
+        any explicitly-supplied value that differs from current config
+        forces a restart."""
         return (
             self.running()
             and (not model or model == self.config.model)
             and (not language or language == self.config.language)
-            and vac is None
+            and (gate_kind is None or gate_kind == self.config.gate_kind)
             and conf is None
+            and gate_speech_threshold is None
+            and gate_hangover_ms is None
+            and gate_pre_roll_ms is None
         )
 
     def begin_transition(
@@ -340,22 +405,35 @@ class WhisperLiveKitChannel:
         *,
         model: str | None = None,
         language: str | None = None,
-        vac: bool | None = None,
+        gate_kind: str | None = None,
         conf: bool | None = None,
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
     ) -> None:
         """Announce that a (re)start with the supplied overrides is about
-        to happen. Replaces `config` for vac/conf so the next `start()`
-        spawns with the new values, and flips `info` to `state="starting"`
-        with the new model/language reflected — so dashboards polling
-        /api/state during the stop→start window don't see the previous
-        selection. `start()` will overwrite `state` again on success;
-        this method ensures the transition itself is observable."""
-        if vac is not None or conf is not None:
-            self.config = replace(
-                self.config,
-                vac=bool(vac) if vac is not None else self.config.vac,
-                confidence_validation=bool(conf) if conf is not None else self.config.confidence_validation,
-            )
+        to happen. Replaces `config` for the supplied knobs so the next
+        `start()` spawns with the new values, and flips `info` to
+        `state="starting"` with the new model/language reflected — so
+        dashboards polling /api/state during the stop→start window don't
+        see the previous selection. `start()` will overwrite `state`
+        again on success; this method ensures the transition itself is
+        observable."""
+        replacements: dict[str, Any] = {}
+        if gate_kind is not None:
+            if gate_kind not in ("tapscribe", "backend"):
+                raise ValueError(f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
+            replacements["gate_kind"] = gate_kind
+        if conf is not None:
+            replacements["confidence_validation"] = bool(conf)
+        if gate_speech_threshold is not None:
+            replacements["gate_speech_threshold"] = float(gate_speech_threshold)
+        if gate_hangover_ms is not None:
+            replacements["gate_hangover_ms"] = int(gate_hangover_ms)
+        if gate_pre_roll_ms is not None:
+            replacements["gate_pre_roll_ms"] = int(gate_pre_roll_ms)
+        if replacements:
+            self.config = replace(self.config, **replacements)
         self.info["state"] = "starting"
         self.info["last_error"] = ""
         if model is not None:
@@ -460,7 +538,10 @@ class WhisperLiveKitChannel:
             self.info["port"] = str(self.config.port)
             self.info["backend"] = "mlx-whisper" if self.use_mlx else "faster-whisper"
             self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
-            self.info["vac"] = "on" if self.config.vac else "off"
+            self.info["gate_kind"] = self.config.gate_kind
+            self.info["gate_speech_threshold"] = f"{self.config.gate_speech_threshold:.2f}"
+            self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
+            self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
             self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
             self.info["state"] = "starting"
             self.info["last_error"] = ""

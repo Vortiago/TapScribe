@@ -281,6 +281,94 @@ def test_api_state_active_rows_include_level_for_the_dashboard_meter(client, rec
     assert row["level"] == pytest.approx(0.73)
 
 
+def test_api_state_active_rows_include_buffer_transcription(client, recorder_under_test):
+    """The dashboard's per-tap in-flight indicator reads
+    `buffer_transcription` off each entry. JSON contract pin so an
+    asdict refactor that drops the new field surfaces immediately."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(
+        recorder_under_test.streams.register(
+            ActiveStream(
+                conn_id="abc-buf",
+                identity="buf-test",
+                name="Buf",
+                filename="buf.wav",
+                started_at=datetime.now(timezone.utc),
+                buffer_transcription="words in flight",
+            )
+        )
+    )
+
+    body = client.get("/api/state").json()
+    row = next(a for a in body["active"] if a["identity"] == "buf-test")
+    assert row.get("buffer_transcription") == "words in flight"
+
+
+def test_api_state_live_info_carries_gate_config(client, recorder_under_test):
+    """The dashboard's gate-kind dropdown + sliders read live_info to
+    seed their default values. gate_kind / gate_speech_threshold /
+    gate_hangover_ms / gate_pre_roll_ms must all be present."""
+    body = client.get("/api/state").json()
+    li = body["live_info"]
+    assert li.get("gate_kind") in ("tapscribe", "backend")
+    assert li.get("gate_speech_threshold")  # non-empty string
+    assert li.get("gate_hangover_ms")
+    assert li.get("gate_pre_roll_ms")
+
+
+def test_api_state_exposes_live_supports_native_vad(client):
+    """The dashboard greys out the "backend" gate_kind option when the
+    current LiveChannel implementation has no native VAD. WhisperLiveKit
+    has --vac, so this is True for the default channel."""
+    body = client.get("/api/state").json()
+    assert body.get("live_supports_native_vad") is True
+
+
+def test_live_start_rejects_invalid_gate_kind(client):
+    """The dashboard is the only sanctioned source for gate_kind, but
+    a stale or hand-crafted POST that doesn't pass "tapscribe" /
+    "backend" must surface as a 400 — not a 500 from a downstream
+    ValueError. CodeQL treats Request.json() as untrusted input."""
+    r = client.post("/api/live/start", json={"gate_kind": "backendd"})
+    assert r.status_code == 400, r.text
+    assert "gate_kind" in r.text
+
+
+def test_live_start_rejects_backend_gate_kind_when_unsupported(client, recorder_under_test, monkeypatch):
+    """A stale dashboard might POST gate_kind=backend to a future
+    channel without a native VAD. UI auto-greys but isn't enforced —
+    server-side validation prevents it from silently bypassing the
+    only working gate."""
+    monkeypatch.setattr(recorder_under_test.live, "supports_native_vad", False, raising=False)
+    r = client.post("/api/live/start", json={"gate_kind": "backend"})
+    assert r.status_code == 400, r.text
+    assert "native" in r.text.lower() or "supports" in r.text.lower()
+
+
+def test_live_start_rejects_out_of_range_gate_knobs(client):
+    """HTML min/max are client-side hints. Server must clamp / reject
+    so a malicious or stale client can't push the gate into nonsense
+    (negative thresholds, year-long hangovers)."""
+    for bad in (
+        {"gate_speech_threshold": -0.1},
+        {"gate_speech_threshold": 1.5},
+        {"gate_hangover_ms": -50},
+        {"gate_hangover_ms": 10**7},  # ~3 hours
+        {"gate_pre_roll_ms": -1},
+        {"gate_pre_roll_ms": 10**7},
+    ):
+        r = client.post("/api/live/start", json=bad)
+        assert r.status_code == 400, f"{bad!r} returned {r.status_code}: {r.text}"
+
+
+def test_live_start_rejects_unparseable_gate_knobs(client):
+    """Numeric fields with non-numeric strings must surface as 400,
+    not a 500 from `float("hello")`."""
+    r = client.post("/api/live/start", json={"gate_speech_threshold": "loud"})
+    assert r.status_code == 400, r.text
+
+
 def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_test):
     """The per-row rec/live toggles render their state from the active
     entry's record/live fields. Those must follow the *current*
@@ -642,7 +730,18 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
     body = client.get("/api/state").json()
     s = next(s for s in body["sessions"] if s["session"] == "s")
     row = next(f for f in s["files"] if f["name"] == wav.name)
-    assert row["transcripts"] == [{"backend": "faster-whisper", "model": "small.en", "is_primary": True}]
+    # Compare the contract fields only — wav_cache.transcripts_listing
+    # optionally surfaces `transcribe_ms` when the underlying transcribe
+    # call ran for >0 ms (Windows / loaded CI). That's a perf detail,
+    # not part of the legacy-sidecar wire contract this test pins.
+    listing = row["transcripts"]
+    assert len(listing) == 1
+    entry = listing[0]
+    assert {"backend": entry["backend"], "model": entry["model"], "is_primary": entry["is_primary"]} == {
+        "backend": "faster-whisper",
+        "model": "small.en",
+        "is_primary": True,
+    }
 
 
 def test_api_transcribe_returns_freshly_written_transcript(client, recorder_under_test, monkeypatch):

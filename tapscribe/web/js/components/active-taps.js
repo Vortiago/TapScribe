@@ -83,6 +83,43 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
       btn.dataset.state = on ? "1" : "0";
       btn.classList.toggle("on", on);
     }
+
+    // Three-state status line under each tap row:
+    //   ⟳ <text>      — model is transcribing the latest hypothesis
+    //   ⟳ listening…  — audio is being forwarded but nothing decoded yet
+    //   ⏸ quiet       — gate is closed (no speech detected)
+    // Hidden when LIVE is off, or when we have nothing meaningful to show
+    // (e.g. backend-gate mode with no buffer text — we can't tell what
+    // the backend's own VAD is doing, so we stay silent).
+    const bufRow = pick(node, "bufferRow");
+    const bufText = pick(node, "bufferText");
+    const bufIcon = pick(node, "bufferIcon");
+    const buf = (a.buffer_transcription || "").trim();
+    const gateOpen = !!a.gate_open;
+    if (bufRow && bufText && bufIcon) {
+      let icon = "";
+      let text = "";
+      let cls = "";
+      if (liveOn) {
+        if (buf) {
+          icon = "⟳"; text = buf; cls = "buf-active";
+        } else if (gateOpen) {
+          icon = "⟳"; text = "listening…"; cls = "buf-listening";
+        } else {
+          icon = "⏸"; text = "quiet"; cls = "buf-quiet";
+        }
+      }
+      if (text) {
+        bufRow.hidden = false;
+        bufIcon.textContent = icon;
+        bufText.textContent = text;
+        bufRow.className = "stream-buffer " + cls;
+      } else {
+        bufRow.hidden = true;
+        bufText.textContent = "";
+      }
+    }
+
     frag.appendChild(node);
   }
   bodyEl.replaceChildren(frag);

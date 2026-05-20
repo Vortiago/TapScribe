@@ -19,10 +19,10 @@ import asyncio
 import os
 import secrets
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 # ---------------------------------------------------------------------------
 # ActiveStreams — /record WebSocket connections currently writing WAVs
@@ -58,6 +58,17 @@ class ActiveStream:
     # live is off; surfaced in /api/state so the dashboard can render a
     # per-row backlog indicator.
     lag_s: float | None = None
+    # WlK's latest in-flight (uncommitted) hypothesis text, before
+    # it commits to `lines`. Drives the dashboard's "⟳ <text>" indicator.
+    buffer_transcription: str = ""
+    # True while TapScribe's SpeechGate is forwarding audio (mid-burst,
+    # pre-roll + hangover included). Only meaningful when gate_kind=
+    # "tapscribe"; under "backend" we can't see the backend VAD's state
+    # so it stays False.
+    gate_open: bool = False
+
+
+_ACTIVE_STREAM_FIELDS = frozenset(f.name for f in fields(ActiveStream))
 
 
 class ActiveStreams:
@@ -80,6 +91,23 @@ class ActiveStreams:
         async with self._lock:
             self._by_id.pop(conn_id, None)
 
+    async def _apply(self, conn_id: str, **fields) -> None:
+        """Set one or more fields on the ActiveStream with `conn_id`.
+        No-op when the conn_id is unknown — the WS handler can race
+        against close() and call us after the entry's been removed.
+
+        Typo'd field names raise `AttributeError` rather than silently
+        setting a phantom attribute on the dataclass."""
+        for k in fields:
+            if k not in _ACTIVE_STREAM_FIELDS:
+                raise AttributeError(f"ActiveStream has no field {k!r}")
+        async with self._lock:
+            existing = self._by_id.get(conn_id)
+            if existing is None:
+                return
+            for k, v in fields.items():
+                setattr(existing, k, v)
+
     async def update_bytes(
         self,
         conn_id: str,
@@ -87,26 +115,26 @@ class ActiveStreams:
         *,
         level: float | None = None,
     ) -> None:
-        """No-op when the conn_id is unknown — the WS handler can race
-        against close and call us after the entry's been removed.
-
-        `level` is the per-frame volume-meter sample (0.0–1.0). Passed
+        """`level` is the per-frame volume-meter sample (0.0–1.0). Passed
         alongside the byte count so the dashboard's active-streams panel
-        gets both updates from a single lock acquire instead of two."""
-        async with self._lock:
-            existing = self._by_id.get(conn_id)
-            if existing is not None:
-                existing.bytes_received = bytes_received
-                if level is not None:
-                    existing.level = level
+        gets both updates from a single lock acquire instead of two.
+        Missing `level` (e.g. resume path before the first new frame)
+        leaves the previous level untouched."""
+        fields: dict[str, Any] = {"bytes_received": bytes_received}
+        if level is not None:
+            fields["level"] = level
+        await self._apply(conn_id, **fields)
 
     async def update_lag(self, conn_id: str, lag_s: float | None) -> None:
-        """Same race semantics as update_bytes: harmless when the conn_id
-        has already been removed."""
-        async with self._lock:
-            existing = self._by_id.get(conn_id)
-            if existing is not None:
-                existing.lag_s = lag_s
+        await self._apply(conn_id, lag_s=lag_s)
+
+    async def update_gate_open(self, conn_id: str, gate_open: bool) -> None:
+        await self._apply(conn_id, gate_open=gate_open)
+
+    async def update_buffer_transcription(self, conn_id: str, text: str) -> None:
+        # Empty `text` is a real value (text just committed out of the
+        # buffer), not a sentinel — clear the dashboard indicator.
+        await self._apply(conn_id, buffer_transcription=text)
 
     async def snapshot(self) -> list[ActiveStream]:
         async with self._lock:

@@ -86,6 +86,12 @@ def recorder_with_relay(tmp_path: Path, fake_wlk: FakeWlkThread) -> Recorder:
             language="en",
             host="localhost",
             port=fake_wlk.port,
+            # Relay-focused tests pre-date the TapScribe gate and feed
+            # near-silent synthetic PCM that real Silero would block.
+            # Pin them to backend-mode gating to keep their semantics —
+            # gate-specific behavior is exercised separately by the
+            # tests that set gate_kind="tapscribe" explicitly.
+            gate_kind="backend",
         ),
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
@@ -632,6 +638,249 @@ async def test_relay_settled_lines_land_in_live_transcripts(
     for entry in snap:
         assert entry["identity"] == "alice"
         assert entry["name"] == "Alice"
+
+
+async def test_tapscribe_gate_blocks_silence_from_reaching_relay(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With gate_kind="tapscribe" and a VAD that never says start, the
+    gate stays closed and no PCM should leak through to WlK — even
+    though we're feeding frames to write_frame at full rate. WAV write
+    is unaffected (silence still hits disk)."""
+    from dataclasses import replace as dc_replace
+
+    from tapscribe.speech_gate import SpeechGate
+
+    # Force gate_kind="tapscribe" on the recorder's LiveConfig.
+    recorder_with_relay.live.config = dc_replace(
+        recorder_with_relay.live.config, gate_kind="tapscribe", gate_pre_roll_ms=0
+    )
+
+    def _never_starts(*args, **kwargs):
+        def analyze(chunk):
+            return None
+
+        return SpeechGate(vad=analyze, pre_roll_ms=0)
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _never_starts)
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-gate-silence",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        for _ in range(20):
+            await fan_out.write_frame(PCM_FRAME)
+        # Give the relay a beat to push anything queued (there shouldn't
+        # be any). Polling rather than sleeping so the test fails fast
+        # if bytes DO leak through.
+        await asyncio.sleep(0.05)
+
+    # Nothing reached WlK — the gate ate every frame.
+    assert sum(len(c) for c in fake_wlk.received) == 0
+    # WAV still got all the frames written to disk.
+    wavs = list(recorder_with_relay.session_dir.glob("*.wav"))
+    assert len(wavs) == 1
+    with wave.open(str(wavs[0]), "rb") as w:
+        assert w.getnframes() == 320 * 20
+
+
+async def test_tapscribe_gate_passes_speech_frames_through(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With gate_kind="tapscribe" and a VAD that opens immediately,
+    PCM frames reach WlK normally — gating is a filter, not a wall."""
+    from dataclasses import replace as dc_replace
+
+    from tapscribe.speech_gate import SpeechGate
+
+    recorder_with_relay.live.config = dc_replace(
+        recorder_with_relay.live.config, gate_kind="tapscribe", gate_pre_roll_ms=0
+    )
+
+    def _opens_immediately(*args, **kwargs):
+        # Return start on the very first VAD call; None forever after.
+        sent_start = [False]
+
+        def analyze(chunk):
+            if not sent_start[0]:
+                sent_start[0] = True
+                return {"start": 0}
+            return None
+
+        return SpeechGate(vad=analyze, pre_roll_ms=0)
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _opens_immediately)
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-gate-speech",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        # First frame buffers (640 < 1024) — no VAD run. Second frame
+        # triggers VAD start; from then on every frame flows through.
+        for _ in range(5):
+            await fan_out.write_frame(PCM_FRAME)
+        # Most of the frames should have round-tripped to WlK.
+        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 3)
+
+
+async def test_backend_gate_kind_passes_all_frames_without_a_gate(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+):
+    """With gate_kind="backend", TapFanOut does NOT instantiate a
+    SpeechGate — bytes pass straight through to the relay (today's
+    behaviour preserved as the operator-facing escape hatch)."""
+    from dataclasses import replace as dc_replace
+
+    recorder_with_relay.live.config = dc_replace(recorder_with_relay.live.config, gate_kind="backend")
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-backend-gate",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        for _ in range(3):
+            await fan_out.write_frame(PCM_FRAME)
+        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 3)
+
+
+async def test_gate_construction_failure_falls_back_to_passthrough(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """If build_gate_for_config raises (Silero missing, bad config),
+    the /tap must keep working with passthrough — losing the gate is
+    a degraded experience, but a dropped tap is unacceptable."""
+    from dataclasses import replace as dc_replace
+
+    recorder_with_relay.live.config = dc_replace(recorder_with_relay.live.config, gate_kind="tapscribe")
+
+    def _exploding_factory(*args, **kwargs):
+        raise RuntimeError("silero unavailable")
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _exploding_factory)
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-gate-fail",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        await fan_out.write_frame(PCM_FRAME)
+        # Passthrough — frame reaches WlK despite the gate exploding.
+        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
+
+
+async def test_gate_open_state_propagates_to_active_stream(
+    recorder_with_relay: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When the SpeechGate transitions open or closed, the per-tap
+    ActiveStream.gate_open must follow. The dashboard's status-line
+    rendering relies on this — operators see ⟳ vs ⏸ from this flag."""
+    from dataclasses import replace as dc_replace
+
+    from tapscribe.speech_gate import SpeechGate
+
+    recorder_with_relay.live.config = dc_replace(
+        recorder_with_relay.live.config, gate_kind="tapscribe", gate_pre_roll_ms=0
+    )
+
+    # VAD queue: open on call #1, then close on call #2.
+    def _open_then_close(*args, **kwargs):
+        events = [{"start": 0}, None, {"end": 0}]
+
+        def analyze(chunk):
+            return events.pop(0) if events else None
+
+        return SpeechGate(vad=analyze, pre_roll_ms=0)
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _open_then_close)
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-gate-state",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        # Initially closed.
+        snap = await recorder_with_relay.streams.snapshot()
+        assert snap[0].gate_open is False
+
+        # Frame 1 (640 buffered, no VAD run yet).
+        await fan_out.write_frame(PCM_FRAME)
+        # Frame 2 (1280 buffered → VAD runs → start). Gate flips open.
+        await fan_out.write_frame(PCM_FRAME)
+        snap = await recorder_with_relay.streams.snapshot()
+        assert snap[0].gate_open is True
+
+        # Frames 3, 4 keep it open (VAD call #2 returns None).
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out.write_frame(PCM_FRAME)
+        # Frame 5 fires VAD call #3 → end. Gate flips closed.
+        await fan_out.write_frame(PCM_FRAME)
+        snap = await recorder_with_relay.streams.snapshot()
+        assert snap[0].gate_open is False
+
+
+async def test_relay_buffer_transcription_updates_active_stream(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+):
+    """The relay's on_buffer callback must land on
+    ActiveStream.buffer_transcription so the dashboard's per-tap
+    in-flight indicator updates. Use gate_kind="backend" to keep this
+    test focused on the relay→stream wiring without involving the
+    gate's own state machine."""
+    from dataclasses import replace as dc_replace
+
+    recorder_with_relay.live.config = dc_replace(recorder_with_relay.live.config, gate_kind="backend")
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-buf-wire",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        # Send a frame so the relay is alive and the fake server is
+        # connected; then push a snapshot with a buffer_transcription.
+        await fan_out.write_frame(PCM_FRAME)
+        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
+        fake_wlk.push_buffer("in flight tail")
+
+        async def _has_buffer() -> bool:
+            snap = await recorder_with_relay.streams.snapshot()
+            return any(s.buffer_transcription == "in flight tail" for s in snap)
+
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while asyncio.get_event_loop().time() < deadline:
+            if await _has_buffer():
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("buffer_transcription never landed on the active stream")
 
 
 async def test_relay_skipped_when_live_channel_not_running(recorder: Recorder):

@@ -57,6 +57,7 @@ class WlKRelay:
         language: str,
         on_settled_line: Callable[[str], None],
         on_metrics: Callable[[float], Awaitable[None]] | None = None,
+        on_buffer: Callable[[str], None] | None = None,
         drain_timeout: float = 1.0,
     ):
         self._host = host
@@ -64,6 +65,9 @@ class WlKRelay:
         self._language = language
         self._on_settled_line = on_settled_line
         self._on_metrics = on_metrics
+        # Fired with WlK's `buffer_transcription` only on change
+        # (including the transition to "" when text commits out).
+        self._on_buffer = on_buffer
         self._drain_timeout = drain_timeout
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._consumer: asyncio.Task | None = None
@@ -73,6 +77,9 @@ class WlKRelay:
         # in-flight tail); on close-drain we also emit the tail.
         self._emitted_count: int = 0
         self._last_snapshot: list[dict] = []
+        # Used to dedupe on_buffer calls and to rescue residual
+        # uncommitted text on close (see _flush_tail).
+        self._last_buffer: str = ""
         # Latest `remaining_time_transcription` value WlK reported on this
         # connection. Whisperlivekit's internal `lag=`/`internal_buffer=`
         # heartbeat is log-only and has no connection id; this field is
@@ -172,6 +179,16 @@ class WlKRelay:
                     if self._on_metrics is not None:
                         with contextlib.suppress(Exception):
                             await self._on_metrics(self.lag_s)
+                # In-flight buffer (uncommitted hypothesis). Surface it
+                # only on change so the dashboard doesn't get hammered
+                # with redundant updates when WlK ticks at 2 Hz with the
+                # same text in flight.
+                raw_buf = data.get("buffer_transcription")
+                if isinstance(raw_buf, str) and raw_buf != self._last_buffer:
+                    self._last_buffer = raw_buf
+                    if self._on_buffer is not None:
+                        with contextlib.suppress(Exception):
+                            self._on_buffer(raw_buf)
                 snapshot = data.get("lines")
                 if not isinstance(snapshot, list):
                     continue
@@ -198,10 +215,21 @@ class WlKRelay:
             self._on_settled_line(text)
 
     def _flush_tail(self) -> None:
-        """Emit any held-back tail lines from the last snapshot. Called
-        once on close — sees every line whose position the consumer
-        hadn't yet superseded with a newer entry."""
+        """Emit any held-back tail lines from the last snapshot, plus any
+        in-flight `buffer_transcription` that didn't make it into a
+        committed line before close. Plus rescues any non-empty
+        `buffer_transcription` as a final settled line — without
+        this, the trailing word(s) of every utterance that hadn't
+        cleared LocalAgreement-2 by close time would silently drop.
+        """
         snapshot = self._last_snapshot
         while self._emitted_count < len(snapshot):
             self._emit_line(snapshot[self._emitted_count])
             self._emitted_count += 1
+        tail = (self._last_buffer or "").strip()
+        if tail:
+            self._on_settled_line(tail)
+            self._last_buffer = ""
+            if self._on_buffer is not None:
+                with contextlib.suppress(Exception):
+                    self._on_buffer("")

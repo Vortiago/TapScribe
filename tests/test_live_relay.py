@@ -292,6 +292,107 @@ async def test_relay_ignores_lines_without_text(fake_wlk: _FakeWlk):
     await relay.close()
 
 
+async def test_relay_pushes_buffer_transcription_to_on_buffer_callback(fake_wlk: _FakeWlk):
+    """WlK's response carries the in-flight (uncommitted) hypothesis text
+    in `buffer_transcription` on every snapshot. The relay forwards this
+    to `on_buffer` so the dashboard's per-tap row can render "what
+    Whisper is currently transcribing" before it commits to `lines`.
+    """
+    bufs: list[str] = []
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lambda _t: None,
+        on_buffer=bufs.append,
+    )
+    await relay.connect()
+    await fake_wlk.push_lines_snapshot([], buffer_transcription="hello in flight")
+    await _wait_for(lambda: bufs == ["hello in flight"])
+    await fake_wlk.push_lines_snapshot([], buffer_transcription="hello world in flight")
+    await _wait_for(lambda: bufs == ["hello in flight", "hello world in flight"])
+    await relay.close()
+
+
+async def test_relay_emits_empty_buffer_when_text_commits_to_lines(fake_wlk: _FakeWlk):
+    """Once Whisper commits its in-flight text to `lines`, WlK sets
+    `buffer_transcription` back to "". The relay must surface that
+    transition so the dashboard's in-flight indicator clears."""
+    bufs: list[str] = []
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lambda _t: None,
+        on_buffer=bufs.append,
+    )
+    await relay.connect()
+    await fake_wlk.push_lines_snapshot([], buffer_transcription="growing tail")
+    await _wait_for(lambda: bufs == ["growing tail"])
+    # Now the tail is committed and the buffer empties.
+    await fake_wlk.push_lines_snapshot(
+        [{"text": "growing tail", "speaker": 1, "start": 0.0, "end": 1.0}],
+        buffer_transcription="",
+    )
+    await _wait_for(lambda: bufs == ["growing tail", ""])
+    await relay.close()
+
+
+async def test_relay_close_flushes_trailing_buffer_transcription(fake_wlk: _FakeWlk):
+    """The bug we're fixing: on `/tap` close, the trailing words still
+    in `buffer_transcription` were getting dropped on the floor.
+    `_flush_tail` now also emits the non-empty buffer as a final
+    settled line so those words reach the chat log."""
+    lines = _SignalList()
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lines.append,
+        on_buffer=lambda _t: None,
+    )
+    await relay.connect()
+    # Send a snapshot with one committed line and an in-flight tail.
+    # The committed line is the relay's "held tail" (in-flight position
+    # in `lines`) — but here we also have buffer_transcription content
+    # that's not yet in `lines`.
+    await fake_wlk.push_lines_snapshot(
+        [{"text": "committed sentence", "speaker": 1, "start": 0.0, "end": 1.5}],
+        buffer_transcription="trailing words that didn't commit",
+    )
+    # No lines emitted yet — single committed entry is the held tail.
+    await asyncio.sleep(0.02)
+    assert list(lines) == []
+    # Close → flush. Both the held tail AND the buffer_transcription
+    # land in `lines`.
+    await relay.close()
+    assert "committed sentence" in lines
+    assert "trailing words that didn't commit" in lines
+
+
+async def test_relay_close_with_empty_buffer_does_not_emit_phantom_line(fake_wlk: _FakeWlk):
+    """When `buffer_transcription` is empty at close time, no phantom
+    empty line should appear — that would clutter LiveTranscripts with
+    blank entries every time the gate sees clean speech→silence."""
+    lines = _SignalList()
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lines.append,
+        on_buffer=lambda _t: None,
+    )
+    await relay.connect()
+    await fake_wlk.push_lines_snapshot(
+        [{"text": "tail", "speaker": 1, "start": 0.0, "end": 1.0}],
+        buffer_transcription="",
+    )
+    await asyncio.sleep(0.02)
+    await relay.close()
+    # Only the held tail line; no extra empty.
+    assert list(lines) == ["tail"]
+
+
 async def test_relay_connect_returns_false_on_unreachable_target():
     """When WlK isn't running, connect() returns False without raising.
     The /tap handler relies on this to decide whether to attempt sends."""
