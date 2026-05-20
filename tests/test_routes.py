@@ -581,6 +581,78 @@ def test_session_meta_404s_for_nonexistent_session(client):
 
 
 # ---------------------------------------------------------------------------
+# Session-meta: per-session prompt / hotwords overrides. These persist in
+# session-meta.json next to label + aliases. Override chain for batch jobs
+# is: session-meta → global config/prompt.txt — the per-job ephemeral form
+# field that used to ride in the /api/transcribe* body is gone.
+# ---------------------------------------------------------------------------
+
+
+def test_session_meta_round_trips_prompt_and_hotwords(client, recorder_under_test):
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    payload = {"prompt": "team kickoff · Alice, Bob, Patricia", "hotwords": "Acme, Patricia Lin"}
+    r = client.put("/api/session-meta/fakesession", json=payload)
+    assert r.status_code == 200
+    meta = r.json()["meta"]
+    assert meta["prompt"] == payload["prompt"]
+    assert meta["hotwords"] == payload["hotwords"]
+    assert client.get("/api/session-meta/fakesession").json()["prompt"] == payload["prompt"]
+
+
+def test_session_meta_drops_non_string_prompt_and_hotwords(client, recorder_under_test):
+    """Bad payload shouldn't kill the read path. Non-string fields are
+    dropped silently, matching how label/aliases already behave."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    r = client.put("/api/session-meta/fakesession", json={"prompt": 42, "hotwords": ["nope"]})
+    assert r.status_code == 200
+    meta = r.json()["meta"]
+    assert "prompt" not in meta or meta["prompt"] == ""
+    assert "hotwords" not in meta or meta["hotwords"] == ""
+
+
+def test_session_meta_preserves_label_when_setting_prompt(client, recorder_under_test):
+    """Partial updates: setting prompt mustn't wipe an existing label."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    client.put("/api/session-meta/fakesession", json={"label": "kickoff"})
+    client.put("/api/session-meta/fakesession", json={"prompt": "context"})
+    meta = client.get("/api/session-meta/fakesession").json()
+    assert meta["label"] == "kickoff"
+    assert meta["prompt"] == "context"
+
+
+def test_api_state_sessions_include_meta_prompt_and_hotwords(client, recorder_under_test):
+    """The dashboard renders the override badge in the session-detail
+    pane off the meta block. /api/state's per-session entry must surface
+    these so the JS doesn't need a second round-trip per session."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    client.put("/api/session-meta/fakesession", json={"prompt": "P", "hotwords": "H"})
+    body = client.get("/api/state").json()
+    row = next(s for s in body["sessions"] if s["session"] == "fakesession")
+    assert row["session_meta"]["prompt"] == "P"
+    assert row["session_meta"]["hotwords"] == "H"
+
+
+def test_api_state_reports_default_override_counts(client, recorder_under_test):
+    """The 'default config' panel shows '· N sessions override this' next
+    to each editor. /api/state exposes the counts so the JS doesn't have
+    to walk every session."""
+    base = recorder_under_test.recordings_dir
+    for name in ("s1", "s2", "s3"):
+        (base / name).mkdir()
+    client.put("/api/session-meta/s1", json={"prompt": "x"})
+    client.put("/api/session-meta/s2", json={"prompt": "y", "hotwords": "z"})
+    client.put("/api/session-meta/s3", json={"label": "no override"})
+    body = client.get("/api/state").json()
+    counts = body["default_override_counts"]
+    assert counts["prompt"] == 2
+    assert counts["hotwords"] == 1
+
+
+# ---------------------------------------------------------------------------
 # /api/sessions/{target}/absorb
 # ---------------------------------------------------------------------------
 
@@ -859,6 +931,64 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
         "model": "small.en",
         "is_primary": True,
     }
+
+
+def test_api_transcribe_uses_session_meta_prompt_when_set(client, recorder_under_test, monkeypatch):
+    """Override chain (per-WAV batch): session-meta.prompt → global
+    prompt.txt. The ephemeral form-typed override that used to ride in
+    the request body is gone — the persisted meta is the source of truth."""
+    captured = {}
+
+    class _Spy(TranscriberStub):
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+            captured["initial_prompt"] = initial_prompt
+            captured["hotwords"] = hotwords
+            return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
+
+    fake = _Spy(backend="fake-backend", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
+    (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL", encoding="utf-8")
+    (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
+    client.put("/api/session-meta/s", json={"prompt": "SESSION OVERRIDE", "hotwords": "Patricia"})
+
+    client.post(
+        "/api/transcribe",
+        json={"session": "s", "name": "20260101T010000Z__alice__abc.wav", "model": "fake-small.en"},
+    )
+    assert captured["initial_prompt"] == "SESSION OVERRIDE"
+    assert captured["hotwords"] == "Patricia"
+
+
+def test_api_transcribe_falls_back_to_global_when_session_meta_empty(
+    client, recorder_under_test, monkeypatch
+):
+    captured = {}
+
+    class _Spy(TranscriberStub):
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+            captured["initial_prompt"] = initial_prompt
+            captured["hotwords"] = hotwords
+            return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
+
+    fake = _Spy(backend="fake-backend", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
+    (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL DEFAULT", encoding="utf-8")
+    (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
+
+    client.post(
+        "/api/transcribe",
+        json={"session": "s", "name": "20260101T010000Z__alice__abc.wav", "model": "fake-small.en"},
+    )
+    assert captured["initial_prompt"] == "GLOBAL DEFAULT"
+    assert captured["hotwords"] == "Acme"
 
 
 def test_api_transcribe_returns_freshly_written_transcript(client, recorder_under_test, monkeypatch):

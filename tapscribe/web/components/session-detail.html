@@ -81,6 +81,33 @@
   <select class="select" data-input-name></select>
 </template>
 
+<!-- Per-session override row. Two flavours: "default" (operator hasn't
+     overridden — preview the inherited value in placeholder) and "set"
+     (override active — show a tinted textarea + reset affordance). -->
+<template id="tpl-sess-override-default">
+  <span class="lbl" data-slot="label"></span>
+  <div class="meta-override default">
+    <div class="meta-override-hd">
+      <span class="badge default" title="this session uses the global default">● default</span>
+      <span class="dim tiny">edit below to override for this session only</span>
+    </div>
+    <textarea class="textarea" rows="2" data-meta-key data-slot="textarea"></textarea>
+  </div>
+</template>
+
+<template id="tpl-sess-override-set">
+  <span class="lbl" data-slot="label"></span>
+  <div class="meta-override set">
+    <div class="meta-override-hd">
+      <span class="badge override" title="this session overrides the global default">◆ session override</span>
+      <span class="dim tiny">saved to session-meta.json</span>
+      <span class="spacer" style="flex:1;"></span>
+      <button class="btn tiny ghost" type="button" data-meta-reset title="Discard session override and use the global default">↺ reset</button>
+    </div>
+    <textarea class="textarea" rows="2" data-meta-key data-slot="textarea"></textarea>
+  </div>
+</template>
+
 <template id="tpl-source-original">
   <label class="row tiny gap-xs row-click">
     <input type="radio" data-source-pick="original">

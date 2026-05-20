@@ -1,16 +1,13 @@
-// Config-in-effect card. Renders three columns:
-//   • batch prompt (prompt.txt) — editable, gated by inputs_support.batch_prompt
-//   • live prompt (live-prompt.txt) — editable, gated by inputs_support.live_prompt
-//   • hotwords (hotwords.txt) — editable, gated by inputs_support.batch_hotwords
-//   • hallucination filter (hallucinations.txt) — read-only, always shown
+// "Default config" card — global batch defaults (prompt.txt, hotwords.txt)
+// + the hallucination filter. The live prompt has moved into the live
+// channel panel; each session's per-batch override lives in the session
+// detail. This panel surfaces the system-wide defaults only.
 //
-// Each editor renders a textarea + save button. The save handler PUTs to
-// /api/config/<key> and reflects the result in a status badge.
-//
-// Rebuilds are signature-gated so the user's in-progress edit isn't
-// blown away by the per-second /api/state poll. While the user is focused
-// inside any editor textarea, the whole card skips re-render — the same
-// pattern live-channel.js uses to keep <select>s open.
+// Each editor is hidden when no installed batch model declares the
+// corresponding input (registry-driven via inputs_support.batch_*).
+// Save buttons PUT to /api/config/{prompt|hotwords}. Atomic on the
+// server. While focus is inside any editor textarea the whole card
+// skips its per-second rebuild so polling can't blow away unsaved edits.
 
 import { tpl, pick } from "../templates.js";
 import { putJson } from "../api.js";
@@ -22,8 +19,7 @@ function buildCol({ title, file, count, body }) {
   pick(frag, "title").textContent = title;
   pick(frag, "file").textContent = file;
   if (count) pick(frag, "count").textContent = `· ${count}`;
-  const bodyEl = pick(frag, "body");
-  body(bodyEl);
+  body(pick(frag, "body"));
   return frag;
 }
 
@@ -44,9 +40,7 @@ function codeList(values) {
   return frag;
 }
 
-// Build the editor: textarea + save button. `placeholder` hints what the
-// field is for when empty. Returns the fragment ready to append.
-function buildEditor({ key, content, placeholder }) {
+function buildEditor({ key, content, placeholder, overrideCount }) {
   const frag = tpl("tpl-cfg-editor");
   const ta = pick(frag, "textarea");
   ta.value = content || "";
@@ -57,13 +51,16 @@ function buildEditor({ key, content, placeholder }) {
   const status = pick(frag, "status");
   status.dataset.cfgKey = key;
 
-  // Track dirty state so the status badge can flip back to "unsaved" once
-  // the operator edits after a save. The save handler clears `dirty`.
-  let dirty = false;
+  // Override-count footnote — empty when zero so the cell stays clean
+  // on installs with no per-session overrides set.
+  const overrideEl = pick(frag, "overrideCount");
+  if (overrideCount > 0) {
+    overrideEl.textContent = `${overrideCount} session${overrideCount === 1 ? "" : "s"} override${overrideCount === 1 ? "s" : ""} this`;
+  }
+
   let original = content || "";
   ta.addEventListener("input", () => {
-    dirty = ta.value !== original;
-    status.textContent = dirty ? "unsaved" : "";
+    status.textContent = ta.value !== original ? "unsaved" : "";
   });
   btn.addEventListener("click", async () => {
     btn.disabled = true;
@@ -71,13 +68,8 @@ function buildEditor({ key, content, placeholder }) {
     try {
       await putJson(`/api/config/${key}`, { content: ta.value });
       original = ta.value;
-      dirty = false;
       status.textContent = "saved";
-      // Fade the status after a moment so the badge isn't a permanent
-      // distraction in the corner of the operator's eye.
-      setTimeout(() => {
-        if (status.textContent === "saved") status.textContent = "";
-      }, 1500);
+      setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
     } catch (e) {
       status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
     } finally {
@@ -87,32 +79,22 @@ function buildEditor({ key, content, placeholder }) {
   return frag;
 }
 
-export function render(j, { gridEl }) {
-  // Skip rebuild while the operator is mid-edit — replacing the DOM
-  // would yank focus and lose unsaved keystrokes.
+export function render(j, { gridEl, headerNoteEl }) {
   const active = document.activeElement;
   if (active && active.dataset && active.dataset.cfgKey && gridEl.contains(active)) return;
 
   const p = j.prompt || {};
-  const lp = j.live_prompt || {};
   const h = j.hotwords || {};
   const hl = j.hallucinations || {};
-  const support = j.inputs_support || {
-    // Default-true so a server that hasn't been updated yet keeps showing
-    // both editors. The flags only HIDE; they never silently un-render
-    // an editor when the server failed to send them.
-    live_prompt: true,
-    batch_prompt: true,
-    batch_hotwords: true,
-  };
+  const support = j.inputs_support || { batch_prompt: true, batch_hotwords: true };
+  const counts = j.default_override_counts || { prompt: 0, hotwords: 0 };
   const sig = [
     p.length || 0, p.content || "",
-    lp.length || 0, lp.content || "",
     h.length || 0, h.content || "",
     hl.count || 0, (hl.rules || []).join("|"),
-    support.live_prompt ? 1 : 0,
     support.batch_prompt ? 1 : 0,
     support.batch_hotwords ? 1 : 0,
+    counts.prompt | 0, counts.hotwords | 0,
   ].join("§");
   if (sig === lastSig) return;
   lastSig = sig;
@@ -124,29 +106,15 @@ export function render(j, { gridEl }) {
 
   if (support.batch_prompt) {
     out.appendChild(buildCol({
-      title: "initial prompt (batch)",
+      title: "default prompt",
       file: "prompt.txt",
       count: p.length ? `${p.length} chars` : null,
       body: (el) => {
         el.appendChild(buildEditor({
           key: "prompt",
           content: p.content || "",
-          placeholder: "meeting context shown to Whisper before each batch job…",
-        }));
-      },
-    }));
-  }
-
-  if (support.live_prompt) {
-    out.appendChild(buildCol({
-      title: "initial prompt (live)",
-      file: "live-prompt.txt",
-      count: lp.length ? `${lp.length} chars` : null,
-      body: (el) => {
-        el.appendChild(buildEditor({
-          key: "live-prompt",
-          content: lp.content || "",
-          placeholder: "always-on context fed to the live channel — independent from batch…",
+          placeholder: "default context biasing for batch transcription — sessions can override below",
+          overrideCount: counts.prompt,
         }));
       },
     }));
@@ -154,7 +122,7 @@ export function render(j, { gridEl }) {
 
   if (support.batch_hotwords) {
     out.appendChild(buildCol({
-      title: "hotwords",
+      title: "default hotwords",
       file: "hotwords.txt",
       count: hotwordList.length ? `${hotwordList.length} terms` : null,
       body: (el) => {
@@ -162,6 +130,7 @@ export function render(j, { gridEl }) {
           key: "hotwords",
           content: h.content || "",
           placeholder: "comma-separated names / jargon, e.g. Acme Inc., Patricia Lin",
+          overrideCount: counts.hotwords,
         }));
       },
     }));
@@ -182,6 +151,9 @@ export function render(j, { gridEl }) {
   }));
 
   gridEl.replaceChildren(out);
+  if (headerNoteEl) {
+    headerNoteEl.textContent = "batch defaults — overridden per-session in the controls below";
+  }
 }
 
 export const invalidate = () => { lastSig = ""; };

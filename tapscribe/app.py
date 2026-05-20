@@ -314,13 +314,22 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
         row["record"] = pref.record
         row["live"] = pref.live
         active.append(row)
+    sessions_list = gather_sessions(
+        current_session=recorder.session_start,
+        jobs=jobs_snapshot,
+    )
+    # Count sessions that override each default. The "default config" panel
+    # surfaces these as "· N sessions override this" so operators can see
+    # which defaults are being shadowed before editing them.
+    override_counts = {
+        "prompt": sum(1 for s in sessions_list if (s.get("session_meta") or {}).get("prompt")),
+        "hotwords": sum(1 for s in sessions_list if (s.get("session_meta") or {}).get("hotwords")),
+    }
     return {
         "current_session": recorder.session_start,
         "active": active,
-        "sessions": gather_sessions(
-            current_session=recorder.session_start,
-            jobs=jobs_snapshot,
-        ),
+        "sessions": sessions_list,
+        "default_override_counts": override_counts,
         "live_feed": recorder.transcripts.snapshot(),
         "live_info": dict(recorder.live.info),
         "live_log": list(recorder.live.log)[-30:],
@@ -829,14 +838,23 @@ async def api_set_primary(
     return {"ok": True, "primary": {"backend": backend, "model": model}}
 
 
+def _effective_batch_prompt_hotwords(session: str) -> tuple[str | None, str | None]:
+    """Override chain for batch transcribe jobs: session-meta → global
+    config files. Returns (initial_prompt, hotwords), each None when
+    both layers are empty so the adapter receives no value (vs. the
+    empty string, which some backends would treat as a real prompt)."""
+    meta = read_session_meta(session)
+    prompt = (meta.get("prompt") or "").strip() or (read_prompt() or "").strip()
+    hotwords = (meta.get("hotwords") or "").strip() or (read_hotwords() or "").strip()
+    return (prompt or None), (hotwords or None)
+
+
 @app.post("/api/transcribe")
 async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await req.json()
     session = body.get("session") or ""
     name = body.get("name") or ""
     model_name = body.get("model") or "small.en"
-    prompt_override = body.get("prompt") or ""
-    hotwords_override = body.get("hotwords") or ""
     source = body.get("source") or "original"
     if not session or not name:
         raise HTTPException(400, "session and name are required")
@@ -862,8 +880,7 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
     # preference if the body didn't carry one.
     backend_override = (body.get("backend") or "").strip() or recorder.backend
     transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
-    initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
-    hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
+    initial_prompt, hotwords = _effective_batch_prompt_hotwords(session)
     # Canary's per-call language fields ride alongside prompt/hotwords. Empty
     # string → adapter falls back to its own "en" default.
     source_lang = (body.get("source_lang") or "").strip() or None
@@ -905,8 +922,6 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     from_iso = body.get("from_iso") or None
     to_iso = body.get("to_iso") or None
     force = bool(body.get("force"))
-    prompt_override = body.get("prompt") or ""
-    hotwords_override = body.get("hotwords") or ""
     source = body.get("source") or "original"
     if not session:
         raise HTTPException(400, "session is required")
@@ -927,12 +942,11 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
 
     backend_override = (body.get("backend") or "").strip() or recorder.backend
     transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
-    initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
-    hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
+    initial_prompt, hotwords = _effective_batch_prompt_hotwords(session)
     source_lang = (body.get("source_lang") or "").strip() or None
     target_lang = (body.get("target_lang") or "").strip() or None
     rules = hallucinations_mod.parse_rules()
-    effective_force = force or bool(prompt_override.strip() or hotwords_override.strip())
+    effective_force = force
 
     claimed = await recorder.jobs.claim(
         JobState(

@@ -239,28 +239,52 @@ function buildModelSelect(sel, ctx) {
   }
 }
 
-// Render the per-model dynamic input rows (textarea/text/select). Each row
-// is rendered into the modelInputs ctl-grid alongside the backend chips
-// and the model select. Input values are captured into `ctx.rangeState`
-// keyed by the input's registry name — main.js reads them on submit.
-function buildModelInputs(host, ctx, modelEntry, sessKey) {
+// Per-session inputs. Three kinds, each with different lifetime:
+//
+//   1. `initial_prompt` and `hotwords` are PERSISTENT overrides on top
+//      of the global default. They live in session-meta.json (next to
+//      label + aliases) and survive page reloads. Rendered as
+//      badge + textarea rows with a "reset to default" affordance.
+//
+//   2. SelectInputs (Canary's source_lang / target_lang) are EPHEMERAL
+//      per-batch picks. They stay in `rangeState` as before.
+//
+// The split exists because the per-WAV prompt/hotwords answer "what
+// context should bias *this whole session's* transcription" — a stable
+// choice — whereas language picks are sometimes per-job (translate this
+// one French clip into English, then transcribe the rest natively).
+function buildModelInputs(host, ctx, modelEntry, sessKey, sessionMeta, defaults) {
   host.replaceChildren();
   if (!modelEntry) return;
   const rng = ctx.rangeState[sessKey] || {};
+  const meta = sessionMeta || {};
   for (const input of modelEntry.inputs || []) {
-    if (input.type === "text") {
-      const tplId = input.kind === "textarea" ? "tpl-input-textarea" : "tpl-input-text";
-      const fragNodes = collectInputNodes(tpl(tplId));
-      const labelEl = fragNodes[0];
-      const fieldEl = fragNodes[1];
-      labelEl.textContent = input.label;
-      fieldEl.dataset.inputName = input.name;
-      fieldEl.dataset.sessId = sessKey;
-      fieldEl.placeholder = input.placeholder || "";
-      if (input.description) fieldEl.title = input.description;
-      fieldEl.value = rng[input.name] || "";
-      host.appendChild(labelEl);
-      host.appendChild(fieldEl);
+    if (input.type === "text" && (input.name === "initial_prompt" || input.name === "hotwords")) {
+      const isPrompt = input.name === "initial_prompt";
+      const metaKey = isPrompt ? "prompt" : "hotwords";
+      const defaultValue = (defaults && defaults[metaKey]) || "";
+      const overrideValue = meta[metaKey] || "";
+      const hasOverride = overrideValue.length > 0;
+
+      const row = tpl(hasOverride ? "tpl-sess-override-set" : "tpl-sess-override-default");
+      pick(row, "label").textContent = input.label;
+      const ta = pick(row, "textarea");
+      ta.dataset.metaKey = metaKey;
+      ta.dataset.sessId = sessKey;
+      ta.value = overrideValue;
+      if (!hasOverride) {
+        // In default state, show a preview of the inherited value as
+        // placeholder so the operator sees what's actually in effect.
+        ta.placeholder = defaultValue
+          ? `default (${defaultValue.length > 80 ? defaultValue.slice(0, 80) + "…" : defaultValue})`
+          : input.placeholder || "no default set";
+      }
+      const resetBtn = row.querySelector("[data-meta-reset]");
+      if (resetBtn) resetBtn.dataset.metaReset = `${sessKey}:${metaKey}`;
+      // Append label + the row body as separate ctl-grid cells so they
+      // align with the other label/value rows.
+      const nodes = collectInputNodes(row);
+      for (const n of nodes) host.appendChild(n);
     } else if (input.type === "select") {
       const fragNodes = collectInputNodes(tpl("tpl-input-select"));
       const labelEl = fragNodes[0];
@@ -317,8 +341,16 @@ function buildControls(s, sessKey, ctx) {
   toEl.value = rng.to || "";
 
   // Render dynamic input rows from the selected model's `inputs` tuple.
+  // Per-session prompt/hotwords overrides come through `effectiveMeta`
+  // so optimistic local edits show immediately rather than waiting for
+  // the next /api/state tick to round-trip the persisted value.
   const currentEntry = (ctx.modelCatalog?.models || []).find((m) => m.model_id === ctx.batchModel);
-  buildModelInputs(pick(frag, "modelInputs"), ctx, currentEntry, sessKey);
+  const sessionMeta = ctx.effectiveMeta(s) || {};
+  const defaults = {
+    prompt: ctx.defaults?.prompt || "",
+    hotwords: ctx.defaults?.hotwords || "",
+  };
+  buildModelInputs(pick(frag, "modelInputs"), ctx, currentEntry, sessKey, sessionMeta, defaults);
 
   buildActionRow(pick(frag, "actions"), s, sessKey, ctx);
   return frag;
@@ -588,6 +620,19 @@ function wire(host, s, sessKey, ctx) {
     if (el.tagName === "SELECT") {
       el.addEventListener("change", () => ctx.onRangeEdit(el.dataset.sessId, el.dataset.inputName, el.value));
     }
+  }
+
+  // Per-session prompt/hotwords overrides — persisted to session-meta.
+  // Debounced on the main.js side so each keystroke doesn't fire a PUT.
+  for (const el of host.querySelectorAll("[data-meta-key]")) {
+    el.addEventListener("input", () =>
+      ctx.onMetaOverrideEdit(el.dataset.sessId, el.dataset.metaKey, el.value));
+  }
+  for (const btn of host.querySelectorAll("[data-meta-reset]")) {
+    btn.addEventListener("click", () => {
+      const [sessId, metaKey] = btn.dataset.metaReset.split(":");
+      ctx.onMetaOverrideEdit(sessId, metaKey, "");
+    });
   }
 
   for (const r of host.querySelectorAll("[data-source-pick]")) {

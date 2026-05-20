@@ -59,6 +59,19 @@
       view logs <span class="dim" data-slot="logCount"></span>
     </button>
   </div>
+
+  <details class="live-init-prompt" data-slot="initPromptRow" hidden>
+    <summary>
+      <span class="caret">▸</span>
+      init prompt
+      <span class="dim tnum" data-slot="initPromptCount"></span>
+    </summary>
+    <textarea class="textarea" rows="3" id="liveInitPromptText" placeholder="context fed to whisperlivekit-server as --init-prompt on next restart"></textarea>
+    <div class="action-row mt-xs">
+      <button class="btn tiny" id="liveInitPromptSave" type="button">save</button>
+      <span class="dim tiny" data-slot="initPromptStatus"></span>
+    </div>
+  </details>
 </template>
 
 <template id="tpl-live-log-dialog">

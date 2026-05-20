@@ -87,9 +87,10 @@ def stripped_dir(session: str) -> Path:
 
 
 def read_session_meta(session: str) -> dict[str, Any]:
-    """Return the per-session metadata dict (operator-editable display label
-    and speaker aliases). Missing or unreadable → {} (caller can treat as
-    no overrides)."""
+    """Return the per-session metadata dict: operator-editable display
+    label, speaker aliases, and per-session batch prompt/hotwords
+    overrides. Missing or unreadable → {} (caller can treat as no
+    overrides). Non-string fields are dropped silently."""
     data = _read_json_or_none(session_meta_path(session))
     if not isinstance(data, dict):
         return {}
@@ -98,20 +99,33 @@ def read_session_meta(session: str) -> dict[str, Any]:
         out["label"] = data["label"]
     if isinstance(data.get("aliases"), dict):
         out["aliases"] = {str(k): str(v) for k, v in data["aliases"].items() if isinstance(v, str)}
+    if isinstance(data.get("prompt"), str):
+        out["prompt"] = data["prompt"]
+    if isinstance(data.get("hotwords"), str):
+        out["hotwords"] = data["hotwords"]
     return out
 
 
 def write_session_meta(session: str, meta: dict[str, Any]) -> None:
+    """Persist the per-session meta. Partial updates (e.g. only
+    `{"prompt": "..."}`) preserve existing fields the caller didn't
+    mention — otherwise editing one field would clear the others."""
     session = _safe_part(session, "session")
-    # Inline realpath+startswith sanitiser at the file-access site.
     root = os.path.realpath(config.RECORDINGS_DIR)
     real_parent = os.path.realpath(os.path.join(root, session))
     if real_parent != root and not real_parent.startswith(root + os.sep):
         raise HTTPException(404, "session not found")
     os.makedirs(real_parent, exist_ok=True)
+    existing = read_session_meta(session)
+    merged = {
+        **existing,
+        **{k: v for k, v in meta.items() if k in {"label", "aliases", "prompt", "hotwords"}},
+    }
     sanitized = {
-        "label": meta.get("label", "") if isinstance(meta.get("label"), str) else "",
-        "aliases": {str(k): str(v) for k, v in (meta.get("aliases") or {}).items() if isinstance(v, str)},
+        "label": merged.get("label", "") if isinstance(merged.get("label"), str) else "",
+        "aliases": {str(k): str(v) for k, v in (merged.get("aliases") or {}).items() if isinstance(v, str)},
+        "prompt": merged.get("prompt", "") if isinstance(merged.get("prompt"), str) else "",
+        "hotwords": merged.get("hotwords", "") if isinstance(merged.get("hotwords"), str) else "",
     }
     with open(os.path.join(real_parent, "session-meta.json"), "w", encoding="utf-8") as fh:
         fh.write(json.dumps(sanitized, indent=2, ensure_ascii=False))

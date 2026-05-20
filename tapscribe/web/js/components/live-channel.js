@@ -3,6 +3,7 @@
 // payload hasn't actually changed, so open <details>/<select> stay open.
 
 import { tpl, mount, pick } from "../templates.js";
+import { putJson } from "../api.js";
 
 // Display labels for model families — used as <optgroup> labels in the live
 // model select. Mirrors session-detail.js's FAMILY_LABELS but trimmed to
@@ -25,15 +26,20 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   stateEl.textContent = state;
   mlxEl.textContent = mlxAvail ? "mlx available" : "cpu only";
 
-  // Don't rebuild while the user is editing — would close their <select>
-  // or wipe the slider value they're in the middle of typing.
+  // Don't rebuild while the user is editing — would close their <select>,
+  // wipe a slider value they're typing, or wipe their in-progress
+  // init-prompt edit.
   const focused = document.activeElement;
   const editableIds = new Set([
     "liveModelSelect", "liveLangInput",
     "liveGateKindSelect",
     "liveGateThreshold", "liveGateHangover", "liveGatePreRoll",
+    "liveInitPromptText",
   ]);
   if (focused && editableIds.has(focused.id)) return;
+
+  const lp = j.live_prompt || {};
+  const sup = j.inputs_support || { live_prompt: true };
 
   const sig = [
     state, li.model || "", li.language || "", li.pid || "", li.host || "",
@@ -42,9 +48,8 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
     li.gate_hangover_ms || "", li.gate_pre_roll_ms || "",
     supportsNativeVad ? "1" : "0",
     log.length, log.length ? log[log.length - 1] : "",
-    // include catalog length so a server-restart-driven catalog refresh
-    // forces a re-render of the model options.
     (liveCatalog?.models || []).length,
+    sup.live_prompt ? 1 : 0, lp.length || 0, lp.content || "",
   ].join("§");
   if (sig === lastSig) return;
   lastSig = sig;
@@ -157,6 +162,18 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
     pick(frag, "logCount").textContent = `(${log.length}+)`;
   }
 
+  // Init-prompt expandable. Hidden when no installed live model supports
+  // initial_prompt (registry-driven via inputs_support.live_prompt).
+  const initRow = pick(frag, "initPromptRow");
+  if (sup.live_prompt) {
+    initRow.hidden = false;
+    pick(frag, "initPromptCount").textContent = lp.length ? `· ${lp.length} chars` : "";
+    frag.querySelector("#liveInitPromptText").value = lp.content || "";
+    // Default-open the editor when populated so the operator sees what's
+    // in effect; collapsed when empty to keep the panel compact.
+    initRow.open = !!lp.length;
+  }
+
   mount(bodyEl, frag);
 
   // Wire actions after mount so #ids resolve against the live DOM.
@@ -171,6 +188,25 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
     const li = bodyEl.querySelector("#liveLangInput");
     if (li && (li.value === "en" || li.value === "")) li.value = "no";
   });
+
+  const initBtn = bodyEl.querySelector("#liveInitPromptSave");
+  if (initBtn) {
+    initBtn.addEventListener("click", async () => {
+      const ta = bodyEl.querySelector("#liveInitPromptText");
+      const status = bodyEl.querySelector('[data-slot="initPromptStatus"]');
+      initBtn.disabled = true;
+      status.textContent = "saving…";
+      try {
+        await putJson("/api/config/live-prompt", { content: ta.value });
+        status.textContent = "saved";
+        setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
+      } catch (e) {
+        status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+      } finally {
+        initBtn.disabled = false;
+      }
+    });
+  }
 }
 
 export const formValues = () => {

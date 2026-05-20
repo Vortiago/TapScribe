@@ -91,6 +91,8 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     return {
       label: local && "label" in local ? local.label : (server.label || ""),
       aliases: local && "aliases" in local ? local.aliases : (server.aliases || {}),
+      prompt: local && "prompt" in local ? local.prompt : (server.prompt || ""),
+      hotwords: local && "hotwords" in local ? local.hotwords : (server.hotwords || ""),
     };
   }
 
@@ -107,8 +109,8 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     return Array.from(set).sort();
   }
 
-  // Debounced PUT /api/session-meta. The caller passes the FULL meta object
-  // (label + aliases); we serialise it as-is.
+  // Debounced PUT /api/session-meta. The server merges partial payloads
+  // so we send only the fields we know locally.
   function persistSessionMeta(sessId) {
     clearTimeout(metaSaveTimers.get(sessId));
     metaSaveTimers.set(sessId, setTimeout(async () => {
@@ -141,7 +143,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       bodyEl: $("liveChannelBody"),
       onAction: { start: liveStartOrApply, stop: liveStop },
     };
-    configCardCtx = { gridEl: $("configGrid") };
+    configCardCtx = { gridEl: $("configGrid"), headerNoteEl: $("configHeaderNote") };
     ribbonCtx = { statusEl: $("sessionStatus"), pillEl: $("recordingPill") };
   }
 
@@ -337,6 +339,12 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       rxFlags,
       effectiveMeta,
       deriveSpeakerKeys,
+      // Global batch defaults — shown as the placeholder preview in
+      // per-session override rows when no override is set.
+      defaults: {
+        prompt: (lastJson && lastJson.prompt && lastJson.prompt.content) || "",
+        hotwords: (lastJson && lastJson.hotwords && lastJson.hotwords.content) || "",
+      },
       // sub-component
       renderMerged: (t, meta) => mergedTranscript.render(t, meta, { showAudit }),
       // callbacks
@@ -381,8 +389,21 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         const aliases = { ...(cur.aliases || {}) };
         if (value) aliases[key] = value;
         else delete aliases[key];
-        localMeta[sk] = { label: cur.label || "", aliases };
+        localMeta[sk] = { ...localMeta[sk], label: cur.label || "", aliases };
         persistSessionMeta(sk);
+      },
+      onMetaOverrideEdit: (sk, metaKey, value) => {
+        const cur = effectiveMeta(s);
+        localMeta[sk] = {
+          ...localMeta[sk],
+          label: cur.label || "",
+          aliases: cur.aliases || {},
+          [metaKey]: value,
+        };
+        persistSessionMeta(sk);
+        // Refresh the badge state on the row (default vs override) without
+        // waiting for the next /api/state tick.
+        lastSessionsSig = "";
       },
       onAbsorbSession: (target, source) => absorbSession(target, source),
       onRxToggle: (sk) => { rxOpen = !rxOpen; rxOwnerSession = sk; lastSessionsSig = ""; tick(); },
@@ -415,10 +436,10 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       rangeState[sk] = rangeState[sk] || {};
       rangeState[sk][k] = el.value;
     }
-    // Dynamic per-model inputs use [data-input-name] (the input's
-    // registry name — `initial_prompt`, `hotwords`, `source_lang`,
-    // `target_lang`) and live in the currently-open session detail.
-    // sessId is read off the parent .sess-detail container.
+    // Dynamic per-model inputs use [data-input-name] (the registry
+    // input's name — `source_lang`, `target_lang`). `initial_prompt`
+    // and `hotwords` are persisted via session-meta directly (see
+    // [data-meta-key]), not via the ephemeral rangeState.
     for (const el of document.querySelectorAll("[data-input-name]")) {
       const sk = el.dataset.sessId;
       if (!sk) continue;
@@ -474,10 +495,8 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         session, name, source,
         model: batchModel,
         backend: batchBackend,
-        // Forward all registry-declared inputs from the session's rangeState.
-        // Adapters that don't consume a given field ignore it.
-        prompt: rng.initial_prompt || "",
-        hotwords: rng.hotwords || "",
+        // Prompt and hotwords resolve server-side from session-meta →
+        // global defaults; the dashboard edits session-meta directly.
         source_lang: rng.source_lang || "",
         target_lang: rng.target_lang || "",
       }));
@@ -496,8 +515,6 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       backend: batchBackend,
       from_iso: (rng.from || "").trim(),
       to_iso: (rng.to || "").trim(),
-      prompt: rng.initial_prompt || "",
-      hotwords: rng.hotwords || "",
       source_lang: rng.source_lang || "",
       target_lang: rng.target_lang || "",
       source: effectiveSource(session),
