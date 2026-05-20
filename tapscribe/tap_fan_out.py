@@ -192,13 +192,11 @@ class TapFanOut:
                     flush=True,
                 )
             else:
-                short_id = safe_name(self._identity)[:10] or "unknown"
-                name_slug = safe_name(self._name) or "anon"
-                # Filename uses a fresh local uuid for uniqueness; the bridge's
-                # utterance_id lives in the index, not in the path. Two distinct
-                # utterances sharing an utterance_id (e.g. an expired-and-restarted
-                # one) must not collide on disk.
-                fname = build_recorder_wav_name(started_at, name_slug, short_id)
+                # `safe_name` + `[:10]` cap the identity slug; the helper
+                # applies its own `safe_name` and empty-string fallbacks so
+                # we don't repeat them here.
+                short_id = safe_name(self._identity)[:10]
+                fname = build_recorder_wav_name(started_at, self._name or "", short_id)
                 session_dir = self._recorder.session_dir
                 session_dir.mkdir(parents=True, exist_ok=True)
                 fpath = session_dir / fname

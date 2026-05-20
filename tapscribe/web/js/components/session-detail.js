@@ -1,7 +1,7 @@
 // Session detail pane — the big right-hand side of the dashboard:
 // header, controls box (model/source/silence/from-to/prompt/hotwords),
-// optional aliases box, WAV list (with stripped sub-rows + expandable
-// inline transcripts), regex tester, and the merged-transcript mount.
+// optional aliases box, WAV list (with expandable inline transcripts),
+// regex tester, and the merged-transcript mount.
 //
 // All state and callbacks come in via `ctx` from main.js so this stays
 // a pure render-and-wire module.
@@ -38,9 +38,9 @@ function filterCatalogByBackend(catalog, backend) {
   return models.filter((m) => (m.backends || []).includes(backend));
 }
 
-// Build the inline-transcript fragment shown when the user clicks a WAV row
-// or its stripped sub-row. Kept here (not in merged-transcript.js) because
-// it renders the per-WAV transcript record, not the session-merged one.
+// Build the inline-transcript fragment shown when the user clicks a WAV
+// row. Kept here (not in merged-transcript.js) because it renders the
+// per-WAV transcript record, not the session-merged one.
 function buildExpandTx(t) {
   const frag = tpl("tpl-expand-tx");
   const metaHost = pick(frag, "meta");
