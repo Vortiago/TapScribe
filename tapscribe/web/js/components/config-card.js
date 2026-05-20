@@ -10,7 +10,7 @@
 // skips its per-second rebuild so polling can't blow away unsaved edits.
 
 import { tpl, pick } from "../templates.js";
-import { putJson } from "../api.js";
+import { wireConfigSave } from "../api.js";
 
 let lastSig = "";
 
@@ -58,24 +58,15 @@ function buildEditor({ key, content, placeholder, overrideCount }) {
     overrideEl.textContent = `${overrideCount} session${overrideCount === 1 ? "" : "s"} override${overrideCount === 1 ? "s" : ""} this`;
   }
 
-  let original = content || "";
+  // Track baseline for the "unsaved" badge. wireConfigSave owns the
+  // saving/saved/failed transitions and advances `baseline` only after
+  // a successful save, so a failed save leaves the badge unsaved.
+  let baseline = content || "";
   ta.addEventListener("input", () => {
-    status.textContent = ta.value !== original ? "unsaved" : "";
+    if (status.textContent === "saving…" || status.textContent === "saved") return;
+    status.textContent = ta.value !== baseline ? "unsaved" : "";
   });
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    status.textContent = "saving…";
-    try {
-      await putJson(`/api/config/${key}`, { content: ta.value });
-      original = ta.value;
-      status.textContent = "saved";
-      setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
-    } catch (e) {
-      status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
-    } finally {
-      btn.disabled = false;
-    }
-  });
+  wireConfigSave({ key, btn, textarea: ta, status, onSuccess: (v) => { baseline = v; } });
   return frag;
 }
 

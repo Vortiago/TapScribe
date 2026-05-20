@@ -20,3 +20,24 @@ export const fetchState = () => fetch("/api/state", { cache: "no-store" }).then(
 export const postJson = (url, body) => fetch(url, { method: "POST", ..._body(body) }).then(_unwrap);
 export const putJson  = (url, body) => fetch(url, { method: "PUT",  ..._body(body) }).then(_unwrap);
 export const del      = (url)       => fetch(url, { method: "DELETE" }).then(_unwrap);
+
+// Wire a textarea + save button to PUT /api/config/{key}. Used by both the
+// "default config" card editors and the live-channel's init-prompt
+// expandable. Manages the status badge lifecycle (saving / saved / failed)
+// and clears the success badge after a short delay.
+export function wireConfigSave({ key, btn, textarea, status, onSuccess }) {
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    status.textContent = "saving…";
+    try {
+      await putJson(`/api/config/${key}`, { content: textarea.value });
+      status.textContent = "saved";
+      onSuccess?.(textarea.value);
+      setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
+    } catch (e) {
+      status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}

@@ -88,11 +88,12 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
   function effectiveMeta(s) {
     const local = s ? localMeta[s.session] : null;
     const server = (s && s.session_meta) || {};
+    const pick = (k, dflt) => (local && k in local ? local[k] : (server[k] || dflt));
     return {
-      label: local && "label" in local ? local.label : (server.label || ""),
-      aliases: local && "aliases" in local ? local.aliases : (server.aliases || {}),
-      prompt: local && "prompt" in local ? local.prompt : (server.prompt || ""),
-      hotwords: local && "hotwords" in local ? local.hotwords : (server.hotwords || ""),
+      label: pick("label", ""),
+      aliases: pick("aliases", {}),
+      prompt: pick("prompt", ""),
+      hotwords: pick("hotwords", ""),
     };
   }
 
@@ -380,8 +381,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       onStripRun: stripSession,
       onStripRemove: removeStripped,
       onNameEdit: (sk, value) => {
-        const cur = effectiveMeta(s);
-        localMeta[sk] = { label: value, aliases: cur.aliases || {} };
+        localMeta[sk] = { ...effectiveMeta(s), label: value };
         persistSessionMeta(sk);
       },
       onAliasEdit: (sk, key, value) => {
@@ -389,20 +389,17 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         const aliases = { ...(cur.aliases || {}) };
         if (value) aliases[key] = value;
         else delete aliases[key];
-        localMeta[sk] = { ...localMeta[sk], label: cur.label || "", aliases };
+        localMeta[sk] = { ...cur, aliases };
         persistSessionMeta(sk);
       },
       onMetaOverrideEdit: (sk, metaKey, value) => {
-        const cur = effectiveMeta(s);
-        localMeta[sk] = {
-          ...localMeta[sk],
-          label: cur.label || "",
-          aliases: cur.aliases || {},
-          [metaKey]: value,
-        };
+        // effectiveMeta resolves local-over-server for every field, so we
+        // can rebuild localMeta from it without separately re-spreading
+        // the prior local entry.
+        localMeta[sk] = { ...effectiveMeta(s), [metaKey]: value };
         persistSessionMeta(sk);
-        // Refresh the badge state on the row (default vs override) without
-        // waiting for the next /api/state tick.
+        // Flip the badge style on the next tick without waiting for the
+        // PUT to round-trip via /api/state.
         lastSessionsSig = "";
       },
       onAbsorbSession: (target, source) => absorbSession(target, source),

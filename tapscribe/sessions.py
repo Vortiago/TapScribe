@@ -86,6 +86,15 @@ def stripped_dir(session: str) -> Path:
     return Path(real)
 
 
+_META_STRING_FIELDS = ("label", "prompt", "hotwords")
+
+
+def _coerce_aliases(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): str(v) for k, v in value.items() if isinstance(v, str)}
+
+
 def read_session_meta(session: str) -> dict[str, Any]:
     """Return the per-session metadata dict: operator-editable display
     label, speaker aliases, and per-session batch prompt/hotwords
@@ -94,15 +103,9 @@ def read_session_meta(session: str) -> dict[str, Any]:
     data = _read_json_or_none(session_meta_path(session))
     if not isinstance(data, dict):
         return {}
-    out: dict[str, Any] = {}
-    if isinstance(data.get("label"), str):
-        out["label"] = data["label"]
+    out: dict[str, Any] = {k: data[k] for k in _META_STRING_FIELDS if isinstance(data.get(k), str)}
     if isinstance(data.get("aliases"), dict):
-        out["aliases"] = {str(k): str(v) for k, v in data["aliases"].items() if isinstance(v, str)}
-    if isinstance(data.get("prompt"), str):
-        out["prompt"] = data["prompt"]
-    if isinstance(data.get("hotwords"), str):
-        out["hotwords"] = data["hotwords"]
+        out["aliases"] = _coerce_aliases(data["aliases"])
     return out
 
 
@@ -117,16 +120,10 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
         raise HTTPException(404, "session not found")
     os.makedirs(real_parent, exist_ok=True)
     existing = read_session_meta(session)
-    merged = {
-        **existing,
-        **{k: v for k, v in meta.items() if k in {"label", "aliases", "prompt", "hotwords"}},
-    }
-    sanitized = {
-        "label": merged.get("label", "") if isinstance(merged.get("label"), str) else "",
-        "aliases": {str(k): str(v) for k, v in (merged.get("aliases") or {}).items() if isinstance(v, str)},
-        "prompt": merged.get("prompt", "") if isinstance(merged.get("prompt"), str) else "",
-        "hotwords": merged.get("hotwords", "") if isinstance(merged.get("hotwords"), str) else "",
-    }
+    allowed = {"aliases", *_META_STRING_FIELDS}
+    merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
+    sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
+    sanitized["aliases"] = _coerce_aliases(merged.get("aliases"))
     with open(os.path.join(real_parent, "session-meta.json"), "w", encoding="utf-8") as fh:
         fh.write(json.dumps(sanitized, indent=2, ensure_ascii=False))
 

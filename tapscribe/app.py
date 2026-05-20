@@ -318,13 +318,14 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
         current_session=recorder.session_start,
         jobs=jobs_snapshot,
     )
-    # Count sessions that override each default. The "default config" panel
-    # surfaces these as "· N sessions override this" so operators can see
-    # which defaults are being shadowed before editing them.
-    override_counts = {
-        "prompt": sum(1 for s in sessions_list if (s.get("session_meta") or {}).get("prompt")),
-        "hotwords": sum(1 for s in sessions_list if (s.get("session_meta") or {}).get("hotwords")),
-    }
+    # Powers the "· N sessions override this" footer in the default config panel.
+    override_counts = {"prompt": 0, "hotwords": 0}
+    for s in sessions_list:
+        m = s.get("session_meta") or {}
+        if m.get("prompt"):
+            override_counts["prompt"] += 1
+        if m.get("hotwords"):
+            override_counts["hotwords"] += 1
     return {
         "current_session": recorder.session_start,
         "active": active,

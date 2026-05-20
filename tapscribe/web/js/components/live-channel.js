@@ -3,7 +3,7 @@
 // payload hasn't actually changed, so open <details>/<select> stay open.
 
 import { tpl, mount, pick } from "../templates.js";
-import { putJson } from "../api.js";
+import { wireConfigSave } from "../api.js";
 
 // Display labels for model families — used as <optgroup> labels in the live
 // model select. Mirrors session-detail.js's FAMILY_LABELS but trimmed to
@@ -191,20 +191,11 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
 
   const initBtn = bodyEl.querySelector("#liveInitPromptSave");
   if (initBtn) {
-    initBtn.addEventListener("click", async () => {
-      const ta = bodyEl.querySelector("#liveInitPromptText");
-      const status = bodyEl.querySelector('[data-slot="initPromptStatus"]');
-      initBtn.disabled = true;
-      status.textContent = "saving…";
-      try {
-        await putJson("/api/config/live-prompt", { content: ta.value });
-        status.textContent = "saved";
-        setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
-      } catch (e) {
-        status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
-      } finally {
-        initBtn.disabled = false;
-      }
+    wireConfigSave({
+      key: "live-prompt",
+      btn: initBtn,
+      textarea: bodyEl.querySelector("#liveInitPromptText"),
+      status: bodyEl.querySelector('[data-slot="initPromptStatus"]'),
     });
   }
 }

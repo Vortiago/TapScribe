@@ -253,16 +253,16 @@ function buildModelSelect(sel, ctx) {
 // context should bias *this whole session's* transcription" — a stable
 // choice — whereas language picks are sometimes per-job (translate this
 // one French clip into English, then transcribe the rest natively).
-function buildModelInputs(host, ctx, modelEntry, sessKey, sessionMeta, defaults) {
+function buildModelInputs(host, ctx, modelEntry, sessKey) {
   host.replaceChildren();
   if (!modelEntry) return;
   const rng = ctx.rangeState[sessKey] || {};
-  const meta = sessionMeta || {};
+  const meta = ctx.sessionMeta || {};
+  const defaults = ctx.defaults || {};
   for (const input of modelEntry.inputs || []) {
     if (input.type === "text" && (input.name === "initial_prompt" || input.name === "hotwords")) {
-      const isPrompt = input.name === "initial_prompt";
-      const metaKey = isPrompt ? "prompt" : "hotwords";
-      const defaultValue = (defaults && defaults[metaKey]) || "";
+      const metaKey = input.name === "initial_prompt" ? "prompt" : "hotwords";
+      const defaultValue = defaults[metaKey] || "";
       const overrideValue = meta[metaKey] || "";
       const hasOverride = overrideValue.length > 0;
 
@@ -280,7 +280,10 @@ function buildModelInputs(host, ctx, modelEntry, sessKey, sessionMeta, defaults)
           : input.placeholder || "no default set";
       }
       const resetBtn = row.querySelector("[data-meta-reset]");
-      if (resetBtn) resetBtn.dataset.metaReset = `${sessKey}:${metaKey}`;
+      if (resetBtn) {
+        resetBtn.dataset.sessId = sessKey;
+        resetBtn.dataset.metaKey = metaKey;
+      }
       // Append label + the row body as separate ctl-grid cells so they
       // align with the other label/value rows.
       const nodes = collectInputNodes(row);
@@ -340,17 +343,12 @@ function buildControls(s, sessKey, ctx) {
   toEl.placeholder = s.latest_iso || "optional ISO timestamp";
   toEl.value = rng.to || "";
 
-  // Render dynamic input rows from the selected model's `inputs` tuple.
   // Per-session prompt/hotwords overrides come through `effectiveMeta`
   // so optimistic local edits show immediately rather than waiting for
   // the next /api/state tick to round-trip the persisted value.
   const currentEntry = (ctx.modelCatalog?.models || []).find((m) => m.model_id === ctx.batchModel);
-  const sessionMeta = ctx.effectiveMeta(s) || {};
-  const defaults = {
-    prompt: ctx.defaults?.prompt || "",
-    hotwords: ctx.defaults?.hotwords || "",
-  };
-  buildModelInputs(pick(frag, "modelInputs"), ctx, currentEntry, sessKey, sessionMeta, defaults);
+  const inputCtx = { ...ctx, sessionMeta: ctx.effectiveMeta(s) };
+  buildModelInputs(pick(frag, "modelInputs"), inputCtx, currentEntry, sessKey);
 
   buildActionRow(pick(frag, "actions"), s, sessKey, ctx);
   return frag;
@@ -629,10 +627,8 @@ function wire(host, s, sessKey, ctx) {
       ctx.onMetaOverrideEdit(el.dataset.sessId, el.dataset.metaKey, el.value));
   }
   for (const btn of host.querySelectorAll("[data-meta-reset]")) {
-    btn.addEventListener("click", () => {
-      const [sessId, metaKey] = btn.dataset.metaReset.split(":");
-      ctx.onMetaOverrideEdit(sessId, metaKey, "");
-    });
+    btn.addEventListener("click", () =>
+      ctx.onMetaOverrideEdit(btn.dataset.sessId, btn.dataset.metaKey, ""));
   }
 
   for (const r of host.querySelectorAll("[data-source-pick]")) {
