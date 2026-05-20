@@ -1,7 +1,8 @@
 // Session detail pane — the big right-hand side of the dashboard:
 // header, controls box (model/source/silence/from-to/prompt/hotwords),
-// optional aliases box, WAV list (with expandable inline transcripts),
-// regex tester, and the merged-transcript mount.
+// optional aliases box, WAV list (originals + stripped-region sub-rows,
+// each with expandable inline transcripts), regex tester, and the
+// merged-transcript mount.
 //
 // All state and callbacks come in via `ctx` from main.js so this stays
 // a pure render-and-wire module.
@@ -396,7 +397,70 @@ function buildWavRow(f, sessKey, ctx) {
   const out = document.createDocumentFragment();
   out.appendChild(frag);
   if (open && f.transcript) out.appendChild(buildExpandTx(f.transcript));
+
+  // Region sub-rows — one per WAV strip-silence produced from this original.
+  // Backend buckets them by (speaker_slug, ident); they share the parent's
+  // controls layout but live under <session>/stripped/.
+  for (const r of (f.regions || [])) {
+    appendRegionSub(out, r, sessKey, ctx);
+  }
   return out;
+}
+
+// Build and append one stripped-region sub-row. Each region has its own
+// unique filename, so its toggle/transcribe/inflight keys are independent
+// from the parent original's keys.
+function appendRegionSub(host, r, sessKey, ctx) {
+  const wavKey = `${sessKey}/${r.name}`;
+  const toggleKey = `${wavKey}@stripped`;
+  const inflightKey = `${wavKey}@stripped`;
+  const busy = ctx.wavInflight.has(inflightKey);
+  const open = ctx.expandedWav === toggleKey;
+  const dlHref = `/api/wav/${encodeURIComponent(sessKey)}/${encodeURIComponent(r.name)}?source=stripped`;
+
+  const frag = tpl("tpl-wav-row-stripped");
+  const row = frag.firstElementChild;
+  if (busy) row.classList.add("in-flight");
+  if (ctx.wavJustDone.has(inflightKey)) row.classList.add("just-completed");
+
+  const nameEl = pick(row, "name");
+  nameEl.dataset.toggleWav = toggleKey;
+  nameEl.title = `${r.name} (stripped region)${r.transcript ? "\n\nClick to expand the transcript." : ""}`;
+  nameEl.textContent = `↳ ${truncMid(r.name, 40)}`;
+  if (r.transcript) nameEl.classList.add("has-tx");
+
+  pick(row, "duration").textContent = fmtDur(r.duration_s);
+
+  const sizeHost = pick(row, "sizeCell");
+  if (busy) {
+    const cell = tpl("tpl-wav-size-inflight");
+    const span = cell.firstElementChild;
+    span.dataset.elapsedFor = inflightKey;
+    span.textContent = `transcribing… ${fmtElapsedShort((Date.now() - ctx.wavInflight.get(inflightKey)) / 1000)}`;
+    sizeHost.replaceWith(cell);
+  } else {
+    const cell = tpl("tpl-wav-size-static");
+    let text = fmtBytes(r.size);
+    if (r.transcript?.transcribe_ms != null) text += ` · took ${fmtMs(r.transcript.transcribe_ms)}`;
+    pick(cell, "text").textContent = text;
+    sizeHost.replaceWith(cell);
+  }
+
+  pick(row, "download").href = dlHref;
+  const txBtn = pick(row, "txButton");
+  // data-tx-wav uses the region's own name so the dispatch passes that
+  // name straight to /api/transcribe with source=stripped.
+  txBtn.dataset.txWav = wavKey;
+  txBtn.dataset.txSource = "stripped";
+  if (busy) {
+    txBtn.disabled = true;
+    txBtn.replaceChildren(tpl("tpl-wav-tx-busy"));
+  } else {
+    txBtn.textContent = r.transcript ? "re-tx" : "transcribe";
+  }
+
+  host.appendChild(frag);
+  if (open && r.transcript) host.appendChild(buildExpandTx(r.transcript));
 }
 
 function buildWavList(s, sessKey, ctx) {

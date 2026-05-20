@@ -243,9 +243,9 @@ def _describe_wav(w: Path) -> dict[str, Any]:
     with many WAVs doesn't re-walk each transcripts dir multiple times
     per poll tick.
 
-    Stripped region WAVs are surfaced session-wide via `stripped_stats`,
-    not as per-original sub-rows — strip-silence now produces N regions
-    per source so the 1:1 sibling shape no longer applies."""
+    Region WAVs produced by strip-silence (in <session>/stripped/) get
+    attached as `regions` by `_describe_session` — they share the same
+    row shape as originals (no nested `regions` of their own)."""
     wav_start = parse_wav_start(w.name)
     dur = round(wav_duration_s(w), 2)
     wav_start_iso = wav_start.isoformat() if wav_start else None
@@ -270,6 +270,23 @@ def _describe_session(
 ) -> dict[str, Any]:
     """Build one entry for the dashboard's session list from `sd`."""
     wavs = [_describe_wav(w) for w in sorted(sd.glob("*.wav"))]
+
+    # Bucket region WAVs from stripped/ by (speaker_slug, ident) so each
+    # original WAV's row can render the N regions it was split into as
+    # sub-rows. strip_one_wav mints region names via build_recorder_wav_name(
+    # origin_start + offset, original_speaker_slug, original_ident, fresh
+    # uuid8), so the (speaker, ident) pair survives the split and identifies
+    # the source unambiguously. Regions from legacy stripped/ folders
+    # (pre-split refactor) bucket against their originals the same way —
+    # those filenames preserved the same convention.
+    region_buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    stripped_root = sd / "stripped"
+    if stripped_root.is_dir():
+        for rw in sorted(stripped_root.glob("*.wav")):
+            key = _split_filename_components(rw.name)
+            region_buckets.setdefault(key, []).append(_describe_wav(rw))
+    for w in wavs:
+        w["regions"] = region_buckets.get(_split_filename_components(w["name"]), [])
     starts = [parse_wav_start(w["name"]) for w in wavs]
     starts = [s for s in starts if s is not None]
     earliest = min(starts) if starts else None

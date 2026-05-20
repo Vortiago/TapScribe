@@ -194,9 +194,16 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
           s.is_current ? 1 : 0,
           s.wav_count,
           s.session_transcript ? s.session_transcript.transcribed_at : "",
-          (s.files || []).map((f) =>
-            f.name + ":" + (f.transcript ? f.transcript.transcribed_at : "")
-          ).join(","),
+          (s.files || []).map((f) => {
+            // Include each region's transcript stamp so a region transcribe
+            // re-flows the row (its "took Xms" cell + has-tx marker).
+            const regionSig = (f.regions || [])
+              .map((r) => r.name + "@" + (r.transcript ? r.transcript.transcribed_at : ""))
+              .join("|");
+            return f.name
+              + ":" + (f.transcript ? f.transcript.transcribed_at : "")
+              + "::" + regionSig;
+          }).join(","),
           meta.label || "",
           aliasSig,
           stripSig,
@@ -344,11 +351,23 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       onCopyMerged: copyMerged,
       onTranscribeWav: transcribeWav,
       onToggleWav: (wk, sess) => {
-        // Stripped sub-row keys carry "@stripped" so they don't collide.
+        // Stripped region sub-row keys carry "@stripped"; the base key is
+        // "<session>/<name>" where <name> is the region's own (unique)
+        // filename. Originals: same shape, no suffix.
         const stripped = wk.endsWith("@stripped");
         const baseKey = stripped ? wk.slice(0, -"@stripped".length) : wk;
-        const f = (sess.files || []).find((ff) => sess.session + "/" + ff.name === baseKey);
-        const tx = stripped ? f?.stripped?.transcript : f?.transcript;
+        const idx = baseKey.indexOf("/");
+        const targetName = idx >= 0 ? baseKey.slice(idx + 1) : baseKey;
+        let tx = null;
+        if (stripped) {
+          for (const ff of (sess.files || [])) {
+            const r = (ff.regions || []).find((rr) => rr.name === targetName);
+            if (r) { tx = r.transcript; break; }
+          }
+        } else {
+          const f = (sess.files || []).find((ff) => ff.name === targetName);
+          tx = f?.transcript || null;
+        }
         if (!tx) return;
         expandedWav = expandedWav === wk ? null : wk;
         lastSessionsSig = "";

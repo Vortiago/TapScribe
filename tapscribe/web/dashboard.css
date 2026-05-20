@@ -884,6 +884,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
     & .m         { color: var(--fg-2); }
     &.in-flight  { color: var(--warn); }
   }
+  /* Stripped region sub-rows under each original — indented and slightly
+     dimmed so they read as subordinate to their parent. One sub-row per
+     speech region produced by strip-silence. */
+  & .wav-row.strip-sub {
+    padding-left: 24px;
+    opacity: 0.85;
+  }
 }
 .btn.just-completed { animation: sx-flash 1.5s ease-out; }
 
