@@ -50,8 +50,17 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Reco
     monkeypatch.setattr(_config, "AUTH_ENABLED", False)
     monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
-    monkeypatch.setattr(_config, "CONFIG_DIR", tmp_path / "config")
-    (tmp_path / "config").mkdir()
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr(_config, "CONFIG_DIR", cfg)
+    # The text helpers and /api/state both read these path constants
+    # directly — re-bind them to the tmp config dir so the editable-config
+    # writes land where the test expects them (and where the recorder
+    # under test reads from).
+    monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
+    monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
+    monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
+    monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
     (tmp_path / "recordings").mkdir()
 
     return Recorder(
@@ -171,6 +180,114 @@ def test_api_state_carries_backend_preference_and_available_backends(client):
     assert "backend" in body
     assert "available_backends" in body
     assert isinstance(body["available_backends"], list)
+
+
+# ---------------------------------------------------------------------------
+# /api/state — editable prompt + hotwords blocks. The dashboard renders
+# textareas for each one, gated by `inputs_support`.
+# ---------------------------------------------------------------------------
+
+
+def test_api_state_includes_live_prompt_block(client, recorder_under_test):  # noqa: ARG001
+    """The live channel has its own prompt file (config/live-prompt.txt),
+    independent from the batch prompt.txt. /api/state surfaces both so
+    the dashboard renders separate editors."""
+    r = client.get("/api/state")
+    body = r.json()
+    assert "live_prompt" in body
+    lp = body["live_prompt"]
+    assert "path" in lp
+    assert lp["path"].endswith("live-prompt.txt")
+    assert "content" in lp
+    assert "length" in lp
+
+
+def test_api_state_includes_inputs_support_flags(client):
+    """The dashboard hides each editor when no installed model in that
+    context declares the corresponding input. /api/state exposes those
+    booleans so the JS doesn't need to re-derive them from /api/models."""
+    body = client.get("/api/state").json()
+    support = body["inputs_support"]
+    # Whisper family is always present in test fixture (faster_whisper
+    # is in the dev install), so all three should be True.
+    assert support["live_prompt"] is True
+    assert support["batch_prompt"] is True
+    assert support["batch_hotwords"] is True
+
+
+def test_api_state_inputs_support_hides_when_only_non_supporting_models_installed(client):
+    """If the only installed batch families are Voxtral / Parakeet /
+    Canary (none declare initial_prompt or hotwords), batch_prompt and
+    batch_hotwords are False. Same logic for live: if the only installed
+    live family doesn't declare initial_prompt, live_prompt is False."""
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+
+    # Pretend only voxtral (mistral_common + mlx_voxtral) is installed.
+    # No Whisper family → no initial_prompt / hotwords support anywhere.
+    set_installed_modules_for_testing(frozenset({"mistral_common", "mlx_voxtral"}))
+    try:
+        body = client.get("/api/state").json()
+        support = body["inputs_support"]
+        assert support["live_prompt"] is False
+        assert support["batch_prompt"] is False
+        assert support["batch_hotwords"] is False
+    finally:
+        # The autouse fixture re-installs every probe on teardown, but
+        # restore eagerly so the next assertion in this test couldn't
+        # leak across.
+        set_installed_modules_for_testing(None)
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/config/{key} — dashboard's save button writes prompt /
+# live-prompt / hotwords back to disk. Atomic via tempfile + rename so a
+# crashed write never leaves a truncated file.
+# ---------------------------------------------------------------------------
+
+
+def test_put_config_prompt_writes_file(client, recorder_under_test):
+    r = client.put("/api/config/prompt", json={"content": "Q3 planning · roadmap"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "key": "prompt", "length": len("Q3 planning · roadmap")}
+    assert (recorder_under_test.config_dir / "prompt.txt").read_text(
+        encoding="utf-8"
+    ) == "Q3 planning · roadmap"
+
+
+def test_put_config_live_prompt_writes_file(client, recorder_under_test):
+    r = client.put("/api/config/live-prompt", json={"content": "weekly standup"})
+    assert r.status_code == 200
+    assert (recorder_under_test.config_dir / "live-prompt.txt").read_text(
+        encoding="utf-8"
+    ) == "weekly standup"
+
+
+def test_put_config_hotwords_writes_file(client, recorder_under_test):
+    r = client.put("/api/config/hotwords", json={"content": "Acme, Patricia Lin"})
+    assert r.status_code == 200
+    assert (recorder_under_test.config_dir / "hotwords.txt").read_text(
+        encoding="utf-8"
+    ) == "Acme, Patricia Lin"
+
+
+def test_put_config_empty_content_clears_file(client, recorder_under_test):
+    (recorder_under_test.config_dir / "prompt.txt").write_text("existing", encoding="utf-8")
+    r = client.put("/api/config/prompt", json={"content": ""})
+    assert r.status_code == 200
+    assert (recorder_under_test.config_dir / "prompt.txt").read_text(encoding="utf-8") == ""
+
+
+def test_put_config_unknown_key_rejected(client):
+    r = client.put("/api/config/halibut", json={"content": "anything"})
+    assert r.status_code == 404
+
+
+def test_put_config_rejects_oversize(client):
+    """4000-char cap. Pasting a transcript dump into the prompt field
+    should fail loudly at the boundary, not get silently truncated
+    downstream where it would surprise the operator with a partial prompt."""
+    r = client.put("/api/config/prompt", json={"content": "x" * 5000})
+    assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +581,98 @@ def test_session_meta_404s_for_nonexistent_session(client):
 
 
 # ---------------------------------------------------------------------------
+# Session-meta: per-session prompt / hotwords overrides. These persist in
+# session-meta.json next to label + aliases. Override chain for batch jobs
+# is: session-meta → global config/prompt.txt — the per-job ephemeral form
+# field that used to ride in the /api/transcribe* body is gone.
+# ---------------------------------------------------------------------------
+
+
+def test_session_meta_round_trips_prompt_and_hotwords(client, recorder_under_test):
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    payload = {"prompt": "team kickoff · Alice, Bob, Patricia", "hotwords": "Acme, Patricia Lin"}
+    r = client.put("/api/session-meta/fakesession", json=payload)
+    assert r.status_code == 200
+    meta = r.json()["meta"]
+    assert meta["prompt"] == payload["prompt"]
+    assert meta["hotwords"] == payload["hotwords"]
+    assert client.get("/api/session-meta/fakesession").json()["prompt"] == payload["prompt"]
+
+
+def test_session_meta_drops_non_string_prompt_and_hotwords(client, recorder_under_test):
+    """Bad payload shouldn't kill the read path. Non-string fields are
+    dropped silently, matching how label/aliases already behave."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    r = client.put("/api/session-meta/fakesession", json={"prompt": 42, "hotwords": ["nope"]})
+    assert r.status_code == 200
+    meta = r.json()["meta"]
+    assert "prompt" not in meta or meta["prompt"] == ""
+    assert "hotwords" not in meta or meta["hotwords"] == ""
+
+
+def test_session_meta_preserves_label_when_setting_prompt(client, recorder_under_test):
+    """Partial updates: setting prompt mustn't wipe an existing label."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    client.put("/api/session-meta/fakesession", json={"label": "kickoff"})
+    client.put("/api/session-meta/fakesession", json={"prompt": "context"})
+    meta = client.get("/api/session-meta/fakesession").json()
+    assert meta["label"] == "kickoff"
+    assert meta["prompt"] == "context"
+
+
+def test_session_meta_rejects_oversize_prompt(client, recorder_under_test):
+    """Symmetric with PUT /api/config/{key}: the 4000-char cap exists to
+    fail loudly at the boundary instead of letting a pasted transcript
+    silently land on every batch job as `initial_prompt=`. The same cap
+    must apply to session-meta overrides — otherwise a buggy client (or
+    a curious operator) can paste a megabyte into session-meta.json and
+    bypass the global guardrail."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    r = client.put("/api/session-meta/fakesession", json={"prompt": "x" * 5000})
+    assert r.status_code == 400
+
+
+def test_session_meta_rejects_oversize_hotwords(client, recorder_under_test):
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    r = client.put("/api/session-meta/fakesession", json={"hotwords": "x" * 5000})
+    assert r.status_code == 400
+
+
+def test_api_state_sessions_include_meta_prompt_and_hotwords(client, recorder_under_test):
+    """The dashboard renders the override badge in the session-detail
+    pane off the meta block. /api/state's per-session entry must surface
+    these so the JS doesn't need a second round-trip per session."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    client.put("/api/session-meta/fakesession", json={"prompt": "P", "hotwords": "H"})
+    body = client.get("/api/state").json()
+    row = next(s for s in body["sessions"] if s["session"] == "fakesession")
+    assert row["session_meta"]["prompt"] == "P"
+    assert row["session_meta"]["hotwords"] == "H"
+
+
+def test_api_state_reports_default_override_counts(client, recorder_under_test):
+    """The 'default config' panel shows '· N sessions override this' next
+    to each editor. /api/state exposes the counts so the JS doesn't have
+    to walk every session."""
+    base = recorder_under_test.recordings_dir
+    for name in ("s1", "s2", "s3"):
+        (base / name).mkdir()
+    client.put("/api/session-meta/s1", json={"prompt": "x"})
+    client.put("/api/session-meta/s2", json={"prompt": "y", "hotwords": "z"})
+    client.put("/api/session-meta/s3", json={"label": "no override"})
+    body = client.get("/api/state").json()
+    counts = body["default_override_counts"]
+    assert counts["prompt"] == 2
+    assert counts["hotwords"] == 1
+
+
+# ---------------------------------------------------------------------------
 # /api/sessions/{target}/absorb
 # ---------------------------------------------------------------------------
 
@@ -615,8 +824,8 @@ def test_api_state_files_row_lists_all_cached_transcripts(client, recorder_under
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
-    wav = sd / "20260101T010000Z__alice__abc.wav"
+    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
 
     cached_transcribe(
         wav,
@@ -652,8 +861,8 @@ def test_api_set_primary_flips_pointer(client, recorder_under_test):
     from tapscribe.wav_cache import cached_transcribe, read_cached
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
-    wav = sd / "20260101T010000Z__alice__abc.wav"
+    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
         TranscriberStub(backend="faster-whisper", model="small.en"),
@@ -671,7 +880,7 @@ def test_api_set_primary_flips_pointer(client, recorder_under_test):
 
     # voxtral is the default primary (newest write) — flip to whisper.
     r = client.put(
-        "/api/wav/s/20260101T010000Z__alice__abc.wav/primary",
+        "/api/wav/s/2026-01-01T01-00-00Z__alice__abc.wav/primary",
         json={"backend": "faster-whisper", "model": "small.en"},
     )
     assert r.status_code == 200, r.text
@@ -685,8 +894,8 @@ def test_api_set_primary_422_for_uncached_combo(client, recorder_under_test):
     from tapscribe.wav_cache import cached_transcribe
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
-    wav = sd / "20260101T010000Z__alice__abc.wav"
+    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
         TranscriberStub(backend="faster-whisper", model="small.en"),
@@ -696,7 +905,7 @@ def test_api_set_primary_422_for_uncached_combo(client, recorder_under_test):
     )
 
     r = client.put(
-        "/api/wav/s/20260101T010000Z__alice__abc.wav/primary",
+        "/api/wav/s/2026-01-01T01-00-00Z__alice__abc.wav/primary",
         json={"backend": "mlx-voxtral", "model": "voxtral-mini"},
     )
     assert r.status_code == 422
@@ -717,8 +926,8 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
     from tapscribe.wav_cache import cached_transcribe
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
-    wav = sd / "20260101T010000Z__alice__abc.wav"
+    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
         TranscriberStub(backend="faster-whisper", model="small.en"),
@@ -744,6 +953,173 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
     }
 
 
+def test_api_transcribe_uses_session_meta_prompt_when_set(client, recorder_under_test, monkeypatch):
+    """Override chain (per-WAV batch): session-meta.prompt → global
+    prompt.txt. The ephemeral form-typed override that used to ride in
+    the request body is gone — the persisted meta is the source of truth."""
+    captured = {}
+
+    class _Spy(TranscriberStub):
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+            captured["initial_prompt"] = initial_prompt
+            captured["hotwords"] = hotwords
+            return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
+
+    fake = _Spy(backend="fake-backend", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL", encoding="utf-8")
+    (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
+    client.put("/api/session-meta/s", json={"prompt": "SESSION OVERRIDE", "hotwords": "Patricia"})
+
+    client.post(
+        "/api/transcribe",
+        json={"session": "s", "name": "2026-01-01T01-00-00Z__alice__abc.wav", "model": "fake-small.en"},
+    )
+    assert captured["initial_prompt"] == "SESSION OVERRIDE"
+    assert captured["hotwords"] == "Patricia"
+
+
+def test_api_transcribe_falls_back_to_global_when_session_meta_empty(
+    client, recorder_under_test, monkeypatch
+):
+    captured = {}
+
+    class _Spy(TranscriberStub):
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+            captured["initial_prompt"] = initial_prompt
+            captured["hotwords"] = hotwords
+            return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
+
+    fake = _Spy(backend="fake-backend", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL DEFAULT", encoding="utf-8")
+    (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
+
+    client.post(
+        "/api/transcribe",
+        json={"session": "s", "name": "2026-01-01T01-00-00Z__alice__abc.wav", "model": "fake-small.en"},
+    )
+    assert captured["initial_prompt"] == "GLOBAL DEFAULT"
+    assert captured["hotwords"] == "Acme"
+
+
+def test_api_transcribe_session_re_runs_when_session_meta_prompt_changes(
+    client, recorder_under_test, monkeypatch
+):
+    """Cache invariant: editing the session-meta override and re-running
+    /api/transcribe-session must NOT return the previously-cached
+    transcripts that were produced under the old prompt. The cache hit
+    check has to compare initial_prompt_used / hotwords_used too —
+    otherwise an operator editing the prompt and clicking
+    'transcribe whole session' silently sees the stale merge.
+
+    (The per-WAV /api/transcribe route already passes force=True so it
+    bypasses the cache; this regression bites only the session endpoint,
+    which is the common case after the override refactor.)
+
+    Reproducer: transcribe once under prompt 'A' (warms the cache),
+    flip the session-meta to prompt 'B', transcribe again WITHOUT
+    force=true, assert the transcriber was invoked a second time and
+    got prompt 'B'."""
+    captured: list[dict] = []
+
+    class _Spy(TranscriberStub):
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+            captured.append({"initial_prompt": initial_prompt, "hotwords": hotwords})
+            return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
+
+    fake = _Spy(backend="fake-backend", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    payload = {"session": "s", "model": "fake-small.en"}
+
+    # First run under prompt A — caches sidecar with initial_prompt_used="A".
+    client.put("/api/session-meta/s", json={"prompt": "PROMPT A"})
+    client.post("/api/transcribe-session", json=payload)
+    assert captured[-1]["initial_prompt"] == "PROMPT A"
+
+    # Flip the session-meta to a new prompt; re-run without force. The
+    # cache match key must include initial_prompt, so the stale "A"
+    # sidecar should NOT satisfy the hit and the transcriber must re-run
+    # with "B".
+    captured.clear()
+    client.put("/api/session-meta/s", json={"prompt": "PROMPT B"})
+    client.post("/api/transcribe-session", json=payload)
+    assert captured, "cache returned stale sidecar — initial_prompt mismatch went unnoticed"
+    assert captured[-1]["initial_prompt"] == "PROMPT B"
+
+
+def test_api_transcribe_session_re_runs_when_session_meta_hotwords_change(
+    client, recorder_under_test, monkeypatch
+):
+    """Same invariant as the prompt test above, for hotwords."""
+    captured: list[dict] = []
+
+    class _Spy(TranscriberStub):
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+            captured.append({"hotwords": hotwords})
+            return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
+
+    fake = _Spy(backend="fake-backend", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    payload = {"session": "s", "model": "fake-small.en"}
+
+    client.put("/api/session-meta/s", json={"hotwords": "Acme"})
+    client.post("/api/transcribe-session", json=payload)
+
+    captured.clear()
+    client.put("/api/session-meta/s", json={"hotwords": "Acme, Patricia"})
+    client.post("/api/transcribe-session", json=payload)
+    assert captured, "cache returned stale sidecar — hotwords mismatch went unnoticed"
+    assert captured[-1]["hotwords"] == "Acme, Patricia"
+
+
+def test_api_transcribe_session_re_uses_cache_when_prompt_unchanged(client, recorder_under_test, monkeypatch):
+    """The other half of the cache invariant: when prompt + hotwords
+    haven't changed, the cache MUST be reused (the whole point of the
+    cache). Without this, the override widening would degenerate the
+    cache to a perpetual miss."""
+    runs: list[None] = []
+
+    class _Spy(TranscriberStub):
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+            runs.append(None)
+            return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
+
+    fake = _Spy(backend="fake-backend", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    payload = {"session": "s", "model": "fake-small.en"}
+
+    client.put("/api/session-meta/s", json={"prompt": "STABLE"})
+    client.post("/api/transcribe-session", json=payload)
+    first_run_count = len(runs)
+    assert first_run_count == 1
+
+    # Re-run with no changes — cache should hit, transcriber should not
+    # be invoked again.
+    client.post("/api/transcribe-session", json=payload)
+    assert len(runs) == first_run_count, "cache missed despite unchanged prompt/hotwords"
+
+
 def test_api_transcribe_returns_freshly_written_transcript(client, recorder_under_test, monkeypatch):
     """The single-WAV transcribe route writes a new sidecar via the
     cache and returns the wire JSON. With the multi-cache layout there
@@ -757,11 +1133,11 @@ def test_api_transcribe_returns_freshly_written_transcript(client, recorder_unde
     monkeypatch.setattr("tapscribe.app.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
+    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
 
     r = client.post(
         "/api/transcribe",
-        json={"session": "s", "name": "20260101T010000Z__alice__abc.wav", "model": "fake-small.en"},
+        json={"session": "s", "name": "2026-01-01T01-00-00Z__alice__abc.wav", "model": "fake-small.en"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -769,7 +1145,7 @@ def test_api_transcribe_returns_freshly_written_transcript(client, recorder_unde
     assert body["backend"] == "fake-backend"
     assert body["model"] == "fake-small.en"
     # Sidecar lives in the new layout, not at <wav>.json.
-    wav = sd / "20260101T010000Z__alice__abc.wav"
+    wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     assert not wav.with_suffix(".json").is_file()
     assert wav.with_suffix(".transcripts").is_dir()
 
@@ -782,8 +1158,8 @@ def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
-    session = _seed_session(root, "s", ["20260101T010000Z__alice__abc.wav"])
-    wav = session / "20260101T010000Z__alice__abc.wav"
+    session = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    wav = session / "2026-01-01T01-00-00Z__alice__abc.wav"
 
     cached_transcribe(
         wav,

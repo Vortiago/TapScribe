@@ -25,7 +25,13 @@ from fastapi import HTTPException
 from . import config
 from . import strip_silence as _ss
 from .audio import wav_duration_s, wav_rms_dbfs
-from .text import build_recorder_wav_name, parse_wav_speaker_slug, parse_wav_start
+from .text import (
+    atomic_write_text,
+    build_recorder_wav_name,
+    parse_wav_speaker_slug,
+    parse_wav_start,
+    validate_config_text,
+)
 from .wav_cache import cache_listing, read_primary_payload
 
 if TYPE_CHECKING:
@@ -86,35 +92,62 @@ def stripped_dir(session: str) -> Path:
     return Path(real)
 
 
+_META_STRING_FIELDS = ("label", "prompt", "hotwords")
+
+
+def _coerce_aliases(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): str(v) for k, v in value.items() if isinstance(v, str)}
+
+
 def read_session_meta(session: str) -> dict[str, Any]:
-    """Return the per-session metadata dict (operator-editable display label
-    and speaker aliases). Missing or unreadable → {} (caller can treat as
-    no overrides)."""
+    """Return the per-session metadata dict: operator-editable display
+    label, speaker aliases, and per-session batch prompt/hotwords
+    overrides. Missing or unreadable → {} (caller can treat as no
+    overrides). Non-string fields are dropped silently."""
     data = _read_json_or_none(session_meta_path(session))
     if not isinstance(data, dict):
         return {}
-    out: dict[str, Any] = {}
-    if isinstance(data.get("label"), str):
-        out["label"] = data["label"]
+    out: dict[str, Any] = {k: data[k] for k in _META_STRING_FIELDS if isinstance(data.get(k), str)}
     if isinstance(data.get("aliases"), dict):
-        out["aliases"] = {str(k): str(v) for k, v in data["aliases"].items() if isinstance(v, str)}
+        out["aliases"] = _coerce_aliases(data["aliases"])
     return out
 
 
 def write_session_meta(session: str, meta: dict[str, Any]) -> None:
+    """Persist the per-session meta. Partial updates (e.g. only
+    `{"prompt": "..."}`) preserve existing fields the caller didn't
+    mention — otherwise editing one field would clear the others.
+
+    `prompt` and `hotwords` run through the same MAX_CONFIG_TEXT_LEN cap
+    as the global config writers — symmetric with `PUT /api/config/{key}`
+    so a buggy client can't bypass the guardrail via this endpoint.
+    Raises `HTTPException(400)` on oversize input.
+
+    Atomic via `atomic_write_text` so a crashed write never leaves a
+    torn JSON file (which `_read_json_or_none` would silently swallow,
+    losing the operator's label + aliases + overrides all at once)."""
     session = _safe_part(session, "session")
-    # Inline realpath+startswith sanitiser at the file-access site.
     root = os.path.realpath(config.RECORDINGS_DIR)
     real_parent = os.path.realpath(os.path.join(root, session))
     if real_parent != root and not real_parent.startswith(root + os.sep):
         raise HTTPException(404, "session not found")
     os.makedirs(real_parent, exist_ok=True)
-    sanitized = {
-        "label": meta.get("label", "") if isinstance(meta.get("label"), str) else "",
-        "aliases": {str(k): str(v) for k, v in (meta.get("aliases") or {}).items() if isinstance(v, str)},
-    }
-    with open(os.path.join(real_parent, "session-meta.json"), "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(sanitized, indent=2, ensure_ascii=False))
+    existing = read_session_meta(session)
+    allowed = {"aliases", *_META_STRING_FIELDS}
+    merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
+    sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
+    sanitized["aliases"] = _coerce_aliases(merged.get("aliases"))
+    for capped_field in ("prompt", "hotwords"):
+        try:
+            validate_config_text(sanitized[capped_field])
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+    atomic_write_text(
+        Path(real_parent) / "session-meta.json",
+        json.dumps(sanitized, indent=2, ensure_ascii=False),
+    )
 
 
 def stripped_stats(session: str) -> dict[str, Any] | None:

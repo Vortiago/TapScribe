@@ -33,7 +33,16 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from .nb_whisper import download_nb_whisper_ct2_dir
-from .text import read_prompt
+from .text import read_live_prompt
+
+
+def resolve_live_init_prompt() -> str | None:
+    """Read the live-channel init prompt (config/live-prompt.txt) and
+    coerce the empty case to None so build_live_cmd omits --init-prompt.
+
+    Wraps the read in a tiny helper so the substitution is testable
+    without spinning up a subprocess."""
+    return read_live_prompt() or None
 
 
 @runtime_checkable
@@ -500,7 +509,7 @@ class WhisperLiveKitChannel:
                 self.config,
                 use_mlx=self.use_mlx,
                 nb_whisper_ct2_dir=ct2_dir,
-                init_prompt=read_prompt() or None,
+                init_prompt=resolve_live_init_prompt(),
             )
 
             popen_kwargs: dict[str, Any] = dict(

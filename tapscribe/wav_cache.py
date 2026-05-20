@@ -219,7 +219,15 @@ def cached_transcribe(
     target=fr — so the cache hit also requires matching language pair.
     Whisper / Voxtral / Parakeet ignore these kwargs, and their cached
     entries have empty source/target_language, so the match is trivially
-    "both empty" for those backends."""
+    "both empty" for those backends.
+
+    Prompt-aware: `initial_prompt` and `hotwords` are part of the match
+    key too. A cached entry written under `initial_prompt="A"` must
+    not be served when the caller now wants `initial_prompt="B"` —
+    otherwise editing the session-meta override and re-running would
+    silently return the stale transcript. Adapters that don't consume
+    these kwargs (Voxtral / Parakeet / Canary today) record empty
+    strings, so the match is trivially "both empty" there."""
     backend = transcriber.backend
     model = transcriber.model_name
     size, mtime_ns = _wav_fingerprint(wav_path)
@@ -231,6 +239,8 @@ def cached_transcribe(
             and existing.wav_mtime_ns == mtime_ns
             and (existing.result.source_language or "") == (source_lang or "")
             and (existing.result.target_language or "") == (target_lang or "")
+            and (existing.result.initial_prompt_used or "") == (initial_prompt or "")
+            and (existing.result.hotwords_used or "") == (hotwords or "")
         ):
             return existing
 

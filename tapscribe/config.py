@@ -32,6 +32,12 @@ WEB_DIR: Path = Path(__file__).resolve().parent / "web"
 # Config files. These can be edited at runtime; the recorder re-reads each
 # one per transcribe job so changes take effect without a restart.
 PROMPT_FILE: Path = CONFIG_DIR / "prompt.txt"
+# Independent prompt for the live channel (whisperlivekit-server).
+# Operators set this separately from the batch prompt because live and
+# batch typically run different models and/or different cadences (a
+# terse always-on prompt for live vs a meeting-specific one for batch).
+# Empty/missing = the live channel runs without an --init-prompt.
+LIVE_PROMPT_FILE: Path = CONFIG_DIR / "live-prompt.txt"
 HOTWORDS_FILE: Path = CONFIG_DIR / "hotwords.txt"
 HALLUCINATIONS_FILE: Path = CONFIG_DIR / "hallucinations.txt"
 

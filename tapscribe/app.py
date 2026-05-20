@@ -61,7 +61,15 @@ from .sessions import (
     write_session_meta,
 )
 from .tap_fan_out import TapFanOut
-from .text import read_hotwords, read_prompt
+from .text import (
+    MAX_CONFIG_TEXT_LEN,
+    read_hotwords,
+    read_live_prompt,
+    read_prompt,
+    write_hotwords,
+    write_live_prompt,
+    write_prompt,
+)
 from .transcribers import load_transcriber
 from .transcribers.catalog import REGISTRY, available_backends
 from .wav_cache import cached_transcribe, read_primary_payload, set_primary_transcript
@@ -71,6 +79,44 @@ def _available_backends_snapshot() -> frozenset[str]:
     """`available_backends()` returns the cached set; expose as plain set
     of strings for the JSON serialiser."""
     return frozenset(str(k) for k in available_backends())
+
+
+def _compute_inputs_support() -> dict[str, bool]:
+    """Derive per-context support flags for the dashboard editors.
+
+    The dashboard hides each editor when no installed model in that
+    context declares the corresponding input. We compute this from the
+    registry (`ModelEntry.inputs`) so adding a future Voxtral prompt
+    field (or removing one) automatically updates the UI gating with
+    no manual flag-flipping.
+
+    `live_hotwords` is intentionally not exposed: WhisperLiveKit's CLI
+    has no --hotwords flag (see `build_live_cmd`), so even though
+    Whisper-family entries declare hotwords in `WHISPER_INPUTS`, the
+    live channel can't currently consume them.
+    """
+
+    def _any_installed_has(context: str, input_name: str) -> bool:
+        for entry in REGISTRY.for_context(context, only_installed=True):  # type: ignore[arg-type]
+            for inp in entry.inputs:
+                if inp.name == input_name:
+                    return True
+        return False
+
+    return {
+        "live_prompt": _any_installed_has("live", "initial_prompt"),
+        "batch_prompt": _any_installed_has("batch", "initial_prompt"),
+        "batch_hotwords": _any_installed_has("batch", "hotwords"),
+    }
+
+
+# Map of config key (URL segment) → writer. Keeps the PUT handler one
+# branch deep and makes the supported keys easy to grep for.
+_CONFIG_WRITERS = {
+    "prompt": write_prompt,
+    "live-prompt": write_live_prompt,
+    "hotwords": write_hotwords,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +299,10 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
     prompt = read_prompt()
+    live_prompt = read_live_prompt()
     hotwords = read_hotwords()
     halluc_rules = hallucinations_mod.parse_rules()
+    inputs_support = _compute_inputs_support()
     # The per-row rec/live toggles control the per-identity preference,
     # not the in-flight WS snapshot — so the button state needs to track
     # the current preference, otherwise clicks land server-side but the
@@ -266,13 +314,23 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
         row["record"] = pref.record
         row["live"] = pref.live
         active.append(row)
+    sessions_list = gather_sessions(
+        current_session=recorder.session_start,
+        jobs=jobs_snapshot,
+    )
+    # Powers the "· N sessions override this" footer in the default config panel.
+    override_counts = {"prompt": 0, "hotwords": 0}
+    for s in sessions_list:
+        m = s.get("session_meta") or {}
+        if m.get("prompt"):
+            override_counts["prompt"] += 1
+        if m.get("hotwords"):
+            override_counts["hotwords"] += 1
     return {
         "current_session": recorder.session_start,
         "active": active,
-        "sessions": gather_sessions(
-            current_session=recorder.session_start,
-            jobs=jobs_snapshot,
-        ),
+        "sessions": sessions_list,
+        "default_override_counts": override_counts,
         "live_feed": recorder.transcripts.snapshot(),
         "live_info": dict(recorder.live.info),
         "live_log": list(recorder.live.log)[-30:],
@@ -286,11 +344,17 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
             "content": prompt,
             "length": len(prompt),
         },
+        "live_prompt": {
+            "path": str(config.LIVE_PROMPT_FILE),
+            "content": live_prompt,
+            "length": len(live_prompt),
+        },
         "hotwords": {
             "path": str(config.HOTWORDS_FILE),
             "content": hotwords,
             "length": len(hotwords),
         },
+        "inputs_support": inputs_support,
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "rules": [r["raw"] for r in halluc_rules],
@@ -493,6 +557,35 @@ async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_re
         enabled = recorder.toggle_recording()
     print(f"[tapscribe] recording {'enabled' if enabled else 'paused'}", flush=True)
     return {"ok": True, "enabled": enabled}
+
+
+# ---------------------------------------------------------------------------
+# Editable config — dashboard "save" buttons for prompt / live-prompt /
+# hotwords. Atomic via tempfile + rename inside the writer helpers.
+# ---------------------------------------------------------------------------
+
+
+@app.put("/api/config/{key}")
+async def api_config_put(key: str, req: Request):
+    writer = _CONFIG_WRITERS.get(key)
+    if writer is None:
+        raise HTTPException(404, f"unknown config key: {key!r}")
+    body = await _json_body(req)
+    content = body.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(400, "content must be a string")
+    if len(content) > MAX_CONFIG_TEXT_LEN:
+        raise HTTPException(
+            400,
+            f"content exceeds {MAX_CONFIG_TEXT_LEN}-char cap (got {len(content)})",
+        )
+    try:
+        writer(content)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except OSError as e:
+        raise HTTPException(500, f"failed to write config: {e}") from e
+    return {"ok": True, "key": key, "length": len(content)}
 
 
 # ---------------------------------------------------------------------------
@@ -746,14 +839,31 @@ async def api_set_primary(
     return {"ok": True, "primary": {"backend": backend, "model": model}}
 
 
+def _effective_batch_prompt_hotwords(session: str) -> tuple[str | None, str | None]:
+    """Override chain for batch transcribe jobs: session-meta → global
+    config files. Returns (initial_prompt, hotwords), each None when
+    both layers are empty so the adapter receives no value (vs. the
+    empty string, which some backends would treat as a real prompt).
+
+    Limitation: an empty session-meta override falls back to the global
+    default — there's no way for a session to assert "specifically NO
+    prompt, even though a global is set." If an operator needs that
+    today the workaround is to clear the global prompt; a future
+    sentinel value (e.g. a `null` override that's distinct from the
+    empty string) could express it explicitly without touching the
+    global."""
+    meta = read_session_meta(session)
+    prompt = (meta.get("prompt") or "").strip() or (read_prompt() or "").strip()
+    hotwords = (meta.get("hotwords") or "").strip() or (read_hotwords() or "").strip()
+    return (prompt or None), (hotwords or None)
+
+
 @app.post("/api/transcribe")
 async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await req.json()
     session = body.get("session") or ""
     name = body.get("name") or ""
     model_name = body.get("model") or "small.en"
-    prompt_override = body.get("prompt") or ""
-    hotwords_override = body.get("hotwords") or ""
     source = body.get("source") or "original"
     if not session or not name:
         raise HTTPException(400, "session and name are required")
@@ -779,8 +889,7 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
     # preference if the body didn't carry one.
     backend_override = (body.get("backend") or "").strip() or recorder.backend
     transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
-    initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
-    hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
+    initial_prompt, hotwords = _effective_batch_prompt_hotwords(session)
     # Canary's per-call language fields ride alongside prompt/hotwords. Empty
     # string → adapter falls back to its own "en" default.
     source_lang = (body.get("source_lang") or "").strip() or None
@@ -822,8 +931,6 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     from_iso = body.get("from_iso") or None
     to_iso = body.get("to_iso") or None
     force = bool(body.get("force"))
-    prompt_override = body.get("prompt") or ""
-    hotwords_override = body.get("hotwords") or ""
     source = body.get("source") or "original"
     if not session:
         raise HTTPException(400, "session is required")
@@ -844,12 +951,18 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
 
     backend_override = (body.get("backend") or "").strip() or recorder.backend
     transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
-    initial_prompt = (prompt_override or "").strip() or (read_prompt() or None)
-    hotwords = (hotwords_override or "").strip() or (read_hotwords() or None)
+    initial_prompt, hotwords = _effective_batch_prompt_hotwords(session)
     source_lang = (body.get("source_lang") or "").strip() or None
     target_lang = (body.get("target_lang") or "").strip() or None
     rules = hallucinations_mod.parse_rules()
-    effective_force = force or bool(prompt_override.strip() or hotwords_override.strip())
+    # No `effective_force = force or bool(prompt/hotwords_override)` here:
+    # the cache match key in `cached_transcribe` now includes
+    # initial_prompt_used + hotwords_used, so a meta change automatically
+    # misses the cache. As a side benefit this re-runs only the WAVs
+    # whose cached entry doesn't match — the old `effective_force` path
+    # forced every file in the session, even ones already transcribed
+    # under the new prompt by a prior /api/transcribe call.
+    effective_force = force
 
     claimed = await recorder.jobs.claim(
         JobState(

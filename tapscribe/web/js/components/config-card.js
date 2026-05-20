@@ -1,7 +1,16 @@
-// Config-in-effect three-column card. Signature-gated so we only rebuild
-// when the underlying prompt/hotwords/hallucinations files change.
+// "Default config" card — global batch defaults (prompt.txt, hotwords.txt)
+// + the hallucination filter. The live prompt has moved into the live
+// channel panel; each session's per-batch override lives in the session
+// detail. This panel surfaces the system-wide defaults only.
+//
+// Each editor is hidden when no installed batch model declares the
+// corresponding input (registry-driven via inputs_support.batch_*).
+// Save buttons PUT to /api/config/{prompt|hotwords}. Atomic on the
+// server. While focus is inside any editor textarea the whole card
+// skips its per-second rebuild so polling can't blow away unsaved edits.
 
 import { tpl, pick } from "../templates.js";
+import { wireConfigSave } from "../api.js";
 
 let lastSig = "";
 
@@ -10,8 +19,7 @@ function buildCol({ title, file, count, body }) {
   pick(frag, "title").textContent = title;
   pick(frag, "file").textContent = file;
   if (count) pick(frag, "count").textContent = `· ${count}`;
-  const bodyEl = pick(frag, "body");
-  body(bodyEl);
+  body(pick(frag, "body"));
   return frag;
 }
 
@@ -32,11 +40,53 @@ function codeList(values) {
   return frag;
 }
 
-export function render(j, { gridEl }) {
+function buildEditor({ key, content, placeholder, overrideCount }) {
+  const frag = tpl("tpl-cfg-editor");
+  const ta = pick(frag, "textarea");
+  ta.value = content || "";
+  ta.placeholder = placeholder || "";
+  ta.dataset.cfgKey = key;
+  const btn = pick(frag, "saveBtn");
+  btn.dataset.cfgKey = key;
+  const status = pick(frag, "status");
+  status.dataset.cfgKey = key;
+
+  // Override-count footnote — empty when zero so the cell stays clean
+  // on installs with no per-session overrides set.
+  const overrideEl = pick(frag, "overrideCount");
+  if (overrideCount > 0) {
+    overrideEl.textContent = `${overrideCount} session${overrideCount === 1 ? "" : "s"} override${overrideCount === 1 ? "s" : ""} this`;
+  }
+
+  // Track baseline for the "unsaved" badge. wireConfigSave owns the
+  // saving/saved/failed transitions and advances `baseline` only after
+  // a successful save, so a failed save leaves the badge unsaved.
+  let baseline = content || "";
+  ta.addEventListener("input", () => {
+    if (status.textContent === "saving…" || status.textContent === "saved") return;
+    status.textContent = ta.value !== baseline ? "unsaved" : "";
+  });
+  wireConfigSave({ key, btn, textarea: ta, status, onSuccess: (v) => { baseline = v; } });
+  return frag;
+}
+
+export function render(j, { gridEl, headerNoteEl }) {
+  const active = document.activeElement;
+  if (active && active.dataset && active.dataset.cfgKey && gridEl.contains(active)) return;
+
   const p = j.prompt || {};
   const h = j.hotwords || {};
   const hl = j.hallucinations || {};
-  const sig = [p.length || 0, h.length || 0, hl.count || 0, p.content || "", h.content || "", (hl.rules || []).join("|")].join("§");
+  const support = j.inputs_support || { batch_prompt: true, batch_hotwords: true };
+  const counts = j.default_override_counts || { prompt: 0, hotwords: 0 };
+  const sig = [
+    p.length || 0, p.content || "",
+    h.length || 0, h.content || "",
+    hl.count || 0, (hl.rules || []).join("|"),
+    support.batch_prompt ? 1 : 0,
+    support.batch_hotwords ? 1 : 0,
+    counts.prompt | 0, counts.hotwords | 0,
+  ].join("§");
   if (sig === lastSig) return;
   lastSig = sig;
 
@@ -44,24 +94,39 @@ export function render(j, { gridEl }) {
   const halRules = hl.rules || [];
 
   const out = document.createDocumentFragment();
-  out.appendChild(buildCol({
-    title: "initial prompt",
-    file: "prompt.txt",
-    count: p.length ? `${p.length} chars` : null,
-    body: (el) => {
-      if (p.length) el.textContent = p.content;
-      else el.appendChild(emptyMsg("empty — no prose context biasing"));
-    },
-  }));
-  out.appendChild(buildCol({
-    title: "hotwords",
-    file: "hotwords.txt",
-    count: hotwordList.length ? `${hotwordList.length} terms` : null,
-    body: (el) => {
-      if (hotwordList.length) el.appendChild(codeList(hotwordList));
-      else el.appendChild(emptyMsg("empty — no keyword biasing"));
-    },
-  }));
+
+  if (support.batch_prompt) {
+    out.appendChild(buildCol({
+      title: "default prompt",
+      file: "prompt.txt",
+      count: p.length ? `${p.length} chars` : null,
+      body: (el) => {
+        el.appendChild(buildEditor({
+          key: "prompt",
+          content: p.content || "",
+          placeholder: "default context biasing for batch transcription — sessions can override below",
+          overrideCount: counts.prompt,
+        }));
+      },
+    }));
+  }
+
+  if (support.batch_hotwords) {
+    out.appendChild(buildCol({
+      title: "default hotwords",
+      file: "hotwords.txt",
+      count: hotwordList.length ? `${hotwordList.length} terms` : null,
+      body: (el) => {
+        el.appendChild(buildEditor({
+          key: "hotwords",
+          content: h.content || "",
+          placeholder: "comma-separated names / jargon, e.g. Acme Inc., Patricia Lin",
+          overrideCount: counts.hotwords,
+        }));
+      },
+    }));
+  }
+
   out.appendChild(buildCol({
     title: "hallucination filter",
     file: "hallucinations.txt",
@@ -77,6 +142,9 @@ export function render(j, { gridEl }) {
   }));
 
   gridEl.replaceChildren(out);
+  if (headerNoteEl) {
+    headerNoteEl.textContent = "batch defaults — overridden per-session in the controls below";
+  }
 }
 
 export const invalidate = () => { lastSig = ""; };
