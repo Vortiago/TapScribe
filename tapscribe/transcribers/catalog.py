@@ -383,10 +383,7 @@ class TranscriberRegistry:
     def require(self, model_id: str) -> ModelEntry:
         entry = self._by_id.get(model_id)
         if entry is None:
-            raise KeyError(
-                f"model_id={model_id!r} not in registry. "
-                f"Known: {sorted(self._by_id)!r}"
-            )
+            raise KeyError(f"model_id={model_id!r} not in registry. Known: {sorted(self._by_id)!r}")
         return entry
 
     def for_context(self, context: Context) -> tuple[ModelEntry, ...]:

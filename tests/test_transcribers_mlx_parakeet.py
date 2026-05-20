@@ -72,9 +72,7 @@ def test_transcribe_returns_segments_with_real_timestamps(tmp_path: Path):
         ],
         text="Hello there. How are you?",
     )
-    t = MlxParakeetTranscriber(
-        model_name="parakeet-tdt-0.6b-v3", model=_fake_parakeet_model(aligned)
-    )
+    t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=_fake_parakeet_model(aligned))
     wav = _one_second_wav(tmp_path / "x.wav")
     result = t.transcribe(wav)
 
@@ -101,9 +99,7 @@ def test_transcribe_propagates_word_level_timestamps(tmp_path: Path):
         sentences=[_aligned_sentence("Hello there", start=0.10, end=0.80, tokens=tokens)],
         text="Hello there",
     )
-    t = MlxParakeetTranscriber(
-        model_name="parakeet-tdt-0.6b-v3", model=_fake_parakeet_model(aligned)
-    )
+    t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=_fake_parakeet_model(aligned))
     wav = _one_second_wav(tmp_path / "x.wav")
     result = t.transcribe(wav)
     assert result.segments[0].words is not None
@@ -121,9 +117,7 @@ def test_transcribe_accepts_but_drops_prompt_and_hotwords_records_them(tmp_path:
     them on the result for audit."""
     from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
 
-    aligned = _aligned_result(
-        sentences=[_aligned_sentence("ok", 0.0, 0.5)], text="ok"
-    )
+    aligned = _aligned_result(sentences=[_aligned_sentence("ok", 0.0, 0.5)], text="ok")
     fake = _fake_parakeet_model(aligned)
     t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=fake)
     wav = _one_second_wav(tmp_path / "x.wav")
@@ -142,9 +136,7 @@ def test_transcribe_records_language_from_source_lang_or_auto(tmp_path: Path):
     source_lang we sent in, or `'auto'` when the caller didn't pin one."""
     from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
 
-    aligned = _aligned_result(
-        sentences=[_aligned_sentence("ok", 0.0, 0.5)], text="ok"
-    )
+    aligned = _aligned_result(sentences=[_aligned_sentence("ok", 0.0, 0.5)], text="ok")
     t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=_fake_parakeet_model(aligned))
     wav = _one_second_wav(tmp_path / "x.wav")
     r1 = t.transcribe(wav)

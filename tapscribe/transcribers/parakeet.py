@@ -48,15 +48,13 @@ def _lookup(payload: Any, key: str, default: Any = None) -> Any:
 
 
 def _word_from_payload(payload: Any) -> Word:
-    text = (_lookup(payload, "word", "") or _lookup(payload, "text", "") or "")
+    text = _lookup(payload, "word", "") or _lookup(payload, "text", "") or ""
     start = float(_lookup(payload, "start", 0.0) or 0.0)
     end = float(_lookup(payload, "end", 0.0) or 0.0)
     return Word(start=round(start, 2), end=round(end, 2), word=text, prob=1.0)
 
 
-def _build_segments(
-    segment_dicts: list[Any], word_dicts: list[Any]
-) -> tuple[TranscriptionSegment, ...]:
+def _build_segments(segment_dicts: list[Any], word_dicts: list[Any]) -> tuple[TranscriptionSegment, ...]:
     """Pair NeMo's segment list with its word list.
 
     Same shape as `mlx_canary._build_segments` / `canary._build_segments`
@@ -73,9 +71,7 @@ def _build_segments(
         start = float(_lookup(seg, "start", 0.0) or 0.0)
         end = float(_lookup(seg, "end", 0.0) or 0.0)
         text = (_lookup(seg, "segment", "") or _lookup(seg, "text", "") or "").strip()
-        in_range = tuple(
-            w for w in all_words if w.start >= start - 1e-3 and w.end <= end + 1e-3
-        )
+        in_range = tuple(w for w in all_words if w.start >= start - 1e-3 and w.end <= end + 1e-3)
         out.append(
             TranscriptionSegment(
                 start=round(start, 2),
@@ -162,9 +158,7 @@ class ParakeetTranscriber:
         segments = _build_segments(seg_list, word_list)
         dur = round(wav_duration_s(path), 2)
         if not segments and text:
-            segments = (
-                TranscriptionSegment(start=0.0, end=dur, text=text, words=None),
-            )
+            segments = (TranscriptionSegment(start=0.0, end=dur, text=text, words=None),)
 
         return TranscriptionResult(
             transcriber=self.name,

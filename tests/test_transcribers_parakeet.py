@@ -86,7 +86,9 @@ def test_transcribe_attaches_words_to_segments_by_range(tmp_path: Path):
         {"start": 0.90, "end": 1.20, "word": "How"},
         {"start": 1.25, "end": 1.50, "word": "are you"},
     ]
-    fake = _fake_parakeet_model(_parakeet_response("Hello there. How are you?", segments=seg_list, words=words))
+    fake = _fake_parakeet_model(
+        _parakeet_response("Hello there. How are you?", segments=seg_list, words=words)
+    )
     t = ParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=fake, device="CUDA")
     wav = _one_second_wav(tmp_path / "x.wav")
     r = t.transcribe(wav)

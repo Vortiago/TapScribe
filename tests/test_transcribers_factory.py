@@ -123,9 +123,7 @@ def _rebuild_registry(monkeypatch):
         BackendBinding(kinds=frozenset({"mlx"}), loader=catalog._load_mlx_whisper),
         BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_faster_whisper),
     )
-    nb_backends = (
-        BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_faster_whisper),
-    )
+    nb_backends = (BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_faster_whisper),)
     voxtral_backends = (
         BackendBinding(kinds=frozenset({"mlx"}), loader=catalog._load_voxtral_mlx),
         BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_voxtral_hf),
@@ -142,35 +140,64 @@ def _rebuild_registry(monkeypatch):
     batch_only = frozenset({"batch"})
     entries = (
         ModelEntry(
-            model_id="small.en", family="whisper", display_name="small.en",
-            description="", languages=("en",), contexts=both,
-            backends=whisper_backends, inputs=WHISPER_INPUTS,
+            model_id="small.en",
+            family="whisper",
+            display_name="small.en",
+            description="",
+            languages=("en",),
+            contexts=both,
+            backends=whisper_backends,
+            inputs=WHISPER_INPUTS,
         ),
         ModelEntry(
-            model_id="medium.en", family="whisper", display_name="medium.en",
-            description="", languages=("en",), contexts=both,
-            backends=whisper_backends, inputs=WHISPER_INPUTS,
+            model_id="medium.en",
+            family="whisper",
+            display_name="medium.en",
+            description="",
+            languages=("en",),
+            contexts=both,
+            backends=whisper_backends,
+            inputs=WHISPER_INPUTS,
         ),
         ModelEntry(
-            model_id="nb-whisper-medium", family="nb-whisper",
-            display_name="nb-whisper-medium", description="", languages=("no",),
-            contexts=both, backends=nb_backends, inputs=WHISPER_INPUTS,
+            model_id="nb-whisper-medium",
+            family="nb-whisper",
+            display_name="nb-whisper-medium",
+            description="",
+            languages=("no",),
+            contexts=both,
+            backends=nb_backends,
+            inputs=WHISPER_INPUTS,
         ),
         ModelEntry(
-            model_id="voxtral-mini", family="voxtral", display_name="voxtral-mini",
-            description="", languages=("en",), contexts=both,
-            backends=voxtral_backends, inputs=NO_INPUTS,
+            model_id="voxtral-mini",
+            family="voxtral",
+            display_name="voxtral-mini",
+            description="",
+            languages=("en",),
+            contexts=both,
+            backends=voxtral_backends,
+            inputs=NO_INPUTS,
         ),
         ModelEntry(
-            model_id="parakeet-tdt-0.6b-v3", family="parakeet",
-            display_name="parakeet-tdt-0.6b-v3", description="",
-            languages=_PARAKEET_LANG_CODES, contexts=batch_only,
-            backends=parakeet_backends, inputs=NO_INPUTS,
+            model_id="parakeet-tdt-0.6b-v3",
+            family="parakeet",
+            display_name="parakeet-tdt-0.6b-v3",
+            description="",
+            languages=_PARAKEET_LANG_CODES,
+            contexts=batch_only,
+            backends=parakeet_backends,
+            inputs=NO_INPUTS,
         ),
         ModelEntry(
-            model_id="canary-1b-v2", family="canary", display_name="canary-1b-v2",
-            description="", languages=_CANARY_LANG_CODES, contexts=batch_only,
-            backends=canary_backends, inputs=CANARY_INPUTS,
+            model_id="canary-1b-v2",
+            family="canary",
+            display_name="canary-1b-v2",
+            description="",
+            languages=_CANARY_LANG_CODES,
+            contexts=batch_only,
+            backends=canary_backends,
+            inputs=CANARY_INPUTS,
         ),
     )
     fresh = TranscriberRegistry(entries)
@@ -180,9 +207,7 @@ def _rebuild_registry(monkeypatch):
 
 def _load(model_id: str, **kwargs):
     """Helper: load through the patched registry."""
-    return transcribers.load_transcriber(
-        model_id, registry=catalog.REGISTRY, **kwargs
-    )
+    return transcribers.load_transcriber(model_id, registry=catalog.REGISTRY, **kwargs)
 
 
 def test_routes_whisper_to_faster_whisper_on_cuda():

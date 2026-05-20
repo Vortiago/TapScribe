@@ -72,6 +72,7 @@ def _available_backends_snapshot() -> frozenset[str]:
     of strings for the JSON serialiser."""
     return frozenset(str(k) for k in available_backends())
 
+
 # ---------------------------------------------------------------------------
 # Dependency injection — every route reads the Recorder via Depends
 # ---------------------------------------------------------------------------
