@@ -8,7 +8,7 @@ filters fire.
 from __future__ import annotations
 
 import wave
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -49,7 +49,7 @@ def test_select_returns_empty_for_empty_session(tmp_path: Path):
 def test_select_returns_all_audible_wavs_sorted_by_start_time(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     _write_wav(session_dir / _wav_name(base + timedelta(seconds=5)))
     _write_wav(session_dir / _wav_name(base + timedelta(seconds=0)))
     _write_wav(session_dir / _wav_name(base + timedelta(seconds=10)))
@@ -64,7 +64,7 @@ def test_select_returns_all_audible_wavs_sorted_by_start_time(tmp_path: Path):
 def test_select_drops_silent_wavs_below_floor(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     # One audible (amplitude=8000 ≈ -12 dBFS) + one silent (zeros)
     audible = _write_wav(session_dir / _wav_name(base + timedelta(seconds=0)))
     silent_path = session_dir / _wav_name(base + timedelta(seconds=5), speaker="bob")
@@ -82,7 +82,7 @@ def test_select_drops_silent_wavs_below_floor(tmp_path: Path):
 def test_select_drops_empty_or_corrupt_wavs(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     good = _write_wav(session_dir / _wav_name(base))
     # 30-byte garbage "WAV" — too small to read
     bad = session_dir / _wav_name(base + timedelta(seconds=5), speaker="bob")
@@ -96,7 +96,7 @@ def test_select_drops_empty_or_corrupt_wavs(tmp_path: Path):
 def test_select_filters_by_iso_time_range(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     early = _write_wav(session_dir / _wav_name(base))
     mid = _write_wav(session_dir / _wav_name(base + timedelta(minutes=5), speaker="b"))
     late = _write_wav(session_dir / _wav_name(base + timedelta(minutes=10), speaker="c"))
@@ -121,7 +121,7 @@ def test_select_with_source_stripped_uses_stripped_subdir(tmp_path: Path):
     session_dir = tmp_path / "session"
     stripped = session_dir / "stripped"
     stripped.mkdir(parents=True)
-    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     # original (in session_dir) is audible — needed for the silence gate
     _write_wav(session_dir / _wav_name(base))
     # stripped sibling at the same name

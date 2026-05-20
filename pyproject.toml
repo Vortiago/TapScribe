@@ -7,15 +7,13 @@ name = "tapscribe"
 version = "0.1.0"
 description = "Local-first transcription recorder + operator dashboard built on Whisper."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
@@ -41,29 +39,52 @@ dependencies = [
 [project.optional-dependencies]
 # The actual model backends are heavy and platform-dependent; keep them
 # optional so a CI / docs install doesn't pull in PyTorch + CUDA.
-whisper = ["faster-whisper>=1.0", "whisperlivekit>=0.1"]
-mlx = ["mlx-whisper>=0.5; sys_platform == 'darwin' and platform_machine == 'arm64'"]
-voxtral = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
-# Parakeet TDT 0.6B v3 — NVIDIA's top-of-leaderboard ASR. Two adapters:
-#   - parakeet-mlx (Apple Silicon, ~2.5GB model on disk)
-#   - parakeet (NeMo Toolkit, runs on CUDA or CPU — official NVIDIA
-#     integration; released `transformers` packages don't yet have
-#     the `parakeet_tdt` model type mapping, so NeMo is the path).
+#
+# The picker (tools/install_picker.py) composes per-family backend
+# selections from these atomic extras: each family has a "shared" extra
+# (always installed when the family is on) plus one or two backend-
+# specific extras (CPU/CUDA and/or MLX) which the operator can opt into
+# independently. Keep the family/backend split explicit here so a stray
+# `pip install -e .[canary-mlx]` on a Linux box doesn't drag in NeMo.
+
+# --- Whisper / NB-Whisper ---------------------------------------------------
+# Live channel needs whisperlivekit no matter which backend drives it;
+# faster-whisper covers the CPU/CUDA path; mlx-whisper covers Apple
+# Silicon. mlx-whisper's PyPI release line tops out at 0.4.x — a `>=0.5`
+# floor is unsatisfiable, so don't tighten this without checking PyPI.
+whisper-live = ["whisperlivekit>=0.1"]
+whisper-cpu = ["faster-whisper>=1.0"]
+whisper-mlx = ["mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+# --- Voxtral (Mistral) ------------------------------------------------------
+# CPU/CUDA only — no published MLX adapter on PyPI as of 2026-05.
+voxtral-cpu = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
+
+# --- Parakeet TDT 0.6B v3 ---------------------------------------------------
+# Two independent adapters; no shared piece between them.
+parakeet-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
 parakeet-mlx = [
     "parakeet-mlx>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
-parakeet = [
-    "nemo_toolkit[asr]>=2.5",
-    "torch>=2.1",
-]
-# Canary 1B v2 — NVIDIA's translation-capable multilingual ASR. NeMo
-# Toolkit is large (~PyTorch + Lightning + Hydra); on Apple Silicon the
-# mlx-audio package provides a lighter alternative.
-canary = [
-    "nemo_toolkit[asr]>=2.5",
-    "torch>=2.1",
-    "mlx-audio>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
+
+# --- Canary 1B v2 -----------------------------------------------------------
+# NeMo for CPU/CUDA; mlx-audio for Apple Silicon. The `mlx-audio` package
+# stays env-marker-gated so installing `canary-mlx` on Linux is a no-op
+# rather than a resolver failure.
+canary-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
+canary-mlx = ["mlx-audio>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+# --- Convenience aliases (back-compat) --------------------------------------
+# Older docs, the Dockerfile, and test-skip messages still reference the
+# pre-split umbrella names. They self-reference the atomic extras above
+# so version-floor / env-marker changes only have to land in one place
+# (the original bug — `mlx-whisper>=0.5` unsatisfiable on PyPI — was
+# kept alive by a duplicate floor in the umbrella).
+whisper = ["tapscribe[whisper-live,whisper-cpu,whisper-mlx]"]
+mlx = ["tapscribe[whisper-mlx]"]
+voxtral = ["tapscribe[voxtral-cpu]"]
+parakeet = ["tapscribe[parakeet-cpu,parakeet-mlx]"]
+canary = ["tapscribe[canary-cpu,canary-mlx]"]
 vad = ["silero-vad>=5.0", "torch>=2.1"]
 dev = [
     "pytest>=8",
@@ -112,13 +133,6 @@ filterwarnings = [
     "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
     "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
     "ignore:remove second argument of ws_handler:DeprecationWarning",
-    # Python 3.10 asyncio quirk: _SSLProtocolTransport.__del__ can raise
-    # ResourceWarning during GC even when uvicorn / httpx tore the
-    # transport down cleanly. Pytest re-raises the unraisable as a
-    # PytestUnraisableExceptionWarning. Fixed in 3.11+. Narrow filter
-    # matches the SSL transport message only — drop when 3.10 is gone.
-    "ignore:unclosed transport.*_SSLProtocolTransport:ResourceWarning",
-    "ignore:.*_SSLProtocolTransport:pytest.PytestUnraisableExceptionWarning",
     # silero-vad ships its model as a TorchScript .jit file; torch 2.6
     # deprecated jit.load. Tracked at github.com/snakers4/silero-vad —
     # remove when silero migrates to torch.export.
@@ -132,7 +146,7 @@ markers = [
 
 [tool.ruff]
 line-length = 110
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

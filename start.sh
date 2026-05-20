@@ -16,7 +16,7 @@
 # auth prompt. Use --no-auth only for trusted localhost development.
 #
 # It will:
-#   1. Find a Python 3.10+
+#   1. Find a Python 3.12+
 #   2. Create a venv at ./.venv if missing
 #   3. Launch tools/install_picker.py — interactive checkbox prompt that
 #      asks which model families (Whisper / Voxtral / Parakeet / Canary)
@@ -84,13 +84,15 @@ elif [ "$OS_NAME" = "Darwin" ] && [ "$ARCH" = "x86_64" ]; then
 fi
 
 # --- Python detection -------------------------------------------------------
+# TapScribe requires Python 3.12+. 3.10/3.11 were dropped after 3.10's
+# EOL window closed; 3.12 matches Ubuntu 24.04 LTS's default `python3`.
 PY=""
-for cand in python3.13 python3.12 python3.11 python3.10 python3; do
+for cand in python3.13 python3.12 python3; do
     if command -v "$cand" >/dev/null 2>&1; then
         ver=$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "0.0")
         major=${ver%.*}
         minor=${ver#*.}
-        if [ "$major" -ge 4 ] 2>/dev/null || { [ "$major" -eq 3 ] && [ "$minor" -ge 10 ]; } 2>/dev/null; then
+        if [ "$major" -ge 4 ] 2>/dev/null || { [ "$major" -eq 3 ] && [ "$minor" -ge 12 ]; } 2>/dev/null; then
             PY="$cand"
             break
         fi
@@ -99,10 +101,15 @@ done
 
 if [ -z "$PY" ]; then
     cat >&2 <<EOF
-[start] No Python 3.10+ found on PATH.
+[start] No Python 3.12+ found on PATH.
 
 On macOS the easiest fix is Homebrew:
   brew install python@3.13
+
+On Ubuntu 22.04 (which ships 3.10):
+  sudo apt install python3.12 python3.12-venv
+
+On Ubuntu 24.04+ python3 is already 3.12.
 
 Then re-run this script.
 EOF

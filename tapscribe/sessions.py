@@ -16,7 +16,7 @@ import os
 import os.path
 import re
 import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -134,7 +134,7 @@ def stripped_stats(session: str) -> dict[str, Any] | None:
         except OSError:
             pass
     try:
-        mtime_iso = datetime.fromtimestamp(d.stat().st_mtime, tz=timezone.utc).isoformat()
+        mtime_iso = datetime.fromtimestamp(d.stat().st_mtime, tz=UTC).isoformat()
     except OSError:
         mtime_iso = None
     return {
@@ -427,7 +427,7 @@ def strip_one_wav(
         }
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    origin = parse_wav_start(src.name) or datetime.fromtimestamp(src.stat().st_mtime, tz=timezone.utc)
+    origin = parse_wav_start(src.name) or datetime.fromtimestamp(src.stat().st_mtime, tz=UTC)
     speaker_slug, ident_slug = _split_filename_components(src.name)
 
     speech_samples = 0

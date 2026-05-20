@@ -104,6 +104,17 @@ MLX on a model that doesn't support it.
 and `/api/models` surface it so the dashboard can gray out chips
 for backends not installed on the server.
 
+**Disambiguation — picker vocabulary vs runtime vocabulary:**
+`tools/install_picker.py` exposes its own `BackendDef` and
+`FamilyChoice.backend` strings (`"cpu"` / `"mlx"` / `"both"`). These
+describe what pyproject extras pip should install *before* TapScribe
+runs — not what the runtime selects at transcribe time. The picker
+treats `"cpu"` as "the torch / faster-whisper / NeMo wheels"
+(runtime resolves CPU vs CUDA itself), and `"both"` means "install
+both atomic extras so the runtime can switch". After install the
+runtime side takes over with `BackendKind` / `BackendPreference`
+above; the picker has no presence there.
+
 ## ModelInput — TextInput / SelectInput
 
 The per-model UI form-field declarations the registry attaches to

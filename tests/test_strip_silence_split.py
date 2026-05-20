@@ -9,7 +9,7 @@ segments at correct times without needing a region-map sidecar.
 from __future__ import annotations
 
 import wave
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -73,7 +73,7 @@ def test_strip_one_wav_writes_one_wav_per_speech_region(tmp_path: Path):
     session_dir.mkdir()
     out_dir.mkdir()
 
-    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
     # 3 speech bursts separated by 1s silences → 3 regions
     samples = _make_speech_silence([1.0, 1.0, 1.0], [1.0, 1.0])
     src = session_dir / _wav_name(start)
@@ -101,7 +101,7 @@ def test_split_filename_timestamp_equals_origin_plus_region_offset(tmp_path: Pat
     session_dir.mkdir()
     out_dir.mkdir()
 
-    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
     samples = _make_speech_silence([1.0, 1.0, 1.0], [1.0, 1.0])
     src = session_dir / _wav_name(start)
     _write_wav(src, samples)
@@ -131,7 +131,7 @@ def test_split_filename_preserves_speaker_slug(tmp_path: Path):
     session_dir.mkdir()
     out_dir.mkdir()
 
-    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
     samples = _make_speech_silence([1.0, 1.0], [1.0])
     src = session_dir / _wav_name(start, speaker="bob")
     _write_wav(src, samples)
@@ -152,7 +152,7 @@ def test_split_filenames_are_unique_when_regions_share_a_second(tmp_path: Path):
     session_dir.mkdir()
     out_dir.mkdir()
 
-    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
     # 0.3s burst, 0.5s silence, 0.3s burst — both regions land inside
     # the same wall-clock second from origin. Use longer pads so the
     # gap is still recognised by the RMS detector with min_silence_ms=400.
@@ -183,7 +183,7 @@ def test_split_no_speech_regions_writes_nothing(tmp_path: Path):
     session_dir.mkdir()
     out_dir.mkdir()
 
-    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
     # Pure silence (well below the whole-file silence gate)
     n = ss.SAMPLE_RATE * 2
     samples = np.zeros(n, dtype=np.int16)
@@ -214,7 +214,7 @@ def test_select_session_wavs_treats_split_outputs_as_independent_utterances(tmp_
     session_dir.mkdir()
     out_dir.mkdir()
 
-    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
     samples = _make_speech_silence([1.0, 1.0, 1.0], [1.0, 1.0])
     src = session_dir / _wav_name(start)
     _write_wav(src, samples)
@@ -246,7 +246,7 @@ def test_merge_after_split_places_segments_at_real_wall_clock_times(tmp_path: Pa
     session_dir.mkdir()
     out_dir.mkdir()
 
-    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=timezone.utc)
+    start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
     samples = _make_speech_silence([1.0, 1.0, 1.0], [1.0, 1.0])
     src = session_dir / _wav_name(start)
     _write_wav(src, samples)

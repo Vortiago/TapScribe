@@ -7,7 +7,7 @@ on nothing in TapScribe besides config paths. Easy to unit-test.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -97,7 +97,7 @@ def parse_iso(s: str | None) -> datetime | None:
         s = s[:-1] + "+00:00"
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -111,7 +111,7 @@ def parse_wav_start(name: str) -> datetime | None:
         # strptime can't read the trailing Z in this format, so peel it.
         if head.endswith("Z"):
             head = head[:-1]
-        return datetime.strptime(head, "%Y-%m-%dT%H-%M-%S").replace(tzinfo=timezone.utc)
+        return datetime.strptime(head, "%Y-%m-%dT%H-%M-%S").replace(tzinfo=UTC)
     except (ValueError, IndexError):
         return None
 

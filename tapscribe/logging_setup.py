@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _RESERVED_LOGRECORD_KEYS = frozenset(
     {
@@ -55,7 +55,7 @@ class JsonFormatter(logging.Formatter):
     inside the JSON envelope."""
 
     def format(self, record: logging.LogRecord) -> str:
-        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
+        ts = datetime.fromtimestamp(record.created, tz=UTC).isoformat()
         payload: dict[str, object] = {
             "ts": ts,
             "level": record.levelname,

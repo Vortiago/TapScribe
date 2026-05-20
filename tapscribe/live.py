@@ -28,7 +28,7 @@ import sys
 import threading
 from collections import deque
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -546,7 +546,7 @@ class WhisperLiveKitChannel:
             self.info["state"] = "starting"
             self.info["last_error"] = ""
             self.info["pid"] = str(self._proc.pid)
-            self.info["started_at"] = datetime.now(timezone.utc).isoformat()
+            self.info["started_at"] = datetime.now(UTC).isoformat()
             self.log.clear()
 
             threading.Thread(target=self._pump_logs, args=(self._proc,), daemon=True).start()

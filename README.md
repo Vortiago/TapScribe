@@ -44,7 +44,7 @@ bash start.sh             # localhost only
 bash start.sh --lan       # bind 0.0.0.0
 ```
 
-The script finds Python 3.10+, creates `.venv`, installs dependencies
+The script finds Python 3.12+, creates `.venv`, installs dependencies
 (`whisperlivekit`, `python-multipart`, `transformers`, plus `mlx-whisper` on
 Apple Silicon), and launches TapScribe on port 8001 with
 `whisperlivekit-server` as a child on port 8000. Child logs are prefixed
@@ -214,7 +214,7 @@ Three layers, all fast:
   ```
 
 GitHub Actions runs the suite and `ruff check` on every push and PR across
-Python 3.10-3.13 on Ubuntu, macOS, and Windows.
+Python 3.12-3.13 on Ubuntu, macOS, and Windows.
 
 ## License
 

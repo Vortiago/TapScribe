@@ -37,3 +37,11 @@ introduced and how to avoid them:
   external input. Constrain with `choices=` / `type=int` / `type=float`
   where possible; defensive validation at the boundary keeps the rest
   of the codebase clean.
+- **Every `except: pass` (and `except Foo: pass`) needs an explanatory
+  comment inside the body** explaining *why* swallowing is the correct
+  behaviour. CodeQL's `py/empty-except` flags bare passes, and the
+  reviewer asks for justification on every PR that ships one. Don't
+  ship `except Foo: pass` — write `except Foo:` then a comment saying
+  what raises it, why suppression is intentional, and what's lost when
+  it's swallowed. If suppression is *not* the right behaviour, log or
+  re-raise instead.

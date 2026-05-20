@@ -28,7 +28,7 @@ import logging
 import shutil
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -557,7 +557,7 @@ async def api_session_strip_silence(
             kind="strip",
             current=0,
             total=len(originals),
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             status="stripping",
         )
     )
@@ -572,7 +572,7 @@ async def api_session_strip_silence(
             except OSError as e:
                 raise HTTPException(500, f"could not clear stripped/: {e}") from e
 
-        started = datetime.now(timezone.utc)
+        started = datetime.now(UTC)
 
         def _run() -> list[dict[str, Any]]:
             results: list[dict[str, Any]] = []
@@ -588,7 +588,7 @@ async def api_session_strip_silence(
             return results
 
         results = await asyncio.to_thread(_run)
-        finished = datetime.now(timezone.utc)
+        finished = datetime.now(UTC)
     finally:
         await recorder.jobs.release(session)
 
@@ -857,7 +857,7 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
             kind="transcribe",
             current=0,
             total=len(selection.wavs),
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             model=model_name,
             status="running",
         )

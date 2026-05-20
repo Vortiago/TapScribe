@@ -61,7 +61,7 @@ def _generate_pair(cert_path: Path, key_path: Path, host: str) -> None:
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "TapScribe"),
         ]
     )
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.UTC)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -104,9 +104,9 @@ def _looks_valid(cert_path: Path) -> bool:
     not_after = (
         cert.not_valid_after_utc
         if hasattr(cert, "not_valid_after_utc")
-        else cert.not_valid_after.replace(tzinfo=_dt.timezone.utc)
+        else cert.not_valid_after.replace(tzinfo=_dt.UTC)
     )
-    return not_after > _dt.datetime.now(_dt.timezone.utc)
+    return not_after > _dt.datetime.now(_dt.UTC)
 
 
 def ensure_self_signed_cert(cert_path: Path, key_path: Path, *, host: str) -> TlsPair:
