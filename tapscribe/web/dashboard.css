@@ -507,14 +507,39 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .stream-buffer.buf-quiet .buffer-icon { color: var(--fg-3); }
 
 /*
- * Gate-knob rows in the live-channel panel. Slightly indented + smaller
- * label so the three rows visually group as sub-settings of the
- * gate-kind selector above them.
+ * Gate-knob rows in the live-channel panel. The base `.live-row` grid
+ * (70px label · 1fr input) is too cramped here — both the label and
+ * the helper text need more horizontal room than the input. We
+ * override into a two-row layout per knob:
+ *
+ *     label
+ *     [input]   helper text
+ *
+ * so the helper reads naturally beneath the label it explains and
+ * still fits on one line at the panel's narrow ~340px width. Slight
+ * indent groups these as sub-settings of the speech-filter selector
+ * above them.
  */
-.gate-knob-row {
+.gate-knob-row.live-row {
+  grid-template-columns: 90px 1fr;
+  grid-template-areas:
+    "lbl lbl"
+    "inp hint";
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 2px;
   padding-left: 12px;
+  margin-bottom: 6px;
 
-  & .lbl { font-size: 11px; color: var(--fg-2); }
+  & .lbl  { grid-area: lbl; font-size: 11px; color: var(--fg-2); }
+  & .input { grid-area: inp; max-width: 100%; }
+  & .dim.tiny {
+    grid-area: hint;
+    font-style: italic;
+    white-space: normal;
+    line-height: 1.25;
+    align-self: center;
+  }
 }
 
 /* ── Config card (horizontal three-column) ───────────────────── */
