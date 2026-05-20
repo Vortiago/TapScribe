@@ -195,11 +195,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
           s.wav_count,
           s.session_transcript ? s.session_transcript.transcribed_at : "",
           (s.files || []).map((f) =>
-            f.name
-              + ":" + (f.transcript ? f.transcript.transcribed_at : "")
-              // include stripped duration AND its transcript stamp so the
-              // sub-row's "took X ms" cell refreshes after a transcribe.
-              + ":" + (f.stripped ? (f.stripped.duration_s + "/" + (f.stripped.transcript ? f.stripped.transcript.transcribed_at : "")) : "")
+            f.name + ":" + (f.transcript ? f.transcript.transcribed_at : "")
           ).join(","),
           meta.label || "",
           aliasSig,

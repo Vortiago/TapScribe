@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from tapscribe import text
 
@@ -75,6 +77,42 @@ def test_parse_wav_speaker_slug_extracts_middle_chunks():
 
 def test_parse_wav_speaker_slug_returns_empty_for_short_names():
     assert text.parse_wav_speaker_slug("only_three_parts.wav") == ""
+
+
+def test_build_recorder_wav_name_round_trips_through_parsers():
+    """The helper's output must satisfy both parse_wav_start and
+    parse_wav_speaker_slug — that's the contract that lets the
+    strip-silence splitter and the live recorder share filename
+    conventions."""
+    when = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    name = text.build_recorder_wav_name(when, "alice_smith", "ident01")
+    assert text.parse_wav_start(name) == when
+    assert text.parse_wav_speaker_slug(name) == "alice_smith"
+    assert name.endswith(".wav")
+
+
+def test_build_recorder_wav_name_strips_path_separators_from_slugs():
+    """`/` and `\\` would let a slug escape its directory if interpolated
+    raw. The helper passes both slugs through `safe_name`, so the
+    resulting filename is always a single path component."""
+    when = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone.utc)
+    name = text.build_recorder_wav_name(when, "../etc/passwd", "id/with/slash")
+    assert "/" not in name
+    assert "\\" not in name
+
+
+def test_build_recorder_wav_name_rejects_naive_datetime():
+    """strftime would emit a misleading `Z` on a naive datetime — guard
+    at the contract boundary so downstream parsers don't lie."""
+    naive = datetime(2026, 5, 12, 9, 19, 55)
+    with pytest.raises(ValueError):
+        text.build_recorder_wav_name(naive, "alice", "ident01")
+
+
+def test_build_recorder_wav_name_rejects_non_utc_offset():
+    plus_one = datetime(2026, 5, 12, 9, 19, 55, tzinfo=timezone(timedelta(hours=1)))
+    with pytest.raises(ValueError):
+        text.build_recorder_wav_name(plus_one, "alice", "ident01")
 
 
 def test_read_prompt_returns_empty_when_missing(tmp_config_dir):

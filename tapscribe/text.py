@@ -7,8 +7,9 @@ on nothing in TapScribe besides config paths. Easy to unit-test.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from . import config
 
@@ -125,3 +126,29 @@ def parse_wav_speaker_slug(name: str) -> str:
     if len(parts) < 4:
         return ""
     return "_".join(parts[1:-2])
+
+
+def build_recorder_wav_name(start: datetime, speaker_slug: str, ident: str) -> str:
+    """Mint the canonical recorder filename:
+    `<YYYY-MM-DDTHH-MM-SSZ>_<speaker_slug>_<ident>_<uuid8>.wav`.
+
+    Single source of truth for the format `parse_wav_start` and
+    `parse_wav_speaker_slug` parse — both the live `/tap` recorder and
+    the strip-silence splitter mint names through here so they can't
+    drift apart. The trailing 8-char uuid is a tiebreaker for filenames
+    that share a wall-clock second.
+
+    Defensive: both slugs run through `safe_name` so anything containing
+    a path separator (or other filename-hostile char) is reduced to
+    underscores before the components are interpolated. Callers can
+    trust the return value contains no `/`, `\\`, or `..`."""
+    # strftime("%Y-…Z") would happily emit a "Z" on a naive datetime,
+    # producing a filename that lies about being UTC. Catch that at the
+    # contract boundary so downstream parse_wav_start always recovers a
+    # true UTC instant.
+    if start.tzinfo is None or start.utcoffset() != timedelta(0):
+        raise ValueError(f"build_recorder_wav_name requires a UTC-aware datetime; got {start!r}")
+    safe_speaker = safe_name(speaker_slug) or "anon"
+    safe_ident = safe_name(ident) or "unknown"
+    stamp = start.strftime("%Y-%m-%dT%H-%M-%SZ")
+    return f"{stamp}_{safe_speaker}_{safe_ident}_{uuid4().hex[:8]}.wav"

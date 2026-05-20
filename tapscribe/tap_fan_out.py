@@ -18,12 +18,11 @@ import time
 import wave
 from contextlib import suppress
 from datetime import datetime, timezone
-from uuid import uuid4
 
 from .audio import int16_peak_norm, open_recorder_wav
 from .live_relay import WlKRelay
 from .recorder import ActiveStream, Recorder, UtteranceRecord
-from .text import clean_meta_tokens, safe_name
+from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 
 # Per-frame decay factor for the volume-meter peak hold. Frames are 20 ms
 # (640 bytes @ 16 kHz mono int16); 0.92 per frame gives a ~165 ms half-life
@@ -193,14 +192,11 @@ class TapFanOut:
                     flush=True,
                 )
             else:
-                started_iso = started_at.strftime("%Y-%m-%dT%H-%M-%SZ")
-                short_id = safe_name(self._identity)[:10] or "unknown"
-                name_slug = safe_name(self._name) or "anon"
-                # Filename uses a fresh local uuid for uniqueness; the bridge's
-                # utterance_id lives in the index, not in the path. Two distinct
-                # utterances sharing an utterance_id (e.g. an expired-and-restarted
-                # one) must not collide on disk.
-                fname = f"{started_iso}_{name_slug}_{short_id}_{uuid4().hex[:8]}.wav"
+                # `safe_name` + `[:10]` cap the identity slug; the helper
+                # applies its own `safe_name` and empty-string fallbacks so
+                # we don't repeat them here.
+                short_id = safe_name(self._identity)[:10]
+                fname = build_recorder_wav_name(started_at, self._name or "", short_id)
                 session_dir = self._recorder.session_dir
                 session_dir.mkdir(parents=True, exist_ok=True)
                 fpath = session_dir / fname

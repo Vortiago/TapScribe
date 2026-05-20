@@ -501,11 +501,10 @@ async def api_session_strip_silence(
         def _run() -> list[dict[str, Any]]:
             results: list[dict[str, Any]] = []
             for src in originals:
-                dst = out_dir / src.name
                 try:
                     results.append(
                         strip_one_wav(
-                            src, dst, min_silence_ms, pad_ms, threshold_db, use_silero, speech_floor_db
+                            src, out_dir, min_silence_ms, pad_ms, threshold_db, use_silero, speech_floor_db
                         )
                     )
                 except Exception as e:

@@ -778,13 +778,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-1);
 }
 
-/* The stripped/ sub-row under each WAV, indented and slightly dimmed so
-   it's visually subordinate to its parent. */
-.wav-row.strip-sub {
-  padding-left: 18px;
-  opacity: 0.85;
-}
-
 /* wav list */
 .wav-list {
   & .wav-row {
