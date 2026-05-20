@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 # tools/ isn't a package — make install_picker importable by name.
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
@@ -20,6 +23,8 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import install_picker  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -335,6 +340,111 @@ def test_handle_key_digit_jumps_and_toggles():
     install_picker._handle_key("3", sel, cursor)
     assert cursor == [2]
     assert "parakeet" in sel.families
+
+
+# ── pyproject extras: pip resolution regression ─────────────────────
+#
+# These pin the failure mode the operator hit:
+#   ERROR: Could not find a version that satisfies the requirement
+#   mlx-whisper>=0.5 ... (from versions: ..., 0.4.3)
+#
+# Apple-Silicon installs that include the `mlx` extra (i.e. everyone
+# who selects Whisper on macOS arm64) MUST get a mlx-whisper specifier
+# that PyPI can actually satisfy.
+
+
+def _extras_block(extra_name: str) -> list[str]:
+    """Pull one `[project.optional-dependencies]` entry out of pyproject.toml.
+    Hand-parsed via regex because tomllib is 3.11+ and TapScribe still
+    supports 3.10 — keeping the test runnable on every CI matrix row."""
+    text = (REPO_ROOT / "pyproject.toml").read_text()
+    pattern = re.compile(
+        rf"^{re.escape(extra_name)}\s*=\s*\[(.*?)\]",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    assert m, f"could not find `{extra_name} = [...]` in pyproject.toml"
+    raw = m.group(1)
+    out: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip().rstrip(",")
+        if not line or line.startswith("#"):
+            continue
+        # Strip surrounding quotes (single or double).
+        if line[0] in ("'", '"') and line[-1] in ("'", '"'):
+            line = line[1:-1]
+        out.append(line)
+    return out
+
+
+def _requirement_for(extras_lines: list[str], project_name: str) -> Requirement:
+    for line in extras_lines:
+        req = Requirement(line)
+        if req.name == project_name:
+            return req
+    raise AssertionError(f"no requirement named {project_name!r} in {extras_lines!r}")
+
+
+def test_pyproject_mlx_extra_admits_a_real_mlx_whisper_release():
+    """Regression for the install error pasted in the PR description.
+
+    The `mlx` extra used to declare `mlx-whisper>=0.5`, but PyPI's
+    release line tops out at 0.4.x — so every Apple-Silicon install
+    that resolved the extra failed with "No matching distribution
+    found". This test guards against re-introducing a floor PyPI can't
+    satisfy: at least one of the versions pip reported as available
+    (0.1.0.dev0 / 0.1.0 / 0.2.0 / 0.3.0 / 0.4.0-0.4.3) must satisfy
+    whatever specifier we ship.
+    """
+    req = _requirement_for(_extras_block("mlx"), "mlx-whisper")
+    pypi_published_versions = ["0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.4.1", "0.4.2", "0.4.3"]
+    satisfying = [v for v in pypi_published_versions if Version(v) in req.specifier]
+    assert satisfying, (
+        f"mlx-whisper specifier {req.specifier!r} is not satisfied by any "
+        f"version PyPI is known to publish ({pypi_published_versions}). "
+        "This is the exact failure mode that broke `bash start.sh` on "
+        "Apple Silicon. Lower the floor to a version that exists."
+    )
+
+
+def test_pyproject_mlx_extra_stays_platform_gated():
+    """The mlx-whisper requirement must keep its Darwin/arm64 env marker
+    so pip on Linux/Windows/Intel-Mac skips it instead of erroring out
+    on a wheel that doesn't exist for their platform."""
+    req = _requirement_for(_extras_block("mlx"), "mlx-whisper")
+    assert req.marker is not None, "mlx-whisper must stay gated by a sys_platform marker"
+    marker = str(req.marker)
+    assert "darwin" in marker and "arm64" in marker, (
+        f"unexpected mlx-whisper marker {marker!r}; expected Darwin + arm64 gating"
+    )
+
+
+def test_picker_on_apple_silicon_actually_requests_the_mlx_extra():
+    """End-to-end: the failure was triggered by the picker resolving an
+    extras set that included `mlx`. Confirm the picker still does so
+    when an operator selects Whisper on Apple Silicon, so the regression
+    test above is actually exercising the production code path."""
+    sel = install_picker.Selection(families={"whisper"})
+    caps = install_picker.MachineCaps(os_name="Darwin", arch="arm64", mlx=True, cuda=False)
+    extras = install_picker.resolve_extras(sel, caps)
+    assert "mlx" in extras
+    argv = install_picker.build_pip_argv(extras, python="/usr/bin/python3")
+    # The exact shape of the failing command:
+    #   python -m pip install -e '.[whisper,mlx]'
+    assert argv[-1] == ".[whisper,mlx]"
+
+
+def test_picker_full_apple_silicon_selection_matches_failing_invocation():
+    """The original failure log was for
+       tapscribe[canary,mlx,parakeet,parakeet-mlx,whisper]
+    so reproduce that exact extras set and confirm the picker still
+    chooses it for an Apple-Silicon operator who ticks everything."""
+    sel = install_picker.Selection(families={"whisper", "parakeet", "canary"})
+    # Voxtral intentionally omitted: the original error report didn't
+    # include `voxtral` either, so this matches the reproduction.
+    caps = install_picker.MachineCaps(os_name="Darwin", arch="arm64", mlx=True, cuda=False)
+    extras = install_picker.resolve_extras(sel, caps)
+    assert set(extras) == {"whisper", "mlx", "parakeet", "parakeet-mlx", "canary"}
 
 
 # ── detect_caps ─────────────────────────────────────────────────────
