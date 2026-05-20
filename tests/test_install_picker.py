@@ -405,26 +405,24 @@ def test_handle_key_space_toggles_enabled():
     assert sel.choices["whisper"].enabled is True
 
 
-def test_handle_key_right_cycles_backend_through_cpu_mlx_both():
-    """The ←/→ flow is the user-visible answer to 'I want to pick MLX-only
-    for Whisper but Both for Parakeet'."""
+@pytest.mark.parametrize(
+    "direction, expected_sequence",
+    [
+        ("right", [BACKEND_MLX, BACKEND_BOTH, BACKEND_CPU]),
+        ("left", [BACKEND_BOTH, BACKEND_MLX, BACKEND_CPU]),
+    ],
+    ids=["right→cpu→mlx→both→cpu", "left→cpu→both→mlx→cpu"],
+)
+def test_handle_key_cycles_backend(direction, expected_sequence):
+    """The ←/→ flow is the user-visible answer to 'I want MLX-only for
+    Whisper but Both for Parakeet'. Last item in `expected_sequence`
+    confirms the cycle wraps."""
     sel = Selection()
-    sel.choices["whisper"] = FamilyChoice(enabled=True, backend=BACKEND_CPU)
+    _enable(sel, "whisper", BACKEND_CPU)
     apple = _apple_caps()
-    install_picker._handle_key("right", sel, [0], apple)
-    assert sel.choices["whisper"].backend == BACKEND_MLX
-    install_picker._handle_key("right", sel, [0], apple)
-    assert sel.choices["whisper"].backend == BACKEND_BOTH
-    install_picker._handle_key("right", sel, [0], apple)
-    assert sel.choices["whisper"].backend == BACKEND_CPU  # wraps
-
-
-def test_handle_key_left_cycles_backend_in_reverse():
-    sel = Selection()
-    sel.choices["whisper"] = FamilyChoice(enabled=True, backend=BACKEND_CPU)
-    apple = _apple_caps()
-    install_picker._handle_key("left", sel, [0], apple)
-    assert sel.choices["whisper"].backend == BACKEND_BOTH
+    for expected in expected_sequence:
+        install_picker._handle_key(direction, sel, [0], apple)
+        assert sel.choices["whisper"].backend == expected
 
 
 def test_handle_key_left_right_noop_when_one_backend():
@@ -498,21 +496,24 @@ def test_pyproject_whisper_mlx_admits_a_real_release():
     )
 
 
-def test_pyproject_mlx_extras_stay_platform_gated():
-    """The MLX-only atomic extras must keep their Darwin/arm64 env marker
-    so pip on Linux/Windows/Intel-Mac skips them instead of erroring out
-    on wheels that don't exist for those platforms."""
-    for extra_name, pkg in (
+@pytest.mark.parametrize(
+    "extra_name, pkg",
+    [
         ("whisper-mlx", "mlx-whisper"),
         ("parakeet-mlx", "parakeet-mlx"),
         ("canary-mlx", "mlx-audio"),
-    ):
-        req = _requirement_for(_atomic_extras(extra_name), pkg)
-        assert req.marker is not None, f"{extra_name} → {pkg} must stay sys_platform-gated"
-        marker = str(req.marker)
-        assert "darwin" in marker and "arm64" in marker, (
-            f"{extra_name} → {pkg} marker {marker!r} dropped Darwin+arm64 gating"
-        )
+    ],
+)
+def test_pyproject_mlx_extras_stay_platform_gated(extra_name, pkg):
+    """The MLX-only atomic extras must keep their Darwin/arm64 env marker
+    so pip on Linux/Windows/Intel-Mac skips them instead of erroring out
+    on wheels that don't exist for those platforms."""
+    req = _requirement_for(_atomic_extras(extra_name), pkg)
+    assert req.marker is not None, f"{extra_name} → {pkg} must stay sys_platform-gated"
+    marker = str(req.marker)
+    assert "darwin" in marker and "arm64" in marker, (
+        f"{extra_name} → {pkg} marker {marker!r} dropped Darwin+arm64 gating"
+    )
 
 
 def test_pyproject_cpu_extras_do_not_pull_mlx_packages():

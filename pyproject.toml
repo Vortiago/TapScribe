@@ -75,25 +75,16 @@ canary-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
 canary-mlx = ["mlx-audio>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 # --- Convenience aliases (back-compat) --------------------------------------
-# Older docs, the Dockerfile, and the test-skip messages reference these
-# umbrella extras. They expand to whichever backend best fits a "default
-# install" on the target platform — pip's env markers make the MLX
-# packages no-op on non-Apple-Silicon hosts, so listing both is safe.
-whisper = [
-    "whisperlivekit>=0.1",
-    "faster-whisper>=1.0",
-    "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
-mlx = [
-    "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
-voxtral = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
-parakeet = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
-canary = [
-    "nemo_toolkit[asr]>=2.5",
-    "torch>=2.1",
-    "mlx-audio>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
+# Older docs, the Dockerfile, and test-skip messages still reference the
+# pre-split umbrella names. They self-reference the atomic extras above
+# so version-floor / env-marker changes only have to land in one place
+# (the original bug — `mlx-whisper>=0.5` unsatisfiable on PyPI — was
+# kept alive by a duplicate floor in the umbrella).
+whisper = ["tapscribe[whisper-live,whisper-cpu,whisper-mlx]"]
+mlx = ["tapscribe[whisper-mlx]"]
+voxtral = ["tapscribe[voxtral-cpu]"]
+parakeet = ["tapscribe[parakeet-cpu,parakeet-mlx]"]
+canary = ["tapscribe[canary-cpu,canary-mlx]"]
 vad = ["silero-vad>=5.0", "torch>=2.1"]
 dev = [
     "pytest>=8",

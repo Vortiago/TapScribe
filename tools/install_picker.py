@@ -35,13 +35,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = REPO_ROOT / ".tapscribe-install.json"
-STATE_VERSION = 2  # bump when the on-disk schema changes
+STATE_VERSION = 2
 
 # Backend key sentinels — used both in the FamilyDef declarations and in
 # persisted state, so spelling matters.
-BACKEND_CPU = "cpu"  # CPU or CUDA — same install, runtime picks
-BACKEND_MLX = "mlx"  # Apple Silicon GPU
-BACKEND_BOTH = "both"  # install both atomic backends so the catalog can pick
+BACKEND_CPU = "cpu"
+BACKEND_MLX = "mlx"
+BACKEND_BOTH = "both"
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,8 @@ FAMILIES: tuple[FamilyDef, ...] = (
         label="Whisper / NB-Whisper",
         description=(
             "OpenAI Whisper + NB-AiLab's Norwegian-tuned variants. "
-            "Powers the live caption channel. Recommended baseline."
+            "Main batch backend; also drives the live caption channel. "
+            "Recommended baseline."
         ),
         size_hint="~150 MB CPU / ~80 MB MLX",
         # whisperlivekit is the live-socket server — the recorder spawns
@@ -133,9 +134,6 @@ FAMILIES: tuple[FamilyDef, ...] = (
         ),
     ),
 )
-
-
-_FAMILIES_BY_KEY: dict[str, FamilyDef] = {f.key: f for f in FAMILIES}
 
 
 # ---------------------------------------------------------------------------
@@ -223,14 +221,10 @@ def cycleable_backend_keys(fam: FamilyDef, caps: MachineCaps) -> list[str]:
 
 @dataclass
 class FamilyChoice:
-    """One row's persisted state.
-
-    `enabled` = is this family ticked? `backend` is one of `BACKEND_CPU`
-    / `BACKEND_MLX` / `BACKEND_BOTH`; stale choices (e.g. "mlx" loaded
-    on a Linux box) are silently downgraded at install-time, not on
-    load — so moving the checkout back to Apple Silicon restores the
-    MLX preference instead of losing it.
-    """
+    """One row's persisted state. Stale backend values (e.g. "mlx"
+    loaded on a Linux box) are silently downgraded at install-time, not
+    on load — so moving the checkout back to Apple Silicon restores the
+    MLX preference instead of losing it."""
 
     enabled: bool = False
     backend: str = BACKEND_CPU
@@ -278,7 +272,8 @@ class Selection:
     @classmethod
     def _load_v1(cls, data: dict, caps: MachineCaps) -> Selection:
         raw = data.get("families", [])
-        old_enabled = {k for k in raw if k in _FAMILIES_BY_KEY}
+        known_keys = {f.key for f in FAMILIES}
+        old_enabled = {k for k in raw if k in known_keys}
         out = cls()
         for fam in FAMILIES:
             on = fam.key in old_enabled
@@ -556,6 +551,33 @@ def _numbered_loop(selection: Selection, caps: MachineCaps, *, stream_in, stream
 # ---------------------------------------------------------------------------
 
 
+# Single-byte → symbolic-name table shared by both raw-mode readers. POSIX
+# delivers a couple of extras (ctrl-d / backspace) that Windows' msvcrt
+# never surfaces, but a lookup miss falls through to the UTF-8 decode path
+# either way, so listing them here is harmless on Windows.
+_SYMBOLIC_BYTES: dict[bytes, str] = {
+    b"\r": "enter",
+    b"\n": "enter",
+    b" ": "space",
+    b"\t": "tab",
+    b"\x03": "ctrl-c",
+    b"\x04": "ctrl-d",
+    b"\x1b": "esc",
+    b"\x7f": "backspace",
+}
+
+
+def _classify_byte(ch: bytes) -> str:
+    """Map one raw byte to a symbolic key name, falling back to a
+    lowercase decoded char (or "esc" if the byte isn't UTF-8)."""
+    if ch in _SYMBOLIC_BYTES:
+        return _SYMBOLIC_BYTES[ch]
+    try:
+        return ch.decode("utf-8", errors="replace").lower()
+    except UnicodeDecodeError:
+        return "esc"
+
+
 def _read_key_posix(fd: int) -> str:
     """Read one keystroke from a POSIX raw-mode terminal. Returns one of
     the symbolic names handled by `_handle_key` or a single lowercase
@@ -569,8 +591,8 @@ def _read_key_posix(fd: int) -> str:
     if not ch:
         return "eof"
     if ch == b"\x1b":
-        # ESC: could be a lone Esc or the start of an escape sequence.
-        # Wait briefly for follow-on bytes; if none arrive, treat as Esc.
+        # ESC alone vs the start of an escape sequence — wait briefly
+        # for follow-on bytes; if none arrive, treat as a lone Esc.
         rlist, _, _ = select.select([fd], [], [], 0.05)
         if not rlist:
             return "esc"
@@ -584,22 +606,7 @@ def _read_key_posix(fd: int) -> str:
         if rest.startswith(b"[D") or rest.startswith(b"OD"):
             return "left"
         return "esc"
-    if ch in (b"\r", b"\n"):
-        return "enter"
-    if ch == b" ":
-        return "space"
-    if ch == b"\t":
-        return "tab"
-    if ch == b"\x03":
-        return "ctrl-c"
-    if ch == b"\x04":
-        return "ctrl-d"
-    if ch == b"\x7f":
-        return "backspace"
-    try:
-        return ch.decode("utf-8", errors="replace").lower()
-    except UnicodeDecodeError:
-        return "esc"
+    return _classify_byte(ch)
 
 
 def _read_key_windows() -> str:
@@ -609,20 +616,7 @@ def _read_key_windows() -> str:
     if ch in (b"\x00", b"\xe0"):
         ch2 = msvcrt.getch()
         return {b"H": "up", b"P": "down", b"K": "left", b"M": "right"}.get(ch2, "esc")
-    if ch in (b"\r", b"\n"):
-        return "enter"
-    if ch == b" ":
-        return "space"
-    if ch == b"\t":
-        return "tab"
-    if ch == b"\x03":
-        return "ctrl-c"
-    if ch == b"\x1b":
-        return "esc"
-    try:
-        return ch.decode("utf-8", errors="replace").lower()
-    except UnicodeDecodeError:
-        return "esc"
+    return _classify_byte(ch)
 
 
 def _enable_windows_vt() -> None:
@@ -640,6 +634,11 @@ def _enable_windows_vt() -> None:
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             kernel32.SetConsoleMode(handle, mode.value | 0x0004)
     except OSError:
+        # Pre-Windows-10 consoles don't expose Get/SetConsoleMode and
+        # the call raises OSError. Swallowing is intentional: without
+        # VT processing the picker prints raw escape codes (ugly), but
+        # the operator can still confirm/quit, so the picker shouldn't
+        # crash the bring-up over a cosmetic terminal-feature probe.
         pass
 
 
