@@ -64,7 +64,7 @@ from .tap_fan_out import TapFanOut
 from .text import read_hotwords, read_prompt
 from .transcribers import load_transcriber
 from .transcribers.catalog import REGISTRY, available_backends
-from .wav_cache import cached_transcribe
+from .wav_cache import cached_transcribe, read_primary_payload, set_primary_transcript
 
 
 def _available_backends_snapshot() -> frozenset[str]:
@@ -642,6 +642,35 @@ async def get_wav(session: str, name: str, source: str = "original"):
     return FileResponse(path, media_type="audio/wav", filename=dl_name)
 
 
+@app.put("/api/wav/{session}/{name}/primary")
+async def api_set_primary(
+    session: str,
+    name: str,
+    req: Request,
+    recorder: Recorder = Depends(get_recorder),  # noqa: ARG001
+):
+    """Point the primary cached transcript at the given (backend, model).
+    Used by the per-WAV picker UI to flip which transcript merge_session
+    and the dashboard surface, without re-running anything.
+
+    Body: `{"backend": "faster-whisper", "model": "small.en", "source"?: "original"|"stripped"}`.
+    """
+    body = await _json_body(req)
+    backend = body.get("backend")
+    model = body.get("model")
+    if not isinstance(backend, str) or not backend:
+        raise HTTPException(400, "backend required")
+    if not isinstance(model, str) or not model:
+        raise HTTPException(400, "model required")
+    source = body.get("source") or "original"
+    path = resolve_wav(session, name, source)
+    try:
+        await asyncio.to_thread(set_primary_transcript, path, backend=backend, model=model)
+    except FileNotFoundError as e:
+        raise HTTPException(422, str(e)) from e
+    return {"ok": True, "primary": {"backend": backend, "model": model}}
+
+
 @app.post("/api/transcribe")
 async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await req.json()
@@ -696,8 +725,13 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         source=source,
     )
 
-    # Read the sidecar back as a dict to preserve the wire shape callers expect.
-    result_dict = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    # Return the freshly-written sidecar's raw JSON dict to preserve the
+    # wire shape callers expect. read_primary_payload resolves whichever
+    # cache layout actually landed (legacy or new-layout) without the
+    # route needing to know.
+    result_dict = read_primary_payload(path)
+    if result_dict is None:
+        raise HTTPException(500, "cached_transcribe completed but no sidecar landed on disk")
     print(
         f"[tapscribe] transcribed {name} ({source}) with {model_name} in {cached.transcribe_ms} ms",
         flush=True,

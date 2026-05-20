@@ -187,8 +187,10 @@ async def test_two_bridges_stream_then_session_is_transcribed(
 
         assert (rec.session_dir / "session-transcript.json").is_file()
         assert (rec.session_dir / "session-transcript.txt").is_file()
+        from tapscribe.wav_cache import read_cached
+
         for wav in wavs:
-            assert wav.with_suffix(".json").is_file()
+            assert read_cached(wav) is not None, f"no cached transcript for {wav.name}"
 
         resp = await client.post("/api/recording/toggle", json={"enabled": False})
         assert resp.json() == {"ok": True, "enabled": False}
@@ -347,19 +349,21 @@ async def test_pipeline_with_real_whisper(running_recorder: RunningRecorder):
         )
         assert resp.status_code == 200, resp.text
 
+    from tapscribe.wav_cache import read_cached
+
     sidecars_by_speaker = {}
-    for p in rec.session_dir.glob("*.json"):
-        if p.name == "session-transcript.json":
+    for wav in rec.session_dir.glob("*.wav"):
+        cached = read_cached(wav)
+        if cached is None:
             continue
-        data = json.loads(p.read_text(encoding="utf-8"))
-        sidecars_by_speaker[data.get("speaker_name", "")] = data
+        sidecars_by_speaker[cached.speaker_name] = cached
 
     for fx in fixtures:
         sidecar = sidecars_by_speaker.get(fx.wav.stem)
         assert sidecar is not None, (
             f"no sidecar for speaker {fx.wav.stem!r} (have: {sorted(sidecars_by_speaker)})"
         )
-        transcript = sidecar.get("text", "")
+        transcript = sidecar.result.text
         reference_words = _word_tokens(fx.reference)
         transcript_words = _word_tokens(transcript)
         overlap = reference_words & transcript_words
