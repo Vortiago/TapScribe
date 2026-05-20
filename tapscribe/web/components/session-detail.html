@@ -173,6 +173,10 @@
 <template id="tpl-expand-tx">
   <div class="expand-tx">
     <div class="meta" data-slot="meta"></div>
+    <div class="tx-picker" data-slot="picker" hidden>
+      <span class="dim tiny">transcripts:</span>
+      <span data-slot="pickerPills"></span>
+    </div>
     <div class="body" data-slot="body"></div>
     <details class="mt-s" data-slot="auditDetails" hidden>
       <summary class="dim tiny" data-slot="auditSummary"></summary>
@@ -182,6 +186,10 @@
       </table>
     </details>
   </div>
+</template>
+
+<template id="tpl-tx-pick-pill">
+  <button class="chip tx-pick" type="button"></button>
 </template>
 
 <template id="tpl-expand-meta-field">

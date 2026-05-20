@@ -1,20 +1,29 @@
 """Per-WAV transcription cache.
 
-Every transcribed WAV gets a sidecar `<name>.json` next to the WAV.
-`cached_transcribe` is the policy-aware entry point: cache hit returns
-the parsed sidecar, miss runs the Transcriber + hallucination filter and
-writes the result back. `read_cached` is the pure read.
+Each transcribed WAV gets one or more cached transcripts in a sibling
+`<wav>.transcripts/` directory — one sidecar JSON per (backend, model),
+plus a `_primary` text file pointing at the entry the merge layer
+reads. `cached_transcribe` is the policy-aware entry point: cache hit
+returns the parsed sidecar for this transcriber's (backend, model),
+miss runs the Transcriber + hallucination filter and writes a new entry
+without evicting other entries.
 
-The on-disk format is a flat JSON object whose keys span both the
-TranscriptionResult fields and the write-time envelope (when this WAV
-was transcribed, which source folder, the speaker slug parsed from the
-filename, the absolute UTC start time). Land 2's `merge_session` reads
-the same sidecars to build the session-level transcript.
+Legacy `<wav>.json` sidecars (one transcript per WAV) are still
+readable; the first new-layout write for the same WAV migrates the
+legacy file into the new layout so the two formats never coexist.
+
+The on-disk JSON wire shape inside each sidecar is unchanged: a
+TranscriptionResult flattened with the write-time envelope (when this
+WAV was transcribed, source folder, parsed speaker, absolute UTC start
+time) and the on-disk WAV fingerprint (size + mtime). See
+CONTEXT.md "Per-WAV transcript cache" for the layout.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,7 +45,7 @@ class CachedTranscription:
     and the on-disk WAV fingerprint (size + mtime) we use to detect that
     the WAV was rewritten since the transcript was produced — the resume
     path rewrites the same path with appended audio, so the cache key
-    must be more than just model name."""
+    must be more than just (backend, model)."""
 
     result: TranscriptionResult
     transcribed_at: datetime
@@ -48,22 +57,142 @@ class CachedTranscription:
     wav_mtime_ns: int = 0
 
 
+# ---------------------------------------------------------------------------
+# Path helpers — on-disk layout for the multi-transcript cache
+# ---------------------------------------------------------------------------
+
+_FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
+_PRIMARY_POINTER = "_primary"
+
+
+def _safe(component: str) -> str:
+    """Sanitise one filename component to `[A-Za-z0-9._-]+`, replacing
+    other characters with `-`. Empty input becomes `_` so the filename
+    always has a body."""
+    if not component:
+        return "_"
+    return _FILENAME_SAFE_RE.sub("-", component)
+
+
+def _entry_key(backend: str, model: str) -> str:
+    """Build the per-entry index key: `<backend>__<model>` after
+    sanitising each component."""
+    return f"{_safe(backend)}__{_safe(model)}"
+
+
+def _transcripts_dir(wav_path: Path) -> Path:
+    return wav_path.with_suffix(".transcripts")
+
+
+def _legacy_sidecar(wav_path: Path) -> Path:
+    return wav_path.with_suffix(".json")
+
+
+# ---------------------------------------------------------------------------
+# Read API
+# ---------------------------------------------------------------------------
+
+
 def read_cached(wav_path: Path) -> CachedTranscription | None:
-    """Return the parsed sidecar for `wav_path`, or None if the file is
-    missing or unparseable."""
-    sidecar = wav_path.with_suffix(".json")
-    if not sidecar.is_file():
+    """Return the *primary* cached transcript for `wav_path`, or None.
+
+    The primary is whichever entry the `_primary` pointer names; if the
+    pointer is missing or stale, we fall back to the newest-mtime
+    sidecar. When only a legacy `<wav>.json` exists, it is the primary
+    by definition."""
+    target = _primary_sidecar_path(wav_path)
+    if target is None:
+        return None
+    return _read_entry(target)
+
+
+def read_primary_payload(wav_path: Path) -> dict[str, Any] | None:
+    """Return the primary transcript as the raw on-disk JSON dict, or
+    None. Bypasses the `CachedTranscription` dataclass build so the
+    dashboard hot path can stream sidecars to the wire without an
+    intermediate parse/serialize round-trip."""
+    target = _primary_sidecar_path(wav_path)
+    if target is None:
         return None
     try:
-        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        data = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict):
-        return None
-    try:
-        return _from_dict(data)
-    except (KeyError, TypeError, ValueError):
-        return None
+    return data if isinstance(data, dict) else None
+
+
+def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
+    """Every cached transcript for `wav_path`, one per (backend, model).
+    Unparseable sidecars are silently dropped. Order is unspecified."""
+    d = _transcripts_dir(wav_path)
+    if d.is_dir():
+        out: list[CachedTranscription] = []
+        for entry in sorted(d.glob("*.json")):
+            cached = _read_entry(entry)
+            if cached is not None:
+                out.append(cached)
+        return out
+    legacy = _read_entry(_legacy_sidecar(wav_path))
+    return [legacy] if legacy is not None else []
+
+
+def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
+    """Compact per-(backend, model) listing for dashboards. One walk,
+    one parse per entry: returns `{"backend", "model", "is_primary",
+    "transcribe_ms"?}` dicts ready for the wire. Single-sidecar legacy
+    WAVs return a one-element list with `is_primary=True`."""
+    d = _transcripts_dir(wav_path)
+    if d.is_dir():
+        sidecars = sorted(d.glob("*.json"))
+        if not sidecars:
+            return []
+        primary = _primary_filename(d, sidecars)
+        out: list[dict[str, Any]] = []
+        for sidecar in sidecars:
+            entry = _read_entry(sidecar)
+            if entry is None:
+                continue
+            item: dict[str, Any] = {
+                "backend": entry.result.backend,
+                "model": entry.result.model,
+                "is_primary": sidecar.name == primary,
+            }
+            if entry.transcribe_ms:
+                item["transcribe_ms"] = entry.transcribe_ms
+            out.append(item)
+        return out
+    legacy = _read_entry(_legacy_sidecar(wav_path))
+    if legacy is None:
+        return []
+    item: dict[str, Any] = {
+        "backend": legacy.result.backend,
+        "model": legacy.result.model,
+        "is_primary": True,
+    }
+    if legacy.transcribe_ms:
+        item["transcribe_ms"] = legacy.transcribe_ms
+    return [item]
+
+
+def set_primary_transcript(wav_path: Path, *, backend: str, model: str) -> None:
+    """Point the primary at the named `(backend, model)` entry. Raises
+    `FileNotFoundError` if that entry isn't cached for this WAV.
+
+    Implicitly migrates the legacy sidecar layout into the new one if
+    necessary so the pointer has somewhere to live."""
+    _migrate_legacy_if_needed(wav_path)
+    d = _transcripts_dir(wav_path)
+    key = _entry_key(backend, model)
+    target = d / f"{key}.json"
+    if not target.is_file():
+        raise FileNotFoundError(f"no cached transcript for backend={backend!r}, model={model!r} at {target}")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / _PRIMARY_POINTER).write_text(key, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Cache-aware transcribe
+# ---------------------------------------------------------------------------
 
 
 def cached_transcribe(
@@ -76,18 +205,18 @@ def cached_transcribe(
     force: bool = False,
     source: str = "original",
 ) -> CachedTranscription:
-    """Try the cache; on miss/force/model-mismatch, transcribe + apply +
-    write sidecar. Returns the `CachedTranscription`."""
+    """Cache-aware transcribe keyed by `(transcriber.backend,
+    transcriber.model_name)`. On miss/force/fingerprint-mismatch, runs
+    the transcriber, applies the hallucination filter, and writes a new
+    entry without evicting any other entry. Returns the fresh
+    `CachedTranscription`."""
+    backend = transcriber.backend
+    model = transcriber.model_name
     size, mtime_ns = _wav_fingerprint(wav_path)
     if not force:
-        cached = read_cached(wav_path)
-        if (
-            cached is not None
-            and cached.result.model == transcriber.model_name
-            and cached.wav_size == size
-            and cached.wav_mtime_ns == mtime_ns
-        ):
-            return cached
+        existing = _read_entry_for(wav_path, backend=backend, model=model)
+        if existing is not None and existing.wav_size == size and existing.wav_mtime_ns == mtime_ns:
+            return existing
 
     started = datetime.now(timezone.utc)
     raw = transcriber.transcribe(wav_path, initial_prompt=initial_prompt, hotwords=hotwords)
@@ -110,7 +239,7 @@ def cached_transcribe(
         wav_size=size,
         wav_mtime_ns=mtime_ns,
     )
-    _write_sidecar(wav_path, cached)
+    _write_entry(wav_path, cached, backend=backend, model=model)
     return cached
 
 
@@ -126,16 +255,138 @@ def _wav_fingerprint(wav_path: Path) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Serialization (kept private so callers go through cached_transcribe / read_cached)
+# Per-entry I/O (private — callers go through cached_transcribe / read_cached)
 # ---------------------------------------------------------------------------
 
 
-def _write_sidecar(wav_path: Path, cached: CachedTranscription) -> None:
-    sidecar = wav_path.with_suffix(".json")
-    sidecar.write_text(
+def _read_entry(path: Path) -> CachedTranscription | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return _from_dict(data)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _read_entry_for(wav_path: Path, *, backend: str, model: str) -> CachedTranscription | None:
+    """Return the cached entry for this specific `(backend, model)`,
+    or None. Looks first in the new-layout directory; falls back to the
+    legacy `<wav>.json` only if its embedded backend+model match."""
+    d = _transcripts_dir(wav_path)
+    if d.is_dir():
+        return _read_entry(d / f"{_entry_key(backend, model)}.json")
+    legacy = _read_entry(_legacy_sidecar(wav_path))
+    if legacy is None:
+        return None
+    if legacy.result.backend == backend and legacy.result.model == model:
+        return legacy
+    return None
+
+
+def _primary_sidecar_path(wav_path: Path) -> Path | None:
+    """The on-disk path of the primary sidecar for this WAV, or None
+    if no transcript is cached. Picks the new-layout primary when the
+    `<wav>.transcripts/` directory exists, otherwise the legacy
+    `<wav>.json`."""
+    d = _transcripts_dir(wav_path)
+    if d.is_dir():
+        name = _primary_filename(d)
+        return d / name if name else None
+    legacy = _legacy_sidecar(wav_path)
+    return legacy if legacy.is_file() else None
+
+
+def _primary_filename(transcripts_dir: Path, sidecars: list[Path] | None = None) -> str | None:
+    """The filename (just the leaf, not the full path) of the primary
+    sidecar inside `transcripts_dir`. Honors `_primary` when valid;
+    otherwise falls back to the newest-mtime sidecar.
+
+    `sidecars` may be supplied by a caller that already globbed the
+    directory to share the syscall — important on the dashboard hot
+    path."""
+    pointer = transcripts_dir / _PRIMARY_POINTER
+    if pointer.is_file():
+        try:
+            key = pointer.read_text(encoding="utf-8").strip()
+        except OSError:
+            key = ""
+        if key:
+            candidate = transcripts_dir / f"{key}.json"
+            if candidate.is_file():
+                return candidate.name
+    if sidecars is None:
+        sidecars = list(transcripts_dir.glob("*.json"))
+    if not sidecars:
+        return None
+    newest = max(sidecars, key=lambda p: p.stat().st_mtime_ns)
+    return newest.name
+
+
+def _write_entry(
+    wav_path: Path,
+    cached: CachedTranscription,
+    *,
+    backend: str,
+    model: str,
+) -> None:
+    _migrate_legacy_if_needed(wav_path)
+    d = _transcripts_dir(wav_path)
+    d.mkdir(parents=True, exist_ok=True)
+    key = _entry_key(backend, model)
+    (d / f"{key}.json").write_text(
         json.dumps(_to_dict(cached), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    # A fresh write becomes the primary — operators flipping models on
+    # the same WAV expect the dashboard to show the just-produced result
+    # unless they explicitly pinned a different primary.
+    (d / _PRIMARY_POINTER).write_text(key, encoding="utf-8")
+
+
+def _migrate_legacy_if_needed(wav_path: Path) -> None:
+    """Move a legacy `<wav>.json` into the new-layout directory under
+    its own `(backend, model)` key, so the two formats never coexist
+    for the same WAV. No-op if the directory already exists or no
+    legacy file is present. Unparseable legacy files are removed so
+    they can't shadow the new layout on subsequent reads."""
+    d = _transcripts_dir(wav_path)
+    if d.exists():
+        return
+    legacy = _legacy_sidecar(wav_path)
+    if not legacy.is_file():
+        return
+    parsed = _read_entry(legacy)
+    if parsed is None:
+        # Best-effort cleanup of a corrupt legacy sidecar. If unlink fails
+        # (Windows file lock, perms) the file stays put — subsequent reads
+        # will keep returning None from `_read_entry`, which is the same
+        # behavior as before this PR, so the failure is non-fatal.
+        with contextlib.suppress(OSError):
+            legacy.unlink()
+        return
+    d.mkdir(parents=True, exist_ok=True)
+    key = _entry_key(parsed.result.backend, parsed.result.model)
+    target = d / f"{key}.json"
+    try:
+        legacy.replace(target)
+    except OSError:
+        try:
+            target.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
+            legacy.unlink()
+        except OSError:
+            return
+    (d / _PRIMARY_POINTER).write_text(key, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Serialization
+# ---------------------------------------------------------------------------
 
 
 def _to_dict(cached: CachedTranscription) -> dict[str, Any]:
