@@ -25,6 +25,24 @@ from tapscribe.live import LiveConfig
 from tapscribe.recorder import ActiveStream, Recorder
 
 
+@pytest.fixture(autouse=True)
+def _force_all_probes_installed():
+    """/api/models filters out registry entries whose adapter modules
+    aren't importable; in a CI env that hasn't installed nemo /
+    parakeet-mlx / mlx-audio / mlx-voxtral, the catalog assertions in
+    this file would all flap. Pretend every probe module is installed
+    so the route tests check the JSON shape, not the host's pip state.
+    Tests that exercise the filter itself override per-test."""
+    from tapscribe.transcribers.catalog import REGISTRY, set_installed_modules_for_testing
+
+    probes = {b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module}
+    set_installed_modules_for_testing(frozenset(probes))
+    try:
+        yield
+    finally:
+        set_installed_modules_for_testing(None)
+
+
 @pytest.fixture
 def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Recorder:
     """Build a Recorder rooted at tmp_path. Disables auth + auto-start
@@ -128,28 +146,23 @@ def test_api_models_hides_families_whose_adapters_are_not_installed(client):
     """The install picker can pull in only some family extras (e.g.
     Whisper but not Parakeet). The /api/models filter mirrors that so
     the dashboard's dropdowns don't advertise models that would fail
-    to lazy-import."""
+    to lazy-import.
+
+    The autouse fixture above resets the install-probe override to
+    `None` between tests, so this test only needs to set its own
+    simulated install set — no manual restore.
+    """
     from tapscribe.transcribers.catalog import set_installed_modules_for_testing
 
-    # Simulate "only the whisper-family adapters installed" — drops
-    # nemo / parakeet_mlx / mlx_audio / mlx_voxtral / transformers.
     set_installed_modules_for_testing(frozenset({"faster_whisper", "mlx_whisper"}))
-    try:
-        r = client.get("/api/models?context=batch")
-        assert r.status_code == 200
-        ids = {m["model_id"] for m in r.json()["models"]}
-        assert "tiny.en" in ids  # whisper survives
-        assert "nb-whisper-medium" in ids  # nb-whisper rides on faster_whisper
-        assert "voxtral-mini" not in ids
-        assert "parakeet-tdt-0.6b-v3" not in ids
-        assert "canary-1b-v2" not in ids
-    finally:
-        # Restore the conftest default ("all probes installed") so other
-        # client-using tests aren't affected.
-        from tapscribe.transcribers.catalog import REGISTRY
-
-        probes = {b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module}
-        set_installed_modules_for_testing(frozenset(probes))
+    r = client.get("/api/models?context=batch")
+    assert r.status_code == 200
+    ids = {m["model_id"] for m in r.json()["models"]}
+    assert "tiny.en" in ids  # whisper survives
+    assert "nb-whisper-medium" in ids  # nb-whisper rides on faster_whisper
+    assert "voxtral-mini" not in ids
+    assert "parakeet-tdt-0.6b-v3" not in ids
+    assert "canary-1b-v2" not in ids
 
 
 def test_api_state_carries_backend_preference_and_available_backends(client):

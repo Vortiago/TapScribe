@@ -33,7 +33,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = REPO_ROOT / ".tapscribe-install.json"
-STATE_SCHEMA_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +76,7 @@ FAMILIES: tuple[FamilyDef, ...] = (
     FamilyDef(
         key="voxtral",
         label="Voxtral (Mistral)",
-        description=(
-            "Mistral Voxtral 3B audio LLM. Batch + live. "
-            "Pulls PyTorch + transformers."
-        ),
+        description=("Mistral Voxtral 3B audio LLM. Batch + live. Pulls PyTorch + transformers."),
         size_hint="~2 GB",
         extras_cpu_cuda=("voxtral",),
         # No published MLX-voxtral PyPI extra yet — the catalog probes for
@@ -91,10 +87,7 @@ FAMILIES: tuple[FamilyDef, ...] = (
     FamilyDef(
         key="parakeet",
         label="Parakeet (NVIDIA)",
-        description=(
-            "NVIDIA Parakeet TDT 0.6B v3 — 25 EU langs, top of HF Open ASR. "
-            "Batch only."
-        ),
+        description=("NVIDIA Parakeet TDT 0.6B v3 — 25 EU langs, top of HF Open ASR. Batch only."),
         size_hint="~1.5 GB",
         extras_cpu_cuda=("parakeet",),
         extras_mlx=("parakeet-mlx",),
@@ -196,16 +189,7 @@ class Selection:
         return cls(families=families)
 
     def save(self, path: Path) -> None:
-        path.write_text(
-            json.dumps(
-                {
-                    "schema_version": STATE_SCHEMA_VERSION,
-                    "families": sorted(self.families),
-                },
-                indent=2,
-            )
-            + "\n"
-        )
+        path.write_text(json.dumps({"families": sorted(self.families)}, indent=2) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     caps = detect_caps(force_no_mlx=args.no_mlx)
+    first_run = not STATE_FILE.exists()
     selection = Selection.load(STATE_FILE)
 
     # Non-interactive: still requires a TTY to be polite to CI / piped
@@ -421,9 +406,18 @@ def main(argv: list[str] | None = None) -> int:
     # explicitly.
     interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
     if interactive:
-        confirmed = interactive_loop(
-            selection, caps, stream_in=sys.stdin, stream_out=sys.stdout
-        )
+        if first_run:
+            # Heads-up for operators upgrading from a TapScribe that
+            # always installed Voxtral as part of start.sh's hard-coded
+            # base set. The default selection is whisper-only now —
+            # surface that so they don't silently lose Voxtral.
+            print(
+                "[install-picker] First run on this checkout. Previous versions of "
+                "start.sh installed Whisper + Voxtral; the picker now defaults to "
+                "Whisper only. Tick Voxtral (option 2) below if you used it.",
+                flush=True,
+            )
+        confirmed = interactive_loop(selection, caps, stream_in=sys.stdin, stream_out=sys.stdout)
         if not confirmed:
             print("[install-picker] aborted by operator.", file=sys.stderr)
             return 1
@@ -434,8 +428,11 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
-    selection.save(STATE_FILE)
     extras = resolve_extras(selection, caps)
+    # Dry-run is purely read-only: don't persist the selection so the
+    # operator can preview the pip command without committing to it.
+    if not args.dry_run:
+        selection.save(STATE_FILE)
     rc = run_install(extras, dry_run=args.dry_run)
     if rc != 0:
         print(f"[install-picker] pip exited with status {rc}.", file=sys.stderr)

@@ -545,7 +545,14 @@ _VOXTRAL_BACKENDS: tuple[BackendBinding, ...] = (
     BackendBinding(
         kinds=frozenset({"cuda", "cpu"}),
         loader=_load_voxtral_hf,
-        probe_module="transformers",
+        # `mistral_common` rather than `transformers`: `transformers` is
+        # heavy enough that other extras (and indirect deps) sometimes
+        # pull it in transitively, which would falsely advertise Voxtral
+        # on installs that didn't ask for it. `mistral_common` is only
+        # listed in the `voxtral` extra and is required for the Voxtral
+        # processor's apply_transcription_request path, so its presence
+        # is a reliable signal that the operator opted into Voxtral.
+        probe_module="mistral_common",
     ),
 )
 
