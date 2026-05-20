@@ -94,6 +94,10 @@ def _write_text_file_atomic(path: Path, content: str) -> None:
             f.write(normalised)
         os.replace(tmp, path)
     except Exception:
+        # Best-effort cleanup of the half-written tempfile. The unlink
+        # itself can fail (file already gone if the write raised before
+        # the fd was flushed, or the dir was yanked out); ignoring that
+        # is safe because the outer `raise` propagates the real error.
         try:
             os.unlink(tmp)
         except OSError:
