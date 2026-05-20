@@ -105,10 +105,7 @@ def _validate_config_text(content: str) -> str:
     """Reject oversize input (see MAX_CONFIG_TEXT_LEN). Returns the
     content unchanged on success so callers can chain."""
     if len(content) > MAX_CONFIG_TEXT_LEN:
-        raise ValueError(
-            f"config text exceeds {MAX_CONFIG_TEXT_LEN}-char cap "
-            f"(got {len(content)} chars)"
-        )
+        raise ValueError(f"config text exceeds {MAX_CONFIG_TEXT_LEN}-char cap (got {len(content)} chars)")
     return content
 
 

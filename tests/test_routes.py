@@ -249,19 +249,25 @@ def test_put_config_prompt_writes_file(client, recorder_under_test):
     r = client.put("/api/config/prompt", json={"content": "Q3 planning · roadmap"})
     assert r.status_code == 200
     assert r.json() == {"ok": True, "key": "prompt", "length": len("Q3 planning · roadmap")}
-    assert (recorder_under_test.config_dir / "prompt.txt").read_text(encoding="utf-8") == "Q3 planning · roadmap"
+    assert (recorder_under_test.config_dir / "prompt.txt").read_text(
+        encoding="utf-8"
+    ) == "Q3 planning · roadmap"
 
 
 def test_put_config_live_prompt_writes_file(client, recorder_under_test):
     r = client.put("/api/config/live-prompt", json={"content": "weekly standup"})
     assert r.status_code == 200
-    assert (recorder_under_test.config_dir / "live-prompt.txt").read_text(encoding="utf-8") == "weekly standup"
+    assert (recorder_under_test.config_dir / "live-prompt.txt").read_text(
+        encoding="utf-8"
+    ) == "weekly standup"
 
 
 def test_put_config_hotwords_writes_file(client, recorder_under_test):
     r = client.put("/api/config/hotwords", json={"content": "Acme, Patricia Lin"})
     assert r.status_code == 200
-    assert (recorder_under_test.config_dir / "hotwords.txt").read_text(encoding="utf-8") == "Acme, Patricia Lin"
+    assert (recorder_under_test.config_dir / "hotwords.txt").read_text(
+        encoding="utf-8"
+    ) == "Acme, Patricia Lin"
 
 
 def test_put_config_empty_content_clears_file(client, recorder_under_test):
