@@ -352,7 +352,13 @@ async def api_models(context: str = "batch"):
     """
     if context not in ("batch", "live"):
         raise HTTPException(400, f"context must be 'batch' or 'live' (got {context!r})")
-    entries = REGISTRY.for_context(context)  # type: ignore[arg-type]
+    # `only_installed` filters out families whose adapter packages weren't
+    # selected at install time (the picker in tools/install_picker.py only
+    # pulls in extras the operator ticks). Without this filter, the
+    # dashboard would advertise Parakeet/Canary even on machines that
+    # skipped the NeMo install — and the operator would only find out by
+    # clicking and hitting the lazy-import error.
+    entries = REGISTRY.for_context(context, only_installed=True)  # type: ignore[arg-type]
     return {
         "context": context,
         "available_backends": sorted(_available_backends_snapshot()),

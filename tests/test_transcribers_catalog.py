@@ -19,6 +19,7 @@ from tapscribe.transcribers.catalog import (
     TranscriberRegistry,
     resolve_backend_preference,
     set_available_backends_for_testing,
+    set_installed_modules_for_testing,
 )
 
 
@@ -277,6 +278,160 @@ def test_unavailable_entry_resolves_with_actionable_error():
     reg = TranscriberRegistry((entry,))
     with pytest.raises(RuntimeError, match="not available yet"):
         reg.resolve("future-model", preference="auto")
+
+
+# ── Install-probe filter (drives /api/models `only_installed=True`) ────
+
+
+def test_binding_with_empty_probe_module_is_installed():
+    """`probe_module=""` opts a binding out of probing — used by tests
+    that construct hypothetical bindings whose loader is a no-op lambda.
+    The is_installed() default for those is True."""
+    b = BackendBinding(kinds=frozenset({"cpu"}), loader=lambda *_: None)  # type: ignore[arg-type]
+    assert b.probe_module == ""
+    assert b.is_installed() is True
+
+
+def test_binding_is_installed_reflects_probe_module_override():
+    set_available_backends_for_testing(frozenset({"cuda", "cpu"}))
+    b_present = BackendBinding(
+        kinds=frozenset({"cpu"}),
+        loader=lambda *_: None,  # type: ignore[arg-type]
+        probe_module="fake_present",
+    )
+    b_absent = BackendBinding(
+        kinds=frozenset({"cpu"}),
+        loader=lambda *_: None,  # type: ignore[arg-type]
+        probe_module="fake_absent",
+    )
+    set_installed_modules_for_testing(frozenset({"fake_present"}))
+    try:
+        assert b_present.is_installed() is True
+        assert b_absent.is_installed() is False
+    finally:
+        set_installed_modules_for_testing(None)
+
+
+def test_entry_is_installed_requires_kind_overlap_with_available_backends():
+    """A binding whose adapter is importable but whose kinds aren't
+    available on this machine should NOT make the entry count as
+    installed — the dashboard would advertise a model the operator
+    can't actually run."""
+    set_available_backends_for_testing(frozenset({"cpu"}))  # no MLX
+    set_installed_modules_for_testing(frozenset({"fake_mlx_adapter"}))
+    entry = ModelEntry(
+        model_id="mlx-only",
+        family="whisper",
+        display_name="x",
+        description="",
+        languages=("en",),
+        contexts=frozenset({"batch"}),
+        backends=(
+            BackendBinding(
+                kinds=frozenset({"mlx"}),
+                loader=lambda *_: None,  # type: ignore[arg-type]
+                probe_module="fake_mlx_adapter",
+            ),
+        ),
+    )
+    try:
+        assert entry.is_installed() is False
+    finally:
+        set_installed_modules_for_testing(None)
+
+
+def test_entry_is_installed_true_when_at_least_one_binding_matches():
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset({"fake_cpu_adapter"}))
+    entry = ModelEntry(
+        model_id="two-bindings",
+        family="whisper",
+        display_name="x",
+        description="",
+        languages=("en",),
+        contexts=frozenset({"batch"}),
+        backends=(
+            BackendBinding(
+                kinds=frozenset({"mlx"}),
+                loader=lambda *_: None,  # type: ignore[arg-type]
+                probe_module="fake_mlx_only",  # not in the installed set
+            ),
+            BackendBinding(
+                kinds=frozenset({"cpu", "cuda"}),
+                loader=lambda *_: None,  # type: ignore[arg-type]
+                probe_module="fake_cpu_adapter",  # installed AND cpu is available
+            ),
+        ),
+    )
+    try:
+        assert entry.is_installed() is True
+    finally:
+        set_installed_modules_for_testing(None)
+
+
+def test_unavailable_entries_are_never_reported_installed():
+    """`available=False` placeholders ("coming soon") are filtered out
+    of /api/models even if their adapter happens to be importable."""
+    entry = ModelEntry(
+        model_id="future",
+        family="whisper",
+        display_name="x",
+        description="",
+        languages=("en",),
+        contexts=frozenset({"batch"}),
+        backends=(
+            BackendBinding(
+                kinds=frozenset({"cpu"}),
+                loader=lambda *_: None,  # type: ignore[arg-type]
+                probe_module="",  # always-installed sentinel
+            ),
+        ),
+        available=False,
+    )
+    assert entry.is_installed() is False
+
+
+def test_for_context_only_installed_filters_entries():
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset({"installed_adapter"}))
+    installed_entry = ModelEntry(
+        model_id="have-it",
+        family="whisper",
+        display_name="x",
+        description="",
+        languages=("en",),
+        contexts=frozenset({"batch"}),
+        backends=(
+            BackendBinding(
+                kinds=frozenset({"cpu"}),
+                loader=lambda *_: None,  # type: ignore[arg-type]
+                probe_module="installed_adapter",
+            ),
+        ),
+    )
+    missing_entry = ModelEntry(
+        model_id="missing",
+        family="whisper",
+        display_name="y",
+        description="",
+        languages=("en",),
+        contexts=frozenset({"batch"}),
+        backends=(
+            BackendBinding(
+                kinds=frozenset({"cpu"}),
+                loader=lambda *_: None,  # type: ignore[arg-type]
+                probe_module="not_installed",
+            ),
+        ),
+    )
+    reg = TranscriberRegistry((installed_entry, missing_entry))
+    try:
+        unfiltered = {e.model_id for e in reg.for_context("batch")}
+        assert unfiltered == {"have-it", "missing"}
+        filtered = {e.model_id for e in reg.for_context("batch", only_installed=True)}
+        assert filtered == {"have-it"}
+    finally:
+        set_installed_modules_for_testing(None)
 
 
 def test_textinput_label_and_description_round_trip():
