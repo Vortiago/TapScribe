@@ -173,6 +173,18 @@
   </div>
 </template>
 
+<template id="tpl-wav-row-stripped">
+  <div class="wav-row strip-sub">
+    <a class="wav-name" href="#" data-slot="name"></a>
+    <span class="wav-num" data-slot="duration"></span>
+    <span data-slot="sizeCell"></span>
+    <span class="row gap-xs">
+      <a class="btn tiny ghost" download title="Download stripped region" data-slot="download">⬇</a>
+      <button class="btn tiny" data-slot="txButton"></button>
+    </span>
+  </div>
+</template>
+
 <template id="tpl-wav-size-static">
   <span class="wav-num"><span class="m" data-slot="text"></span></span>
 </template>

@@ -323,3 +323,58 @@ def _fake_sidecar_json(*, text: str, duration: float, wav_start_iso: str | None 
     if wav_start_iso:
         payload["wav_start"] = wav_start_iso
     return json.dumps(payload)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard session description: region WAVs attach to their origin original.
+# ---------------------------------------------------------------------------
+
+
+def test_describe_session_attaches_regions_to_origin_wav(tmp_path: Path, monkeypatch):
+    """`_describe_session` buckets stripped/*.wav by (speaker_slug, ident) so
+    the dashboard can render each region as a sub-row under the original
+    it was split from. Sibling originals with different idents must not
+    cross-contaminate."""
+    from tapscribe import config
+    from tapscribe.sessions import _describe_session
+
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path)
+    session_dir = tmp_path / "session"
+    out_dir = session_dir / "stripped"
+    session_dir.mkdir()
+    out_dir.mkdir()
+
+    start_a = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
+    start_b = datetime(2026, 5, 12, 9, 31, 30, tzinfo=UTC)
+    orig_a = session_dir / _wav_name(start_a, speaker="alice", ident="aaaa1111")
+    orig_b = session_dir / _wav_name(start_b, speaker="bob", ident="bbbb2222")
+    _write_wav(orig_a, _make_speech_silence([1.0, 1.0, 1.0], [1.0, 1.0]))
+    _write_wav(orig_b, _make_speech_silence([1.0, 1.0], [1.0]))
+
+    strip_one_wav(orig_a, out_dir, **_common_kwargs())
+    strip_one_wav(orig_b, out_dir, **_common_kwargs())
+
+    sess = _describe_session(session_dir, jobs={}, current_session="")
+
+    files = {f["name"]: f for f in sess["files"]}
+    a_regions = files[orig_a.name]["regions"]
+    b_regions = files[orig_b.name]["regions"]
+    assert len(a_regions) == 3
+    assert len(b_regions) == 2
+    # Region speaker slugs round-trip from the parent.
+    for r in a_regions:
+        assert parse_wav_speaker_slug(r["name"]) == "alice"
+    for r in b_regions:
+        assert parse_wav_speaker_slug(r["name"]) == "bob"
+    # And each region carries the per-WAV row fields the UI consumes.
+    sample = a_regions[0]
+    assert {
+        "name",
+        "size",
+        "duration_s",
+        "transcript",
+        "transcripts",
+        "wav_start",
+        "wav_end",
+        "speaker_name",
+    } <= sample.keys()

@@ -1,12 +1,17 @@
 """Browser-driven E2E: dashboard renders what the pipeline produces.
 
-Two tests in this file, both driving real headless Chromium against
+Three tests in this file, all driving real headless Chromium against
 the running uvicorn server:
 
 - `test_dashboard_shows_active_taps_live_feed_and_merged_transcript`
   is the fast plumbing check — synthetic WAVs through two bridges plus
   a `FakeTranscriber`, so it runs in CI without `faster-whisper`
   installed. Verifies every panel renders correctly under load.
+- `test_dashboard_renders_strip_silence_region_sub_rows` exercises the
+  per-WAV region sub-rows the strip-silence pipeline mints — splits a
+  multi-burst WAV, expects N indented `.wav-row.strip-sub` rows under
+  the original, transcribes one of them, and expands its inline
+  transcript.
 - `test_dashboard_with_real_audio_and_whisper` is the full-fat check:
   streams the committed `armstrong-en.wav` fixture through the bridge,
   clicks the dashboard's **▶ transcribe whole session** button, and
@@ -309,6 +314,163 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                 """,
                 timeout=2000,
             )
+        finally:
+            await browser.close()
+
+
+async def test_dashboard_renders_strip_silence_region_sub_rows(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,
+    tmp_path: Path,
+):
+    """Each original WAV's row shows one indented `.wav-row.strip-sub`
+    per region the strip-silence splitter wrote to `<session>/stripped/`,
+    each with its own download link + transcribe button + expandable
+    inline transcript.
+
+    This is the load-bearing UX guard for the sub-row UI: the splitter
+    refactor (PR #49) silently dropped the old 1:1 stripped sibling UI,
+    so a regression here would leave region WAVs invisible to the
+    operator. The test streams a 3-burst WAV, splits it, asserts 3
+    sub-rows render under the parent, then exercises one sub-row's
+    transcribe + expand controls end-to-end.
+    """
+    # Imported here so the helper stays colocated with the strip-silence
+    # pipeline test it was originally written for.
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Scripted text the FakeTranscriber returns for any region WAV — the
+    # speaker slug on every region is "Alice" (inherited from the
+    # original's filename), so one entry covers all N regions.
+    scripted = "stripped region segment from Alice"
+    fake_transcriber.text_by_speaker["Alice"] = scripted
+
+    src_wav = _build_speech_silence_wav(tmp_path / "alice-multi.wav")
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src_wav,
+        utterance_id="utt-strip-ui",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+    recorded = sorted(rec.session_dir.glob("*.wav"))
+    assert len(recorded) == 1, f"expected one recorded WAV, got {[w.name for w in recorded]}"
+    original_name = recorded[0].name
+
+    # Mint the per-region WAVs server-side before opening the dashboard so
+    # the first poll cycle already includes them in `/api/state`.
+    import httpx
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            f"/api/sessions/{rec.session_start}/strip-silence",
+            json={
+                "min_silence_ms": 400,
+                "pad_ms": 50,
+                "threshold_db": -30.0,
+                "use_silero": False,
+                "speech_floor_db": -40.0,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["files_written"] == 1
+    region_wavs = sorted((rec.session_dir / "stripped").glob("*.wav"))
+    assert len(region_wavs) == 3, (
+        f"strip-silence should have produced 3 region WAVs from the 3-burst source, "
+        f"got {[w.name for w in region_wavs]}"
+    )
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(
+                viewport={"width": 1400, "height": 900},
+            )
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+
+            # The original WAV row must render, with exactly 3 indented
+            # `.wav-row.strip-sub` siblings under it (the three regions).
+            await page.wait_for_function(
+                """
+                () => document.querySelectorAll('.wav-list .wav-row.strip-sub').length === 3
+                """,
+                timeout=10000,
+            )
+            # Sub-rows live inside the same `.wav-list` as the original —
+            # i.e. not in some sibling list. Asserts the DOM topology so a
+            # future refactor that re-parents them is flagged here.
+            total_rows = await page.locator(".wav-list .wav-row").count()
+            assert total_rows == 4, f"expected 1 original + 3 region rows, got {total_rows}"
+
+            # Each region row carries its own transcribe button targeting
+            # source=stripped and the region's own name.
+            for r in region_wavs:
+                btn_sel = (
+                    f'.wav-row.strip-sub button[data-tx-source="stripped"]'
+                    f'[data-tx-wav="{rec.session_start}/{r.name}"]'
+                )
+                btn = page.locator(btn_sel)
+                await btn.wait_for(state="visible", timeout=3000)
+
+            # Click the first region's transcribe button and wait for the
+            # row to flip from "transcribing…" to "took Xms".
+            first_region = region_wavs[0]
+            first_btn_sel = (
+                f'.wav-row.strip-sub button[data-tx-source="stripped"]'
+                f'[data-tx-wav="{rec.session_start}/{first_region.name}"]'
+            )
+            await page.locator(first_btn_sel).click()
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const row = document.querySelector(
+                    '.wav-row.strip-sub button[data-tx-wav="{rec.session_start}/{first_region.name}"]'
+                  )?.closest('.wav-row');
+                  return row && /took\\s+\\d/.test(row.innerText);
+                }}
+                """,
+                timeout=10000,
+            )
+
+            # Clicking the region's name expands the inline transcript
+            # right below the sub-row. Its text must be the scripted text
+            # the FakeTranscriber returned.
+            name_sel = (
+                f'.wav-row.strip-sub [data-toggle-wav="{rec.session_start}/{first_region.name}@stripped"]'
+            )
+            await page.locator(name_sel).click()
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const tx = document.querySelectorAll('.wav-list .expand-tx');
+                  return Array.from(tx).some((el) => el.innerText.includes({scripted!r}));
+                }}
+                """,
+                timeout=5000,
+            )
+
+            await page.screenshot(
+                path=str(SHOTS_DIR / "07-stripped-region-sub-rows.png"),
+                full_page=True,
+            )
+
+            # The original WAV's row is still present and identifiable by
+            # its (unique) original filename — sub-rows must not have
+            # taken its place in the DOM.
+            orig_row = page.locator(f'.wav-list [data-toggle-wav="{rec.session_start}/{original_name}"]')
+            await orig_row.wait_for(state="visible", timeout=2000)
         finally:
             await browser.close()
 
