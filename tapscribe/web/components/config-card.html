@@ -22,3 +22,15 @@
 <template id="tpl-cfg-code">
   <code data-slot="val"></code>
 </template>
+
+<!-- Editable textarea + save button used for prompt / live-prompt /
+     hotwords editors. The component code wires the save handler to a
+     PUT /api/config/<key>. `data-slot="status"` holds the save status
+     badge (idle / saving / saved / failed). -->
+<template id="tpl-cfg-editor">
+  <textarea class="textarea cfg-editor-text" rows="3" data-slot="textarea"></textarea>
+  <div class="row gap-xs cfg-editor-actions">
+    <button class="btn tiny" type="button" data-slot="saveBtn">save</button>
+    <span class="dim tiny" data-slot="status"></span>
+  </div>
+</template>

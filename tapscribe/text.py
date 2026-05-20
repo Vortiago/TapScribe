@@ -51,10 +51,81 @@ def read_prompt() -> str:
     return read_text_file(config.PROMPT_FILE)
 
 
+def read_live_prompt() -> str:
+    """Return the WhisperLiveKit `--init-prompt` from live-prompt.txt.
+
+    Independent from `read_prompt()` — an empty live-prompt.txt does NOT
+    fall back to prompt.txt, since the dashboard exposes the two as two
+    separate editors and operators are expected to set each explicitly
+    (live and batch typically run different cadences and sometimes
+    different model families)."""
+    return read_text_file(config.LIVE_PROMPT_FILE)
+
+
 def read_hotwords() -> str:
     """Return the faster-whisper `hotwords` string from hotwords.txt — a
     comma- or space-separated list of proper nouns / tricky vocabulary."""
     return read_text_file(config.HOTWORDS_FILE)
+
+
+# Cap pasted prompts/hotwords at 4000 chars. Whisper's init_prompt is
+# capped around 224 tokens (~1k chars), so anything bigger is almost
+# certainly a paste mistake (transcript dump, log) — fail at the API
+# boundary rather than silently truncating downstream.
+MAX_CONFIG_TEXT_LEN: int = 4000
+
+
+def _write_text_file_atomic(path: Path, content: str) -> None:
+    """Write `content` to `path` via tempfile + os.replace so a crashed
+    write never leaves a half-written file on disk. CRLF is normalised
+    to LF so the Whisper CLI doesn't see literal `\\r` in the prompt."""
+    import os
+    import tempfile
+
+    normalised = content.replace("\r\n", "\n").replace("\r", "\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(normalised)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _validate_config_text(content: str) -> str:
+    """Reject oversize input (see MAX_CONFIG_TEXT_LEN). Returns the
+    content unchanged on success so callers can chain."""
+    if len(content) > MAX_CONFIG_TEXT_LEN:
+        raise ValueError(
+            f"config text exceeds {MAX_CONFIG_TEXT_LEN}-char cap "
+            f"(got {len(content)} chars)"
+        )
+    return content
+
+
+def write_prompt(content: str) -> None:
+    """Persist the batch initial prompt to prompt.txt. Atomic; oversize input rejected."""
+    _write_text_file_atomic(config.PROMPT_FILE, _validate_config_text(content))
+
+
+def write_live_prompt(content: str) -> None:
+    """Persist the live-channel init prompt to live-prompt.txt. Atomic;
+    oversize input rejected."""
+    _write_text_file_atomic(config.LIVE_PROMPT_FILE, _validate_config_text(content))
+
+
+def write_hotwords(content: str) -> None:
+    """Persist the hotwords list to hotwords.txt. Atomic; oversize input rejected."""
+    _write_text_file_atomic(config.HOTWORDS_FILE, _validate_config_text(content))
 
 
 def normalise_for_exact(text: str) -> str:

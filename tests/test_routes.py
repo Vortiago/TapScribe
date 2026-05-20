@@ -50,8 +50,17 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Reco
     monkeypatch.setattr(_config, "AUTH_ENABLED", False)
     monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
-    monkeypatch.setattr(_config, "CONFIG_DIR", tmp_path / "config")
-    (tmp_path / "config").mkdir()
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr(_config, "CONFIG_DIR", cfg)
+    # The text helpers and /api/state both read these path constants
+    # directly — re-bind them to the tmp config dir so the editable-config
+    # writes land where the test expects them (and where the recorder
+    # under test reads from).
+    monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
+    monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt", raising=False)
+    monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
+    monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
     (tmp_path / "recordings").mkdir()
 
     return Recorder(
@@ -171,6 +180,108 @@ def test_api_state_carries_backend_preference_and_available_backends(client):
     assert "backend" in body
     assert "available_backends" in body
     assert isinstance(body["available_backends"], list)
+
+
+# ---------------------------------------------------------------------------
+# /api/state — editable prompt + hotwords blocks. The dashboard renders
+# textareas for each one, gated by `inputs_support`.
+# ---------------------------------------------------------------------------
+
+
+def test_api_state_includes_live_prompt_block(client, recorder_under_test):  # noqa: ARG001
+    """The live channel has its own prompt file (config/live-prompt.txt),
+    independent from the batch prompt.txt. /api/state surfaces both so
+    the dashboard renders separate editors."""
+    r = client.get("/api/state")
+    body = r.json()
+    assert "live_prompt" in body
+    lp = body["live_prompt"]
+    assert "path" in lp
+    assert lp["path"].endswith("live-prompt.txt")
+    assert "content" in lp
+    assert "length" in lp
+
+
+def test_api_state_includes_inputs_support_flags(client):
+    """The dashboard hides each editor when no installed model in that
+    context declares the corresponding input. /api/state exposes those
+    booleans so the JS doesn't need to re-derive them from /api/models."""
+    body = client.get("/api/state").json()
+    support = body["inputs_support"]
+    # Whisper family is always present in test fixture (faster_whisper
+    # is in the dev install), so all three should be True.
+    assert support["live_prompt"] is True
+    assert support["batch_prompt"] is True
+    assert support["batch_hotwords"] is True
+
+
+def test_api_state_inputs_support_hides_when_only_non_supporting_models_installed(client):
+    """If the only installed batch families are Voxtral / Parakeet /
+    Canary (none declare initial_prompt or hotwords), batch_prompt and
+    batch_hotwords are False. Same logic for live: if the only installed
+    live family doesn't declare initial_prompt, live_prompt is False."""
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+
+    # Pretend only voxtral (mistral_common + mlx_voxtral) is installed.
+    # No Whisper family → no initial_prompt / hotwords support anywhere.
+    set_installed_modules_for_testing(frozenset({"mistral_common", "mlx_voxtral"}))
+    try:
+        body = client.get("/api/state").json()
+        support = body["inputs_support"]
+        assert support["live_prompt"] is False
+        assert support["batch_prompt"] is False
+        assert support["batch_hotwords"] is False
+    finally:
+        # The autouse fixture re-installs every probe on teardown, but
+        # restore eagerly so the next assertion in this test couldn't
+        # leak across.
+        set_installed_modules_for_testing(None)
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/config/{key} — dashboard's save button writes prompt /
+# live-prompt / hotwords back to disk. Atomic via tempfile + rename so a
+# crashed write never leaves a truncated file.
+# ---------------------------------------------------------------------------
+
+
+def test_put_config_prompt_writes_file(client, recorder_under_test):
+    r = client.put("/api/config/prompt", json={"content": "Q3 planning · roadmap"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "key": "prompt", "length": len("Q3 planning · roadmap")}
+    assert (recorder_under_test.config_dir / "prompt.txt").read_text(encoding="utf-8") == "Q3 planning · roadmap"
+
+
+def test_put_config_live_prompt_writes_file(client, recorder_under_test):
+    r = client.put("/api/config/live-prompt", json={"content": "weekly standup"})
+    assert r.status_code == 200
+    assert (recorder_under_test.config_dir / "live-prompt.txt").read_text(encoding="utf-8") == "weekly standup"
+
+
+def test_put_config_hotwords_writes_file(client, recorder_under_test):
+    r = client.put("/api/config/hotwords", json={"content": "Acme, Patricia Lin"})
+    assert r.status_code == 200
+    assert (recorder_under_test.config_dir / "hotwords.txt").read_text(encoding="utf-8") == "Acme, Patricia Lin"
+
+
+def test_put_config_empty_content_clears_file(client, recorder_under_test):
+    (recorder_under_test.config_dir / "prompt.txt").write_text("existing", encoding="utf-8")
+    r = client.put("/api/config/prompt", json={"content": ""})
+    assert r.status_code == 200
+    assert (recorder_under_test.config_dir / "prompt.txt").read_text(encoding="utf-8") == ""
+
+
+def test_put_config_unknown_key_rejected(client):
+    r = client.put("/api/config/halibut", json={"content": "anything"})
+    assert r.status_code == 404
+
+
+def test_put_config_rejects_oversize(client):
+    """4000-char cap. Pasting a transcript dump into the prompt field
+    should fail loudly at the boundary, not get silently truncated
+    downstream where it would surprise the operator with a partial prompt."""
+    r = client.put("/api/config/prompt", json={"content": "x" * 5000})
+    assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------

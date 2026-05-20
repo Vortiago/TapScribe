@@ -154,6 +154,27 @@ def test_init_prompt_only_passed_when_supplied():
     assert cmd_with[cmd_with.index("--init-prompt") + 1] == "weekly planning"
 
 
+def test_live_init_prompt_helper_reads_live_prompt_file(tmp_config_dir):
+    """The live channel feeds whisperlivekit-server its OWN prompt
+    (config/live-prompt.txt), not the batch prompt (config/prompt.txt).
+    The two are independent — see CONTEXT.md."""
+    from tapscribe.live import resolve_live_init_prompt
+
+    (tmp_config_dir / "live-prompt.txt").write_text("daily standup", encoding="utf-8")
+    (tmp_config_dir / "prompt.txt").write_text("meeting context", encoding="utf-8")
+    assert resolve_live_init_prompt() == "daily standup"
+
+
+def test_live_init_prompt_helper_returns_none_when_live_prompt_empty(tmp_config_dir):
+    """Empty live-prompt.txt resolves to None even if prompt.txt is set —
+    independent contexts (see CONTEXT.md). build_live_cmd then omits
+    --init-prompt entirely."""
+    (tmp_config_dir / "prompt.txt").write_text("batch context", encoding="utf-8")
+    from tapscribe.live import resolve_live_init_prompt
+
+    assert resolve_live_init_prompt() is None
+
+
 def test_min_chunk_size_only_passed_when_set():
     """Operators dial latency vs. accuracy by raising min chunk size — bigger
     chunk = more future context per decode = better accuracy but more lag.

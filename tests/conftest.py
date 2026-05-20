@@ -40,6 +40,7 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cfg.mkdir()
     monkeypatch.setattr(config, "CONFIG_DIR", cfg)
     monkeypatch.setattr(config, "PROMPT_FILE", cfg / "prompt.txt")
+    monkeypatch.setattr(config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt", raising=False)
     monkeypatch.setattr(config, "HOTWORDS_FILE", cfg / "hotwords.txt")
     monkeypatch.setattr(config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
     return cfg

@@ -61,7 +61,15 @@ from .sessions import (
     write_session_meta,
 )
 from .tap_fan_out import TapFanOut
-from .text import read_hotwords, read_prompt
+from .text import (
+    MAX_CONFIG_TEXT_LEN,
+    read_hotwords,
+    read_live_prompt,
+    read_prompt,
+    write_hotwords,
+    write_live_prompt,
+    write_prompt,
+)
 from .transcribers import load_transcriber
 from .transcribers.catalog import REGISTRY, available_backends
 from .wav_cache import cached_transcribe, read_primary_payload, set_primary_transcript
@@ -71,6 +79,44 @@ def _available_backends_snapshot() -> frozenset[str]:
     """`available_backends()` returns the cached set; expose as plain set
     of strings for the JSON serialiser."""
     return frozenset(str(k) for k in available_backends())
+
+
+def _compute_inputs_support() -> dict[str, bool]:
+    """Derive per-context support flags for the dashboard editors.
+
+    The dashboard hides each editor when no installed model in that
+    context declares the corresponding input. We compute this from the
+    registry (`ModelEntry.inputs`) so adding a future Voxtral prompt
+    field (or removing one) automatically updates the UI gating with
+    no manual flag-flipping.
+
+    `live_hotwords` is intentionally not exposed: WhisperLiveKit's CLI
+    has no --hotwords flag (see `build_live_cmd`), so even though
+    Whisper-family entries declare hotwords in `WHISPER_INPUTS`, the
+    live channel can't currently consume them.
+    """
+
+    def _any_installed_has(context: str, input_name: str) -> bool:
+        for entry in REGISTRY.for_context(context, only_installed=True):  # type: ignore[arg-type]
+            for inp in entry.inputs:
+                if inp.name == input_name:
+                    return True
+        return False
+
+    return {
+        "live_prompt": _any_installed_has("live", "initial_prompt"),
+        "batch_prompt": _any_installed_has("batch", "initial_prompt"),
+        "batch_hotwords": _any_installed_has("batch", "hotwords"),
+    }
+
+
+# Map of config key (URL segment) → writer. Keeps the PUT handler one
+# branch deep and makes the supported keys easy to grep for.
+_CONFIG_WRITERS = {
+    "prompt": write_prompt,
+    "live-prompt": write_live_prompt,
+    "hotwords": write_hotwords,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +299,10 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
     prompt = read_prompt()
+    live_prompt = read_live_prompt()
     hotwords = read_hotwords()
     halluc_rules = hallucinations_mod.parse_rules()
+    inputs_support = _compute_inputs_support()
     # The per-row rec/live toggles control the per-identity preference,
     # not the in-flight WS snapshot — so the button state needs to track
     # the current preference, otherwise clicks land server-side but the
@@ -286,11 +334,17 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
             "content": prompt,
             "length": len(prompt),
         },
+        "live_prompt": {
+            "path": str(config.LIVE_PROMPT_FILE),
+            "content": live_prompt,
+            "length": len(live_prompt),
+        },
         "hotwords": {
             "path": str(config.HOTWORDS_FILE),
             "content": hotwords,
             "length": len(hotwords),
         },
+        "inputs_support": inputs_support,
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "rules": [r["raw"] for r in halluc_rules],
@@ -493,6 +547,35 @@ async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_re
         enabled = recorder.toggle_recording()
     print(f"[tapscribe] recording {'enabled' if enabled else 'paused'}", flush=True)
     return {"ok": True, "enabled": enabled}
+
+
+# ---------------------------------------------------------------------------
+# Editable config — dashboard "save" buttons for prompt / live-prompt /
+# hotwords. Atomic via tempfile + rename inside the writer helpers.
+# ---------------------------------------------------------------------------
+
+
+@app.put("/api/config/{key}")
+async def api_config_put(key: str, req: Request):
+    writer = _CONFIG_WRITERS.get(key)
+    if writer is None:
+        raise HTTPException(404, f"unknown config key: {key!r}")
+    body = await _json_body(req)
+    content = body.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(400, "content must be a string")
+    if len(content) > MAX_CONFIG_TEXT_LEN:
+        raise HTTPException(
+            400,
+            f"content exceeds {MAX_CONFIG_TEXT_LEN}-char cap (got {len(content)})",
+        )
+    try:
+        writer(content)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except OSError as e:
+        raise HTTPException(500, f"failed to write config: {e}") from e
+    return {"ok": True, "key": key, "length": len(content)}
 
 
 # ---------------------------------------------------------------------------
