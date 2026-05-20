@@ -250,7 +250,7 @@ def test_silero_vad_analyzer_accepts_pcm_chunks() -> None:
     Silero's behavior on synthetic silence/noise is sensitive enough
     that committing to a specific outcome would make this test flaky.
     """
-    silero_vad = pytest.importorskip("silero_vad")  # noqa: F841
+    pytest.importorskip("silero_vad")
     from tapscribe.speech_gate import make_silero_vad
 
     analyze = make_silero_vad(threshold=0.5, hangover_ms=400)
