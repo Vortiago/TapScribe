@@ -47,6 +47,40 @@ def main() -> None:
         "to it — so a stable well-known port is rarely useful, and a fixed 8000 "
         "is the most common cause of `EADDRINUSE` after a hard-killed prior run.",
     )
+    # WhisperLiveKit streaming knobs. Each one trades latency for accuracy;
+    # operators tune them against the per-tap lag reading in the live-channel
+    # dashboard panel. Unset = use WLK's own default.
+    p.add_argument(
+        "--live-min-chunk-size",
+        type=float,
+        default=None,
+        help="Minimum audio chunk size in seconds the live channel decodes at "
+        "a time. Higher = more future context per decode = better accuracy + "
+        "more lag. Unset = use WhisperLiveKit's default.",
+    )
+    p.add_argument(
+        "--live-buffer-trimming",
+        choices=("sentence", "segment"),
+        default=None,
+        help="When the live channel resets its rolling buffer: on sentence "
+        "boundaries (more conservative, better accuracy) or segment "
+        "boundaries. Unset = use WhisperLiveKit's default.",
+    )
+    p.add_argument(
+        "--live-buffer-trimming-sec",
+        type=float,
+        default=None,
+        help="Buffer length (s) above which trimming is triggered. Pairs with "
+        "--live-buffer-trimming. Unset = use WhisperLiveKit's default.",
+    )
+    p.add_argument(
+        "--live-max-context-tokens",
+        type=int,
+        default=None,
+        help="Max prior-text tokens the live decoder can condition on. Higher "
+        "= better continuations + more compute per tick. Unset = use "
+        "WhisperLiveKit's default.",
+    )
     p.add_argument(
         "--no-mlx",
         action="store_true",
@@ -116,6 +150,10 @@ def main() -> None:
         language=args.live_language,
         host=args.live_host or "127.0.0.1",
         port=args.live_port,
+        min_chunk_size=args.live_min_chunk_size,
+        buffer_trimming=args.live_buffer_trimming,
+        buffer_trimming_sec=args.live_buffer_trimming_sec,
+        max_context_tokens=args.live_max_context_tokens,
     )
 
     recorder = Recorder(

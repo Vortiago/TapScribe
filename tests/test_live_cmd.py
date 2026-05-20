@@ -74,6 +74,59 @@ def test_init_prompt_only_passed_when_supplied():
     assert cmd_with[cmd_with.index("--init-prompt") + 1] == "weekly planning"
 
 
+def test_min_chunk_size_only_passed_when_set():
+    """Operators dial latency vs. accuracy by raising min chunk size — bigger
+    chunk = more future context per decode = better accuracy but more lag.
+    Default (None) means WLK uses its own default; we don't emit the flag."""
+    cfg_default = LiveConfig(model="tiny.en", language="en", host="h", port=8000)
+    cfg_tuned = LiveConfig(model="tiny.en", language="en", host="h", port=8000, min_chunk_size=2.5)
+    assert "--min-chunk-size" not in build_live_cmd(EXE, cfg_default, use_mlx=False)
+    cmd = build_live_cmd(EXE, cfg_tuned, use_mlx=False)
+    assert "--min-chunk-size" in cmd
+    assert cmd[cmd.index("--min-chunk-size") + 1] == "2.5"
+
+
+def test_buffer_trimming_only_passed_when_set():
+    """`--buffer_trimming` controls how the rolling buffer is reset (sentence
+    vs segment boundaries). `--buffer_trimming_sec` is the length threshold
+    that triggers the reset. Both default to WLK's behavior (flag absent)."""
+    cfg_default = LiveConfig(model="tiny.en", language="en", host="h", port=8000)
+    cfg_tuned = LiveConfig(
+        model="tiny.en",
+        language="en",
+        host="h",
+        port=8000,
+        buffer_trimming="sentence",
+        buffer_trimming_sec=15.0,
+    )
+    assert "--buffer_trimming" not in build_live_cmd(EXE, cfg_default, use_mlx=False)
+    assert "--buffer_trimming_sec" not in build_live_cmd(EXE, cfg_default, use_mlx=False)
+    cmd = build_live_cmd(EXE, cfg_tuned, use_mlx=False)
+    assert cmd[cmd.index("--buffer_trimming") + 1] == "sentence"
+    assert cmd[cmd.index("--buffer_trimming_sec") + 1] == "15.0"
+
+
+def test_buffer_trimming_strategy_alone_emits_only_the_strategy_flag():
+    """Setting only the strategy (not the seconds threshold) emits just the
+    strategy flag — WLK keeps its own default for the threshold."""
+    cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, buffer_trimming="segment")
+    cmd = build_live_cmd(EXE, cfg, use_mlx=False)
+    assert "--buffer_trimming" in cmd
+    assert cmd[cmd.index("--buffer_trimming") + 1] == "segment"
+    assert "--buffer_trimming_sec" not in cmd
+
+
+def test_max_context_tokens_only_passed_when_set():
+    """Raising max context tokens lets the decoder condition on more prior
+    text — usually better continuations, more compute per tick. Default 0
+    (== don't emit) means WLK's own default applies."""
+    cfg_default = LiveConfig(model="tiny.en", language="en", host="h", port=8000)
+    cfg_tuned = LiveConfig(model="tiny.en", language="en", host="h", port=8000, max_context_tokens=128)
+    assert "--max-context-tokens" not in build_live_cmd(EXE, cfg_default, use_mlx=False)
+    cmd = build_live_cmd(EXE, cfg_tuned, use_mlx=False)
+    assert cmd[cmd.index("--max-context-tokens") + 1] == "128"
+
+
 def test_nb_whisper_uses_model_path_and_backend_policy_not_model_flag(tmp_path: Path):
     cfg = LiveConfig(model="nb-whisper-medium", language="no", host="h", port=8000)
     ct2_dir = tmp_path / "nb-whisper-medium-ct2"

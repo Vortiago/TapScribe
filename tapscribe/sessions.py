@@ -347,16 +347,23 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
 
 def strip_one_wav(
     src: Path,
-    dst: Path,
+    out_dir: Path,
     min_silence_ms: int,
     pad_ms: int,
     threshold_db: float,
     use_silero: bool,
     speech_floor_db: float,
 ) -> dict[str, Any]:
-    """Strip silence from one WAV. Returns per-file stats. Used by the
-    strip-silence endpoint, which runs this in a worker thread."""
-    import numpy as np
+    """Split one WAV into one output per detected speech region.
+
+    Each region's output filename uses the recorder's naming convention
+    `<iso>_<speaker>_<ident>_<uuid>.wav` with `<iso>` recomputed as
+    `original_start + region_start_seconds`. That makes `parse_wav_start`
+    place each region at its true wall-clock time during the session
+    merge with no extra metadata.
+
+    Used by the strip-silence endpoint, which runs this in a worker thread.
+    """
 
     samples = _ss.read_wav_int16(src)
     total = len(samples)
@@ -368,14 +375,15 @@ def strip_one_wav(
             "speech_seconds": 0.0,
             "segments": 0,
             "written": False,
+            "regions_written": [],
             "reason": "empty",
         }
 
     # Whole-file silence gate. Same threshold the transcribe path uses
     # (SILENT_RMS_DBFS_FLOOR). If the original WAV has no sustained signal,
-    # silero will at best false-positive on a transient, and the resulting
-    # stripped sibling is just concentrated noise that hallucinates under
-    # Whisper. Don't write it.
+    # silero will at best false-positive on a transient, and the per-region
+    # outputs are just concentrated noise that hallucinates under Whisper.
+    # Don't write them.
     overall_rms_dbfs = wav_rms_dbfs(src)
     if overall_rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
         return {
@@ -384,6 +392,7 @@ def strip_one_wav(
             "speech_seconds": 0.0,
             "segments": 0,
             "written": False,
+            "regions_written": [],
             "reason": f"whole-file silent ({overall_rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)",
         }
 
@@ -408,6 +417,7 @@ def strip_one_wav(
             "speech_seconds": 0.0,
             "segments": 0,
             "written": False,
+            "regions_written": [],
             "reason": "no speech detected",
             "detector": detector,
         }
@@ -421,23 +431,64 @@ def strip_one_wav(
             "speech_seconds": 0.0,
             "segments": 0,
             "written": False,
+            "regions_written": [],
             "reason": f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
             "detector": detector,
         }
 
-    out_samples = np.concatenate([samples[s:e] for s, e in regions])
-    speech_secs = len(out_samples) / _ss.SAMPLE_RATE
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    _ss.write_wav_int16(dst, out_samples)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    origin = parse_wav_start(src.name) or datetime.fromtimestamp(src.stat().st_mtime, tz=timezone.utc)
+    speaker_slug, ident_slug = _split_filename_components(src.name)
+
+    speech_samples = 0
+    regions_written: list[str] = []
+    for start_sample, end_sample in regions:
+        region_samples = samples[start_sample:end_sample]
+        offset_s = start_sample / _ss.SAMPLE_RATE
+        region_start = origin + timedelta(seconds=offset_s)
+        fname = _build_region_filename(region_start, speaker_slug, ident_slug)
+        _ss.write_wav_int16(out_dir / fname, region_samples)
+        regions_written.append(fname)
+        speech_samples += len(region_samples)
+
     return {
         "name": src.name,
         "in_seconds": round(in_secs, 2),
-        "speech_seconds": round(speech_secs, 2),
+        "speech_seconds": round(speech_samples / _ss.SAMPLE_RATE, 2),
         "segments": len(regions),
         "segments_filtered_below_floor": pre_filter_count - len(regions),
         "written": True,
+        "regions_written": regions_written,
         "detector": detector,
     }
+
+
+def _split_filename_components(name: str) -> tuple[str, str]:
+    """Pull `<speaker_slug>` and `<ident>` out of a recorder filename so
+    we can stitch them back into the per-region output names.
+
+    Recorder format: `<iso>_<speaker_slug>_<ident>_<utt>.wav`. `<ident>` is
+    always exactly `parts[-2]` of the stem; `<speaker_slug>` is whatever
+    sits between the timestamp and `<ident>` (already recovered by
+    `parse_wav_speaker_slug`). Falls back to safe defaults when the input
+    doesn't follow the convention so a hand-dropped WAV still produces
+    workable output names.
+    """
+    speaker = parse_wav_speaker_slug(name) or "anon"
+    stem = name.rsplit(".", 1)[0]
+    parts = stem.split("_")
+    ident = parts[-2] if len(parts) >= 4 else "unknown"
+    return speaker, ident
+
+
+def _build_region_filename(region_start: datetime, speaker_slug: str, ident_slug: str) -> str:
+    """Mint a recorder-shaped filename for one stripped region. The trailing
+    8-char uuid makes filenames unique even when two regions land in the
+    same wall-clock second (the recorder's stamp is second-resolution)."""
+    from uuid import uuid4
+
+    stamp = region_start.strftime("%Y-%m-%dT%H-%M-%SZ")
+    return f"{stamp}_{speaker_slug}_{ident_slug}_{uuid4().hex[:8]}.wav"
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,12 @@ class LiveConfig:
     Mutation of the live channel's config goes through replacing the
     whole value, not poking at fields — the LiveChannel.config attribute
     is swapped wholesale by `start()` when called with overrides.
+
+    The streaming-knob fields below default to `None`: when unset we
+    omit the corresponding WLK flag and let WLK's own default apply.
+    Operators trade latency for accuracy by setting them — the per-tap
+    `lag_s` reported by the relay tells them when a setting has pushed
+    the machine past keep-up.
     """
 
     model: str
@@ -91,6 +97,11 @@ class LiveConfig:
     port: int
     vac: bool = True
     confidence_validation: bool = True
+    # Forwarded to whisperlivekit-server when set — see build_live_cmd.
+    min_chunk_size: float | None = None
+    buffer_trimming: str | None = None  # "sentence" | "segment"
+    buffer_trimming_sec: float | None = None
+    max_context_tokens: int | None = None
 
 
 def is_nb_whisper(model: str) -> bool:
@@ -156,6 +167,19 @@ def build_live_cmd(
 
     if init_prompt:
         cmd.extend(["--init-prompt", init_prompt])
+
+    # Streaming knobs: only emit a flag when the operator set the field, so
+    # WLK's own defaults apply otherwise. Pairs (e.g. trimming strategy +
+    # threshold) are independently optional — WLK accepts the strategy
+    # alone and falls back to its default threshold.
+    if config.min_chunk_size is not None:
+        cmd.extend(["--min-chunk-size", str(config.min_chunk_size)])
+    if config.buffer_trimming is not None:
+        cmd.extend(["--buffer_trimming", config.buffer_trimming])
+    if config.buffer_trimming_sec is not None:
+        cmd.extend(["--buffer_trimming_sec", str(config.buffer_trimming_sec)])
+    if config.max_context_tokens is not None:
+        cmd.extend(["--max-context-tokens", str(config.max_context_tokens)])
 
     return cmd
 
