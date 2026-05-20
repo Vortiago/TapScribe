@@ -58,6 +58,14 @@ class ActiveStream:
     # live is off; surfaced in /api/state so the dashboard can render a
     # per-row backlog indicator.
     lag_s: float | None = None
+    # In-flight (uncommitted) hypothesis text from WlK's most recent
+    # snapshot — what Whisper is currently transcribing but hasn't yet
+    # confirmed across multiple decode windows. Surfaced on the tap row
+    # as a "currently saying…" indicator so operators can see the
+    # leading edge of speech before it commits to the chat log. Empty
+    # whenever WlK's buffer is clean (text just committed, no audio
+    # in flight, or live is off).
+    buffer_transcription: str = ""
 
 
 class ActiveStreams:
@@ -107,6 +115,17 @@ class ActiveStreams:
             existing = self._by_id.get(conn_id)
             if existing is not None:
                 existing.lag_s = lag_s
+
+    async def update_buffer_transcription(self, conn_id: str, text: str) -> None:
+        """Same race semantics as update_lag: harmless when the conn_id
+        has already been removed. Called by TapFanOut from the relay's
+        on_buffer callback whenever WlK's `buffer_transcription` field
+        changes — empty `text` is a real value (text just committed
+        out of the buffer), not a "skip the update" sentinel."""
+        async with self._lock:
+            existing = self._by_id.get(conn_id)
+            if existing is not None:
+                existing.buffer_transcription = text
 
     async def snapshot(self) -> list[ActiveStream]:
         async with self._lock:

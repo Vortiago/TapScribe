@@ -52,7 +52,17 @@ def _build_recorder(tmp_path: Path, port: int = 9999) -> Recorder:
     return Recorder(
         recordings_dir=recordings,
         config_dir=config_dir,
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=port),
+        # Pre-gate concurrency tests feed near-silent synthetic PCM that
+        # real Silero would block — pin gate_kind="backend" so they
+        # exercise relay reconnect / race semantics without the gate
+        # filtering their bytes.
+        live_config=LiveConfig(
+            model="tiny.en",
+            language="en",
+            host="localhost",
+            port=port,
+            gate_kind="backend",
+        ),
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
     )

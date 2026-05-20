@@ -285,21 +285,47 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     body = await _json_body(req)
     model = (body.get("model") or "").strip() or None
     language = (body.get("language") or "").strip() or None
-    vac = body.get("vac")
+    gate_kind_raw = body.get("gate_kind")
+    gate_kind = (gate_kind_raw or "").strip() or None
     conf = body.get("confidence_validation")
+    # Optional gate knobs — only forwarded when explicitly supplied so
+    # an "Apply" with no change to the sliders doesn't force a restart.
+    gst = body.get("gate_speech_threshold")
+    ghm = body.get("gate_hangover_ms")
+    gpr = body.get("gate_pre_roll_ms")
+    gate_speech_threshold = float(gst) if gst is not None else None
+    gate_hangover_ms = int(ghm) if ghm is not None else None
+    gate_pre_roll_ms = int(gpr) if gpr is not None else None
 
-    if recorder.live.matches(model=model, language=language, vac=vac, conf=conf):
+    if recorder.live.matches(
+        model=model,
+        language=language,
+        gate_kind=gate_kind,
+        conf=conf,
+        gate_speech_threshold=gate_speech_threshold,
+        gate_hangover_ms=gate_hangover_ms,
+        gate_pre_roll_ms=gate_pre_roll_ms,
+    ):
         return {
             "ok": True,
             "msg": "already running with requested config",
             "state": recorder.live.info["state"],
         }
 
-    # Announce the transition (replaces vac/conf in config, flips info to
-    # "starting" with the new model/language) BEFORE we tear down the old
-    # child or fetch weights — otherwise dashboards polling /api/state
-    # during the stop→start window would render the previous selection.
-    recorder.live.begin_transition(model=model, language=language, vac=vac, conf=conf)
+    # Announce the transition (replaces gate config + conf in LiveConfig,
+    # flips info to "starting" with the new model/language) BEFORE we
+    # tear down the old child or fetch weights — otherwise dashboards
+    # polling /api/state during the stop→start window would render the
+    # previous selection.
+    recorder.live.begin_transition(
+        model=model,
+        language=language,
+        gate_kind=gate_kind,
+        conf=conf,
+        gate_speech_threshold=gate_speech_threshold,
+        gate_hangover_ms=gate_hangover_ms,
+        gate_pre_roll_ms=gate_pre_roll_ms,
+    )
 
     if recorder.live.running():
         await asyncio.to_thread(recorder.live.stop)

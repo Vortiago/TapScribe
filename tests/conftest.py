@@ -209,6 +209,48 @@ class FakeWlkThread:
         with contextlib.suppress(Exception):
             fut.result(timeout=2.0)
 
+    def push_buffer(
+        self,
+        text: str,
+        *,
+        connection_index: int | None = None,
+    ) -> None:
+        """Push a FrontData-shaped snapshot whose `buffer_transcription`
+        is `text` and whose `lines` is the current cumulative list (no
+        new commit). Mirrors the wire-level moment where WlK reports
+        in-flight hypothesis without yet promoting it to a settled
+        line. Used by gate / buffer-display tests."""
+        if self._loop is None:
+            return
+
+        if connection_index is None:
+            targets = list(range(len(self.connections)))
+        else:
+            targets = [connection_index]
+
+        async def _push():
+            for i in targets:
+                if i < 0 or i >= len(self.connections):
+                    continue
+                acc = self._lines_acc_by_connection[i]
+                msg = json.dumps(
+                    {
+                        "status": "active_transcription",
+                        "lines": list(acc),
+                        "buffer_transcription": text,
+                        "buffer_diarization": "",
+                        "buffer_translation": "",
+                        "remaining_time_transcription": 0,
+                        "remaining_time_diarization": 0,
+                    }
+                )
+                with contextlib.suppress(Exception):
+                    await self.connections[i].send(msg)
+
+        fut = asyncio.run_coroutine_threadsafe(_push(), self._loop)
+        with contextlib.suppress(Exception):
+            fut.result(timeout=2.0)
+
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop

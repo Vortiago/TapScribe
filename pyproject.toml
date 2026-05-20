@@ -119,6 +119,10 @@ filterwarnings = [
     # matches the SSL transport message only — drop when 3.10 is gone.
     "ignore:unclosed transport.*_SSLProtocolTransport:ResourceWarning",
     "ignore:.*_SSLProtocolTransport:pytest.PytestUnraisableExceptionWarning",
+    # silero-vad ships its model as a TorchScript .jit file; torch 2.6
+    # deprecated jit.load. Tracked at github.com/snakers4/silero-vad —
+    # remove when silero migrates to torch.export.
+    "ignore:.*torch\\.jit\\.load.*is deprecated.*:DeprecationWarning",
 ]
 markers = [
     "real_audio: end-to-end test that streams real audio fixtures and runs a real Whisper backend. Skipped unless tests/fixtures/audio/ is populated and faster-whisper is installed.",

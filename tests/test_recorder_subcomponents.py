@@ -97,6 +97,47 @@ async def test_active_streams_update_bytes_carries_level_when_provided():
     assert snap[0].level == pytest.approx(0.42)
 
 
+@pytest.mark.asyncio
+async def test_active_streams_update_buffer_transcription_persists_text():
+    """The dashboard's per-tap in-flight indicator reads
+    `buffer_transcription` off the active stream snapshot, populated by
+    TapFanOut whenever WlK pushes a new buffer_transcription via the
+    relay's on_buffer callback. Empty default + idempotent set + works
+    on the same lock as the other update_* methods."""
+    streams = ActiveStreams()
+    await streams.register(
+        ActiveStream(
+            conn_id="a", identity="i", name="n", filename="f",
+            started_at=datetime.now(timezone.utc),
+        )
+    )
+    snap = await streams.snapshot()
+    assert snap[0].buffer_transcription == ""
+
+    await streams.update_buffer_transcription("a", "hello world in flight")
+    snap = await streams.snapshot()
+    assert snap[0].buffer_transcription == "hello world in flight"
+
+    # Subsequent set with the same value is a no-op (idempotent).
+    await streams.update_buffer_transcription("a", "hello world in flight")
+    snap = await streams.snapshot()
+    assert snap[0].buffer_transcription == "hello world in flight"
+
+    # Clearing back to "" (text committed to lines) is reflected.
+    await streams.update_buffer_transcription("a", "")
+    snap = await streams.snapshot()
+    assert snap[0].buffer_transcription == ""
+
+
+@pytest.mark.asyncio
+async def test_active_streams_update_buffer_transcription_unknown_id_is_noop():
+    """Same race semantics as update_bytes / update_lag: a tap whose
+    WS handler raced against close() and called us after the entry was
+    removed must not raise."""
+    streams = ActiveStreams()
+    await streams.update_buffer_transcription("nobody-home", "should not raise")
+
+
 # ---------------------------------------------------------------------------
 # JobTracker
 # ---------------------------------------------------------------------------
