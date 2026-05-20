@@ -6,7 +6,9 @@ on nothing in TapScribe besides config paths. Easy to unit-test.
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -79,9 +81,6 @@ def _write_text_file_atomic(path: Path, content: str) -> None:
     """Write `content` to `path` via tempfile + os.replace so a crashed
     write never leaves a half-written file on disk. CRLF is normalised
     to LF so the Whisper CLI doesn't see literal `\\r` in the prompt."""
-    import os
-    import tempfile
-
     normalised = content.replace("\r\n", "\n").replace("\r", "\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(
