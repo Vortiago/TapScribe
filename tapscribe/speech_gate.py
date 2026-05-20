@@ -73,19 +73,10 @@ class SpeechGate:
     ) -> None:
         self._vad = vad
         self._is_open = False
-        # Ring buffer of recent frames, capped so a long silence doesn't
-        # leak memory. maxlen=0 is supported (no pre-roll), and serves as
-        # the "no leading recovery" mode operators can pick if they want
-        # to test the gate in isolation from this feature.
-        max_pre_roll_frames = max(0, pre_roll_ms // 20)
-        self._pre_roll: deque[bytes] = deque(maxlen=max_pre_roll_frames or 1)
-        if max_pre_roll_frames == 0:
-            # deque(maxlen=0) is illegal in stdlib (raises) — use the
-            # smallest legal cap and immediately discard via a guard
-            # flag. Simpler than two code paths.
-            self._pre_roll_disabled = True
-        else:
-            self._pre_roll_disabled = False
+        # Ring buffer of recent frames. maxlen=0 is legal — `deque`
+        # silently drops appends, so pre_roll_ms=0 just means "no
+        # leading recovery" without needing a separate code path.
+        self._pre_roll: deque[bytes] = deque(maxlen=max(0, pre_roll_ms // 20))
         # Sample buffer holding raw PCM bytes awaiting VAD inference.
         # Drained in VAD_CHUNK_BYTES-sized slices.
         self._sample_buf = bytearray()
@@ -132,15 +123,13 @@ class SpeechGate:
         #   2. Currently open (no transition or was already open): emit this frame.
         #   3. Currently closed: park the frame in pre-roll for future open.
         if opened_during_this_frame:
-            if not self._pre_roll_disabled:
-                emitted.extend(self._pre_roll)
+            emitted.extend(self._pre_roll)
             self._pre_roll.clear()
             emitted.append(frame)
         elif self._is_open:
             emitted.append(frame)
         else:
-            if not self._pre_roll_disabled:
-                self._pre_roll.append(frame)
+            self._pre_roll.append(frame)
         return emitted
 
 

@@ -22,7 +22,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 # ---------------------------------------------------------------------------
 # ActiveStreams — /record WebSocket connections currently writing WAVs
@@ -58,21 +58,13 @@ class ActiveStream:
     # live is off; surfaced in /api/state so the dashboard can render a
     # per-row backlog indicator.
     lag_s: float | None = None
-    # In-flight (uncommitted) hypothesis text from WlK's most recent
-    # snapshot — what Whisper is currently transcribing but hasn't yet
-    # confirmed across multiple decode windows. Surfaced on the tap row
-    # as a "currently saying…" indicator so operators can see the
-    # leading edge of speech before it commits to the chat log. Empty
-    # whenever WlK's buffer is clean (text just committed, no audio
-    # in flight, or live is off).
+    # WlK's latest in-flight (uncommitted) hypothesis text, before
+    # it commits to `lines`. Drives the dashboard's "⟳ <text>" indicator.
     buffer_transcription: str = ""
-    # True while TapScribe's SpeechGate is currently forwarding audio
-    # to the live backend (mid-burst, including pre-roll and hangover).
-    # False while filtering silence. Drives the per-tap status line on
-    # the dashboard: operators can tell at a glance whether the gate
-    # is letting audio through or holding it back. Only meaningful when
-    # gate_kind="tapscribe"; in "backend" mode the recorder doesn't
-    # know what the backend's own VAD is doing, so this stays False.
+    # True while TapScribe's SpeechGate is forwarding audio (mid-burst,
+    # pre-roll + hangover included). Only meaningful when gate_kind=
+    # "tapscribe"; under "backend" we can't see the backend VAD's state
+    # so it stays False.
     gate_open: bool = False
 
 
@@ -96,6 +88,17 @@ class ActiveStreams:
         async with self._lock:
             self._by_id.pop(conn_id, None)
 
+    async def _apply(self, conn_id: str, **fields) -> None:
+        """Set one or more fields on the ActiveStream with `conn_id`.
+        No-op when the conn_id is unknown — the WS handler can race
+        against close() and call us after the entry's been removed."""
+        async with self._lock:
+            existing = self._by_id.get(conn_id)
+            if existing is None:
+                return
+            for k, v in fields.items():
+                setattr(existing, k, v)
+
     async def update_bytes(
         self,
         conn_id: str,
@@ -103,47 +106,26 @@ class ActiveStreams:
         *,
         level: float | None = None,
     ) -> None:
-        """No-op when the conn_id is unknown — the WS handler can race
-        against close and call us after the entry's been removed.
-
-        `level` is the per-frame volume-meter sample (0.0–1.0). Passed
+        """`level` is the per-frame volume-meter sample (0.0–1.0). Passed
         alongside the byte count so the dashboard's active-streams panel
-        gets both updates from a single lock acquire instead of two."""
-        async with self._lock:
-            existing = self._by_id.get(conn_id)
-            if existing is not None:
-                existing.bytes_received = bytes_received
-                if level is not None:
-                    existing.level = level
+        gets both updates from a single lock acquire instead of two.
+        Missing `level` (e.g. resume path before the first new frame)
+        leaves the previous level untouched."""
+        fields: dict[str, Any] = {"bytes_received": bytes_received}
+        if level is not None:
+            fields["level"] = level
+        await self._apply(conn_id, **fields)
 
     async def update_lag(self, conn_id: str, lag_s: float | None) -> None:
-        """Same race semantics as update_bytes: harmless when the conn_id
-        has already been removed."""
-        async with self._lock:
-            existing = self._by_id.get(conn_id)
-            if existing is not None:
-                existing.lag_s = lag_s
+        await self._apply(conn_id, lag_s=lag_s)
 
     async def update_gate_open(self, conn_id: str, gate_open: bool) -> None:
-        """Same race semantics as the other update_* methods. Called
-        by TapFanOut on each gate transition (open↔closed) — the
-        per-frame check in write_frame skips this call when the value
-        hasn't changed, so we don't hammer the lock at 50 Hz/tap."""
-        async with self._lock:
-            existing = self._by_id.get(conn_id)
-            if existing is not None:
-                existing.gate_open = gate_open
+        await self._apply(conn_id, gate_open=gate_open)
 
     async def update_buffer_transcription(self, conn_id: str, text: str) -> None:
-        """Same race semantics as update_lag: harmless when the conn_id
-        has already been removed. Called by TapFanOut from the relay's
-        on_buffer callback whenever WlK's `buffer_transcription` field
-        changes — empty `text` is a real value (text just committed
-        out of the buffer), not a "skip the update" sentinel."""
-        async with self._lock:
-            existing = self._by_id.get(conn_id)
-            if existing is not None:
-                existing.buffer_transcription = text
+        # Empty `text` is a real value (text just committed out of the
+        # buffer), not a sentinel — clear the dashboard indicator.
+        await self._apply(conn_id, buffer_transcription=text)
 
     async def snapshot(self) -> list[ActiveStream]:
         async with self._lock:

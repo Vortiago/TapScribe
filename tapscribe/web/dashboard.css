@@ -383,14 +383,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
   align-items: center;
   gap: 10px;
   padding: 7px 0;
-  /* Border is on the wrapping .stream-row-wrap so the in-flight
-     buffer line sits inside the same divider; legacy single-row
-     callers without a wrapper still get a row-level border. */
+  /* Border lives on .stream-row-wrap so the in-flight buffer line
+     sits inside the same divider as the row that produced it. */
 }
-:not(.stream-row-wrap) > .stream-row {
-  border-bottom: 1px solid var(--hairline-2);
-}
-.stream-row:last-child { border-bottom: 0; }
 .stream-row .who { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .stream-row .who .name {
   font-size: 12px;

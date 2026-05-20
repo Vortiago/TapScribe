@@ -369,9 +369,7 @@ class WhisperLiveKitChannel:
         self.info["gate_pre_roll_ms"] = str(config.gate_pre_roll_ms)
         self.info["confidence_validation"] = "on" if config.confidence_validation else "off"
 
-    # WhisperLiveKit has a native VAD (--vac / --no-vac). The dashboard
-    # surfaces "backend" as a valid gate_kind only when this is True.
-    supports_native_vad: bool = True
+    supports_native_vad: bool = True  # --vac / --no-vac flag exists
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None

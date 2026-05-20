@@ -73,17 +73,12 @@ class TapFanOut:
         self._bytes_received: int = 0
         self._relay: WlKRelay | None = None
         self._relay_alive: bool = False
-        # Per-tap SpeechGate (Silero-backed). Built in `_open` from the
-        # recorder's current LiveConfig; None when gate_kind="backend"
-        # (in which case PCM goes straight to the relay and the
-        # backend's own VAD does the gating). Tests override
-        # `tapscribe.tap_fan_out.build_gate_for_config` to inject a
-        # deterministic fake VAD without loading Silero.
+        # Per-tap SpeechGate (Silero-backed). None when gate_kind=
+        # "backend" — PCM then bypasses the gate and the backend's
+        # own VAD handles silence. `_gate_open_last` mirrors
+        # `_gate.is_open` so write_frame only writes to the
+        # ActiveStream on transitions (not at the 50 Hz frame rate).
         self._gate: SpeechGate | None = None
-        # Mirror of `self._gate.is_open` from the last frame, so
-        # write_frame can detect transitions and only push to the
-        # ActiveStream when the value actually changed (avoids a lock
-        # acquire on every 20 ms frame).
         self._gate_open_last: bool = False
         # Backoff bookkeeping for transparent relay reconnection across
         # WhisperLiveKit restarts (model swap, child crash). The task
@@ -151,12 +146,6 @@ class TapFanOut:
             self._bytes_received,
             level=self._level,
         )
-        # TapScribe-side speech gate (Silero VAD + pre-roll). When the
-        # gate is present (gate_kind="tapscribe") it filters silence
-        # before bytes reach WlK — recovering leading consonants via
-        # pre-roll, sparing the shared model from idle-time decoder
-        # work. When absent (gate_kind="backend"), bytes flow straight
-        # through and the backend's own VAD does the gating.
         if self._gate is not None:
             frames_to_send = self._gate.feed(buf)
             # Surface gate transitions to the dashboard. Skip the lock
@@ -272,32 +261,7 @@ class TapFanOut:
         )
 
         if self._do_live and self._recorder.live.running():
-            candidate = WlKRelay(
-                host=self._recorder.live.config.host,
-                port=self._recorder.live.config.port,
-                language=self._recorder.live.config.language,
-                on_settled_line=self._on_settled_line,
-                on_metrics=self._on_metrics,
-                on_buffer=self._on_buffer,
-            )
-            if await candidate.connect():
-                self._relay = candidate
-                self._relay_alive = True
-            # Build the TapScribe-side gate once we know live is going
-            # to be wired. build_gate_for_config returns None when
-            # gate_kind="backend", which the write_frame fast-path
-            # checks for before invoking. Gate failures (Silero load
-            # error, etc.) shouldn't kill the tap — log and fall back
-            # to passthrough so the bridge doesn't see a dropped /tap.
-            try:
-                self._gate = build_gate_for_config(self._recorder.live.config)
-            except Exception as e:
-                print(
-                    f"[tapscribe] /tap gate construction failed for "
-                    f"{self._identity}: {e}; falling back to passthrough",
-                    flush=True,
-                )
-                self._gate = None
+            await self._attach_relay_and_gate(self._recorder.live.config)
 
     async def _on_metrics(self, lag_s: float) -> None:
         """Push the relay's latest reported lag to this tap's row so the
@@ -307,12 +271,12 @@ class TapFanOut:
     def _on_buffer(self, text: str) -> None:
         """Forward the relay's latest `buffer_transcription` to the
         active stream so the dashboard's per-tap in-flight indicator
-        can render it. Sync (not awaitable) because the relay invokes
-        it from inside its consumer task; we hop onto the loop via
-        `create_task` to avoid coupling consumer latency to the
-        ActiveStreams lock acquisition."""
-        loop = asyncio.get_event_loop()
-        loop.create_task(self._recorder.streams.update_buffer_transcription(self._conn_id, text))
+        can render it. The relay invokes this synchronously from its
+        consumer task; we hop onto the loop so the consumer doesn't
+        block on the ActiveStreams lock."""
+        asyncio.get_running_loop().create_task(
+            self._recorder.streams.update_buffer_transcription(self._conn_id, text)
+        )
 
     def _maybe_schedule_relay_reconnect(self) -> None:
         """Kick off a background relay reconnect if none is pending and
@@ -344,6 +308,23 @@ class TapFanOut:
             with suppress(Exception):
                 await stale.close()
         cfg = self._recorder.live.config
+        if await self._attach_relay_and_gate(cfg):
+            print(
+                f"[tapscribe] /tap relay reconnected for {self._identity} "
+                f"-> {cfg.host}:{cfg.port} (model={cfg.model}, lang={cfg.language})",
+                flush=True,
+            )
+
+    async def _attach_relay_and_gate(self, cfg) -> bool:
+        """Build the WlK relay + (optional) SpeechGate against `cfg`.
+        Sets `self._relay` / `self._relay_alive` / `self._gate` on
+        success and returns True. Returns False if the relay fails to
+        connect; the gate is only built (and only paid for) when the
+        relay is actually going to be fed.
+
+        Gate-construction failures (Silero load error, etc.) don't kill
+        the tap — we log and fall through with `self._gate = None`, so
+        the bridge sees passthrough rather than a dropped /tap WS."""
         candidate = WlKRelay(
             host=cfg.host,
             port=cfg.port,
@@ -352,27 +333,20 @@ class TapFanOut:
             on_metrics=self._on_metrics,
             on_buffer=self._on_buffer,
         )
-        if await candidate.connect():
-            self._relay = candidate
-            self._relay_alive = True
-            # The operator may have flipped gate_kind via Apply (restart),
-            # so rebuild the gate too. Keeps the active /tap honest with
-            # the recorder's current LiveConfig instead of remembering
-            # the gate it was opened with.
-            try:
-                self._gate = build_gate_for_config(cfg)
-            except Exception as e:
-                print(
-                    f"[tapscribe] /tap gate rebuild failed for "
-                    f"{self._identity}: {e}; falling back to passthrough",
-                    flush=True,
-                )
-                self._gate = None
+        if not await candidate.connect():
+            return False
+        self._relay = candidate
+        self._relay_alive = True
+        try:
+            self._gate = build_gate_for_config(cfg)
+        except Exception as e:
             print(
-                f"[tapscribe] /tap relay reconnected for {self._identity} "
-                f"-> {cfg.host}:{cfg.port} (model={cfg.model}, lang={cfg.language})",
+                f"[tapscribe] /tap gate construction failed for "
+                f"{self._identity}: {e}; falling back to passthrough",
                 flush=True,
             )
+            self._gate = None
+        return True
 
     def _on_settled_line(self, text: str) -> None:
         """Settled-line consumer for the WlKRelay. Cleans Whisper

@@ -65,12 +65,8 @@ class WlKRelay:
         self._language = language
         self._on_settled_line = on_settled_line
         self._on_metrics = on_metrics
-        # `on_buffer` receives the in-flight (uncommitted) hypothesis
-        # text from each snapshot. Surfaced for the dashboard's per-tap
-        # in-flight indicator — operators see what Whisper is currently
-        # transcribing before it commits to `lines`. Called with the
-        # latest `buffer_transcription` string only when it CHANGES,
-        # including the transition to "" when text commits out.
+        # Fired with WlK's `buffer_transcription` only on change
+        # (including the transition to "" when text commits out).
         self._on_buffer = on_buffer
         self._drain_timeout = drain_timeout
         self._ws: websockets.WebSocketClientProtocol | None = None
@@ -81,13 +77,8 @@ class WlKRelay:
         # in-flight tail); on close-drain we also emit the tail.
         self._emitted_count: int = 0
         self._last_snapshot: list[dict] = []
-        # Latest `buffer_transcription` value WlK reported. The relay
-        # emits `on_buffer` when this changes; `_flush_tail` emits any
-        # non-empty residual as a final settled line on close —
-        # otherwise trailing words still in flight when the bridge mutes
-        # would be silently lost (the only thing WlK ever commits to
-        # `lines` is text it has confirmed across multiple windows, and
-        # the tail of a short utterance never sees that follow-on).
+        # Used to dedupe on_buffer calls and to rescue residual
+        # uncommitted text on close (see _flush_tail).
         self._last_buffer: str = ""
         # Latest `remaining_time_transcription` value WlK reported on this
         # connection. Whisperlivekit's internal `lag=`/`internal_buffer=`
@@ -226,34 +217,18 @@ class WlKRelay:
     def _flush_tail(self) -> None:
         """Emit any held-back tail lines from the last snapshot, plus any
         in-flight `buffer_transcription` that didn't make it into a
-        committed line before close. Called once on close — sees every
-        line whose position the consumer hadn't yet superseded with a
-        newer entry, AND the trailing uncommitted hypothesis that
-        WhisperLiveKit was still holding when the audio stopped.
-
-        Without the buffer_transcription rescue, every short utterance
-        whose trailing word(s) hadn't been confirmed across multiple
-        decode windows by close time would silently drop those words
-        — the bug operators see as "the chat is missing the last word
-        of every sentence." See `/api/state` + dashboard for the
-        complementary live-display of buffer_transcription before
-        commit.
+        committed line before close. Plus rescues any non-empty
+        `buffer_transcription` as a final settled line — without
+        this, the trailing word(s) of every utterance that hadn't
+        cleared LocalAgreement-2 by close time would silently drop.
         """
         snapshot = self._last_snapshot
         while self._emitted_count < len(snapshot):
             self._emit_line(snapshot[self._emitted_count])
             self._emitted_count += 1
-        # Rescue trailing buffer text. The held-tail line above has
-        # text already committed by Whisper; buffer_transcription is
-        # the uncommitted residual after that. Both can be non-empty
-        # at close (e.g. a 5 s utterance whose first half committed
-        # but whose second half didn't). Skip empty / whitespace-only
-        # to avoid phantom blank entries on clean speech→silence.
         tail = (self._last_buffer or "").strip()
         if tail:
             self._on_settled_line(tail)
-            # Mirror commit semantics: the dashboard's in-flight
-            # indicator should clear once we've finalised the text.
             self._last_buffer = ""
             if self._on_buffer is not None:
                 with contextlib.suppress(Exception):
