@@ -61,10 +61,10 @@ async def _seed_state(recorder: Recorder) -> None:
 
     await recorder.streams.register(
         ActiveStream(
-            conn_id="conn-khiem",
-            identity="khiem",
-            name="Khiem Nguyen",
-            filename="khiem.wav",
+            conn_id="conn-alice",
+            identity="alice",
+            name="Alice Example",
+            filename="alice.wav",
             started_at=datetime.now(timezone.utc),
             bytes_received=320_000,
             level=0.45,
@@ -76,10 +76,10 @@ async def _seed_state(recorder: Recorder) -> None:
     )
     await recorder.streams.register(
         ActiveStream(
-            conn_id="conn-huy",
-            identity="huy",
-            name="Huy Dam",
-            filename="huy.wav",
+            conn_id="conn-bob",
+            identity="bob",
+            name="Bob Example",
+            filename="bob.wav",
             started_at=datetime.now(timezone.utc),
             bytes_received=180_000,
             level=0.0,
@@ -200,18 +200,16 @@ async def main() -> None:
             )
 
             # 3) Tap-row crop showing the in-flight buffer_transcription
-            #    line beneath Khiem's row.
-            khiem_row = await page.query_selector(
-                ".stream-row-wrap:has(.fg:text('Khiem Nguyen'))"
+            #    line beneath Alice's row.
+            alice_row = await page.query_selector(
+                ".stream-row-wrap:has(.fg:text('Alice Example'))"
             )
-            if khiem_row is None:
-                khiem_row = await page.query_selector(
-                    "section.card:has(.stream-row-wrap)"
-                )
-            assert khiem_row is not None
+            if alice_row is None:
+                alice_row = await page.query_selector("section.card:has(.stream-row-wrap)")
+            assert alice_row is not None
             # Screenshot the row + its associated buffer line (template
             # wraps both in the same root .stream-row template fragment).
-            await khiem_row.screenshot(
+            await alice_row.screenshot(
                 path=str(SHOTS_DIR / "03-tap-row-with-in-flight-buffer.png")
             )
 
