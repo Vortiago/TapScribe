@@ -83,7 +83,15 @@ class FamilyDef:
     default_selected: bool = False
 
     def has_mlx(self) -> bool:
-        return any(b.key == BACKEND_MLX for b in self.backends)
+        return self.declares_backend(BACKEND_MLX)
+
+    def declares_backend(self, backend_key: str) -> bool:
+        """True iff this family currently declares `backend_key`.
+        `BACKEND_BOTH` is a virtual key — valid only when ≥2 atomic
+        backends are declared."""
+        if backend_key == BACKEND_BOTH:
+            return len(self.backends) >= 2
+        return any(b.key == backend_key for b in self.backends)
 
 
 FAMILIES: tuple[FamilyDef, ...] = (
@@ -298,6 +306,20 @@ class Selection:
             out.choices[fam.key] = FamilyChoice(enabled=enabled, backend=backend)
         return out
 
+    def removed_backend_families(self) -> list[FamilyDef]:
+        """Enabled families whose saved backend isn't in the catalog
+        anymore (a PR removed it). Surfaced by the picker so the
+        operator re-picks instead of silently inheriting a heavy
+        alternative."""
+        out: list[FamilyDef] = []
+        for fam in FAMILIES:
+            choice = self.choices.get(fam.key)
+            if not choice or not choice.enabled:
+                continue
+            if not fam.declares_backend(choice.backend):
+                out.append(fam)
+        return out
+
     def save(self, path: Path) -> None:
         body = {
             "version": STATE_VERSION,
@@ -319,9 +341,20 @@ class Selection:
 
 def effective_backends(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps) -> list[BackendDef]:
     """Filter the operator's requested backend down to what this machine
-    can actually install. A stale MLX choice on a Linux box silently
-    downgrades to CPU/CUDA — we don't bother prompting because the user
-    can change it from the picker if they want."""
+    can actually install.
+
+    Two failure shapes when the requested backend isn't in `available_backends`:
+
+    1. The backend exists in the family's catalog but this host can't
+       run it (e.g. saved MLX choice opened on a Linux box). Silently
+       downgrade to the first available backend so the install still
+       produces something usable.
+    2. The backend is no longer in the family's catalog at all
+       (`canary-mlx` removal in PR #61 motivated this case). Returning
+       the other backend here would drag in a heavy alternative the
+       operator didn't choose, so return `[]` and let the renderer /
+       main loop surface the situation.
+    """
     avail = available_backends(fam, caps)
     if not avail:
         return []
@@ -330,6 +363,8 @@ def effective_backends(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps) 
     matched = next((b for b in avail if b.key == choice.backend), None)
     if matched is not None:
         return [matched]
+    if not fam.declares_backend(choice.backend):
+        return []
     return [avail[0]]
 
 
@@ -349,9 +384,12 @@ def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
         choice = selection.choices.get(fam.key)
         if not choice or not choice.enabled:
             continue
+        backends = effective_backends(fam, choice, caps)
+        if not backends:
+            continue
         for extra in fam.shared_extras:
             add(extra)
-        for be in effective_backends(fam, choice, caps):
+        for be in backends:
             for extra in be.extras:
                 add(extra)
     return out
@@ -441,6 +479,11 @@ def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None
             extras = family_extras_preview(fam, choice, caps)
             if extras:
                 lines.append(f"          Installs: [{', '.join(extras)}]")
+            elif not fam.declares_backend(choice.backend):
+                lines.append(
+                    f"          Installs: (nothing — the '{choice.backend}' backend was removed "
+                    "in a recent update; re-pick to confirm a fallback)"
+                )
             else:
                 lines.append("          Installs: (nothing — no backend available)")
         else:
@@ -890,6 +933,25 @@ def main(argv: list[str] | None = None) -> int:
     selection = Selection.load(STATE_FILE, caps)
 
     interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
+
+    # In interactive mode the renderer surfaces removed-backend rows
+    # inline, so a separate stderr warning is redundant (and worse,
+    # scrolls off the moment the operator re-picks). In non-interactive
+    # mode there's no renderer — print one line per affected family so
+    # `start.sh --non-interactive` doesn't silently produce an
+    # incomplete install.
+    if not interactive:
+        for fam in selection.removed_backend_families():
+            backend = selection.choices[fam.key].backend
+            print(
+                f"[install-picker] WARNING: '{fam.key}' was saved with backend "
+                f"'{backend}', which is no longer in this version's catalog. "
+                "Not auto-selecting an alternative — re-pick interactively, "
+                "or edit .tapscribe-install.json. The family will be skipped this run.",
+                file=sys.stderr,
+                flush=True,
+            )
+
     if interactive:
         if first_run:
             print(

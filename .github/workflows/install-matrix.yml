@@ -1,0 +1,97 @@
+name: install matrix
+
+# Real `pip install -e .[…]` across every supported OS + every model
+# family. Catches install regressions before an operator does — PR #61
+# removed `canary-mlx` and an operator's saved `backend=mlx` silently
+# fell back to `canary-cpu` → NeMo → kaldialign → cmake build failure
+# on macOS, which no unit test caught because none of them ran pip.
+#
+# Path-gated to install-affecting files only: NeMo + torch downloads
+# are multi-GB per job, so we don't pay this cost on every PR.
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+    paths:
+      - 'pyproject.toml'
+      - 'tools/install_picker.py'
+      - 'start.sh'
+      - 'start.ps1'
+      - '.github/workflows/install-matrix.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pyproject.toml'
+      - 'tools/install_picker.py'
+      - 'start.sh'
+      - 'start.ps1'
+      - '.github/workflows/install-matrix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    name: install (${{ matrix.os }} · ${{ matrix.family }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Per-family split so a failure points at the responsible
+        # extra in the PR check list, not a single opaque "matrix
+        # failed" red mark.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        family: [whisper, voxtral, parakeet, canary]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          # Wheel cache is orthogonal to dependency resolution — pip
+          # still re-resolves the graph on every run, the cache just
+          # skips re-downloading the multi-GB torch / NeMo wheels.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Verify cmake on PATH (cross-OS)
+        # NeMo's transitive `kaldialign` builds a C++ extension via
+        # cmake. All three runner images currently ship cmake, but
+        # surfacing the version up-front means a future image change
+        # that drops it fails here with a legible message rather than
+        # 100 lines into a pip build log.
+        shell: bash
+        run: |
+          if ! command -v cmake >/dev/null; then
+            echo "cmake not on PATH — installing for ${RUNNER_OS}"
+            case "$RUNNER_OS" in
+              Linux)   sudo apt-get update && sudo apt-get install -y cmake build-essential ;;
+              macOS)   brew install cmake ;;
+              Windows) echo "no automatic install path on Windows runner; failing"; exit 1 ;;
+            esac
+          fi
+          cmake --version
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Picker dry-run sanity
+        # Cheap fast-fail: catches alias-references-removed-atomic-extra
+        # regressions in the picker's argv composition before we pay
+        # the multi-GB install download.
+        run: python tools/install_picker.py --dry-run --non-interactive
+
+      - name: Install tapscribe + ${{ matrix.family }} extra
+        run: python -m pip install -e ".[${{ matrix.family }}]"
+
+      - name: Verify package import
+        run: python -c "import tapscribe; print(tapscribe.__name__, 'OK')"

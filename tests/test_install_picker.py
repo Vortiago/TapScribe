@@ -199,12 +199,79 @@ def test_resolve_extras_whisper_both_installs_everything():
 
 def test_resolve_extras_mlx_choice_on_non_mlx_machine_downgrades_silently():
     """Operator's CPU box doesn't ship MLX — picking it has to fall back
-    cleanly so the install doesn't try to resolve a non-existent wheel."""
+    cleanly so the install doesn't try to resolve a non-existent wheel.
+
+    This is the *host caps* fallback: MLX is still in the Whisper catalog,
+    just unavailable on Linux. Compare with the catalog-removed case
+    below (`test_resolve_extras_removed_backend_does_not_silently_fall_back`)
+    which deliberately does NOT downgrade."""
     sel = Selection()
     _enable(sel, "whisper", BACKEND_MLX)
     extras = install_picker.resolve_extras(sel, _caps())
     assert "whisper-mlx" not in extras
     assert "whisper-cpu" in extras
+
+
+def _patch_whisper_without_mlx(monkeypatch) -> None:
+    """Pretend a future PR removed the MLX backend from Whisper. Used by
+    the catalog-removed regression tests so they don't depend on what
+    the *current* catalog declares — they're testing the contract, not
+    today's catalog shape."""
+    whisper = next(f for f in FAMILIES if f.key == "whisper")
+    cpu_only = install_picker.FamilyDef(
+        key=whisper.key,
+        label=whisper.label,
+        description=whisper.description,
+        size_hint=whisper.size_hint,
+        shared_extras=whisper.shared_extras,
+        backends=(install_picker.BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("whisper-cpu",)),),
+        default_selected=whisper.default_selected,
+    )
+    others = tuple(f for f in FAMILIES if f.key != whisper.key)
+    monkeypatch.setattr(install_picker, "FAMILIES", (cpu_only, *others))
+
+
+def test_resolve_extras_removed_backend_does_not_silently_fall_back(monkeypatch):
+    """Regression for PR #61's canary-mlx removal: a saved `backend=mlx`
+    choice on a family that no longer declares MLX must NOT silently
+    pick up the CPU atom. Apple Silicon caps so the failure isn't
+    a host-caps fallback — purely a catalog-removed one."""
+    _patch_whisper_without_mlx(monkeypatch)
+    sel = Selection()
+    _enable(sel, "whisper", BACKEND_MLX)
+    extras = install_picker.resolve_extras(sel, _apple_caps())
+    assert "whisper-cpu" not in extras
+
+
+def test_removed_backend_families_surfaces_only_removed_catalog(monkeypatch):
+    """`Selection.removed_backend_families` returns enabled families
+    whose saved backend isn't in the catalog anymore — drives the
+    main-loop stderr warning."""
+    _patch_whisper_without_mlx(monkeypatch)
+    sel = Selection()
+    _enable(sel, "whisper", BACKEND_MLX)  # removed from catalog → surfaces
+    _enable(sel, "voxtral", BACKEND_MLX)  # not in catalog (Voxtral has no MLX) → also surfaces
+    keys = {f.key for f in sel.removed_backend_families()}
+    assert keys == {"whisper", "voxtral"}
+
+    sel2 = Selection()
+    _enable(sel2, "whisper", BACKEND_CPU)
+    assert sel2.removed_backend_families() == []
+
+
+def test_familydef_declares_backend():
+    whisper = next(f for f in FAMILIES if f.key == "whisper")
+    voxtral = next(f for f in FAMILIES if f.key == "voxtral")
+    # Voxtral has only one backend declared; 'Both' is meaningless and
+    # `declares_backend` rejects it. Same for MLX.
+    assert whisper.declares_backend(BACKEND_BOTH) is True
+    assert voxtral.declares_backend(BACKEND_BOTH) is False
+    assert whisper.declares_backend(BACKEND_CPU) is True
+    assert whisper.declares_backend(BACKEND_MLX) is True
+    assert voxtral.declares_backend(BACKEND_MLX) is False
+    # has_mlx is the BACKEND_MLX special case of declares_backend.
+    assert whisper.has_mlx() is True
+    assert voxtral.has_mlx() is False
 
 
 def test_resolve_extras_preserves_family_order_for_reproducibility():
