@@ -233,6 +233,28 @@ export interface SuppressedSegment {
   source_wav: string;
 }
 
+// Operator-tunable knobs for /api/sessions/{session}/strip-silence.
+// Mirrors STRIP_OPT_DEFAULTS in main.js — keep in sync.
+export interface StripOpts {
+  min_silence_ms: number;
+  pad_ms: number;
+  speech_floor_db: number;
+}
+
+// /api/sessions/{session}/strip-silence response
+export interface StripSilenceResult {
+  ok: boolean;
+  session: string;
+  files_processed: number;
+  files_written: number;
+  in_seconds: number;
+  speech_seconds: number;
+  detector: string | string[];
+  stripped_at: string;
+  took_ms: number;
+  files: { segments?: number; [k: string]: unknown }[];
+}
+
 // ---------------------------------------------------------------------------
 // Model catalog — /api/models response
 // ---------------------------------------------------------------------------
@@ -335,7 +357,7 @@ export interface SessionDetailCtx {
   // Mutation callbacks
   onTranscribeSession: (sessId: string) => void;
   onCopyMerged: (sessId: string, btn: HTMLButtonElement) => void;
-  onTranscribeWav: (wavKey: string, sess: Session) => void;
+  onTranscribeWav: (session: string, name: string, sourceOverride?: string | null) => void;
   onToggleWav: (wavKey: string, sess: Session) => void;
   onRangeEdit: (sessKey: string, key: string, value: string) => void;
   onModelChange: (model: string) => void;
@@ -343,6 +365,13 @@ export interface SessionDetailCtx {
   onSourcePick: (sessKey: string, source: "original" | "stripped") => void;
   onStripRun: (sessId: string) => void;
   onStripRemove: (sessId: string) => void;
+  // strip-silence operator knobs (added in #58). stripOpts holds the
+  // currently-selected values; the inputs in session-detail.js render
+  // them and call onStripOptEdit per keystroke (empty string → reset to
+  // default for that key, see main.js). onStripOptReset bulk-resets.
+  stripOpts: StripOpts;
+  onStripOptEdit: <K extends keyof StripOpts>(key: K, value: string) => void;
+  onStripOptReset: () => void;
   onNameEdit: (sessKey: string, value: string) => void;
   onAliasEdit: (sessKey: string, speakerKey: string, value: string) => void;
   onMetaOverrideEdit: (sessKey: string, metaKey: string, value: string) => void;

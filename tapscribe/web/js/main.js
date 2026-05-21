@@ -1,9 +1,10 @@
+// @ts-check
 // TapScribe — operator console.
 // Vanilla JS ES module. Polls /api/state every second; full re-render of the
 // sessions browser only when something structural changed so user scroll +
 // inputs survive across ticks.
 
-import { cssEscape, fmtClock } from "./formatters.js";
+import { cssEscape, fmtClock, fmtElapsedShort } from "./formatters.js";
 import { fetchState, postJson, putJson, del } from "./api.js";
 import { loadTemplates } from "./templates.js";
 import { aliasOf } from "./speakers.js";
@@ -18,6 +19,11 @@ import * as sessionDetail from "./components/session-detail.js";
 
 // Convenience: run an async op behind an alert("X failed: …") wrapper and
 // then re-poll. Returns whether the op succeeded.
+/**
+ * @param {string} label
+ * @param {() => Promise<unknown>} op
+ * @param {() => Promise<unknown>} [after]
+ */
 async function tryThen(label, op, after = tick) {
   try { await op(); }
   catch (e) { alert(`${label} failed: ${e}`); return false; }
@@ -29,6 +35,13 @@ async function tryThen(label, op, after = tick) {
 // transcribeSession, and stripSession. Marks `key` busy in `inflight`,
 // guarantees the spinner stays visible at least MIN_VISIBLE_MS, then sets
 // `done.set(key, …)` (with FLASH_MS auto-clear) when `op()` resolves cleanly.
+/**
+ * @param {Map<string, number>} inflight
+ * @param {Map<string, number> | null} done
+ * @param {string} key
+ * @param {string} label
+ * @param {() => Promise<unknown>} op
+ */
 async function withInflight(inflight, done, key, label, op) {
   if (inflight.has(key)) return;
   const startMs = Date.now();
@@ -51,21 +64,32 @@ async function withInflight(inflight, done, key, label, op) {
   return !failed;
 }
 
-const $ = (id) => document.getElementById(id);
+/** @type {(id: string) => HTMLElement} */
+const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
 
 // ---- Render state -------------------------------------------------------
+/** @type {import('./types.js').AppState | null} */
 let lastJson = null;
+/** @type {Map<string, number>} */
 const wavInflight = new Map();
+/** @type {Map<string, number>} */
 const wavJustDone = new Map();
+/** @type {Map<string, number>} */
 const sessJustDone = new Map();
 const MIN_VISIBLE_MS = 600;      // keep the spinner visible at least this long so quick completions are perceptible
 const FLASH_MS = 1500;           // how long the green "just done" tint stays on a row/button
+/** @type {Map<string, number>} */
 const sessInflight = new Map();
+/** @type {Map<string, number>} */
 const sessStripInflight = new Map();
+/** @type {Map<string, "original" | "stripped">} */
 const sourcePick = new Map();    // session name → "original" | "stripped"
+/** @type {string | null} */
 let selectedSessionId = null;    // which session is open (null = pick is_current)
+/** @type {string | null} */
 let expandedWav = null;          // "<session>/<name>" expanded inline transcript
 let showAudit = true;            // whether to show the suppressed-audit table
+/** @type {Record<string, Record<string, string>>} */
 const rangeState = {};           // per-session form state (from/to/prompt/hotwords)
 let sessionFilter = "";          // sidebar filter query
 let batchModel = "small.en";     // dashboard-wide batch transcribe model (Controls box)
@@ -73,8 +97,11 @@ let batchBackend = "auto";       // dashboard-wide backend preference; chips dri
 // Catalog of every model registered server-side, filtered to batch context.
 // Loaded once on dashboard boot; `available_backends` tells the chip row
 // which backends to gray out. Shape mirrors GET /api/models?context=batch.
+/** @type {import('./types.js').ModelCatalog} */
 let modelCatalog = { context: "batch", available_backends: [], models: [] };
+/** @type {import('./types.js').ModelCatalog} */
 let liveModelCatalog = { context: "live", available_backends: [], models: [] };
+/** @type {Record<string, import('./types.js').EffectiveMeta>} */
 const localMeta = {};            // per-session optimistic meta cache (label + aliases)
 const metaSaveTimers = new Map();// debounce timers for PUT /api/session-meta
 
@@ -84,11 +111,13 @@ const metaSaveTimers = new Map();// debounce timers for PUT /api/session-meta
 // fallbacks in api_session_strip_silence (tapscribe/app.py) and
 // SPEECH_RMS_DBFS_FLOOR (tapscribe/strip_silence.py).
 const STRIP_OPTS_LS_KEY = "tapscribe.stripOpts.v1";
+/** @type {import('./types.js').StripOpts} */
 const STRIP_OPT_DEFAULTS = Object.freeze({
   min_silence_ms: 500,
   pad_ms: 200,
   speech_floor_db: -45,
 });
+/** @returns {import('./types.js').StripOpts} */
 function loadStripOpts() {
   try {
     const raw = localStorage.getItem(STRIP_OPTS_LS_KEY);
@@ -112,25 +141,34 @@ let stripOpts = loadStripOpts();
 let rxPattern = "";              // regex tester pattern (per-currently-selected-session)
 let rxFlags = "i";
 let rxOpen = false;
+/** @type {string | null} */
 let rxOwnerSession = null;       // which session rxPattern was last typed for
 
 let lastSessionsSig = "";        // structural signature; re-renders sessions only when changed
 
   // Pull effective meta for a session: optimistic local override beats server.
+  /**
+   * @param {import('./types.js').Session | null} s
+   * @returns {import('./types.js').EffectiveMeta}
+   */
   function effectiveMeta(s) {
-    const local = s ? localMeta[s.session] : null;
-    const server = (s && s.session_meta) || {};
-    const pick = (k, dflt) => (local && k in local ? local[k] : (server[k] || dflt));
+    const local = /** @type {Record<string, unknown> | undefined} */ (s ? localMeta[s.session] : undefined);
+    const server = /** @type {Record<string, unknown>} */ ((s && s.session_meta) || {});
+    const pick = /** @param {string} k @param {unknown} dflt */ (k, dflt) => (local && k in local ? local[k] : (server[k] || dflt));
     return {
-      label: pick("label", ""),
-      aliases: pick("aliases", {}),
-      prompt: pick("prompt", ""),
-      hotwords: pick("hotwords", ""),
+      label: /** @type {string} */ (pick("label", "")),
+      aliases: /** @type {Record<string, string>} */ (pick("aliases", {})),
+      prompt: /** @type {string} */ (pick("prompt", "")),
+      hotwords: /** @type {string} */ (pick("hotwords", "")),
     };
   }
 
   // Derive the set of speaker keys for which we should show an alias editor.
   // Prefer the merged transcript's speakers list; fall back to per-WAV speaker_name.
+  /**
+   * @param {import('./types.js').Session | null} s
+   * @returns {string[]}
+   */
   function deriveSpeakerKeys(s) {
     const set = new Set();
     if (s && s.session_transcript && Array.isArray(s.session_transcript.speakers)) {
@@ -144,6 +182,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
 
   // Debounced PUT /api/session-meta. The server merges partial payloads
   // so we send only the fields we know locally.
+  /** @param {string} sessId */
   function persistSessionMeta(sessId) {
     clearTimeout(metaSaveTimers.get(sessId));
     metaSaveTimers.set(sessId, setTimeout(async () => {
@@ -158,7 +197,16 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
   // ---- Polling ------------------------------------------------------------
 
   // DOM handles for the components — looked up once at boot, not per-tick.
-  let liveFeedCtx, activeTapsCtx, liveChannelCtx, configCardCtx, ribbonCtx;
+  /** @type {import('./types.js').LiveFeedCtx} */
+  let liveFeedCtx;
+  /** @type {import('./types.js').ActiveTapsCtx} */
+  let activeTapsCtx;
+  /** @type {Omit<import('./types.js').LiveChannelCtx, 'mlxAvail' | 'liveCatalog'>} */
+  let liveChannelCtx;
+  /** @type {import('./types.js').ConfigCardCtx} */
+  let configCardCtx;
+  /** @type {import('./types.js').RibbonCtx} */
+  let ribbonCtx;
   function initComponentCtx() {
     liveFeedCtx = {
       countEl: $("liveFeedCount"),
@@ -210,11 +258,20 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     return tryThen("Live start/apply", () => postJson("/api/live/start", liveChannel.formValues()));
   }
   const liveStop = () => tryThen("Live stop", () => postJson("/api/live/stop"));
+  /**
+   * @param {string} identity
+   * @param {string} which
+   * @param {boolean} enabled
+   */
   const setTapPref = (identity, which, enabled) =>
     tryThen("Tap setting toggle", () => putJson("/api/tap-settings", { identity, [which]: enabled }));
 
   // ---- Sessions: tabs + detail --------------------------------------------
 
+  /**
+   * @param {import('./types.js').Session[]} sessions
+   * @returns {string}
+   */
   function sessionsSignature(sessions) {
     // Cheap signature of structural state that, when changed, should trigger a full re-render.
     return sessions
@@ -257,13 +314,19 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       .join("§");
   }
 
+  /**
+   * @param {import('./types.js').Session[]} sessions
+   * @returns {string | null}
+   */
   function pickSelectedSession(sessions) {
     if (!sessions.length) return null;
     if (selectedSessionId && sessions.find((s) => s.session === selectedSessionId)) return selectedSessionId;
     const cur = sessions.find((s) => s.is_current);
-    return cur ? cur.session : sessions[0].session;
+    // sessions[0] exists: length was checked above
+    return cur ? cur.session : /** @type {import('./types.js').Session} */ (sessions[0]).session;
   }
 
+  /** @param {import('./types.js').AppState} j */
   function renderSessionsIfChanged(j) {
     const sessions = j.sessions || [];
     $("sessCount").textContent = sessions.length + " on disk";
@@ -319,17 +382,22 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     renderSessionDetail(selected);
   }
 
+  /**
+   * @param {import('./types.js').Session[]} sessions
+   * @param {string | null} selectedId
+   */
   function renderSessionSidebar(sessions, selectedId) {
     sessionSidebar.render(sessions, {
       listEl: $("sessList"),
       selectedId,
       filter: sessionFilter,
       metaFor: effectiveMeta,
-      onSelect: (id) => { selectedSessionId = id; lastSessionsSig = ""; tick(); },
-      onDelete: (id) => deleteSession(id),
+      onSelect: (/** @type {string} */ id) => { selectedSessionId = id; lastSessionsSig = ""; tick(); },
+      onDelete: (/** @type {string} */ id) => deleteSession(id),
     });
   }
 
+  /** @param {string} sessId */
   async function deleteSession(sessId) {
     const sess = (lastJson && lastJson.sessions || []).find((x) => x.session === sessId);
     const wavCount = sess ? sess.wav_count : 0;
@@ -349,6 +417,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
   // /api/session-meta PUTs would 404 after delete and stale wav-inflight keys
   // would leak. wavInflight/wavJustDone keys are prefixed "session/…" so we
   // sweep them by prefix.
+  /** @param {string} sessId */
   function forgetSession(sessId) {
     delete localMeta[sessId];
     delete rangeState[sessId];
@@ -367,8 +436,10 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
 
   // Per-session detail render — delegates to the session-detail component
   // with all the state + callbacks it needs to render and wire events.
+  /** @param {import('./types.js').Session | undefined} s */
   function renderSessionDetail(s) {
-    sessionDetail.render(s, $("sessDetailRoot"), {
+    if (!s) return;
+    sessionDetail.render(s, $("sessDetailRoot"), /** @type {import('./types.js').SessionDetailCtx} */ ({
       // state
       lastJson,
       batchModel,
@@ -487,15 +558,16 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       onRxSeed: (sk, seed) => {
         rxPattern = seed;
         rxOwnerSession = sk;
-        const inp = $("sessDetailRoot").querySelector("[data-rx-pattern]");
+        const inp = /** @type {HTMLInputElement | null} */ ($("sessDetailRoot").querySelector("[data-rx-pattern]"));
         if (inp) inp.value = seed;
         updateRegexResult(s);
       },
       onAuditToggle: () => { showAudit = !showAudit; lastSessionsSig = ""; tick(); },
-    });
+    }));
   }
 
 
+  /** @param {import('./types.js').Session} s */
   function updateRegexResult(s) {
     // Surgical update: don't re-render the whole detail (would lose input focus).
     const out = $("sessDetailRoot").querySelector(".rx-result");
@@ -505,22 +577,26 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
   }
 
   function captureRangeState() {
-    for (const el of document.querySelectorAll("[data-range-key]")) {
+    for (const el of /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll("[data-range-key]"))) {
       const sk = el.dataset.sessId;
       const k = el.dataset.rangeKey;
-      rangeState[sk] = rangeState[sk] || {};
-      rangeState[sk][k] = el.value;
+      if (!sk || !k) continue;
+      const entry = rangeState[sk] ?? {};
+      rangeState[sk] = entry;
+      entry[k] = el.value;
     }
     // Dynamic per-model inputs use [data-input-name] (the registry
     // input's name — `source_lang`, `target_lang`). `initial_prompt`
     // and `hotwords` are persisted via session-meta directly (see
     // [data-meta-key]), not via the ephemeral rangeState.
-    for (const el of document.querySelectorAll("[data-input-name]")) {
+    for (const el of /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll("[data-input-name]"))) {
       const sk = el.dataset.sessId;
       if (!sk) continue;
       const k = el.dataset.inputName;
-      rangeState[sk] = rangeState[sk] || {};
-      rangeState[sk][k] = el.value;
+      if (!k) continue;
+      const entry = rangeState[sk] ?? {};
+      rangeState[sk] = entry;
+      entry[k] = el.value;
     }
   }
 
@@ -537,10 +613,11 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
 
   // Lightweight per-tick update: refresh the session-transcribe button's
   // label, busy state, and elapsed timer — surgically (no full re-render).
+  /** @param {import('./types.js').AppState} j */
   function updateSessionProgressInPlace(j) {
     if (!j.sessions) return;
     for (const s of j.sessions) {
-      const btn = document.querySelector(`[data-tx-sess="${cssEscape(s.session)}"]`);
+      const btn = /** @type {HTMLButtonElement | null} */ (document.querySelector(`[data-tx-sess="${cssEscape(s.session)}"]`));
       if (!btn) continue;
       const { node, busy } = sessionDetail.sessionProgressInner(s, sessInflight);
       btn.replaceChildren(node);
@@ -552,13 +629,23 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
 
   // Resolve the effective source for a session: a stripped pick falls back
   // to "original" when no stripped/ folder exists.
+  /**
+   * @param {string} session
+   * @param {string | null | undefined} [override]
+   * @returns {"original" | "stripped"}
+   */
   function effectiveSource(session, override) {
-    if (override) return override;
+    if (override) return /** @type {"original" | "stripped"} */ (override);
     const s = lastJson?.sessions?.find((x) => x.session === session);
     const want = sourcePick.get(session) || "original";
     return (want === "stripped" && !s?.stripped) ? "original" : want;
   }
 
+  /**
+   * @param {string} session
+   * @param {string} name
+   * @param {string | null | undefined} [sourceOverride]
+   */
   function transcribeWav(session, name, sourceOverride) {
     const source = effectiveSource(session, sourceOverride);
     // Key inflight/justDone by source so original and stripped sub-rows can
@@ -577,6 +664,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       }));
   }
 
+  /** @param {string} session */
   async function transcribeSession(session) {
     captureRangeState();
     if (lastJson) updateSessionProgressInPlace(lastJson);
@@ -599,19 +687,22 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       () => postJson("/api/transcribe-session", payload));
   }
 
+  /** @param {string} session */
   async function stripSession(session) {
-    let summary = null;
+    let _summary = null;
     // Snapshot the current operator-tuned params so the POST body matches
     // exactly what the inputs show — protects against the user nudging an
     // input mid-flight from accidentally changing semantics.
     const body = { ...stripOpts };
     await withInflight(sessStripInflight, null, session, "Strip silence", async () => {
-      summary = await postJson(`/api/sessions/${encodeURIComponent(session)}/strip-silence`, body);
+      _summary = await postJson(`/api/sessions/${encodeURIComponent(session)}/strip-silence`, body);
     });
+    // tsc can't track variable mutation through an async closure; snapshot with cast.
+    const summary = /** @type {import('./types.js').StripSilenceResult | null} */ (_summary);
     // Auto-flip source to stripped on success so the user can immediately
     // transcribe the cleaned audio. Skip when no files were written — an
     // all-silent session produces no stripped/ folder.
-    if (summary?.files_written > 0) sourcePick.set(session, "stripped");
+    if (summary && summary.files_written > 0) sourcePick.set(session, "stripped");
     if (summary) {
       const pct = summary.in_seconds > 0 ? Math.round(100 * summary.speech_seconds / summary.in_seconds) : 0;
       console.log(`[strip-silence] ${session}:`, summary, "params:", body);
@@ -624,8 +715,13 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     }
   }
 
+  /**
+   * @param {string} target
+   * @param {string} source
+   */
   async function absorbSession(target, source) {
     const sessions = lastJson?.sessions || [];
+    /** @param {string} id */
     const labelOf = (id) => {
       const s = sessions.find((x) => x.session === id);
       const lbl = s ? effectiveMeta(s).label : "";
@@ -645,6 +741,7 @@ The source folder will be deleted. The target's merged transcript (if any) will 
     await refresh();
   }
 
+  /** @param {string} session */
   async function removeStripped(session) {
     if (!confirm("Delete the stripped/ folder for this session?\n\nOriginals are kept. You can rerun strip silence later.")) return;
     try { await del(`/api/sessions/${encodeURIComponent(session)}/stripped`); }
@@ -654,6 +751,10 @@ The source folder will be deleted. The target's merged transcript (if any) will 
     await refresh();
   }
 
+  /**
+   * @param {string} session
+   * @param {HTMLButtonElement} btn
+   */
   async function copyMerged(session, btn) {
     if (!lastJson) return;
     const s = lastJson.sessions.find((x) => x.session === session);
@@ -707,6 +808,10 @@ The source folder will be deleted. The target's merged transcript (if any) will 
     }
   }
 
+  /**
+   * @param {string} text
+   * @param {HTMLButtonElement} btn
+   */
   function openTranscriptTab(text, btn) {
     const w = window.open("", "_blank");
     if (w) {
@@ -717,12 +822,20 @@ The source folder will be deleted. The target's merged transcript (if any) will 
     }
   }
 
+  /**
+   * @param {Window} w
+   * @param {string} text
+   */
   function populateTranscriptTab(w, text) {
     w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
     w.document.body.style.whiteSpace = "pre-wrap";
     w.document.body.textContent = text;
   }
 
+  /**
+   * @param {HTMLButtonElement | null} btn
+   * @param {string} label
+   */
   function flashButton(btn, label) {
     if (!btn) return;
     const prev = btn.textContent;
@@ -755,7 +868,7 @@ The source folder will be deleted. The target's merged transcript (if any) will 
   // visual state immediately so the click feels responsive — the poll
   // tick after setTapPref() will re-paint from the authoritative state.
   $("activeTapsBody").addEventListener("click", async (ev) => {
-    const btn = ev.target.closest(".tap-toggle");
+    const btn = /** @type {HTMLButtonElement | null} */ (/** @type {Element | null} */ (ev.target)?.closest(".tap-toggle"));
     if (!btn) return;
     if (btn.disabled) return;
     const identity = btn.dataset.identity;
@@ -794,7 +907,7 @@ The source folder will be deleted. The target's merged transcript (if any) will 
   // Sidebar filter — bound once on boot; input is static in the HTML shell.
   // Triggering a re-render of the sidebar (via signature reset) is enough.
   $("sessFilter").addEventListener("input", () => {
-    sessionFilter = $("sessFilter").value || "";
+    sessionFilter = /** @type {HTMLInputElement} */ ($("sessFilter")).value || "";
     lastSessionsSig = "";
     if (lastJson) renderSessionsIfChanged(lastJson);
   });
