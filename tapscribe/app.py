@@ -631,9 +631,12 @@ async def api_session_strip_silence(
     session_dir = resolve_session_dir(session)
 
     body = await _json_body(req)
-    min_silence_ms = int(body.get("min_silence_ms") or 500)
-    pad_ms = int(body.get("pad_ms") or 200)
-    threshold_db = float(body.get("threshold_db") or -45.0)
+    # `if x is not None else default` (not `x or default`) so the operator
+    # can pass 0 explicitly — e.g. pad_ms=0 disables region padding for
+    # A/B comparisons. Negatives are nonsense; clamp at zero.
+    min_silence_ms = max(0, int(body["min_silence_ms"])) if body.get("min_silence_ms") is not None else 500
+    pad_ms = max(0, int(body["pad_ms"])) if body.get("pad_ms") is not None else 200
+    threshold_db = float(body.get("threshold_db") if body.get("threshold_db") is not None else -45.0)
     speech_floor_db = float(
         body.get("speech_floor_db") if body.get("speech_floor_db") is not None else _ss.SPEECH_RMS_DBFS_FLOOR
     )

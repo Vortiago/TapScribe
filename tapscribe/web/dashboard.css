@@ -980,6 +980,32 @@ button, input, select, textarea { font: inherit; color: inherit; }
     opacity: 0.85;
   }
 }
+
+/* Strip-silence parameter row — inline knobs next to the ✂ button. */
+.strip-settings {
+  margin-left: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+
+  & .strip-knob {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+
+    & .lbl {
+      color: var(--fg-2);
+      font-size: 10.5px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    & .input {
+      width: 60px;
+      padding: 2px 4px;
+      font-size: 11px;
+      text-align: right;
+    }
+  }
+}
 .btn.just-completed { animation: sx-flash 1.5s ease-out; }
 
 @keyframes sx-flash {
