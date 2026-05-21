@@ -63,6 +63,23 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# --- Runtime python deps ----------------------------------------------------
+# The TapScribe per-tap silence gate (gate_kind="tapscribe", which is the
+# default) imports silero_vad lazily on the first /tap WS. Missing → the tap
+# falls back to passthrough mode ("gate construction failed … falling back to
+# passthrough"), which silently disables the gate the operator picked. Install
+# the [vad] extra so the dependency is satisfied alongside the model install.
+# No-op on re-runs once installed. (No ffmpeg branch here: parakeet-mlx, the
+# only backend that needs a system ffmpeg, is Apple-Silicon-only.)
+& python -c "import silero_vad" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[start] silero-vad missing — installing the [vad] extra so the TapScribe gate works…"
+    & python -m pip install --quiet -e ".[vad]"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "[start] 'pip install -e .[vad]' failed. The recorder will still boot, but the TapScribe silence gate will fall back to passthrough on every /tap."
+    }
+}
+
 # --- Configuration ----------------------------------------------------------
 $Model = if ($env:SX_MODEL) { $env:SX_MODEL } else { "tiny.en" }
 $LangCode = if ($env:SX_LANG) { $env:SX_LANG } else { "en" }

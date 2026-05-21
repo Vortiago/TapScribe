@@ -6,6 +6,33 @@
   Convention changes go there or in `pyproject.toml`, not here.
 - `bridges/README.md` — Bridge → `/tap` wire contract.
 
+## Runtime deps the install picker does NOT cover
+
+`tools/install_picker.py` resolves *model* extras (`whisper-cpu`,
+`parakeet-mlx`, …). Two recurring runtime dependencies fall outside
+that matrix and are wired into `start.sh` / `start.ps1` instead, after
+the picker runs:
+
+- **`ffmpeg` (system binary)** — `parakeet-mlx`'s `transcribe()` shells
+  out to ffmpeg via its hardcoded `load_audio()`. Missing ffmpeg →
+  `RuntimeError("FFmpeg is not installed or not in your PATH.")`
+  mid-request, deep in a Starlette middleware stack. `start.sh`
+  auto-installs via Homebrew on macOS when `parakeet_mlx` is in the
+  venv. Don't add a Python preflight that `shutil.which("ffmpeg")`s —
+  CI doesn't have ffmpeg and the existing unit tests mock the model.
+  Fix is install-time, not runtime.
+- **`silero-vad` (`[vad]` extra, pulls `torch>=2.1`)** — the per-tap
+  TapScribe gate (`gate_kind="tapscribe"`, the default) imports
+  `silero_vad` lazily on the first `/tap` WS. Missing → the tap logs
+  `gate construction failed … falling back to passthrough` and the
+  gate the operator picked is silently a no-op. `start.sh` runs
+  `pip install -e ".[vad]"` when the module isn't importable.
+
+If a new runtime dep with the same shape (system binary, or optional
+Python package gated by a lazy import) lands, add it to the `Runtime
+system + python deps` block in `start.sh` rather than as a Python
+preflight — operators hit it once on bring-up instead of mid-request.
+
 ## Security: avoid CodeQL "security-and-quality" tripwires
 
 PRs are scanned by CodeQL with the `security-and-quality` suite (see
