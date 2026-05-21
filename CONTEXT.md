@@ -49,8 +49,10 @@ Each Transcriber declares its `device`, `name`, and `backend`. The
 `"voxtral"`, `"parakeet"`, `"canary"`) — the same string lands in
 result JSON under `"transcriber"`. The `backend` field
 (`"faster-whisper"`, `"mlx-whisper"`, `"hf-transformers"`,
-`"mlx-voxtral"`, `"parakeet-mlx"`, `"parakeet-hf"`, `"canary-mlx"`,
-`"canary-nemo"`) disambiguates which runtime did the work.
+`"mlx-voxtral"`, `"parakeet-mlx"`, `"parakeet-hf"`,
+`"canary-nemo"`) disambiguates which runtime did the work. `"canary-mlx"`
+is a planned-but-not-wired backend — the adapter exists in-tree but is
+not registered in the catalog; see PR #61.
 
 Note: there is also a **LiveChannel** (a Protocol — see below) — the
 `whisperlivekit-server` child process the Recorder supervises for

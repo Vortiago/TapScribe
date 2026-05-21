@@ -108,9 +108,14 @@ def test_parakeet_supports_mlx_cuda_and_cpu():
     assert pk.supported_backend_kinds() == frozenset({"mlx", "cuda", "cpu"})
 
 
-def test_canary_supports_mlx_cuda_and_cpu():
+def test_canary_supports_cuda_and_cpu_only():
+    """No MLX binding for Canary (PR #61) — `mlx-audio` has no published
+    Canary weights and no shippable .nemo→MLX converter, so the catalog
+    exposes only the NeMo CPU/CUDA path. The MLX adapter remains in-tree
+    for the day upstream publishes weights; until then it must not be
+    advertised through the registry."""
     c = REGISTRY.require("canary-1b-v2")
-    assert c.supported_backend_kinds() == frozenset({"mlx", "cuda", "cpu"})
+    assert c.supported_backend_kinds() == frozenset({"cuda", "cpu"})
 
 
 # ── resolve / preference handling ────────────────────────────────────────
