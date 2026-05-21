@@ -31,6 +31,7 @@ from .base import (
     TranscriptionResult,
     TranscriptionSegment,
     Word,
+    build_transcription_result,
 )
 
 # Default repo on Hugging Face — `from_pretrained` resolves the catalog
@@ -146,20 +147,15 @@ class MlxParakeetTranscriber:
         segments = tuple(_sentence_to_segment(s) for s in sentences)
         text = (_attr(aligned, "text", "") or "").strip()
 
-        return TranscriptionResult(
-            transcriber=self.name,
-            backend=self.backend,
-            device=self.device,
-            model=self.model_name,
-            # Parakeet doesn't echo a detected language; record the hint
-            # the operator pinned, or "auto" when they didn't.
-            language=source_lang or "auto",
-            language_probability=0.0,
-            duration=round(wav_duration_s(path), 2),
+        # Parakeet doesn't echo a detected language; record the hint
+        # the operator pinned, or "auto" when they didn't.
+        return build_transcription_result(
+            self,
             text=text,
             segments=segments,
-            initial_prompt_used=initial_prompt or "",
-            hotwords_used=hotwords or "",
-            quality_settings={},
-            source_language=source_lang or "",
+            duration=wav_duration_s(path),
+            language=source_lang or "auto",
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            source_lang=source_lang,
         )

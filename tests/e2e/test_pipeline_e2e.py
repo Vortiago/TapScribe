@@ -53,18 +53,18 @@ FAKE_TEXT_BY_SPEAKER = {
 @pytest.fixture
 def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
     """Replace the real factory + cache with a single FakeTranscriber the
-    test owns. The route module imported `load_transcriber` at module
-    load, so we patch both the canonical reference and that local
-    binding."""
+    test owns. The orchestrator module imported `load_transcriber` at
+    module load, so we patch both the canonical reference and that
+    local binding."""
     fake = FakeTranscriber(text_by_speaker=FAKE_TEXT_BY_SPEAKER)
 
     def _factory(model_name: str, **_kwargs) -> FakeTranscriber:  # noqa: ARG001
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
-    import tapscribe.app as _app
+    import tapscribe.batch_transcribe as _bt
 
-    monkeypatch.setattr(_app, "load_transcriber", _factory)
+    monkeypatch.setattr(_bt, "load_transcriber", _factory)
     _transcribers.clear_cache()
     return fake
 

@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..nb_whisper import download_nb_whisper_ct2_dir
-from .base import TranscriptionResult, TranscriptionSegment, default_language_for
+from .base import (
+    TranscriptionResult,
+    TranscriptionSegment,
+    build_transcription_result,
+    default_language_for,
+)
 
 
 class FasterWhisperTranscriber:
@@ -108,18 +113,15 @@ class FasterWhisperTranscriber:
         typed_segments = [TranscriptionSegment.from_payload(s) for s in segments]
 
         applied_view = {k: (v if not callable(v) else str(v)) for k, v in applied.items()}
-        return TranscriptionResult(
-            transcriber=self.name,
-            backend=self.backend,
-            device=self.device,
-            model=self.model_name,
-            language=info.language,
-            language_probability=round(info.language_probability or 0.0, 3),
-            duration=round(info.duration or 0.0, 2),
+        return build_transcription_result(
+            self,
             text=" ".join(s.text for s in typed_segments).strip(),
             segments=tuple(typed_segments),
-            initial_prompt_used=initial_prompt or "",
-            hotwords_used=hotwords or "",
+            duration=info.duration or 0.0,
+            language=info.language,
+            language_probability=info.language_probability or 0.0,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            source_lang=source_lang,
             quality_settings=applied_view,
-            source_language=source_lang or "",
         )
