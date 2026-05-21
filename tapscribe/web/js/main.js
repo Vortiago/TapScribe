@@ -64,8 +64,16 @@ async function withInflight(inflight, done, key, label, op) {
   return !failed;
 }
 
-/** @type {(id: string) => HTMLElement} */
-const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
+// Throws if the id isn't in the DOM — the dashboard's static HTML is
+// authored to a fixed schema, so a missing id is a programmer bug.
+// Failing loudly at the call site beats a "null is not an object" three
+// stack frames deeper, and matches the contract of pick() in templates.js.
+/** @param {string} id */
+const $ = (id) => {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`missing element: #${id}`);
+  return el;
+};
 
 // ---- Render state -------------------------------------------------------
 /** @type {import('./types.js').AppState | null} */

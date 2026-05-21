@@ -223,7 +223,7 @@ export function render(t, meta, { showAudit }) {
   if (t.target_language) {
     const badge = pick(frag, "translateBadge");
     badge.hidden = false;
-    const src = t.source_language || "?";
+    const src = t.source_language || t.language || "?";
     badge.textContent = ` → translated ${src} → ${t.target_language}`;
     badge.title = "Output language differs from input — this is a translation, not a verbatim transcript.";
   }

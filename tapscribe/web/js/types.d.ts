@@ -213,6 +213,11 @@ export interface MergedTranscript {
   low_confidence_count: number;
   source_language: string;
   target_language: string;
+  // Defensive: older on-disk session JSON (pre-#48) never wrote this at
+  // the MergedTranscript level, but the translate-badge fallback chain
+  // (merged-transcript.js render) still reads it for safety. Widen the
+  // type rather than narrow the runtime check.
+  language?: string;
 }
 
 export interface Segment {

@@ -195,8 +195,14 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   bodyEl.querySelector("#liveStopBtn")?.addEventListener("click", onAction.stop);
   bodyEl.querySelector("#liveLogBtn")?.addEventListener("click", openLogDialog);
   // Nudge language to "no" when an nb-whisper model is picked and lang is
-  // still on the boot default.
-  bodyEl.querySelector("#liveModelSelect")?.addEventListener("change", (e) => {
+  // still on the boot default. #liveModelSelect is in the always-present
+  // top section of the live-channel template (not in any of the
+  // state-specific action templates), so it's a hard error if it's
+  // missing — unlike the start/stop/apply buttons above, which use `?.`
+  // because each only appears in one of the three state templates.
+  const modelSelect = bodyEl.querySelector("#liveModelSelect");
+  if (!modelSelect) throw new Error("#liveModelSelect missing from live-channel template");
+  modelSelect.addEventListener("change", (e) => {
     const value = /** @type {HTMLSelectElement} */ (e.target).value;
     if (!value.startsWith("nb-")) return;
     const li = /** @type {HTMLInputElement | null} */ (bodyEl.querySelector("#liveLangInput"));

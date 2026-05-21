@@ -5,6 +5,12 @@
 - `.claude/hooks/` — `session-start.sh` installs deps, `stop.sh` runs ruff.
   Convention changes go there or in `pyproject.toml`, not here.
 - `bridges/README.md` — Bridge → `/tap` wire contract.
+- `frontend/` — TypeScript-via-JSDoc gate for `tapscribe/web/js/`. The
+  `stop.sh` hook silently skips when `frontend/node_modules/.bin/tsc` is
+  absent (fresh worktree before `session-start.sh` has finished), so if
+  you've changed JS and want a local sanity check, run `cd frontend &&
+  npm install && npm run typecheck` once after a fresh clone. CI's
+  `frontend-typecheck` job is the source of truth either way.
 
 ## Runtime deps the install picker does NOT cover
 

@@ -62,16 +62,22 @@ export function slot(frag, slots) {
 }
 
 // Convenience: `pick(frag, "name")` → first `[data-slot=name]` element.
-// Cast to HTMLElement because every template author knows the slot exists
-// and uses HTML-specific properties (.dataset, .hidden, .title) on it.
-// Subtype-specific props (.value, .checked, .disabled) still need an
-// explicit cast at the call site.
+// Throws if the slot isn't present: template authors are expected to keep
+// `data-slot=…` markers in sync with their `pick()` calls, so a missing
+// slot is a programmer bug, not a runtime condition to handle. The throw
+// surfaces it at the call site (where the developer can see which slot
+// they typo'd) instead of as a "Cannot read properties of null" three
+// frames deeper.
 /**
  * @param {ParentNode} frag
  * @param {string} name
  * @returns {HTMLElement}
  */
-export const pick = (frag, name) => /** @type {HTMLElement} */ (frag.querySelector(`[data-slot="${name}"]`));
+export const pick = (frag, name) => {
+  const el = /** @type {HTMLElement | null} */ (frag.querySelector(`[data-slot="${name}"]`));
+  if (!el) throw new Error(`template slot not found: data-slot="${name}"`);
+  return el;
+};
 
 // Replace `host`'s children with the rendered fragment. Avoids the
 // `innerHTML = ""` flicker by swapping once.
