@@ -334,6 +334,128 @@ def test_load_fails_fast_when_mlx_audio_missing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Loader resolution — what gets handed to mlx-audio's `from_pretrained`.
+# There is no published MLX-converted Canary repo on HuggingFace as of
+# 2026-05; the upstream README only documents loading from a local
+# directory that the operator converted from NVIDIA's `.nemo`. Earlier
+# revisions of this adapter resolved bare model names to
+# `mlx-community/canary-1b-v2`, which returns 401/404 from the Hub at
+# request time — these tests pin the correct behaviour: surface a
+# clear, actionable error when no local path is configured.
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_mlx_audio_module(monkeypatch, recorder: dict[str, str]) -> None:
+    """Inject a stub `mlx_audio.stt.models.canary` whose `Model.from_pretrained`
+    records the path it was given, so the resolution tests can verify *what*
+    the adapter would have passed to upstream without needing mlx-audio
+    installed on this host."""
+    import importlib.machinery
+    import importlib.util as importlib_util
+    import sys
+    import types
+
+    def _mod(name: str) -> types.ModuleType:
+        m = types.ModuleType(name)
+        m.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+        return m
+
+    fake_pkg = _mod("mlx_audio")
+    fake_pkg.__path__ = []
+    fake_stt = _mod("mlx_audio.stt")
+    fake_stt.__path__ = []
+    fake_models = _mod("mlx_audio.stt.models")
+    fake_models.__path__ = []
+    fake_canary = _mod("mlx_audio.stt.models.canary")
+
+    class _FakeCanaryModel:
+        @classmethod
+        def from_pretrained(cls, path_or_repo, **_kwargs):
+            recorder["path"] = path_or_repo
+            return MagicMock()
+
+    fake_canary.Model = _FakeCanaryModel
+    monkeypatch.setitem(sys.modules, "mlx_audio", fake_pkg)
+    monkeypatch.setitem(sys.modules, "mlx_audio.stt", fake_stt)
+    monkeypatch.setitem(sys.modules, "mlx_audio.stt.models", fake_models)
+    monkeypatch.setitem(sys.modules, "mlx_audio.stt.models.canary", fake_canary)
+
+    real_find_spec = importlib_util.find_spec
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name == "mlx_audio":
+            return fake_pkg.__spec__
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib_util, "find_spec", fake_find_spec)
+
+
+def test_load_without_local_path_raises_clear_error(monkeypatch, tmp_path):
+    """No env var, no on-disk path — the adapter must NOT silently
+    try to download a bogus `mlx-community/canary-1b-v2` repo (the
+    upstream Hub returns 401 with `Repository Not Found`). It should
+    raise a `RuntimeError` whose message tells the operator exactly
+    what to do: convert the .nemo weights and point an env var at
+    the result."""
+    recorder: dict[str, str] = {}
+    _install_fake_mlx_audio_module(monkeypatch, recorder)
+    monkeypatch.delenv("TAPSCRIBE_CANARY_MLX_PATH", raising=False)
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    with pytest.raises(RuntimeError, match="TAPSCRIBE_CANARY_MLX_PATH"):
+        MlxCanaryTranscriber.load("canary-1b-v2")
+    # And critically: upstream `from_pretrained` was NOT called with a
+    # guessed HF repo (that's the exact regression PRs #48 / #60 shipped).
+    assert "path" not in recorder
+
+
+def test_load_uses_env_var_local_path(monkeypatch, tmp_path):
+    """When TAPSCRIBE_CANARY_MLX_PATH points at a converted model
+    directory, that path is what gets handed to upstream — no Hub
+    round-trip, no guessed repo id."""
+    converted = tmp_path / "canary-1b-v2-mlx"
+    converted.mkdir()
+    recorder: dict[str, str] = {}
+    _install_fake_mlx_audio_module(monkeypatch, recorder)
+    monkeypatch.setenv("TAPSCRIBE_CANARY_MLX_PATH", str(converted))
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    t = MlxCanaryTranscriber.load("canary-1b-v2")
+    assert t.model_name == "canary-1b-v2"
+    assert recorder["path"] == str(converted)
+
+
+def test_load_accepts_model_name_that_is_an_existing_directory(monkeypatch, tmp_path):
+    """An operator passing `model_name` as a path that exists on disk
+    (e.g. via a direct API call) should be forwarded verbatim — no
+    env var required."""
+    converted = tmp_path / "my-canary-mlx"
+    converted.mkdir()
+    recorder: dict[str, str] = {}
+    _install_fake_mlx_audio_module(monkeypatch, recorder)
+    monkeypatch.delenv("TAPSCRIBE_CANARY_MLX_PATH", raising=False)
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    MlxCanaryTranscriber.load(str(converted))
+    assert recorder["path"] == str(converted)
+
+
+def test_load_rejects_env_var_pointing_at_nonexistent_path(monkeypatch, tmp_path):
+    """A typo / stale path in TAPSCRIBE_CANARY_MLX_PATH should fail at
+    load time with a clear message — letting it through means upstream
+    raises a confusing `snapshot_download` error treating the bad path
+    as an HF repo id."""
+    recorder: dict[str, str] = {}
+    _install_fake_mlx_audio_module(monkeypatch, recorder)
+    monkeypatch.setenv("TAPSCRIBE_CANARY_MLX_PATH", str(tmp_path / "does-not-exist"))
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    with pytest.raises(RuntimeError, match="does-not-exist"):
+        MlxCanaryTranscriber.load("canary-1b-v2")
+    assert "path" not in recorder
+
+
+# ---------------------------------------------------------------------------
 # Upstream API smoke test — only runs when mlx-audio is actually installed.
 # This is the canary-equivalent of the parakeet smoke test: catches an
 # upstream rename / restructure (`Canary` → `Model` → `???`) the moment
