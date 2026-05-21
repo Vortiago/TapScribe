@@ -730,12 +730,14 @@ function wire(host, s, sessKey, ctx) {
     btn.addEventListener("click", () => ctx.onStripRemove(btn.dataset.stripRemove));
   }
   for (const el of host.querySelectorAll("[data-strip-opt]")) {
-    el.addEventListener("input", () => {
-      ctx.onStripOptEdit(el.dataset.stripOpt, el.value);
-      // Clearing the input snaps the stored value back to the default
-      // (see main.js:onStripOptEdit). Mirror that visually so the box
-      // doesn't read empty while a non-zero default is what'll actually
-      // be POSTed on click.
+    el.addEventListener("input", () =>
+      ctx.onStripOptEdit(el.dataset.stripOpt, el.value));
+    // Snap an empty box back to the stored default — but on blur, not
+    // input. Doing it on every keystroke briefly auto-fills "500" the
+    // instant the operator clears the box, which a slow typist would
+    // then have to clear again. Blur is the moment the operator's done
+    // editing, so the visible value matches what the next POST will use.
+    el.addEventListener("blur", () => {
       if (el.value === "") el.value = String(ctx.stripOpts[el.dataset.stripOpt]);
     });
   }

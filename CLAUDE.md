@@ -64,14 +64,25 @@ green, check what's in the CI matrix you're not running:
 
 ### Local playwright setup
 
-This dev box ships Chromium under `/opt/pw-browsers/chromium-1194/`.
-Playwright matches its bundled Chromium revision to the playwright
-package version, so version drift between `pip install playwright`
-(latest) and the on-disk browser is the standard failure mode
-("Executable doesn't exist at /opt/pw-browsers/chromium_headless_shell-<N>/...").
+`pytest tests/e2e/test_dashboard_ui.py` skips itself if `playwright`
+isn't importable. On a normal developer laptop the standard setup
+works — `pip install playwright && python -m playwright install
+chromium`. Only fall back to the recipe below when the standard
+install fails (no outbound network, network policy blocks the Chrome
+for Testing download, etc.), which is the typical case inside Claude
+Code on the web's managed execution environment.
 
-The on-disk revision `1194` matches **playwright 1.56.x**. To bring up
-the playwright tests:
+#### When `playwright install` can't reach the network (Claude Code on the web, etc.)
+
+On the sandboxed dev box, Chromium ships pre-installed under
+`/opt/pw-browsers/chromium-<rev>/`. Playwright matches its bundled
+Chromium revision to the playwright package version, so version drift
+between `pip install playwright` (latest) and the on-disk browser is
+the standard failure mode ("Executable doesn't exist at
+/opt/pw-browsers/chromium_headless_shell-<N>/...").
+
+**As of 2026-05-21**, the on-disk revision is `1194`, which matches
+**playwright 1.56.x**:
 
 ```bash
 pip install 'playwright==1.56.*'
@@ -81,8 +92,11 @@ pytest tests/e2e/test_dashboard_ui.py -m 'not real_audio'
 
 `playwright install chromium` will fail (no outbound network); don't
 try. If the on-disk revision changes, mismatched-version errors tell
-you which version Playwright is looking for — bump the pip install to
-match.
+you which version Playwright is looking for — `ls /opt/pw-browsers/`
+shows the actual revision, and bumping the pip install to the matching
+playwright release brings them back in sync. Don't paste the recipe
+above wholesale on a real developer laptop; it's only correct for the
+managed environment.
 
 ### When CI flips red on a dashboard test, suspect import hygiene
 
