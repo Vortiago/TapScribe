@@ -563,8 +563,8 @@ _PARAKEET_BACKENDS: tuple[BackendBinding, ...] = (
 )
 
 
+# Canary is NeMo-only: there are no published mlx-audio Canary weights.
 _CANARY_BACKENDS: tuple[BackendBinding, ...] = (
-    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_canary_mlx, probe_module="mlx_audio"),
     BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_canary_nemo, probe_module="nemo"),
 )
 

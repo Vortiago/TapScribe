@@ -79,11 +79,6 @@ def _stub_loaders_and_backends(monkeypatch):
     )
     monkeypatch.setattr(
         catalog,
-        "_load_canary_mlx",
-        lambda mid, kind: _StubTranscriber("canary-mlx", mid, kind),
-    )
-    monkeypatch.setattr(
-        catalog,
         "_load_canary_nemo",
         lambda mid, kind: _StubTranscriber("canary-nemo", mid, kind),
     )
@@ -132,10 +127,7 @@ def _rebuild_registry(monkeypatch):
         BackendBinding(kinds=frozenset({"mlx"}), loader=catalog._load_parakeet_mlx),
         BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_parakeet_hf),
     )
-    canary_backends = (
-        BackendBinding(kinds=frozenset({"mlx"}), loader=catalog._load_canary_mlx),
-        BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_canary_nemo),
-    )
+    canary_backends = (BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_canary_nemo),)
     both = frozenset({"batch", "live"})
     batch_only = frozenset({"batch"})
     entries = (
@@ -263,11 +255,6 @@ def test_routes_parakeet_to_mlx_when_mlx_preferred():
 def test_routes_parakeet_to_nemo_when_cuda_preferred():
     t = _load("parakeet-tdt-0.6b-v3", backend="cuda")
     assert t.name == "parakeet-nemo"
-
-
-def test_routes_canary_to_mlx_when_mlx():
-    t = _load("canary-1b-v2", backend="mlx")
-    assert t.name == "canary-mlx"
 
 
 def test_routes_canary_to_nemo_when_cuda():

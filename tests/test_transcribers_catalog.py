@@ -108,9 +108,9 @@ def test_parakeet_supports_mlx_cuda_and_cpu():
     assert pk.supported_backend_kinds() == frozenset({"mlx", "cuda", "cpu"})
 
 
-def test_canary_supports_mlx_cuda_and_cpu():
+def test_canary_supports_cuda_and_cpu_only():
     c = REGISTRY.require("canary-1b-v2")
-    assert c.supported_backend_kinds() == frozenset({"mlx", "cuda", "cpu"})
+    assert c.supported_backend_kinds() == frozenset({"cuda", "cpu"})
 
 
 # ── resolve / preference handling ────────────────────────────────────────

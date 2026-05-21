@@ -207,14 +207,6 @@ def test_resolve_extras_mlx_choice_on_non_mlx_machine_downgrades_silently():
     assert "whisper-cpu" in extras
 
 
-def test_resolve_extras_canary_mlx_only_skips_nemo():
-    """Apple Silicon canary picker → MLX shouldn't drag in NeMo + torch."""
-    sel = Selection()
-    _enable(sel, "canary", BACKEND_MLX)
-    extras = install_picker.resolve_extras(sel, _apple_caps())
-    assert extras == ["canary-mlx"]
-
-
 def test_resolve_extras_preserves_family_order_for_reproducibility():
     sel = Selection()
     _enable(sel, "canary", BACKEND_CPU)
@@ -639,7 +631,6 @@ def test_pyproject_whisper_mlx_admits_a_real_release():
     [
         ("whisper-mlx", "mlx-whisper"),
         ("parakeet-mlx", "parakeet-mlx"),
-        ("canary-mlx", "mlx-audio"),
     ],
 )
 def test_pyproject_mlx_extras_stay_platform_gated(extra_name, pkg):
@@ -667,17 +658,17 @@ def test_picker_apple_silicon_mlx_only_matches_failing_invocation_atoms():
        tapscribe[canary,mlx,parakeet,parakeet-mlx,whisper]
     so reproduce the post-split equivalent and confirm the picker still
     resolves it without dragging in the `whisper-cpu` atom when the
-    operator explicitly chose MLX-only on Apple Silicon."""
+    operator explicitly chose MLX-only on Apple Silicon. Canary has no
+    MLX backend so a Mac-only selection covers just Whisper and
+    Parakeet here."""
     sel = Selection()
     _enable(sel, "whisper", BACKEND_MLX)
     _enable(sel, "parakeet", BACKEND_MLX)
-    _enable(sel, "canary", BACKEND_MLX)
     extras = install_picker.resolve_extras(sel, _apple_caps())
     assert extras == [
         "whisper-live",
         "whisper-mlx",
         "parakeet-mlx",
-        "canary-mlx",
     ]
 
 

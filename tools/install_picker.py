@@ -127,11 +127,9 @@ FAMILIES: tuple[FamilyDef, ...] = (
         key="canary",
         label="Canary (NVIDIA)",
         description=("NVIDIA Canary 1B v2 — translation + 25 EU langs. Batch only."),
-        size_hint="~2 GB CPU / ~500 MB MLX",
-        backends=(
-            BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("canary-cpu",)),
-            BackendDef(key=BACKEND_MLX, label="MLX", extras=("canary-mlx",)),
-        ),
+        size_hint="~2 GB CPU",
+        # NeMo only — there are no published mlx-audio Canary weights.
+        backends=(BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("canary-cpu",)),),
     ),
 )
 

@@ -333,6 +333,68 @@ def test_load_fails_fast_when_mlx_audio_missing(monkeypatch):
         MlxCanaryTranscriber.load("canary-1b-v2")
 
 
+def test_resolve_local_path_without_env_var_raises(monkeypatch):
+    monkeypatch.delenv("TAPSCRIBE_CANARY_MLX_PATH", raising=False)
+    from tapscribe.transcribers.mlx_canary import _resolve_local_path
+
+    with pytest.raises(RuntimeError, match="TAPSCRIBE_CANARY_MLX_PATH"):
+        _resolve_local_path("canary-1b-v2")
+
+
+def test_resolve_local_path_with_valid_env_var_returns_it(monkeypatch, tmp_path):
+    converted = tmp_path / "canary-1b-v2-mlx"
+    converted.mkdir()
+    monkeypatch.setenv("TAPSCRIBE_CANARY_MLX_PATH", str(converted))
+    from tapscribe.transcribers.mlx_canary import _resolve_local_path
+
+    assert _resolve_local_path("canary-1b-v2") == str(converted)
+
+
+def test_resolve_local_path_rejects_env_var_pointing_at_missing_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAPSCRIBE_CANARY_MLX_PATH", str(tmp_path / "does-not-exist"))
+    from tapscribe.transcribers.mlx_canary import _resolve_local_path
+
+    with pytest.raises(RuntimeError, match="does-not-exist"):
+        _resolve_local_path("canary-1b-v2")
+
+
+def test_load_forwards_resolved_path_to_canary_from_pretrained(monkeypatch, tmp_path):
+    """End-to-end: `load()` must pass the resolved local path to upstream
+    `Canary.from_pretrained` — the regression this whole module exists
+    to prevent was passing a guessed Hub repo id instead."""
+    import importlib.machinery
+    import sys
+    import types
+
+    converted = tmp_path / "canary-mlx"
+    converted.mkdir()
+    monkeypatch.setenv("TAPSCRIBE_CANARY_MLX_PATH", str(converted))
+
+    recorded: dict[str, str] = {}
+
+    class _FakeCanary:
+        @classmethod
+        def from_pretrained(cls, path_or_repo, **_kwargs):
+            recorded["path"] = path_or_repo
+            return MagicMock()
+
+    def _stub(name: str) -> types.ModuleType:
+        m = types.ModuleType(name)
+        m.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+        return m
+
+    for name in ("mlx_audio", "mlx_audio.stt", "mlx_audio.stt.models"):
+        monkeypatch.setitem(sys.modules, name, _stub(name))
+    leaf = _stub("mlx_audio.stt.models.canary")
+    leaf.Model = _FakeCanary
+    monkeypatch.setitem(sys.modules, "mlx_audio.stt.models.canary", leaf)
+
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    MlxCanaryTranscriber.load("canary-1b-v2")
+    assert recorded["path"] == str(converted)
+
+
 # ---------------------------------------------------------------------------
 # Upstream API smoke test — only runs when mlx-audio is actually installed.
 # This is the canary-equivalent of the parakeet smoke test: catches an

@@ -36,6 +36,7 @@ dashboard shows where in the WAV each transcribed chunk came from.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -50,11 +51,10 @@ from .base import (
     build_transcription_result,
 )
 
-# Default MLX repo. Other Canary variants can be added by extending this
-# table and registering them in catalog.py.
-_MLX_REPO_TABLE: dict[str, str] = {
-    "canary-1b-v2": "mlx-community/canary-1b-v2",
-}
+# mlx-audio's Canary has no published Hub repo; the loader requires a
+# locally converted MLX-safetensors directory. Operators point this env
+# var at the converted dir.
+ENV_LOCAL_PATH = "TAPSCRIBE_CANARY_MLX_PATH"
 
 
 # Chunking defaults. Each window must stay under Canary's per-call
@@ -81,8 +81,21 @@ _OVERLAP_S_BOUNDS = (0.0, 60.0)
 _MAX_TOKENS_BOUNDS = (16, 4096)
 
 
-def _resolve_repo(model_name: str) -> str:
-    return _MLX_REPO_TABLE.get(model_name, f"mlx-community/{model_name}")
+_CONVERSION_GUIDE_URL = "https://github.com/Blaizzy/mlx-audio/tree/main/mlx_audio/stt/models/canary"
+
+
+def _resolve_local_path(model_name: str) -> str:
+    env_value = (os.environ.get(ENV_LOCAL_PATH) or "").strip()
+    if not env_value:
+        raise RuntimeError(
+            f"MLX Canary {model_name!r} needs a locally converted weights "
+            f"directory; set {ENV_LOCAL_PATH}=/path/to/canary-mlx. "
+            f"Conversion guide: {_CONVERSION_GUIDE_URL}"
+        )
+    env_path = Path(env_value).expanduser()
+    if not env_path.is_dir():
+        raise RuntimeError(f"{ENV_LOCAL_PATH}={env_value!r} is not an existing directory.")
+    return str(env_path)
 
 
 def _trim_leading_overlap(prev_text: str, current_text: str, *, max_words: int = 8) -> str:
@@ -223,15 +236,17 @@ class MlxCanaryTranscriber:
                 "See https://github.com/Blaizzy/mlx-audio"
             )
 
+        # Fail fast before paying mlx_audio's import cost.
+        source = _resolve_local_path(model_name)
+
         # Lazy import — mlx_audio pulls a lot of optional models on first
         # load; we only want the import cost when the operator actually
         # picks Canary. The class was renamed `Canary` → `Model` in
         # mlx-audio 0.4.0; we alias to keep the rest of the file readable.
         from mlx_audio.stt.models.canary import Model as Canary  # type: ignore
 
-        repo = _resolve_repo(model_name)
-        print(f"[tapscribe] loading mlx-audio Canary: {repo}", flush=True)
-        model = Canary.from_pretrained(repo)
+        print(f"[tapscribe] loading mlx-audio Canary from {source}", flush=True)
+        model = Canary.from_pretrained(source)
         return cls(model_name=model_name, model=model)
 
     def _generate_window(self, pcm: Any, *, source_lang: str, target_lang: str) -> tuple[str, int | None]:

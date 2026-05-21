@@ -54,7 +54,7 @@ dependencies = [
 # (always installed when the family is on) plus one or two backend-
 # specific extras (CPU/CUDA and/or MLX) which the operator can opt into
 # independently. Keep the family/backend split explicit here so a stray
-# `pip install -e .[canary-mlx]` on a Linux box doesn't drag in NeMo.
+# `pip install -e .[parakeet-mlx]` on a Linux box doesn't drag in NeMo.
 
 # --- Whisper / NB-Whisper ---------------------------------------------------
 # Live channel needs whisperlivekit no matter which backend drives it;
@@ -85,11 +85,9 @@ parakeet-mlx = [
 ]
 
 # --- Canary 1B v2 -----------------------------------------------------------
-# NeMo for CPU/CUDA; mlx-audio for Apple Silicon. The `mlx-audio` package
-# stays env-marker-gated so installing `canary-mlx` on Linux is a no-op
-# rather than a resolver failure.
+# NeMo for CPU/CUDA only. No MLX extra — there are no published
+# mlx-audio Canary weights on the Hub.
 canary-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
-canary-mlx = ["mlx-audio>=0.4,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 # --- Convenience aliases (back-compat) --------------------------------------
 # Older docs, the Dockerfile, and test-skip messages still reference the
@@ -101,7 +99,7 @@ whisper = ["tapscribe[whisper-live,whisper-cpu,whisper-mlx]"]
 mlx = ["tapscribe[whisper-mlx]"]
 voxtral = ["tapscribe[voxtral-cpu]"]
 parakeet = ["tapscribe[parakeet-cpu,parakeet-mlx]"]
-canary = ["tapscribe[canary-cpu,canary-mlx]"]
+canary = ["tapscribe[canary-cpu]"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
