@@ -123,6 +123,14 @@ class MlxParakeetTranscriber:
         self.model_name = model_name
         self._model = model
         self._mel_fn = mel_fn
+        # Latches True after `_resolve_mel_fn` hits an ImportError so a
+        # host without parakeet-mlx pays the import cost (and prints the
+        # log line) once per instance instead of once per request. In
+        # practice `MlxParakeetTranscriber.load()` already raises before
+        # any instance is built without parakeet-mlx, but tests and
+        # future refactors that construct the adapter directly hit this
+        # path.
+        self._mel_fn_unavailable = False
 
     @classmethod
     def load(cls, model_name: str) -> MlxParakeetTranscriber:
@@ -162,6 +170,10 @@ class MlxParakeetTranscriber:
         """
         if self._mel_fn is not None:
             return self._mel_fn
+        if self._mel_fn_unavailable:
+            # Already tried and failed once on this instance — don't
+            # re-import or re-log on every subsequent transcribe.
+            return None
         try:
             import mlx.core as mx  # type: ignore[import-not-found]  # noqa: PLC0415
             from parakeet_mlx.audio import get_logmel  # type: ignore[import-not-found]  # noqa: PLC0415
@@ -169,9 +181,10 @@ class MlxParakeetTranscriber:
             print(
                 f"[tapscribe] parakeet pre-decode helpers unavailable "
                 f"({type(e).__name__}: {e}); using model.transcribe(path) "
-                "which needs ffmpeg on PATH.",
+                "which needs ffmpeg on PATH (logged once per instance).",
                 flush=True,
             )
+            self._mel_fn_unavailable = True
             return None
         self._mel_fn = lambda pcm, preproc: get_logmel(mx.array(pcm), preproc)
         return self._mel_fn
@@ -245,6 +258,13 @@ class MlxParakeetTranscriber:
             # so a non-empty list is the documented contract. Defensive None here
             # routes through the ffmpeg fallback instead of IndexError-ing into
             # Starlette — protects against a future regression in either branch.
+            # Logged (like every other bail-out in this function) so a recurring
+            # fallback shows up in the recorder log with its cause.
+            print(
+                "[tapscribe] parakeet generate(mel) returned empty list; "
+                "using model.transcribe(path) which needs ffmpeg on PATH.",
+                flush=True,
+            )
             return None
         return results[0]
 

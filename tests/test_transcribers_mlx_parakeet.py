@@ -329,22 +329,68 @@ def test_pre_decode_falls_back_when_generate_raises(tmp_path: Path):
     model.transcribe.assert_called_once()
 
 
-def test_pre_decode_falls_back_when_mel_fn_unavailable(tmp_path: Path):
-    """When `mel_fn` isn't injected AND parakeet-mlx isn't importable
-    (the CI case), `_resolve_mel_fn` returns None and the adapter falls
-    back to the path-based transcribe."""
+def test_pre_decode_falls_back_when_mel_fn_unavailable(tmp_path: Path, monkeypatch):
+    """When `_resolve_mel_fn` returns None (either because the lazy
+    import failed or because a future refactor made the helpers
+    unavailable), the adapter falls back to the path-based transcribe.
+
+    The earlier version of this test relied on `parakeet_mlx` not
+    being importable to drive the None return — that's true on Linux
+    CI but breaks silently on macOS dev machines where the lazy
+    import would succeed and `model.generate.return_value = []`
+    would route through the empty-list defensive branch instead.
+    The monkeypatch makes the path-under-test deterministic
+    regardless of whether parakeet-mlx is installed on the host.
+    """
     from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
 
     model = _model_with_generate(sample_rate=16000, generate_return=[])
-    # No mel_fn → _resolve_mel_fn tries `import parakeet_mlx.audio` which
-    # ImportErrors on CI (Linux, no parakeet-mlx installed) → None.
     t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=model)
+    # Force `_resolve_mel_fn` to behave as if parakeet-mlx weren't
+    # importable, regardless of whether it actually is on this host.
+    monkeypatch.setattr(t, "_resolve_mel_fn", lambda: None)
     wav = _one_second_wav(tmp_path / "x.wav")
     result = t.transcribe(wav)
 
     assert result.text == "fallback"
     model.generate.assert_not_called()
     model.transcribe.assert_called_once()
+
+
+def test_resolve_mel_fn_caches_unavailable_sentinel(monkeypatch):
+    """`_resolve_mel_fn` should attempt the lazy import at most once per
+    instance — on a host without parakeet-mlx, repeated transcribes
+    shouldn't keep re-importing (and re-logging) on every request.
+
+    Monkeypatch `builtins.__import__` so any import of parakeet_mlx /
+    mlx.core raises ImportError, then count attempts across calls.
+    After the first call sets the `_mel_fn_unavailable` latch, the
+    second call should short-circuit without touching the import
+    machinery.
+    """
+    import builtins
+
+    from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
+
+    real_import = builtins.__import__
+    import_count = {"n": 0}
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("parakeet_mlx") or name == "mlx.core":
+            import_count["n"] += 1
+            raise ImportError(f"forced for test: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=MagicMock())
+    assert t._resolve_mel_fn() is None
+    first_call_imports = import_count["n"]
+    assert first_call_imports >= 1, "lazy import should have run on first call"
+
+    # Second call: the latch should prevent any further import attempts.
+    assert t._resolve_mel_fn() is None
+    assert import_count["n"] == first_call_imports
 
 
 # ---------------------------------------------------------------------------
