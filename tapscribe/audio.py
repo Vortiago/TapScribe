@@ -113,5 +113,3 @@ def wav_rms_dbfs(path: Path) -> float:
         return -200.0
     rms = float(np.sqrt((samples.astype(np.float32) ** 2).mean()))
     return dbfs_from_rms(rms)
-
-
