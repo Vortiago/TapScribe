@@ -20,28 +20,78 @@ the picker runs:
   gate the operator picked is silently a no-op. `start.sh` runs
   `pip install -e ".[vad]"` when the module isn't importable.
 
-**`ffmpeg` is NOT required for normal operation.** The MLX backends —
-both `mlx_whisper` and `mlx_parakeet` — pre-decode the recorder's WAV
-into a numpy/mx array via `tapscribe.wav_predecode.
-load_recorder_wav_as_pcm` and feed it to the model's lower-level
-entry point (`mlx_whisper.transcribe(array, …)` and
-`model.generate(get_logmel(audio, preproc))` respectively),
-short-circuiting the bundled `load_audio()` that shells out to ffmpeg.
-The trick lives in its own module (`tapscribe/wav_predecode.py`) so
-the next contributor poking at "where do we skip ffmpeg" finds it on
-the first grep.
-Don't reintroduce a path-only call in either adapter without keeping
-the pre-decode shortcut: parakeet-mlx in particular fails mid-request
-with `RuntimeError("FFmpeg is not installed …")` deep in Starlette
-middleware when ffmpeg is absent. The adapters keep a
-`model.transcribe(str(path))` fallback for unusual WAVs (different
-sample rate / channel layout) that still needs ffmpeg — but the log
-line says so, so a recurring fallback is visible.
+**`ffmpeg` is NOT required, period.** Every MLX backend
+(`mlx_whisper`, `mlx_parakeet`, `mlx_canary`) pre-decodes the
+recorder's WAV via `tapscribe.wav_predecode.load_recorder_wav_as_pcm`
+into a numpy float32 array and hands it directly to the model's
+array-accepting entry point:
+
+- `mlx_whisper.transcribe(array, …)` for Whisper. The model's own
+  30-s internal windowing covers long inputs.
+- `parakeet_mlx.audio.get_logmel(mx.array(array), preproc)` →
+  `model.generate(mel)` for Parakeet, **inside a chunking loop**
+  (`chunk_duration_s` / `overlap_duration_s` knobs on
+  `MlxParakeetTranscriber`) so long sessions stay under the Metal
+  GPU's per-buffer cap. Per-window timestamps are shifted by the
+  window's start so the merged result is session-relative.
+- `mlx_audio.stt.models.canary.Model.generate(array, …)` for Canary,
+  **also chunked** — the upstream `max_tokens=200` default caps a
+  single call to roughly 30 s of speech, so the adapter calls
+  generate once per ~30 s window and stitches text. Canary 0.4.x's
+  `STTOutput` no longer reports segment or word-level timestamps,
+  so the adapter synthesises segment start/end from the window
+  offsets.
+
+The pre-decode trick lives in its own module
+(`tapscribe/wav_predecode.py`) so the next contributor poking at
+"where do we skip ffmpeg" finds it on the first grep. The chunking
+loops live next to their adapter and share the same shape.
+
+There is **no path-based fallback**. Non-recorder WAVs (different
+sample rate / channel layout / sample width) raise a clear
+`RuntimeError("unexpected WAV format …")` at pre-decode time — the
+operator's signal to convert the file, not a cue to silently
+re-introduce ffmpeg. Reintroducing a `model.transcribe(str(path))`
+fallback would defeat the whole point and is rejected at review.
+
+The chunk-size knobs are env-tunable today
+(`TAPSCRIBE_PARAKEET_CHUNK_S`, `TAPSCRIBE_PARAKEET_OVERLAP_S`,
+`TAPSCRIBE_CANARY_CHUNK_S`, `TAPSCRIBE_CANARY_OVERLAP_S`,
+`TAPSCRIBE_CANARY_MAX_TOKENS`). A follow-up PR will plumb per-request
+values from the dashboard through `BatchSessionRequest` so operators
+can tune from the UI without restarting the recorder — every
+operator-tunable setting belongs in the dashboard, see the
+strip-silence knobs in `web/components/session-detail.html` for the
+pattern.
 
 If a new runtime dep with the same shape (system binary, or optional
 Python package gated by a lazy import) lands, add it to the `Runtime
 python deps` block in `start.sh` rather than as a Python preflight —
 operators hit it once on bring-up instead of mid-request.
+
+### Upstream MLX symbols: lock the contract with a smoke test
+
+The MLX adapters import undocumented symbols from `mlx_whisper`,
+`parakeet_mlx.audio`, and `mlx_audio.stt.models.canary`. Upstream
+renames (Canary was renamed `Canary` → `Model` between mlx-audio
+0.3.x and 0.4.x) silently break those imports at request time,
+*after* a clean unit-test run that mocked the model object. The
+convention to catch this earlier:
+
+- **Pin a narrow upper bound** in `pyproject.toml`
+  (`mlx-audio>=0.4,<0.5`, `parakeet-mlx>=0.5,<0.6`, etc.) — primary
+  defence.
+- **Add an `importorskip`-gated smoke test** that asserts every
+  imported symbol exists with the expected shape (signature kwargs,
+  classmethod presence). One per adapter, at the bottom of
+  `tests/test_transcribers_mlx_*.py`. The test no-ops on hosts
+  where the upstream package isn't importable (the Linux CI matrix)
+  and runs in full on the macOS-arm64 CI runner.
+
+A future upstream API change then fails CI on the PR that bumps the
+pin instead of failing in production weeks later. The pattern is
+short — see `test_mlx_audio_canary_upstream_contract` in
+`tests/test_transcribers_mlx_canary.py` for the template.
 
 ## Security: avoid CodeQL "security-and-quality" tripwires
 

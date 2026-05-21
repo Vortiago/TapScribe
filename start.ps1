@@ -69,9 +69,10 @@ if ($LASTEXITCODE -ne 0) {
 # falls back to passthrough mode ("gate construction failed … falling back to
 # passthrough"), which silently disables the gate the operator picked. Install
 # the [vad] extra so the dependency is satisfied alongside the model install.
-# No-op on re-runs once installed. (No ffmpeg branch here: parakeet-mlx, the
-# only backend that previously needed a system ffmpeg, now pre-decodes the
-# recorder's WAV via tapscribe/wav_predecode.py — see CLAUDE.md.)
+# No-op on re-runs once installed. (No ffmpeg branch here: every MLX backend —
+# mlx-whisper, parakeet-mlx, and mlx-audio Canary — pre-decodes the recorder's
+# WAV via tapscribe/wav_predecode.py and skips the ffmpeg-shelling audio
+# loaders the upstream packages would otherwise use. See CLAUDE.md.)
 #
 # `find_spec` instead of `import silero_vad` so we don't pay the ~1-2s torch
 # import on every recorder bring-up just to probe whether silero-vad is on
