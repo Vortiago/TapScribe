@@ -9,7 +9,6 @@ straight against a tmpdir-rooted Recorder and a TranscriberStub.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import wave
 from datetime import UTC, datetime
@@ -117,7 +116,9 @@ def install_stub_transcriber(monkeypatch: pytest.MonkeyPatch):
 WAV_NAME = "2026-01-01T01-00-00Z__alice__abc.wav"
 
 
-def test_transcribe_one_writes_sidecar_and_returns_payload(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_one_writes_sidecar_and_returns_payload(
+    recorder_under_test, install_stub_transcriber
+):
     """Happy path: the orchestrator runs the cache layer, the sidecar
     lands on disk, and the returned dict is the freshly-written
     payload (not an in-memory shape that could drift from the file)."""
@@ -133,7 +134,7 @@ def test_transcribe_one_writes_sidecar_and_returns_payload(recorder_under_test, 
         source_lang=None,
         target_lang=None,
     )
-    payload = asyncio.run(transcribe_one(recorder_under_test, request))
+    payload = await transcribe_one(recorder_under_test, request)
 
     assert payload["text"] == "hello world"
     assert payload["transcriber"] == "fake"
@@ -145,7 +146,9 @@ def test_transcribe_one_writes_sidecar_and_returns_payload(recorder_under_test, 
     assert any(transcripts_dir.glob("*.json"))
 
 
-def test_transcribe_one_raises_wav_unreadable_on_empty_file(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_one_raises_wav_unreadable_on_empty_file(
+    recorder_under_test, install_stub_transcriber
+):
     """Files under 64 bytes (or with unreadable headers) raise before
     the model is loaded — the operator gets fast feedback, the stub
     never sees a `transcribe()` call."""
@@ -165,11 +168,13 @@ def test_transcribe_one_raises_wav_unreadable_on_empty_file(recorder_under_test,
         target_lang=None,
     )
     with pytest.raises(WavUnreadable):
-        asyncio.run(transcribe_one(recorder_under_test, request))
+        await transcribe_one(recorder_under_test, request)
     assert stub.calls == []
 
 
-def test_transcribe_one_raises_wav_too_quiet_on_silent_audio(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_one_raises_wav_too_quiet_on_silent_audio(
+    recorder_under_test, install_stub_transcriber
+):
     """All-zeros PCM trips the silence floor. The Transcriber must NOT
     be invoked — Whisper would hallucinate."""
     stub = TranscriberStub(backend="fake-be", model="fake-m")
@@ -188,11 +193,13 @@ def test_transcribe_one_raises_wav_too_quiet_on_silent_audio(recorder_under_test
         target_lang=None,
     )
     with pytest.raises(WavTooQuiet):
-        asyncio.run(transcribe_one(recorder_under_test, request))
+        await transcribe_one(recorder_under_test, request)
     assert stub.calls == []
 
 
-def test_transcribe_one_uses_session_meta_prompt_when_set(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_one_uses_session_meta_prompt_when_set(
+    recorder_under_test, install_stub_transcriber
+):
     """Override chain: session-meta beats the global config file. This
     is the same invariant exercised by the route-level test, but here
     we drive the module directly and assert on the stub's captured
@@ -224,12 +231,14 @@ def test_transcribe_one_uses_session_meta_prompt_when_set(recorder_under_test, i
         source_lang=None,
         target_lang=None,
     )
-    asyncio.run(transcribe_one(recorder_under_test, request))
+    await transcribe_one(recorder_under_test, request)
     assert captured["initial_prompt"] == "SESSION OVERRIDE"
     assert captured["hotwords"] == "Patricia"
 
 
-def test_transcribe_one_falls_back_to_global_when_meta_empty(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_one_falls_back_to_global_when_meta_empty(
+    recorder_under_test, install_stub_transcriber
+):
     captured: dict[str, str | None] = {}
 
     class _Spy(TranscriberStub):
@@ -252,7 +261,7 @@ def test_transcribe_one_falls_back_to_global_when_meta_empty(recorder_under_test
         source_lang=None,
         target_lang=None,
     )
-    asyncio.run(transcribe_one(recorder_under_test, request))
+    await transcribe_one(recorder_under_test, request)
     assert captured["initial_prompt"] == "GLOBAL DEFAULT"
     assert captured["hotwords"] == "Acme"
 
@@ -268,7 +277,9 @@ SESSION_WAVS = [
 ]
 
 
-def test_transcribe_session_writes_outputs_and_returns_merged(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_session_writes_outputs_and_returns_merged(
+    recorder_under_test, install_stub_transcriber
+):
     """Drives the loop, the merge, AND the file writes. Returns the
     same dict that landed in session-transcript.json on disk."""
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m", text="merged"))
@@ -285,7 +296,7 @@ def test_transcribe_session_writes_outputs_and_returns_merged(recorder_under_tes
         source_lang=None,
         target_lang=None,
     )
-    merged = asyncio.run(transcribe_session(recorder_under_test, request))
+    merged = await transcribe_session(recorder_under_test, request)
 
     assert merged["model"] == "fake-m"
     assert (sd / "session-transcript.json").is_file()
@@ -294,7 +305,9 @@ def test_transcribe_session_writes_outputs_and_returns_merged(recorder_under_tes
     assert written == merged
 
 
-def test_transcribe_session_releases_jobtracker_on_success(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_session_releases_jobtracker_on_success(
+    recorder_under_test, install_stub_transcriber
+):
     """Whether the loop succeeds OR raises, the JobTracker slot must
     be released. Otherwise a single bad run would wedge the session
     forever (the next call would 409 even after the operator fixed
@@ -313,11 +326,13 @@ def test_transcribe_session_releases_jobtracker_on_success(recorder_under_test, 
         source_lang=None,
         target_lang=None,
     )
-    asyncio.run(transcribe_session(recorder_under_test, request))
+    await transcribe_session(recorder_under_test, request)
     assert recorder_under_test.jobs.get("s") is None
 
 
-def test_transcribe_session_releases_jobtracker_on_exception(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_session_releases_jobtracker_on_exception(
+    recorder_under_test, install_stub_transcriber
+):
     """A mid-loop transcriber crash must still release the slot."""
 
     class _Boom(TranscriberStub):
@@ -339,26 +354,24 @@ def test_transcribe_session_releases_jobtracker_on_exception(recorder_under_test
         target_lang=None,
     )
     with pytest.raises(RuntimeError, match="model exploded"):
-        asyncio.run(transcribe_session(recorder_under_test, request))
+        await transcribe_session(recorder_under_test, request)
     assert recorder_under_test.jobs.get("s") is None
 
 
-def test_transcribe_session_raises_session_busy_when_slot_taken(
+async def test_transcribe_session_raises_session_busy_when_slot_taken(
     recorder_under_test, install_stub_transcriber
 ):
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m"))
     _seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
     # Pre-claim the slot — as if another transcribe were in flight.
-    asyncio.run(
-        recorder_under_test.jobs.claim(
-            JobState(
-                session="s",
-                kind="transcribe",
-                current=0,
-                total=1,
-                started_at=datetime.now(UTC),
-                status="running",
-            )
+    await recorder_under_test.jobs.claim(
+        JobState(
+            session="s",
+            kind="transcribe",
+            current=0,
+            total=1,
+            started_at=datetime.now(UTC),
+            status="running",
         )
     )
 
@@ -374,10 +387,10 @@ def test_transcribe_session_raises_session_busy_when_slot_taken(
         target_lang=None,
     )
     with pytest.raises(SessionBusy):
-        asyncio.run(transcribe_session(recorder_under_test, request))
+        await transcribe_session(recorder_under_test, request)
 
 
-def test_transcribe_session_raises_no_usable_wavs_on_empty_range(
+async def test_transcribe_session_raises_no_usable_wavs_on_empty_range(
     recorder_under_test, install_stub_transcriber
 ):
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m"))
@@ -396,10 +409,10 @@ def test_transcribe_session_raises_no_usable_wavs_on_empty_range(
         target_lang=None,
     )
     with pytest.raises(NoUsableWavs):
-        asyncio.run(transcribe_session(recorder_under_test, request))
+        await transcribe_session(recorder_under_test, request)
 
 
-def test_transcribe_session_raises_invalid_range_on_unparseable_iso(
+async def test_transcribe_session_raises_invalid_range_on_unparseable_iso(
     recorder_under_test, install_stub_transcriber
 ):
     """Unparseable from_iso surfaces as `InvalidRange` — the route maps
@@ -420,10 +433,10 @@ def test_transcribe_session_raises_invalid_range_on_unparseable_iso(
         target_lang=None,
     )
     with pytest.raises(InvalidRange):
-        asyncio.run(transcribe_session(recorder_under_test, request))
+        await transcribe_session(recorder_under_test, request)
 
 
-def test_transcribe_session_progress_updates_per_wav(recorder_under_test, install_stub_transcriber):
+async def test_transcribe_session_progress_updates_per_wav(recorder_under_test, install_stub_transcriber):
     """Per-WAV progress lands in the JobTracker BEFORE each transcribe
     call, so the dashboard's once-per-second poll sees `current` advance
     in real time. We capture the observed progress sequence inside the
@@ -458,7 +471,7 @@ def test_transcribe_session_progress_updates_per_wav(recorder_under_test, instal
         source_lang=None,
         target_lang=None,
     )
-    asyncio.run(transcribe_session(recorder_under_test, request))
+    await transcribe_session(recorder_under_test, request)
 
     assert observed_currents == [0, 1]
     assert observed_files == list(SESSION_WAVS)

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import shutil
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -157,13 +158,20 @@ def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | No
     """Parse an optional numeric body field with range enforcement.
     None / missing → returned unchanged so the downstream "field not
     supplied" semantics still work. Anything else must round-trip
-    through `float()` and land in [lo, hi]; otherwise raise 400."""
+    through `float()`, be finite, and land in [lo, hi]; otherwise
+    raise 400. The explicit finite check matters because
+    `lo <= NaN <= hi` is always False AND `NaN` happily survives
+    `float()` — without the check a `{"gate_speech_threshold": NaN}`
+    payload would slip past with a confusing "must be in […]" error
+    that names NaN as the offending value."""
     if raw is None:
         return None
     try:
         value = float(raw)
     except (TypeError, ValueError) as e:
         raise HTTPException(400, f"{field} must be a number, got {raw!r}") from e
+    if not math.isfinite(value):
+        raise HTTPException(400, f"{field} must be a finite number, got {value}")
     if not (lo <= value <= hi):
         raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
     return value

@@ -21,7 +21,14 @@ _MISSING = object()
 def _lookup(payload: Any, key: str, default: Any = "") -> Any:
     """Read `key` from `payload`. Dict lookup if the payload is a dict,
     `getattr` otherwise. Missing → `default`. Single-key form mirrors
-    the pre-consolidation `_lookup` helper that lived in each adapter."""
+    the pre-consolidation `_lookup` helper that lived in each adapter.
+
+    Note: `base._lookup` is a sibling helper with `default=None`. The
+    divergence is intentional — this module's callers (`_first_truthy`
+    + direct calls in `build_segments_from_nemo_payload`) test on
+    truthiness, so an empty-string default avoids spurious None / int
+    comparisons. `base._lookup` is used by `Word.from_payload` where
+    None is the documented "field absent" sentinel for `prob`."""
     if isinstance(payload, dict):
         return payload.get(key, default)
     value = getattr(payload, key, _MISSING)

@@ -486,6 +486,18 @@ def test_live_start_rejects_unparseable_gate_knobs(client):
     assert r.status_code == 400, r.text
 
 
+def test_live_start_rejects_non_finite_gate_knobs(client):
+    """JSON doesn't emit NaN / Infinity but `float()` accepts those
+    spellings — a hand-crafted client could slip them past the range
+    check (lo <= NaN <= hi is always False so the comparison fails
+    silently with a confusing "must be in […]" error). `math.isfinite`
+    rejects them with a clear "must be a finite number"."""
+    for bad in ("NaN", "Infinity", "-Infinity"):
+        r = client.post("/api/live/start", json={"gate_speech_threshold": bad})
+        assert r.status_code == 400, f"{bad!r} returned {r.status_code}: {r.text}"
+        assert "finite" in r.text.lower(), f"{bad!r} error message: {r.text}"
+
+
 def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_test):
     """The per-row rec/live toggles render their state from the active
     entry's record/live fields. Those must follow the *current*
@@ -1149,6 +1161,112 @@ def test_api_transcribe_returns_freshly_written_transcript(client, recorder_unde
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     assert not wav.with_suffix(".json").is_file()
     assert wav.with_suffix(".transcripts").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Route-layer error mapping: each domain exception raised by
+# tapscribe.batch_transcribe must surface as the documented HTTP status.
+# These guard the wire contract that the dashboard and any external HTTP
+# client rely on; a regression here is silent until something downstream
+# blows up.
+# ---------------------------------------------------------------------------
+
+
+def test_api_transcribe_returns_422_for_empty_wav(client, recorder_under_test):
+    """An on-disk WAV file shorter than 64 bytes (truncated upload,
+    aborted recording, etc.) maps to `WavUnreadable` in the orchestrator,
+    which the route translates to 422 so the dashboard can surface a
+    clear error rather than waiting on a stalled model."""
+    root = recorder_under_test.recordings_dir
+    sd = root / "s"
+    sd.mkdir(parents=True)
+    (sd / "2026-01-01T01-00-00Z__alice__abc.wav").write_bytes(b"")  # 0 bytes
+
+    r = client.post(
+        "/api/transcribe",
+        json={"session": "s", "name": "2026-01-01T01-00-00Z__alice__abc.wav", "model": "tiny.en"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_api_transcribe_returns_422_for_silent_wav(client, recorder_under_test):
+    """An all-zeros WAV trips the silence floor (`WavTooQuiet`) before
+    any model is loaded. Without the 422 mapping Whisper would chew
+    through noise and produce a hallucinated transcript."""
+    root = recorder_under_test.recordings_dir
+    sd = root / "s"
+    sd.mkdir(parents=True)
+    # amplitude=0 → all-zero samples → -inf dBFS, far below SILENT_RMS_DBFS_FLOOR.
+    _seed_wav(sd / "2026-01-01T01-00-00Z__alice__abc.wav", amplitude=0)
+
+    r = client.post(
+        "/api/transcribe",
+        json={"session": "s", "name": "2026-01-01T01-00-00Z__alice__abc.wav", "model": "tiny.en"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_api_transcribe_session_returns_400_for_unparseable_from_iso(client, recorder_under_test):
+    """`InvalidRange` is the "syntactically wrong input" path —
+    distinct from `NoUsableWavs` (empty result with valid inputs).
+    Routes map it to 400 so an operator typing a bad timestamp gets
+    a "client error, fix your input" signal instead of a 404 that
+    would suggest the session was empty."""
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+
+    r = client.post(
+        "/api/transcribe-session",
+        json={"session": "s", "model": "tiny.en", "from_iso": "not-a-timestamp"},
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_api_transcribe_session_returns_404_for_empty_range(client, recorder_under_test):
+    """Valid inputs but the session has no WAVs. The dashboard's "no
+    transcripts to merge" path depends on the 404."""
+    (recorder_under_test.recordings_dir / "s").mkdir(parents=True)
+
+    r = client.post(
+        "/api/transcribe-session",
+        json={"session": "s", "model": "tiny.en"},
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_api_transcribe_session_returns_409_when_job_already_in_flight(client, recorder_under_test):
+    """One transcribe / strip job per session at a time. Pre-claiming
+    the slot simulates a concurrent operator click; the route must
+    refuse with 409 rather than corrupting JobTracker state by
+    starting a second loop alongside the first."""
+    from tapscribe.recorder import JobState
+
+    root = recorder_under_test.recordings_dir
+    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+
+    # Pre-claim the slot — TestClient's sync API doesn't expose the loop,
+    # but JobTracker.claim is async. anyio.from_thread mirrors the
+    # pattern starlette.testclient uses internally for sync→async calls.
+    import anyio.from_thread
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.jobs.claim,
+            JobState(
+                session="s",
+                kind="strip",
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+                status="running",
+            ),
+        )
+
+    r = client.post(
+        "/api/transcribe-session",
+        json={"session": "s", "model": "tiny.en"},
+    )
+    assert r.status_code == 409, r.text
 
 
 def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_test):
