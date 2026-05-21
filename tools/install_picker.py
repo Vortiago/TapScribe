@@ -317,11 +317,36 @@ class Selection:
 # ---------------------------------------------------------------------------
 
 
+def backend_in_catalog(fam: FamilyDef, backend_key: str) -> bool:
+    """True iff `backend_key` is one of the backends this family currently
+    declares. `BACKEND_BOTH` is a virtual key (not a BackendDef) but a
+    valid catalog choice when the family has ≥2 backends declared."""
+    if backend_key == BACKEND_BOTH:
+        return len(fam.backends) >= 2
+    return any(b.key == backend_key for b in fam.backends)
+
+
 def effective_backends(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps) -> list[BackendDef]:
     """Filter the operator's requested backend down to what this machine
-    can actually install. A stale MLX choice on a Linux box silently
-    downgrades to CPU/CUDA — we don't bother prompting because the user
-    can change it from the picker if they want."""
+    can actually install.
+
+    Two failure shapes when the requested backend isn't in `available_backends`:
+
+    1. The backend exists in the family's catalog but this host can't run
+       it (e.g. saved MLX choice opened on a Linux box). Silently
+       downgrade to the first available backend — the operator's intent
+       was "install Whisper", and falling back to CPU keeps the install
+       producing something usable. They can re-pick from the menu if
+       they want.
+    2. The backend is no longer in the family's catalog at all (e.g.
+       `canary-mlx` was removed in PR #61). The previously-saved choice
+       describes a backend that no longer exists, so silently picking
+       the *other* backend would drag in a heavy alternative the
+       operator didn't choose — Canary on Apple Silicon falling back
+       from MLX to NeMo+kaldialign+cmake is exactly the regression that
+       motivated this split. Return `[]` and let the renderer / main
+       loop surface the situation so the operator re-picks deliberately.
+    """
     avail = available_backends(fam, caps)
     if not avail:
         return []
@@ -330,7 +355,24 @@ def effective_backends(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps) 
     matched = next((b for b in avail if b.key == choice.backend), None)
     if matched is not None:
         return [matched]
+    if not backend_in_catalog(fam, choice.backend):
+        return []
     return [avail[0]]
+
+
+def families_with_removed_backend(selection: Selection, caps: MachineCaps) -> list[FamilyDef]:
+    """Families whose saved `enabled+backend` points at a backend that
+    isn't in the family's catalog anymore (a PR removed it). The picker
+    surfaces these so the operator re-picks instead of silently inheriting
+    a heavy alternative."""
+    out: list[FamilyDef] = []
+    for fam in FAMILIES:
+        choice = selection.choices.get(fam.key)
+        if not choice or not choice.enabled:
+            continue
+        if not backend_in_catalog(fam, choice.backend):
+            out.append(fam)
+    return out
 
 
 def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
@@ -349,9 +391,17 @@ def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
         choice = selection.choices.get(fam.key)
         if not choice or not choice.enabled:
             continue
+        backends = effective_backends(fam, choice, caps)
+        if not backends:
+            # No backend resolved — either no available backend on this
+            # host or the saved backend was removed from the catalog.
+            # Skip the family entirely (shared extras included) so we
+            # don't install half a family. The operator's notice is
+            # surfaced separately in `main()`.
+            continue
         for extra in fam.shared_extras:
             add(extra)
-        for be in effective_backends(fam, choice, caps):
+        for be in backends:
             for extra in be.extras:
                 add(extra)
     return out
@@ -441,6 +491,11 @@ def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None
             extras = family_extras_preview(fam, choice, caps)
             if extras:
                 lines.append(f"          Installs: [{', '.join(extras)}]")
+            elif not backend_in_catalog(fam, choice.backend):
+                lines.append(
+                    f"          Installs: (nothing — the '{choice.backend}' backend was removed "
+                    "in a recent update; re-pick to confirm a fallback)"
+                )
             else:
                 lines.append("          Installs: (nothing — no backend available)")
         else:
@@ -888,6 +943,24 @@ def main(argv: list[str] | None = None) -> int:
     caps = detect_caps(force_no_mlx=args.no_mlx)
     first_run = not STATE_FILE.exists()
     selection = Selection.load(STATE_FILE, caps)
+
+    # Warn the operator (always, before either picker path) about saved
+    # backends that the catalog no longer ships. Without this, a removed
+    # backend silently produced no extras in non-interactive mode and
+    # silently a *different* backend's extras in older interactive runs
+    # — both surprised the operator. See `effective_backends` for the
+    # split-rationale; this is the user-visible half.
+    removed = families_with_removed_backend(selection, caps)
+    for fam in removed:
+        backend = selection.choices[fam.key].backend
+        print(
+            f"[install-picker] WARNING: '{fam.key}' was saved with backend "
+            f"'{backend}', which is no longer in this version's catalog. "
+            "Not auto-selecting an alternative — re-pick from the menu, or "
+            "edit .tapscribe-install.json. The family will be skipped this run.",
+            file=sys.stderr,
+            flush=True,
+        )
 
     interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
     if interactive:

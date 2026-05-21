@@ -1,0 +1,125 @@
+name: install matrix
+
+# Real `pip install -e .[…]` across every supported OS + every model
+# family. The goal is to catch install regressions before an operator
+# does — the canonical motivator is PR #61, where `canary-mlx` was
+# removed from the catalog and an operator's saved `backend=mlx` choice
+# silently fell back to `canary-cpu` → NeMo → kaldialign → cmake build
+# failure on macOS. Unit tests didn't catch it because none of them
+# actually ran pip.
+#
+# Path-gated: only install-affecting files trigger this workflow. The
+# matrix is expensive (NeMo + torch + transformers + faster-whisper
+# pull several GB per job) so we don't run it on every PR — only the
+# ones that could plausibly break the install.
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+    paths:
+      - 'pyproject.toml'
+      - 'tools/install_picker.py'
+      - 'start.sh'
+      - 'start.ps1'
+      - '.github/workflows/install-matrix.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pyproject.toml'
+      - 'tools/install_picker.py'
+      - 'start.sh'
+      - 'start.ps1'
+      - '.github/workflows/install-matrix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    name: install (${{ matrix.os }} · ${{ matrix.family }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # One job per model family — gives a clear "Canary broke on
+        # macOS" signal in the PR check list instead of a single
+        # opaque "install matrix failed" red mark. The picker
+        # composes each family from its atomic extras; the umbrella
+        # alias `[canary]` is what `start.sh` would land on for an
+        # operator who ticked the Canary row, so we test that exact
+        # surface (not the underlying `canary-cpu` atom).
+        family: [whisper, voxtral, parakeet, canary]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          # No pip cache: we explicitly want to see fresh resolves so
+          # cache-poisoning from prior runs doesn't hide a regression.
+
+      - name: Install build prerequisites (Linux)
+        if: runner.os == 'Linux'
+        # NeMo's transitive `kaldialign` builds a C++ extension via
+        # cmake. ubuntu-latest already has cmake on PATH, but we list
+        # it explicitly so a future runner-image change doesn't
+        # silently drop the prereq.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Install build prerequisites (macOS)
+        if: runner.os == 'macOS'
+        # macOS GitHub runners ship cmake pre-installed (image
+        # manifest documents it), but we surface a `cmake --version`
+        # so an absent-cmake CI failure has a legible message before
+        # pip starts.
+        run: |
+          which cmake || brew install cmake
+          cmake --version
+
+      - name: Install build prerequisites (Windows)
+        if: runner.os == 'Windows'
+        # windows-latest ships cmake; `where` is the equivalent of
+        # `which`. NeMo on Windows is partially supported upstream so
+        # an install failure here is information either way.
+        run: |
+          where cmake
+          cmake --version
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Run install picker dry-run (sanity)
+        # Sanity check that the picker's resolved argv is something
+        # pip is willing to look at, before we hand it the heavy job.
+        # The umbrella alias maps to whichever atomic extras the
+        # current pyproject lists — so this also catches "alias
+        # references a removed atomic extra" regressions.
+        run: python tools/install_picker.py --dry-run --non-interactive
+
+      - name: Install tapscribe + ${{ matrix.family }} extra
+        # The actual install. The umbrella aliases (`[whisper]`,
+        # `[parakeet]`, …) self-expand to the right CPU+MLX atomic
+        # combination for the host; env markers make the MLX atoms
+        # no-ops off Apple Silicon. If this step fails, an operator
+        # running `start.sh` on this OS will hit the same failure —
+        # which is the whole point of this workflow.
+        run: python -m pip install -e ".[${{ matrix.family }}]"
+
+      - name: Verify package import
+        # `pip install` succeeding doesn't prove the package is
+        # importable (a backend can install cleanly but expose a
+        # broken module). The import is the contract `start.sh`
+        # relies on, so verify it.
+        run: python -c "import tapscribe; print(tapscribe.__name__, 'OK')"
