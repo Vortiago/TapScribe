@@ -1,3 +1,4 @@
+// @ts-check
 // Merged session transcript: one chronological flow of segments (including
 // suppressed lines as strikethrough) plus the speaking-time stacked bar,
 // meta strip, and a collapsible hallucination-audit table.
@@ -6,15 +7,35 @@ import { tpl, slot, pick } from "../templates.js";
 import { aliasOf } from "../speakers.js";
 import { fmtClock, fmtDur, fmtMs, truncMid } from "../formatters.js";
 
+/**
+ * @typedef {{
+ *   kind: "ok",
+ *   ts: string, hms: string, speaker: string, text: string,
+ *   lowConf: boolean, confidence: number | null,
+ * } | {
+ *   kind: "sup",
+ *   ts: string, hms: string, speaker: string, text: string, rule: string,
+ * }} MergedItem
+ */
+
 // `spkClass(name)` resolves the canonical 0..4 colour index from the
 // session's speaker list — the same indexing the merged transcript itself
 // emits, so a speaker's colour matches the speaking-time bar.
+/**
+ * @param {string[]} speakers
+ * @param {string} raw
+ */
 function spkClassOf(speakers, raw) {
   const i = speakers.indexOf(raw);
   return `who-${i >= 0 ? i % 5 : 0}`;
 }
 
+/**
+ * @param {import('../types.js').MergedTranscript} t
+ * @returns {MergedItem[]}
+ */
 function buildItems(t) {
+  /** @type {MergedItem[]} */
   const items = [];
   for (const seg of t.segments || []) {
     items.push({
@@ -41,6 +62,12 @@ function buildItems(t) {
   return items;
 }
 
+/**
+ * @param {DocumentFragment} frag
+ * @param {string[]} speakers
+ * @param {Record<string, number>} speakingByName
+ * @param {Record<string, string>} aliases
+ */
 function buildSpkBar(frag, speakers, speakingByName, aliases) {
   const totalRaw = speakers.reduce((acc, name) => acc + (speakingByName[name] || 0), 0);
   if (!speakers.length || !totalRaw) return;
@@ -52,27 +79,33 @@ function buildSpkBar(frag, speakers, speakingByName, aliases) {
   legend.hidden = false;
 
   for (let i = 0; i < speakers.length; i++) {
-    const sec = speakingByName[speakers[i]] || 0;
+    const spkName = speakers[i] ?? "";
+    const sec = speakingByName[spkName] || 0;
     const pct = ((sec / total) * 100).toFixed(2);
-    const display = aliasOf(speakers[i], aliases);
+    const display = aliasOf(spkName, aliases);
 
-    const cell = tpl("tpl-spk-bar-cell").firstElementChild;
-    cell.dataset.spk = i % 5;
+    const cell = /** @type {HTMLElement} */ (tpl("tpl-spk-bar-cell").firstElementChild);
+    cell.dataset.spk = String(i % 5);
     cell.style.width = `${pct}%`;
     cell.title = `${display} · ${fmtDur(sec)}`;
     bar.appendChild(cell);
 
     const entry = tpl("tpl-spk-legend-entry");
-    const root = entry.firstElementChild;
-    root.querySelector(".sw").dataset.spk = i % 5;
+    const root = /** @type {HTMLElement} */ (entry.firstElementChild);
+    /** @type {HTMLElement} */ (root.querySelector(".sw")).dataset.spk = String(i % 5);
     const nameEl = pick(root, "name");
     nameEl.textContent = display;
-    nameEl.dataset.spk = i % 5;
+    nameEl.dataset.spk = String(i % 5);
     pick(root, "pct").textContent = `${((sec / total) * 100).toFixed(0)}%`;
     legend.appendChild(entry);
   }
 }
 
+/**
+ * @param {HTMLElement} host
+ * @param {import('../types.js').MergedTranscript} t
+ * @param {number} lowCount
+ */
 function buildMetaStrip(host, t, lowCount) {
   host.append(
     "merged at ", coloredSpan("fg", fmtClock(t.transcribed_at)),
@@ -83,6 +116,10 @@ function buildMetaStrip(host, t, lowCount) {
   if (t.suppressed_count > 0) host.append(" · ", coloredSpan("c-rec", `${t.suppressed_count} suppressed`));
 }
 
+/**
+ * @param {string} cls
+ * @param {string} text
+ */
 function coloredSpan(cls, text) {
   const s = document.createElement("span");
   s.className = cls;
@@ -90,9 +127,14 @@ function coloredSpan(cls, text) {
   return s;
 }
 
+/**
+ * @param {MergedItem} it
+ * @param {string[]} speakers
+ * @param {Record<string, string>} aliases
+ */
 function buildLine(it, speakers, aliases) {
   const node = tpl("tpl-merged-line");
-  const row = node.firstElementChild;
+  const row = /** @type {HTMLElement} */ (node.firstElementChild);
   pick(row, "ts").textContent = `[${it.hms}]`;
   const label = pick(row, "speakerLabel");
   label.className = spkClassOf(speakers, it.speaker);
@@ -102,7 +144,7 @@ function buildLine(it, speakers, aliases) {
   const body = pick(row, "body");
 
   if (it.kind === "sup") {
-    const seg = tpl("tpl-merged-seg-suppressed").firstElementChild;
+    const seg = /** @type {HTMLElement} */ (tpl("tpl-merged-seg-suppressed").firstElementChild);
     seg.title = `suppressed · matched: ${it.rule}`;
     seg.textContent = it.text;
     body.replaceWith(seg);
@@ -115,17 +157,22 @@ function buildLine(it, speakers, aliases) {
     // exp(avg_logprob) ≈ geometric-mean per-token prob, a reasonable proxy.
     const pct = it.confidence != null ? (Math.exp(it.confidence) * 100).toFixed(0) : "?";
     pick(seg, "pct").textContent = `⚑ ${pct}%`;
-    body.replaceWith(seg.firstElementChild);
+    body.replaceWith(/** @type {HTMLElement} */ (seg.firstElementChild));
   } else {
     // The template's <span> *is* the slot — set textContent directly
     // rather than picking a descendant that doesn't exist.
-    const seg = tpl("tpl-merged-seg-ok").firstElementChild;
+    const seg = /** @type {HTMLElement} */ (tpl("tpl-merged-seg-ok").firstElementChild);
     seg.textContent = it.text;
     body.replaceWith(seg);
   }
   return node;
 }
 
+/**
+ * @param {HTMLElement} host
+ * @param {import('../types.js').MergedTranscript} t
+ * @param {boolean} showAudit
+ */
 function buildAudit(host, t, showAudit) {
   const wrapper = tpl("tpl-audit-wrapper");
   pick(wrapper, "toggle").textContent =
@@ -148,6 +195,12 @@ function buildAudit(host, t, showAudit) {
   host.appendChild(wrapper);
 }
 
+/**
+ * @param {import('../types.js').MergedTranscript} t
+ * @param {import('../types.js').EffectiveMeta | null | undefined} meta
+ * @param {{ showAudit: boolean }} opts
+ * @returns {DocumentFragment}
+ */
 export function render(t, meta, { showAudit }) {
   const items = buildItems(t);
   const speakers = t.speakers || [];
@@ -157,7 +210,7 @@ export function render(t, meta, { showAudit }) {
 
   const lowCount = typeof t.low_confidence_count === "number"
     ? t.low_confidence_count
-    : items.filter((it) => it.lowConf).length;
+    : items.filter((it) => it.kind === "ok" && it.lowConf).length;
 
   const frag = tpl("tpl-merged");
   pick(frag, "headerMeta").textContent =
@@ -170,7 +223,7 @@ export function render(t, meta, { showAudit }) {
   if (t.target_language) {
     const badge = pick(frag, "translateBadge");
     badge.hidden = false;
-    const src = t.source_language || t.language || "?";
+    const src = t.source_language || "?";
     badge.textContent = ` → translated ${src} → ${t.target_language}`;
     badge.title = "Output language differs from input — this is a translation, not a verbatim transcript.";
   }

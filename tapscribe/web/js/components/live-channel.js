@@ -68,8 +68,8 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   lastSig = sig;
 
   const frag = tpl("tpl-live-channel");
-  const sel = frag.querySelector("#liveModelSelect");
-  const langInput = frag.querySelector("#liveLangInput");
+  const sel = /** @type {HTMLSelectElement} */ (frag.querySelector("#liveModelSelect"));
+  const langInput = /** @type {HTMLInputElement} */ (frag.querySelector("#liveLangInput"));
   const currentModel = li.model || "tiny.en";
 
   // Group live-eligible models by family (Whisper / NB-Whisper / …). If
@@ -118,10 +118,10 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   // option is greyed out (disabled) when the current LiveChannel has
   // no native VAD — picking it would be a no-op since there's nothing
   // backend-side to defer gating to.
-  const gateSel = frag.querySelector("#liveGateKindSelect");
+  const gateSel = /** @type {HTMLSelectElement | null} */ (frag.querySelector("#liveGateKindSelect"));
   if (gateSel) {
     gateSel.value = li.gate_kind || "tapscribe";
-    const backendOpt = gateSel.querySelector('option[value="backend"]');
+    const backendOpt = /** @type {HTMLOptionElement | null} */ (gateSel.querySelector('option[value="backend"]'));
     if (backendOpt) {
       backendOpt.disabled = !supportsNativeVad;
       backendOpt.textContent = supportsNativeVad
@@ -129,11 +129,11 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
         : "Backend native VAD (not supported)";
     }
   }
-  const threshEl = frag.querySelector("#liveGateThreshold");
+  const threshEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGateThreshold"));
   if (threshEl) threshEl.value = li.gate_speech_threshold || "0.50";
-  const hangEl = frag.querySelector("#liveGateHangover");
+  const hangEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGateHangover"));
   if (hangEl) hangEl.value = li.gate_hangover_ms || "400";
-  const prerollEl = frag.querySelector("#liveGatePreRoll");
+  const prerollEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGatePreRoll"));
   if (prerollEl) prerollEl.value = li.gate_pre_roll_ms || "300";
 
   const starting = state === "starting";
@@ -177,11 +177,11 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
 
   // Init-prompt expandable. Hidden when no installed live model supports
   // initial_prompt (registry-driven via inputs_support.live_prompt).
-  const initRow = pick(frag, "initPromptRow");
+  const initRow = /** @type {HTMLDetailsElement} */ (pick(frag, "initPromptRow"));
   if (sup.live_prompt) {
     initRow.hidden = false;
     pick(frag, "initPromptCount").textContent = lp.length ? `· ${lp.length} chars` : "";
-    frag.querySelector("#liveInitPromptText").value = lp.content || "";
+    /** @type {HTMLTextAreaElement} */ (frag.querySelector("#liveInitPromptText")).value = lp.content || "";
     // Default-open the editor when populated so the operator sees what's
     // in effect; collapsed when empty to keep the panel compact.
     initRow.open = !!lp.length;

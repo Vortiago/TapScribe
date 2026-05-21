@@ -1,8 +1,13 @@
+// @ts-check
 // Top-of-page ribbon: session status line + recording pill state.
 
 import { tpl, mount, slot } from "../templates.js";
 import { fmtElapsed } from "../formatters.js";
 
+/**
+ * @param {import('../types.js').AppState} j
+ * @param {import('../types.js').RibbonCtx} ctx
+ */
 export function renderStatus(j, { statusEl }) {
   const sess = (j.sessions || []).find((s) => s.is_current) || (j.sessions || [])[0];
   const elapsed = sess?.earliest_iso
@@ -16,10 +21,18 @@ export function renderStatus(j, { statusEl }) {
   mount(statusEl, frag);
 }
 
+/**
+ * @param {HTMLElement} statusEl
+ * @param {string} msg
+ */
 export function renderError(statusEl, msg) {
   mount(statusEl, slot(tpl("tpl-ribbon-error"), { msg: `recorder unreachable: ${msg}` }));
 }
 
+/**
+ * @param {{ pillEl: HTMLElement }} ctx
+ * @param {boolean} enabled
+ */
 export function renderRecPill({ pillEl }, enabled) {
   pillEl.classList.toggle("paused", !enabled);
   pillEl.title = enabled

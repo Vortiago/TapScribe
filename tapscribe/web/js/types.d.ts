@@ -375,7 +375,7 @@ export interface SessionDetailCtx {
   effectiveMeta: (s: Session | null) => EffectiveMeta;
   deriveSpeakerKeys: (s: Session | null) => string[];
   // Sub-component delegate
-  renderMerged: (t: MergedTranscript, meta: EffectiveMeta) => void;
+  renderMerged: (t: MergedTranscript, meta: EffectiveMeta) => Node;
   // Mutation callbacks
   onTranscribeSession: (sessId: string) => void;
   onCopyMerged: (sessId: string, btn: HTMLButtonElement) => void;

@@ -1,3 +1,4 @@
+// @ts-check
 // Active taps panel — one row per live audio source the recorder is
 // currently receiving bytes from.
 
@@ -5,6 +6,10 @@ import { tpl, mount, pick } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
 
+/**
+ * @param {import('../types.js').AppState} j
+ * @param {import('../types.js').ActiveTapsCtx} ctx
+ */
 export function render(j, { countEl, badgeEl, bodyEl }) {
   const list = j.active || [];
   countEl.textContent = String(list.length);
@@ -27,10 +32,10 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
     const filename = a.filename || "";
 
     const node = tpl("tpl-stream-row");
-    const row = node.querySelector(".stream-row");
+    const row = /** @type {HTMLElement} */ (node.querySelector(".stream-row"));
 
     const marker = pick(row, "spkMarker");
-    marker.dataset.spk = speakerIndex(a.name || ident);
+    marker.dataset.spk = String(speakerIndex(a.name || ident));
 
     pick(row, "name").textContent = a.name || "<anon>";
     const identEl = pick(row, "ident");
@@ -76,7 +81,7 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
       lagEl.classList.toggle("lag-bad", lag >= 2);
     }
 
-    for (const btn of row.querySelectorAll(".tap-toggle")) {
+    for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (row.querySelectorAll(".tap-toggle"))) {
       const which = btn.dataset.toggle;
       const on = which === "record" ? recOn : liveOn;
       btn.dataset.identity = ident;

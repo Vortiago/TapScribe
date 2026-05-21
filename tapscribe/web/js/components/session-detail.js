@@ -99,7 +99,7 @@ function buildSourceRow(host, s, sessKey, ctx) {
   const current = (want === "stripped" && !stripped) ? "original" : want;
 
   const orig = tpl("tpl-source-original");
-  const origInput = orig.querySelector("input");
+  const origInput = /** @type {HTMLInputElement} */ (orig.querySelector("input"));
   origInput.name = `src-${sessKey}`;
   origInput.dataset.sessId = sessKey;
   if (current === "original") origInput.checked = true;
@@ -108,7 +108,7 @@ function buildSourceRow(host, s, sessKey, ctx) {
 
   if (stripped) {
     const sub = tpl("tpl-source-stripped");
-    const subInput = sub.querySelector("input");
+    const subInput = /** @type {HTMLInputElement} */ (sub.querySelector("input"));
     subInput.name = `src-${sessKey}`;
     subInput.dataset.sessId = sessKey;
     if (current === "stripped") subInput.checked = true;
@@ -154,7 +154,7 @@ function buildSilenceCtl(host, s, sessKey, ctx) {
   }
   if (s.stripped) {
     const frag = tpl("tpl-silence-existing");
-    for (const btn of frag.querySelectorAll("[data-strip-run], [data-strip-remove]")) {
+    for (const btn of /** @type {NodeListOf<HTMLElement>} */ (frag.querySelectorAll("[data-strip-run], [data-strip-remove]"))) {
       const attr = btn.hasAttribute("data-strip-run") ? "stripRun" : "stripRemove";
       btn.dataset[attr] = sessKey;
     }
@@ -163,7 +163,7 @@ function buildSilenceCtl(host, s, sessKey, ctx) {
     host.appendChild(frag);
   } else {
     const frag = tpl("tpl-silence-none");
-    frag.querySelector("[data-strip-run]").dataset.stripRun = sessKey;
+    /** @type {HTMLElement} */ (frag.querySelector("[data-strip-run]")).dataset.stripRun = sessKey;
     appendStripSettings(frag, sessKey, ctx);
     host.appendChild(frag);
   }
@@ -217,7 +217,7 @@ export function sessionProgressInner(s, sessInflight) {
  */
 function buildActionRow(host, s, sessKey, ctx) {
   const { node, busy } = sessionProgressInner(s, ctx.sessInflight);
-  const btn = tpl("tpl-sess-tx-button").firstElementChild;
+  const btn = /** @type {HTMLButtonElement} */ (tpl("tpl-sess-tx-button").firstElementChild);
   btn.dataset.txSess = sessKey;
   if (busy) btn.disabled = true;
   if (!s.session_transcript) btn.classList.add("primary");
@@ -226,7 +226,7 @@ function buildActionRow(host, s, sessKey, ctx) {
   host.appendChild(btn);
 
   if (s.session_transcript) {
-    const copy = tpl("tpl-sess-copy-button").firstElementChild;
+    const copy = /** @type {HTMLButtonElement} */ (tpl("tpl-sess-copy-button").firstElementChild);
     copy.dataset.copySess = sessKey;
     host.appendChild(copy);
   }
@@ -239,8 +239,8 @@ function buildActionRow(host, s, sessKey, ctx) {
 function buildBackendChips(host, ctx) {
   const available = new Set(ctx.modelCatalog?.available_backends || []);
   for (const kind of ["auto", "mlx", "cuda", "cpu"]) {
-    const chip = tpl("tpl-backend-chip").firstElementChild;
-    chip.textContent = BACKEND_LABELS[kind];
+    const chip = /** @type {HTMLButtonElement} */ (tpl("tpl-backend-chip").firstElementChild);
+    chip.textContent = BACKEND_LABELS[kind] ?? kind;
     chip.dataset.backendChip = kind;
     // "auto" is always pickable; explicit kinds disabled when the server
     // reports they're not present on this machine. Grayed-out chips
@@ -339,7 +339,7 @@ function buildModelInputs(host, ctx, modelEntry, sessKey) {
 
       const row = tpl(hasOverride ? "tpl-sess-override-set" : "tpl-sess-override-default");
       pick(row, "label").textContent = input.label;
-      const ta = pick(row, "textarea");
+      const ta = /** @type {HTMLTextAreaElement} */ (pick(row, "textarea"));
       ta.dataset.metaKey = metaKey;
       ta.dataset.sessId = sessKey;
       ta.value = overrideValue;
@@ -350,7 +350,7 @@ function buildModelInputs(host, ctx, modelEntry, sessKey) {
           ? `default (${defaultValue.length > 80 ? defaultValue.slice(0, 80) + "…" : defaultValue})`
           : input.placeholder || "no default set";
       }
-      const resetBtn = row.querySelector("[data-meta-reset]");
+      const resetBtn = /** @type {HTMLElement | null} */ (row.querySelector("[data-meta-reset]"));
       if (resetBtn) {
         resetBtn.dataset.sessId = sessKey;
         // Use a distinct attribute (NOT `data-meta-key`) so the textarea's
@@ -409,18 +409,18 @@ function buildControls(s, sessKey, ctx) {
 
   buildBackendChips(pick(frag, "backendChips"), ctx);
 
-  const sel = frag.querySelector("[data-model-pick]");
+  const sel = /** @type {HTMLSelectElement} */ (frag.querySelector("[data-model-pick]"));
   buildModelSelect(sel, ctx);
 
   buildSourceRow(pick(frag, "sourceRow"), s, sessKey, ctx);
   buildSilenceCtl(pick(frag, "silenceCtl"), s, sessKey, ctx);
 
   const rng = ctx.rangeState[sessKey] || {};
-  const fromEl = pick(frag, "rangeFrom");
+  const fromEl = /** @type {HTMLInputElement} */ (pick(frag, "rangeFrom"));
   fromEl.dataset.sessId = sessKey;
   fromEl.placeholder = s.earliest_iso || "optional ISO timestamp";
   fromEl.value = rng.from || "";
-  const toEl = pick(frag, "rangeTo");
+  const toEl = /** @type {HTMLInputElement} */ (pick(frag, "rangeTo"));
   toEl.dataset.sessId = sessKey;
   toEl.placeholder = s.latest_iso || "optional ISO timestamp";
   toEl.value = rng.to || "";
@@ -450,7 +450,7 @@ function buildAliases(meta, aliasKeys, sessKey) {
     const code = pick(row, "key");
     code.textContent = k;
     code.title = k;
-    const input = pick(row, "input");
+    const input = /** @type {HTMLInputElement} */ (pick(row, "input"));
     input.dataset.aliasKey = k;
     input.dataset.aliasSess = sessKey;
     input.placeholder = k.replace(/[_-]+/g, " ");
@@ -472,7 +472,7 @@ function buildWavRow(f, sessKey, ctx) {
   const dlHref = `/api/wav/${encodeURIComponent(sessKey)}/${encodeURIComponent(f.name)}`;
 
   const frag = tpl("tpl-wav-row");
-  const row = frag.firstElementChild;
+  const row = /** @type {HTMLElement} */ (frag.firstElementChild);
   if (busy) row.classList.add("in-flight");
   if (ctx.wavJustDone.has(wavKey)) row.classList.add("just-completed");
 
@@ -489,7 +489,7 @@ function buildWavRow(f, sessKey, ctx) {
     const cell = tpl("tpl-wav-size-inflight");
     // The template's outer span *is* the slot — set its dataset + text
     // directly. `updateWavInflightInPlace` finds the cell by data-elapsed-for.
-    const span = cell.firstElementChild;
+    const span = /** @type {HTMLElement} */ (cell.firstElementChild);
     span.dataset.elapsedFor = wavKey;
     span.textContent = `transcribing… ${fmtElapsedShort((Date.now() - (ctx.wavInflight.get(wavKey) ?? 0)) / 1000)}`;
     sizeHost.replaceWith(cell);
@@ -502,8 +502,8 @@ function buildWavRow(f, sessKey, ctx) {
     sizeHost.replaceWith(cell);
   }
 
-  pick(row, "download").href = dlHref;
-  const txBtn = pick(row, "txButton");
+  /** @type {HTMLAnchorElement} */ (pick(row, "download")).href = dlHref;
+  const txBtn = /** @type {HTMLButtonElement} */ (pick(row, "txButton"));
   txBtn.dataset.txWav = wavKey;
   txBtn.dataset.txSource = "original";
   if (busy) {
@@ -546,7 +546,7 @@ function appendRegionSub(host, r, sessKey, ctx) {
   const dlHref = `/api/wav/${encodeURIComponent(sessKey)}/${encodeURIComponent(r.name)}?source=stripped`;
 
   const frag = tpl("tpl-wav-row-stripped");
-  const row = frag.firstElementChild;
+  const row = /** @type {HTMLElement} */ (frag.firstElementChild);
   if (busy) row.classList.add("in-flight");
   if (ctx.wavJustDone.has(inflightKey)) row.classList.add("just-completed");
 
@@ -561,7 +561,7 @@ function appendRegionSub(host, r, sessKey, ctx) {
   const sizeHost = pick(row, "sizeCell");
   if (busy) {
     const cell = tpl("tpl-wav-size-inflight");
-    const span = cell.firstElementChild;
+    const span = /** @type {HTMLElement} */ (cell.firstElementChild);
     span.dataset.elapsedFor = inflightKey;
     span.textContent = `transcribing… ${fmtElapsedShort((Date.now() - (ctx.wavInflight.get(inflightKey) ?? 0)) / 1000)}`;
     sizeHost.replaceWith(cell);
@@ -573,8 +573,8 @@ function appendRegionSub(host, r, sessKey, ctx) {
     sizeHost.replaceWith(cell);
   }
 
-  pick(row, "download").href = dlHref;
-  const txBtn = pick(row, "txButton");
+  /** @type {HTMLAnchorElement} */ (pick(row, "download")).href = dlHref;
+  const txBtn = /** @type {HTMLButtonElement} */ (pick(row, "txButton"));
   // data-tx-wav uses the region's own name so the dispatch passes that
   // name straight to /api/transcribe with source=stripped.
   txBtn.dataset.txWav = wavKey;
@@ -651,8 +651,8 @@ function buildRegexTester(s, ctx) {
   if (ctx.rxOpen) {
     const body = pick(frag, "body");
     body.hidden = false;
-    pick(frag, "patternInput").value = ctx.rxPattern;
-    pick(frag, "flagsInput").value = ctx.rxFlags;
+    /** @type {HTMLInputElement} */ (pick(frag, "patternInput")).value = ctx.rxPattern;
+    /** @type {HTMLInputElement} */ (pick(frag, "flagsInput")).value = ctx.rxFlags;
 
     if (existingRules.length) {
       const seeds = pick(frag, "seeds");
@@ -665,7 +665,7 @@ function buildRegexTester(s, ctx) {
         const lower = r.toLowerCase();
         if (lower.startsWith("re:")) seed = r.slice(3).trim();
         else if (lower.startsWith("exact:")) seed = `^${r.slice(6).trim()}$`;
-        const code = tpl("tpl-regex-seed").firstElementChild;
+        const code = /** @type {HTMLElement} */ (tpl("tpl-regex-seed").firstElementChild);
         code.dataset.rxSeed = seed;
         code.textContent = r;
         list.appendChild(code);
@@ -693,7 +693,7 @@ export function render(s, host, ctx) {
   const frag = tpl("tpl-sess-detail");
 
   // Header row
-  const nameInput = frag.querySelector("[data-sess-name]");
+  const nameInput = /** @type {HTMLInputElement} */ (frag.querySelector("[data-sess-name]"));
   nameInput.dataset.sessName = sessKey;
   nameInput.value = meta.label || "";
   if (!meta.label) nameInput.classList.add("unnamed");
@@ -716,7 +716,7 @@ export function render(s, host, ctx) {
   );
   if (mergeCandidates.length) {
     const absorbFrag = tpl("tpl-sess-absorb");
-    const sel = absorbFrag.querySelector("[data-absorb-pick]");
+    const sel = /** @type {HTMLSelectElement} */ (absorbFrag.querySelector("[data-absorb-pick]"));
     sel.dataset.absorbTarget = sessKey;
     for (const other of mergeCandidates) {
       const otherMeta = ctx.effectiveMeta(other);

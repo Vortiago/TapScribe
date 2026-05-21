@@ -1,3 +1,4 @@
+// @ts-check
 // Grouped session sidebar — filterable list grouped by date bucket
 // (Today / Yesterday / This week / Older).
 
@@ -6,8 +7,13 @@ import { fmtSessionLabel } from "../formatters.js";
 
 // Bucket sessions by date relative to "now". BUCKET_ORDER fixes the display
 // order independently of Map.groupBy's first-seen insertion order.
-const BUCKET_ORDER = ["Today", "Yesterday", "This week", "Older"];
+const BUCKET_ORDER = /** @type {const} */ (["Today", "Yesterday", "This week", "Older"]);
 
+/**
+ * @param {string} session
+ * @param {number} now
+ * @returns {typeof BUCKET_ORDER[number]}
+ */
 function bucketOf(session, now) {
   const m = /^(\d{4})-(\d{2})-(\d{2})T/.exec(session);
   if (!m) return "Older";
@@ -19,12 +25,23 @@ function bucketOf(session, now) {
   return "Older";
 }
 
+/**
+ * @param {import('../types.js').Session[]} sessions
+ * @returns {[string, import('../types.js').Session[]][]}
+ */
 function groupSessions(sessions) {
   const now = Date.now();
   const byBucket = Map.groupBy(sessions, (s) => bucketOf(s.session, now));
-  return BUCKET_ORDER.flatMap((name) => byBucket.has(name) ? [[name, byBucket.get(name)]] : []);
+  return BUCKET_ORDER.flatMap((name) => {
+    const items = byBucket.get(name);
+    return items ? [/** @type {[string, import('../types.js').Session[]]} */ ([name, items])] : [];
+  });
 }
 
+/**
+ * @param {import('../types.js').Session[]} sessions
+ * @param {import('../types.js').SessionSidebarCtx} ctx
+ */
 export function render(sessions, {
   listEl, selectedId, filter, metaFor, onSelect, onDelete,
 }) {
@@ -49,7 +66,7 @@ export function render(sessions, {
     for (const s of items) {
       const meta = metaFor(s);
       const node = tpl("tpl-sess-item");
-      const row = node.firstElementChild;
+      const row = /** @type {HTMLElement} */ (node.firstElementChild);
       row.classList.toggle("active", s.session === selectedId);
       row.classList.toggle("current", !!s.is_current);
       row.dataset.sessId = s.session;
@@ -75,19 +92,19 @@ export function render(sessions, {
   }
   mount(listEl, out);
 
-  for (const row of listEl.querySelectorAll(".sess-item")) {
+  for (const row of /** @type {NodeListOf<HTMLElement>} */ (listEl.querySelectorAll(".sess-item"))) {
     row.addEventListener("click", (e) => {
       // Delete-button clicks bubble to the row — bail so the delete handler
       // (which runs first via stopPropagation) owns that event.
-      if (e.target.closest("[data-del-sess]")) return;
-      onSelect(row.dataset.sessId);
+      if (/** @type {Element | null} */ (e.target)?.closest("[data-del-sess]")) return;
+      onSelect(row.dataset.sessId || "");
     });
   }
-  for (const del of listEl.querySelectorAll("[data-del-sess]")) {
+  for (const del of /** @type {NodeListOf<HTMLElement>} */ (listEl.querySelectorAll("[data-del-sess]"))) {
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
       e.preventDefault();
-      await onDelete(del.dataset.delSess);
+      await onDelete(del.dataset.delSess || "");
     });
   }
 }

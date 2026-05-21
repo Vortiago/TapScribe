@@ -1,3 +1,4 @@
+// @ts-check
 // "Default config" card — global batch defaults (prompt.txt, hotwords.txt)
 // + the hallucination filter. The live prompt has moved into the live
 // channel panel; each session's per-batch override lives in the session
@@ -14,6 +15,14 @@ import { wireConfigSave } from "../api.js";
 
 let lastSig = "";
 
+/**
+ * @param {{
+ *   title: string,
+ *   file: string,
+ *   count: string | null,
+ *   body: (el: HTMLElement) => void,
+ * }} opts
+ */
 function buildCol({ title, file, count, body }) {
   const frag = tpl("tpl-cfg-col");
   pick(frag, "title").textContent = title;
@@ -23,12 +32,14 @@ function buildCol({ title, file, count, body }) {
   return frag;
 }
 
+/** @param {string} text */
 function emptyMsg(text) {
   const frag = tpl("tpl-cfg-empty");
   pick(frag, "msg").textContent = text;
   return frag;
 }
 
+/** @param {string[]} values */
 function codeList(values) {
   const frag = document.createDocumentFragment();
   for (const v of values) {
@@ -40,13 +51,21 @@ function codeList(values) {
   return frag;
 }
 
+/**
+ * @param {{
+ *   key: string,
+ *   content: string,
+ *   placeholder: string,
+ *   overrideCount: number,
+ * }} opts
+ */
 function buildEditor({ key, content, placeholder, overrideCount }) {
   const frag = tpl("tpl-cfg-editor");
-  const ta = pick(frag, "textarea");
+  const ta = /** @type {HTMLTextAreaElement} */ (pick(frag, "textarea"));
   ta.value = content || "";
   ta.placeholder = placeholder || "";
   ta.dataset.cfgKey = key;
-  const btn = pick(frag, "saveBtn");
+  const btn = /** @type {HTMLButtonElement} */ (pick(frag, "saveBtn"));
   btn.dataset.cfgKey = key;
   const status = pick(frag, "status");
   status.dataset.cfgKey = key;
@@ -70,14 +89,18 @@ function buildEditor({ key, content, placeholder, overrideCount }) {
   return frag;
 }
 
+/**
+ * @param {import('../types.js').AppState} j
+ * @param {import('../types.js').ConfigCardCtx} ctx
+ */
 export function render(j, { gridEl, headerNoteEl }) {
-  const active = document.activeElement;
+  const active = /** @type {HTMLElement | null} */ (document.activeElement);
   if (active && active.dataset && active.dataset.cfgKey && gridEl.contains(active)) return;
 
-  const p = j.prompt || {};
-  const h = j.hotwords || {};
-  const hl = j.hallucinations || {};
-  const support = j.inputs_support || { batch_prompt: true, batch_hotwords: true };
+  const p = j.prompt || { path: "", content: "", length: 0 };
+  const h = j.hotwords || { path: "", content: "", length: 0 };
+  const hl = j.hallucinations || { path: "", rules: [], count: 0 };
+  const support = j.inputs_support || { live_prompt: true, batch_prompt: true, batch_hotwords: true };
   const counts = j.default_override_counts || { prompt: 0, hotwords: 0 };
   const sig = [
     p.length || 0, p.content || "",
