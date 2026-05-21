@@ -155,8 +155,14 @@ def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | No
         return None
     try:
         value = float(raw)
-    except (TypeError, ValueError) as e:
-        raise HTTPException(400, f"{field} must be a number, got {raw!r}") from e
+    except (TypeError, ValueError):
+        # `from None` (not `from e`) so the original exception's traceback
+        # isn't chained into the HTTPException. FastAPI's default handler
+        # only returns `detail`, so a chain isn't user-visible in practice
+        # — but CodeQL's `py/stack-trace-exposure` flags any chained throw
+        # at an HTTP boundary defensively, and the chain adds nothing for
+        # the operator's debugging that the message above doesn't already.
+        raise HTTPException(400, f"{field} must be a number, got {raw!r}") from None
     if not (lo <= value <= hi):
         raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
     return value
@@ -170,8 +176,9 @@ def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
         # only sends whole-number gap/pad values via <input type="number"
         # step="..."> so the truncation case shouldn't fire in practice.
         value = int(raw)
-    except (TypeError, ValueError) as e:
-        raise HTTPException(400, f"{field} must be an integer, got {raw!r}") from e
+    except (TypeError, ValueError):
+        # `from None` — see _parse_bounded_float for the rationale.
+        raise HTTPException(400, f"{field} must be an integer, got {raw!r}") from None
     if not (lo <= value <= hi):
         raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
     return value
