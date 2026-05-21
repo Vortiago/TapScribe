@@ -122,20 +122,15 @@ class MlxWhisperTranscriber:
 
         fn = self._transcribe_fn or _import_mlx_transcribe()
 
-        # mlx-whisper's path-based loader runs `ffmpeg` as a subprocess,
-        # which fails on machines without ffmpeg on PATH. The recorder
-        # always writes the exact format mlx-whisper wants, so pre-decode
-        # ourselves to skip that dependency. Fall back to the string path
-        # if the WAV has an unexpected format.
-        try:
-            audio = load_recorder_wav_as_pcm(path)
-            result = fn(audio, **kwargs)
-        except RuntimeError as e:
-            print(
-                f"[tapscribe] mlx pre-decode failed ({e}); falling back to path (needs ffmpeg on PATH).",
-                flush=True,
-            )
-            result = fn(str(path), **kwargs)
+        # mlx-whisper's path-based loader runs `ffmpeg` as a subprocess.
+        # The recorder always writes the exact format mlx-whisper wants
+        # (16 kHz mono 16-bit), so pre-decode ourselves and skip that
+        # dependency entirely. `load_recorder_wav_as_pcm` raises on
+        # unusual WAVs (different sample rate / channels / sample width)
+        # — that's the operator's signal to convert the file, not a
+        # cue to silently fall back to ffmpeg.
+        audio = load_recorder_wav_as_pcm(path)
+        result = fn(audio, **kwargs)
 
         segments = [TranscriptionSegment.from_payload(s) for s in (result.get("segments") or [])]
 

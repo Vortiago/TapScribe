@@ -116,3 +116,59 @@ def test_transcribe_folds_hotwords_into_initial_prompt(tmp_path: Path):
     assert "Acme, Patricia" in prompt_sent
     assert "Proper nouns" in prompt_sent  # framing line preserved
     assert "hotwords" not in captured  # mlx-whisper kwarg never passed
+
+
+def test_transcribe_rejects_non_recorder_wav(tmp_path: Path):
+    """A non-16kHz WAV is rejected at pre-decode time with an explicit
+    error — no silent ffmpeg fallback. The operator gets a clear
+    "convert the file" signal instead of a runtime dep they didn't
+    sign up for."""
+    import pytest
+
+    def stub(*args, **kwargs):  # noqa: ARG001 — should not be called
+        raise AssertionError("transcribe_fn should not be called on rejected WAV")
+
+    t = MlxWhisperTranscriber(
+        model_name="small.en",
+        hf_repo="mlx-community/whisper-small.en-mlx",
+        transcribe_fn=stub,
+    )
+    odd_wav = tmp_path / "odd.wav"
+    with wave.open(str(odd_wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        w.writeframes(np.zeros(8000, dtype=np.int16).tobytes())
+
+    with pytest.raises(RuntimeError, match="unexpected WAV format"):
+        t.transcribe(odd_wav)
+
+
+# ---------------------------------------------------------------------------
+# Upstream API smoke test — only runs when mlx-whisper is actually installed.
+# Symbol-contract check so an upstream rename or signature change of
+# `mlx_whisper.transcribe` trips a test instead of crashing at request
+# time on the operator's machine.
+# ---------------------------------------------------------------------------
+
+
+def test_mlx_whisper_upstream_contract():
+    """If mlx_whisper is installed, its `transcribe` callable must exist
+    and accept the `path_or_hf_repo` keyword the adapter relies on."""
+    import inspect
+
+    import pytest
+
+    pytest.importorskip("mlx_whisper")
+    import mlx_whisper  # type: ignore
+
+    assert callable(getattr(mlx_whisper, "transcribe", None)), (
+        "mlx_whisper.transcribe is the entry point the adapter calls"
+    )
+    sig = inspect.signature(mlx_whisper.transcribe)
+    # The adapter passes `path_or_hf_repo=...` by keyword. Absence
+    # means the API changed and the adapter needs updating.
+    assert "path_or_hf_repo" in sig.parameters, (
+        f"mlx_whisper.transcribe signature changed; expected path_or_hf_repo kwarg, "
+        f"saw {sorted(sig.parameters)}"
+    )

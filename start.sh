@@ -166,11 +166,12 @@ fi
 # operator picked. Pull the `[vad]` extra so the dependency is satisfied
 # alongside the model install. No-op on re-runs once installed.
 #
-# (No ffmpeg branch here: parakeet-mlx's batch path used to shell out to
-# ffmpeg via its bundled `load_audio()`, but `tapscribe.transcribers.
-# mlx_parakeet` now pre-decodes the recorder's WAV and calls the model's
-# lower-level `generate(mel)` directly. Same dependency-skipping trick
-# as `mlx_whisper`.)
+# (No ffmpeg branch here: every MLX backend — mlx-whisper, parakeet-mlx,
+# and mlx-audio Canary — pre-decodes the recorder's WAV via
+# `tapscribe.wav_predecode.load_recorder_wav_as_pcm` and hands the model
+# a numpy array, skipping the ffmpeg-shelling audio loaders the upstream
+# packages would otherwise use. There is no ffmpeg fallback; non-recorder
+# WAVs raise a clear "convert the file" error at request time.)
 # `find_spec` instead of `import silero_vad` so we don't pay the
 # ~1-2s torch import on every recorder bring-up just to probe
 # whether silero-vad is on the import path. The actual import is
