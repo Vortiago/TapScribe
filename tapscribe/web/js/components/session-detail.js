@@ -7,7 +7,7 @@
 // All state and callbacks come in via `ctx` from main.js so this stays
 // a pure render-and-wire module.
 
-import { tpl, mount, pick } from "../templates.js";
+import { tpl, mount, pick, slot } from "../templates.js";
 import { fmtBytes, fmtClock, fmtDur, fmtElapsedShort, fmtMs, truncMid } from "../formatters.js";
 
 // Display labels for backend kinds — appears in the chip row above the model
