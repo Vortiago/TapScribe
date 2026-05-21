@@ -98,28 +98,17 @@ def _stub_detect_speech_silero(samples_int16, min_silence_ms: int, pad_ms: int):
     return out
 
 
-@pytest.fixture
-def stub_silero(monkeypatch: pytest.MonkeyPatch):
-    """Patch tapscribe.strip_silence.detect_speech_silero with the cheap
-    RMS-based stand-in so the strip-silence tests don't pull in torch."""
-    from tapscribe import strip_silence
-
-    monkeypatch.setattr(strip_silence, "detect_speech_silero", _stub_detect_speech_silero)
-    return _stub_detect_speech_silero
-
-
 @pytest.fixture(autouse=True)
-def _stub_silero_for_strip_silence_tests(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
-    """Auto-apply the silero stub to any test file that exercises
-    strip-silence. Cheaper than asking every test to opt in via the
-    explicit `stub_silero` fixture, and harmless when the test never
-    invokes the detector."""
-    name = request.node.fspath.basename
-    if name not in {
-        "test_strip_silence_split.py",
-        "test_pipeline_strip_silence.py",
-        "test_dashboard_ui.py",
-    }:
+def _stub_silero(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Replace strip_silence.detect_speech_silero with the cheap RMS-based
+    stand-in on every test by default. Tests that need the real silero
+    (or want to assert what happens when it's missing) opt out with
+    `@pytest.mark.real_silero`.
+
+    Autouse + opt-out is robust against future strip-silence tests being
+    added and silently pulling torch into CI; the previous filename
+    allowlist required maintenance every time a new test file landed."""
+    if request.node.get_closest_marker("real_silero") is not None:
         return
     from tapscribe import strip_silence
 

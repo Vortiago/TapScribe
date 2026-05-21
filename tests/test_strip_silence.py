@@ -44,9 +44,13 @@ def test_read_wav_int16_rejects_wrong_rate(tmp_path):
         ss.read_wav_int16(path)
 
 
+@pytest.mark.real_silero
 def test_detect_speech_silero_without_silero_raises_runtime_error(monkeypatch):
     """When silero-vad isn't installed, the production path must surface a
-    clear actionable error — not silently fall back, not return None."""
+    clear actionable error — not silently fall back, not return None.
+
+    Opts out of the autouse silero stub via @real_silero so we exercise
+    the actual import path."""
     import builtins
 
     real_import = builtins.__import__

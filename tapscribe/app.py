@@ -166,8 +166,9 @@ def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
     if raw is None:
         return None
     try:
-        # Accept JSON numerics (which arrive as float in some clients)
-        # by routing through float→int — rejects "3.5" implicitly.
+        # int("3.5") raises; int(3.5) truncates silently to 3. The dashboard
+        # only sends whole-number gap/pad values via <input type="number"
+        # step="..."> so the truncation case shouldn't fire in practice.
         value = int(raw)
     except (TypeError, ValueError) as e:
         raise HTTPException(400, f"{field} must be an integer, got {raw!r}") from e
@@ -637,7 +638,10 @@ async def api_session_strip_silence(
     # past those the operator is misusing the feature, not tuning it.
     # `is None` (not `or`) so an explicit 0 — e.g. pad_ms=0 to disable
     # region padding for A/B — doesn't silently fall back to the default.
-    min_silence_ms = _parse_bounded_int(body.get("min_silence_ms"), "min_silence_ms", lo=0, hi=600_000)
+    # min_silence_ms lower bound matches the HTML form's min="100"; a
+    # value of 0 would make silero split on every cross-window dip and is
+    # never what the operator wants.
+    min_silence_ms = _parse_bounded_int(body.get("min_silence_ms"), "min_silence_ms", lo=100, hi=600_000)
     if min_silence_ms is None:
         min_silence_ms = 500
     pad_ms = _parse_bounded_int(body.get("pad_ms"), "pad_ms", lo=0, hi=5_000)

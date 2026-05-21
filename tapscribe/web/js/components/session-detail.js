@@ -104,17 +104,16 @@ function buildSourceRow(host, s, sessKey, ctx) {
   }
 }
 
-// Render the strip-silence parameter inputs (gap/pad/floor/voice/silero)
-// into the .strip-settings slot. Current values come from ctx.stripOpts
-// which main.js loads from localStorage; edits round-trip back through
+// Render the strip-silence parameter inputs (gap/pad/floor) into the
+// .strip-settings slot. Current values come from ctx.stripOpts which
+// main.js loads from localStorage; edits round-trip back through
 // ctx.onStripOptEdit so the next strip-silence POST sees them.
 function appendStripSettings(parent, sessKey, ctx) {
   const frag = tpl("tpl-strip-settings");
   const opts = ctx.stripOpts || {};
   for (const el of frag.querySelectorAll("[data-strip-opt]")) {
     const k = el.dataset.stripOpt;
-    if (el.type === "checkbox") el.checked = !!opts[k];
-    else el.value = opts[k] ?? "";
+    el.value = opts[k] ?? "";
     el.dataset.sessId = sessKey;
   }
   const reset = frag.querySelector("[data-strip-opt-reset]");
@@ -731,10 +730,13 @@ function wire(host, s, sessKey, ctx) {
     btn.addEventListener("click", () => ctx.onStripRemove(btn.dataset.stripRemove));
   }
   for (const el of host.querySelectorAll("[data-strip-opt]")) {
-    const evt = el.type === "checkbox" ? "change" : "input";
-    el.addEventListener(evt, () => {
-      const value = el.type === "checkbox" ? el.checked : el.value;
-      ctx.onStripOptEdit(el.dataset.stripOpt, value);
+    el.addEventListener("input", () => {
+      ctx.onStripOptEdit(el.dataset.stripOpt, el.value);
+      // Clearing the input snaps the stored value back to the default
+      // (see main.js:onStripOptEdit). Mirror that visually so the box
+      // doesn't read empty while a non-zero default is what'll actually
+      // be POSTed on click.
+      if (el.value === "") el.value = String(ctx.stripOpts[el.dataset.stripOpt]);
     });
   }
   for (const btn of host.querySelectorAll("[data-strip-opt-reset]")) {

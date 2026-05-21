@@ -615,13 +615,11 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     if (summary) {
       const pct = summary.in_seconds > 0 ? Math.round(100 * summary.speech_seconds / summary.in_seconds) : 0;
       console.log(`[strip-silence] ${session}:`, summary, "params:", body);
-      const detector = Array.isArray(summary.detector) ? summary.detector.join(", ") : summary.detector;
       const regions = (summary.files || []).reduce((n, r) => n + (r.segments || 0), 0);
       const params = `gap=${body.min_silence_ms}ms pad=${body.pad_ms}ms floor=${body.speech_floor_db}dB`;
       alert(
         `Stripped ${summary.files_written}/${summary.files_processed} WAVs → ${regions} regions · `
-        + `${Math.round(summary.speech_seconds)}s speech of ${Math.round(summary.in_seconds)}s (${pct}%) · `
-        + `detector ${detector}\n${params}`
+        + `${Math.round(summary.speech_seconds)}s speech of ${Math.round(summary.in_seconds)}s (${pct}%)\n${params}`
       );
     }
   }

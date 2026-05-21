@@ -142,6 +142,7 @@ markers = [
     "real_audio: end-to-end test that streams real audio fixtures and runs a real Whisper backend. Skipped unless tests/fixtures/audio/ is populated and faster-whisper is installed.",
     "chaos: race-condition / error-recovery test exercising background tasks, abnormal close paths, or repeated rapid mutations. Opt out with -m 'not chaos'.",
     "browser_e2e: requires Playwright + Chromium (`pip install -e .[dev] && python -m playwright install chromium`). Opt out with -m 'not browser_e2e'.",
+    "real_silero: opt out of the autouse silero stub in tests/conftest.py — exercises the real `detect_speech_silero` import path (only set on tests that need it).",
 ]
 
 [tool.ruff]
