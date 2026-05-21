@@ -22,8 +22,11 @@ backends — pick what matches your hardware:
 pip install -e ".[whisper]"        # CPU / CUDA via faster-whisper + WhisperLiveKit
 pip install -e ".[mlx]"            # Apple Silicon only
 pip install -e ".[voxtral]"        # Mistral Voxtral via HF transformers
-pip install -e ".[vad]"            # silero-vad for the strip-silence path
 ```
+
+silero-vad + torch are core dependencies (used by both the live
+SpeechGate and the strip-silence detector) so they install
+automatically with `pip install -e .` — no extra needed.
 
 ## Running tests + lint
 

@@ -1,8 +1,7 @@
 """Strip silence from WAV files or split them at silence boundaries.
 
-Detection runs through silero-vad (install via the `vad` extra:
-`pip install tapscribe[vad]`). It's the same engine the live SpeechGate
-uses, so any TapScribe install that runs the live channel already has it.
+Detection runs through silero-vad, which ships as a core dependency
+(see pyproject.toml). It's the same engine the live SpeechGate uses.
 
 Inputs are expected to be 16 kHz mono int16, matching what the recorder
 captures from the bridge extension. Use ffmpeg to convert other formats
@@ -74,17 +73,18 @@ def filter_low_energy_regions(samples_int16: np.ndarray, regions, floor_dbfs: fl
 def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms: int):
     """Returns list of (start_sample, end_sample) speech regions.
 
-    Raises RuntimeError if silero-vad isn't installed — the operator needs
-    to `pip install tapscribe[vad]`. There's no RMS fallback: the live
-    SpeechGate has the same dependency, so any working TapScribe install
-    already has silero.
+    silero-vad + torch are core dependencies (pyproject.toml). If the
+    import below ever fails, the install is broken — reinstall TapScribe.
+    Raised as RuntimeError so the route surfaces a clear 500 instead of
+    a bare ImportError.
     """
     try:
         import torch
         from silero_vad import get_speech_timestamps, load_silero_vad
     except ImportError as e:
         raise RuntimeError(
-            "strip-silence requires silero-vad. Install it with `pip install tapscribe[vad]`."
+            "silero-vad/torch import failed — TapScribe install is corrupt. "
+            "Reinstall the package (`pip install -e .`)."
         ) from e
     audio = torch.from_numpy(samples_int16).float() / 32768.0
     model = load_silero_vad()

@@ -46,8 +46,10 @@ def test_read_wav_int16_rejects_wrong_rate(tmp_path):
 
 @pytest.mark.real_silero
 def test_detect_speech_silero_without_silero_raises_runtime_error(monkeypatch):
-    """When silero-vad isn't installed, the production path must surface a
-    clear actionable error — not silently fall back, not return None.
+    """silero-vad + torch are core deps; the production path must surface
+    a clear "install is corrupt" error — not silently fall back, not
+    return None — when the import fails (which now signals a broken
+    install rather than an opt-out).
 
     Opts out of the autouse silero stub via @real_silero so we exercise
     the actual import path."""
@@ -63,5 +65,5 @@ def test_detect_speech_silero_without_silero_raises_runtime_error(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", _no_silero)
-    with pytest.raises(RuntimeError, match=r"tapscribe\[vad\]"):
+    with pytest.raises(RuntimeError, match=r"install is corrupt"):
         ss.detect_speech_silero(np.zeros(16000, dtype=np.int16), min_silence_ms=500, pad_ms=200)
