@@ -159,15 +159,6 @@
     <input class="input" type="number" max="0" step="1" data-strip-opt="speech_floor_db">
     <span class="dim">dBFS</span>
   </label>
-  <label class="strip-knob" title="RMS-fallback voice threshold (dBFS) — only consulted when silero is off. Above this is treated as speech.">
-    <span class="lbl">voice</span>
-    <input class="input" type="number" max="0" step="1" data-strip-opt="threshold_db">
-    <span class="dim">dBFS</span>
-  </label>
-  <label class="strip-knob" title="Use silero-vad (neural VAD) when available. Uncheck to force the RMS-threshold fallback (useful for A/B comparisons or when silero is over-segmenting).">
-    <input type="checkbox" data-strip-opt="use_silero">
-    <span class="lbl">silero</span>
-  </label>
   <button class="btn tiny ghost" type="button" data-strip-opt-reset title="Reset to built-in defaults">↺</button>
 </template>
 

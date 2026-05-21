@@ -52,11 +52,11 @@ def _write_wav(path: Path, samples: np.ndarray) -> None:
 
 
 def _common_kwargs() -> dict:
+    # detect_speech_silero is auto-stubbed by the conftest fixture so this
+    # test file doesn't pull in torch on CI.
     return dict(
         min_silence_ms=400,
         pad_ms=50,
-        threshold_db=-30.0,
-        use_silero=False,  # avoid the heavy torch dep in CI
         speech_floor_db=-40.0,
     )
 
@@ -154,8 +154,8 @@ def test_split_filenames_are_unique_when_regions_share_a_second(tmp_path: Path):
 
     start = datetime(2026, 5, 12, 9, 30, 15, tzinfo=UTC)
     # 0.3s burst, 0.5s silence, 0.3s burst — both regions land inside
-    # the same wall-clock second from origin. Use longer pads so the
-    # gap is still recognised by the RMS detector with min_silence_ms=400.
+    # the same wall-clock second from origin. The 0.5s gap clears the
+    # min_silence_ms=400 threshold in the stubbed silero detector.
     samples = _make_speech_silence([0.3, 0.3], [0.5])
     src = session_dir / _wav_name(start)
     _write_wav(src, samples)
@@ -174,7 +174,7 @@ def test_split_filenames_are_unique_when_regions_share_a_second(tmp_path: Path):
 def test_split_no_speech_regions_writes_nothing(tmp_path: Path):
     """A WAV whose detector returns no regions writes 0 files and reports it.
 
-    Build something the RMS detector accepts but the speech floor rejects:
+    Build something the detector accepts but the speech floor rejects:
     audible enough to fire the detector, quiet enough to fall below the
     speech_floor_db gate.
     """

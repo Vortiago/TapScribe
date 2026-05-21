@@ -1,9 +1,6 @@
-"""Tests for tapscribe.strip_silence — RMS detector + region filtering.
-
-We avoid silero-vad here because it pulls in torch, which is too heavy for
-CI. detect_speech_silero returns None when not installed, which is
-exercised indirectly elsewhere.
-"""
+"""Tests for tapscribe.strip_silence — helper functions that stay on the
+production path (the silero detector itself is exercised end-to-end via
+the stub in conftest)."""
 
 from __future__ import annotations
 
@@ -11,49 +8,6 @@ import numpy as np
 import pytest
 
 from tapscribe import strip_silence as ss
-
-
-def _make_speech_silence(speech_lengths_s, silence_lengths_s, amplitude=8000):
-    """Build a deterministic int16 sample array with speech bursts (a
-    sine-shaped envelope at `amplitude`) separated by silence."""
-    chunks = []
-    n_speech = len(speech_lengths_s)
-    n_silence = len(silence_lengths_s)
-    for i in range(max(n_speech, n_silence)):
-        if i < n_speech:
-            n = int(speech_lengths_s[i] * ss.SAMPLE_RATE)
-            # Square wave is the loudest possible signal at a given amplitude;
-            # easy to keep above the -45 dBFS floor without depending on
-            # randomness.
-            block = np.tile(np.array([amplitude, -amplitude], dtype=np.int16), n // 2 + 1)[:n]
-            chunks.append(block)
-        if i < n_silence:
-            n = int(silence_lengths_s[i] * ss.SAMPLE_RATE)
-            chunks.append(np.zeros(n, dtype=np.int16))
-    return np.concatenate(chunks)
-
-
-def test_detect_speech_rms_finds_two_regions():
-    # 1 s speech, 1 s silence, 1 s speech → expect 2 detected regions.
-    audio = _make_speech_silence([1.0, 1.0], [1.0])
-    regions = ss.detect_speech_rms(audio, threshold_db=-30.0, min_silence_ms=500, pad_ms=50)
-    assert len(regions) == 2
-    for s, e in regions:
-        assert 0 <= s < e <= len(audio)
-
-
-def test_detect_speech_rms_merges_short_silences():
-    # 1 s speech, 0.1 s silence, 1 s speech, with min_silence_ms=500 →
-    # the gap is short enough to merge into one region.
-    audio = _make_speech_silence([1.0, 1.0], [0.1])
-    regions = ss.detect_speech_rms(audio, threshold_db=-30.0, min_silence_ms=500, pad_ms=10)
-    assert len(regions) == 1
-
-
-def test_detect_speech_rms_returns_empty_on_silence():
-    audio = np.zeros(2 * ss.SAMPLE_RATE, dtype=np.int16)
-    regions = ss.detect_speech_rms(audio, threshold_db=-30.0, min_silence_ms=500, pad_ms=50)
-    assert regions == []
 
 
 def test_filter_low_energy_regions_drops_quiet_ones():
@@ -88,3 +42,22 @@ def test_read_wav_int16_rejects_wrong_rate(tmp_path):
         w.writeframes(np.zeros(800, dtype=np.int16).tobytes())
     with pytest.raises(ValueError):
         ss.read_wav_int16(path)
+
+
+def test_detect_speech_silero_without_silero_raises_runtime_error(monkeypatch):
+    """When silero-vad isn't installed, the production path must surface a
+    clear actionable error — not silently fall back, not return None."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_silero(name, *args, **kwargs):
+        # Block both deps that the production import line uses so the test
+        # outcome doesn't depend on whether torch happens to be installed.
+        if name in {"torch", "silero_vad"} or name.startswith(("torch.", "silero_vad.")):
+            raise ImportError(f"simulated missing dep: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_silero)
+    with pytest.raises(RuntimeError, match=r"tapscribe\[vad\]"):
+        ss.detect_speech_silero(np.zeros(16000, dtype=np.int16), min_silence_ms=500, pad_ms=200)

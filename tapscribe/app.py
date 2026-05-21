@@ -631,16 +631,21 @@ async def api_session_strip_silence(
     session_dir = resolve_session_dir(session)
 
     body = await _json_body(req)
-    # `if x is not None else default` (not `x or default`) so the operator
-    # can pass 0 explicitly — e.g. pad_ms=0 disables region padding for
-    # A/B comparisons. Negatives are nonsense; clamp at zero.
-    min_silence_ms = max(0, int(body["min_silence_ms"])) if body.get("min_silence_ms") is not None else 500
-    pad_ms = max(0, int(body["pad_ms"])) if body.get("pad_ms") is not None else 200
-    threshold_db = float(body.get("threshold_db") if body.get("threshold_db") is not None else -45.0)
-    speech_floor_db = float(
-        body.get("speech_floor_db") if body.get("speech_floor_db") is not None else _ss.SPEECH_RMS_DBFS_FLOOR
-    )
-    use_silero = bool(body.get("use_silero", True))
+    # Range-bound everything that hits the silero detector so a malformed
+    # dashboard POST returns 400 instead of a 500 from int()/float().
+    # Upper bounds are generous (10 min gap / 5 s pad / 0 dBFS floor) —
+    # past those the operator is misusing the feature, not tuning it.
+    # `is None` (not `or`) so an explicit 0 — e.g. pad_ms=0 to disable
+    # region padding for A/B — doesn't silently fall back to the default.
+    min_silence_ms = _parse_bounded_int(body.get("min_silence_ms"), "min_silence_ms", lo=0, hi=600_000)
+    if min_silence_ms is None:
+        min_silence_ms = 500
+    pad_ms = _parse_bounded_int(body.get("pad_ms"), "pad_ms", lo=0, hi=5_000)
+    if pad_ms is None:
+        pad_ms = 200
+    speech_floor_db = _parse_bounded_float(body.get("speech_floor_db"), "speech_floor_db", lo=-120.0, hi=0.0)
+    if speech_floor_db is None:
+        speech_floor_db = _ss.SPEECH_RMS_DBFS_FLOOR
 
     originals = sorted(session_dir.glob("*.wav"))
     if not originals:
@@ -674,11 +679,7 @@ async def api_session_strip_silence(
             results: list[dict[str, Any]] = []
             for src in originals:
                 try:
-                    results.append(
-                        strip_one_wav(
-                            src, out_dir, min_silence_ms, pad_ms, threshold_db, use_silero, speech_floor_db
-                        )
-                    )
+                    results.append(strip_one_wav(src, out_dir, min_silence_ms, pad_ms, speech_floor_db))
                 except Exception as e:
                     results.append({"name": src.name, "written": False, "error": str(e)})
             return results

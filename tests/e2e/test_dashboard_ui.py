@@ -374,8 +374,6 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
             json={
                 "min_silence_ms": 400,
                 "pad_ms": 50,
-                "threshold_db": -30.0,
-                "use_silero": False,
                 "speech_floor_db": -40.0,
             },
         )

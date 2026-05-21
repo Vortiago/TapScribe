@@ -78,8 +78,8 @@ let liveModelCatalog = { context: "live", available_backends: [], models: [] };
 const localMeta = {};            // per-session optimistic meta cache (label + aliases)
 const metaSaveTimers = new Map();// debounce timers for PUT /api/session-meta
 
-// Strip-silence tunables (gap/pad/floor/silero). Surfaced as inputs next to
-// the strip-silence button on every session and persisted to localStorage so
+// Strip-silence tunables (gap/pad/floor). Surfaced as inputs next to the
+// strip-silence button on every session and persisted to localStorage so
 // the last-used values stick across reloads. Defaults mirror the server-side
 // fallbacks in api_session_strip_silence (tapscribe/app.py) and
 // SPEECH_RMS_DBFS_FLOOR (tapscribe/strip_silence.py).
@@ -88,8 +88,6 @@ const STRIP_OPT_DEFAULTS = Object.freeze({
   min_silence_ms: 500,
   pad_ms: 200,
   speech_floor_db: -45,
-  threshold_db: -45,
-  use_silero: true,
 });
 function loadStripOpts() {
   try {
@@ -447,8 +445,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       // Reset *does* tick so every session's row picks up the new defaults.
       stripOpts,
       onStripOptEdit: (k, v) => {
-        if (k === "use_silero") stripOpts[k] = !!v;
-        else if (k === "speech_floor_db" || k === "threshold_db") {
+        if (k === "speech_floor_db") {
           stripOpts[k] = v === "" ? STRIP_OPT_DEFAULTS[k] : Number(v);
         } else {
           stripOpts[k] = v === "" ? STRIP_OPT_DEFAULTS[k] : Math.max(0, parseInt(v, 10) || 0);
@@ -620,7 +617,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       console.log(`[strip-silence] ${session}:`, summary, "params:", body);
       const detector = Array.isArray(summary.detector) ? summary.detector.join(", ") : summary.detector;
       const regions = (summary.files || []).reduce((n, r) => n + (r.segments || 0), 0);
-      const params = `gap=${body.min_silence_ms}ms pad=${body.pad_ms}ms floor=${body.speech_floor_db}dB voice=${body.threshold_db}dB silero=${body.use_silero ? "on" : "off"}`;
+      const params = `gap=${body.min_silence_ms}ms pad=${body.pad_ms}ms floor=${body.speech_floor_db}dB`;
       alert(
         `Stripped ${summary.files_written}/${summary.files_processed} WAVs → ${regions} regions · `
         + `${Math.round(summary.speech_seconds)}s speech of ${Math.round(summary.in_seconds)}s (${pct}%) · `

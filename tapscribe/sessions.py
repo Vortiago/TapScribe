@@ -390,8 +390,6 @@ def strip_one_wav(
     out_dir: Path,
     min_silence_ms: int,
     pad_ms: int,
-    threshold_db: float,
-    use_silero: bool,
     speech_floor_db: float,
 ) -> dict[str, Any]:
     """Split one WAV into one output per detected speech region.
@@ -436,19 +434,7 @@ def strip_one_wav(
             "reason": f"whole-file silent ({overall_rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)",
         }
 
-    regions = None
-    detector = "rms"
-    if use_silero:
-        regions = _ss.detect_speech_silero(samples, min_silence_ms=min_silence_ms, pad_ms=pad_ms)
-        if regions is not None:
-            detector = "silero-vad"
-    if regions is None:
-        regions = _ss.detect_speech_rms(
-            samples,
-            threshold_db=threshold_db,
-            min_silence_ms=min_silence_ms,
-            pad_ms=pad_ms,
-        )
+    regions = _ss.detect_speech_silero(samples, min_silence_ms=min_silence_ms, pad_ms=pad_ms)
 
     if not regions:
         return {
@@ -459,7 +445,7 @@ def strip_one_wav(
             "written": False,
             "regions_written": [],
             "reason": "no speech detected",
-            "detector": detector,
+            "detector": "silero-vad",
         }
 
     pre_filter_count = len(regions)
@@ -473,7 +459,7 @@ def strip_one_wav(
             "written": False,
             "regions_written": [],
             "reason": f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
-            "detector": detector,
+            "detector": "silero-vad",
         }
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -499,7 +485,7 @@ def strip_one_wav(
         "segments_filtered_below_floor": pre_filter_count - len(regions),
         "written": True,
         "regions_written": regions_written,
-        "detector": detector,
+        "detector": "silero-vad",
     }
 
 
