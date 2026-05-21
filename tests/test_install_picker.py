@@ -212,21 +212,11 @@ def test_resolve_extras_mlx_choice_on_non_mlx_machine_downgrades_silently():
     assert "whisper-cpu" in extras
 
 
-def test_resolve_extras_removed_backend_does_not_silently_fall_back(monkeypatch):
-    """Regression for the canary-mlx removal in PR #61.
-
-    An operator's saved `.tapscribe-install.json` from before #61 had
-    Canary enabled with `backend: "mlx"`. After the merge that removed
-    `canary-mlx` from the catalog, the picker was silently falling back
-    to `canary-cpu`, which drags in NeMo → kaldialign → cmake. On a Mac
-    without cmake on PATH the install failed mid-build. That class of
-    silent semantic change for a saved selection is the bug.
-
-    Simulate the same shape: pretend a future PR removed the MLX
-    backend from a hypothetical family with both backends declared, on
-    a machine that DOES have MLX (so the fallback isn't a host-caps
-    issue — purely a catalog-removed issue). The resolved extras must
-    not contain the CPU atom for that family."""
+def _patch_whisper_without_mlx(monkeypatch) -> None:
+    """Pretend a future PR removed the MLX backend from Whisper. Used by
+    the catalog-removed regression tests so they don't depend on what
+    the *current* catalog declares — they're testing the contract, not
+    today's catalog shape."""
     whisper = next(f for f in FAMILIES if f.key == "whisper")
     cpu_only = install_picker.FamilyDef(
         key=whisper.key,
@@ -240,62 +230,48 @@ def test_resolve_extras_removed_backend_does_not_silently_fall_back(monkeypatch)
     others = tuple(f for f in FAMILIES if f.key != whisper.key)
     monkeypatch.setattr(install_picker, "FAMILIES", (cpu_only, *others))
 
+
+def test_resolve_extras_removed_backend_does_not_silently_fall_back(monkeypatch):
+    """Regression for PR #61's canary-mlx removal: a saved `backend=mlx`
+    choice on a family that no longer declares MLX must NOT silently
+    pick up the CPU atom. Apple Silicon caps so the failure isn't
+    a host-caps fallback — purely a catalog-removed one."""
+    _patch_whisper_without_mlx(monkeypatch)
     sel = Selection()
     _enable(sel, "whisper", BACKEND_MLX)
     extras = install_picker.resolve_extras(sel, _apple_caps())
-    # 'whisper-cpu' would have been the silent fallback before the fix —
-    # assert it's NOT picked up. The shared 'whisper-live' atom still
-    # ships because that doesn't depend on which backend the operator
-    # picked, but `resolve_extras` currently only emits shared extras
-    # when at least one backend resolves. Either way, the CPU atom must
-    # be absent.
     assert "whisper-cpu" not in extras
 
 
-def test_families_with_removed_backend_surfaces_only_removed_catalog(monkeypatch):
-    """Helper for the main loop / stderr-warning path: returns the
-    enabled families whose saved backend isn't in the catalog anymore
-    — but NOT families whose backend is merely host-unavailable."""
-    # Same monkeypatch shape as above: a hypothetical Whisper-without-MLX.
-    whisper = next(f for f in FAMILIES if f.key == "whisper")
-    cpu_only = install_picker.FamilyDef(
-        key=whisper.key,
-        label=whisper.label,
-        description=whisper.description,
-        size_hint=whisper.size_hint,
-        shared_extras=whisper.shared_extras,
-        backends=(install_picker.BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("whisper-cpu",)),),
-        default_selected=whisper.default_selected,
-    )
-    others = tuple(f for f in FAMILIES if f.key != whisper.key)
-    monkeypatch.setattr(install_picker, "FAMILIES", (cpu_only, *others))
-
+def test_removed_backend_families_surfaces_only_removed_catalog(monkeypatch):
+    """`Selection.removed_backend_families` returns enabled families
+    whose saved backend isn't in the catalog anymore — drives the
+    main-loop stderr warning."""
+    _patch_whisper_without_mlx(monkeypatch)
     sel = Selection()
     _enable(sel, "whisper", BACKEND_MLX)  # removed from catalog → surfaces
     _enable(sel, "voxtral", BACKEND_MLX)  # not in catalog (Voxtral has no MLX) → also surfaces
-    removed = install_picker.families_with_removed_backend(sel, _apple_caps())
-    keys = {f.key for f in removed}
-    assert "whisper" in keys
-    assert "voxtral" in keys
+    keys = {f.key for f in sel.removed_backend_families()}
+    assert keys == {"whisper", "voxtral"}
 
-    # Sanity: a family with a *valid* catalog choice (MLX on Whisper if
-    # the catalog still had MLX) wouldn't surface. Reset by giving
-    # Whisper a CPU choice instead.
     sel2 = Selection()
     _enable(sel2, "whisper", BACKEND_CPU)
-    assert install_picker.families_with_removed_backend(sel2, _apple_caps()) == []
+    assert sel2.removed_backend_families() == []
 
 
-def test_backend_in_catalog_recognises_both_when_two_backends_declared():
+def test_familydef_declares_backend():
     whisper = next(f for f in FAMILIES if f.key == "whisper")
     voxtral = next(f for f in FAMILIES if f.key == "voxtral")
-    assert install_picker.backend_in_catalog(whisper, BACKEND_BOTH) is True
-    # Voxtral has only one backend declared (CPU); 'Both' is meaningless
-    # there and shouldn't be admitted.
-    assert install_picker.backend_in_catalog(voxtral, BACKEND_BOTH) is False
-    assert install_picker.backend_in_catalog(whisper, BACKEND_CPU) is True
-    assert install_picker.backend_in_catalog(whisper, BACKEND_MLX) is True
-    assert install_picker.backend_in_catalog(voxtral, BACKEND_MLX) is False
+    # Voxtral has only one backend declared; 'Both' is meaningless and
+    # `declares_backend` rejects it. Same for MLX.
+    assert whisper.declares_backend(BACKEND_BOTH) is True
+    assert voxtral.declares_backend(BACKEND_BOTH) is False
+    assert whisper.declares_backend(BACKEND_CPU) is True
+    assert whisper.declares_backend(BACKEND_MLX) is True
+    assert voxtral.declares_backend(BACKEND_MLX) is False
+    # has_mlx is the BACKEND_MLX special case of declares_backend.
+    assert whisper.has_mlx() is True
+    assert voxtral.has_mlx() is False
 
 
 def test_resolve_extras_preserves_family_order_for_reproducibility():
