@@ -158,54 +158,19 @@ if ! python tools/install_picker.py "${PICKER_ARGS[@]}"; then
     exit 1
 fi
 
-# --- Runtime system + python deps ------------------------------------------
-# Two repeat trip-wires that bit operators with a fresh checkout get resolved
-# here, BEFORE the recorder boots, so the failure modes never reach a /tap
-# WebSocket or a transcribe job:
+# --- Runtime python deps ----------------------------------------------------
+# The TapScribe per-tap silence gate (`gate_kind="tapscribe"`, which is
+# the default) imports `silero_vad` lazily on the first /tap WS. Missing
+# → the tap falls back to passthrough mode ("gate construction failed …
+# falling back to passthrough"), which silently disables the gate the
+# operator picked. Pull the `[vad]` extra so the dependency is satisfied
+# alongside the model install. No-op on re-runs once installed.
 #
-#   1. parakeet-mlx's `transcribe()` shells out to `ffmpeg` via its own
-#      `load_audio()` — there's no in-process decode hook to replace it
-#      with — so a missing system ffmpeg surfaces as a RuntimeError mid
-#      request. Install ffmpeg via Homebrew on macOS (the only host
-#      where parakeet-mlx is selectable). Linux / Windows operators get
-#      a clear hint instead of an auto-install since their package
-#      managers need sudo.
-#
-#   2. The TapScribe per-tap silence gate (`gate_kind="tapscribe"`,
-#      which is the default) imports `silero_vad` lazily on the first
-#      /tap WS. Missing → the tap falls back to passthrough mode
-#      ("gate construction failed … falling back to passthrough"),
-#      which silently disables the gate the operator picked. Pull the
-#      `[vad]` extra so the dependency is satisfied alongside the model
-#      install.
-#
-# Both checks are no-ops when already satisfied, so re-runs stay cheap.
-if python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('parakeet_mlx') else 1)" 2>/dev/null; then
-    if ! command -v ffmpeg >/dev/null 2>&1; then
-        if [ "$OS_NAME" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
-            echo "[start] parakeet-mlx is installed but ffmpeg is missing — installing via Homebrew…"
-            if ! brew install ffmpeg; then
-                echo "[start] 'brew install ffmpeg' failed. Install it manually and re-run:" >&2
-                echo "[start]   brew install ffmpeg" >&2
-                exit 1
-            fi
-        else
-            cat >&2 <<EOF
-[start] parakeet-mlx is installed but ffmpeg is not on PATH. parakeet-mlx
-        decodes audio by shelling out to ffmpeg — without it, every batch
-        transcribe with Parakeet will fail at request time. Install it:
-
-          macOS:  brew install ffmpeg
-          Ubuntu: sudo apt install ffmpeg
-          Fedora: sudo dnf install ffmpeg
-
-        Then re-run this script.
-EOF
-            exit 1
-        fi
-    fi
-fi
-
+# (No ffmpeg branch here: parakeet-mlx's batch path used to shell out to
+# ffmpeg via its bundled `load_audio()`, but `tapscribe.transcribers.
+# mlx_parakeet` now pre-decodes the recorder's WAV and calls the model's
+# lower-level `generate(mel)` directly. Same dependency-skipping trick
+# as `mlx_whisper`.)
 if ! python -c "import silero_vad" 2>/dev/null; then
     echo "[start] silero-vad missing — installing the [vad] extra so the TapScribe gate works…"
     if ! python -m pip install --quiet -e ".[vad]"; then

@@ -24,9 +24,10 @@ API contract:
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
-from ..audio import wav_duration_s
+from ..audio import RECORDER_SAMPLE_RATE, load_recorder_wav_as_pcm, wav_duration_s
 from .base import (
     TranscriptionResult,
     TranscriptionSegment,
@@ -129,6 +130,49 @@ class MlxParakeetTranscriber:
         model = from_pretrained(repo)
         return cls(model_name=model_name, model=model)
 
+    def _transcribe_via_generate(self, path: Path) -> Any | None:
+        """Pre-decode + `model.generate(mel)` short-circuit so we never
+        shell out to ffmpeg in the common case.
+
+        Returns the AlignedResult on success, or None if any step in the
+        pre-decode pipeline fails (mlx / parakeet_mlx not importable,
+        unexpected WAV format, preprocessor sample-rate mismatch, etc.) —
+        the caller falls back to `self._model.transcribe(str(path))`,
+        which is parakeet-mlx's own ffmpeg-backed path.
+
+        Catches a broad set of exceptions on purpose: every failure mode
+        here is non-fatal because the fallback path covers it. The log
+        line names the cause so a recurring failure surfaces in the
+        recorder log instead of being silently degraded.
+        """
+        try:
+            import mlx.core as mx  # type: ignore[import-not-found]  # noqa: PLC0415
+            from parakeet_mlx.audio import get_logmel  # type: ignore[import-not-found]  # noqa: PLC0415
+
+            preproc = self._model.preprocessor_config
+            if int(getattr(preproc, "sample_rate", 0)) != RECORDER_SAMPLE_RATE:
+                raise RuntimeError(
+                    f"parakeet preprocessor sample_rate "
+                    f"{getattr(preproc, 'sample_rate', '?')} != recorder "
+                    f"{RECORDER_SAMPLE_RATE}; falling back to ffmpeg resample"
+                )
+            pcm = load_recorder_wav_as_pcm(path)
+            mel = get_logmel(mx.array(pcm), preproc)
+            results = self._model.generate(mel)
+            if not results:
+                # Empty audio → some generate() backends return an empty list.
+                # Synthesise the same shape transcribe() returns so the rest
+                # of the adapter is oblivious.
+                return SimpleNamespace(text="", sentences=[])
+            return results[0]
+        except (ImportError, RuntimeError, AttributeError, TypeError, OSError) as e:
+            print(
+                f"[tapscribe] parakeet pre-decode failed ({type(e).__name__}: {e}); "
+                "falling back to model.transcribe(path) which needs ffmpeg on PATH.",
+                flush=True,
+            )
+            return None
+
     def transcribe(
         self,
         path: Path,
@@ -138,11 +182,21 @@ class MlxParakeetTranscriber:
         source_lang: str | None = None,
         target_lang: str | None = None,  # noqa: ARG002 — Parakeet doesn't translate
     ) -> TranscriptionResult:
-        # parakeet-mlx's transcribe takes only the audio path (plus optional
-        # chunk_duration / overlap_duration tuning kwargs we don't expose).
-        # No language hint slot — operator's source_lang choice is recorded
-        # on the result, not forwarded.
-        aligned = self._model.transcribe(str(path))
+        # parakeet-mlx's `transcribe(path)` calls its bundled `load_audio()`,
+        # which shells out to `ffmpeg` — so a host without ffmpeg fails
+        # at request time with `RuntimeError("FFmpeg is not installed …")`
+        # deep in Starlette middleware. The recorder always writes 16 kHz
+        # mono int16 (matches parakeet's preprocessor sample rate exactly),
+        # so we can pre-decode the WAV ourselves, build the log-mel via
+        # `parakeet_mlx.audio.get_logmel`, and call the model's lower-level
+        # `generate(mel)` directly. Same pattern as `mlx_whisper`'s
+        # pre-decode short-circuit. The fallback to the path-based
+        # `transcribe()` is kept for the rare unusual-WAV case (e.g. a
+        # session WAV that didn't come from the recorder) — that path
+        # still needs ffmpeg.
+        aligned = self._transcribe_via_generate(path)
+        if aligned is None:
+            aligned = self._model.transcribe(str(path))
         sentences = _attr(aligned, "sentences", None) or []
         segments = tuple(_sentence_to_segment(s) for s in sentences)
         text = (_attr(aligned, "text", "") or "").strip()

@@ -9,18 +9,10 @@
 ## Runtime deps the install picker does NOT cover
 
 `tools/install_picker.py` resolves *model* extras (`whisper-cpu`,
-`parakeet-mlx`, …). Two recurring runtime dependencies fall outside
-that matrix and are wired into `start.sh` / `start.ps1` instead, after
+`parakeet-mlx`, …). One recurring runtime dependency falls outside
+that matrix and is wired into `start.sh` / `start.ps1` instead, after
 the picker runs:
 
-- **`ffmpeg` (system binary)** — `parakeet-mlx`'s `transcribe()` shells
-  out to ffmpeg via its hardcoded `load_audio()`. Missing ffmpeg →
-  `RuntimeError("FFmpeg is not installed or not in your PATH.")`
-  mid-request, deep in a Starlette middleware stack. `start.sh`
-  auto-installs via Homebrew on macOS when `parakeet_mlx` is in the
-  venv. Don't add a Python preflight that `shutil.which("ffmpeg")`s —
-  CI doesn't have ffmpeg and the existing unit tests mock the model.
-  Fix is install-time, not runtime.
 - **`silero-vad` (`[vad]` extra, pulls `torch>=2.1`)** — the per-tap
   TapScribe gate (`gate_kind="tapscribe"`, the default) imports
   `silero_vad` lazily on the first `/tap` WS. Missing → the tap logs
@@ -28,10 +20,24 @@ the picker runs:
   gate the operator picked is silently a no-op. `start.sh` runs
   `pip install -e ".[vad]"` when the module isn't importable.
 
+**`ffmpeg` is NOT required for normal operation.** The MLX backends —
+both `mlx_whisper` and `mlx_parakeet` — pre-decode the recorder's WAV
+into a numpy/mx array (via `load_recorder_wav_as_pcm`) and feed it to
+the model's lower-level entry point (`mlx_whisper.transcribe(array,
+…)` and `model.generate(get_logmel(audio, preproc))` respectively),
+short-circuiting the bundled `load_audio()` that shells out to ffmpeg.
+Don't reintroduce a path-only call in either adapter without keeping
+the pre-decode shortcut: parakeet-mlx in particular fails mid-request
+with `RuntimeError("FFmpeg is not installed …")` deep in Starlette
+middleware when ffmpeg is absent. The adapters keep a
+`model.transcribe(str(path))` fallback for unusual WAVs (different
+sample rate / channel layout) that still needs ffmpeg — but the log
+line says so, so a recurring fallback is visible.
+
 If a new runtime dep with the same shape (system binary, or optional
 Python package gated by a lazy import) lands, add it to the `Runtime
-system + python deps` block in `start.sh` rather than as a Python
-preflight — operators hit it once on bring-up instead of mid-request.
+python deps` block in `start.sh` rather than as a Python preflight —
+operators hit it once on bring-up instead of mid-request.
 
 ## Security: avoid CodeQL "security-and-quality" tripwires
 
