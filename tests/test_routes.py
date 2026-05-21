@@ -1234,12 +1234,23 @@ def test_api_transcribe_session_returns_404_for_empty_range(client, recorder_und
     assert r.status_code == 404, r.text
 
 
-def test_api_transcribe_session_returns_409_when_job_already_in_flight(client, recorder_under_test):
+def test_api_transcribe_session_returns_409_when_job_already_in_flight(
+    client, recorder_under_test, monkeypatch
+):
     """One transcribe / strip job per session at a time. Pre-claiming
     the slot simulates a concurrent operator click; the route must
     refuse with 409 rather than corrupting JobTracker state by
-    starting a second loop alongside the first."""
+    starting a second loop alongside the first.
+
+    `transcribe_session` calls `load_transcriber` BEFORE the
+    JobTracker.claim, so without stubbing the loader CI (where
+    `faster_whisper` isn't installed) would hit `ModuleNotFoundError`
+    instead of reaching the SessionBusy branch we're trying to exercise."""
     from tapscribe.recorder import JobState
+
+    fake = TranscriberStub(backend="fake-be", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
     _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
