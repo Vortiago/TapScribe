@@ -71,9 +71,9 @@ def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
-    import tapscribe.app as _app
+    import tapscribe.batch_transcribe as _bt
 
-    monkeypatch.setattr(_app, "load_transcriber", _factory)
+    monkeypatch.setattr(_bt, "load_transcriber", _factory)
     _transcribers.clear_cache()
     return fake
 

@@ -23,8 +23,8 @@ The big-picture route map:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import math
 import shutil
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -47,9 +47,18 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, config
 from . import hallucinations as hallucinations_mod
 from . import strip_silence as _ss
-from .audio import wav_duration_s, wav_rms_dbfs
+from .batch_transcribe import (
+    BatchOneRequest,
+    BatchSessionRequest,
+    InvalidRange,
+    NoUsableWavs,
+    SessionBusy,
+    WavTooQuiet,
+    WavUnreadable,
+    transcribe_one,
+    transcribe_session,
+)
 from .recorder import JobState, Recorder
-from .session_merge import merge_session, select_session_wavs
 from .sessions import (
     absorb_session,
     gather_sessions,
@@ -70,9 +79,8 @@ from .text import (
     write_live_prompt,
     write_prompt,
 )
-from .transcribers import load_transcriber
 from .transcribers.catalog import REGISTRY, available_backends
-from .wav_cache import cached_transcribe, read_primary_payload, set_primary_transcript
+from .wav_cache import set_primary_transcript
 
 
 def _available_backends_snapshot() -> frozenset[str]:
@@ -150,19 +158,22 @@ def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | No
     """Parse an optional numeric body field with range enforcement.
     None / missing → returned unchanged so the downstream "field not
     supplied" semantics still work. Anything else must round-trip
-    through `float()` and land in [lo, hi]; otherwise raise 400."""
+    through `float()`, be finite, and land in [lo, hi]; otherwise
+    raise 400. The explicit finite check matters because
+    `lo <= NaN <= hi` is always False AND `NaN` happily survives
+    `float()` — without the check a `{"gate_speech_threshold": NaN}`
+    payload would slip past with a confusing "must be in […]" error
+    that names NaN as the offending value."""
     if raw is None:
         return None
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        # `from None` (not `from e`) so the original exception's traceback
-        # isn't chained into the HTTPException. FastAPI's default handler
-        # only returns `detail`, so a chain isn't user-visible in practice
-        # — but CodeQL's `py/stack-trace-exposure` flags any chained throw
-        # at an HTTP boundary defensively, and the chain adds nothing for
-        # the operator's debugging that the message above doesn't already.
+        # `from None` — CodeQL py/stack-trace-exposure: chain adds nothing
+        # the detail message doesn't already convey.
         raise HTTPException(400, f"{field} must be a number, got {raw!r}") from None
+    if not math.isfinite(value):
+        raise HTTPException(400, f"{field} must be a finite number, got {value}")
     if not (lo <= value <= hi):
         raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
     return value
@@ -172,9 +183,8 @@ def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
     if raw is None:
         return None
     try:
-        # int("3.5") raises; int(3.5) truncates silently to 3. The dashboard
-        # only sends whole-number gap/pad values via <input type="number"
-        # step="..."> so the truncation case shouldn't fire in practice.
+        # Accept JSON numerics (which arrive as float in some clients)
+        # by routing through float→int — rejects "3.5" implicitly.
         value = int(raw)
     except (TypeError, ValueError):
         # `from None` — see _parse_bounded_float for the rationale.
@@ -590,9 +600,9 @@ async def api_config_put(key: str, req: Request):
     try:
         writer(content)
     except ValueError as e:
-        raise HTTPException(400, str(e)) from e
+        raise HTTPException(400, str(e)) from None
     except OSError as e:
-        raise HTTPException(500, f"failed to write config: {e}") from e
+        raise HTTPException(500, f"failed to write config: {e}") from None
     return {"ok": True, "key": key, "length": len(content)}
 
 
@@ -641,13 +651,8 @@ async def api_session_strip_silence(
     body = await _json_body(req)
     # Range-bound everything that hits the silero detector so a malformed
     # dashboard POST returns 400 instead of a 500 from int()/float().
-    # Upper bounds are generous (10 min gap / 5 s pad / 0 dBFS floor) —
-    # past those the operator is misusing the feature, not tuning it.
     # `is None` (not `or`) so an explicit 0 — e.g. pad_ms=0 to disable
     # region padding for A/B — doesn't silently fall back to the default.
-    # min_silence_ms lower bound matches the HTML form's min="100"; a
-    # value of 0 would make silero split on every cross-window dip and is
-    # never what the operator wants.
     min_silence_ms = _parse_bounded_int(body.get("min_silence_ms"), "min_silence_ms", lo=100, hi=600_000)
     if min_silence_ms is None:
         min_silence_ms = 500
@@ -682,7 +687,7 @@ async def api_session_strip_silence(
             try:
                 shutil.rmtree(out_dir)
             except OSError as e:
-                raise HTTPException(500, f"could not clear stripped/: {e}") from e
+                raise HTTPException(500, f"could not clear stripped/: {e}") from None
 
         started = datetime.now(UTC)
 
@@ -736,7 +741,7 @@ async def api_session_stripped_delete(session: str, recorder: Recorder = Depends
     try:
         shutil.rmtree(d)
     except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from e
+        raise HTTPException(500, f"delete failed: {e}") from None
     print(f"[tapscribe] removed stripped/ from session: {session}", flush=True)
     return {"ok": True, "deleted": True}
 
@@ -793,7 +798,7 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     try:
         shutil.rmtree(session_dir)
     except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from e
+        raise HTTPException(500, f"delete failed: {e}") from None
     await recorder.jobs.release(session)
     print(f"[tapscribe] deleted session: {session_dir}", flush=True)
     return {"ok": True, "deleted": session}
@@ -850,27 +855,8 @@ async def api_set_primary(
     try:
         await asyncio.to_thread(set_primary_transcript, path, backend=backend, model=model)
     except FileNotFoundError as e:
-        raise HTTPException(422, str(e)) from e
+        raise HTTPException(422, str(e)) from None
     return {"ok": True, "primary": {"backend": backend, "model": model}}
-
-
-def _effective_batch_prompt_hotwords(session: str) -> tuple[str | None, str | None]:
-    """Override chain for batch transcribe jobs: session-meta → global
-    config files. Returns (initial_prompt, hotwords), each None when
-    both layers are empty so the adapter receives no value (vs. the
-    empty string, which some backends would treat as a real prompt).
-
-    Limitation: an empty session-meta override falls back to the global
-    default — there's no way for a session to assert "specifically NO
-    prompt, even though a global is set." If an operator needs that
-    today the workaround is to clear the global prompt; a future
-    sentinel value (e.g. a `null` override that's distinct from the
-    empty string) could express it explicitly without touching the
-    global."""
-    meta = read_session_meta(session)
-    prompt = (meta.get("prompt") or "").strip() or (read_prompt() or "").strip()
-    hotwords = (meta.get("hotwords") or "").strip() or (read_hotwords() or "").strip()
-    return (prompt or None), (hotwords or None)
 
 
 @app.post("/api/transcribe")
@@ -878,154 +864,66 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
     body = await req.json()
     session = body.get("session") or ""
     name = body.get("name") or ""
-    model_name = body.get("model") or "small.en"
-    source = body.get("source") or "original"
     if not session or not name:
         raise HTTPException(400, "session and name are required")
-    path = resolve_wav(session, name, source)
-    try:
-        size = path.stat().st_size
-    except OSError:
-        size = 0
-    if size < 64 or wav_duration_s(path) <= 0.0:
-        raise HTTPException(422, "empty or unreadable WAV (size=" + str(size) + " bytes)")
-    # Silence detection always reads the ORIGINAL, not the per-source file.
-    original_path = config.RECORDINGS_DIR / session / name
-    rms_dbfs = wav_rms_dbfs(original_path)
-    if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
-        raise HTTPException(
-            422,
-            f"original WAV is essentially silent ({rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS) "
-            "— Whisper would hallucinate. Remove or skip this file.",
-        )
-
-    # Per-call backend override — when the dashboard's backend chip
-    # differs from the Recorder's default. Falls back to the Recorder's
-    # preference if the body didn't carry one.
-    backend_override = (body.get("backend") or "").strip() or recorder.backend
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
-    initial_prompt, hotwords = _effective_batch_prompt_hotwords(session)
-    # Canary's per-call language fields ride alongside prompt/hotwords. Empty
-    # string → adapter falls back to its own "en" default.
-    source_lang = (body.get("source_lang") or "").strip() or None
-    target_lang = (body.get("target_lang") or "").strip() or None
-    rules = hallucinations_mod.parse_rules()
-
-    cached = await asyncio.to_thread(
-        cached_transcribe,
-        path,
-        transcriber,
-        initial_prompt=initial_prompt,
-        hotwords=hotwords,
-        source_lang=source_lang,
-        target_lang=target_lang,
-        hallucination_rules=rules,
-        force=True,  # explicit per-WAV transcribe always re-runs
+    source = body.get("source") or "original"
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    request = BatchOneRequest(
+        session=session,
+        name=name,
         source=source,
+        model=body.get("model") or "small.en",
+        # Per-call backend override — falls back to the Recorder's
+        # preference when the body didn't carry one.
+        backend=(body.get("backend") or "").strip() or recorder.backend,
+        # Canary's per-call language fields ride alongside prompt/hotwords.
+        # Empty → adapter falls back to its own default.
+        source_lang=(body.get("source_lang") or "").strip() or None,
+        target_lang=(body.get("target_lang") or "").strip() or None,
     )
-
-    # Return the freshly-written sidecar's raw JSON dict to preserve the
-    # wire shape callers expect. read_primary_payload resolves whichever
-    # cache layout actually landed (legacy or new-layout) without the
-    # route needing to know.
-    result_dict = read_primary_payload(path)
-    if result_dict is None:
-        raise HTTPException(500, "cached_transcribe completed but no sidecar landed on disk")
+    try:
+        payload = await transcribe_one(recorder, request)
+    except WavUnreadable as e:
+        raise HTTPException(422, str(e)) from None
+    except WavTooQuiet as e:
+        raise HTTPException(422, str(e)) from None
     print(
-        f"[tapscribe] transcribed {name} ({source}) with {model_name} in {cached.transcribe_ms} ms",
+        f"[tapscribe] transcribed {request.name} ({request.source}) with {request.model}",
         flush=True,
     )
-    return JSONResponse(result_dict)
+    return JSONResponse(payload)
 
 
 @app.post("/api/transcribe-session")
 async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await req.json()
     session = body.get("session") or ""
-    model_name = body.get("model") or "small.en"
-    from_iso = body.get("from_iso") or None
-    to_iso = body.get("to_iso") or None
-    force = bool(body.get("force"))
-    source = body.get("source") or "original"
     if not session:
         raise HTTPException(400, "session is required")
-    session_dir = resolve_session_dir(session)
-
-    # Phase 0: pure selection.
-    try:
-        selection = select_session_wavs(
-            session_dir,
-            from_iso=from_iso,
-            to_iso=to_iso,
-            source=source,
-        )
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from e
-    if not selection.wavs:
-        raise HTTPException(404, "no usable WAVs in the given range")
-
-    backend_override = (body.get("backend") or "").strip() or recorder.backend
-    transcriber = await asyncio.to_thread(load_transcriber, model_name, backend=backend_override)
-    initial_prompt, hotwords = _effective_batch_prompt_hotwords(session)
-    source_lang = (body.get("source_lang") or "").strip() or None
-    target_lang = (body.get("target_lang") or "").strip() or None
-    rules = hallucinations_mod.parse_rules()
-    # No `effective_force = force or bool(prompt/hotwords_override)` here:
-    # the cache match key in `cached_transcribe` now includes
-    # initial_prompt_used + hotwords_used, so a meta change automatically
-    # misses the cache. As a side benefit this re-runs only the WAVs
-    # whose cached entry doesn't match — the old `effective_force` path
-    # forced every file in the session, even ones already transcribed
-    # under the new prompt by a prior /api/transcribe call.
-    effective_force = force
-
-    claimed = await recorder.jobs.claim(
-        JobState(
-            session=session,
-            kind="transcribe",
-            current=0,
-            total=len(selection.wavs),
-            started_at=datetime.now(UTC),
-            model=model_name,
-            status="running",
-        )
+    source = body.get("source") or "original"
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    request = BatchSessionRequest(
+        session=session,
+        source=source,
+        model=body.get("model") or "small.en",
+        backend=(body.get("backend") or "").strip() or recorder.backend,
+        from_iso=body.get("from_iso") or None,
+        to_iso=body.get("to_iso") or None,
+        force=bool(body.get("force")),
+        source_lang=(body.get("source_lang") or "").strip() or None,
+        target_lang=(body.get("target_lang") or "").strip() or None,
     )
-    if not claimed:
-        raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
-
     try:
-        # Phase 1: ensure every selected WAV is transcribed (cache-aware).
-        for idx, wav in enumerate(selection.wavs):
-            await recorder.jobs.update(session, current=idx, current_file=wav.name)
-            await asyncio.to_thread(
-                cached_transcribe,
-                wav,
-                transcriber,
-                initial_prompt=initial_prompt,
-                hotwords=hotwords,
-                source_lang=source_lang,
-                target_lang=target_lang,
-                hallucination_rules=rules,
-                force=effective_force,
-                source=selection.source,
-            )
-
-        # Phase 2: pure read-and-build merge.
-        transcript = merge_session(selection)
-        merged = transcript.to_dict()
-        if not merged.get("model"):
-            merged["model"] = model_name
-
-        out_path = session_dir / "session-transcript.json"
-        out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-        (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
-
-        return JSONResponse(merged)
-    except Exception as e:
-        await recorder.jobs.update(session, status="error: " + str(e))
-        raise
-    finally:
-        await recorder.jobs.release(session)
+        merged = await transcribe_session(recorder, request)
+    except InvalidRange as e:
+        raise HTTPException(400, str(e)) from None
+    except NoUsableWavs as e:
+        raise HTTPException(404, str(e)) from None
+    except SessionBusy as e:
+        raise HTTPException(409, str(e)) from None
+    return JSONResponse(merged)
 
 
 # ---------------------------------------------------------------------------

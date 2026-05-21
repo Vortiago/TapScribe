@@ -12,6 +12,7 @@ from tapscribe.transcribers.base import (
     TranscriptionResult,
     TranscriptionSegment,
     Word,
+    build_transcription_result,
     default_language_for,
 )
 
@@ -165,3 +166,164 @@ def test_transcription_result_supports_dataclasses_replace_for_pipeline_steps():
     # original untouched
     assert r.segments == (seg, sup)
     assert r.suppressed_hallucinations == ()
+
+
+# ---------------------------------------------------------------------------
+# build_transcription_result — the shared constructor that absorbs the audit-
+# field boilerplate the per-adapter `transcribe()` methods used to repeat.
+# ---------------------------------------------------------------------------
+
+
+def test_build_transcription_result_reads_audit_fields_from_adapter():
+    """The four audit fields (transcriber/backend/device/model) used to be
+    re-spelled by hand in every adapter's `return TranscriptionResult(...)`
+    literal. The shared constructor pulls them off the adapter so a future
+    TranscriptionResult field-rename touches one site instead of nine."""
+    adapter = _FakeTranscriber()
+    seg = TranscriptionSegment(start=0.0, end=1.0, text="hi")
+    result = build_transcription_result(
+        adapter,
+        text="hi",
+        segments=(seg,),
+        duration=1.0,
+        language="en",
+    )
+    assert result.transcriber == "fake"
+    assert result.backend == "fake-backend"
+    assert result.device == "test"
+    assert result.model == "fake-model"
+
+
+def test_build_transcription_result_rounds_language_probability_to_three_dp():
+    """faster-whisper's `info.language_probability` is a high-precision
+    float; the wire format was always 3dp. Centralise the rounding so
+    every backend's cached JSON looks consistent (even backends that
+    pass 0.0 — round(0.0, 3) is still 0.0)."""
+    adapter = _FakeTranscriber()
+    result = build_transcription_result(
+        adapter,
+        text="",
+        segments=(),
+        duration=0.0,
+        language="en",
+        language_probability=0.9234567,
+    )
+    assert result.language_probability == 0.923
+
+
+def test_build_transcription_result_rounds_duration_to_two_dp():
+    """Adapters were each calling `round(wav_duration_s(...), 2)` at
+    the call site. Centralising means a future change to the wire-
+    format precision touches one place."""
+    adapter = _FakeTranscriber()
+    result = build_transcription_result(
+        adapter,
+        text="",
+        segments=(),
+        duration=1.23456,
+        language="en",
+    )
+    assert result.duration == 1.23
+
+
+def test_build_transcription_result_coerces_none_inputs_to_empty_string():
+    """The wire format never carries None for prompt / hotwords /
+    source_language — adapters historically did `initial_prompt or ""`
+    each time. Centralise so the call site is just `initial_prompt=…`
+    and the helper does the coercion."""
+    adapter = _FakeTranscriber()
+    result = build_transcription_result(
+        adapter,
+        text="",
+        segments=(),
+        duration=0.0,
+        language="en",
+        initial_prompt=None,
+        hotwords=None,
+        source_lang=None,
+    )
+    assert result.initial_prompt_used == ""
+    assert result.hotwords_used == ""
+    assert result.source_language == ""
+
+
+def test_build_transcription_result_passes_through_non_empty_inputs():
+    """Explicitly-supplied values reach the result unmolested."""
+    adapter = _FakeTranscriber()
+    result = build_transcription_result(
+        adapter,
+        text="",
+        segments=(),
+        duration=0.0,
+        language="en",
+        initial_prompt="please punctuate",
+        hotwords="Acme",
+        source_lang="en",
+    )
+    assert result.initial_prompt_used == "please punctuate"
+    assert result.hotwords_used == "Acme"
+    assert result.source_language == "en"
+
+
+def test_build_transcription_result_blanks_target_when_equal_to_source():
+    """Canary's contract: `target_language` is non-empty ONLY when
+    translation actually happened (target_lang != source_lang). When
+    they match — plain transcription — the field stays empty so the
+    dashboard's translation badge doesn't flash for a no-op."""
+    adapter = _FakeTranscriber()
+    result = build_transcription_result(
+        adapter,
+        text="",
+        segments=(),
+        duration=0.0,
+        language="en",
+        source_lang="en",
+        target_lang="en",
+    )
+    assert result.target_language == ""
+
+
+def test_build_transcription_result_keeps_target_when_translating():
+    adapter = _FakeTranscriber()
+    result = build_transcription_result(
+        adapter,
+        text="",
+        segments=(),
+        duration=0.0,
+        language="en",
+        source_lang="en",
+        target_lang="es",
+    )
+    assert result.target_language == "es"
+
+
+def test_build_transcription_result_blanks_target_when_none():
+    """Most adapters (Whisper, Voxtral, Parakeet) don't translate.
+    They call without `target_lang`; the field must end up empty so
+    the wire shape is uniform."""
+    adapter = _FakeTranscriber()
+    result = build_transcription_result(
+        adapter,
+        text="",
+        segments=(),
+        duration=0.0,
+        language="en",
+        source_lang="en",
+    )
+    assert result.target_language == ""
+
+
+def test_build_transcription_result_defaults_quality_settings_to_empty_dict():
+    """None → {}. Some adapters (mlx_parakeet) historically passed
+    `{}` explicitly; some passed a populated dict. The helper accepts
+    None as "no extras"."""
+    adapter = _FakeTranscriber()
+    result = build_transcription_result(
+        adapter,
+        text="",
+        segments=(),
+        duration=0.0,
+        language="en",
+        quality_settings=None,
+    )
+    assert result.quality_settings == {}

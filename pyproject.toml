@@ -73,7 +73,15 @@ voxtral-cpu = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
 # Two independent adapters; no shared piece between them.
 parakeet-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
 parakeet-mlx = [
-    "parakeet-mlx>=0.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # Upper bound: `tapscribe.transcribers.mlx_parakeet` relies on
+    # `parakeet_mlx.audio.get_logmel` and the model's `generate(mel)` entry
+    # point to side-step the bundled ffmpeg-based loader (see
+    # `tapscribe/wav_predecode.py`). Those names are not part of the
+    # README-documented public API, so a major-version bump that
+    # relocates them would silently regress every batch transcribe to
+    # needing ffmpeg on PATH. Bump the cap deliberately after auditing
+    # the upstream changelog.
+    "parakeet-mlx>=0.5,<0.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 # --- Canary 1B v2 -----------------------------------------------------------

@@ -12,6 +12,7 @@ from __future__ import annotations
 import types
 import wave
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -175,3 +176,239 @@ def test_transcribe_emits_empty_segments_for_empty_aligned_result(tmp_path: Path
     result = t.transcribe(wav)
     assert result.segments == ()
     assert result.text == ""
+
+
+# ---------------------------------------------------------------------------
+# _transcribe_via_generate — the pre-decode fast path that avoids ffmpeg.
+#
+# These tests inject `mel_fn` so they don't need parakeet-mlx installed (it's
+# Apple Silicon only and CI runs on Linux). They exercise:
+#   - the happy path: mel_fn is called with PCM, model.generate(mel)[0] is
+#     returned, and the wrapper transcribe() never touches model.transcribe();
+#   - the fallback boundary: each per-failure-mode early return yields None
+#     and the caller falls through to model.transcribe(path);
+#   - the empty-list defensive return from generate (so a future upstream
+#     regression doesn't IndexError into the Starlette response).
+# ---------------------------------------------------------------------------
+
+
+def _model_with_generate(*, sample_rate: int, generate_return: Any) -> MagicMock:
+    """Build a fake model that exposes the API surface the pre-decode path
+    expects: `preprocessor_config.sample_rate`, `generate(mel)`, plus the
+    fallback `transcribe(path)` so a None return from the pre-decode lands
+    somewhere predictable for the assertion."""
+    model = MagicMock()
+    model.preprocessor_config.sample_rate = sample_rate
+    model.generate.return_value = generate_return
+    # Sentinel result so a test that erroneously hits the fallback shows up
+    # with a recognisable value instead of a MagicMock dump.
+    model.transcribe.return_value = _aligned_result(
+        sentences=[_aligned_sentence("fallback", 0.0, 0.1)], text="fallback"
+    )
+    return model
+
+
+def test_pre_decode_happy_path_skips_model_transcribe(tmp_path: Path):
+    """With matching sample rates and a mel_fn injected, the adapter uses
+    `model.generate(mel)[0]` and never calls the ffmpeg-backed
+    `model.transcribe(path)`."""
+    from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
+
+    aligned = _aligned_result(sentences=[_aligned_sentence("hi", 0.0, 0.5)], text="hi")
+    model = _model_with_generate(sample_rate=16000, generate_return=[aligned])
+    captured: dict[str, Any] = {}
+
+    def fake_mel(pcm, preproc):
+        captured["pcm_dtype"] = pcm.dtype.name
+        captured["pcm_len"] = int(pcm.shape[0])
+        captured["preproc"] = preproc
+        return "fake-mel-token"
+
+    t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=model, mel_fn=fake_mel)
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav)
+
+    assert result.text == "hi"
+    # mel_fn saw the recorder-format PCM, model.generate saw the resulting mel,
+    # and the ffmpeg-backed model.transcribe was never invoked.
+    assert captured["pcm_dtype"] == "float32"
+    assert captured["pcm_len"] == 16000  # _one_second_wav() at 16 kHz
+    model.generate.assert_called_once_with("fake-mel-token")
+    model.transcribe.assert_not_called()
+
+
+def test_pre_decode_falls_back_when_sample_rate_mismatches(tmp_path: Path):
+    """If the loaded model's preprocessor expects a sample rate other than
+    the recorder's 16 kHz, the pre-decode path bails out — falling back to
+    `model.transcribe(path)` so parakeet-mlx's own loader can resample."""
+    from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
+
+    aligned = _aligned_result(sentences=[_aligned_sentence("hi", 0.0, 0.5)], text="hi")
+    model = _model_with_generate(sample_rate=8000, generate_return=[aligned])
+    t = MlxParakeetTranscriber(
+        model_name="parakeet-tdt-0.6b-v3",
+        model=model,
+        mel_fn=lambda pcm, preproc: pytest.fail("mel_fn should not be called"),
+    )
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav)
+
+    # Hit the fallback transcribe(path) — sentinel "fallback" text confirms it.
+    assert result.text == "fallback"
+    model.generate.assert_not_called()
+    model.transcribe.assert_called_once()
+
+
+def test_pre_decode_falls_back_when_wav_format_unexpected(tmp_path: Path):
+    """A stereo / non-16kHz WAV (e.g. one a user dropped into the session
+    folder manually) trips load_recorder_wav_as_pcm. The adapter routes
+    that to model.transcribe(path) so ffmpeg can decode the unusual input."""
+    from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
+
+    aligned = _aligned_result(sentences=[_aligned_sentence("hi", 0.0, 0.5)], text="hi")
+    model = _model_with_generate(sample_rate=16000, generate_return=[aligned])
+    t = MlxParakeetTranscriber(
+        model_name="parakeet-tdt-0.6b-v3",
+        model=model,
+        mel_fn=lambda pcm, preproc: pytest.fail("mel_fn should not be called on rejected WAV"),
+    )
+    # 8 kHz instead of 16 kHz — load_recorder_wav_as_pcm raises RuntimeError.
+    odd_wav = tmp_path / "odd.wav"
+    with wave.open(str(odd_wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        w.writeframes(np.zeros(8000, dtype=np.int16).tobytes())
+
+    result = t.transcribe(odd_wav)
+
+    assert result.text == "fallback"
+    model.transcribe.assert_called_once()
+
+
+def test_pre_decode_falls_back_when_generate_returns_empty_list(tmp_path: Path):
+    """`parakeet_mlx`'s contract is that generate() always returns at least
+    one AlignedResult — but a future regression that returns [] would
+    IndexError on `results[0]` mid-request. The defensive empty check routes
+    through the ffmpeg fallback instead."""
+    from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
+
+    model = _model_with_generate(sample_rate=16000, generate_return=[])
+    t = MlxParakeetTranscriber(
+        model_name="parakeet-tdt-0.6b-v3",
+        model=model,
+        mel_fn=lambda pcm, preproc: "fake-mel",
+    )
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav)
+
+    # mel_fn ran (so generate was called) but the empty list routed us to
+    # the fallback transcribe(path) instead of crashing.
+    model.generate.assert_called_once_with("fake-mel")
+    model.transcribe.assert_called_once()
+    assert result.text == "fallback"
+
+
+def test_pre_decode_falls_back_when_generate_raises(tmp_path: Path):
+    """An exception from mel_fn or model.generate (e.g. an mlx-internal
+    shape mismatch after an upstream upgrade) routes through the fallback
+    rather than tearing down the Starlette response."""
+    from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
+
+    model = _model_with_generate(sample_rate=16000, generate_return=[])
+    model.generate.side_effect = RuntimeError("mlx kaboom")
+    t = MlxParakeetTranscriber(
+        model_name="parakeet-tdt-0.6b-v3",
+        model=model,
+        mel_fn=lambda pcm, preproc: "fake-mel",
+    )
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav)
+
+    assert result.text == "fallback"
+    model.transcribe.assert_called_once()
+
+
+def test_pre_decode_falls_back_when_mel_fn_unavailable(tmp_path: Path, monkeypatch):
+    """When `_resolve_mel_fn` returns None (either because the lazy
+    import failed or because a future refactor made the helpers
+    unavailable), the adapter falls back to the path-based transcribe.
+
+    The earlier version of this test relied on `parakeet_mlx` not
+    being importable to drive the None return — that's true on Linux
+    CI but breaks silently on macOS dev machines where the lazy
+    import would succeed and `model.generate.return_value = []`
+    would route through the empty-list defensive branch instead.
+    The monkeypatch makes the path-under-test deterministic
+    regardless of whether parakeet-mlx is installed on the host.
+    """
+    from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
+
+    model = _model_with_generate(sample_rate=16000, generate_return=[])
+    t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=model)
+    # Force `_resolve_mel_fn` to behave as if parakeet-mlx weren't
+    # importable, regardless of whether it actually is on this host.
+    monkeypatch.setattr(t, "_resolve_mel_fn", lambda: None)
+    wav = _one_second_wav(tmp_path / "x.wav")
+    result = t.transcribe(wav)
+
+    assert result.text == "fallback"
+    model.generate.assert_not_called()
+    model.transcribe.assert_called_once()
+
+
+def test_resolve_mel_fn_caches_unavailable_sentinel(monkeypatch):
+    """`_resolve_mel_fn` should attempt the lazy import at most once per
+    instance — on a host without parakeet-mlx, repeated transcribes
+    shouldn't keep re-importing (and re-logging) on every request.
+
+    Monkeypatch `builtins.__import__` so any import of parakeet_mlx /
+    mlx.core raises ImportError, then count attempts across calls.
+    After the first call sets the `_mel_fn_unavailable` latch, the
+    second call should short-circuit without touching the import
+    machinery.
+    """
+    import builtins
+
+    from tapscribe.transcribers.mlx_parakeet import MlxParakeetTranscriber
+
+    real_import = builtins.__import__
+    import_count = {"n": 0}
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("parakeet_mlx") or name == "mlx.core":
+            import_count["n"] += 1
+            raise ImportError(f"forced for test: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    t = MlxParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=MagicMock())
+    assert t._resolve_mel_fn() is None
+    first_call_imports = import_count["n"]
+    assert first_call_imports >= 1, "lazy import should have run on first call"
+
+    # Second call: the latch should prevent any further import attempts.
+    assert t._resolve_mel_fn() is None
+    assert import_count["n"] == first_call_imports
+
+
+# ---------------------------------------------------------------------------
+# Upstream API smoke test — only runs when parakeet-mlx is actually installed.
+# This is the one place CI on macOS catches a rename or relocation of the
+# undocumented entry points (`parakeet_mlx.audio.get_logmel`, the
+# `preprocessor_config.sample_rate` attribute, the `generate(mel)` shape)
+# BEFORE operators hit the regression on a host without ffmpeg. The pyproject
+# upper bound (`parakeet-mlx>=0.5,<0.6`) is the primary defence; this test
+# is the secondary signal.
+# ---------------------------------------------------------------------------
+
+
+def test_parakeet_mlx_audio_entry_points_present():
+    """If parakeet-mlx is installed, the symbols mlx_parakeet imports lazily
+    must exist. A future point release that renames `get_logmel` (or moves
+    it out of `parakeet_mlx.audio`) trips this test before operators
+    discover their batch transcribes have silently regressed to needing
+    ffmpeg again."""
+    pytest.importorskip("parakeet_mlx")
+    from parakeet_mlx.audio import get_logmel  # noqa: F401 — import is the assertion
