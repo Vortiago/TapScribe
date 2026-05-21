@@ -171,9 +171,17 @@ fi
 # mlx_parakeet` now pre-decodes the recorder's WAV and calls the model's
 # lower-level `generate(mel)` directly. Same dependency-skipping trick
 # as `mlx_whisper`.)
-if ! python -c "import silero_vad" 2>/dev/null; then
+# `find_spec` instead of `import silero_vad` so we don't pay the
+# ~1-2s torch import on every recorder bring-up just to probe
+# whether silero-vad is on the import path. The actual import is
+# deferred to `tapscribe.speech_gate` on the first /tap WS.
+if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('silero_vad') else 1)" 2>/dev/null; then
     echo "[start] silero-vad missing — installing the [vad] extra so the TapScribe gate works…"
-    if ! python -m pip install --quiet -e ".[vad]"; then
+    # NOT --quiet: the install pulls torch (~700MB), which can take
+    # minutes and occasionally fails on wheel resolution. Visible
+    # pip output makes the failure reason recoverable; a silent
+    # warning + no diagnostic would just frustrate the operator.
+    if ! python -m pip install -e ".[vad]"; then
         echo "[start] 'pip install -e .[vad]' failed. The recorder will still boot, but the" >&2
         echo "        TapScribe silence gate will fall back to passthrough on every /tap." >&2
     fi
