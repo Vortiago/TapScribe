@@ -563,13 +563,7 @@ _PARAKEET_BACKENDS: tuple[BackendBinding, ...] = (
 )
 
 
-# Canary has only a CPU/CUDA binding for now. MLX is intentionally not
-# wired in — no published `mlx-community/canary-1b-v2` exists, no working
-# .nemo→MLX converter is available to bundle, and shipping the MLX path
-# means every Apple Silicon operator hits a RepositoryNotFoundError at
-# request time. The adapter (`tapscribe.transcribers.mlx_canary`) and its
-# tests are kept so re-enabling is a one-line `BackendBinding(...)` add
-# when upstream publishes weights. See PR #61.
+# Canary is NeMo-only: there are no published mlx-audio Canary weights.
 _CANARY_BACKENDS: tuple[BackendBinding, ...] = (
     BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_canary_nemo, probe_module="nemo"),
 )

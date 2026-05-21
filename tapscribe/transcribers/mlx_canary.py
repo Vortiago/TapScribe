@@ -51,17 +51,9 @@ from .base import (
     build_transcription_result,
 )
 
-# There is no published MLX-converted Canary on the Hugging Face Hub as of
-# 2026-05. The upstream `mlx-audio` Canary README only documents loading
-# from a local directory of MLX safetensors that the operator converted
-# themselves from NVIDIA's `.nemo` upstream (see
-# https://github.com/Blaizzy/mlx-audio/tree/main/mlx_audio/stt/models/canary).
-# Earlier revisions of this adapter resolved `canary-1b-v2` to a
-# `mlx-community/canary-1b-v2` Hub repo, which returns 401 / Repository
-# Not Found at request time — the operator hit a stack trace deep inside
-# `huggingface_hub.snapshot_download` long after the dashboard told them
-# "loading…". The env var below is the operator's escape hatch; the
-# `load()` method below refuses to guess a Hub repo id instead.
+# mlx-audio's Canary has no published Hub repo; the loader requires a
+# locally converted MLX-safetensors directory. Operators point this env
+# var at the converted dir.
 ENV_LOCAL_PATH = "TAPSCRIBE_CANARY_MLX_PATH"
 
 
@@ -89,42 +81,21 @@ _OVERLAP_S_BOUNDS = (0.0, 60.0)
 _MAX_TOKENS_BOUNDS = (16, 4096)
 
 
+_CONVERSION_GUIDE_URL = "https://github.com/Blaizzy/mlx-audio/tree/main/mlx_audio/stt/models/canary"
+
+
 def _resolve_local_path(model_name: str) -> str:
-    """Resolve the directory mlx-audio's `from_pretrained` should load.
-
-    Precedence: `model_name` itself when it names an existing directory
-    (lets API callers pass a path directly); otherwise the
-    `TAPSCRIBE_CANARY_MLX_PATH` env var. Anything else raises a
-    `RuntimeError` whose message names the env var and points at the
-    upstream conversion guide — never guess an HF repo id.
-    """
-    candidate = Path(model_name).expanduser()
-    if candidate.is_dir():
-        return str(candidate)
-
     env_value = (os.environ.get(ENV_LOCAL_PATH) or "").strip()
-    if env_value:
-        env_path = Path(env_value).expanduser()
-        if not env_path.is_dir():
-            raise RuntimeError(
-                f"{ENV_LOCAL_PATH}={env_value!r} does not point at an existing "
-                "directory. Convert NVIDIA's canary-1b-v2.nemo to MLX "
-                "safetensors per "
-                "https://github.com/Blaizzy/mlx-audio/tree/main/mlx_audio/stt/models/canary "
-                "and set this env var to the resulting directory."
-            )
-        return str(env_path)
-
-    raise RuntimeError(
-        f"MLX Canary needs a locally converted model directory; the "
-        f"`mlx-audio` package has no published Hugging Face weights for "
-        f"{model_name!r} (the previous `mlx-community/canary-1b-v2` repo "
-        "does not exist and the loader hits a 401). Download "
-        "https://huggingface.co/nvidia/canary-1b-v2/blob/main/canary-1b-v2.nemo, "
-        "convert it to MLX safetensors per "
-        "https://github.com/Blaizzy/mlx-audio/tree/main/mlx_audio/stt/models/canary, "
-        f"and set {ENV_LOCAL_PATH}=/path/to/canary-1b-v2-mlx."
-    )
+    if not env_value:
+        raise RuntimeError(
+            f"MLX Canary {model_name!r} needs a locally converted weights "
+            f"directory; set {ENV_LOCAL_PATH}=/path/to/canary-mlx. "
+            f"Conversion guide: {_CONVERSION_GUIDE_URL}"
+        )
+    env_path = Path(env_value).expanduser()
+    if not env_path.is_dir():
+        raise RuntimeError(f"{ENV_LOCAL_PATH}={env_value!r} is not an existing directory.")
+    return str(env_path)
 
 
 def _trim_leading_overlap(prev_text: str, current_text: str, *, max_words: int = 8) -> str:
@@ -265,9 +236,7 @@ class MlxCanaryTranscriber:
                 "See https://github.com/Blaizzy/mlx-audio"
             )
 
-        # Resolve before the lazy import so a missing/misconfigured local
-        # path fails with our clear error before the heavy `mlx_audio`
-        # import cost is paid.
+        # Fail fast before paying mlx_audio's import cost.
         source = _resolve_local_path(model_name)
 
         # Lazy import — mlx_audio pulls a lot of optional models on first

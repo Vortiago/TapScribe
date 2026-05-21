@@ -85,12 +85,8 @@ parakeet-mlx = [
 ]
 
 # --- Canary 1B v2 -----------------------------------------------------------
-# NeMo for CPU/CUDA only. The `canary-mlx` extra was removed in PR #61:
-# `mlx-audio` has no published `mlx-community/canary-1b-v2` weights and
-# no off-the-shelf .nemo→MLX converter exists, so offering an MLX backend
-# meant every Apple Silicon install hit a RepositoryNotFoundError on
-# first transcribe. The `tapscribe.transcribers.mlx_canary` adapter is
-# kept in-tree so re-enabling is a one-line catalog binding + extra.
+# NeMo for CPU/CUDA only. No MLX extra — there are no published
+# mlx-audio Canary weights on the Hub.
 canary-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
 
 # --- Convenience aliases (back-compat) --------------------------------------

@@ -659,8 +659,8 @@ def test_picker_apple_silicon_mlx_only_matches_failing_invocation_atoms():
     so reproduce the post-split equivalent and confirm the picker still
     resolves it without dragging in the `whisper-cpu` atom when the
     operator explicitly chose MLX-only on Apple Silicon. Canary has no
-    MLX backend offered (see PR #61), so a Mac-only selection covers
-    just Whisper and Parakeet here."""
+    MLX backend so a Mac-only selection covers just Whisper and
+    Parakeet here."""
     sel = Selection()
     _enable(sel, "whisper", BACKEND_MLX)
     _enable(sel, "parakeet", BACKEND_MLX)
