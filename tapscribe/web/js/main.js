@@ -77,6 +77,38 @@ let modelCatalog = { context: "batch", available_backends: [], models: [] };
 let liveModelCatalog = { context: "live", available_backends: [], models: [] };
 const localMeta = {};            // per-session optimistic meta cache (label + aliases)
 const metaSaveTimers = new Map();// debounce timers for PUT /api/session-meta
+
+// Strip-silence tunables (gap/pad/floor). Surfaced as inputs next to the
+// strip-silence button on every session and persisted to localStorage so
+// the last-used values stick across reloads. Defaults mirror the server-side
+// fallbacks in api_session_strip_silence (tapscribe/app.py) and
+// SPEECH_RMS_DBFS_FLOOR (tapscribe/strip_silence.py).
+const STRIP_OPTS_LS_KEY = "tapscribe.stripOpts.v1";
+const STRIP_OPT_DEFAULTS = Object.freeze({
+  min_silence_ms: 500,
+  pad_ms: 200,
+  speech_floor_db: -45,
+});
+function loadStripOpts() {
+  try {
+    const raw = localStorage.getItem(STRIP_OPTS_LS_KEY);
+    if (!raw) return { ...STRIP_OPT_DEFAULTS };
+    const parsed = JSON.parse(raw);
+    return { ...STRIP_OPT_DEFAULTS, ...parsed };
+  } catch {
+    // localStorage unavailable (private mode) or corrupt JSON — fall back
+    // to defaults rather than blowing up the dashboard boot.
+    return { ...STRIP_OPT_DEFAULTS };
+  }
+}
+function saveStripOpts() {
+  try { localStorage.setItem(STRIP_OPTS_LS_KEY, JSON.stringify(stripOpts)); }
+  catch {
+    // localStorage write quota / private-mode failure is best-effort —
+    // the in-memory values still drive the next /strip-silence POST.
+  }
+}
+let stripOpts = loadStripOpts();
 let rxPattern = "";              // regex tester pattern (per-currently-selected-session)
 let rxFlags = "i";
 let rxOpen = false;
@@ -407,6 +439,25 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       onSourcePick: (sk, v) => { sourcePick.set(sk, v); },
       onStripRun: stripSession,
       onStripRemove: removeStripped,
+      // Strip-silence parameter inputs. Edits don't tick — re-rendering on
+      // every keystroke would steal focus and the focused-input guard in
+      // renderSessionsIfChanged already protects the live inputs anyway.
+      // Reset *does* tick so every session's row picks up the new defaults.
+      stripOpts,
+      onStripOptEdit: (k, v) => {
+        if (k === "speech_floor_db") {
+          stripOpts[k] = v === "" ? STRIP_OPT_DEFAULTS[k] : Number(v);
+        } else {
+          stripOpts[k] = v === "" ? STRIP_OPT_DEFAULTS[k] : Math.max(0, parseInt(v, 10) || 0);
+        }
+        saveStripOpts();
+      },
+      onStripOptReset: () => {
+        stripOpts = { ...STRIP_OPT_DEFAULTS };
+        saveStripOpts();
+        lastSessionsSig = "";
+        tick();
+      },
       onNameEdit: (sk, value) => {
         localMeta[sk] = { ...effectiveMeta(s), label: value };
         persistSessionMeta(sk);
@@ -550,8 +601,12 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
 
   async function stripSession(session) {
     let summary = null;
+    // Snapshot the current operator-tuned params so the POST body matches
+    // exactly what the inputs show — protects against the user nudging an
+    // input mid-flight from accidentally changing semantics.
+    const body = { ...stripOpts };
     await withInflight(sessStripInflight, null, session, "Strip silence", async () => {
-      summary = await postJson(`/api/sessions/${encodeURIComponent(session)}/strip-silence`);
+      summary = await postJson(`/api/sessions/${encodeURIComponent(session)}/strip-silence`, body);
     });
     // Auto-flip source to stripped on success so the user can immediately
     // transcribe the cleaned audio. Skip when no files were written — an
@@ -559,9 +614,13 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     if (summary?.files_written > 0) sourcePick.set(session, "stripped");
     if (summary) {
       const pct = summary.in_seconds > 0 ? Math.round(100 * summary.speech_seconds / summary.in_seconds) : 0;
-      console.log(`[strip-silence] ${session}:`, summary);
-      const detector = Array.isArray(summary.detector) ? summary.detector.join(", ") : summary.detector;
-      alert(`Stripped ${summary.files_written}/${summary.files_processed} WAVs · ${Math.round(summary.speech_seconds)}s speech of ${Math.round(summary.in_seconds)}s (${pct}%) · detector ${detector}`);
+      console.log(`[strip-silence] ${session}:`, summary, "params:", body);
+      const regions = (summary.files || []).reduce((n, r) => n + (r.segments || 0), 0);
+      const params = `gap=${body.min_silence_ms}ms pad=${body.pad_ms}ms floor=${body.speech_floor_db}dB`;
+      alert(
+        `Stripped ${summary.files_written}/${summary.files_processed} WAVs → ${regions} regions · `
+        + `${Math.round(summary.speech_seconds)}s speech of ${Math.round(summary.in_seconds)}s (${pct}%)\n${params}`
+      );
     }
   }
 

@@ -7,7 +7,7 @@
 // All state and callbacks come in via `ctx` from main.js so this stays
 // a pure render-and-wire module.
 
-import { tpl, mount, slot, pick } from "../templates.js";
+import { tpl, mount, pick, slot } from "../templates.js";
 import { fmtBytes, fmtClock, fmtDur, fmtElapsedShort, fmtMs, truncMid } from "../formatters.js";
 
 // Display labels for backend kinds — appears in the chip row above the model
@@ -104,6 +104,23 @@ function buildSourceRow(host, s, sessKey, ctx) {
   }
 }
 
+// Render the strip-silence parameter inputs (gap/pad/floor) into the
+// .strip-settings slot. Current values come from ctx.stripOpts which
+// main.js loads from localStorage; edits round-trip back through
+// ctx.onStripOptEdit so the next strip-silence POST sees them.
+function appendStripSettings(parent, sessKey, ctx) {
+  const frag = tpl("tpl-strip-settings");
+  const opts = ctx.stripOpts || {};
+  for (const el of frag.querySelectorAll("[data-strip-opt]")) {
+    const k = el.dataset.stripOpt;
+    el.value = opts[k] ?? "";
+    el.dataset.sessId = sessKey;
+  }
+  const reset = frag.querySelector("[data-strip-opt-reset]");
+  if (reset) reset.dataset.sessId = sessKey;
+  pick(parent, "settings").appendChild(frag);
+}
+
 function buildSilenceCtl(host, s, sessKey, ctx) {
   if (ctx.sessStripInflight.has(sessKey)) {
     host.appendChild(tpl("tpl-silence-stripping"));
@@ -116,10 +133,12 @@ function buildSilenceCtl(host, s, sessKey, ctx) {
       btn.dataset[attr] = sessKey;
     }
     pick(frag, "strippedAt").textContent = `stripped ${fmtClock(s.stripped.stripped_at)}`;
+    appendStripSettings(frag, sessKey, ctx);
     host.appendChild(frag);
   } else {
     const frag = tpl("tpl-silence-none");
     frag.querySelector("[data-strip-run]").dataset.stripRun = sessKey;
+    appendStripSettings(frag, sessKey, ctx);
     host.appendChild(frag);
   }
 }
@@ -709,6 +728,21 @@ function wire(host, s, sessKey, ctx) {
   }
   for (const btn of host.querySelectorAll("[data-strip-remove]")) {
     btn.addEventListener("click", () => ctx.onStripRemove(btn.dataset.stripRemove));
+  }
+  for (const el of host.querySelectorAll("[data-strip-opt]")) {
+    el.addEventListener("input", () =>
+      ctx.onStripOptEdit(el.dataset.stripOpt, el.value));
+    // Snap an empty box back to the stored default — but on blur, not
+    // input. Doing it on every keystroke briefly auto-fills "500" the
+    // instant the operator clears the box, which a slow typist would
+    // then have to clear again. Blur is the moment the operator's done
+    // editing, so the visible value matches what the next POST will use.
+    el.addEventListener("blur", () => {
+      if (el.value === "") el.value = String(ctx.stripOpts[el.dataset.stripOpt]);
+    });
+  }
+  for (const btn of host.querySelectorAll("[data-strip-opt-reset]")) {
+    btn.addEventListener("click", () => ctx.onStripOptReset());
   }
 
   const nameInput = host.querySelector("[data-sess-name]");

@@ -134,11 +134,32 @@
   <button class="btn tiny" data-strip-run title="Re-run silence stripping on the originals">↻ re-strip</button>
   <button class="btn tiny ghost" data-strip-remove title="Delete the stripped/ folder (originals are kept)">× remove</button>
   <span class="dim tiny" data-slot="strippedAt"></span>
+  <span class="strip-settings tiny row gap-xs" data-slot="settings"></span>
 </template>
 
 <template id="tpl-silence-none">
   <button class="btn tiny" data-strip-run title="Detect silence and write trimmed copies under stripped/. Originals untouched.">✂ strip silence</button>
   <span class="dim tiny">copies to stripped/, originals untouched</span>
+  <span class="strip-settings tiny row gap-xs" data-slot="settings"></span>
+</template>
+
+<template id="tpl-strip-settings">
+  <label class="strip-knob" title="Minimum silence gap (ms) before splitting into a new region. Higher = fewer, longer chunks (better Whisper context, may glue overlapping turns).">
+    <span class="lbl">gap</span>
+    <input class="input" type="number" min="100" step="100" data-strip-opt="min_silence_ms">
+    <span class="dim">ms</span>
+  </label>
+  <label class="strip-knob" title="Leading/trailing context (ms) added to each detected region.">
+    <span class="lbl">pad</span>
+    <input class="input" type="number" min="0" step="50" data-strip-opt="pad_ms">
+    <span class="dim">ms</span>
+  </label>
+  <label class="strip-knob" title="Drop regions whose RMS amplitude is below this (dBFS). Lower (more negative) keeps fainter voices; higher rejects ambient noise that Whisper would hallucinate on.">
+    <span class="lbl">floor</span>
+    <input class="input" type="number" max="0" step="1" data-strip-opt="speech_floor_db">
+    <span class="dim">dBFS</span>
+  </label>
+  <button class="btn tiny ghost" type="button" data-strip-opt-reset title="Reset to built-in defaults">↺</button>
 </template>
 
 <template id="tpl-sess-absorb">

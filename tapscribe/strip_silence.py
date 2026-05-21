@@ -1,7 +1,7 @@
 """Strip silence from WAV files or split them at silence boundaries.
 
-Detection prefers silero-vad if installed (pip install silero-vad), with a
-simple RMS-amplitude threshold fallback otherwise.
+Detection runs through silero-vad, which ships as a core dependency
+(see pyproject.toml). It's the same engine the live SpeechGate uses.
 
 Inputs are expected to be 16 kHz mono int16, matching what the recorder
 captures from the bridge extension. Use ffmpeg to convert other formats
@@ -71,13 +71,21 @@ def filter_low_energy_regions(samples_int16: np.ndarray, regions, floor_dbfs: fl
 
 
 def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms: int):
-    """Returns list of (start_sample, end_sample) speech regions, or None if
-    silero-vad isn't importable."""
+    """Returns list of (start_sample, end_sample) speech regions.
+
+    silero-vad + torch are core dependencies (pyproject.toml). If the
+    import below ever fails, the install is broken — reinstall TapScribe.
+    Raised as RuntimeError so the route surfaces a clear 500 instead of
+    a bare ImportError.
+    """
     try:
         import torch
         from silero_vad import get_speech_timestamps, load_silero_vad
-    except ImportError:
-        return None
+    except ImportError as e:
+        raise RuntimeError(
+            "silero-vad/torch import failed — TapScribe install is corrupt. "
+            "Reinstall the package (`pip install -e .`)."
+        ) from e
     audio = torch.from_numpy(samples_int16).float() / 32768.0
     model = load_silero_vad()
     ts = get_speech_timestamps(
@@ -88,54 +96,3 @@ def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms:
         speech_pad_ms=pad_ms,
     )
     return [(t["start"], t["end"]) for t in ts]
-
-
-def detect_speech_rms(samples_int16: np.ndarray, threshold_db: float, min_silence_ms: int, pad_ms: int):
-    """RMS-threshold fallback when silero-vad is not installed.
-
-    Computes RMS over 30 ms windows, marks anything above threshold as speech,
-    merges gaps shorter than min_silence_ms, then pads each region by pad_ms.
-    """
-    window_ms = 30
-    window_samples = SAMPLE_RATE * window_ms // 1000
-    audio = samples_int16.astype(np.float32) / 32768.0
-    n_windows = len(audio) // window_samples
-    if n_windows == 0:
-        return []
-    audio = audio[: n_windows * window_samples].reshape(n_windows, window_samples)
-    rms = np.sqrt((audio**2).mean(axis=1) + 1e-12)
-    db = 20.0 * np.log10(rms + 1e-12)
-    is_speech = db > threshold_db
-
-    regions_w = []
-    in_speech = False
-    start = 0
-    for i, v in enumerate(is_speech):
-        if v and not in_speech:
-            start = i
-            in_speech = True
-        elif not v and in_speech:
-            regions_w.append((start, i))
-            in_speech = False
-    if in_speech:
-        regions_w.append((start, n_windows))
-
-    min_silence_windows = max(1, min_silence_ms // window_ms)
-    merged_w = []
-    for s, e in regions_w:
-        if merged_w and s - merged_w[-1][1] < min_silence_windows:
-            merged_w[-1] = (merged_w[-1][0], e)
-        else:
-            merged_w.append((s, e))
-
-    pad_samples = (SAMPLE_RATE * pad_ms) // 1000
-    total = len(samples_int16)
-    padded = []
-    for s, e in merged_w:
-        s2 = max(0, s * window_samples - pad_samples)
-        e2 = min(total, e * window_samples + pad_samples)
-        if padded and s2 <= padded[-1][1]:
-            padded[-1] = (padded[-1][0], e2)
-        else:
-            padded.append((s2, e2))
-    return padded

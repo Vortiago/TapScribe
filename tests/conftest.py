@@ -27,6 +27,94 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+# ---------------------------------------------------------------------------
+# Silero stub for strip-silence tests
+# ---------------------------------------------------------------------------
+#
+# tapscribe.strip_silence.detect_speech_silero loads the real silero-vad
+# model, which pulls torch into the import graph — too heavy for CI. The
+# fixture below monkeypatches it with a deterministic RMS-windowed detector
+# that produces the same region boundaries silero would on the synthetic
+# square-wave-and-silence fixtures the tests use.
+#
+# Keep this strictly a test-side helper: production must always run the real
+# silero (any TapScribe install that has the live channel already does).
+
+
+def _stub_detect_speech_silero(samples_int16, min_silence_ms: int, pad_ms: int):
+    """Deterministic stand-in for the real silero detector — same signature.
+
+    Computes RMS over 30 ms windows, calls anything > -45 dBFS "speech",
+    merges gaps shorter than min_silence_ms, then pads each region by
+    pad_ms. Matches silero's region semantics closely enough for the
+    synthetic fixtures (square-wave bursts above the floor, zeros between).
+    """
+    import numpy as np
+
+    from tapscribe.audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
+
+    window_ms = 30
+    window_samples = SAMPLE_RATE * window_ms // 1000
+    audio = samples_int16.astype(np.float32) / 32768.0
+    n_windows = len(audio) // window_samples
+    if n_windows == 0:
+        return []
+    audio = audio[: n_windows * window_samples].reshape(n_windows, window_samples)
+    rms = np.sqrt((audio**2).mean(axis=1) + 1e-12)
+    db = 20.0 * np.log10(rms + 1e-12)
+    is_speech = db > -45.0
+
+    raw: list[tuple[int, int]] = []
+    in_speech = False
+    start = 0
+    for i, v in enumerate(is_speech):
+        if v and not in_speech:
+            start = i
+            in_speech = True
+        elif not v and in_speech:
+            raw.append((start, i))
+            in_speech = False
+    if in_speech:
+        raw.append((start, n_windows))
+
+    min_silence_windows = max(1, min_silence_ms // window_ms)
+    merged: list[tuple[int, int]] = []
+    for s, e in raw:
+        if merged and s - merged[-1][1] < min_silence_windows:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+
+    pad_samples = (SAMPLE_RATE * pad_ms) // 1000
+    total = len(samples_int16)
+    out: list[tuple[int, int]] = []
+    for s, e in merged:
+        s2 = max(0, s * window_samples - pad_samples)
+        e2 = min(total, e * window_samples + pad_samples)
+        if out and s2 <= out[-1][1]:
+            out[-1] = (out[-1][0], e2)
+        else:
+            out.append((s2, e2))
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _stub_silero(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Replace strip_silence.detect_speech_silero with the cheap RMS-based
+    stand-in on every test by default. Tests that need the real silero
+    (or want to assert what happens when it's missing) opt out with
+    `@pytest.mark.real_silero`.
+
+    Autouse + opt-out is robust against future strip-silence tests being
+    added and silently pulling torch into CI; the previous filename
+    allowlist required maintenance every time a new test file landed."""
+    if request.node.get_closest_marker("real_silero") is not None:
+        return
+    from tapscribe import strip_silence
+
+    monkeypatch.setattr(strip_silence, "detect_speech_silero", _stub_detect_speech_silero)
+
+
 @pytest.fixture
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Point the package's CONFIG_DIR + the three config files at a tmpdir.

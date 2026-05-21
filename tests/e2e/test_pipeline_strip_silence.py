@@ -107,8 +107,6 @@ async def test_strip_silence_splits_and_merge_preserves_wall_clock_times(
             json={
                 "min_silence_ms": 400,
                 "pad_ms": 50,
-                "threshold_db": -30.0,
-                "use_silero": False,  # CI doesn't carry torch
                 "speech_floor_db": -40.0,
             },
         )

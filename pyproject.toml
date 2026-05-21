@@ -34,6 +34,15 @@ dependencies = [
     # block ws:// from https://app.spatial.chat as mixed content), so
     # TLS is effectively the happy path — not optional enough to gate.
     "cryptography>=42",
+    # silero-vad powers two production paths: the live SpeechGate
+    # (tapscribe/speech_gate.py) and strip-silence's region detector
+    # (tapscribe/strip_silence.py). Both are core operator features, so
+    # silero ships as a hard dependency rather than an opt-in extra.
+    # Torch is pulled in transitively (silero ships its model as a
+    # TorchScript .jit file); the ~500 MB payload is unavoidable for
+    # the live channel anyway.
+    "silero-vad>=5.0",
+    "torch>=2.1",
 ]
 
 [project.optional-dependencies]
@@ -93,7 +102,6 @@ mlx = ["tapscribe[whisper-mlx]"]
 voxtral = ["tapscribe[voxtral-cpu]"]
 parakeet = ["tapscribe[parakeet-cpu,parakeet-mlx]"]
 canary = ["tapscribe[canary-cpu,canary-mlx]"]
-vad = ["silero-vad>=5.0", "torch>=2.1"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -150,6 +158,7 @@ markers = [
     "real_audio: end-to-end test that streams real audio fixtures and runs a real Whisper backend. Skipped unless tests/fixtures/audio/ is populated and faster-whisper is installed.",
     "chaos: race-condition / error-recovery test exercising background tasks, abnormal close paths, or repeated rapid mutations. Opt out with -m 'not chaos'.",
     "browser_e2e: requires Playwright + Chromium (`pip install -e .[dev] && python -m playwright install chromium`). Opt out with -m 'not browser_e2e'.",
+    "real_silero: opt out of the autouse silero stub in tests/conftest.py — exercises the real `detect_speech_silero` import path (only set on tests that need it).",
 ]
 
 [tool.ruff]

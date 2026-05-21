@@ -168,8 +168,10 @@ def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | No
         return None
     try:
         value = float(raw)
-    except (TypeError, ValueError) as e:
-        raise HTTPException(400, f"{field} must be a number, got {raw!r}") from e
+    except (TypeError, ValueError):
+        # `from None` — CodeQL py/stack-trace-exposure: chain adds nothing
+        # the detail message doesn't already convey.
+        raise HTTPException(400, f"{field} must be a number, got {raw!r}") from None
     if not math.isfinite(value):
         raise HTTPException(400, f"{field} must be a finite number, got {value}")
     if not (lo <= value <= hi):
@@ -184,8 +186,9 @@ def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
         # Accept JSON numerics (which arrive as float in some clients)
         # by routing through float→int — rejects "3.5" implicitly.
         value = int(raw)
-    except (TypeError, ValueError) as e:
-        raise HTTPException(400, f"{field} must be an integer, got {raw!r}") from e
+    except (TypeError, ValueError):
+        # `from None` — see _parse_bounded_float for the rationale.
+        raise HTTPException(400, f"{field} must be an integer, got {raw!r}") from None
     if not (lo <= value <= hi):
         raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
     return value
@@ -597,9 +600,9 @@ async def api_config_put(key: str, req: Request):
     try:
         writer(content)
     except ValueError as e:
-        raise HTTPException(400, str(e)) from e
+        raise HTTPException(400, str(e)) from None
     except OSError as e:
-        raise HTTPException(500, f"failed to write config: {e}") from e
+        raise HTTPException(500, f"failed to write config: {e}") from None
     return {"ok": True, "key": key, "length": len(content)}
 
 
@@ -646,13 +649,19 @@ async def api_session_strip_silence(
     session_dir = resolve_session_dir(session)
 
     body = await _json_body(req)
-    min_silence_ms = int(body.get("min_silence_ms") or 500)
-    pad_ms = int(body.get("pad_ms") or 200)
-    threshold_db = float(body.get("threshold_db") or -45.0)
-    speech_floor_db = float(
-        body.get("speech_floor_db") if body.get("speech_floor_db") is not None else _ss.SPEECH_RMS_DBFS_FLOOR
-    )
-    use_silero = bool(body.get("use_silero", True))
+    # Range-bound everything that hits the silero detector so a malformed
+    # dashboard POST returns 400 instead of a 500 from int()/float().
+    # `is None` (not `or`) so an explicit 0 — e.g. pad_ms=0 to disable
+    # region padding for A/B — doesn't silently fall back to the default.
+    min_silence_ms = _parse_bounded_int(body.get("min_silence_ms"), "min_silence_ms", lo=100, hi=600_000)
+    if min_silence_ms is None:
+        min_silence_ms = 500
+    pad_ms = _parse_bounded_int(body.get("pad_ms"), "pad_ms", lo=0, hi=5_000)
+    if pad_ms is None:
+        pad_ms = 200
+    speech_floor_db = _parse_bounded_float(body.get("speech_floor_db"), "speech_floor_db", lo=-120.0, hi=0.0)
+    if speech_floor_db is None:
+        speech_floor_db = _ss.SPEECH_RMS_DBFS_FLOOR
 
     originals = sorted(session_dir.glob("*.wav"))
     if not originals:
@@ -678,7 +687,7 @@ async def api_session_strip_silence(
             try:
                 shutil.rmtree(out_dir)
             except OSError as e:
-                raise HTTPException(500, f"could not clear stripped/: {e}") from e
+                raise HTTPException(500, f"could not clear stripped/: {e}") from None
 
         started = datetime.now(UTC)
 
@@ -686,11 +695,7 @@ async def api_session_strip_silence(
             results: list[dict[str, Any]] = []
             for src in originals:
                 try:
-                    results.append(
-                        strip_one_wav(
-                            src, out_dir, min_silence_ms, pad_ms, threshold_db, use_silero, speech_floor_db
-                        )
-                    )
+                    results.append(strip_one_wav(src, out_dir, min_silence_ms, pad_ms, speech_floor_db))
                 except Exception as e:
                     results.append({"name": src.name, "written": False, "error": str(e)})
             return results
@@ -736,7 +741,7 @@ async def api_session_stripped_delete(session: str, recorder: Recorder = Depends
     try:
         shutil.rmtree(d)
     except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from e
+        raise HTTPException(500, f"delete failed: {e}") from None
     print(f"[tapscribe] removed stripped/ from session: {session}", flush=True)
     return {"ok": True, "deleted": True}
 
@@ -793,7 +798,7 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     try:
         shutil.rmtree(session_dir)
     except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from e
+        raise HTTPException(500, f"delete failed: {e}") from None
     await recorder.jobs.release(session)
     print(f"[tapscribe] deleted session: {session_dir}", flush=True)
     return {"ok": True, "deleted": session}
@@ -850,7 +855,7 @@ async def api_set_primary(
     try:
         await asyncio.to_thread(set_primary_transcript, path, backend=backend, model=model)
     except FileNotFoundError as e:
-        raise HTTPException(422, str(e)) from e
+        raise HTTPException(422, str(e)) from None
     return {"ok": True, "primary": {"backend": backend, "model": model}}
 
 
@@ -880,9 +885,9 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
     try:
         payload = await transcribe_one(recorder, request)
     except WavUnreadable as e:
-        raise HTTPException(422, str(e)) from e
+        raise HTTPException(422, str(e)) from None
     except WavTooQuiet as e:
-        raise HTTPException(422, str(e)) from e
+        raise HTTPException(422, str(e)) from None
     print(
         f"[tapscribe] transcribed {request.name} ({request.source}) with {request.model}",
         flush=True,
@@ -913,11 +918,11 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     try:
         merged = await transcribe_session(recorder, request)
     except InvalidRange as e:
-        raise HTTPException(400, str(e)) from e
+        raise HTTPException(400, str(e)) from None
     except NoUsableWavs as e:
-        raise HTTPException(404, str(e)) from e
+        raise HTTPException(404, str(e)) from None
     except SessionBusy as e:
-        raise HTTPException(409, str(e)) from e
+        raise HTTPException(409, str(e)) from None
     return JSONResponse(merged)
 
 
