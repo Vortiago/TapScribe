@@ -383,12 +383,18 @@ class WhisperLiveKitChannel:
         self.info["device"] = "Apple Silicon GPU" if use_mlx else "CPU"
         # Seed gate info too so the dashboard's selector / sliders show
         # the right values before the first start().
-        self.info["gate_kind"] = config.gate_kind
-        self.info["gate_speech_threshold"] = f"{config.gate_speech_threshold:.2f}"
-        self.info["gate_hangover_ms"] = str(config.gate_hangover_ms)
-        self.info["gate_pre_roll_ms"] = str(config.gate_pre_roll_ms)
-        self.info["gate_min_speech_ms"] = str(config.gate_min_speech_ms)
-        self.info["confidence_validation"] = "on" if config.confidence_validation else "off"
+        self._mirror_gate_info()
+
+    def _mirror_gate_info(self) -> None:
+        """Push the current `config`'s gate + confidence fields into
+        `info`. Called from `__init__` (boot) and `start()` (after a
+        config-swap) so the dashboard never reads a stale value."""
+        self.info["gate_kind"] = self.config.gate_kind
+        self.info["gate_speech_threshold"] = f"{self.config.gate_speech_threshold:.2f}"
+        self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
+        self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
+        self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
+        self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
 
     supports_native_vad: bool = True  # --vac / --no-vac flag exists
 
@@ -564,12 +570,7 @@ class WhisperLiveKitChannel:
             self.info["port"] = str(self.config.port)
             self.info["backend"] = "mlx-whisper" if self.use_mlx else "faster-whisper"
             self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
-            self.info["gate_kind"] = self.config.gate_kind
-            self.info["gate_speech_threshold"] = f"{self.config.gate_speech_threshold:.2f}"
-            self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
-            self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
-            self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
-            self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
+            self._mirror_gate_info()
             self.info["state"] = "starting"
             self.info["last_error"] = ""
             self.info["pid"] = str(self._proc.pid)
