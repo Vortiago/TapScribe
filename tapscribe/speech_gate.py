@@ -63,6 +63,20 @@ class SpeechGate:
     Lifecycle: instantiate once per /tap WS, call `feed()` for every
     20 ms PCM frame, forward the returned frames to the live relay. No
     explicit close — the gate is GCed when the TapFanOut goes away.
+
+    Two phases on the silence→speech transition:
+      1. VAD says "start". If `min_speech_ms == 0`, that's enough to
+         confirm-open immediately (legacy behaviour). Otherwise the
+         gate enters a *pending* state: frames are buffered separately
+         and not yet emitted.
+      2. Pending → confirmed only once `min_speech_ms` of audio has
+         accumulated. If VAD says "end" first, the candidate is
+         discarded (brief noise blip — clicks, key taps, single
+         coughs). On confirmation the pre-roll + pending buffer + the
+         current frame are flushed in one burst.
+
+    `is_open` is True only in the *confirmed* state, so dashboards see
+    pending warm-up as "still quiet" rather than flicker.
     """
 
     def __init__(
@@ -70,6 +84,7 @@ class SpeechGate:
         *,
         vad: VadAnalyzer,
         pre_roll_ms: int = 300,
+        min_speech_ms: int = 0,
     ) -> None:
         self._vad = vad
         self._is_open = False
@@ -80,6 +95,13 @@ class SpeechGate:
         # Sample buffer holding raw PCM bytes awaiting VAD inference.
         # Drained in VAD_CHUNK_BYTES-sized slices.
         self._sample_buf = bytearray()
+        # Pending-open guard. VAD "start" with min_speech_ms>0 enters
+        # pending; frames buffered here are either flushed (on
+        # confirmation) or discarded (on early "end") without ever
+        # reaching the relay.
+        self._min_speech_ms = max(0, min_speech_ms)
+        self._pending_open = False
+        self._pending_frames: list[bytes] = []
 
     @property
     def is_open(self) -> bool:
@@ -87,9 +109,10 @@ class SpeechGate:
 
     def feed(self, frame: bytes) -> list[bytes]:
         """Push one PCM frame through the gate. Returns the frames to
-        forward to the live relay — empty list during silence, the
-        frame itself during speech, and the pre-roll burst + the
-        triggering frame on the silence→speech transition.
+        forward to the live relay — empty list during silence or
+        pending warm-up, the frame itself during confirmed speech,
+        and a pre-roll + pending-buffer burst on the
+        silence→confirmed-speech transition.
 
         Malformed frames (wrong size) are dropped silently — the
         contract is fixed-size 20 ms frames, and anything else is an
@@ -103,38 +126,72 @@ class SpeechGate:
         # tracks open/close transitions across calls.
         self._sample_buf.extend(frame)
 
-        emitted: list[bytes] = []
-        opened_during_this_frame = False
         # Today a single feed() runs VAD at most once (640 B/frame ≤
-        # 1024 B/chunk); if frame size ever grows, two transitions
-        # in one feed are possible and the open/close handling below
-        # would need to consider the order of events, not just the
-        # final state.
+        # 1024 B/chunk); if frame size ever grows, two transitions in
+        # one feed are possible and we'd need to consider event order.
+        # Track the latest event so the post-loop decision uses it.
+        event_kind: str | None = None  # None | "start" | "end"
         while len(self._sample_buf) >= VAD_CHUNK_BYTES:
             chunk = bytes(self._sample_buf[:VAD_CHUNK_BYTES])
             del self._sample_buf[:VAD_CHUNK_BYTES]
             event = self._vad(chunk)
             if event is None:
                 continue
-            if "start" in event and not self._is_open:
-                self._is_open = True
-                opened_during_this_frame = True
-            elif "end" in event and self._is_open:
-                self._is_open = False
+            if "start" in event:
+                event_kind = "start"
+            elif "end" in event:
+                event_kind = "end"
 
-        # After VAD has processed every full chunk available, decide
-        # what to emit for THIS frame. Three cases:
-        #   1. Just transitioned to open: dump pre-roll, then emit this frame.
-        #   2. Currently open (no transition or was already open): emit this frame.
-        #   3. Currently closed: park the frame in pre-roll for future open.
-        if opened_during_this_frame:
-            emitted.extend(self._pre_roll)
-            self._pre_roll.clear()
-            emitted.append(frame)
-        elif self._is_open:
-            emitted.append(frame)
-        else:
+        # State machine:
+        #   closed + start → confirmed-open (min_speech_ms==0) or pending
+        #   pending + frame → accumulate; once >= min_speech_ms, confirm
+        #   pending + end → discard candidate (false alarm)
+        #   confirmed + frame → emit
+        #   confirmed + end → close, drop this trailing frame
+        #   closed + frame → park in pre-roll
+        emitted: list[bytes] = []
+        if event_kind == "start" and not self._is_open and not self._pending_open:
+            if self._min_speech_ms == 0:
+                self._is_open = True
+                emitted.extend(self._pre_roll)
+                self._pre_roll.clear()
+                emitted.append(frame)
+                return emitted
+            self._pending_open = True
+            self._pending_frames = [frame]
+            return emitted
+
+        if event_kind == "end":
+            if self._pending_open:
+                # False alarm — let the candidate frames seed pre-roll
+                # for the next attempt so we still capture leading audio.
+                for f in self._pending_frames:
+                    self._pre_roll.append(f)
+                self._pre_roll.append(frame)
+                self._pending_open = False
+                self._pending_frames = []
+                return emitted
+            if self._is_open:
+                self._is_open = False
+                return emitted
             self._pre_roll.append(frame)
+            return emitted
+
+        # No VAD transition this frame.
+        if self._is_open:
+            emitted.append(frame)
+            return emitted
+        if self._pending_open:
+            self._pending_frames.append(frame)
+            if len(self._pending_frames) * 20 >= self._min_speech_ms:
+                self._is_open = True
+                self._pending_open = False
+                emitted.extend(self._pre_roll)
+                self._pre_roll.clear()
+                emitted.extend(self._pending_frames)
+                self._pending_frames = []
+            return emitted
+        self._pre_roll.append(frame)
         return emitted
 
 
@@ -218,4 +275,8 @@ def build_gate_for_config(config) -> SpeechGate | None:  # config: LiveConfig
         threshold=float(config.gate_speech_threshold),
         hangover_ms=int(config.gate_hangover_ms),
     )
-    return SpeechGate(vad=vad, pre_roll_ms=int(config.gate_pre_roll_ms))
+    return SpeechGate(
+        vad=vad,
+        pre_roll_ms=int(config.gate_pre_roll_ms),
+        min_speech_ms=int(getattr(config, "gate_min_speech_ms", 0) or 0),
+    )

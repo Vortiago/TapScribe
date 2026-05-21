@@ -14,13 +14,28 @@ relay holds:
     typically appends the result to `recorder.transcripts` so the
     dashboard sees it.
 
-WlK semantics: every response carries a CUMULATIVE `lines` list — i.e.
-each tick re-sends every line emitted so far in the session, not just
-the new ones. The last entry may still be growing as new tokens arrive.
-The relay treats a line as finalized when (a) a newer line appears
-after it (so the position is stable), or (b) the relay closes (drain) —
-in which case the in-flight tail is also flushed so a short utterance
-that produced exactly one line isn't lost.
+WlK semantics: every response carries a CUMULATIVE `lines` list — each
+tick re-sends every line emitted so far in the session, not just the
+new ones. Same-speaker consecutive segments get merged inside WlK
+(`segments[-1].text += segment.text` per `tokens_alignment.py`), so a
+line's text CAN grow between snapshots; we identify lines by
+`(speaker, start)` and emit only the new suffix on growth.
+
+Emission policy:
+
+  1. Every snapshot, emit all non-tail entries via the key-aware
+     `_consider_emit_line` (dedupes against previous emissions of the
+     same `(speaker, start)`).
+  2. The tail (last entry) is held back as long as it may still grow
+     — but once `buffer_transcription` is empty AND the tail's text
+     has been stable across `_TAIL_STABLE_SNAPSHOTS` consecutive
+     snapshots, we flush it. This makes short utterances ("Hello.")
+     reach the LiveFeed without waiting for /tap close, while still
+     handling the merger case correctly (a later snapshot whose tail
+     grows the previously-flushed line emits only the new suffix).
+  3. On close, anything still unemitted (the most recent tail + any
+     non-empty `buffer_transcription`) is flushed so no audio's
+     transcript is lost when the bridge disconnects.
 
 Lifecycle: `connect()` returns False on any failure (WlK not running,
 host down, etc.) — callers branch on the bool rather than catching
@@ -39,6 +54,16 @@ from collections.abc import Awaitable, Callable
 
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
+
+# How many consecutive snapshots a tail must hold the same text (with
+# `buffer_transcription` empty) before we flush it as settled. WlK's
+# tick rate is ~2–5 Hz; 3 snapshots buys ~600 ms – 1.5 s of
+# confirmation, which is short enough that short utterances reach the
+# dashboard quickly but long enough that a brief mid-snapshot pause
+# doesn't flush a still-growing line. The merger edge case (a
+# previously-flushed tail later grows via same-speaker merge) is
+# handled by suffix-only re-emission in `_consider_emit_line`.
+_TAIL_STABLE_SNAPSHOTS: int = 3
 
 
 class WlKRelay:
@@ -71,12 +96,29 @@ class WlKRelay:
         self._drain_timeout = drain_timeout
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._consumer: asyncio.Task | None = None
-        # How many entries from the cumulative `lines` snapshot we've
-        # already passed to the callback. Each tick we emit
-        # `snapshot[_emitted_count : len(snapshot) - 1]` (skipping the
-        # in-flight tail); on close-drain we also emit the tail.
-        self._emitted_count: int = 0
         self._last_snapshot: list[dict] = []
+        # Per-line emission state, keyed by `(speaker, start)` from the
+        # WlK wire format. Tracks the text we last forwarded to the
+        # callback so a re-sent snapshot doesn't double-emit, and so a
+        # line whose text grows between snapshots (WlK merges
+        # consecutive same-speaker segments — see
+        # `tokens_alignment.py`) only emits the new suffix.
+        self._emitted_by_key: dict[tuple, str] = {}
+        # Non-tail entries are immutable in WlK's wire format — the
+        # merger case only ever modifies the CURRENT tail in place;
+        # once a newer entry appears after a position, that position
+        # is frozen. Cache the lower bound of the scan so we don't
+        # re-walk hundreds of stable lines on every snapshot for long
+        # sessions.
+        self._last_emit_scan_upto: int = 0
+        # Tail-stability bookkeeping: counts how many consecutive
+        # snapshots the tail's `(key, text)` has matched while the
+        # buffer was empty. Reset whenever the tail changes or buffer
+        # has in-flight text. Once it crosses `_TAIL_STABLE_SNAPSHOTS`
+        # the tail is flushed via `_consider_emit_line`.
+        self._tail_stable_key: tuple | None = None
+        self._tail_stable_text: str = ""
+        self._tail_stable_count: int = 0
         # Used to dedupe on_buffer calls and to rescue residual
         # uncommitted text on close (see _flush_tail).
         self._last_buffer: str = ""
@@ -155,10 +197,20 @@ class WlKRelay:
         """Read WlK's response stream and route settled lines to the callback.
 
         WlK emits rolling JSON whose `lines` field is a CUMULATIVE
-        snapshot of every committed line so far in the session. The last
-        entry may still be growing — we only emit lines whose position
-        has been superseded by a newer entry. The remaining tail is
-        emitted on close (`_flush_tail`).
+        snapshot of every committed line so far in the session. Each
+        entry's text can grow between snapshots when WlK merges
+        consecutive same-speaker segments, so emissions are
+        `(speaker, start)`-keyed and re-send only the new suffix on
+        growth.
+
+        Tail handling: every non-tail entry is forwarded immediately.
+        The tail is held until either (a) a newer line appears after it
+        (it becomes a non-tail and follows the immediate path) or (b)
+        we observe `_TAIL_STABLE_SNAPSHOTS` consecutive snapshots where
+        the tail's text is unchanged and `buffer_transcription` is
+        empty — that's WlK's "no more in-flight tokens" signal, so
+        flushing is safe. Anything still unemitted at close time goes
+        through `_flush_tail`.
 
         Malformed payloads, snapshots that shrink (shouldn't happen in
         practice), and entries with no usable text are dropped silently.
@@ -193,39 +245,109 @@ class WlKRelay:
                 if not isinstance(snapshot, list):
                     continue
                 self._last_snapshot = snapshot
-                # Emit everything strictly before the tail. The tail (last
-                # entry) may still be growing; hold it until either a newer
-                # line appears in a future snapshot, or close() drains.
+                # Emit every newly-non-tail entry. Non-tail positions
+                # are immutable in WlK's wire format, so we only need
+                # to scan from the last upto we processed. The dedup
+                # in `_consider_emit_line` covers a tail-becoming-
+                # non-tail whose text already settled (no re-emit) and
+                # the rare same-key text-change case (emits the diff).
                 upto = max(0, len(snapshot) - 1)
-                while self._emitted_count < upto:
-                    self._emit_line(snapshot[self._emitted_count])
-                    self._emitted_count += 1
+                for i in range(self._last_emit_scan_upto, upto):
+                    self._consider_emit_line(snapshot[i])
+                if upto > self._last_emit_scan_upto:
+                    self._last_emit_scan_upto = upto
+                # Tail-stability flush: once the tail text has held
+                # steady (with the in-flight buffer empty) for enough
+                # consecutive snapshots, WlK has nothing more to
+                # commit into it and we can flush without losing
+                # context — short utterances reach the LiveFeed
+                # without waiting for the bridge to disconnect.
+                self._maybe_flush_stable_tail(snapshot)
         except (ConnectionClosed, asyncio.CancelledError):
             pass
         except Exception as e:
             print(f"[tapscribe] WlK relay consumer error: {e}", flush=True)
 
-    def _emit_line(self, line: dict) -> None:
-        """Push one settled line to the callback. Skips entries with no
-        text (e.g. silence segments WlK emits with `speaker == -2`)."""
+    @staticmethod
+    def _line_key(line: dict) -> tuple:
+        """Stable identity for a `lines[]` entry. WlK doesn't ship an
+        explicit id, but `(speaker, start)` is unique within a session
+        — `start` is the segment's start timestamp from the audio, and
+        WlK only assigns one segment per (speaker, start) point."""
+        return (line.get("speaker"), line.get("start"))
+
+    def _consider_emit_line(self, line: dict) -> None:
+        """Emit a line — or the new suffix if its text grew since the
+        last emission — guarding against duplicates from re-sent
+        snapshots. Silence segments (`speaker == -2`) and other
+        empty-text entries are silently skipped."""
         if not isinstance(line, dict):
             return
         text = (line.get("text") or "").strip()
-        if text:
+        if not text:
+            return
+        key = self._line_key(line)
+        prev = self._emitted_by_key.get(key, "")
+        if text == prev:
+            return
+        if prev and text.startswith(prev):
+            # Growth (same-speaker merger): forward only the new tail.
+            # `lstrip()` to drop the boundary whitespace WlK inserts
+            # when concatenating segments.
+            suffix = text[len(prev) :].lstrip()
+            if not suffix:
+                return
+            self._on_settled_line(suffix)
+        else:
+            # Either first emit of this key, or text changed in a way
+            # that isn't a clean prefix-extension (rare — would mean
+            # WlK rewrote a committed line). Forward as-is rather than
+            # try to guess the diff.
             self._on_settled_line(text)
+        self._emitted_by_key[key] = text
+
+    def _maybe_flush_stable_tail(self, snapshot: list[dict]) -> None:
+        """Track tail stability and flush once the threshold's reached.
+        Resets the counter whenever the tail key changes, the text
+        changes, or the in-flight buffer is non-empty."""
+        if not snapshot:
+            self._tail_stable_key = None
+            self._tail_stable_text = ""
+            self._tail_stable_count = 0
+            return
+        tail = snapshot[-1]
+        if not isinstance(tail, dict):
+            return
+        key = self._line_key(tail)
+        text = (tail.get("text") or "").strip()
+        buf_empty = not (self._last_buffer or "").strip()
+        if not text or not buf_empty:
+            self._tail_stable_key = key
+            self._tail_stable_text = text
+            self._tail_stable_count = 0
+            return
+        if key == self._tail_stable_key and text == self._tail_stable_text:
+            self._tail_stable_count += 1
+        else:
+            self._tail_stable_key = key
+            self._tail_stable_text = text
+            self._tail_stable_count = 1
+        if self._tail_stable_count >= _TAIL_STABLE_SNAPSHOTS:
+            # `_consider_emit_line` is idempotent on (key, text), so if
+            # we've already flushed this tail (e.g. via close-drain
+            # racing), this call is a no-op.
+            self._consider_emit_line(tail)
 
     def _flush_tail(self) -> None:
-        """Emit any held-back tail lines from the last snapshot, plus any
-        in-flight `buffer_transcription` that didn't make it into a
-        committed line before close. Plus rescues any non-empty
-        `buffer_transcription` as a final settled line — without
-        this, the trailing word(s) of every utterance that hadn't
-        cleared LocalAgreement-2 by close time would silently drop.
+        """Close-time drain: emit anything still unemitted from the
+        most-recent snapshot, plus any non-empty `buffer_transcription`
+        as a final settled line. Without this, the trailing word(s) of
+        every utterance that hadn't cleared LocalAgreement-2 by close
+        time — or a single-line short utterance whose tail never
+        stabilised long enough to auto-flush — would silently drop.
         """
-        snapshot = self._last_snapshot
-        while self._emitted_count < len(snapshot):
-            self._emit_line(snapshot[self._emitted_count])
-            self._emitted_count += 1
+        for line in self._last_snapshot:
+            self._consider_emit_line(line)
         tail = (self._last_buffer or "").strip()
         if tail:
             self._on_settled_line(tail)

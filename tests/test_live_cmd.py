@@ -96,6 +96,7 @@ def test_matches_returns_false_when_only_a_gate_knob_differs():
     assert chan.matches(**base, gate_speech_threshold=0.7) is False
     assert chan.matches(**base, gate_hangover_ms=600) is False
     assert chan.matches(**base, gate_pre_roll_ms=500) is False
+    assert chan.matches(**base, gate_min_speech_ms=120) is False
     # Knobs equal to current config still force a restart — matches
     # treats "explicitly supplied" as a restart request regardless of
     # equality (operators rarely re-submit the exact same value). Pin
@@ -116,9 +117,9 @@ def test_whisper_live_kit_channel_supports_native_vad():
 
 
 def test_gate_knobs_are_independent_of_build_live_cmd():
-    """gate_speech_threshold / gate_hangover_ms / gate_pre_roll_ms are
-    consumed by the TapScribe-side SpeechGate, NOT by WlK. They must
-    not appear in the WlK argv regardless of their values."""
+    """The TapScribe-side gate knobs (threshold, hangover, pre-roll,
+    min-speech) are consumed by SpeechGate, NOT by WlK. They must not
+    appear in the WlK argv regardless of their values."""
     cfg = LiveConfig(
         model="tiny.en",
         language="en",
@@ -127,6 +128,7 @@ def test_gate_knobs_are_independent_of_build_live_cmd():
         gate_speech_threshold=0.7,
         gate_hangover_ms=600,
         gate_pre_roll_ms=500,
+        gate_min_speech_ms=120,
     )
     cmd = build_live_cmd(EXE, cfg, use_mlx=False)
     # No leakage of TapScribe-side knobs into the WlK child's argv.
@@ -134,9 +136,11 @@ def test_gate_knobs_are_independent_of_build_live_cmd():
     assert "--gate-threshold" not in cmd
     assert "--hangover-ms" not in cmd
     assert "--pre-roll-ms" not in cmd
+    assert "--min-speech-ms" not in cmd
     assert "0.7" not in cmd
     assert "600" not in cmd
     assert "500" not in cmd
+    assert "120" not in cmd
 
 
 def test_confidence_validation_flag_only_appended_when_enabled():

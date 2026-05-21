@@ -76,6 +76,7 @@ export interface LiveInfo {
   gate_speech_threshold: string;
   gate_hangover_ms: string;
   gate_pre_roll_ms: string;
+  gate_min_speech_ms: string;
   confidence_validation: "on" | "off" | "";
 }
 

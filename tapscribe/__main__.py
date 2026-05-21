@@ -82,6 +82,15 @@ def main() -> None:
         "WhisperLiveKit's default.",
     )
     p.add_argument(
+        "--live-gate-min-speech-ms",
+        type=int,
+        default=None,
+        help="Minimum confirmed-speech window (ms) before the TapScribe speech "
+        "gate releases audio to the live backend. 0 (default) opens on the "
+        "first VAD 'start'; higher values suppress brief noise blips (key "
+        "taps, single coughs). Tunable from the dashboard at runtime.",
+    )
+    p.add_argument(
         "--no-mlx",
         action="store_true",
         help="Disable MLX for BOTH live and batch even on Apple Silicon (back-compat alias for --backend=cpu).",
@@ -145,7 +154,7 @@ def main() -> None:
     config.AUTH_ENABLED = not args.no_auth
     config.AUTO_START_LIVE = not args.no_auto_live
 
-    live_config = LiveConfig(
+    live_config_kwargs: dict[str, object] = dict(
         model=args.live_model,
         language=args.live_language,
         host=args.live_host or "127.0.0.1",
@@ -155,6 +164,9 @@ def main() -> None:
         buffer_trimming_sec=args.live_buffer_trimming_sec,
         max_context_tokens=args.live_max_context_tokens,
     )
+    if args.live_gate_min_speech_ms is not None:
+        live_config_kwargs["gate_min_speech_ms"] = args.live_gate_min_speech_ms
+    live_config = LiveConfig(**live_config_kwargs)  # type: ignore[arg-type]
 
     recorder = Recorder(
         recordings_dir=config.RECORDINGS_DIR,

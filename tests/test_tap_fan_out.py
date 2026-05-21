@@ -843,6 +843,52 @@ async def test_gate_open_state_propagates_to_active_stream(
         assert snap[0].gate_open is False
 
 
+async def test_level_meter_reads_zero_while_gate_is_closed_even_on_loud_input(
+    recorder_with_relay: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The level meter reflects POST-VAD audio: when the gate is closed
+    (silence as far as the transcriber is concerned), the bar must
+    stay dark even if loud audio is hitting the WS. Operators rely on
+    this to see at a glance whether the gate is letting their voice
+    through."""
+    from dataclasses import replace as dc_replace
+
+    from tapscribe.speech_gate import SpeechGate
+
+    recorder_with_relay.live.config = dc_replace(
+        recorder_with_relay.live.config, gate_kind="tapscribe", gate_pre_roll_ms=0
+    )
+
+    # VAD that never reports speech.
+    def _never_starts(*args, **kwargs):
+        return SpeechGate(vad=lambda _c: None, pre_roll_ms=0)
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _never_starts)
+
+    loud = b"\xff\x7f" * 320  # full-scale int16
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-level-gate-closed",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        # Feed many loud frames — without the post-VAD meter change,
+        # the bar would peg at 1.0 from the raw input.
+        for _ in range(40):
+            await fan_out.write_frame(loud)
+        snap = await recorder_with_relay.streams.snapshot()
+
+    # Gate stayed closed → meter never lit up. Allow a tiny epsilon
+    # because of floating-point compounding (it's effectively zero).
+    assert snap[0].level < 0.01, (
+        f"level meter lit up to {snap[0].level:.4f} while gate was closed — should be dark (post-VAD reading)"
+    )
+
+
 async def test_relay_buffer_transcription_updates_active_stream(
     recorder_with_relay: Recorder,
     fake_wlk: FakeWlkThread,

@@ -45,6 +45,7 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
     "liveModelSelect", "liveLangInput",
     "liveGateKindSelect",
     "liveGateThreshold", "liveGateHangover", "liveGatePreRoll",
+    "liveGateMinSpeech",
   ]);
   if (focused) {
     if (editableIds.has(focused.id)) return;
@@ -59,6 +60,7 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
     li.port || "", li.backend || "", li.device || "", li.last_error || "",
     li.gate_kind || "", li.gate_speech_threshold || "",
     li.gate_hangover_ms || "", li.gate_pre_roll_ms || "",
+    li.gate_min_speech_ms || "",
     supportsNativeVad ? "1" : "0",
     log.length, log.length ? log[log.length - 1] : "",
     (liveCatalog?.models || []).length,
@@ -135,6 +137,8 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   if (hangEl) hangEl.value = li.gate_hangover_ms || "400";
   const prerollEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGatePreRoll"));
   if (prerollEl) prerollEl.value = li.gate_pre_roll_ms || "300";
+  const minSpeechEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGateMinSpeech"));
+  if (minSpeechEl) minSpeechEl.value = li.gate_min_speech_ms || "0";
 
   const starting = state === "starting";
   const running = starting || state === "running";
@@ -146,6 +150,7 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
     if (threshEl) threshEl.disabled = true;
     if (hangEl) hangEl.disabled = true;
     if (prerollEl) prerollEl.disabled = true;
+    if (minSpeechEl) minSpeechEl.disabled = true;
   }
 
   const actionsHost = pick(frag, "actions");
@@ -240,6 +245,7 @@ export const formValues = () => {
     gate_speech_threshold: numOrNull("liveGateThreshold"),
     gate_hangover_ms: numOrNull("liveGateHangover"),
     gate_pre_roll_ms: numOrNull("liveGatePreRoll"),
+    gate_min_speech_ms: numOrNull("liveGateMinSpeech"),
   };
 };
 
