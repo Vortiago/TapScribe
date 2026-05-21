@@ -11,6 +11,11 @@
   you've changed JS and want a local sanity check, run `cd frontend &&
   npm install && npm run typecheck` once after a fresh clone. CI's
   `frontend-typecheck` job is the source of truth either way.
+  `noUnusedLocals` is on — declared-but-unread locals (and stale
+  imports) are hard errors. To opt out of the check for an intentionally
+  unused binding (the canonical case is an async closure that mutates a
+  variable consumed via a post-await cast — see `stripSession` in
+  `main.js`), prefix the name with `_`.
 
 ## Runtime deps the install picker does NOT cover
 
