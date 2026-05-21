@@ -27,7 +27,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
-from ..audio import RECORDER_SAMPLE_RATE, load_recorder_wav_as_pcm, wav_duration_s
+from ..audio import RECORDER_SAMPLE_RATE, wav_duration_s
+from ..wav_predecode import load_recorder_wav_as_pcm
 from .base import (
     TranscriptionResult,
     TranscriptionSegment,

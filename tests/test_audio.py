@@ -59,24 +59,6 @@ def test_wav_rms_dbfs_missing_returns_zero(tmp_path):
     assert audio.wav_rms_dbfs(tmp_path / "missing.wav") == 0.0
 
 
-def test_load_recorder_wav_as_pcm_rejects_wrong_format(tmp_path):
-    # Stereo (channels=2) — should be rejected.
-    samples = np.zeros(SAMPLE_RATE, dtype=np.int16)
-    _write_pcm_wav(tmp_path / "stereo.wav", samples, channels=2)
-    with pytest.raises(RuntimeError):
-        audio.load_recorder_wav_as_pcm(tmp_path / "stereo.wav")
-
-
-def test_load_recorder_wav_as_pcm_returns_normalised_float32(tmp_path):
-    samples = np.array([0, 16384, -16384, 32767, -32768], dtype=np.int16)
-    _write_pcm_wav(tmp_path / "ok.wav", samples)
-    out = audio.load_recorder_wav_as_pcm(tmp_path / "ok.wav")
-    assert out.dtype == np.float32
-    # 16384 / 32768 = 0.5 exactly
-    assert out[1] == pytest.approx(0.5)
-    assert out[2] == pytest.approx(-0.5)
-
-
 # ---------------------------------------------------------------------------
 # int16_peak_norm — backs the dashboard's per-tap volume meter
 # ---------------------------------------------------------------------------

@@ -22,10 +22,14 @@ the picker runs:
 
 **`ffmpeg` is NOT required for normal operation.** The MLX backends —
 both `mlx_whisper` and `mlx_parakeet` — pre-decode the recorder's WAV
-into a numpy/mx array (via `load_recorder_wav_as_pcm`) and feed it to
-the model's lower-level entry point (`mlx_whisper.transcribe(array,
-…)` and `model.generate(get_logmel(audio, preproc))` respectively),
+into a numpy/mx array via `tapscribe.wav_predecode.
+load_recorder_wav_as_pcm` and feed it to the model's lower-level
+entry point (`mlx_whisper.transcribe(array, …)` and
+`model.generate(get_logmel(audio, preproc))` respectively),
 short-circuiting the bundled `load_audio()` that shells out to ffmpeg.
+The trick lives in its own module (`tapscribe/wav_predecode.py`) so
+the next contributor poking at "where do we skip ffmpeg" finds it on
+the first grep.
 Don't reintroduce a path-only call in either adapter without keeping
 the pre-decode shortcut: parakeet-mlx in particular fails mid-request
 with `RuntimeError("FFmpeg is not installed …")` deep in Starlette

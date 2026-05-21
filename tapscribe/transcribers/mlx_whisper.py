@@ -13,7 +13,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
-from ..audio import load_recorder_wav_as_pcm, wav_duration_s
+from ..audio import wav_duration_s
+from ..wav_predecode import load_recorder_wav_as_pcm
 from .base import (
     TranscriptionResult,
     TranscriptionSegment,
