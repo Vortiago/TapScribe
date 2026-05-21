@@ -6,6 +6,43 @@
   Convention changes go there or in `pyproject.toml`, not here.
 - `bridges/README.md` — Bridge → `/tap` wire contract.
 
+## Runtime deps the install picker does NOT cover
+
+`tools/install_picker.py` resolves *model* extras (`whisper-cpu`,
+`parakeet-mlx`, …). One recurring runtime dependency falls outside
+that matrix and is wired into `start.sh` / `start.ps1` instead, after
+the picker runs:
+
+- **`silero-vad` (`[vad]` extra, pulls `torch>=2.1`)** — the per-tap
+  TapScribe gate (`gate_kind="tapscribe"`, the default) imports
+  `silero_vad` lazily on the first `/tap` WS. Missing → the tap logs
+  `gate construction failed … falling back to passthrough` and the
+  gate the operator picked is silently a no-op. `start.sh` runs
+  `pip install -e ".[vad]"` when the module isn't importable.
+
+**`ffmpeg` is NOT required for normal operation.** The MLX backends —
+both `mlx_whisper` and `mlx_parakeet` — pre-decode the recorder's WAV
+into a numpy/mx array via `tapscribe.wav_predecode.
+load_recorder_wav_as_pcm` and feed it to the model's lower-level
+entry point (`mlx_whisper.transcribe(array, …)` and
+`model.generate(get_logmel(audio, preproc))` respectively),
+short-circuiting the bundled `load_audio()` that shells out to ffmpeg.
+The trick lives in its own module (`tapscribe/wav_predecode.py`) so
+the next contributor poking at "where do we skip ffmpeg" finds it on
+the first grep.
+Don't reintroduce a path-only call in either adapter without keeping
+the pre-decode shortcut: parakeet-mlx in particular fails mid-request
+with `RuntimeError("FFmpeg is not installed …")` deep in Starlette
+middleware when ffmpeg is absent. The adapters keep a
+`model.transcribe(str(path))` fallback for unusual WAVs (different
+sample rate / channel layout) that still needs ffmpeg — but the log
+line says so, so a recurring fallback is visible.
+
+If a new runtime dep with the same shape (system binary, or optional
+Python package gated by a lazy import) lands, add it to the `Runtime
+python deps` block in `start.sh` rather than as a Python preflight —
+operators hit it once on bring-up instead of mid-request.
+
 ## Security: avoid CodeQL "security-and-quality" tripwires
 
 PRs are scanned by CodeQL with the `security-and-quality` suite (see

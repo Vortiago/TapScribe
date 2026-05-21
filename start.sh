@@ -158,6 +158,35 @@ if ! python tools/install_picker.py "${PICKER_ARGS[@]}"; then
     exit 1
 fi
 
+# --- Runtime python deps ----------------------------------------------------
+# The TapScribe per-tap silence gate (`gate_kind="tapscribe"`, which is
+# the default) imports `silero_vad` lazily on the first /tap WS. Missing
+# → the tap falls back to passthrough mode ("gate construction failed …
+# falling back to passthrough"), which silently disables the gate the
+# operator picked. Pull the `[vad]` extra so the dependency is satisfied
+# alongside the model install. No-op on re-runs once installed.
+#
+# (No ffmpeg branch here: parakeet-mlx's batch path used to shell out to
+# ffmpeg via its bundled `load_audio()`, but `tapscribe.transcribers.
+# mlx_parakeet` now pre-decodes the recorder's WAV and calls the model's
+# lower-level `generate(mel)` directly. Same dependency-skipping trick
+# as `mlx_whisper`.)
+# `find_spec` instead of `import silero_vad` so we don't pay the
+# ~1-2s torch import on every recorder bring-up just to probe
+# whether silero-vad is on the import path. The actual import is
+# deferred to `tapscribe.speech_gate` on the first /tap WS.
+if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('silero_vad') else 1)" 2>/dev/null; then
+    echo "[start] silero-vad missing — installing the [vad] extra so the TapScribe gate works…"
+    # NOT --quiet: the install pulls torch (~700MB), which can take
+    # minutes and occasionally fails on wheel resolution. Visible
+    # pip output makes the failure reason recoverable; a silent
+    # warning + no diagnostic would just frustrate the operator.
+    if ! python -m pip install -e ".[vad]"; then
+        echo "[start] 'pip install -e .[vad]' failed. The recorder will still boot, but the" >&2
+        echo "        TapScribe silence gate will fall back to passthrough on every /tap." >&2
+    fi
+fi
+
 # --- Configuration ----------------------------------------------------------
 MODEL="${SX_MODEL:-tiny.en}"
 LANG="${SX_LANG:-en}"
