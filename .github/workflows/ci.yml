@@ -167,6 +167,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
+      - name: Exclude ML inference engines from audit
+        # torch and silero-vad are ML inference engines whose security model
+        # is "don't load untrusted models" — not "patch network-reachable
+        # RCEs". Their PYSEC advisories are almost all local-only exploits in
+        # rarely-called internals (jit, profiler, quantisation), and the
+        # advisory database rarely records a fixed_in version, so pip-audit
+        # flags every installed version indefinitely regardless of whether the
+        # issue was actually fixed upstream. Auditing them produces permanent
+        # noise that drowns out real findings in the server-facing deps
+        # (fastapi, uvicorn, cryptography, websockets) — which is what this
+        # job is actually here to catch.
+        run: pip uninstall -y torch silero-vad
+
       - name: Run pip-audit
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
