@@ -23,3 +23,9 @@ pip install --quiet --disable-pip-version-check \
 # JS: bridges/local-test-bridge has no package.json and the Chrome
 # extension's tests run on plain `node --test`, so no `npm install`.
 # Node 22 is pre-provisioned on the web runner.
+
+# Frontend typecheck deps (TypeScript). Install only if the package.json
+# exists so this hook stays safe on branches/checkouts that pre-date it.
+if [ -f frontend/package.json ]; then
+  (cd frontend && npm install --silent --no-audit --no-fund)
+fi

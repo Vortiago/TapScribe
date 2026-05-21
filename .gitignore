@@ -23,6 +23,10 @@ recordings/
 # next run so re-launching is one Enter keystroke.
 .tapscribe-install.json
 
+# Frontend typecheck tooling (devDep only, never shipped)
+frontend/node_modules/
+frontend/package-lock.json
+
 # OS / editor
 .DS_Store
 Thumbs.db
