@@ -425,13 +425,18 @@ def test_api_state_active_rows_include_buffer_transcription(client, recorder_und
 def test_api_state_live_info_carries_gate_config(client, recorder_under_test):
     """The dashboard's gate-kind dropdown + sliders read live_info to
     seed their default values. gate_kind / gate_speech_threshold /
-    gate_hangover_ms / gate_pre_roll_ms must all be present."""
+    gate_hangover_ms / gate_pre_roll_ms / gate_min_speech_ms must all
+    be present (the last is a string even when its value is "0",
+    since live_info uses empty string as the unset sentinel)."""
     body = client.get("/api/state").json()
     li = body["live_info"]
     assert li.get("gate_kind") in ("tapscribe", "backend")
     assert li.get("gate_speech_threshold")  # non-empty string
     assert li.get("gate_hangover_ms")
     assert li.get("gate_pre_roll_ms")
+    # gate_min_speech_ms can read "0" (the default) — assert presence,
+    # not truthiness.
+    assert "gate_min_speech_ms" in li
 
 
 def test_api_state_exposes_live_supports_native_vad(client):
@@ -474,6 +479,8 @@ def test_live_start_rejects_out_of_range_gate_knobs(client):
         {"gate_hangover_ms": 10**7},  # ~3 hours
         {"gate_pre_roll_ms": -1},
         {"gate_pre_roll_ms": 10**7},
+        {"gate_min_speech_ms": -1},
+        {"gate_min_speech_ms": 10**7},
     ):
         r = client.post("/api/live/start", json=bad)
         assert r.status_code == 400, f"{bad!r} returned {r.status_code}: {r.text}"

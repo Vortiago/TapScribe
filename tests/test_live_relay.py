@@ -231,7 +231,12 @@ async def test_relay_consumes_lines_into_callback_with_close_drain(fake_wlk: _Fa
 async def test_relay_dedupes_lines_across_repeated_snapshots(fake_wlk: _FakeWlk):
     """WlK re-sends the full lines list on every tick. The relay must
     NOT re-emit a line just because it appeared in three consecutive
-    snapshots — the dashboard would fill with duplicates."""
+    snapshots — the dashboard would fill with duplicates.
+
+    With the tail-stability flush (see `_TAIL_STABLE_SNAPSHOTS`), the
+    third entry DOES eventually settle once it's been stable for
+    enough ticks — but it must still emit exactly once across the
+    repeated snapshots, never duplicated."""
     lines = _SignalList()
     relay = WlKRelay(
         host="localhost",
@@ -245,15 +250,22 @@ async def test_relay_dedupes_lines_across_repeated_snapshots(fake_wlk: _FakeWlk)
         {"text": "second", "speaker": 1, "start": 1.0, "end": 2.0},
         {"text": "third (in-flight)", "speaker": 1, "start": 2.0, "end": 3.0},
     ]
-    # The same snapshot delivered three times should yield each
-    # finalized line exactly once. After the first push the two
-    # non-tail lines should land; the subsequent pushes are de-duped.
+    # Push enough identical snapshots to cross the stability threshold.
+    for _ in range(5):
+        await fake_wlk.push_lines_snapshot(base)
+    # All three lines should land — first two on the first snapshot
+    # (non-tail), third after the stability window.
+    await lines.wait_count(3)
+    assert list(lines) == ["first", "second", "third (in-flight)"]
+    # Pushing the same snapshot again must not re-emit any of them.
     for _ in range(3):
         await fake_wlk.push_lines_snapshot(base)
-    # Wait for the two non-tail lines to make it through the consumer.
-    await lines.wait_count(2)
-    assert list(lines) == ["first", "second"]
+    # Give the consumer a chance to process; assert no duplicates appeared.
+    await asyncio.sleep(0.05)
+    assert list(lines) == ["first", "second", "third (in-flight)"]
     await relay.close()
+    # Close-drain must be idempotent against already-emitted lines.
+    assert list(lines) == ["first", "second", "third (in-flight)"]
 
 
 async def test_relay_ignores_lines_without_text(fake_wlk: _FakeWlk):
@@ -562,6 +574,94 @@ async def test_relay_extracts_remaining_time_into_on_metrics(fake_wlk: _FakeWlk)
     await asyncio.wait_for(metric_event.wait(), timeout=1.0)
     assert seen == [1.25]
     assert relay.lag_s == 1.25
+    await relay.close()
+
+
+async def test_relay_flushes_tail_after_stability_window_no_close_needed(fake_wlk: _FakeWlk):
+    """The user-visible fix: short utterances reach the LiveFeed
+    without waiting for /tap close. After the tail's text has been
+    stable across `_TAIL_STABLE_SNAPSHOTS` consecutive snapshots (with
+    `buffer_transcription` empty), it auto-flushes. Before this
+    change, a one-line utterance would only land on stop/restart."""
+    lines = _SignalList()
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lines.append,
+    )
+    await relay.connect()
+    # One committed line, no in-flight buffer — simulates the user
+    # said one short sentence and the gate closed.
+    tail = [{"text": "hello there", "speaker": 1, "start": 0.0, "end": 1.5}]
+    # Push enough times to cross the stability threshold (currently 3).
+    for _ in range(4):
+        await fake_wlk.push_lines_snapshot(tail, buffer_transcription="")
+    await lines.wait_count(1)
+    assert list(lines) == ["hello there"]
+    await relay.close()
+    # No phantom re-emit on close — the line was already flushed.
+    assert list(lines) == ["hello there"]
+
+
+async def test_relay_does_not_flush_tail_while_buffer_is_non_empty(fake_wlk: _FakeWlk):
+    """The stability flush requires `buffer_transcription` to be empty
+    — that's WlK's "no more in-flight tokens" signal. While buffer is
+    non-empty (WlK is still consuming new audio), the tail might grow,
+    so we hold it."""
+    lines = _SignalList()
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lines.append,
+        on_buffer=lambda _t: None,
+    )
+    await relay.connect()
+    tail = [{"text": "growing tail", "speaker": 1, "start": 0.0, "end": 1.0}]
+    # Send many snapshots with the same tail but a non-empty buffer.
+    # Stability flush must NOT fire.
+    for _ in range(6):
+        await fake_wlk.push_lines_snapshot(tail, buffer_transcription="more incoming")
+    await asyncio.sleep(0.05)
+    assert list(lines) == []
+    # Buffer empties and the tail stabilises → flush.
+    for _ in range(4):
+        await fake_wlk.push_lines_snapshot(tail, buffer_transcription="")
+    await lines.wait_count(1)
+    assert list(lines) == ["growing tail"]
+    await relay.close()
+
+
+async def test_relay_growing_tail_re_emits_only_new_suffix(fake_wlk: _FakeWlk):
+    """If a stabilised+flushed tail later grows (WlK same-speaker
+    merger), the relay must emit only the NEW suffix — never the
+    whole grown text — or the dashboard ends up with both "hello" and
+    "hello world" stacked up."""
+    lines = _SignalList()
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lines.append,
+        on_buffer=lambda _t: None,
+    )
+    await relay.connect()
+    # First: short tail, stabilises and gets flushed.
+    short = [{"text": "hello", "speaker": 1, "start": 0.0, "end": 0.5}]
+    for _ in range(4):
+        await fake_wlk.push_lines_snapshot(short, buffer_transcription="")
+    await lines.wait_count(1)
+    assert list(lines) == ["hello"]
+    # Then: same key (speaker=1, start=0.0) but text grew — WlK
+    # merged in more same-speaker content. Re-stabilise.
+    grown = [{"text": "hello world", "speaker": 1, "start": 0.0, "end": 1.5}]
+    for _ in range(4):
+        await fake_wlk.push_lines_snapshot(grown, buffer_transcription="")
+    await lines.wait_count(2)
+    # Only the suffix ("world") emitted on the growth — never the
+    # whole "hello world".
+    assert list(lines) == ["hello", "world"]
     await relay.close()
 
 

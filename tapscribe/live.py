@@ -94,6 +94,7 @@ class LiveChannel(Protocol):
         gate_speech_threshold: float | None = None,
         gate_hangover_ms: int | None = None,
         gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
     ) -> None: ...
 
     def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]: ...
@@ -136,6 +137,15 @@ class LiveConfig:
     gate_speech_threshold: float = 0.5  # Silero speech probability gate
     gate_hangover_ms: int = 400  # post-speech silence before close
     gate_pre_roll_ms: int = 300  # ring buffer flushed on open
+    # Minimum confirmed-speech window (ms) before the gate emits any
+    # audio. 0 = open instantly on the VAD's first "start" event.
+    # Higher values suppress brief noise blips (key taps, single
+    # coughs, brief bumps) that Silero would otherwise flag as a
+    # one-frame "start". The gate buffers candidate frames during the
+    # warm-up; if VAD says "end" before this threshold is reached, the
+    # candidate is discarded silently. Silero's `VADIterator` has no
+    # equivalent knob — this filter lives entirely in SpeechGate.
+    gate_min_speech_ms: int = 0
     confidence_validation: bool = True
     # Forwarded to whisperlivekit-server when set — see build_live_cmd.
     min_chunk_size: float | None = None
@@ -332,6 +342,7 @@ def _initial_info() -> dict[str, str]:
         "gate_speech_threshold": "",
         "gate_hangover_ms": "",
         "gate_pre_roll_ms": "",
+        "gate_min_speech_ms": "",
         "confidence_validation": "",  # "on" / "off"
     }
 
@@ -376,6 +387,7 @@ class WhisperLiveKitChannel:
         self.info["gate_speech_threshold"] = f"{config.gate_speech_threshold:.2f}"
         self.info["gate_hangover_ms"] = str(config.gate_hangover_ms)
         self.info["gate_pre_roll_ms"] = str(config.gate_pre_roll_ms)
+        self.info["gate_min_speech_ms"] = str(config.gate_min_speech_ms)
         self.info["confidence_validation"] = "on" if config.confidence_validation else "off"
 
     supports_native_vad: bool = True  # --vac / --no-vac flag exists
@@ -393,6 +405,7 @@ class WhisperLiveKitChannel:
         gate_speech_threshold: float | None = None,
         gate_hangover_ms: int | None = None,
         gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
     ) -> bool:
         """True when a running child already satisfies the requested config.
         Optional args are None when the caller doesn't want to change them;
@@ -407,6 +420,7 @@ class WhisperLiveKitChannel:
             and gate_speech_threshold is None
             and gate_hangover_ms is None
             and gate_pre_roll_ms is None
+            and gate_min_speech_ms is None
         )
 
     def begin_transition(
@@ -419,6 +433,7 @@ class WhisperLiveKitChannel:
         gate_speech_threshold: float | None = None,
         gate_hangover_ms: int | None = None,
         gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
     ) -> None:
         """Announce that a (re)start with the supplied overrides is about
         to happen. Replaces `config` for the supplied knobs so the next
@@ -441,6 +456,8 @@ class WhisperLiveKitChannel:
             replacements["gate_hangover_ms"] = int(gate_hangover_ms)
         if gate_pre_roll_ms is not None:
             replacements["gate_pre_roll_ms"] = int(gate_pre_roll_ms)
+        if gate_min_speech_ms is not None:
+            replacements["gate_min_speech_ms"] = int(gate_min_speech_ms)
         if replacements:
             self.config = replace(self.config, **replacements)
         self.info["state"] = "starting"
@@ -551,6 +568,7 @@ class WhisperLiveKitChannel:
             self.info["gate_speech_threshold"] = f"{self.config.gate_speech_threshold:.2f}"
             self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
             self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
+            self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
             self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
             self.info["state"] = "starting"
             self.info["last_error"] = ""

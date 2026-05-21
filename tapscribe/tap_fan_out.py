@@ -130,28 +130,16 @@ class TapFanOut:
         await self._close()
 
     async def write_frame(self, buf: bytes) -> None:
-        # Update the volume-meter peak BEFORE the WAV / relay sends so a
-        # single update_bytes call carries both the new byte count and
-        # the fresh level — one lock acquire instead of two. We update
-        # the meter regardless of `do_record` because the dashboard
-        # should still show a live "audio coming in" indicator for taps
-        # that the operator chose not to persist to disk.
-        peak = int16_peak_norm(buf)
-        # Peak-hold-with-decay: keep the louder of (this frame's peak,
-        # the previous level decayed by one frame). max() — not a
-        # strict `>` test — so a steady tone whose per-frame peak
-        # equals the prior level stays pinned at that level instead
-        # of leaking down by `LEVEL_DECAY_PER_FRAME` every frame.
-        decayed = self._level * LEVEL_DECAY_PER_FRAME
-        self._level = peak if peak > decayed else decayed
+        # Recording first — we persist EVERY incoming frame regardless
+        # of the gate's verdict so the WAV is a faithful record of what
+        # the bridge sent (the gate is a relay-side filter, not a
+        # recording filter). The level meter, by contrast, reflects
+        # POST-gate audio so the operator can see the gate's effect in
+        # real time: silence between speech reads as dark, confirmed
+        # speech lights the bar.
         if self._wf is not None:
             self._wf.writeframes(buf)
             self._bytes_received += len(buf)
-        await self._recorder.streams.update_bytes(
-            self._conn_id,
-            self._bytes_received,
-            level=self._level,
-        )
         if self._gate is not None:
             frames_to_send = self._gate.feed(buf)
             # Surface gate transitions to the dashboard. Skip the lock
@@ -163,6 +151,24 @@ class TapFanOut:
                 await self._recorder.streams.update_gate_open(self._conn_id, current_open)
         else:
             frames_to_send = (buf,)
+
+        # Peak-hold-with-decay on what survived the gate. During pending
+        # warm-up or pure silence, frames_to_send is empty → peak=0 →
+        # the meter decays to dark within its ~165 ms half-life.
+        # max() — not a strict `>` test — so a steady tone whose
+        # per-frame peak equals the prior level stays pinned instead
+        # of leaking down by `LEVEL_DECAY_PER_FRAME` every frame.
+        if frames_to_send:
+            peak = max(int16_peak_norm(f) for f in frames_to_send)
+        else:
+            peak = 0.0
+        decayed = self._level * LEVEL_DECAY_PER_FRAME
+        self._level = peak if peak > decayed else decayed
+        await self._recorder.streams.update_bytes(
+            self._conn_id,
+            self._bytes_received,
+            level=self._level,
+        )
 
         if not frames_to_send:
             return

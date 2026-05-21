@@ -235,6 +235,108 @@ def test_constants_match_protocol() -> None:
 
 
 # ---------------------------------------------------------------------------
+# min_speech_ms — pending-state warm-up
+# ---------------------------------------------------------------------------
+
+
+def test_min_speech_ms_holds_emission_until_threshold_reached() -> None:
+    """With min_speech_ms=100, a "start" event opens the gate into a
+    pending state — frames buffer privately and `is_open` stays False
+    until 100 ms (5 × 20 ms frames) of post-start audio has accumulated.
+    Once the threshold trips, the pre-roll burst + pending frames + the
+    triggering frame are emitted in one shot."""
+    # VAD says start on its first call (which fires on frame 2 since
+    # 1280 B fills one 1024 B chunk). Then None forever — we never see
+    # an "end", so the only thing that can confirm-open is accumulating
+    # enough pending frames.
+    vad = _FakeVad([{"start": 0}])
+    gate = SpeechGate(vad=vad, pre_roll_ms=0, min_speech_ms=100)
+
+    f1 = _frame(1)
+    assert gate.feed(f1) == []  # buffering — VAD not run yet
+    assert gate.is_open is False
+
+    # Frame 2: VAD fires, says start → pending. Nothing emitted yet.
+    f2 = _frame(2)
+    assert gate.feed(f2) == []
+    assert gate.is_open is False
+
+    # Frames 3, 4, 5: still in pending (counting frames since start).
+    # 100 ms / 20 ms = 5 frames threshold. After feeding 5 post-start
+    # frames the confirm fires and we get them all at once.
+    f3, f4, f5, f6 = _frame(3), _frame(4), _frame(5), _frame(6)
+    assert gate.feed(f3) == []
+    assert gate.is_open is False
+    assert gate.feed(f4) == []
+    assert gate.is_open is False
+    assert gate.feed(f5) == []
+    assert gate.is_open is False
+    # Frame 6 is the 5th post-start frame → 5 × 20 ms = 100 ms → confirm.
+    out = gate.feed(f6)
+    assert gate.is_open is True
+    # Order: pre-roll (empty) + buffered pending frames (f2..f5) + f6.
+    assert out == [f2, f3, f4, f5, f6]
+
+
+def test_min_speech_ms_zero_keeps_immediate_open_behaviour() -> None:
+    """min_speech_ms=0 is the default: a "start" event opens the gate
+    on the same frame as today, no warm-up. The existing tests above
+    pin this — this test makes the intent explicit at the boundary."""
+    vad = _FakeVad([{"start": 0}])
+    gate = SpeechGate(vad=vad, pre_roll_ms=0, min_speech_ms=0)
+    f1, f2 = _frame(1), _frame(2)
+    assert gate.feed(f1) == []
+    assert gate.feed(f2) == [f2]
+    assert gate.is_open is True
+
+
+def test_min_speech_ms_discards_brief_blip() -> None:
+    """A "start" followed by an "end" before min_speech_ms elapses is
+    treated as a false alarm — the candidate frames are recycled into
+    pre-roll (so the next true open still recovers leading audio) and
+    the gate never opens. The blip never reaches the relay."""
+    # VAD cadence: chunks fire on frames 2, 4, 5, 7, 8.
+    # Schedule start on call #1 (frame 2), end on call #2 (frame 4).
+    vad = _FakeVad([{"start": 0}, {"end": 0}])
+    gate = SpeechGate(vad=vad, pre_roll_ms=200, min_speech_ms=200)
+
+    f1, f2, f3, f4 = _frame(1), _frame(2), _frame(3), _frame(4)
+    assert gate.feed(f1) == []
+    assert gate.feed(f2) == []  # VAD start → pending
+    assert gate.is_open is False
+    assert gate.feed(f3) == []  # still pending
+    # Frame 4: VAD end → discard candidate. Gate stays closed; nothing
+    # emitted; the candidate frames go back into pre-roll for the next
+    # real open.
+    assert gate.feed(f4) == []
+    assert gate.is_open is False
+
+
+def test_min_speech_ms_after_blip_subsequent_real_open_recovers_pre_roll() -> None:
+    """After a discarded blip, the next real "start" should still
+    flush pre-roll (the candidate's frames live in there) so we
+    haven't traded false-positive suppression for missing leading
+    audio on the next real utterance."""
+    # Cadence note: chunks fire on frames 2, 4, 5, 7, 8.
+    # start#1 (frame 2) → pending
+    # end#1   (frame 4) → discard (only ~40 ms pending, well below 200 ms)
+    # start#2 (frame 5) → pending again
+    # then 10 quiet calls (None) so the pending accumulator can roll past
+    # 200 ms (10 × 20 ms post-start frames) without an end interrupting.
+    vad = _FakeVad([{"start": 0}, {"end": 0}, {"start": 0}])
+    gate = SpeechGate(vad=vad, pre_roll_ms=200, min_speech_ms=200)
+    frames = [_frame(i) for i in range(1, 22)]
+
+    outputs = [gate.feed(f) for f in frames]
+
+    # The gate must eventually confirm open within the 21-frame window
+    # we fed (200 ms / 20 ms = 10 post-start frames needed; second
+    # start fires on frame 5, so confirm by frame 15).
+    assert any(out for out in outputs), "gate never confirmed open after the second start"
+    assert gate.is_open is True
+
+
+# ---------------------------------------------------------------------------
 # Silero smoke test
 # ---------------------------------------------------------------------------
 #

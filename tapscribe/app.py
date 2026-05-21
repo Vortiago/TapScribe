@@ -422,6 +422,9 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     )
     gate_hangover_ms = _parse_bounded_int(body.get("gate_hangover_ms"), "gate_hangover_ms", lo=0, hi=10_000)
     gate_pre_roll_ms = _parse_bounded_int(body.get("gate_pre_roll_ms"), "gate_pre_roll_ms", lo=0, hi=5_000)
+    gate_min_speech_ms = _parse_bounded_int(
+        body.get("gate_min_speech_ms"), "gate_min_speech_ms", lo=0, hi=5_000
+    )
 
     if recorder.live.matches(
         model=model,
@@ -431,6 +434,7 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
         gate_speech_threshold=gate_speech_threshold,
         gate_hangover_ms=gate_hangover_ms,
         gate_pre_roll_ms=gate_pre_roll_ms,
+        gate_min_speech_ms=gate_min_speech_ms,
     ):
         return {
             "ok": True,
@@ -451,6 +455,7 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
         gate_speech_threshold=gate_speech_threshold,
         gate_hangover_ms=gate_hangover_ms,
         gate_pre_roll_ms=gate_pre_roll_ms,
+        gate_min_speech_ms=gate_min_speech_ms,
     )
 
     if recorder.live.running():
