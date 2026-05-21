@@ -127,9 +127,7 @@ def _rebuild_registry(monkeypatch):
         BackendBinding(kinds=frozenset({"mlx"}), loader=catalog._load_parakeet_mlx),
         BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_parakeet_hf),
     )
-    canary_backends = (
-        BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_canary_nemo),
-    )
+    canary_backends = (BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_canary_nemo),)
     both = frozenset({"batch", "live"})
     batch_only = frozenset({"batch"})
     entries = (
