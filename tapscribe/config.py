@@ -89,3 +89,82 @@ AUTH_EXEMPT_ROUTES = frozenset(
 # Whether the FastAPI app's lifespan should auto-start the live channel.
 # Flipped off by --no-auto-live.
 AUTO_START_LIVE: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Env helpers — shared parsers for operator-tunable numeric knobs
+# ---------------------------------------------------------------------------
+
+
+def env_float(
+    name: str,
+    default: float,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    """Read `name` as a float from the environment, falling back to
+    `default` when unset, unparseable, or out of the optional
+    `(min_value, max_value)` range. Every reject case logs once with
+    the actual value and the bound that tripped — typo-tolerant rather
+    than fatal so one bad env var doesn't take down the recorder, but
+    loud enough that the operator sees the bound on next boot.
+
+    Callers should always pass bounds for operator-tunable knobs.
+    Unbounded values are an attack surface: a `TAPSCRIBE_*_CHUNK_S=-5`
+    would silently land at the consumer, where downstream `int()` /
+    `max(1, ...)` clamps may convert it into a pathological setting
+    instead of an obvious mistake.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        print(f"[tapscribe] ignoring unparseable {name}={raw!r}; using default {default}", flush=True)
+        return default
+    if min_value is not None and v < min_value:
+        print(
+            f"[tapscribe] ignoring {name}={v} < min {min_value}; using default {default}",
+            flush=True,
+        )
+        return default
+    if max_value is not None and v > max_value:
+        print(
+            f"[tapscribe] ignoring {name}={v} > max {max_value}; using default {default}",
+            flush=True,
+        )
+        return default
+    return v
+
+
+def env_int(
+    name: str,
+    default: int,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    """Integer counterpart to `env_float`."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        print(f"[tapscribe] ignoring unparseable {name}={raw!r}; using default {default}", flush=True)
+        return default
+    if min_value is not None and v < min_value:
+        print(
+            f"[tapscribe] ignoring {name}={v} < min {min_value}; using default {default}",
+            flush=True,
+        )
+        return default
+    if max_value is not None and v > max_value:
+        print(
+            f"[tapscribe] ignoring {name}={v} > max {max_value}; using default {default}",
+            flush=True,
+        )
+        return default
+    return v

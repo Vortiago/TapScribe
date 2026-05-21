@@ -24,11 +24,14 @@ single format both models want internally: **16 kHz / mono / int16**.
 There's no resampling or channel mixing to do, so a `wave.open` +
 `np.frombuffer` + `/32768.0` is the entire decode.
 
-If a future loader needs a different sample rate or channel layout,
-`load_recorder_wav_as_pcm` raises and the caller falls back to the
-ffmpeg-backed path. Don't grow this module into a general-purpose
-audio decoder — keep it laser-focused on the recorder format, since
-the whole point is that we know exactly what's on disk.
+If the WAV's format doesn't match (different sample rate, channels,
+or sample width) `load_recorder_wav_as_pcm` raises a `RuntimeError`
+with an actionable message — callers propagate it as-is. There is
+no ffmpeg fallback anywhere in the codebase: the MLX adapters depend
+on this module to be the only audio decode path. Don't grow this
+module into a general-purpose audio decoder — keep it laser-focused
+on the recorder format, since the whole point is that we know
+exactly what's on disk.
 """
 
 from __future__ import annotations
@@ -46,8 +49,10 @@ def load_recorder_wav_as_pcm(path: Path):
     `parakeet_mlx.audio.get_logmel(mx.array(array), preproc)`.
 
     Raises `RuntimeError` if the WAV isn't in the recorder's expected
-    format — callers should fall back to their backend's own
-    path-based loader (which needs ffmpeg) for unusual inputs.
+    format. The error names the file, the actual format, and the
+    expected format, plus a one-line ffmpeg recipe so the operator
+    can convert the file. There is no in-process fallback — callers
+    propagate the error.
 
     See the module docstring for why this exists.
     """
@@ -65,7 +70,8 @@ def load_recorder_wav_as_pcm(path: Path):
             raise RuntimeError(
                 f"unexpected WAV format for {path.name}: "
                 f"{rate}Hz/{channels}ch/{sampwidth * 8}-bit "
-                "(expected 16kHz/mono/16-bit — TapScribe writes that natively)"
+                "(expected 16kHz/mono/16-bit — TapScribe writes that natively). "
+                "Convert with: ffmpeg -i in.wav -ar 16000 -ac 1 -sample_fmt s16 out.wav"
             )
         frames = wf.readframes(wf.getnframes())
     return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0

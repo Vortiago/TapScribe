@@ -54,15 +54,15 @@ operator's signal to convert the file, not a cue to silently
 re-introduce ffmpeg. Reintroducing a `model.transcribe(str(path))`
 fallback would defeat the whole point and is rejected at review.
 
-The chunk-size knobs are env-tunable today
-(`TAPSCRIBE_PARAKEET_CHUNK_S`, `TAPSCRIBE_PARAKEET_OVERLAP_S`,
-`TAPSCRIBE_CANARY_CHUNK_S`, `TAPSCRIBE_CANARY_OVERLAP_S`,
-`TAPSCRIBE_CANARY_MAX_TOKENS`). A follow-up PR will plumb per-request
-values from the dashboard through `BatchSessionRequest` so operators
-can tune from the UI without restarting the recorder — every
-operator-tunable setting belongs in the dashboard, see the
-strip-silence knobs in `web/components/session-detail.html` for the
-pattern.
+The chunk-size knobs are env-tunable (`TAPSCRIBE_PARAKEET_CHUNK_S`,
+`TAPSCRIBE_PARAKEET_OVERLAP_S`, `TAPSCRIBE_CANARY_CHUNK_S`,
+`TAPSCRIBE_CANARY_OVERLAP_S`, `TAPSCRIBE_CANARY_MAX_TOKENS`); env
+names are exported as module constants from each adapter
+(`ENV_CHUNK_S`, `ENV_OVERLAP_S`) so the dashboard wiring — when it
+lands — has one source of truth. Every operator-tunable setting
+belongs in the dashboard eventually; see the strip-silence knobs in
+`web/components/session-detail.html` for the pattern when adding
+these.
 
 If a new runtime dep with the same shape (system binary, or optional
 Python package gated by a lazy import) lands, add it to the `Runtime

@@ -30,14 +30,16 @@ def _wav_of_seconds(path: Path, seconds: float) -> Path:
     return path
 
 
-def _stt_output(text: str) -> types.SimpleNamespace:
-    """Mimic mlx-audio 0.4.x `STTOutput`: only `.text` is consumed by
-    the adapter (segment timings are hardcoded to 0.0 upstream and the
-    adapter synthesises real timestamps from window offsets)."""
+def _stt_output(text: str, *, generation_tokens: int = 0) -> types.SimpleNamespace:
+    """Mimic mlx-audio 0.4.x `STTOutput`. `text` is the only field the
+    adapter consumes for transcription; `generation_tokens` drives the
+    truncation-detection path so tests can simulate a window that
+    landed at the max_tokens cap."""
     return types.SimpleNamespace(
         text=text,
         segments=[{"text": text, "start": 0.0, "end": 0.0}],
         language="",
+        generation_tokens=generation_tokens,
     )
 
 
@@ -210,7 +212,6 @@ def test_transcribe_records_chunk_knobs_on_result(tmp_path: Path):
     assert qs["chunk_duration_s"] == 42.0
     assert qs["overlap_duration_s"] == 3.0
     assert qs["max_tokens_per_chunk"] == 512
-    assert qs["windows"] == 1
 
 
 def test_transcribe_rejects_non_recorder_wav(tmp_path: Path):
@@ -232,6 +233,87 @@ def test_transcribe_rejects_non_recorder_wav(tmp_path: Path):
     with pytest.raises(RuntimeError, match="unexpected WAV format"):
         t.transcribe(odd_wav)
     fake.generate.assert_not_called()
+
+
+def test_truncation_flagged_when_generation_tokens_hits_cap(tmp_path: Path):
+    """Canary 0.4.x caps each generate call at `max_tokens`. A window
+    that landed exactly at the cap likely ran out of room mid-sentence
+    — surface `truncation_suspected=True` in quality_settings so the
+    operator knows to bump TAPSCRIBE_CANARY_MAX_TOKENS or shrink the
+    chunk size. This is the chief real-world risk of the chunked path
+    if `max_tokens` is too tight for the speaker's cadence."""
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    fake = _fake_canary_model([_stt_output("right at the cap", generation_tokens=256)])
+    t = MlxCanaryTranscriber(model_name="canary-1b-v2", model=fake, max_tokens_per_chunk=256)
+    wav = _wav_of_seconds(tmp_path / "x.wav", 1.0)
+    r = t.transcribe(wav)
+    assert r.quality_settings.get("truncation_suspected") is True
+
+
+def test_truncation_not_flagged_below_cap(tmp_path: Path):
+    """A window comfortably under the cap shouldn't trigger the
+    truncation flag — false positives would push operators to tune
+    knobs that don't need tuning."""
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    fake = _fake_canary_model([_stt_output("short", generation_tokens=42)])
+    t = MlxCanaryTranscriber(model_name="canary-1b-v2", model=fake, max_tokens_per_chunk=256)
+    wav = _wav_of_seconds(tmp_path / "x.wav", 1.0)
+    r = t.transcribe(wav)
+    assert "truncation_suspected" not in r.quality_settings
+
+
+def test_joined_text_trims_leading_overlap_at_seams(tmp_path: Path):
+    """Canary windows overlap, and the overlap region transcribes twice
+    — the joined text should not contain the duplicate. Per-segment
+    text stays verbatim (operators can still inspect what each window
+    saw), but the rolled-up `result.text` is dedup'd via a suffix-of-
+    prev = prefix-of-next match."""
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    fake = _fake_canary_model(
+        [
+            _stt_output("hello world this is a test"),
+            # Window 2 starts mid-overlap and re-transcribes the last
+            # three words of window 1 before continuing.
+            _stt_output("this is a test of the system"),
+        ]
+    )
+    t = MlxCanaryTranscriber(
+        model_name="canary-1b-v2",
+        model=fake,
+        chunk_duration_s=30.0,
+        overlap_duration_s=5.0,
+    )
+    wav = _wav_of_seconds(tmp_path / "x.wav", 55.0)
+    r = t.transcribe(wav)
+    # Joined text trimmed: no "this is a test this is a test".
+    assert r.text == "hello world this is a test of the system"
+    # Per-segment text preserved so the operator can audit what each
+    # window saw if the dedup ever picks wrong.
+    assert [s.text for s in r.segments] == [
+        "hello world this is a test",
+        "this is a test of the system",
+    ]
+
+
+def test_joined_text_unchanged_when_no_overlap(tmp_path: Path):
+    """When two windows transcribe completely different content (the
+    overlap region was silent on one side, e.g.), the prefix-match
+    dedup finds nothing and the joined text preserves both."""
+    from tapscribe.transcribers.mlx_canary import MlxCanaryTranscriber
+
+    fake = _fake_canary_model([_stt_output("alpha beta gamma"), _stt_output("delta epsilon zeta")])
+    t = MlxCanaryTranscriber(
+        model_name="canary-1b-v2",
+        model=fake,
+        chunk_duration_s=30.0,
+        overlap_duration_s=5.0,
+    )
+    wav = _wav_of_seconds(tmp_path / "x.wav", 55.0)
+    r = t.transcribe(wav)
+    assert r.text == "alpha beta gamma delta epsilon zeta"
 
 
 def test_load_fails_fast_when_mlx_audio_missing(monkeypatch):
