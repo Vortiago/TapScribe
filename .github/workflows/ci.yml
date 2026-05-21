@@ -78,6 +78,30 @@ jobs:
       - name: Run bridge tests (Node built-in runner, no deps)
         run: node --test "bridges/spacialchat-bridge/tests/*.test.js"
 
+  # Frontend typecheck — runs `tsc --noEmit --checkJs` against
+  # tapscribe/web/js/. Files opt in via `// @ts-check`, so this job is
+  # incremental: it only checks files that have explicitly enabled it.
+  # Standalone job (not bolted onto bridge-js) so a type regression shows
+  # up as its own red check on the PR.
+  frontend-typecheck:
+    name: frontend typecheck (tsc --noEmit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package.json
+
+      - name: Install TypeScript
+        run: cd frontend && npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: cd frontend && npm run typecheck
+
   # Dashboard UI E2E with headless Chromium. The synthetic variant
   # (FakeTranscriber + synthetic WAVs) verifies the active-taps / live
   # transcripts / merged-session pipeline end-to-end. The

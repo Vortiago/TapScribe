@@ -34,3 +34,17 @@ if ! fmt_out=$(ruff format --check tapscribe tests 2>&1); then
   } >&2
   exit 2
 fi
+
+# Frontend typecheck. Skipped when tsc isn't installed yet (fresh container
+# whose session-start `npm install` hasn't finished) so the hook stays
+# non-flaky; CI's `frontend-typecheck` job is the source of truth.
+if [ -f frontend/package.json ] && [ -x frontend/node_modules/.bin/tsc ]; then
+  if ! tsc_out=$(cd frontend && npm run --silent typecheck 2>&1); then
+    {
+      echo "tsc --noEmit failed — fix the type errors below before ending the turn:"
+      echo
+      echo "$tsc_out"
+    } >&2
+    exit 2
+  fi
+fi

@@ -1,3 +1,4 @@
+// @ts-check
 // Live channel panel — model/lang form + start/stop/apply controls + recent
 // log. Body rebuild is skipped while the user is editing the form or the
 // payload hasn't actually changed, so open <details>/<select> stay open.
@@ -8,6 +9,7 @@ import { wireConfigSave } from "../api.js";
 // Display labels for model families — used as <optgroup> labels in the live
 // model select. Mirrors session-detail.js's FAMILY_LABELS but trimmed to
 // the families that have live-eligible models today.
+/** @type {[string, string][]} */
 const LIVE_FAMILY_LABELS = [
   ["whisper", "Whisper"],
   ["nb-whisper", "NB-Whisper (Norwegian)"],
@@ -15,8 +17,13 @@ const LIVE_FAMILY_LABELS = [
 ];
 
 let lastSig = "";
+/** @type {ReturnType<typeof setInterval> | null} */
 let logDialogPoll = null;
 
+/**
+ * @param {import('../types.js').AppState} j
+ * @param {import('../types.js').LiveChannelCtx} ctx
+ */
 export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCatalog }) {
   const li = j.live_info || {};
   const log = j.live_log || [];
@@ -33,7 +40,7 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   // The dataset.cfgKey check covers the init-prompt textarea AND its
   // save button + status span so a click-then-poll-tick race can't
   // tear the DOM out from under the save handler.
-  const focused = document.activeElement;
+  const focused = /** @type {HTMLElement | null} */ (document.activeElement);
   const editableIds = new Set([
     "liveModelSelect", "liveLangInput",
     "liveGateKindSelect",
@@ -61,8 +68,8 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   lastSig = sig;
 
   const frag = tpl("tpl-live-channel");
-  const sel = frag.querySelector("#liveModelSelect");
-  const langInput = frag.querySelector("#liveLangInput");
+  const sel = /** @type {HTMLSelectElement} */ (frag.querySelector("#liveModelSelect"));
+  const langInput = /** @type {HTMLInputElement} */ (frag.querySelector("#liveLangInput"));
   const currentModel = li.model || "tiny.en";
 
   // Group live-eligible models by family (Whisper / NB-Whisper / …). If
@@ -111,10 +118,10 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   // option is greyed out (disabled) when the current LiveChannel has
   // no native VAD — picking it would be a no-op since there's nothing
   // backend-side to defer gating to.
-  const gateSel = frag.querySelector("#liveGateKindSelect");
+  const gateSel = /** @type {HTMLSelectElement | null} */ (frag.querySelector("#liveGateKindSelect"));
   if (gateSel) {
     gateSel.value = li.gate_kind || "tapscribe";
-    const backendOpt = gateSel.querySelector('option[value="backend"]');
+    const backendOpt = /** @type {HTMLOptionElement | null} */ (gateSel.querySelector('option[value="backend"]'));
     if (backendOpt) {
       backendOpt.disabled = !supportsNativeVad;
       backendOpt.textContent = supportsNativeVad
@@ -122,11 +129,11 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
         : "Backend native VAD (not supported)";
     }
   }
-  const threshEl = frag.querySelector("#liveGateThreshold");
+  const threshEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGateThreshold"));
   if (threshEl) threshEl.value = li.gate_speech_threshold || "0.50";
-  const hangEl = frag.querySelector("#liveGateHangover");
+  const hangEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGateHangover"));
   if (hangEl) hangEl.value = li.gate_hangover_ms || "400";
-  const prerollEl = frag.querySelector("#liveGatePreRoll");
+  const prerollEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGatePreRoll"));
   if (prerollEl) prerollEl.value = li.gate_pre_roll_ms || "300";
 
   const starting = state === "starting";
@@ -170,11 +177,11 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
 
   // Init-prompt expandable. Hidden when no installed live model supports
   // initial_prompt (registry-driven via inputs_support.live_prompt).
-  const initRow = pick(frag, "initPromptRow");
+  const initRow = /** @type {HTMLDetailsElement} */ (pick(frag, "initPromptRow"));
   if (sup.live_prompt) {
     initRow.hidden = false;
     pick(frag, "initPromptCount").textContent = lp.length ? `· ${lp.length} chars` : "";
-    frag.querySelector("#liveInitPromptText").value = lp.content || "";
+    /** @type {HTMLTextAreaElement} */ (frag.querySelector("#liveInitPromptText")).value = lp.content || "";
     // Default-open the editor when populated so the operator sees what's
     // in effect; collapsed when empty to keep the panel compact.
     initRow.open = !!lp.length;
@@ -188,20 +195,28 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   bodyEl.querySelector("#liveStopBtn")?.addEventListener("click", onAction.stop);
   bodyEl.querySelector("#liveLogBtn")?.addEventListener("click", openLogDialog);
   // Nudge language to "no" when an nb-whisper model is picked and lang is
-  // still on the boot default.
-  bodyEl.querySelector("#liveModelSelect").addEventListener("change", (e) => {
-    if (!e.target.value.startsWith("nb-")) return;
-    const li = bodyEl.querySelector("#liveLangInput");
+  // still on the boot default. #liveModelSelect is in the always-present
+  // top section of the live-channel template (not in any of the
+  // state-specific action templates), so it's a hard error if it's
+  // missing — unlike the start/stop/apply buttons above, which use `?.`
+  // because each only appears in one of the three state templates.
+  const modelSelect = bodyEl.querySelector("#liveModelSelect");
+  if (!modelSelect) throw new Error("#liveModelSelect missing from live-channel template");
+  modelSelect.addEventListener("change", (e) => {
+    const value = /** @type {HTMLSelectElement} */ (e.target).value;
+    if (!value.startsWith("nb-")) return;
+    const li = /** @type {HTMLInputElement | null} */ (bodyEl.querySelector("#liveLangInput"));
     if (li && (li.value === "en" || li.value === "")) li.value = "no";
   });
 
-  const initBtn = bodyEl.querySelector("#liveInitPromptSave");
+  const initBtn = /** @type {HTMLButtonElement | null} */ (bodyEl.querySelector("#liveInitPromptSave"));
   if (initBtn) {
     wireConfigSave({
       key: "live-prompt",
       btn: initBtn,
       textarea: bodyEl.querySelector("#liveInitPromptText"),
       status: bodyEl.querySelector('[data-slot="initPromptStatus"]'),
+      onSuccess: undefined,
     });
   }
 }
@@ -211,16 +226,17 @@ export const formValues = () => {
   // untouched sliders doesn't force a restart over identical numbers).
   // The server-side `matches()` check uses the same null-means-unchanged
   // semantics for these fields.
+  /** @param {string} id */
   const numOrNull = (id) => {
-    const el = document.getElementById(id);
+    const el = /** @type {HTMLInputElement | null} */ (document.getElementById(id));
     if (!el || el.value === "") return null;
     const n = Number(el.value);
     return Number.isFinite(n) ? n : null;
   };
   return {
-    model: document.getElementById("liveModelSelect")?.value ?? null,
-    language: document.getElementById("liveLangInput")?.value.trim() ?? null,
-    gate_kind: document.getElementById("liveGateKindSelect")?.value ?? null,
+    model: /** @type {HTMLSelectElement | null} */ (document.getElementById("liveModelSelect"))?.value ?? null,
+    language: /** @type {HTMLInputElement | null} */ (document.getElementById("liveLangInput"))?.value.trim() ?? null,
+    gate_kind: /** @type {HTMLSelectElement | null} */ (document.getElementById("liveGateKindSelect"))?.value ?? null,
     gate_speech_threshold: numOrNull("liveGateThreshold"),
     gate_hangover_ms: numOrNull("liveGateHangover"),
     gate_pre_roll_ms: numOrNull("liveGatePreRoll"),
@@ -246,6 +262,10 @@ async function fetchLog() {
   }
 }
 
+/**
+ * @param {HTMLDialogElement} dlg
+ * @param {{ log?: string[], state?: string } | null} payload
+ */
 function renderLogInto(dlg, payload) {
   const pre = pick(dlg, "pre");
   const status = pick(dlg, "status");
@@ -264,14 +284,15 @@ function renderLogInto(dlg, payload) {
 async function openLogDialog() {
   // Reuse the existing dialog if it's already in the DOM — avoids
   // multiple ids and lets polling state be tied to one element.
-  let dlg = document.getElementById("liveLogDialog");
+  let dlg = /** @type {HTMLDialogElement | null} */ (document.getElementById("liveLogDialog"));
   if (!dlg) {
     const frag = tpl("tpl-live-log-dialog");
     document.body.appendChild(frag);
-    dlg = document.getElementById("liveLogDialog");
-    dlg.querySelector("#liveLogCloseBtn").addEventListener("click", () => dlg.close());
-    dlg.querySelector("#liveLogRefreshBtn").addEventListener("click", async () => {
-      renderLogInto(dlg, await fetchLog());
+    dlg = /** @type {HTMLDialogElement} */ (document.getElementById("liveLogDialog"));
+    const closeBtn = dlg.querySelector("#liveLogCloseBtn");
+    closeBtn?.addEventListener("click", () => dlg?.close());
+    dlg.querySelector("#liveLogRefreshBtn")?.addEventListener("click", async () => {
+      if (dlg) renderLogInto(dlg, await fetchLog());
     });
     dlg.addEventListener("close", () => {
       if (logDialogPoll !== null) {

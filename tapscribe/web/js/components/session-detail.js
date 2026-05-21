@@ -1,3 +1,4 @@
+// @ts-check
 // Session detail pane — the big right-hand side of the dashboard:
 // header, controls box (model/source/silence/from-to/prompt/hotwords),
 // optional aliases box, WAV list (originals + stripped-region sub-rows,
@@ -13,6 +14,7 @@ import { fmtBytes, fmtClock, fmtDur, fmtElapsedShort, fmtMs, truncMid } from "..
 // Display labels for backend kinds — appears in the chip row above the model
 // select. "auto" is always rendered; the others are disabled when the
 // server-reported `available_backends` doesn't list them.
+/** @type {Record<string, string>} */
 const BACKEND_LABELS = {
   auto: "auto",
   mlx: "mlx",
@@ -22,6 +24,7 @@ const BACKEND_LABELS = {
 
 // Display labels for model families — used as <optgroup> labels in the model
 // select. Order here drives the group order in the dropdown.
+/** @type {[string, string][]} */
 const FAMILY_LABELS = [
   ["whisper", "Whisper"],
   ["nb-whisper", "NB-Whisper (Norwegian)"],
@@ -33,6 +36,11 @@ const FAMILY_LABELS = [
 // Return the catalog entries that can run on the operator's chosen backend.
 // "auto" passes everything through; explicit kinds filter to models that
 // declare a binding for the chosen kind.
+/**
+ * @param {import('../types.js').ModelCatalog} catalog
+ * @param {string} backend
+ * @returns {import('../types.js').ModelEntry[]}
+ */
 function filterCatalogByBackend(catalog, backend) {
   const models = catalog.models || [];
   if (backend === "auto") return models;
@@ -42,6 +50,7 @@ function filterCatalogByBackend(catalog, backend) {
 // Build the inline-transcript fragment shown when the user clicks a WAV
 // row. Kept here (not in merged-transcript.js) because it renders the
 // per-WAV transcript record, not the session-merged one.
+/** @param {import('../types.js').WavTranscript} t */
 function buildExpandTx(t) {
   const frag = tpl("tpl-expand-tx");
   const metaHost = pick(frag, "meta");
@@ -78,13 +87,19 @@ function buildExpandTx(t) {
   return frag;
 }
 
+/**
+ * @param {HTMLElement} host
+ * @param {import('../types.js').Session} s
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildSourceRow(host, s, sessKey, ctx) {
   const stripped = s.stripped || null;
   const want = ctx.sourcePick.get(sessKey) || "original";
   const current = (want === "stripped" && !stripped) ? "original" : want;
 
   const orig = tpl("tpl-source-original");
-  const origInput = orig.querySelector("input");
+  const origInput = /** @type {HTMLInputElement} */ (orig.querySelector("input"));
   origInput.name = `src-${sessKey}`;
   origInput.dataset.sessId = sessKey;
   if (current === "original") origInput.checked = true;
@@ -93,7 +108,7 @@ function buildSourceRow(host, s, sessKey, ctx) {
 
   if (stripped) {
     const sub = tpl("tpl-source-stripped");
-    const subInput = sub.querySelector("input");
+    const subInput = /** @type {HTMLInputElement} */ (sub.querySelector("input"));
     subInput.name = `src-${sessKey}`;
     subInput.dataset.sessId = sessKey;
     if (current === "stripped") subInput.checked = true;
@@ -108,19 +123,30 @@ function buildSourceRow(host, s, sessKey, ctx) {
 // .strip-settings slot. Current values come from ctx.stripOpts which
 // main.js loads from localStorage; edits round-trip back through
 // ctx.onStripOptEdit so the next strip-silence POST sees them.
+/**
+ * @param {DocumentFragment} parent
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function appendStripSettings(parent, sessKey, ctx) {
   const frag = tpl("tpl-strip-settings");
-  const opts = ctx.stripOpts || {};
-  for (const el of frag.querySelectorAll("[data-strip-opt]")) {
-    const k = el.dataset.stripOpt;
-    el.value = opts[k] ?? "";
+  const opts = ctx.stripOpts || /** @type {import('../types.js').StripOpts} */ ({});
+  for (const el of /** @type {NodeListOf<HTMLInputElement>} */ (frag.querySelectorAll("[data-strip-opt]"))) {
+    const k = /** @type {keyof import('../types.js').StripOpts} */ (el.dataset.stripOpt);
+    el.value = k && opts[k] != null ? String(opts[k]) : "";
     el.dataset.sessId = sessKey;
   }
-  const reset = frag.querySelector("[data-strip-opt-reset]");
+  const reset = /** @type {HTMLElement | null} */ (frag.querySelector("[data-strip-opt-reset]"));
   if (reset) reset.dataset.sessId = sessKey;
   pick(parent, "settings").appendChild(frag);
 }
 
+/**
+ * @param {HTMLElement} host
+ * @param {import('../types.js').Session} s
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildSilenceCtl(host, s, sessKey, ctx) {
   if (ctx.sessStripInflight.has(sessKey)) {
     host.appendChild(tpl("tpl-silence-stripping"));
@@ -128,7 +154,7 @@ function buildSilenceCtl(host, s, sessKey, ctx) {
   }
   if (s.stripped) {
     const frag = tpl("tpl-silence-existing");
-    for (const btn of frag.querySelectorAll("[data-strip-run], [data-strip-remove]")) {
+    for (const btn of /** @type {NodeListOf<HTMLElement>} */ (frag.querySelectorAll("[data-strip-run], [data-strip-remove]"))) {
       const attr = btn.hasAttribute("data-strip-run") ? "stripRun" : "stripRemove";
       btn.dataset[attr] = sessKey;
     }
@@ -137,7 +163,7 @@ function buildSilenceCtl(host, s, sessKey, ctx) {
     host.appendChild(frag);
   } else {
     const frag = tpl("tpl-silence-none");
-    frag.querySelector("[data-strip-run]").dataset.stripRun = sessKey;
+    /** @type {HTMLElement} */ (frag.querySelector("[data-strip-run]")).dataset.stripRun = sessKey;
     appendStripSettings(frag, sessKey, ctx);
     host.appendChild(frag);
   }
@@ -146,6 +172,7 @@ function buildSilenceCtl(host, s, sessKey, ctx) {
 // Session-transcribe button content. The same logic runs each poll tick to
 // keep the spinner / counter live, so initial render and `updateProgress`
 // share this one builder and produce the same DOM.
+/** @param {string} label */
 function spinNode(label) {
   const frag = document.createDocumentFragment();
   const spin = document.createElement("span");
@@ -156,6 +183,10 @@ function spinNode(label) {
   return frag;
 }
 
+/**
+ * @param {import('../types.js').Session} s
+ * @param {Map<string, number>} sessInflight
+ */
 export function sessionProgressInner(s, sessInflight) {
   const startMs = sessInflight.get(s.session);
   const elapsed = startMs ? fmtElapsedShort((Date.now() - startMs) / 1000) : null;
@@ -178,9 +209,15 @@ export function sessionProgressInner(s, sessInflight) {
   return { node, busy: false };
 }
 
+/**
+ * @param {HTMLElement} host
+ * @param {import('../types.js').Session} s
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildActionRow(host, s, sessKey, ctx) {
   const { node, busy } = sessionProgressInner(s, ctx.sessInflight);
-  const btn = tpl("tpl-sess-tx-button").firstElementChild;
+  const btn = /** @type {HTMLButtonElement} */ (tpl("tpl-sess-tx-button").firstElementChild);
   btn.dataset.txSess = sessKey;
   if (busy) btn.disabled = true;
   if (!s.session_transcript) btn.classList.add("primary");
@@ -189,17 +226,21 @@ function buildActionRow(host, s, sessKey, ctx) {
   host.appendChild(btn);
 
   if (s.session_transcript) {
-    const copy = tpl("tpl-sess-copy-button").firstElementChild;
+    const copy = /** @type {HTMLButtonElement} */ (tpl("tpl-sess-copy-button").firstElementChild);
     copy.dataset.copySess = sessKey;
     host.appendChild(copy);
   }
 }
 
+/**
+ * @param {HTMLElement} host
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildBackendChips(host, ctx) {
   const available = new Set(ctx.modelCatalog?.available_backends || []);
   for (const kind of ["auto", "mlx", "cuda", "cpu"]) {
-    const chip = tpl("tpl-backend-chip").firstElementChild;
-    chip.textContent = BACKEND_LABELS[kind];
+    const chip = /** @type {HTMLButtonElement} */ (tpl("tpl-backend-chip").firstElementChild);
+    chip.textContent = BACKEND_LABELS[kind] ?? kind;
     chip.dataset.backendChip = kind;
     // "auto" is always pickable; explicit kinds disabled when the server
     // reports they're not present on this machine. Grayed-out chips
@@ -217,6 +258,10 @@ function buildBackendChips(host, ctx) {
 
 // Build the model select from the catalog, grouping options by family and
 // only showing models that can run on the currently-selected backend.
+/**
+ * @param {HTMLSelectElement} sel
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildModelSelect(sel, ctx) {
   const candidates = filterCatalogByBackend(ctx.modelCatalog, ctx.batchBackend);
   // Group entries by family preserving FAMILY_LABELS order; unknown families
@@ -273,6 +318,12 @@ function buildModelSelect(sel, ctx) {
 // context should bias *this whole session's* transcription" — a stable
 // choice — whereas language picks are sometimes per-job (translate this
 // one French clip into English, then transcribe the rest natively).
+/**
+ * @param {HTMLElement} host
+ * @param {import('../types.js').SessionDetailCtx & { sessionMeta: import('../types.js').EffectiveMeta }} ctx
+ * @param {import('../types.js').ModelEntry | null | undefined} modelEntry
+ * @param {string} sessKey
+ */
 function buildModelInputs(host, ctx, modelEntry, sessKey) {
   host.replaceChildren();
   if (!modelEntry) return;
@@ -288,7 +339,7 @@ function buildModelInputs(host, ctx, modelEntry, sessKey) {
 
       const row = tpl(hasOverride ? "tpl-sess-override-set" : "tpl-sess-override-default");
       pick(row, "label").textContent = input.label;
-      const ta = pick(row, "textarea");
+      const ta = /** @type {HTMLTextAreaElement} */ (pick(row, "textarea"));
       ta.dataset.metaKey = metaKey;
       ta.dataset.sessId = sessKey;
       ta.value = overrideValue;
@@ -299,7 +350,7 @@ function buildModelInputs(host, ctx, modelEntry, sessKey) {
           ? `default (${defaultValue.length > 80 ? defaultValue.slice(0, 80) + "…" : defaultValue})`
           : input.placeholder || "no default set";
       }
-      const resetBtn = row.querySelector("[data-meta-reset]");
+      const resetBtn = /** @type {HTMLElement | null} */ (row.querySelector("[data-meta-reset]"));
       if (resetBtn) {
         resetBtn.dataset.sessId = sessKey;
         // Use a distinct attribute (NOT `data-meta-key`) so the textarea's
@@ -314,8 +365,9 @@ function buildModelInputs(host, ctx, modelEntry, sessKey) {
       for (const n of nodes) host.appendChild(n);
     } else if (input.type === "select") {
       const fragNodes = collectInputNodes(tpl("tpl-input-select"));
-      const labelEl = fragNodes[0];
-      const sel = fragNodes[1];
+      const labelEl = /** @type {HTMLElement | undefined} */ (fragNodes[0]);
+      const sel = /** @type {HTMLSelectElement | undefined} */ (fragNodes[1]);
+      if (!labelEl || !sel) continue;
       labelEl.textContent = input.label;
       sel.dataset.inputName = input.name;
       sel.dataset.sessId = sessKey;
@@ -340,10 +392,16 @@ function buildModelInputs(host, ctx, modelEntry, sessKey) {
 // looping on `frag.firstChild` (the loop never terminates unless the
 // child is detached, which yields an infinite-push and a RangeError
 // when the array length overflows V8's max).
+/** @param {DocumentFragment} frag */
 function collectInputNodes(frag) {
   return Array.from(frag.children);
 }
 
+/**
+ * @param {import('../types.js').Session} s
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildControls(s, sessKey, ctx) {
   const frag = tpl("tpl-sess-controls");
   pick(frag, "timerange").textContent =
@@ -351,18 +409,18 @@ function buildControls(s, sessKey, ctx) {
 
   buildBackendChips(pick(frag, "backendChips"), ctx);
 
-  const sel = frag.querySelector("[data-model-pick]");
+  const sel = /** @type {HTMLSelectElement} */ (frag.querySelector("[data-model-pick]"));
   buildModelSelect(sel, ctx);
 
   buildSourceRow(pick(frag, "sourceRow"), s, sessKey, ctx);
   buildSilenceCtl(pick(frag, "silenceCtl"), s, sessKey, ctx);
 
   const rng = ctx.rangeState[sessKey] || {};
-  const fromEl = pick(frag, "rangeFrom");
+  const fromEl = /** @type {HTMLInputElement} */ (pick(frag, "rangeFrom"));
   fromEl.dataset.sessId = sessKey;
   fromEl.placeholder = s.earliest_iso || "optional ISO timestamp";
   fromEl.value = rng.from || "";
-  const toEl = pick(frag, "rangeTo");
+  const toEl = /** @type {HTMLInputElement} */ (pick(frag, "rangeTo"));
   toEl.dataset.sessId = sessKey;
   toEl.placeholder = s.latest_iso || "optional ISO timestamp";
   toEl.value = rng.to || "";
@@ -378,6 +436,11 @@ function buildControls(s, sessKey, ctx) {
   return frag;
 }
 
+/**
+ * @param {import('../types.js').EffectiveMeta} meta
+ * @param {string[]} aliasKeys
+ * @param {string} sessKey
+ */
 function buildAliases(meta, aliasKeys, sessKey) {
   if (!aliasKeys.length) return null;
   const frag = tpl("tpl-sess-aliases");
@@ -387,7 +450,7 @@ function buildAliases(meta, aliasKeys, sessKey) {
     const code = pick(row, "key");
     code.textContent = k;
     code.title = k;
-    const input = pick(row, "input");
+    const input = /** @type {HTMLInputElement} */ (pick(row, "input"));
     input.dataset.aliasKey = k;
     input.dataset.aliasSess = sessKey;
     input.placeholder = k.replace(/[_-]+/g, " ");
@@ -397,6 +460,11 @@ function buildAliases(meta, aliasKeys, sessKey) {
   return frag;
 }
 
+/**
+ * @param {import('../types.js').WavFile} f
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildWavRow(f, sessKey, ctx) {
   const wavKey = `${sessKey}/${f.name}`;
   const busy = ctx.wavInflight.has(wavKey);
@@ -404,7 +472,7 @@ function buildWavRow(f, sessKey, ctx) {
   const dlHref = `/api/wav/${encodeURIComponent(sessKey)}/${encodeURIComponent(f.name)}`;
 
   const frag = tpl("tpl-wav-row");
-  const row = frag.firstElementChild;
+  const row = /** @type {HTMLElement} */ (frag.firstElementChild);
   if (busy) row.classList.add("in-flight");
   if (ctx.wavJustDone.has(wavKey)) row.classList.add("just-completed");
 
@@ -421,9 +489,9 @@ function buildWavRow(f, sessKey, ctx) {
     const cell = tpl("tpl-wav-size-inflight");
     // The template's outer span *is* the slot — set its dataset + text
     // directly. `updateWavInflightInPlace` finds the cell by data-elapsed-for.
-    const span = cell.firstElementChild;
+    const span = /** @type {HTMLElement} */ (cell.firstElementChild);
     span.dataset.elapsedFor = wavKey;
-    span.textContent = `transcribing… ${fmtElapsedShort((Date.now() - ctx.wavInflight.get(wavKey)) / 1000)}`;
+    span.textContent = `transcribing… ${fmtElapsedShort((Date.now() - (ctx.wavInflight.get(wavKey) ?? 0)) / 1000)}`;
     sizeHost.replaceWith(cell);
   } else {
     const cell = tpl("tpl-wav-size-static");
@@ -434,8 +502,8 @@ function buildWavRow(f, sessKey, ctx) {
     sizeHost.replaceWith(cell);
   }
 
-  pick(row, "download").href = dlHref;
-  const txBtn = pick(row, "txButton");
+  /** @type {HTMLAnchorElement} */ (pick(row, "download")).href = dlHref;
+  const txBtn = /** @type {HTMLButtonElement} */ (pick(row, "txButton"));
   txBtn.dataset.txWav = wavKey;
   txBtn.dataset.txSource = "original";
   if (busy) {
@@ -463,6 +531,12 @@ function buildWavRow(f, sessKey, ctx) {
 // Build and append one stripped-region sub-row. Each region has its own
 // unique filename, so its toggle/transcribe/inflight keys are independent
 // from the parent original's keys.
+/**
+ * @param {DocumentFragment} host
+ * @param {import('../types.js').WavRegion} r
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function appendRegionSub(host, r, sessKey, ctx) {
   const wavKey = `${sessKey}/${r.name}`;
   const toggleKey = `${wavKey}@stripped`;
@@ -472,7 +546,7 @@ function appendRegionSub(host, r, sessKey, ctx) {
   const dlHref = `/api/wav/${encodeURIComponent(sessKey)}/${encodeURIComponent(r.name)}?source=stripped`;
 
   const frag = tpl("tpl-wav-row-stripped");
-  const row = frag.firstElementChild;
+  const row = /** @type {HTMLElement} */ (frag.firstElementChild);
   if (busy) row.classList.add("in-flight");
   if (ctx.wavJustDone.has(inflightKey)) row.classList.add("just-completed");
 
@@ -487,9 +561,9 @@ function appendRegionSub(host, r, sessKey, ctx) {
   const sizeHost = pick(row, "sizeCell");
   if (busy) {
     const cell = tpl("tpl-wav-size-inflight");
-    const span = cell.firstElementChild;
+    const span = /** @type {HTMLElement} */ (cell.firstElementChild);
     span.dataset.elapsedFor = inflightKey;
-    span.textContent = `transcribing… ${fmtElapsedShort((Date.now() - ctx.wavInflight.get(inflightKey)) / 1000)}`;
+    span.textContent = `transcribing… ${fmtElapsedShort((Date.now() - (ctx.wavInflight.get(inflightKey) ?? 0)) / 1000)}`;
     sizeHost.replaceWith(cell);
   } else {
     const cell = tpl("tpl-wav-size-static");
@@ -499,8 +573,8 @@ function appendRegionSub(host, r, sessKey, ctx) {
     sizeHost.replaceWith(cell);
   }
 
-  pick(row, "download").href = dlHref;
-  const txBtn = pick(row, "txButton");
+  /** @type {HTMLAnchorElement} */ (pick(row, "download")).href = dlHref;
+  const txBtn = /** @type {HTMLButtonElement} */ (pick(row, "txButton"));
   // data-tx-wav uses the region's own name so the dispatch passes that
   // name straight to /api/transcribe with source=stripped.
   txBtn.dataset.txWav = wavKey;
@@ -516,6 +590,11 @@ function appendRegionSub(host, r, sessKey, ctx) {
   if (open && r.transcript) host.appendChild(buildExpandTx(r.transcript));
 }
 
+/**
+ * @param {import('../types.js').Session} s
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildWavList(s, sessKey, ctx) {
   const frag = tpl("tpl-wav-list");
   const files = s.files || [];
@@ -529,13 +608,17 @@ function buildWavList(s, sessKey, ctx) {
   return frag;
 }
 
+/**
+ * @param {import('../types.js').Segment[]} segs
+ * @param {{ rxPattern: string, rxFlags: string }} opts
+ */
 export function renderRegexHits(segs, { rxPattern, rxFlags }) {
   if (!rxPattern) {
     return slot(tpl("tpl-regex-empty"), { msg: `enter a regex to test against ${segs.length} segments` });
   }
   let rx;
   try { rx = new RegExp(rxPattern, rxFlags); }
-  catch (e) { return slot(tpl("tpl-regex-error"), { msg: String(e.message || e) }); }
+  catch (e) { return slot(tpl("tpl-regex-error"), { msg: String(e instanceof Error ? e.message : e) }); }
   const hits = segs.filter((seg) => seg?.text && rx.test(seg.text));
   if (!hits.length) {
     return slot(tpl("tpl-regex-empty"), { msg: `no matches in ${segs.length} segments` });
@@ -554,6 +637,10 @@ export function renderRegexHits(segs, { rxPattern, rxFlags }) {
   return out;
 }
 
+/**
+ * @param {import('../types.js').Session} s
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function buildRegexTester(s, ctx) {
   const segs = s.session_transcript?.segments || [];
   const existingRules = ctx.lastJson?.hallucinations?.rules || [];
@@ -564,8 +651,8 @@ function buildRegexTester(s, ctx) {
   if (ctx.rxOpen) {
     const body = pick(frag, "body");
     body.hidden = false;
-    pick(frag, "patternInput").value = ctx.rxPattern;
-    pick(frag, "flagsInput").value = ctx.rxFlags;
+    /** @type {HTMLInputElement} */ (pick(frag, "patternInput")).value = ctx.rxPattern;
+    /** @type {HTMLInputElement} */ (pick(frag, "flagsInput")).value = ctx.rxFlags;
 
     if (existingRules.length) {
       const seeds = pick(frag, "seeds");
@@ -578,7 +665,7 @@ function buildRegexTester(s, ctx) {
         const lower = r.toLowerCase();
         if (lower.startsWith("re:")) seed = r.slice(3).trim();
         else if (lower.startsWith("exact:")) seed = `^${r.slice(6).trim()}$`;
-        const code = tpl("tpl-regex-seed").firstElementChild;
+        const code = /** @type {HTMLElement} */ (tpl("tpl-regex-seed").firstElementChild);
         code.dataset.rxSeed = seed;
         code.textContent = r;
         list.appendChild(code);
@@ -591,6 +678,11 @@ function buildRegexTester(s, ctx) {
 
 // Main render. `host` is replaced with the new session detail; `ctx` carries
 // all state + callbacks (see main.js's `sessionDetailCtx`).
+/**
+ * @param {import('../types.js').Session | null | undefined} s
+ * @param {HTMLElement} host
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 export function render(s, host, ctx) {
   if (!s) { host.replaceChildren(); return; }
 
@@ -601,7 +693,7 @@ export function render(s, host, ctx) {
   const frag = tpl("tpl-sess-detail");
 
   // Header row
-  const nameInput = frag.querySelector("[data-sess-name]");
+  const nameInput = /** @type {HTMLInputElement} */ (frag.querySelector("[data-sess-name]"));
   nameInput.dataset.sessName = sessKey;
   nameInput.value = meta.label || "";
   if (!meta.label) nameInput.classList.add("unnamed");
@@ -624,7 +716,7 @@ export function render(s, host, ctx) {
   );
   if (mergeCandidates.length) {
     const absorbFrag = tpl("tpl-sess-absorb");
-    const sel = absorbFrag.querySelector("[data-absorb-pick]");
+    const sel = /** @type {HTMLSelectElement} */ (absorbFrag.querySelector("[data-absorb-pick]"));
     sel.dataset.absorbTarget = sessKey;
     for (const other of mergeCandidates) {
       const otherMeta = ctx.effectiveMeta(other);
@@ -656,107 +748,118 @@ export function render(s, host, ctx) {
   wire(host, s, sessKey, ctx);
 }
 
+/**
+ * @param {HTMLElement} host
+ * @param {import('../types.js').Session} s
+ * @param {string} sessKey
+ * @param {import('../types.js').SessionDetailCtx} ctx
+ */
 function wire(host, s, sessKey, ctx) {
-  for (const btn of host.querySelectorAll("[data-tx-sess]")) {
-    btn.addEventListener("click", () => ctx.onTranscribeSession(btn.dataset.txSess));
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-tx-sess]"))) {
+    btn.addEventListener("click", () => ctx.onTranscribeSession(btn.dataset.txSess || ""));
   }
-  for (const btn of host.querySelectorAll("[data-copy-sess]")) {
-    btn.addEventListener("click", (e) => ctx.onCopyMerged(btn.dataset.copySess, e.currentTarget));
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-copy-sess]"))) {
+    btn.addEventListener("click", () => ctx.onCopyMerged(btn.dataset.copySess || "", btn));
   }
-  for (const btn of host.querySelectorAll("[data-tx-wav]")) {
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-tx-wav]"))) {
     btn.addEventListener("click", (e) => {
       // Immediate visual feedback — the next tick will reskin properly.
-      const t = e.currentTarget;
+      const t = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
       if (t && !t.disabled) {
         t.disabled = true;
         t.replaceChildren(tpl("tpl-wav-tx-busy"));
         t.closest(".wav-row")?.classList.add("in-flight");
       }
-      const wk = btn.dataset.txWav;
+      const wk = btn.dataset.txWav || "";
       const idx = wk.indexOf("/");
       ctx.onTranscribeWav(wk.slice(0, idx), wk.slice(idx + 1), btn.dataset.txSource || null);
     });
   }
-  for (const a of host.querySelectorAll("[data-toggle-wav]")) {
+  for (const a of /** @type {NodeListOf<HTMLElement>} */ (host.querySelectorAll("[data-toggle-wav]"))) {
     a.addEventListener("click", (e) => {
       e.preventDefault();
-      ctx.onToggleWav(a.dataset.toggleWav, s);
+      ctx.onToggleWav(a.dataset.toggleWav || "", s);
     });
   }
-  for (const el of host.querySelectorAll("[data-range-key]")) {
-    el.addEventListener("input", () => ctx.onRangeEdit(el.dataset.sessId, el.dataset.rangeKey, el.value));
+  for (const el of /** @type {NodeListOf<HTMLInputElement>} */ (host.querySelectorAll("[data-range-key]"))) {
+    el.addEventListener("input", () => ctx.onRangeEdit(el.dataset.sessId || "", el.dataset.rangeKey || "", el.value));
   }
 
-  const modelPick = host.querySelector("[data-model-pick]");
+  const modelPick = /** @type {HTMLSelectElement | null} */ (host.querySelector("[data-model-pick]"));
   modelPick?.addEventListener("change", () => ctx.onModelChange(modelPick.value));
 
   // Backend chips: each one carries the kind in `data-backend-chip`.
-  for (const chip of host.querySelectorAll("[data-backend-chip]")) {
+  for (const chip of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-backend-chip]"))) {
     chip.addEventListener("click", () => {
       if (chip.disabled) return;
-      ctx.onBackendChange(chip.dataset.backendChip);
+      ctx.onBackendChange(chip.dataset.backendChip || "");
     });
   }
 
   // Dynamic input rows: capture changes into rangeState so the next
   // submit (transcribe / transcribe-session) sees the operator's pick.
-  for (const el of host.querySelectorAll("[data-input-name]")) {
-    el.addEventListener("input", () => ctx.onRangeEdit(el.dataset.sessId, el.dataset.inputName, el.value));
+  for (const el of /** @type {NodeListOf<HTMLInputElement>} */ (host.querySelectorAll("[data-input-name]"))) {
+    el.addEventListener("input", () => ctx.onRangeEdit(el.dataset.sessId || "", el.dataset.inputName || "", el.value));
     if (el.tagName === "SELECT") {
-      el.addEventListener("change", () => ctx.onRangeEdit(el.dataset.sessId, el.dataset.inputName, el.value));
+      el.addEventListener("change", () => ctx.onRangeEdit(el.dataset.sessId || "", el.dataset.inputName || "", el.value));
     }
   }
 
   // Per-session prompt/hotwords overrides — persisted to session-meta.
   // Debounced on the main.js side so each keystroke doesn't fire a PUT.
-  for (const el of host.querySelectorAll("[data-meta-key]")) {
+  for (const el of /** @type {NodeListOf<HTMLInputElement>} */ (host.querySelectorAll("[data-meta-key]"))) {
     el.addEventListener("input", () =>
-      ctx.onMetaOverrideEdit(el.dataset.sessId, el.dataset.metaKey, el.value));
+      ctx.onMetaOverrideEdit(el.dataset.sessId || "", el.dataset.metaKey || "", el.value));
   }
-  for (const btn of host.querySelectorAll("[data-meta-reset]")) {
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-meta-reset]"))) {
     btn.addEventListener("click", () =>
-      ctx.onMetaOverrideEdit(btn.dataset.sessId, btn.dataset.metaResetKey, ""));
+      ctx.onMetaOverrideEdit(btn.dataset.sessId || "", btn.dataset.metaResetKey || "", ""));
   }
 
-  for (const r of host.querySelectorAll("[data-source-pick]")) {
+  for (const r of /** @type {NodeListOf<HTMLInputElement>} */ (host.querySelectorAll("[data-source-pick]"))) {
     r.addEventListener("change", () => {
-      if (r.checked) ctx.onSourcePick(r.dataset.sessId, r.dataset.sourcePick);
+      if (r.checked) ctx.onSourcePick(r.dataset.sessId || "", /** @type {"original" | "stripped"} */ (r.dataset.sourcePick || "original"));
     });
   }
-  for (const btn of host.querySelectorAll("[data-strip-run]")) {
-    btn.addEventListener("click", () => ctx.onStripRun(btn.dataset.stripRun));
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-strip-run]"))) {
+    btn.addEventListener("click", () => ctx.onStripRun(btn.dataset.stripRun || ""));
   }
-  for (const btn of host.querySelectorAll("[data-strip-remove]")) {
-    btn.addEventListener("click", () => ctx.onStripRemove(btn.dataset.stripRemove));
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-strip-remove]"))) {
+    btn.addEventListener("click", () => ctx.onStripRemove(btn.dataset.stripRemove || ""));
   }
-  for (const el of host.querySelectorAll("[data-strip-opt]")) {
-    el.addEventListener("input", () =>
-      ctx.onStripOptEdit(el.dataset.stripOpt, el.value));
+  for (const el of /** @type {NodeListOf<HTMLInputElement>} */ (host.querySelectorAll("[data-strip-opt]"))) {
+    el.addEventListener("input", () => {
+      const k = /** @type {keyof import('../types.js').StripOpts} */ (el.dataset.stripOpt);
+      if (k) ctx.onStripOptEdit(k, el.value);
+    });
     // Snap an empty box back to the stored default — but on blur, not
     // input. Doing it on every keystroke briefly auto-fills "500" the
     // instant the operator clears the box, which a slow typist would
     // then have to clear again. Blur is the moment the operator's done
     // editing, so the visible value matches what the next POST will use.
     el.addEventListener("blur", () => {
-      if (el.value === "") el.value = String(ctx.stripOpts[el.dataset.stripOpt]);
+      if (el.value === "") {
+        const k = /** @type {keyof import('../types.js').StripOpts} */ (el.dataset.stripOpt);
+        if (k) el.value = String(ctx.stripOpts[k]);
+      }
     });
   }
-  for (const btn of host.querySelectorAll("[data-strip-opt-reset]")) {
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-strip-opt-reset]"))) {
     btn.addEventListener("click", () => ctx.onStripOptReset());
   }
 
-  const nameInput = host.querySelector("[data-sess-name]");
+  const nameInput = /** @type {HTMLInputElement | null} */ (host.querySelector("[data-sess-name]"));
   nameInput?.addEventListener("input", () => {
-    ctx.onNameEdit(nameInput.dataset.sessName, nameInput.value);
+    ctx.onNameEdit(nameInput.dataset.sessName || "", nameInput.value);
     nameInput.classList.toggle("unnamed", !nameInput.value);
   });
 
-  for (const el of host.querySelectorAll("[data-alias-key]")) {
+  for (const el of /** @type {NodeListOf<HTMLInputElement>} */ (host.querySelectorAll("[data-alias-key]"))) {
     el.addEventListener("input", () =>
-      ctx.onAliasEdit(el.dataset.aliasSess, el.dataset.aliasKey, el.value));
+      ctx.onAliasEdit(el.dataset.aliasSess || "", el.dataset.aliasKey || "", el.value));
   }
 
-  const absorbPick = host.querySelector("[data-absorb-pick]");
+  const absorbPick = /** @type {HTMLSelectElement | null} */ (host.querySelector("[data-absorb-pick]"));
   absorbPick?.addEventListener("change", () => {
     const source = absorbPick.value;
     if (!source) return;
@@ -765,16 +868,16 @@ function wire(host, s, sessKey, ctx) {
     // guard in renderSessionsIfChanged blocks the post-merge re-render.
     absorbPick.value = "";
     absorbPick.blur();
-    ctx.onAbsorbSession(absorbPick.dataset.absorbTarget, source);
+    ctx.onAbsorbSession(absorbPick.dataset.absorbTarget || "", source);
   });
 
   host.querySelector("[data-rx-toggle]")?.addEventListener("click", () => ctx.onRxToggle(sessKey));
   host.querySelector("[data-rx-pattern]")?.addEventListener("input", (e) =>
-    ctx.onRxPatternInput(sessKey, e.target.value));
+    ctx.onRxPatternInput(sessKey, /** @type {HTMLInputElement} */ (e.target).value));
   host.querySelector("[data-rx-flags]")?.addEventListener("input", (e) =>
-    ctx.onRxFlagsInput(sessKey, e.target.value));
-  for (const seed of host.querySelectorAll("[data-rx-seed]")) {
-    seed.addEventListener("click", () => ctx.onRxSeed(sessKey, seed.dataset.rxSeed));
+    ctx.onRxFlagsInput(sessKey, /** @type {HTMLInputElement} */ (e.target).value));
+  for (const seed of /** @type {NodeListOf<HTMLElement>} */ (host.querySelectorAll("[data-rx-seed]"))) {
+    seed.addEventListener("click", () => ctx.onRxSeed(sessKey, seed.dataset.rxSeed || ""));
   }
   host.querySelector("[data-toggle-audit]")?.addEventListener("click", ctx.onAuditToggle);
 }

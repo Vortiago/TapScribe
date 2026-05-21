@@ -1,3 +1,4 @@
+// @ts-check
 // Tiny template loader.
 //
 // Components live in `tapscribe/web/components/*.html` as one or more
@@ -11,8 +12,10 @@
 //   node.querySelector("[data-slot=lbl]").textContent = "model";
 //   container.appendChild(node);
 
+/** @type {Set<string>} */
 const fetched = new Set();
 
+/** @param {...string} urls */
 export async function loadTemplates(...urls) {
   const fresh = urls.filter((u) => !fetched.has(u));
   const texts = await Promise.all(
@@ -29,15 +32,25 @@ export async function loadTemplates(...urls) {
 }
 
 // Clone a `<template id>` and return its DocumentFragment.
+/**
+ * @param {string} id
+ * @returns {DocumentFragment}
+ */
 export const tpl = (id) => {
-  const t = document.getElementById(id);
+  const t = /** @type {HTMLTemplateElement | null} */ (document.getElementById(id));
   if (!t) throw new Error(`template not loaded: ${id}`);
-  return t.content.cloneNode(true);
+  return /** @type {DocumentFragment} */ (t.content.cloneNode(true));
 };
 
 // Fill text slots: `{ slot: value }` sets textContent on `[data-slot=slot]`.
 // `null`/`undefined` values are skipped so a single object can describe a
 // partial update. Returns the frag for chaining.
+/**
+ * @template {ParentNode & Node} T
+ * @param {T} frag
+ * @param {Record<string, unknown>} slots
+ * @returns {T}
+ */
 export function slot(frag, slots) {
   for (const [k, v] of Object.entries(slots)) {
     if (v == null) continue;
@@ -49,10 +62,29 @@ export function slot(frag, slots) {
 }
 
 // Convenience: `pick(frag, "name")` → first `[data-slot=name]` element.
-export const pick = (frag, name) => frag.querySelector(`[data-slot="${name}"]`);
+// Throws if the slot isn't present: template authors are expected to keep
+// `data-slot=…` markers in sync with their `pick()` calls, so a missing
+// slot is a programmer bug, not a runtime condition to handle. The throw
+// surfaces it at the call site (where the developer can see which slot
+// they typo'd) instead of as a "Cannot read properties of null" three
+// frames deeper.
+/**
+ * @param {ParentNode} frag
+ * @param {string} name
+ * @returns {HTMLElement}
+ */
+export const pick = (frag, name) => {
+  const el = /** @type {HTMLElement | null} */ (frag.querySelector(`[data-slot="${name}"]`));
+  if (!el) throw new Error(`template slot not found: data-slot="${name}"`);
+  return el;
+};
 
 // Replace `host`'s children with the rendered fragment. Avoids the
 // `innerHTML = ""` flicker by swapping once.
+/**
+ * @param {Element} host
+ * @param {Node} frag
+ */
 export function mount(host, frag) {
   host.replaceChildren(frag);
 }
