@@ -1,3 +1,4 @@
+// @ts-check
 // Live channel panel — model/lang form + start/stop/apply controls + recent
 // log. Body rebuild is skipped while the user is editing the form or the
 // payload hasn't actually changed, so open <details>/<select> stay open.
@@ -8,6 +9,7 @@ import { wireConfigSave } from "../api.js";
 // Display labels for model families — used as <optgroup> labels in the live
 // model select. Mirrors session-detail.js's FAMILY_LABELS but trimmed to
 // the families that have live-eligible models today.
+/** @type {[string, string][]} */
 const LIVE_FAMILY_LABELS = [
   ["whisper", "Whisper"],
   ["nb-whisper", "NB-Whisper (Norwegian)"],
@@ -15,8 +17,13 @@ const LIVE_FAMILY_LABELS = [
 ];
 
 let lastSig = "";
+/** @type {ReturnType<typeof setInterval> | null} */
 let logDialogPoll = null;
 
+/**
+ * @param {import('../types.js').AppState} j
+ * @param {import('../types.js').LiveChannelCtx} ctx
+ */
 export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCatalog }) {
   const li = j.live_info || {};
   const log = j.live_log || [];
@@ -33,7 +40,7 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   // The dataset.cfgKey check covers the init-prompt textarea AND its
   // save button + status span so a click-then-poll-tick race can't
   // tear the DOM out from under the save handler.
-  const focused = document.activeElement;
+  const focused = /** @type {HTMLElement | null} */ (document.activeElement);
   const editableIds = new Set([
     "liveModelSelect", "liveLangInput",
     "liveGateKindSelect",
@@ -189,19 +196,21 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   bodyEl.querySelector("#liveLogBtn")?.addEventListener("click", openLogDialog);
   // Nudge language to "no" when an nb-whisper model is picked and lang is
   // still on the boot default.
-  bodyEl.querySelector("#liveModelSelect").addEventListener("change", (e) => {
-    if (!e.target.value.startsWith("nb-")) return;
-    const li = bodyEl.querySelector("#liveLangInput");
+  bodyEl.querySelector("#liveModelSelect")?.addEventListener("change", (e) => {
+    const value = /** @type {HTMLSelectElement} */ (e.target).value;
+    if (!value.startsWith("nb-")) return;
+    const li = /** @type {HTMLInputElement | null} */ (bodyEl.querySelector("#liveLangInput"));
     if (li && (li.value === "en" || li.value === "")) li.value = "no";
   });
 
-  const initBtn = bodyEl.querySelector("#liveInitPromptSave");
+  const initBtn = /** @type {HTMLButtonElement | null} */ (bodyEl.querySelector("#liveInitPromptSave"));
   if (initBtn) {
     wireConfigSave({
       key: "live-prompt",
       btn: initBtn,
       textarea: bodyEl.querySelector("#liveInitPromptText"),
       status: bodyEl.querySelector('[data-slot="initPromptStatus"]'),
+      onSuccess: undefined,
     });
   }
 }
@@ -211,16 +220,17 @@ export const formValues = () => {
   // untouched sliders doesn't force a restart over identical numbers).
   // The server-side `matches()` check uses the same null-means-unchanged
   // semantics for these fields.
+  /** @param {string} id */
   const numOrNull = (id) => {
-    const el = document.getElementById(id);
+    const el = /** @type {HTMLInputElement | null} */ (document.getElementById(id));
     if (!el || el.value === "") return null;
     const n = Number(el.value);
     return Number.isFinite(n) ? n : null;
   };
   return {
-    model: document.getElementById("liveModelSelect")?.value ?? null,
-    language: document.getElementById("liveLangInput")?.value.trim() ?? null,
-    gate_kind: document.getElementById("liveGateKindSelect")?.value ?? null,
+    model: /** @type {HTMLSelectElement | null} */ (document.getElementById("liveModelSelect"))?.value ?? null,
+    language: /** @type {HTMLInputElement | null} */ (document.getElementById("liveLangInput"))?.value.trim() ?? null,
+    gate_kind: /** @type {HTMLSelectElement | null} */ (document.getElementById("liveGateKindSelect"))?.value ?? null,
     gate_speech_threshold: numOrNull("liveGateThreshold"),
     gate_hangover_ms: numOrNull("liveGateHangover"),
     gate_pre_roll_ms: numOrNull("liveGatePreRoll"),
@@ -246,6 +256,10 @@ async function fetchLog() {
   }
 }
 
+/**
+ * @param {HTMLDialogElement} dlg
+ * @param {{ log?: string[], state?: string } | null} payload
+ */
 function renderLogInto(dlg, payload) {
   const pre = pick(dlg, "pre");
   const status = pick(dlg, "status");
@@ -264,14 +278,15 @@ function renderLogInto(dlg, payload) {
 async function openLogDialog() {
   // Reuse the existing dialog if it's already in the DOM — avoids
   // multiple ids and lets polling state be tied to one element.
-  let dlg = document.getElementById("liveLogDialog");
+  let dlg = /** @type {HTMLDialogElement | null} */ (document.getElementById("liveLogDialog"));
   if (!dlg) {
     const frag = tpl("tpl-live-log-dialog");
     document.body.appendChild(frag);
-    dlg = document.getElementById("liveLogDialog");
-    dlg.querySelector("#liveLogCloseBtn").addEventListener("click", () => dlg.close());
-    dlg.querySelector("#liveLogRefreshBtn").addEventListener("click", async () => {
-      renderLogInto(dlg, await fetchLog());
+    dlg = /** @type {HTMLDialogElement} */ (document.getElementById("liveLogDialog"));
+    const closeBtn = dlg.querySelector("#liveLogCloseBtn");
+    closeBtn?.addEventListener("click", () => dlg?.close());
+    dlg.querySelector("#liveLogRefreshBtn")?.addEventListener("click", async () => {
+      if (dlg) renderLogInto(dlg, await fetchLog());
     });
     dlg.addEventListener("close", () => {
       if (logDialogPoll !== null) {
