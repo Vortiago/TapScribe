@@ -124,7 +124,20 @@ canary-cpu = [
 whisper = ["tapscribe[whisper-live,whisper-cpu,whisper-mlx]"]
 mlx = ["tapscribe[whisper-mlx]"]
 voxtral = ["tapscribe[voxtral-cpu]"]
-parakeet = ["tapscribe[parakeet-cpu,parakeet-mlx]"]
+# On Apple Silicon, parakeet-mlx is the natural backend (GPU-accelerated,
+# ~2-3× faster, no NeMo / kaldialign dependency). Pulling the CPU/NeMo
+# backend alongside it forces pip to resolve NeMo-2.5.x (capped on macOS
+# in `parakeet-cpu` above) together with parakeet-mlx's transitive
+# huggingface_hub / numpy / librosa floors — the two sub-graphs disagree
+# on macOS arm64 + py3.13 and pip surfaces a confusing
+# "ResolutionImpossible / nemo-toolkit" error. Avoid the coexistence by
+# offering only parakeet-mlx through the alias on Apple Silicon.
+# Operators who explicitly want both backends can still pick "Both" in
+# `tools/install_picker.py`, which composes the atomic extras directly.
+parakeet = [
+    "tapscribe[parakeet-mlx]; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "tapscribe[parakeet-cpu]; not (sys_platform == 'darwin' and platform_machine == 'arm64')",
+]
 canary = ["tapscribe[canary-cpu]"]
 dev = [
     "pytest>=8",

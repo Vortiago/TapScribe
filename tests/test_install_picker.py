@@ -800,6 +800,38 @@ def test_pyproject_nemo_extras_pin_macos_to_pre_kaldialign_cap(extra_name):
     )
 
 
+def test_pyproject_parakeet_alias_is_mlx_only_on_apple_silicon():
+    """Regression for the `tapscribe[parakeet]` install failure on
+    macos-latest + py3.13: pulling `parakeet-cpu` (NeMo 2.5.x via our
+    macOS cap) alongside `parakeet-mlx` causes pip's resolver to flag a
+    transitive conflict between the two sub-graphs. On Apple Silicon
+    parakeet-mlx alone is the right backend (faster, GPU, no NeMo
+    dependency), so the alias gates the CPU atom out via a PEP 508
+    marker. Without this gating, `pip install -e .[parakeet]` on a Mac
+    mini fails with ResolutionImpossible."""
+    parakeet_lines = _atomic_extras("parakeet")
+    # Exactly two marker-gated self-references: one Apple-Silicon-only,
+    # one everywhere-else.
+    assert len(parakeet_lines) == 2, (
+        f"parakeet alias must declare two marker-gated entries; got: {parakeet_lines}"
+    )
+    darwin_line = next((line for line in parakeet_lines if "parakeet-mlx" in line), None)
+    other_line = next((line for line in parakeet_lines if "parakeet-cpu" in line), None)
+    assert darwin_line is not None, (
+        f"parakeet alias must include a parakeet-mlx-only entry for Apple Silicon; got: {parakeet_lines}"
+    )
+    assert other_line is not None, (
+        f"parakeet alias must include a parakeet-cpu entry for non-Apple-Silicon hosts; got: {parakeet_lines}"
+    )
+    # The darwin/arm64 line must NOT mention parakeet-cpu — that's the
+    # whole point of the split.
+    assert "parakeet-cpu" not in darwin_line, (
+        "parakeet alias's Apple-Silicon branch pulled in parakeet-cpu, which "
+        "re-introduces the NeMo + parakeet-mlx resolver conflict. The atom must "
+        f"be MLX-only on darwin+arm64. Got: {darwin_line!r}"
+    )
+
+
 def test_picker_apple_silicon_mlx_only_matches_failing_invocation_atoms():
     """End-to-end: the failure log was for
        tapscribe[canary,mlx,parakeet,parakeet-mlx,whisper]
