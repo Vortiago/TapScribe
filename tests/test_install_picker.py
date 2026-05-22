@@ -720,37 +720,85 @@ def test_pyproject_cpu_extras_do_not_pull_mlx_packages():
     assert not any("mlx" in line for line in cpu), cpu
 
 
-@pytest.mark.parametrize("extra_name", ["canary-cpu", "parakeet-cpu"])
-def test_pyproject_nemo_extras_cap_kaldialign_on_macos(extra_name):
-    """Regression for the Mac mini "Build kaldialign failed" install
-    failure: `kaldialign 0.10.0` (released 2026-05-06) shipped Linux +
-    Windows wheels only, no macOS variant. NeMo declares `kaldialign`
-    unbounded, so on macOS pip picks 0.10.0, finds no wheel, falls back
-    to an sdist build that wants cmake + a working C++ toolchain.
+def _requirements_named(lines: list[str], project_name: str) -> list[Requirement]:
+    """All requirements matching `project_name`. The macOS NeMo fix
+    declares the same package twice with different `sys_platform`
+    markers, so callers need to look at the full set."""
+    reqs = [Requirement(line) for line in lines]
+    return [r for r in reqs if r.name == project_name]
 
-    The cap below — `kaldialign<0.10; sys_platform == 'darwin'` — forces
-    pip to pick 0.9.3, whose cp310–cp313 universal2 wheel resolves
-    cleanly on Apple Silicon. Drop it when upstream restores macOS
-    wheels; until then, removing it puts the install back in the
-    failure state."""
-    req = _requirement_for(_atomic_extras(extra_name), "kaldialign")
-    assert req.marker is not None, (
-        f"{extra_name} → kaldialign must stay sys_platform=='darwin'-gated; "
-        "an unconstrained pin would freeze Linux/Windows on an old wheel set."
+
+@pytest.mark.parametrize("extra_name", ["canary-cpu", "parakeet-cpu"])
+def test_pyproject_nemo_extras_pin_macos_to_pre_kaldialign_cap(extra_name):
+    """Regression for the Mac mini "Build kaldialign failed" install
+    failure:
+
+    * `kaldialign 0.10.0` (released 2026-05-06) dropped macOS wheels.
+    * `nemo_toolkit 2.6+` adds `Requires-Dist: kaldialign<=0.9.1`, and
+      kaldialign 0.9.1 has no cp313 macOS wheel — only 0.9.2 and 0.9.3
+      do.
+    * Result: an unconstrained pyproject leaves pip resolving NeMo
+      latest + kaldialign<=0.9.1 on macOS py3.13, then falling back to
+      an sdist build of kaldialign that fails on a stock Mac mini.
+
+    Fix: on macOS, cap NeMo to <2.6 (kaldialign unconstrained there)
+    and pin kaldialign to `>=0.9.2,<0.10` (the wheel-available window).
+    On Linux/Windows neither cap applies and pip stays on the latest
+    NeMo.
+
+    This test pins the shape so a future "cleanup" PR can't strip
+    either half of the fix without understanding why both halves
+    exist."""
+    extras = _atomic_extras(extra_name)
+    nemo_reqs = _requirements_named(extras, "nemo_toolkit")
+    kaldi_reqs = _requirements_named(extras, "kaldialign")
+
+    assert len(nemo_reqs) == 2, (
+        f"{extra_name} must declare nemo_toolkit twice — once for "
+        "sys_platform != 'darwin' (unbounded) and once for == 'darwin' "
+        "(<2.6 to avoid NeMo's kaldialign<=0.9.1 cap). Got: "
+        f"{[str(r) for r in nemo_reqs]}"
     )
-    assert "darwin" in str(req.marker), (
-        f"{extra_name} → kaldialign marker {req.marker!r} dropped the macOS gate"
+    # `packaging` normalises marker quoting to double-quotes; pyproject
+    # source can use either, so compare on the normalised form.
+    darwin_nemo = [r for r in nemo_reqs if r.marker and '== "darwin"' in str(r.marker)]
+    nondarwin_nemo = [r for r in nemo_reqs if r.marker and '!= "darwin"' in str(r.marker)]
+    assert darwin_nemo and nondarwin_nemo, (
+        f"{extra_name} → nemo_toolkit markers must be both `== 'darwin'` and "
+        f"`!= 'darwin'`. Got: {[str(r) for r in nemo_reqs]}"
     )
-    # The actual upper bound — Version('0.10.0') must NOT satisfy the
-    # specifier, Version('0.9.3') must.
-    assert Version("0.9.3") in req.specifier, (
-        f"{extra_name} → kaldialign specifier {req.specifier!r} excludes 0.9.3, "
-        "the version with a macOS arm64 universal2 wheel for cp313"
+    assert Version("2.5.3") in darwin_nemo[0].specifier, (
+        f"{extra_name} darwin nemo specifier {darwin_nemo[0].specifier!r} must "
+        "still admit the last 2.5.x release; that's the one without the "
+        "kaldialign<=0.9.1 cap."
     )
-    assert Version("0.10.0") not in req.specifier, (
-        f"{extra_name} → kaldialign specifier {req.specifier!r} admits 0.10.0, "
-        "which has no macOS wheel and forces a source build that fails on a "
-        "stock Mac mini. Re-add the upper bound."
+    assert Version("2.7.3") not in darwin_nemo[0].specifier, (
+        f"{extra_name} darwin nemo specifier {darwin_nemo[0].specifier!r} admits "
+        "2.7.3, which pins kaldialign<=0.9.1 and re-introduces the macOS sdist "
+        "build path."
+    )
+
+    assert len(kaldi_reqs) == 1 and kaldi_reqs[0].marker is not None, (
+        f"{extra_name} → kaldialign requirement must be present and "
+        "sys_platform-gated"
+    )
+    spec = kaldi_reqs[0].specifier
+    assert "darwin" in str(kaldi_reqs[0].marker), (
+        f"{extra_name} → kaldialign marker {kaldi_reqs[0].marker!r} dropped the "
+        "macOS gate; Linux/Windows must keep the upstream-NeMo-pinned version."
+    )
+    assert Version("0.9.3") in spec and Version("0.9.2") in spec, (
+        f"{extra_name} → kaldialign specifier {spec!r} excludes the only "
+        "wheel-available versions on macOS arm64 cp313 (0.9.2 and 0.9.3)"
+    )
+    assert Version("0.9.1") not in spec, (
+        f"{extra_name} → kaldialign specifier {spec!r} admits 0.9.1, which has "
+        "no cp313 macOS wheel and forces a source build that fails on a stock "
+        "Mac mini."
+    )
+    assert Version("0.10.0") not in spec, (
+        f"{extra_name} → kaldialign specifier {spec!r} admits 0.10.0, which has "
+        "no macOS wheel at all."
     )
 
 

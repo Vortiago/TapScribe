@@ -72,18 +72,21 @@ voxtral-cpu = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
 # --- Parakeet TDT 0.6B v3 ---------------------------------------------------
 # Two independent adapters; no shared piece between them.
 parakeet-cpu = [
-    "nemo_toolkit[asr]>=2.5",
+    # On Linux/Windows the upstream NeMo line is free to float forward.
+    "nemo_toolkit[asr]>=2.5; sys_platform != 'darwin'",
+    # NeMo 2.6+ adds `Requires-Dist: kaldialign<=0.9.1`, but kaldialign
+    # 0.9.1 has no cp313 macOS wheel — only 0.9.2 and 0.9.3 do, and
+    # `kaldialign 0.10.0` (released 2026-05-06) dropped macOS wheels
+    # entirely. The NeMo cap is tighter than ours, so pip resolves to
+    # 0.9.1 on macOS py3.13 and falls back to an sdist build that needs
+    # cmake + a working C++ toolchain and fails (the operator's
+    # "Build kaldialign failed" report). Cap NeMo to 2.5.x on macOS,
+    # which doesn't pin kaldialign at all, then pin kaldialign to the
+    # wheel-available window below. Bump both caps deliberately after
+    # auditing upstream changelogs.
+    "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
     "torch>=2.1",
-    # NeMo declares `kaldialign` with no version constraint. `kaldialign
-    # 0.10.0` (released 2026-05-06) shipped Linux + Windows wheels only —
-    # the macOS universal2 wheels that 0.7.2 → 0.9.3 carried were dropped.
-    # Without this cap pip picks 0.10.0 on macOS, finds no compatible
-    # wheel, falls back to an sdist build that wants cmake + a working
-    # C++ toolchain and fails (the original report: "Build kaldialign
-    # failed" mid-pip-install). 0.9.3 has a cp310–cp313 universal2 wheel
-    # that resolves cleanly on Apple Silicon. Bump the cap when upstream
-    # restores macOS wheels.
-    "kaldialign<0.10; sys_platform == 'darwin'",
+    "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
 ]
 parakeet-mlx = [
     # Upper bound: `tapscribe.transcribers.mlx_parakeet` relies on
@@ -101,13 +104,15 @@ parakeet-mlx = [
 # NeMo for CPU/CUDA only. No MLX extra — there are no published
 # mlx-audio Canary weights on the Hub.
 canary-cpu = [
-    "nemo_toolkit[asr]>=2.5",
+    # See the parakeet-cpu block above for the rationale on the macOS
+    # split — same NeMo-transitive kaldialign problem, same fix.
+    # Duplicated rather than hoisted into a shared extra so an operator
+    # who installs only Canary still gets the constraint without
+    # depending on an opaque indirection.
+    "nemo_toolkit[asr]>=2.5; sys_platform != 'darwin'",
+    "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
     "torch>=2.1",
-    # See the parakeet-cpu block above for the rationale — same cap,
-    # same NeMo-transitive package. Kept duplicated rather than hoisted
-    # into a shared extra so an operator who installs only Canary still
-    # gets the constraint without an opaque indirection.
-    "kaldialign<0.10; sys_platform == 'darwin'",
+    "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
 ]
 
 # --- Convenience aliases (back-compat) --------------------------------------
