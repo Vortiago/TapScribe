@@ -779,8 +779,7 @@ def test_pyproject_nemo_extras_pin_macos_to_pre_kaldialign_cap(extra_name):
     )
 
     assert len(kaldi_reqs) == 1 and kaldi_reqs[0].marker is not None, (
-        f"{extra_name} → kaldialign requirement must be present and "
-        "sys_platform-gated"
+        f"{extra_name} → kaldialign requirement must be present and sys_platform-gated"
     )
     spec = kaldi_reqs[0].specifier
     assert "darwin" in str(kaldi_reqs[0].marker), (
@@ -797,8 +796,7 @@ def test_pyproject_nemo_extras_pin_macos_to_pre_kaldialign_cap(extra_name):
         "Mac mini."
     )
     assert Version("0.10.0") not in spec, (
-        f"{extra_name} → kaldialign specifier {spec!r} admits 0.10.0, which has "
-        "no macOS wheel at all."
+        f"{extra_name} → kaldialign specifier {spec!r} admits 0.10.0, which has no macOS wheel at all."
     )
 
 
