@@ -136,7 +136,10 @@ voxtral = ["tapscribe[voxtral-cpu]"]
 # `tools/install_picker.py`, which composes the atomic extras directly.
 parakeet = [
     "tapscribe[parakeet-mlx]; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "tapscribe[parakeet-cpu]; not (sys_platform == 'darwin' and platform_machine == 'arm64')",
+    # PEP 508 marker grammar has no unary `not` (only `and`/`or` join
+    # comparisons), so the "everywhere except Apple Silicon" condition
+    # is expressed via De Morgan: not (A and B) ≡ (¬A or ¬B).
+    "tapscribe[parakeet-cpu]; sys_platform != 'darwin' or platform_machine != 'arm64'",
 ]
 canary = ["tapscribe[canary-cpu]"]
 dev = [
