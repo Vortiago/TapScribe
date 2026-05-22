@@ -28,6 +28,13 @@ on:
       - 'start.sh'
       - 'start.ps1'
       - '.github/workflows/install-matrix.yml'
+  # Daily cron so PyPI drift surfaces here, not in an operator's terminal.
+  # The original `kaldialign 0.10.0` drop-of-macOS-wheels failure didn't
+  # touch any path-gated file in this repo, so the path-gated triggers
+  # above would never have caught it. A scheduled run catches that whole
+  # class of regression.
+  schedule:
+    - cron: '0 7 * * *'  # 07:00 UTC daily
   workflow_dispatch:
 
 permissions:
@@ -39,7 +46,7 @@ concurrency:
 
 jobs:
   install:
-    name: install (${{ matrix.os }} · ${{ matrix.family }})
+    name: install (${{ matrix.os }} · py${{ matrix.python-version }} · ${{ matrix.family }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -49,14 +56,21 @@ jobs:
         # extra in the PR check list, not a single opaque "matrix
         # failed" red mark.
         os: [ubuntu-latest, macos-latest, windows-latest]
+        # `start.sh` prefers `python3.13` over `python3.12`, so 3.13 is
+        # the version an operator with a current Homebrew Python actually
+        # hits. We test both because pyproject.toml declares
+        # `requires-python = ">=3.12"` and the Apple-Silicon wheel matrix
+        # for transitive deps (e.g. kaldialign) sometimes covers one
+        # without the other.
+        python-version: ["3.12", "3.13"]
         family: [whisper, voxtral, parakeet, canary]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           # Wheel cache is orthogonal to dependency resolution — pip
           # still re-resolves the graph on every run, the cache just
           # skips re-downloading the multi-GB torch / NeMo wheels.

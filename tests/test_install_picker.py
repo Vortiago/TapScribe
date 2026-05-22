@@ -720,6 +720,40 @@ def test_pyproject_cpu_extras_do_not_pull_mlx_packages():
     assert not any("mlx" in line for line in cpu), cpu
 
 
+@pytest.mark.parametrize("extra_name", ["canary-cpu", "parakeet-cpu"])
+def test_pyproject_nemo_extras_cap_kaldialign_on_macos(extra_name):
+    """Regression for the Mac mini "Build kaldialign failed" install
+    failure: `kaldialign 0.10.0` (released 2026-05-06) shipped Linux +
+    Windows wheels only, no macOS variant. NeMo declares `kaldialign`
+    unbounded, so on macOS pip picks 0.10.0, finds no wheel, falls back
+    to an sdist build that wants cmake + a working C++ toolchain.
+
+    The cap below — `kaldialign<0.10; sys_platform == 'darwin'` — forces
+    pip to pick 0.9.3, whose cp310–cp313 universal2 wheel resolves
+    cleanly on Apple Silicon. Drop it when upstream restores macOS
+    wheels; until then, removing it puts the install back in the
+    failure state."""
+    req = _requirement_for(_atomic_extras(extra_name), "kaldialign")
+    assert req.marker is not None, (
+        f"{extra_name} → kaldialign must stay sys_platform=='darwin'-gated; "
+        "an unconstrained pin would freeze Linux/Windows on an old wheel set."
+    )
+    assert "darwin" in str(req.marker), (
+        f"{extra_name} → kaldialign marker {req.marker!r} dropped the macOS gate"
+    )
+    # The actual upper bound — Version('0.10.0') must NOT satisfy the
+    # specifier, Version('0.9.3') must.
+    assert Version("0.9.3") in req.specifier, (
+        f"{extra_name} → kaldialign specifier {req.specifier!r} excludes 0.9.3, "
+        "the version with a macOS arm64 universal2 wheel for cp313"
+    )
+    assert Version("0.10.0") not in req.specifier, (
+        f"{extra_name} → kaldialign specifier {req.specifier!r} admits 0.10.0, "
+        "which has no macOS wheel and forces a source build that fails on a "
+        "stock Mac mini. Re-add the upper bound."
+    )
+
+
 def test_picker_apple_silicon_mlx_only_matches_failing_invocation_atoms():
     """End-to-end: the failure log was for
        tapscribe[canary,mlx,parakeet,parakeet-mlx,whisper]
