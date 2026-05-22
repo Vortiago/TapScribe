@@ -71,7 +71,23 @@ voxtral-cpu = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
 
 # --- Parakeet TDT 0.6B v3 ---------------------------------------------------
 # Two independent adapters; no shared piece between them.
-parakeet-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
+parakeet-cpu = [
+    # On Linux/Windows the upstream NeMo line is free to float forward.
+    "nemo_toolkit[asr]>=2.5; sys_platform != 'darwin'",
+    # NeMo 2.6+ adds `Requires-Dist: kaldialign<=0.9.1`, but kaldialign
+    # 0.9.1 has no cp313 macOS wheel — only 0.9.2 and 0.9.3 do, and
+    # `kaldialign 0.10.0` (released 2026-05-06) dropped macOS wheels
+    # entirely. The NeMo cap is tighter than ours, so pip resolves to
+    # 0.9.1 on macOS py3.13 and falls back to an sdist build that needs
+    # cmake + a working C++ toolchain and fails (the operator's
+    # "Build kaldialign failed" report). Cap NeMo to 2.5.x on macOS,
+    # which doesn't pin kaldialign at all, then pin kaldialign to the
+    # wheel-available window below. Bump both caps deliberately after
+    # auditing upstream changelogs.
+    "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
+    "torch>=2.1",
+    "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
+]
 parakeet-mlx = [
     # Upper bound: `tapscribe.transcribers.mlx_parakeet` relies on
     # `parakeet_mlx.audio.get_logmel` and the model's `generate(mel)` entry
@@ -87,7 +103,17 @@ parakeet-mlx = [
 # --- Canary 1B v2 -----------------------------------------------------------
 # NeMo for CPU/CUDA only. No MLX extra — there are no published
 # mlx-audio Canary weights on the Hub.
-canary-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
+canary-cpu = [
+    # See the parakeet-cpu block above for the rationale on the macOS
+    # split — same NeMo-transitive kaldialign problem, same fix.
+    # Duplicated rather than hoisted into a shared extra so an operator
+    # who installs only Canary still gets the constraint without
+    # depending on an opaque indirection.
+    "nemo_toolkit[asr]>=2.5; sys_platform != 'darwin'",
+    "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
+    "torch>=2.1",
+    "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
+]
 
 # --- Convenience aliases (back-compat) --------------------------------------
 # Older docs, the Dockerfile, and test-skip messages still reference the
@@ -98,7 +124,23 @@ canary-cpu = ["nemo_toolkit[asr]>=2.5", "torch>=2.1"]
 whisper = ["tapscribe[whisper-live,whisper-cpu,whisper-mlx]"]
 mlx = ["tapscribe[whisper-mlx]"]
 voxtral = ["tapscribe[voxtral-cpu]"]
-parakeet = ["tapscribe[parakeet-cpu,parakeet-mlx]"]
+# On Apple Silicon, parakeet-mlx is the natural backend (GPU-accelerated,
+# ~2-3× faster, no NeMo / kaldialign dependency). Pulling the CPU/NeMo
+# backend alongside it forces pip to resolve NeMo-2.5.x (capped on macOS
+# in `parakeet-cpu` above) together with parakeet-mlx's transitive
+# huggingface_hub / numpy / librosa floors — the two sub-graphs disagree
+# on macOS arm64 + py3.13 and pip surfaces a confusing
+# "ResolutionImpossible / nemo-toolkit" error. Avoid the coexistence by
+# offering only parakeet-mlx through the alias on Apple Silicon.
+# Operators who explicitly want both backends can still pick "Both" in
+# `tools/install_picker.py`, which composes the atomic extras directly.
+parakeet = [
+    "tapscribe[parakeet-mlx]; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # PEP 508 marker grammar has no unary `not` (only `and`/`or` join
+    # comparisons), so the "everywhere except Apple Silicon" condition
+    # is expressed via De Morgan: not (A and B) ≡ (¬A or ¬B).
+    "tapscribe[parakeet-cpu]; sys_platform != 'darwin' or platform_machine != 'arm64'",
+]
 canary = ["tapscribe[canary-cpu]"]
 dev = [
     "pytest>=8",
