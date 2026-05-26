@@ -847,6 +847,8 @@ def build_base_config(args) -> LiveConfig:
         kwargs["buffer_trimming_sec"] = args.buffer_trimming_sec
     if args.gate_min_speech_ms is not None:
         kwargs["gate_min_speech_ms"] = args.gate_min_speech_ms
+    if args.confidence_validation is not None:
+        kwargs["confidence_validation"] = args.confidence_validation
     return LiveConfig(**kwargs)
 
 
@@ -923,6 +925,19 @@ def main() -> None:
     p.add_argument("--language", default="en", help="Language hint (en, no, auto). Default: en")
     p.add_argument("--gate-kind", choices=("tapscribe", "backend"), default="tapscribe")
     p.add_argument("--gate-min-speech-ms", type=int, default=None)
+    p.add_argument(
+        "--confidence-validation",
+        dest="confidence_validation",
+        action="store_true",
+        default=None,
+        help="Force WlK confidence-validation on (commits tokens fast; no in-flight buffer).",
+    )
+    p.add_argument(
+        "--no-confidence-validation",
+        dest="confidence_validation",
+        action="store_false",
+        help="Turn confidence-validation off (LocalAgreement; populates the in-flight buffer preview).",
+    )
     p.add_argument("--min-chunk-size", type=float, default=None)
     p.add_argument("--buffer-trimming", choices=("sentence", "segment"), default=None)
     p.add_argument("--buffer-trimming-sec", type=float, default=None)
