@@ -389,15 +389,23 @@ def _lang_for_fixture(wav: Path) -> str:
 
 # Full-pipeline sweep matrix: each dict is a set of LiveConfig field
 # overrides applied (via dataclasses.replace) onto a per-fixture baseline
-# (tiny.en, tapscribe gate, the fixture's language). Row 0 is the
-# PRODUCTION DEFAULT — the "red" baseline every other row is compared
-# against. Edit freely; any LiveConfig field name is a valid key.
+# (the fixture's language). Row 0 of each matrix is the baseline every
+# other row is compared against. Edit freely; any LiveConfig field name is
+# a valid key.
 #
-# The rows are chosen to isolate the hypotheses in
+# There are two matrices because the MODEL has to match the fixture's
+# language: English-only Whisper (`*.en`) cannot transcribe Norwegian
+# regardless of `--lan`, so a Norwegian fixture swept on `.en` models
+# scores pure noise (this is exactly the bogus `marlene-nb` baseline that
+# the first sweep produced). `_sweep_matrix_for` picks the right one.
+#
+# The non-model rows are chosen to isolate the hypotheses in
 # docs/live-tuning-research.md: model size (1-3), the confidence/accuracy
 # trade (4), whether our gate clips speech vs the backend VAD (5), blip
 # suppression (6), and the WlK streaming knobs (7-8).
-SWEEP_MATRIX: list[dict] = [
+
+# English fixtures — English-only Whisper. Row 0 is the PRODUCTION DEFAULT.
+SWEEP_MATRIX_EN: list[dict] = [
     {"model": "tiny.en"},  # production default — baseline
     {"model": "base.en"},
     {"model": "small.en"},
@@ -407,6 +415,28 @@ SWEEP_MATRIX: list[dict] = [
     {"model": "small.en", "min_chunk_size": 1.0},
     {"model": "small.en", "buffer_trimming": "segment"},
 ]
+
+# Norwegian fixtures — NB-Whisper (NbAiLab, Norwegian-tuned). The channel
+# auto-downloads the CT2 weights and build_live_cmd routes these via
+# --model-path + --backend-policy localagreement; every other knob below
+# still applies. Mirrors the EN matrix so the two are read side by side.
+SWEEP_MATRIX_NB: list[dict] = [
+    {"model": "nb-whisper-tiny"},  # Norwegian baseline
+    {"model": "nb-whisper-base"},
+    {"model": "nb-whisper-small"},
+    {"model": "nb-whisper-small", "confidence_validation": False},
+    {"model": "nb-whisper-small", "gate_kind": "backend"},
+    {"model": "nb-whisper-small", "gate_min_speech_ms": 200},
+    {"model": "nb-whisper-small", "min_chunk_size": 1.0},
+    {"model": "nb-whisper-small", "buffer_trimming": "segment"},
+]
+
+
+def _sweep_matrix_for(wav: Path) -> list[dict]:
+    """Pick the model sweep that matches the fixture's language. Norwegian
+    fixtures need NB-Whisper; everything else uses the English `.en`
+    matrix."""
+    return SWEEP_MATRIX_NB if _lang_for_fixture(wav) == "no" else SWEEP_MATRIX_EN
 
 
 def _config_from_overrides(overrides: dict, *, language: str, host: str) -> LiveConfig:
@@ -665,11 +695,11 @@ async def run_sweep(args, *, use_mlx: bool) -> list[RunResult]:
         print(f"No fixtures (paired *.wav + *.reference.txt) under {args.fixture_dir}", file=sys.stderr)
         return []
     results: list[RunResult] = []
-    total = len(fixtures) * len(SWEEP_MATRIX)
+    total = sum(len(_sweep_matrix_for(w)) for w in fixtures)
     i = 0
     for wav in fixtures:
         lang = _lang_for_fixture(wav)
-        for overrides in SWEEP_MATRIX:
+        for overrides in _sweep_matrix_for(wav):
             i += 1
             cfg = _config_from_overrides(overrides, language=lang, host=args.live_host)
             print(f"[{i}/{total}] {wav.stem}  {_config_summary(cfg)}", flush=True)
