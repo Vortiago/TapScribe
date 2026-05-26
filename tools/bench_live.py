@@ -234,6 +234,7 @@ async def _drive_one_stream(
     name: str,
     frames: list[bytes],
     speed: float,
+    start_delay_s: float = 0.0,
 ) -> tuple[dict, str, list[str]]:
     """Drive ONE gated stream through the PRODUCTION fan-out and return
     (per-stream metrics, hypothesis, settled lines).
@@ -245,7 +246,16 @@ async def _drive_one_stream(
     the production code — no parallel reimplementation to drift out of
     sync. lag / gate_open / buffer are sampled from `recorder.streams`
     (the same snapshot `/api/state` serves); settled lines are read back
-    from `recorder.transcripts`, filtered to this stream's identity."""
+    from `recorder.transcripts`, filtered to this stream's identity.
+
+    `start_delay_s` delays *opening* the tap, modelling a real bridge that
+    opens a fresh /tap WS when its speaker starts an utterance (the bridge
+    contract is one WebSocket per utterance). Staggering the open — rather
+    than padding a long-lived connection with leading silence — keeps WlK's
+    per-connection clock anchored at speech onset, so lag isn't inflated by
+    silence that, in production, simply wouldn't be on an open connection."""
+    if start_delay_s > 0:
+        await asyncio.sleep(start_delay_s)
     frame_interval = FRAME_INTERVAL_S / max(speed, 0.01)
 
     utterance_id = f"bench-{identity}-{uuid.uuid4().hex[:8]}"
@@ -369,19 +379,6 @@ async def run_one(
         recorder.live.stop()
 
 
-def _build_stream_frames(frames: list[bytes], n: int, lead_frames: int) -> list[list[bytes]]:
-    """N per-stream frame lists, each offset by `lead_frames * index` via
-    leading/trailing silence so all streams stay the same length and run
-    concurrently; only the speech offset differs. The gate drops the silence,
-    so this changes how much real overlap WlK sees without changing what each
-    stream transcribes."""
-    silence = b"\x00" * FRAME_BYTES
-    total_pad = lead_frames * (n - 1)
-    return [
-        [silence] * (lead_frames * i) + frames + [silence] * (total_pad - lead_frames * i) for i in range(n)
-    ]
-
-
 def _aggregate_streams(outs: list[tuple[dict, str, list]], n: int, reference: str) -> dict:
     errored = sum(1 for m, _, _ in outs if "error" in m)
     lag_means = [m["lag_mean_s"] for m, _, _ in outs if m.get("lag_mean_s") is not None]
@@ -432,12 +429,16 @@ async def run_concurrency_sweep(
     Each stream gets its own identity so its settled captions can be read
     back from `recorder.transcripts`.
 
-    `stagger_s` controls how much the streams' SPEECH overlaps: each stream
-    is offset by `stagger_s * index` via silence the gate drops. stagger=0
-    is full overlap; stagger >= clip length is pure turn-taking."""
+    `stagger_s` offsets when each stream OPENS its tap (`stagger_s * index`),
+    modelling the bridge contract of one /tap WebSocket per utterance: a
+    later speaker's connection opens when they start talking, not at t0. So
+    stagger=0 is full overlap (all taps open at once) and stagger >= clip
+    length is pure turn-taking (taps open and close one after another, ~1
+    connection live at a time). Staggering the OPEN — vs. padding a single
+    long-lived connection with leading silence — keeps WlK's per-connection
+    clock anchored at speech onset so lag reflects real backlog."""
     reference = _read_reference(wav)
     frames = frame_pcm(read_wav_as_pcm_bytes(wav))
-    lead_frames = int(round(stagger_s / FRAME_INTERVAL_S))
 
     recorder = _build_bench_recorder(cfg, use_mlx)
     ok, msg = recorder.live.start()
@@ -454,17 +455,17 @@ async def run_concurrency_sweep(
 
         for n in counts:
             recorder.transcripts.clear()
-            stream_frames = _build_stream_frames(frames, n, lead_frames)
             outs = await asyncio.gather(
                 *(
                     _drive_one_stream(
                         recorder,
                         identity=f"spk{i}",
                         name=f"Speaker {i}",
-                        frames=fr,
+                        frames=frames,
                         speed=speed,
+                        start_delay_s=stagger_s * i,
                     )
-                    for i, fr in enumerate(stream_frames)
+                    for i in range(n)
                 )
             )
             row = _aggregate_streams(outs, n, reference)
@@ -703,11 +704,11 @@ def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig, sta
     print("=" * len(header))
     print(
         "lag/WER are read from the production ActiveStreams + LiveTranscripts (same source as the "
-        "dashboard). lagμ/lagX climbing with N = decode contention; WERμ rising / errored>0 = dropped"
+        "dashboard). Each stream opens its tap at stagger*i (one /tap per utterance, as the bridge"
     )
     print(
-        "speech. NOTE: WlK's remaining_time is wall_clock - processed_audio, so staggered (gated)"
-        " input inflates lag — compare stagger=0 (continuous) for a clean latency read."
+        "does). lagμ/lagX climbing with N = decode contention; WERμ rising / errored>0 = dropped"
+        " speech. Compare stagger=0 (all overlap) vs large stagger (turn-taking, ~1 tap live)."
     )
 
 
@@ -938,9 +939,9 @@ def main() -> None:
         type=float,
         default=0.0,
         metavar="SECONDS",
-        help="With --concurrency: offset each stream's speech by this many seconds (via silence the "
-        "gate drops). 0 = full overlap (gate's blind spot); >= clip length = pure turn-taking (gate "
-        "collapses to ~1x load). Sweep it to find where real overlap breaks.",
+        help="With --concurrency: offset when each stream OPENS its tap by this many seconds (one "
+        "/tap per utterance, as the bridge does). 0 = all taps open at once (full overlap); >= clip "
+        "length = pure turn-taking (taps open/close in sequence, ~1 live at a time).",
     )
     p.add_argument("--fixture-dir", default=str(DEFAULT_FIXTURE_DIR), help="Fixture directory for --sweep")
     p.add_argument(
