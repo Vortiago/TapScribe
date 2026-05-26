@@ -149,6 +149,12 @@ class TapFanOut:
             if current_open != self._gate_open_last:
                 self._gate_open_last = current_open
                 await self._recorder.streams.update_gate_open(self._conn_id, current_open)
+                if not current_open:
+                    # Tap just went idle — drop any stale lag immediately so
+                    # the dashboard stops showing a backlog for a speaker who
+                    # stopped talking, rather than waiting for _on_metrics to
+                    # next fire (and it now suppresses while closed anyway).
+                    await self._recorder.streams.update_lag(self._conn_id, None)
         else:
             frames_to_send = (buf,)
 
@@ -277,7 +283,19 @@ class TapFanOut:
 
     async def _on_metrics(self, lag_s: float) -> None:
         """Push the relay's latest reported lag to this tap's row so the
-        dashboard can render a per-tap backlog indicator."""
+        dashboard can render a per-tap backlog indicator.
+
+        Suppressed while the TapScribe gate is closed: WlK keeps emitting
+        `remaining_time_transcription` even after we stop feeding it, but
+        that value is `wall_clock - last_processed_audio` — it climbs purely
+        because time passes during the silence we're gating out, not because
+        there's a real decode backlog. Reporting it would show a phantom,
+        ever-growing lag for a tap whose speaker has gone quiet. When the
+        gate is open (actively forwarding, hangover included) the number is
+        genuine. Backend-gate mode (`self._gate is None`) feeds WlK
+        continuously, so its lag stays meaningful and is always forwarded."""
+        if self._gate is not None and not self._gate.is_open:
+            return
         await self._recorder.streams.update_lag(self._conn_id, lag_s)
 
     def _on_buffer(self, text: str) -> None:

@@ -843,6 +843,66 @@ async def test_gate_open_state_propagates_to_active_stream(
         assert snap[0].gate_open is False
 
 
+async def test_lag_only_reported_while_gate_open(
+    recorder_with_relay: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A per-tap lag must only show while the gate is open. WlK's
+    `remaining_time_transcription` is wall_clock - last_processed_audio, so
+    it climbs during the silence we gate out even though no audio is in
+    flight — reporting that would paint a phantom, ever-growing backlog for
+    a speaker who has gone quiet. So: lag is surfaced while the gate is
+    open, cleared the instant it closes, and suppressed afterwards."""
+    from dataclasses import replace as dc_replace
+
+    from tapscribe.speech_gate import SpeechGate
+
+    recorder_with_relay.live.config = dc_replace(
+        recorder_with_relay.live.config, gate_kind="tapscribe", gate_pre_roll_ms=0
+    )
+
+    # VAD queue: open on call #1, hold, then close on call #3 (same shape as
+    # test_gate_open_state_propagates_to_active_stream).
+    def _open_then_close(*args, **kwargs):
+        events = [{"start": 0}, None, {"end": 0}]
+
+        def analyze(chunk):
+            return events.pop(0) if events else None
+
+        return SpeechGate(vad=analyze, pre_roll_ms=0)
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _open_then_close)
+
+    async def _lag():
+        snap = await recorder_with_relay.streams.snapshot()
+        return snap[0].lag_s
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-lag-gate",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        # Frames 1-2 open the gate; a metric arriving while open is genuine.
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out._on_metrics(2.0)
+        assert await _lag() is not None
+
+        # Frames 3-5 drive the gate closed → stale lag cleared immediately.
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out.write_frame(PCM_FRAME)
+        assert await _lag() is None
+
+        # WlK keeps reporting a climbing remaining_time through the silence;
+        # it must stay suppressed, not resurface as phantom backlog.
+        await fan_out._on_metrics(99.0)
+        assert await _lag() is None
+
+
 async def test_level_meter_reads_zero_while_gate_is_closed_even_on_loud_input(
     recorder_with_relay: Recorder,
     monkeypatch: pytest.MonkeyPatch,
