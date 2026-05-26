@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import re
 import sys
@@ -268,6 +269,12 @@ async def _drive_one_stream(
         do_record=False,
         do_live=True,
     )
+    # Live was requested but the relay never attached (WlK down / connect
+    # failed): the stream can't produce captions, so flag it errored rather
+    # than letting it masquerade as a zero-caption (WER 1.0) result.
+    if not fan._relay_alive:
+        await fan._close()
+        return {"error": "WlK relay did not connect"}, "", []
     conn_id = fan._conn_id
 
     lag_samples: list[float] = []
@@ -300,26 +307,36 @@ async def _drive_one_stream(
 
     sampler_task = asyncio.create_task(_sampler())
 
-    # Pace against an ABSOLUTE schedule (target = start + i*interval) so the
-    # per-frame production work (gate, relay send, ActiveStream lock) is
-    # absorbed instead of stacked on top of a fixed sleep — otherwise the feed
-    # drifts below real time as N grows and WlK looks falsely under-loaded.
-    # `max_slip` is how far behind schedule we fell: > ~0 means the host
-    # couldn't feed this many streams in real time, so the numbers are soft.
-    start = time.perf_counter()
-    max_slip = 0.0
-    for i, frame in enumerate(frames):
-        await fan.write_frame(frame)
-        slip = time.perf_counter() - (start + (i + 1) * frame_interval)
-        max_slip = max(max_slip, slip)
-        if slip < 0:
-            await asyncio.sleep(-slip)
-    last_frame_wall = time.perf_counter()
-
-    sampling = False
-    await sampler_task
-    await _sample()
-    await fan._close()
+    # try/finally so a mid-feed exception can't leak the sampler task or the
+    # tap's open relay + ActiveStream — important under --concurrency, where a
+    # leaked stream would otherwise dangle for the rest of the sweep.
+    try:
+        # Pace against an ABSOLUTE schedule (target = start + i*interval) so
+        # per-frame production work (gate, relay send, ActiveStream lock) is
+        # absorbed instead of stacked on top of a fixed sleep — otherwise the
+        # feed drifts below real time as N grows and WlK looks falsely
+        # under-loaded. `max_slip` is how far behind schedule we fell: > ~0
+        # means the host couldn't feed this many streams in real time, so the
+        # numbers are soft.
+        start = time.perf_counter()
+        max_slip = 0.0
+        for i, frame in enumerate(frames):
+            await fan.write_frame(frame)
+            slip = time.perf_counter() - (start + (i + 1) * frame_interval)
+            max_slip = max(max_slip, slip)
+            if slip < 0:
+                await asyncio.sleep(-slip)
+        last_frame_wall = time.perf_counter()
+        sampling = False
+        await sampler_task
+        await _sample()
+    finally:
+        sampling = False
+        if not sampler_task.done():
+            sampler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sampler_task
+        await fan._close()
     final_delay = time.perf_counter() - last_frame_wall
 
     lines = [e["text"] for e in recorder.transcripts.snapshot() if e.get("identity") == identity]
@@ -410,10 +427,12 @@ def _aggregate_streams(outs: list[tuple[dict, str, list]], n: int, reference: st
     fin = [m["final_delay_s"] for m, _, _ in outs if "final_delay_s" in m]
     slips = [m["pacing_slip_s"] for m, _, _ in outs if "pacing_slip_s" in m]
     wers: list[float] = []
-    for _m, hyp, _l in outs:
+    for m, hyp, _l in outs:
+        if "error" in m:
+            continue  # didn't run — counted via `errored`, kept out of the WER mean
         try:
             wers.append(score_text(reference, hyp).wer)
-        except Exception:  # empty/failed stream — exclude from the WER mean, count via errored
+        except Exception:  # empty reference etc. — skip; can't score
             pass
     return {
         "streams": n,
@@ -482,7 +501,11 @@ async def run_concurrency_sweep(
 
         for n in counts:
             recorder.transcripts.clear()
-            outs = await asyncio.gather(
+            # return_exceptions=True so one stream blowing up is recorded as an
+            # errored row instead of aborting the sweep (and losing the rows
+            # already computed for smaller N). _drive_one_stream's try/finally
+            # has already closed that stream's tap by the time we see the exc.
+            raw = await asyncio.gather(
                 *(
                     _drive_one_stream(
                         recorder,
@@ -493,8 +516,10 @@ async def run_concurrency_sweep(
                         start_delay_s=stagger_s * i,
                     )
                     for i in range(n)
-                )
+                ),
+                return_exceptions=True,
             )
+            outs = [({"error": repr(o)}, "", []) if isinstance(o, BaseException) else o for o in raw]
             row = _aggregate_streams(outs, n, reference)
             rows.append(row)
             if verbose:

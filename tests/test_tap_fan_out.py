@@ -337,7 +337,7 @@ async def test_write_frame_level_tracks_real_speech_wav(recorder: Recorder):
     """
     fixture = FIXTURES_AUDIO / "armstrong-en.wav"
     frames = _wav_to_frames(fixture)
-    assert len(frames) > 500, "expected ~600 frames from a 12 s WAV"
+    assert len(frames) > 400, "expected ~460 frames from the ~9 s WAV"
 
     levels: list[float] = []
     async with await TapFanOut.open(
@@ -376,7 +376,10 @@ async def test_write_frame_level_decays_through_silence_after_real_audio(recorde
     fixture = FIXTURES_AUDIO / "armstrong-en.wav"
     frames = _wav_to_frames(fixture)
     silence_frame = b"\x00" * 640
-    silent_tail = [silence_frame] * 30  # 30 * 20 ms = 600 ms — well past half-life
+    # 50 * 20 ms = 1 s. The recut clip ends on the loud "...for mankind"
+    # (held level ~0.65), so it needs ~1 s to drain below 0.05 at the ~165 ms
+    # half-life — vs the old clip's quiet tail that cleared in 600 ms.
+    silent_tail = [silence_frame] * 50
 
     peak_during_speech = 0.0
 
@@ -398,7 +401,7 @@ async def test_write_frame_level_decays_through_silence_after_real_audio(recorde
 
     assert peak_during_speech > 0.3, f"meter never lit up during real speech (peak={peak_during_speech:.3f})"
     assert final_level_after_silence < 0.05, (
-        f"meter failed to decay through 600 ms of silence (final={final_level_after_silence:.4f})"
+        f"meter failed to decay through 1 s of silence (final={final_level_after_silence:.4f})"
     )
 
 
