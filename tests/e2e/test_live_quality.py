@@ -60,7 +60,6 @@ async def test_live_path_meets_wer_threshold():
         cfg,
         use_mlx=False,
         speed=1.0,
-        warmup_s=0.5,
         ready_timeout=300.0,
         verbose=False,
     )

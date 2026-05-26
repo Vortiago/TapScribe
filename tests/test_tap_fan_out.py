@@ -903,6 +903,35 @@ async def test_lag_only_reported_while_gate_open(
         assert await _lag() is None
 
 
+async def test_bench_drive_one_stream_uses_production_fan_out(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+):
+    """tools/bench_live._drive_one_stream must run through the production
+    TapFanOut/Recorder path — not a parallel reimplementation. Drive it
+    against the fake WlK (no model needed) and confirm it opens a real tap,
+    feeds frames, samples per-tap state, reads settled lines back from
+    recorder.transcripts, and tears the tap down. Guards the contract that
+    the benchmark and production share one code path."""
+    from tools.bench_live import _drive_one_stream
+
+    frames = [PCM_FRAME] * 20
+    metrics, hypothesis, lines = await _drive_one_stream(
+        recorder_with_relay, identity="alice", name="Alice", frames=frames, speed=8.0
+    )
+
+    # Production-shaped results, read from the real recorder sinks.
+    assert isinstance(lines, list)
+    assert isinstance(hypothesis, str)
+    assert metrics["frames_in"] == len(frames)
+    for key in ("lag_mean_s", "lag_max_s", "gate_open_pct", "final_delay_s", "buffer_nonempty"):
+        assert key in metrics, f"missing production metric {key!r}"
+    # Frames reached the WlK relay (production path, not a side channel).
+    assert sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME)
+    # The tap was registered and then torn down via TapFanOut._close.
+    assert await recorder_with_relay.streams.snapshot() == []
+
+
 async def test_level_meter_reads_zero_while_gate_is_closed_even_on_loud_input(
     recorder_with_relay: Recorder,
     monkeypatch: pytest.MonkeyPatch,

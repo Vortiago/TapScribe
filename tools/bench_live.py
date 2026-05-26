@@ -4,13 +4,15 @@
 Unlike `tools/bench_backends.py` (single-shot BATCH transcription), this
 drives the exact production live pipeline a Bridge would hit:
 
-    WAV → 20 ms PCM frames → SpeechGate (Silero VAD, the TapScribe gate)
-        → WlKRelay → whisperlivekit-server subprocess → settled lines
+    WAV → 20 ms PCM frames → TapFanOut (SpeechGate + WlKRelay) → Recorder
+        → whisperlivekit-server subprocess → ActiveStreams / LiveTranscripts
 
-It reuses the production objects verbatim — `WhisperLiveKitChannel`,
-`build_gate_for_config`, `WlKRelay` — so the audio gets segmented and
-decoded by the same code that runs live, and the captions it captures
-are what the dashboard would have shown. Then it scores those captions
+It drives the production path verbatim — a real `Recorder` and
+`TapFanOut.write_frame`, exactly as the /tap WebSocket endpoint does — so
+the gate decisions, the per-tap lag, the in-flight buffer, and the settled
+captions all come from the same code that runs live (read back from
+`recorder.streams` / `recorder.transcripts`, the dashboard's own sources).
+There is no parallel reimplementation to drift out of sync. It scores those captions
 against a reference transcript with a BROAD metric set (WER/CER plus the
 substitution/deletion/insertion breakdown, latency, and gate
 pass-through) so the numbers themselves reveal what to tune rather than
@@ -53,7 +55,9 @@ import asyncio
 import json
 import re
 import sys
+import tempfile
 import time
+import uuid
 import wave
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -67,8 +71,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tapscribe.live import LiveConfig, WhisperLiveKitChannel  # noqa: E402
-from tapscribe.live_relay import WlKRelay  # noqa: E402
+from tapscribe.recorder import Recorder  # noqa: E402
 from tapscribe.speech_gate import FRAME_BYTES, SAMPLE_RATE, build_gate_for_config  # noqa: E402
+from tapscribe.tap_fan_out import TapFanOut  # noqa: E402
 
 DEFAULT_FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "audio"
 RESULTS_DIR = REPO_ROOT / "bench-results"
@@ -76,12 +81,10 @@ RESULTS_DIR = REPO_ROOT / "bench-results"
 FRAME_MS = 20
 FRAME_INTERVAL_S = FRAME_MS / 1000.0  # 0.02 s — one 20 ms frame at 1x
 
-# WlK's `remaining_time_transcription` is wall_clock - processed_audio_time,
-# so it keeps growing while we send nothing (the gate drops silence and the
-# audio timeline freezes while the clock ticks) — that's not decode lag, just
-# elapsed silence. Only count a lag sample if we forwarded a frame within this
-# window, so dropped silence can't masquerade as backlog.
-ACTIVE_LAG_WINDOW_S = 1.5
+# How often (in frames) to sample the recorder's per-tap state while feeding,
+# matching the dashboard's poll-based view of lag / gate_open / buffer rather
+# than tapping the relay callbacks directly.
+STATE_SAMPLE_EVERY = 5
 
 
 # ---------------------------------------------------------------------------
@@ -208,103 +211,96 @@ async def _wait_until_ready(channel: WhisperLiveKitChannel, *, timeout: float) -
     return f"whisperlivekit-server not ready within {timeout:.0f}s (model load/download too slow?)"
 
 
+def _build_bench_recorder(cfg: LiveConfig, use_mlx: bool) -> Recorder:
+    """A throwaway production Recorder (temp dirs) wired to a real
+    WhisperLiveKitChannel from `cfg`. The bench drives this exactly like
+    the /tap endpoint does, so it exercises the live path verbatim."""
+    tmp = Path(tempfile.mkdtemp(prefix="bench-live-"))
+    (tmp / "recordings").mkdir()
+    (tmp / "config").mkdir()
+    return Recorder(
+        recordings_dir=tmp / "recordings",
+        config_dir=tmp / "config",
+        live_config=cfg,
+        use_mlx=use_mlx,
+        auth_password_file=tmp / ".auth-password",
+    )
+
+
 async def _drive_one_stream(
+    recorder: Recorder,
     *,
-    host: str,
-    port: int,
-    cfg: LiveConfig,
+    identity: str,
+    name: str,
     frames: list[bytes],
     speed: float,
-    warmup_s: float,
-    t0: float | None = None,
 ) -> tuple[dict, str, list[str]]:
-    """Drive ONE gated stream into an already-running WlK channel and
-    return (per-stream metrics, hypothesis, settled lines).
+    """Drive ONE gated stream through the PRODUCTION fan-out and return
+    (per-stream metrics, hypothesis, settled lines).
 
-    Owns only its own relay + gate, not the channel — so the single-stream
-    `run_one` and the N-stream concurrency mode share one feed loop. Pass a
-    shared `t0` when several streams run concurrently so their lag/finalize
-    timings are measured against the same wall clock."""
+    Opens a real `TapFanOut` against `recorder` and feeds it 20 ms frames
+    exactly as the /tap WS would, so the SpeechGate, the WlKRelay, the
+    per-tap `lag_s` (with its gate-closed suppression), the in-flight
+    `buffer_transcription`, and the settled captions are all produced by
+    the production code — no parallel reimplementation to drift out of
+    sync. lag / gate_open / buffer are sampled from `recorder.streams`
+    (the same snapshot `/api/state` serves); settled lines are read back
+    from `recorder.transcripts`, filtered to this stream's identity."""
     frame_interval = FRAME_INTERVAL_S / max(speed, 0.01)
-    if t0 is None:
-        t0 = time.perf_counter()
 
-    settled: list[tuple[float, str]] = []
+    utterance_id = f"bench-{identity}-{uuid.uuid4().hex[:8]}"
+    fan = await TapFanOut.open(
+        recorder,
+        identity=identity,
+        name=name,
+        utterance_id=utterance_id,
+        do_record=False,
+        do_live=True,
+    )
+    conn_id = fan._conn_id
+
     lag_samples: list[float] = []
     buffers: list[str] = []
-    # perf_counter of the last REAL frame forwarded (warmup silence excluded).
-    # 1-element list so the on_metrics closure can read the latest value.
-    last_send = [float("-inf")]
+    gate_open_hits = 0
+    samples = 0
 
-    def on_settled(text: str) -> None:
-        settled.append((time.perf_counter() - t0, text))
+    async def _sample() -> None:
+        nonlocal gate_open_hits, samples
+        for s in await recorder.streams.snapshot():
+            if s.conn_id != conn_id:
+                continue
+            samples += 1
+            if s.gate_open:
+                gate_open_hits += 1
+            if s.lag_s is not None:
+                lag_samples.append(s.lag_s)
+            buf = (s.buffer_transcription or "").strip()
+            if buf:
+                buffers.append(buf)
+            break
 
-    async def on_metrics(lag: float) -> None:
-        # Ignore lag readings that land while we're not actively sending —
-        # see ACTIVE_LAG_WINDOW_S. Otherwise trailing/inter-utterance silence
-        # inflates the number even though there's no real decode backlog.
-        if time.perf_counter() - last_send[0] <= ACTIVE_LAG_WINDOW_S:
-            lag_samples.append(lag)
-
-    def on_buffer(text: str) -> None:
-        # Every in-flight `buffer_transcription` update WlK sends, including
-        # clears (""). Lets us tell "WlK never emits a buffer in this config"
-        # (the dashboard's missing in-flight preview) from "it emits it
-        # transiently and the /api/state poll just misses it".
-        buffers.append(text)
-
-    gate = build_gate_for_config(cfg)
-    relay = WlKRelay(
-        host=host,
-        port=port,
-        language=cfg.language,
-        on_settled_line=on_settled,
-        on_metrics=on_metrics,
-        on_buffer=on_buffer,
-        drain_timeout=3.0,
-    )
-    if not await relay.connect():
-        return {"error": "WlK relay connect failed"}, "", []
-
-    # Warm-up: feed silence so a still-loading ASR worker is ready before
-    # the first real utterance, and so the first words aren't clipped by
-    # model warm-up. Silence passes through the gate as non-speech (or
-    # straight through when gate_kind=backend).
-    if warmup_s > 0:
-        silence = b"\x00" * FRAME_BYTES
-        for _ in range(int(warmup_s / FRAME_INTERVAL_S)):
-            await relay.send(silence)
-            await asyncio.sleep(frame_interval)
-
-    frames_forwarded = 0
-    for frame in frames:
-        out = gate.feed(frame) if gate is not None else [frame]
-        for f in out:
-            if not await relay.send(f):
-                break
-            frames_forwarded += 1
-            last_send[0] = time.perf_counter()
+    for i, frame in enumerate(frames):
+        await fan.write_frame(frame)
+        if i % STATE_SAMPLE_EVERY == 0:
+            await _sample()
         await asyncio.sleep(frame_interval)
-    last_frame_wall = time.perf_counter() - t0
+    await _sample()
+    last_frame_wall = time.perf_counter()
+    await fan._close()
+    final_delay = time.perf_counter() - last_frame_wall
 
-    await relay.close()
-
-    lines = [t for _, t in settled]
+    lines = [e["text"] for e in recorder.transcripts.snapshot() if e.get("identity") == identity]
     hypothesis = " ".join(lines)
-    last_settled_wall = settled[-1][0] if settled else last_frame_wall
-    nonempty_buffers = [b for b in buffers if b.strip()]
     metrics: dict = {
         "n_lines": len(lines),
         "frames_in": len(frames),
-        "frames_forwarded": frames_forwarded,
-        "gate_forward_pct": round(100.0 * frames_forwarded / max(1, len(frames)), 1),
+        "gate_open_pct": round(100.0 * gate_open_hits / max(1, samples), 1),
         "lag_mean_s": round(sum(lag_samples) / len(lag_samples), 3) if lag_samples else None,
         "lag_max_s": round(max(lag_samples), 3) if lag_samples else None,
         "lag_samples": len(lag_samples),
-        "final_delay_s": round(max(0.0, last_settled_wall - last_frame_wall), 2),
-        "buffer_updates": len(buffers),
-        "buffer_nonempty": len(nonempty_buffers),
-        "buffer_sample": nonempty_buffers[-1] if nonempty_buffers else "",
+        "final_delay_s": round(final_delay, 2),
+        "buffer_nonempty": len(buffers),
+        "buffer_sample": buffers[-1] if buffers else "",
     }
     return metrics, hypothesis, lines
 
@@ -315,17 +311,17 @@ async def run_one(
     *,
     use_mlx: bool,
     speed: float,
-    warmup_s: float,
     ready_timeout: float,
     verbose: bool,
 ) -> RunResult:
-    """Drive one WAV through the live path under one LiveConfig and score
-    the captions. Owns the whisperlivekit-server child for the duration."""
+    """Drive one WAV through the production live path under one LiveConfig
+    and score the captions. Owns the whisperlivekit-server child for the
+    duration."""
     cfg_summary = _config_summary(cfg)
     reference = _read_reference(wav)
 
-    channel = WhisperLiveKitChannel(config=cfg, use_mlx=use_mlx)
-    ok, msg = channel.start()
+    recorder = _build_bench_recorder(cfg, use_mlx)
+    ok, msg = recorder.live.start()
     if not ok:
         return RunResult(
             fixture=wav.stem, config=cfg_summary, error=f"start failed: {msg}", reference=reference
@@ -337,19 +333,16 @@ async def run_one(
                 f"  [{wav.stem}] waiting for whisperlivekit-server (model={cfg.model}, mlx={use_mlx})...",
                 flush=True,
             )
-        err = await _wait_until_ready(channel, timeout=ready_timeout)
+        err = await _wait_until_ready(recorder.live, timeout=ready_timeout)
         if err is not None:
             return RunResult(fixture=wav.stem, config=cfg_summary, error=err, reference=reference)
 
-        # After start() the channel mutated config.port to the picked
-        # ephemeral port — connect the relay to the live values.
-        host, port = channel.config.host, channel.config.port
-
+        recorder.transcripts.clear()
         frames = frame_pcm(read_wav_as_pcm_bytes(wav))
         audio_s = len(frames) * FRAME_INTERVAL_S
         feed_start = time.perf_counter()
         smetrics, hypothesis, lines = await _drive_one_stream(
-            host=host, port=port, cfg=cfg, frames=frames, speed=speed, warmup_s=warmup_s
+            recorder, identity="bench", name="Bench Speaker", frames=frames, speed=speed
         )
         wall_s = time.perf_counter() - feed_start
         if "error" in smetrics:
@@ -373,7 +366,7 @@ async def run_one(
             result.metrics["score_error"] = str(e)
         return result
     finally:
-        channel.stop()
+        recorder.live.stop()
 
 
 def _build_stream_frames(frames: list[bytes], n: int, lead_frames: int) -> list[list[bytes]]:
@@ -424,71 +417,54 @@ async def run_concurrency_sweep(
     *,
     counts: list[int],
     stagger_s: float,
-    per_tap_instance: bool,
     use_mlx: bool,
     speed: float,
-    warmup_s: float,
     ready_timeout: float,
     verbose: bool,
 ) -> list[dict]:
-    """Stress WlK with N concurrent gated streams of `wav` and report how
-    lag / WER degrade as N grows — the multi-speaker reproduction.
+    """Stress the production live path with N concurrent gated /tap streams
+    of `wav` and report how lag / WER degrade as N grows.
 
-    Two topologies:
-      * default — ONE WlK server, N connections (production today: every
-        active `/tap` relays into one shared whisperlivekit-server). The
-        server loads once and is reused across all N.
-      * `per_tap_instance` — N WlK servers, ONE connection each (the
-        "process per tap" hypothesis). If the bottleneck is per-connection
-        overhead inside one shared process rather than raw GPU compute,
-        this stays flat where the shared server collapses. Costs N× model
-        memory and N× load time; servers are spawned fresh per N value.
+    This is the multi-speaker reproduction, driven exactly as production
+    runs it: ONE shared `WhisperLiveKitChannel` (loaded once, reused across
+    all N) with N concurrent `TapFanOut` streams relaying into it — every
+    active tap contends for the one decoder, same as the real /tap fan-out.
+    Each stream gets its own identity so its settled captions can be read
+    back from `recorder.transcripts`.
 
-    `stagger_s` controls how much the streams' SPEECH overlaps (the variable
-    that actually matters): each stream is offset by `stagger_s * index` via
-    silence the gate drops. stagger=0 is full overlap; stagger >= clip length
-    is pure turn-taking."""
+    `stagger_s` controls how much the streams' SPEECH overlaps: each stream
+    is offset by `stagger_s * index` via silence the gate drops. stagger=0
+    is full overlap; stagger >= clip length is pure turn-taking."""
     reference = _read_reference(wav)
     frames = frame_pcm(read_wav_as_pcm_bytes(wav))
     lead_frames = int(round(stagger_s / FRAME_INTERVAL_S))
 
-    if per_tap_instance:
-        return await _run_per_tap_instance_sweep(
-            cfg,
-            counts=counts,
-            frames=frames,
-            lead_frames=lead_frames,
-            reference=reference,
-            use_mlx=use_mlx,
-            speed=speed,
-            warmup_s=warmup_s,
-            ready_timeout=ready_timeout,
-            verbose=verbose,
-        )
-
-    channel = WhisperLiveKitChannel(config=cfg, use_mlx=use_mlx)
-    ok, msg = channel.start()
+    recorder = _build_bench_recorder(cfg, use_mlx)
+    ok, msg = recorder.live.start()
     if not ok:
         print(f"start failed: {msg}", file=sys.stderr)
         return []
 
     rows: list[dict] = []
     try:
-        err = await _wait_until_ready(channel, timeout=ready_timeout)
+        err = await _wait_until_ready(recorder.live, timeout=ready_timeout)
         if err is not None:
             print(f"whisperlivekit-server not ready: {err}", file=sys.stderr)
             return []
-        host, port = channel.config.host, channel.config.port
 
         for n in counts:
+            recorder.transcripts.clear()
             stream_frames = _build_stream_frames(frames, n, lead_frames)
-            t0 = time.perf_counter()
             outs = await asyncio.gather(
                 *(
                     _drive_one_stream(
-                        host=host, port=port, cfg=cfg, frames=fr, speed=speed, warmup_s=warmup_s, t0=t0
+                        recorder,
+                        identity=f"spk{i}",
+                        name=f"Speaker {i}",
+                        frames=fr,
+                        speed=speed,
                     )
-                    for fr in stream_frames
+                    for i, fr in enumerate(stream_frames)
                 )
             )
             row = _aggregate_streams(outs, n, reference)
@@ -496,72 +472,7 @@ async def run_concurrency_sweep(
             if verbose:
                 _print_concurrency_row(row)
     finally:
-        channel.stop()
-    return rows
-
-
-async def _run_per_tap_instance_sweep(
-    cfg: LiveConfig,
-    *,
-    counts: list[int],
-    frames: list[bytes],
-    lead_frames: int,
-    reference: str,
-    use_mlx: bool,
-    speed: float,
-    warmup_s: float,
-    ready_timeout: float,
-    verbose: bool,
-) -> list[dict]:
-    """One WlK server per stream (process-per-tap). Servers are spawned
-    fresh for each N so a higher count can't inherit residual state, and
-    they all share the one GPU — so flat lag here vs. the shared-server
-    collapse means the bottleneck was per-connection process overhead."""
-    rows: list[dict] = []
-    for n in counts:
-        channels: list[WhisperLiveKitChannel] = []
-        try:
-            for _ in range(n):
-                ch = WhisperLiveKitChannel(config=cfg, use_mlx=use_mlx)
-                ok, msg = ch.start()
-                if not ok:
-                    print(f"start failed (streams={n}): {msg}", file=sys.stderr)
-                    break
-                channels.append(ch)
-            if len(channels) != n:
-                continue
-            ready_err = None
-            for ch in channels:
-                ready_err = await _wait_until_ready(ch, timeout=ready_timeout)
-                if ready_err is not None:
-                    break
-            if ready_err is not None:
-                print(f"server not ready (streams={n}): {ready_err}", file=sys.stderr)
-                continue
-
-            stream_frames = _build_stream_frames(frames, n, lead_frames)
-            t0 = time.perf_counter()
-            outs = await asyncio.gather(
-                *(
-                    _drive_one_stream(
-                        host=ch.config.host,
-                        port=ch.config.port,
-                        cfg=cfg,
-                        frames=fr,
-                        speed=speed,
-                        warmup_s=warmup_s,
-                        t0=t0,
-                    )
-                    for ch, fr in zip(channels, stream_frames, strict=True)
-                )
-            )
-            row = _aggregate_streams(outs, n, reference)
-            rows.append(row)
-            if verbose:
-                _print_concurrency_row(row)
-        finally:
-            for ch in channels:
-                ch.stop()
+        recorder.live.stop()
     return rows
 
 
@@ -717,7 +628,7 @@ def print_table(results: list[RunResult]) -> None:
         ("lagμ", 6, lambda r: r.metrics.get("lag_mean_s")),
         ("lagX", 6, lambda r: r.metrics.get("lag_max_s")),
         ("finΔ", 6, lambda r: r.metrics.get("final_delay_s")),
-        ("gate%", 6, lambda r: r.metrics.get("gate_forward_pct")),
+        ("gateOn%", 7, lambda r: r.metrics.get("gate_open_pct")),
         ("lines", 5, lambda r: r.metrics.get("n_lines")),
     ]
     header = " ".join(name.rjust(w) if i else name.ljust(w) for i, (name, w, _) in enumerate(cols))
@@ -769,13 +680,11 @@ def write_results_json(results: list[RunResult], *, use_mlx: bool, speed: float)
     return path
 
 
-def print_concurrency_table(
-    rows: list[dict], *, wav: Path, cfg: LiveConfig, stagger_s: float, per_tap_instance: bool = False
-) -> None:
+def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig, stagger_s: float) -> None:
     overlap = "full overlap" if stagger_s == 0 else f"speech staggered {stagger_s:g}s/stream"
-    topo = "1 server per tap" if per_tap_instance else "1 shared server"
     print(
-        f"concurrency stress — fixture={wav.stem} model={cfg.model} gate={cfg.gate_kind} ({overlap}, {topo})"
+        f"concurrency stress — fixture={wav.stem} model={cfg.model} gate={cfg.gate_kind} "
+        f"({overlap}, 1 shared server, production fan-out)"
     )
     cols = [
         ("streams", 8, lambda r: r.get("streams")),
@@ -793,12 +702,12 @@ def print_concurrency_table(
         print(" ".join(_fmt(get(r), w) for _name, w, get in cols))
     print("=" * len(header))
     print(
-        "lag counted only while actively sending (dropped silence no longer inflates it). "
-        "lagμ/lagX climbing with N = decode contention; WERμ rising / errored>0 = dropped speech."
+        "lag/WER are read from the production ActiveStreams + LiveTranscripts (same source as the "
+        "dashboard). lagμ/lagX climbing with N = decode contention; WERμ rising / errored>0 = dropped"
     )
     print(
-        "Compare topologies: if '1 server per tap' stays flat where '1 shared server' collapses, the "
-        "bottleneck is per-connection process overhead, not GPU compute."
+        "speech. NOTE: WlK's remaining_time is wall_clock - processed_audio, so staggered (gated)"
+        " input inflates lag — compare stagger=0 (continuous) for a clean latency read."
     )
 
 
@@ -987,7 +896,6 @@ async def run_sweep(args, *, use_mlx: bool) -> list[RunResult]:
                 cfg,
                 use_mlx=use_mlx,
                 speed=args.speed,
-                warmup_s=args.warmup_s,
                 ready_timeout=args.ready_timeout,
                 verbose=args.verbose,
             )
@@ -1034,14 +942,6 @@ def main() -> None:
         "gate drops). 0 = full overlap (gate's blind spot); >= clip length = pure turn-taking (gate "
         "collapses to ~1x load). Sweep it to find where real overlap breaks.",
     )
-    p.add_argument(
-        "--per-tap-instance",
-        dest="per_tap_instance",
-        action="store_true",
-        help="With --concurrency: spawn one WlK server PER stream (process-per-tap) instead of one "
-        "shared server with N connections. Tests whether the collapse is per-connection process "
-        "overhead (flat here) vs raw GPU compute (still collapses). Costs Nx model memory.",
-    )
     p.add_argument("--fixture-dir", default=str(DEFAULT_FIXTURE_DIR), help="Fixture directory for --sweep")
     p.add_argument(
         "--model", default="tiny.en", help="WhisperLiveKit model (default: tiny.en, the prod default)"
@@ -1081,9 +981,6 @@ def main() -> None:
         default=1.0,
         help="Frame pacing multiplier. 1.0 = real time (faithful). >1 is faster but "
         "changes WlK's time-based commit behaviour — use with caution.",
-    )
-    p.add_argument(
-        "--warmup-s", type=float, default=0.5, help="Seconds of silence to prime the decoder first"
     )
     p.add_argument(
         "--ready-timeout",
@@ -1130,10 +1027,9 @@ def main() -> None:
             print(f"ERROR: {wav} not found", file=sys.stderr)
             sys.exit(1)
         cfg = build_base_config(args)
-        topo = "one-server-per-tap" if args.per_tap_instance else "one shared server"
         print(
             f"backend: {'mlx-whisper' if use_mlx else 'faster-whisper'}  "
-            f"concurrency {counts} stagger={args.stagger:g}s topology={topo} on {wav.stem}  "
+            f"concurrency {counts} stagger={args.stagger:g}s on {wav.stem}  "
             f"config: {_config_summary(cfg)}",
             flush=True,
         )
@@ -1143,10 +1039,8 @@ def main() -> None:
                 cfg,
                 counts=counts,
                 stagger_s=args.stagger,
-                per_tap_instance=args.per_tap_instance,
                 use_mlx=use_mlx,
                 speed=args.speed,
-                warmup_s=args.warmup_s,
                 ready_timeout=args.ready_timeout,
                 verbose=True,
             )
@@ -1154,9 +1048,7 @@ def main() -> None:
         if not rows:
             sys.exit(1)
         print()
-        print_concurrency_table(
-            rows, wav=wav, cfg=cfg, stagger_s=args.stagger, per_tap_instance=args.per_tap_instance
-        )
+        print_concurrency_table(rows, wav=wav, cfg=cfg, stagger_s=args.stagger)
         return
 
     if args.sweep:
@@ -1186,7 +1078,6 @@ def main() -> None:
             cfg,
             use_mlx=use_mlx,
             speed=args.speed,
-            warmup_s=args.warmup_s,
             ready_timeout=args.ready_timeout,
             verbose=True,
         )
