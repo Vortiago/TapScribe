@@ -201,6 +201,85 @@ async def _wait_until_ready(channel: WhisperLiveKitChannel, *, timeout: float) -
     return f"whisperlivekit-server not ready within {timeout:.0f}s (model load/download too slow?)"
 
 
+async def _drive_one_stream(
+    *,
+    host: str,
+    port: int,
+    cfg: LiveConfig,
+    frames: list[bytes],
+    speed: float,
+    warmup_s: float,
+    t0: float | None = None,
+) -> tuple[dict, str, list[str]]:
+    """Drive ONE gated stream into an already-running WlK channel and
+    return (per-stream metrics, hypothesis, settled lines).
+
+    Owns only its own relay + gate, not the channel — so the single-stream
+    `run_one` and the N-stream concurrency mode share one feed loop. Pass a
+    shared `t0` when several streams run concurrently so their lag/finalize
+    timings are measured against the same wall clock."""
+    frame_interval = FRAME_INTERVAL_S / max(speed, 0.01)
+    if t0 is None:
+        t0 = time.perf_counter()
+
+    settled: list[tuple[float, str]] = []
+    lag_samples: list[float] = []
+
+    def on_settled(text: str) -> None:
+        settled.append((time.perf_counter() - t0, text))
+
+    async def on_metrics(lag: float) -> None:
+        lag_samples.append(lag)
+
+    gate = build_gate_for_config(cfg)
+    relay = WlKRelay(
+        host=host,
+        port=port,
+        language=cfg.language,
+        on_settled_line=on_settled,
+        on_metrics=on_metrics,
+        drain_timeout=3.0,
+    )
+    if not await relay.connect():
+        return {"error": "WlK relay connect failed"}, "", []
+
+    # Warm-up: feed silence so a still-loading ASR worker is ready before
+    # the first real utterance, and so the first words aren't clipped by
+    # model warm-up. Silence passes through the gate as non-speech (or
+    # straight through when gate_kind=backend).
+    if warmup_s > 0:
+        silence = b"\x00" * FRAME_BYTES
+        for _ in range(int(warmup_s / FRAME_INTERVAL_S)):
+            await relay.send(silence)
+            await asyncio.sleep(frame_interval)
+
+    frames_forwarded = 0
+    for frame in frames:
+        out = gate.feed(frame) if gate is not None else [frame]
+        for f in out:
+            if not await relay.send(f):
+                break
+            frames_forwarded += 1
+        await asyncio.sleep(frame_interval)
+    last_frame_wall = time.perf_counter() - t0
+
+    await relay.close()
+
+    lines = [t for _, t in settled]
+    hypothesis = " ".join(lines)
+    last_settled_wall = settled[-1][0] if settled else last_frame_wall
+    metrics: dict = {
+        "n_lines": len(lines),
+        "frames_in": len(frames),
+        "frames_forwarded": frames_forwarded,
+        "gate_forward_pct": round(100.0 * frames_forwarded / max(1, len(frames)), 1),
+        "lag_mean_s": round(sum(lag_samples) / len(lag_samples), 3) if lag_samples else None,
+        "lag_max_s": round(max(lag_samples), 3) if lag_samples else None,
+        "final_delay_s": round(max(0.0, last_settled_wall - last_frame_wall), 2),
+    }
+    return metrics, hypothesis, lines
+
+
 async def run_one(
     wav: Path,
     cfg: LiveConfig,
@@ -215,7 +294,6 @@ async def run_one(
     the captions. Owns the whisperlivekit-server child for the duration."""
     cfg_summary = _config_summary(cfg)
     reference = _read_reference(wav)
-    frame_interval = FRAME_INTERVAL_S / max(speed, 0.01)
 
     channel = WhisperLiveKitChannel(config=cfg, use_mlx=use_mlx)
     ok, msg = channel.start()
@@ -238,73 +316,19 @@ async def run_one(
         # ephemeral port — connect the relay to the live values.
         host, port = channel.config.host, channel.config.port
 
-        settled: list[tuple[float, str]] = []
-        lag_samples: list[float] = []
-        t0 = time.perf_counter()
-
-        def on_settled(text: str) -> None:
-            settled.append((time.perf_counter() - t0, text))
-
-        async def on_metrics(lag: float) -> None:
-            lag_samples.append(lag)
-
-        gate = build_gate_for_config(cfg)
-        relay = WlKRelay(
-            host=host,
-            port=port,
-            language=cfg.language,
-            on_settled_line=on_settled,
-            on_metrics=on_metrics,
-            drain_timeout=3.0,
-        )
-        if not await relay.connect():
-            return RunResult(
-                fixture=wav.stem, config=cfg_summary, error="WlK relay connect failed", reference=reference
-            )
-
-        # Warm-up: feed silence so a still-loading ASR worker is ready
-        # before the first real utterance, and so the first words aren't
-        # clipped by model warm-up. Silence passes through the gate as
-        # non-speech (or straight through when gate_kind=backend).
-        if warmup_s > 0:
-            silence = b"\x00" * FRAME_BYTES
-            for _ in range(int(warmup_s / FRAME_INTERVAL_S)):
-                await relay.send(silence)
-                await asyncio.sleep(frame_interval)
-
         frames = frame_pcm(read_wav_as_pcm_bytes(wav))
         audio_s = len(frames) * FRAME_INTERVAL_S
-        frames_forwarded = 0
         feed_start = time.perf_counter()
-        for frame in frames:
-            out = gate.feed(frame) if gate is not None else [frame]
-            for f in out:
-                if not await relay.send(f):
-                    break
-                frames_forwarded += 1
-            await asyncio.sleep(frame_interval)
-        last_frame_wall = time.perf_counter() - t0
-
-        await relay.close()
+        smetrics, hypothesis, lines = await _drive_one_stream(
+            host=host, port=port, cfg=cfg, frames=frames, speed=speed, warmup_s=warmup_s
+        )
         wall_s = time.perf_counter() - feed_start
+        if "error" in smetrics:
+            return RunResult(
+                fixture=wav.stem, config=cfg_summary, error=smetrics["error"], reference=reference
+            )
 
-        lines = [t for _, t in settled]
-        hypothesis = " ".join(lines)
-        last_settled_wall = settled[-1][0] if settled else last_frame_wall
-        final_delay = max(0.0, last_settled_wall - last_frame_wall)
-
-        metrics: dict = {
-            "audio_s": round(audio_s, 2),
-            "wall_s": round(wall_s, 2),
-            "n_lines": len(lines),
-            "frames_in": len(frames),
-            "frames_forwarded": frames_forwarded,
-            "gate_forward_pct": round(100.0 * frames_forwarded / max(1, len(frames)), 1),
-            "lag_mean_s": round(sum(lag_samples) / len(lag_samples), 3) if lag_samples else None,
-            "lag_max_s": round(max(lag_samples), 3) if lag_samples else None,
-            "final_delay_s": round(final_delay, 2),
-        }
-
+        metrics: dict = {"audio_s": round(audio_s, 2), "wall_s": round(wall_s, 2), **smetrics}
         result = RunResult(
             fixture=wav.stem,
             config=cfg_summary,
@@ -321,6 +345,82 @@ async def run_one(
         return result
     finally:
         channel.stop()
+
+
+async def run_concurrency_sweep(
+    wav: Path,
+    cfg: LiveConfig,
+    *,
+    counts: list[int],
+    use_mlx: bool,
+    speed: float,
+    warmup_s: float,
+    ready_timeout: float,
+    verbose: bool,
+) -> list[dict]:
+    """Stress ONE WlK server with N concurrent gated streams of `wav` and
+    report how lag / WER degrade as N grows.
+
+    This is the multi-speaker reproduction: production gives every active
+    `/tap` its own relay into the single shared whisperlivekit-server (one
+    model, one GPU), so simultaneous talkers contend for one decoder. We
+    feed N copies of the fixture at once (full overlap — the worst case)
+    and watch per-stream lag. One channel is reused across all N values so
+    the model loads once; connections are independent per run."""
+    reference = _read_reference(wav)
+    channel = WhisperLiveKitChannel(config=cfg, use_mlx=use_mlx)
+    ok, msg = channel.start()
+    if not ok:
+        print(f"start failed: {msg}", file=sys.stderr)
+        return []
+
+    rows: list[dict] = []
+    try:
+        err = await _wait_until_ready(channel, timeout=ready_timeout)
+        if err is not None:
+            print(f"whisperlivekit-server not ready: {err}", file=sys.stderr)
+            return []
+        host, port = channel.config.host, channel.config.port
+        frames = frame_pcm(read_wav_as_pcm_bytes(wav))
+
+        for n in counts:
+            t0 = time.perf_counter()
+            outs = await asyncio.gather(
+                *(
+                    _drive_one_stream(
+                        host=host, port=port, cfg=cfg, frames=frames, speed=speed, warmup_s=warmup_s, t0=t0
+                    )
+                    for _ in range(n)
+                )
+            )
+            errored = sum(1 for m, _, _ in outs if "error" in m)
+            lag_means = [m["lag_mean_s"] for m, _, _ in outs if m.get("lag_mean_s") is not None]
+            lag_maxes = [m["lag_max_s"] for m, _, _ in outs if m.get("lag_max_s") is not None]
+            fin = [m["final_delay_s"] for m, _, _ in outs if "final_delay_s" in m]
+            wers: list[float] = []
+            for _m, hyp, _l in outs:
+                try:
+                    wers.append(score_text(reference, hyp).wer)
+                except Exception:  # empty/failed stream — exclude from the WER mean, count via errored
+                    pass
+            row = {
+                "streams": n,
+                "errored": errored,
+                "lag_mean_s": round(sum(lag_means) / len(lag_means), 2) if lag_means else None,
+                "lag_max_s": round(max(lag_maxes), 2) if lag_maxes else None,
+                "wer_mean": round(sum(wers) / len(wers), 2) if wers else None,
+                "fin_delay_max_s": round(max(fin), 2) if fin else None,
+            }
+            rows.append(row)
+            if verbose:
+                print(
+                    f"  streams={n}: lagμ={row['lag_mean_s']} lagX={row['lag_max_s']} "
+                    f"WERμ={row['wer_mean']} finΔX={row['fin_delay_max_s']} errored={errored}",
+                    flush=True,
+                )
+    finally:
+        channel.stop()
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +625,30 @@ def write_results_json(results: list[RunResult], *, use_mlx: bool, speed: float)
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig) -> None:
+    print(f"concurrency stress — fixture={wav.stem} model={cfg.model} gate={cfg.gate_kind}")
+    cols = [
+        ("streams", 8, lambda r: r.get("streams")),
+        ("lagμ", 7, lambda r: r.get("lag_mean_s")),
+        ("lagX", 7, lambda r: r.get("lag_max_s")),
+        ("finΔX", 7, lambda r: r.get("fin_delay_max_s")),
+        ("WERμ", 7, lambda r: r.get("wer_mean")),
+        ("errored", 8, lambda r: r.get("errored")),
+    ]
+    header = " ".join(name.rjust(w) for name, w, _ in cols)
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        print(" ".join(_fmt(get(r), w) for _name, w, get in cols))
+    print("=" * len(header))
+    print(
+        "N copies of the fixture fed at once (full overlap) into one WlK server. "
+        "lagμ/lagX climbing with N = the single shared model serializing inference;"
+    )
+    print("WERμ rising / errored>0 with N = streams starved past WlK's buffer-trim window (dropped speech).")
 
 
 def print_detailed(result: RunResult) -> None:
@@ -738,6 +862,14 @@ def main() -> None:
         help="Model-free: sweep GATE configs over every fixture and report how much audio each "
         "forwards (no ASR model needed — Silero loads locally).",
     )
+    p.add_argument(
+        "--concurrency",
+        default=None,
+        metavar="N1,N2,...",
+        help="Multi-speaker stress: feed this many concurrent copies of the fixture into one WlK "
+        "server (e.g. '1,2,3,4') and report how lag/WER degrade with load. Uses --wav (default: "
+        "armstrong-en).",
+    )
     p.add_argument("--fixture-dir", default=str(DEFAULT_FIXTURE_DIR), help="Fixture directory for --sweep")
     p.add_argument(
         "--model", default="tiny.en", help="WhisperLiveKit model (default: tiny.en, the prod default)"
@@ -791,6 +923,41 @@ def main() -> None:
     except ImportError:
         print("ERROR: jiwer is required for scoring. Install with: pip install jiwer", file=sys.stderr)
         sys.exit(1)
+
+    if args.concurrency:
+        try:
+            counts = [int(x) for x in args.concurrency.split(",") if x.strip()]
+        except ValueError:
+            p.error("--concurrency must be a comma list of integers, e.g. 1,2,4")
+        if not counts or any(c < 1 for c in counts):
+            p.error("--concurrency needs positive stream counts, e.g. 1,2,4")
+        wav = args.wav or (DEFAULT_FIXTURE_DIR / "armstrong-en.wav")
+        if not wav.exists():
+            print(f"ERROR: {wav} not found", file=sys.stderr)
+            sys.exit(1)
+        cfg = build_base_config(args)
+        print(
+            f"backend: {'mlx-whisper' if use_mlx else 'faster-whisper'}  "
+            f"concurrency {counts} on {wav.stem}  config: {_config_summary(cfg)}",
+            flush=True,
+        )
+        rows = asyncio.run(
+            run_concurrency_sweep(
+                wav,
+                cfg,
+                counts=counts,
+                use_mlx=use_mlx,
+                speed=args.speed,
+                warmup_s=args.warmup_s,
+                ready_timeout=args.ready_timeout,
+                verbose=True,
+            )
+        )
+        if not rows:
+            sys.exit(1)
+        print()
+        print_concurrency_table(rows, wav=wav, cfg=cfg)
+        return
 
     if args.sweep:
         results = asyncio.run(run_sweep(args, use_mlx=use_mlx))
