@@ -224,12 +224,20 @@ async def _drive_one_stream(
 
     settled: list[tuple[float, str]] = []
     lag_samples: list[float] = []
+    buffers: list[str] = []
 
     def on_settled(text: str) -> None:
         settled.append((time.perf_counter() - t0, text))
 
     async def on_metrics(lag: float) -> None:
         lag_samples.append(lag)
+
+    def on_buffer(text: str) -> None:
+        # Every in-flight `buffer_transcription` update WlK sends, including
+        # clears (""). Lets us tell "WlK never emits a buffer in this config"
+        # (the dashboard's missing in-flight preview) from "it emits it
+        # transiently and the /api/state poll just misses it".
+        buffers.append(text)
 
     gate = build_gate_for_config(cfg)
     relay = WlKRelay(
@@ -238,6 +246,7 @@ async def _drive_one_stream(
         language=cfg.language,
         on_settled_line=on_settled,
         on_metrics=on_metrics,
+        on_buffer=on_buffer,
         drain_timeout=3.0,
     )
     if not await relay.connect():
@@ -268,6 +277,7 @@ async def _drive_one_stream(
     lines = [t for _, t in settled]
     hypothesis = " ".join(lines)
     last_settled_wall = settled[-1][0] if settled else last_frame_wall
+    nonempty_buffers = [b for b in buffers if b.strip()]
     metrics: dict = {
         "n_lines": len(lines),
         "frames_in": len(frames),
@@ -276,6 +286,9 @@ async def _drive_one_stream(
         "lag_mean_s": round(sum(lag_samples) / len(lag_samples), 3) if lag_samples else None,
         "lag_max_s": round(max(lag_samples), 3) if lag_samples else None,
         "final_delay_s": round(max(0.0, last_settled_wall - last_frame_wall), 2),
+        "buffer_updates": len(buffers),
+        "buffer_nonempty": len(nonempty_buffers),
+        "buffer_sample": nonempty_buffers[-1] if nonempty_buffers else "",
     }
     return metrics, hypothesis, lines
 
