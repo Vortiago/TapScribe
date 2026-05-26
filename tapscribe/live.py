@@ -18,6 +18,7 @@ download NB-Whisper weights, spawn, drain stdout, update INFO).
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import shutil
@@ -677,6 +678,14 @@ class WhisperLiveKitChannel:
                             promoted = True
         finally:
             rc = proc.wait()
+            # Close the stdout pipe we've drained to EOF. Popen would
+            # eventually close it on GC, but that leaks an fd per child
+            # across the dashboard's stop→start "Apply model" restarts
+            # (and emits a ResourceWarning under -W error). The pump owns
+            # this end of the pipe, so closing it here is the clean spot.
+            if proc.stdout is not None:
+                with contextlib.suppress(Exception):
+                    proc.stdout.close()
             # Only update INFO if this proc is still the active one; a fresh
             # start() may already have replaced it.
             if self._proc is proc:
