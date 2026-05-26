@@ -55,7 +55,7 @@ import re
 import sys
 import time
 import wave
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -387,17 +387,34 @@ def _lang_for_fixture(wav: Path) -> str:
     return _FIXTURE_LANG.get(wav.stem, "en")
 
 
-# Sweep matrix: list of override dicts merged onto the baseline config.
-# Row 0 is the PRODUCTION DEFAULT (tiny.en, tapscribe gate, all WlK knobs
-# unset) — the "red" baseline every other row is compared against.
+# Full-pipeline sweep matrix: each dict is a set of LiveConfig field
+# overrides applied (via dataclasses.replace) onto a per-fixture baseline
+# (tiny.en, tapscribe gate, the fixture's language). Row 0 is the
+# PRODUCTION DEFAULT — the "red" baseline every other row is compared
+# against. Edit freely; any LiveConfig field name is a valid key.
+#
+# The rows are chosen to isolate the hypotheses in
+# docs/live-tuning-research.md: model size (1-3), the confidence/accuracy
+# trade (4), whether our gate clips speech vs the backend VAD (5), blip
+# suppression (6), and the WlK streaming knobs (7-8).
 SWEEP_MATRIX: list[dict] = [
     {"model": "tiny.en"},  # production default — baseline
     {"model": "base.en"},
     {"model": "small.en"},
+    {"model": "small.en", "confidence_validation": False},
     {"model": "small.en", "gate_kind": "backend"},
+    {"model": "small.en", "gate_min_speech_ms": 200},
     {"model": "small.en", "min_chunk_size": 1.0},
     {"model": "small.en", "buffer_trimming": "segment"},
 ]
+
+
+def _config_from_overrides(overrides: dict, *, language: str, host: str) -> LiveConfig:
+    """Build a LiveConfig from a per-fixture baseline plus a matrix row.
+    `replace` applies any LiveConfig field, so a row can tune gate knobs,
+    confidence_validation, streaming knobs — not just the hardcoded few."""
+    base = LiveConfig(model="tiny.en", language=language, host=host, port=0)
+    return replace(base, **overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +517,125 @@ def print_detailed(result: RunResult) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Gate-only analysis (no ASR model — Silero loads locally)
+# ---------------------------------------------------------------------------
+#
+# The SpeechGate is the front half of the live path and a prime quality
+# suspect: if it clips speech, words are dropped before the backend ever
+# sees them. Silero VAD loads locally with no network, so we can measure
+# exactly how much audio each gate config forwards — useful on boxes that
+# can't download an ASR model (and fast: no subprocess, no real-time
+# pacing). This is NOT a transcription benchmark; it's a gate-aggression
+# benchmark.
+
+_GATE_SUMMARY_FIELDS = (
+    "gate_kind",
+    "gate_speech_threshold",
+    "gate_hangover_ms",
+    "gate_pre_roll_ms",
+    "gate_min_speech_ms",
+)
+
+# Gate-config matrix for --gate-only. Row 0 is the production default.
+GATE_MATRIX: list[dict] = [
+    {},  # production default: thr 0.5, hang 400, pre-roll 300, min-speech 0
+    {"gate_speech_threshold": 0.3},
+    {"gate_speech_threshold": 0.7},
+    {"gate_hangover_ms": 800},
+    {"gate_pre_roll_ms": 500},
+    {"gate_min_speech_ms": 200},
+    {"gate_kind": "backend"},  # no TapScribe gate → forwards everything
+]
+
+
+@dataclass
+class GateStats:
+    fixture: str
+    config: dict
+    frames_in: int
+    frames_forwarded: int
+    forward_pct: float
+    segments: int
+    retained_s: float
+    audio_s: float
+
+
+def analyze_gate(wav: Path, cfg: LiveConfig) -> GateStats:
+    """Feed a WAV through the SpeechGate and report how much it forwards.
+
+    `segments` counts silence→speech openings (gate.is_open False→True),
+    a proxy for how finely the gate chops the audio. `gate_kind=backend`
+    means no TapScribe gate, so everything is forwarded as one segment."""
+    gate = build_gate_for_config(cfg)
+    frames = frame_pcm(read_wav_as_pcm_bytes(wav))
+    forwarded = 0
+    segments = 0
+    prev_open = False
+    for fr in frames:
+        out = gate.feed(fr) if gate is not None else [fr]
+        forwarded += len(out)
+        now_open = gate.is_open if gate is not None else True
+        if now_open and not prev_open:
+            segments += 1
+        prev_open = now_open
+    n = len(frames)
+    return GateStats(
+        fixture=wav.stem,
+        config={f: getattr(cfg, f) for f in _GATE_SUMMARY_FIELDS},
+        frames_in=n,
+        frames_forwarded=forwarded,
+        forward_pct=round(100.0 * forwarded / max(1, n), 1),
+        segments=segments,
+        retained_s=round(forwarded * FRAME_INTERVAL_S, 2),
+        audio_s=round(n * FRAME_INTERVAL_S, 2),
+    )
+
+
+def print_gate_table(rows: list[GateStats]) -> None:
+    cols = [
+        ("fixture", 12, lambda r: r.fixture),
+        ("kind", 9, lambda r: r.config.get("gate_kind")),
+        ("thr", 5, lambda r: r.config.get("gate_speech_threshold")),
+        ("hang", 5, lambda r: r.config.get("gate_hangover_ms")),
+        ("proll", 5, lambda r: r.config.get("gate_pre_roll_ms")),
+        ("minsp", 5, lambda r: r.config.get("gate_min_speech_ms")),
+        ("fwd%", 6, lambda r: r.forward_pct),
+        ("segs", 5, lambda r: r.segments),
+        ("kept_s", 7, lambda r: r.retained_s),
+        ("audio_s", 7, lambda r: r.audio_s),
+    ]
+    header = " ".join(name.rjust(w) if i else name.ljust(w) for i, (name, w, _) in enumerate(cols))
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        cells = []
+        for i, (_n, w, get) in enumerate(cols):
+            v = get(r)
+            cells.append(v[:w].ljust(w) if i == 0 and isinstance(v, str) else _fmt(v, w))
+        print(" ".join(cells))
+    print("=" * len(header))
+    print(
+        "fwd% = frames forwarded to backend; segs = silence→speech openings; "
+        "kept_s = forwarded audio seconds."
+    )
+    print("A low fwd% on a mostly-speech clip suggests the gate is clipping speech (→ dropped words).")
+
+
+def run_gate_sweep(fixture_dir: Path) -> list[GateStats]:
+    fixtures = discover_fixtures(fixture_dir)
+    if not fixtures:
+        print(f"No fixtures under {fixture_dir}", file=sys.stderr)
+        return []
+    rows: list[GateStats] = []
+    for wav in fixtures:
+        for overrides in GATE_MATRIX:
+            cfg = _config_from_overrides(overrides, language=_lang_for_fixture(wav), host="127.0.0.1")
+            rows.append(analyze_gate(wav, cfg))
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -535,16 +671,7 @@ async def run_sweep(args, *, use_mlx: bool) -> list[RunResult]:
         lang = _lang_for_fixture(wav)
         for overrides in SWEEP_MATRIX:
             i += 1
-            cfg = LiveConfig(
-                model=overrides.get("model", "tiny.en"),
-                language=lang,
-                host=args.live_host,
-                port=0,
-                gate_kind=overrides.get("gate_kind", "tapscribe"),
-                min_chunk_size=overrides.get("min_chunk_size"),
-                buffer_trimming=overrides.get("buffer_trimming"),
-                buffer_trimming_sec=overrides.get("buffer_trimming_sec"),
-            )
+            cfg = _config_from_overrides(overrides, language=lang, host=args.live_host)
             print(f"[{i}/{total}] {wav.stem}  {_config_summary(cfg)}", flush=True)
             res = await run_one(
                 wav,
@@ -575,6 +702,12 @@ def main() -> None:
     )
     p.add_argument("wav", nargs="?", type=Path, help="WAV to stream (omit with --sweep)")
     p.add_argument("--sweep", action="store_true", help="Run the config matrix over every fixture")
+    p.add_argument(
+        "--gate-only",
+        action="store_true",
+        help="Model-free: sweep GATE configs over every fixture and report how much audio each "
+        "forwards (no ASR model needed — Silero loads locally).",
+    )
     p.add_argument("--fixture-dir", default=str(DEFAULT_FIXTURE_DIR), help="Fixture directory for --sweep")
     p.add_argument(
         "--model", default="tiny.en", help="WhisperLiveKit model (default: tiny.en, the prod default)"
@@ -609,6 +742,16 @@ def main() -> None:
     args = p.parse_args()
 
     use_mlx = detect_use_mlx() if args.mlx is None else args.mlx
+
+    # Gate-only mode needs neither jiwer nor an ASR model — handle it
+    # before the scoring-dep check so it runs on a model-less box.
+    if args.gate_only:
+        rows = run_gate_sweep(Path(args.fixture_dir))
+        if not rows:
+            sys.exit(1)
+        print()
+        print_gate_table(rows)
+        return
 
     # Fail fast with an actionable message if jiwer isn't importable —
     # scoring is the whole point and a cryptic ImportError mid-run wastes

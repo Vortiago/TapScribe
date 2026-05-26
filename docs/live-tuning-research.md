@@ -49,13 +49,60 @@ From `tapscribe/__main__.py` and `tapscribe/live.py:LiveConfig`:
    single most likely cause of poor live quality.
 2. **`confidence_validation=True` by default.** Upstream explicitly says
    it trades punctuation accuracy for speed. We enable it unconditionally.
-3. **The gate may be over-trimming.** A first dry-run through
-   `build_gate_for_config` on `armstrong-en.wav` (default gate knobs)
-   forwarded only **~21 % of frames** (125 / 600). The Armstrong clip has
-   a dramatic pause, so some of that is real silence — but if the gate is
-   clipping speech, it shows up as **word deletions** in the benchmark's
-   sub/del/ins breakdown. The `gate_kind=tapscribe` vs `backend` rows in
-   the sweep isolate this directly.
+3. **The gate over-trims, badly, on noisy/continuous audio — confirmed
+   with real data** (see the gate-only benchmark below). On
+   `armstrong-en.wav` the default gate forwards only **~21 %** of the
+   audio and opens **once** (3.8–6.0 s), dropping the entire first phrase
+   *"That's one small step for man"* even though the clip is continuous
+   speech end-to-end. This is the strongest concrete lead for poor live
+   quality.
+
+## Gate-only benchmark (real data, model-free)
+
+The `SpeechGate` is the front half of the live path and runs entirely
+locally (Silero VAD loads with no network), so we can measure exactly how
+much audio each gate config forwards **without an ASR model**:
+
+```bash
+python tools/bench_live.py --gate-only
+```
+
+Results on the two fixtures (`fwd%` = frames forwarded to the backend;
+`segs` = silence→speech openings):
+
+| fixture | gate | thr | hang | fwd% | segs | kept_s / audio_s |
+|---|---|---|---|---|---|---|
+| armstrong-en | tapscribe | 0.50 | 400 | **20.8** | 1 | 2.5 / 12.0 |
+| armstrong-en | tapscribe | 0.30 | 400 | 22.5 | 1 | 2.7 / 12.0 |
+| armstrong-en | tapscribe | 0.70 | 400 | 20.8 | 1 | 2.5 / 12.0 |
+| armstrong-en | tapscribe | 0.50 | 800 | 24.0 | 1 | 2.9 / 12.0 |
+| armstrong-en | **backend** | — | — | **100.0** | 1 | 12.0 / 12.0 |
+| marlene-nb | tapscribe | 0.50 | 400 | **91.6** | 4 | 13.7 / 15.0 |
+| marlene-nb | backend | — | — | 100.0 | 1 | 15.0 / 15.0 |
+
+**Reading it:**
+
+- The Armstrong clip is continuous speech at −12 to −21 dBFS (no real
+  silence — verified by an RMS energy profile), yet the gate opens for a
+  single 2.2 s window at the **loudest** passage and discards the rest.
+  Lowering `gate_speech_threshold` to 0.3 barely changes it (22.5 %), so
+  this is **not** a simple threshold tweak — Silero classifies the quieter
+  (but still clearly-spoken) passages as non-speech on this noisy old
+  recording. In production a model gets only that 2.2 s, so most words are
+  never transcribed.
+- The Marlene clip (a clean studio reading) forwards ~92 % across 4
+  segments — the gate behaves well on clean speech. **So the failure is
+  audio-dependent: the gate collapses on noisy / low-level / continuous
+  speech, which is exactly what real meeting audio looks like.**
+- `gate_kind=backend` (no TapScribe gate; WlK's own VAC) forwards 100 %.
+  A strong A/B candidate, and the quickest mitigation to validate.
+
+This points the live-quality investigation squarely at the gate. Open
+questions for the code review / full sweep: is the single-open behaviour a
+Silero limitation on noisy audio, or a bug in `SpeechGate.feed()` /
+`make_silero_vad` (e.g. missing `speech_pad`, the 512-vs-320 sample
+buffering, or the gate never re-opening)? The `gate_kind` A/B in the full
+sweep quantifies the transcription cost directly (deletions).
 
 ## WhisperLiveKit recommendations (upstream)
 
