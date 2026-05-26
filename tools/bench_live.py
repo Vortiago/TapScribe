@@ -352,6 +352,7 @@ async def run_concurrency_sweep(
     cfg: LiveConfig,
     *,
     counts: list[int],
+    stagger_s: float,
     use_mlx: bool,
     speed: float,
     warmup_s: float,
@@ -363,10 +364,17 @@ async def run_concurrency_sweep(
 
     This is the multi-speaker reproduction: production gives every active
     `/tap` its own relay into the single shared whisperlivekit-server (one
-    model, one GPU), so simultaneous talkers contend for one decoder. We
-    feed N copies of the fixture at once (full overlap — the worst case)
-    and watch per-stream lag. One channel is reused across all N values so
-    the model loads once; connections are independent per run."""
+    model, one GPU), so simultaneous talkers contend for one decoder. One
+    channel is reused across all N values so the model loads once;
+    connections are independent per run.
+
+    `stagger_s` controls how much the streams' SPEECH overlaps, which is
+    the variable that actually matters: each stream is offset by
+    `stagger_s * index` using leading/trailing silence (which the gate
+    drops). stagger=0 is full overlap (every gate open at once — the case
+    the gate can't help); stagger >= clip length is pure turn-taking (gates
+    open one at a time — what the gate is designed to collapse to ~1×
+    load). Sweeping stagger between those finds where real overlap breaks."""
     reference = _read_reference(wav)
     channel = WhisperLiveKitChannel(config=cfg, use_mlx=use_mlx)
     ok, msg = channel.start()
@@ -382,15 +390,27 @@ async def run_concurrency_sweep(
             return []
         host, port = channel.config.host, channel.config.port
         frames = frame_pcm(read_wav_as_pcm_bytes(wav))
+        silence = b"\x00" * FRAME_BYTES
+        lead_frames = int(round(stagger_s / FRAME_INTERVAL_S))
 
         for n in counts:
+            total_pad = lead_frames * (n - 1)
+            # Offset each stream's speech by stagger_s via leading/trailing
+            # silence so all streams stay the same length and run
+            # concurrently; only the speech offset differs. The gate drops
+            # the silence, so this changes how much real overlap WlK sees
+            # without changing what each stream transcribes.
+            stream_frames = [
+                [silence] * (lead_frames * i) + frames + [silence] * (total_pad - lead_frames * i)
+                for i in range(n)
+            ]
             t0 = time.perf_counter()
             outs = await asyncio.gather(
                 *(
                     _drive_one_stream(
-                        host=host, port=port, cfg=cfg, frames=frames, speed=speed, warmup_s=warmup_s, t0=t0
+                        host=host, port=port, cfg=cfg, frames=fr, speed=speed, warmup_s=warmup_s, t0=t0
                     )
-                    for _ in range(n)
+                    for fr in stream_frames
                 )
             )
             errored = sum(1 for m, _, _ in outs if "error" in m)
@@ -627,8 +647,9 @@ def write_results_json(results: list[RunResult], *, use_mlx: bool, speed: float)
     return path
 
 
-def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig) -> None:
-    print(f"concurrency stress — fixture={wav.stem} model={cfg.model} gate={cfg.gate_kind}")
+def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig, stagger_s: float) -> None:
+    overlap = "full overlap" if stagger_s == 0 else f"speech staggered {stagger_s:g}s/stream"
+    print(f"concurrency stress — fixture={wav.stem} model={cfg.model} gate={cfg.gate_kind} ({overlap})")
     cols = [
         ("streams", 8, lambda r: r.get("streams")),
         ("lagμ", 7, lambda r: r.get("lag_mean_s")),
@@ -645,10 +666,13 @@ def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig) -> 
         print(" ".join(_fmt(get(r), w) for _name, w, get in cols))
     print("=" * len(header))
     print(
-        "N copies of the fixture fed at once (full overlap) into one WlK server. "
-        "lagμ/lagX climbing with N = the single shared model serializing inference;"
+        "N concurrent streams into one WlK server. lagμ/lagX climbing with N = the single shared "
+        "model serializing inference; WERμ rising / errored>0 = streams starved past WlK's"
     )
-    print("WERμ rising / errored>0 with N = streams starved past WlK's buffer-trim window (dropped speech).")
+    print(
+        "buffer-trim window (dropped speech). Compare stagger=0 (full overlap) vs a large stagger "
+        "(turn-taking): if turn-taking stays flat, the gate is doing its job and overlap is the killer."
+    )
 
 
 def print_detailed(result: RunResult) -> None:
@@ -870,6 +894,15 @@ def main() -> None:
         "server (e.g. '1,2,3,4') and report how lag/WER degrade with load. Uses --wav (default: "
         "armstrong-en).",
     )
+    p.add_argument(
+        "--stagger",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="With --concurrency: offset each stream's speech by this many seconds (via silence the "
+        "gate drops). 0 = full overlap (gate's blind spot); >= clip length = pure turn-taking (gate "
+        "collapses to ~1x load). Sweep it to find where real overlap breaks.",
+    )
     p.add_argument("--fixture-dir", default=str(DEFAULT_FIXTURE_DIR), help="Fixture directory for --sweep")
     p.add_argument(
         "--model", default="tiny.en", help="WhisperLiveKit model (default: tiny.en, the prod default)"
@@ -938,7 +971,7 @@ def main() -> None:
         cfg = build_base_config(args)
         print(
             f"backend: {'mlx-whisper' if use_mlx else 'faster-whisper'}  "
-            f"concurrency {counts} on {wav.stem}  config: {_config_summary(cfg)}",
+            f"concurrency {counts} stagger={args.stagger:g}s on {wav.stem}  config: {_config_summary(cfg)}",
             flush=True,
         )
         rows = asyncio.run(
@@ -946,6 +979,7 @@ def main() -> None:
                 wav,
                 cfg,
                 counts=counts,
+                stagger_s=args.stagger,
                 use_mlx=use_mlx,
                 speed=args.speed,
                 warmup_s=args.warmup_s,
@@ -956,7 +990,7 @@ def main() -> None:
         if not rows:
             sys.exit(1)
         print()
-        print_concurrency_table(rows, wav=wav, cfg=cfg)
+        print_concurrency_table(rows, wav=wav, cfg=cfg, stagger_s=args.stagger)
         return
 
     if args.sweep:
