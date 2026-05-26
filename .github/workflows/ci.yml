@@ -210,3 +210,15 @@ jobs:
           # `local: true` audits the packages installed in this runner's
           # Python environment. Resolved versions, deterministic results.
           local: true
+          # MAL-2026-4750 is a *malicious-package* advisory in the OSV
+          # malicious-packages dataset that matches the name `fastapi`.
+          # It does NOT describe a vulnerability in the legitimate PyPI
+          # fastapi we depend on (the dataset tracks typosquats / backdoored
+          # impostors — e.g. the `fastapi-toolkit` backdoor and fake
+          # `fastapi` copies); the advisory records no fixed version, and
+          # 0.136.3 is the latest release, so there is nothing to bump to.
+          # Auditing it produces a permanent false positive on the real
+          # dependency. Drop this ignore if/when OSV scopes the advisory to
+          # the actual malicious artifact instead of the name `fastapi`.
+          ignore-vulns: |
+            MAL-2026-4750
