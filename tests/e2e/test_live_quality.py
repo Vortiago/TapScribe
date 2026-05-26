@@ -27,10 +27,16 @@ from tapscribe.live import LiveConfig, WhisperLiveKitChannel
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "audio"
 
-# base.en on the clean ~12 s Armstrong clip should land comfortably under
-# this. Generous enough not to flake on CPU faster-whisper, tight enough
-# that the current tiny.en-with-defaults baseline (the bug we're chasing)
-# would fail it — which is the whole point of having the gate.
+# base.en on the corrected ~9 s Armstrong clip (the iconic line) should
+# land well under this — a clean batch decode is ~0 WER, and the live
+# path's real-time streaming + gate add only modest error. The bar is
+# deliberately loose so CPU faster-whisper doesn't flake; tighten it once
+# a clean-fixture sweep confirms the real base.en number.
+#
+# History: this fixture previously held the "step off the LM now" lead-in
+# rather than the reference line, so every model scored ~0.92 here and the
+# bar read like a live-quality bug to chase. It was a mislabeled fixture,
+# not a model deficiency — see tests/fixtures/audio/README.md.
 _MAX_WER = 0.5
 
 
