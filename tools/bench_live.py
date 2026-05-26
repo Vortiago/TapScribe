@@ -81,10 +81,11 @@ RESULTS_DIR = REPO_ROOT / "bench-results"
 FRAME_MS = 20
 FRAME_INTERVAL_S = FRAME_MS / 1000.0  # 0.02 s — one 20 ms frame at 1x
 
-# How often (in frames) to sample the recorder's per-tap state while feeding,
-# matching the dashboard's poll-based view of lag / gate_open / buffer rather
-# than tapping the relay callbacks directly.
-STATE_SAMPLE_EVERY = 5
+# How often (wall-clock seconds) a background task samples the recorder's
+# per-tap state, matching the dashboard's poll-based view of lag / gate_open /
+# buffer. Kept OFF the feed loop so sampling overhead can't slow the feed
+# below real time (which would silently under-load WlK as N grows).
+STATE_SAMPLE_INTERVAL_S = 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -289,13 +290,35 @@ async def _drive_one_stream(
                 buffers.append(buf)
             break
 
+    # Sample per-tap state from a background task, off the feed path.
+    sampling = True
+
+    async def _sampler() -> None:
+        while sampling:
+            await _sample()
+            await asyncio.sleep(STATE_SAMPLE_INTERVAL_S)
+
+    sampler_task = asyncio.create_task(_sampler())
+
+    # Pace against an ABSOLUTE schedule (target = start + i*interval) so the
+    # per-frame production work (gate, relay send, ActiveStream lock) is
+    # absorbed instead of stacked on top of a fixed sleep — otherwise the feed
+    # drifts below real time as N grows and WlK looks falsely under-loaded.
+    # `max_slip` is how far behind schedule we fell: > ~0 means the host
+    # couldn't feed this many streams in real time, so the numbers are soft.
+    start = time.perf_counter()
+    max_slip = 0.0
     for i, frame in enumerate(frames):
         await fan.write_frame(frame)
-        if i % STATE_SAMPLE_EVERY == 0:
-            await _sample()
-        await asyncio.sleep(frame_interval)
-    await _sample()
+        slip = time.perf_counter() - (start + (i + 1) * frame_interval)
+        max_slip = max(max_slip, slip)
+        if slip < 0:
+            await asyncio.sleep(-slip)
     last_frame_wall = time.perf_counter()
+
+    sampling = False
+    await sampler_task
+    await _sample()
     await fan._close()
     final_delay = time.perf_counter() - last_frame_wall
 
@@ -309,6 +332,7 @@ async def _drive_one_stream(
         "lag_max_s": round(max(lag_samples), 3) if lag_samples else None,
         "lag_samples": len(lag_samples),
         "final_delay_s": round(final_delay, 2),
+        "pacing_slip_s": round(max(0.0, max_slip), 2),
         "buffer_nonempty": len(buffers),
         "buffer_sample": buffers[-1] if buffers else "",
     }
@@ -384,6 +408,7 @@ def _aggregate_streams(outs: list[tuple[dict, str, list]], n: int, reference: st
     lag_means = [m["lag_mean_s"] for m, _, _ in outs if m.get("lag_mean_s") is not None]
     lag_maxes = [m["lag_max_s"] for m, _, _ in outs if m.get("lag_max_s") is not None]
     fin = [m["final_delay_s"] for m, _, _ in outs if "final_delay_s" in m]
+    slips = [m["pacing_slip_s"] for m, _, _ in outs if "pacing_slip_s" in m]
     wers: list[float] = []
     for _m, hyp, _l in outs:
         try:
@@ -397,13 +422,15 @@ def _aggregate_streams(outs: list[tuple[dict, str, list]], n: int, reference: st
         "lag_max_s": round(max(lag_maxes), 2) if lag_maxes else None,
         "wer_mean": round(sum(wers) / len(wers), 2) if wers else None,
         "fin_delay_max_s": round(max(fin), 2) if fin else None,
+        "pacing_slip_s": round(max(slips), 2) if slips else None,
     }
 
 
 def _print_concurrency_row(row: dict) -> None:
     print(
         f"  streams={row['streams']}: lagμ={row['lag_mean_s']} lagX={row['lag_max_s']} "
-        f"WERμ={row['wer_mean']} finΔX={row['fin_delay_max_s']} errored={row['errored']}",
+        f"WERμ={row['wer_mean']} finΔX={row['fin_delay_max_s']} slip={row.get('pacing_slip_s')} "
+        f"errored={row['errored']}",
         flush=True,
     )
 
@@ -692,6 +719,7 @@ def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig, sta
         ("lagμ", 7, lambda r: r.get("lag_mean_s")),
         ("lagX", 7, lambda r: r.get("lag_max_s")),
         ("finΔX", 7, lambda r: r.get("fin_delay_max_s")),
+        ("slipX", 7, lambda r: r.get("pacing_slip_s")),
         ("WERμ", 7, lambda r: r.get("wer_mean")),
         ("errored", 8, lambda r: r.get("errored")),
     ]
@@ -708,7 +736,11 @@ def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig, sta
     )
     print(
         "does). lagμ/lagX climbing with N = decode contention; WERμ rising / errored>0 = dropped"
-        " speech. Compare stagger=0 (all overlap) vs large stagger (turn-taking, ~1 tap live)."
+        " speech. slipX = worst real-time pacing slip; if it's > ~0.1s the host couldn't feed N"
+    )
+    print(
+        "streams in real time, so lag/WER for that row are soft (the feed under-loaded WlK)."
+        " Compare stagger=0 (all overlap) vs large stagger (turn-taking, ~1 tap live)."
     )
 
 
