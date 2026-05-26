@@ -76,6 +76,13 @@ RESULTS_DIR = REPO_ROOT / "bench-results"
 FRAME_MS = 20
 FRAME_INTERVAL_S = FRAME_MS / 1000.0  # 0.02 s — one 20 ms frame at 1x
 
+# WlK's `remaining_time_transcription` is wall_clock - processed_audio_time,
+# so it keeps growing while we send nothing (the gate drops silence and the
+# audio timeline freezes while the clock ticks) — that's not decode lag, just
+# elapsed silence. Only count a lag sample if we forwarded a frame within this
+# window, so dropped silence can't masquerade as backlog.
+ACTIVE_LAG_WINDOW_S = 1.5
+
 
 # ---------------------------------------------------------------------------
 # WAV → frames (wire-format only, mirrors tests/e2e/harness.py)
@@ -225,12 +232,19 @@ async def _drive_one_stream(
     settled: list[tuple[float, str]] = []
     lag_samples: list[float] = []
     buffers: list[str] = []
+    # perf_counter of the last REAL frame forwarded (warmup silence excluded).
+    # 1-element list so the on_metrics closure can read the latest value.
+    last_send = [float("-inf")]
 
     def on_settled(text: str) -> None:
         settled.append((time.perf_counter() - t0, text))
 
     async def on_metrics(lag: float) -> None:
-        lag_samples.append(lag)
+        # Ignore lag readings that land while we're not actively sending —
+        # see ACTIVE_LAG_WINDOW_S. Otherwise trailing/inter-utterance silence
+        # inflates the number even though there's no real decode backlog.
+        if time.perf_counter() - last_send[0] <= ACTIVE_LAG_WINDOW_S:
+            lag_samples.append(lag)
 
     def on_buffer(text: str) -> None:
         # Every in-flight `buffer_transcription` update WlK sends, including
@@ -269,6 +283,7 @@ async def _drive_one_stream(
             if not await relay.send(f):
                 break
             frames_forwarded += 1
+            last_send[0] = time.perf_counter()
         await asyncio.sleep(frame_interval)
     last_frame_wall = time.perf_counter() - t0
 
@@ -285,6 +300,7 @@ async def _drive_one_stream(
         "gate_forward_pct": round(100.0 * frames_forwarded / max(1, len(frames)), 1),
         "lag_mean_s": round(sum(lag_samples) / len(lag_samples), 3) if lag_samples else None,
         "lag_max_s": round(max(lag_samples), 3) if lag_samples else None,
+        "lag_samples": len(lag_samples),
         "final_delay_s": round(max(0.0, last_settled_wall - last_frame_wall), 2),
         "buffer_updates": len(buffers),
         "buffer_nonempty": len(nonempty_buffers),
@@ -360,35 +376,96 @@ async def run_one(
         channel.stop()
 
 
+def _build_stream_frames(frames: list[bytes], n: int, lead_frames: int) -> list[list[bytes]]:
+    """N per-stream frame lists, each offset by `lead_frames * index` via
+    leading/trailing silence so all streams stay the same length and run
+    concurrently; only the speech offset differs. The gate drops the silence,
+    so this changes how much real overlap WlK sees without changing what each
+    stream transcribes."""
+    silence = b"\x00" * FRAME_BYTES
+    total_pad = lead_frames * (n - 1)
+    return [
+        [silence] * (lead_frames * i) + frames + [silence] * (total_pad - lead_frames * i) for i in range(n)
+    ]
+
+
+def _aggregate_streams(outs: list[tuple[dict, str, list]], n: int, reference: str) -> dict:
+    errored = sum(1 for m, _, _ in outs if "error" in m)
+    lag_means = [m["lag_mean_s"] for m, _, _ in outs if m.get("lag_mean_s") is not None]
+    lag_maxes = [m["lag_max_s"] for m, _, _ in outs if m.get("lag_max_s") is not None]
+    fin = [m["final_delay_s"] for m, _, _ in outs if "final_delay_s" in m]
+    wers: list[float] = []
+    for _m, hyp, _l in outs:
+        try:
+            wers.append(score_text(reference, hyp).wer)
+        except Exception:  # empty/failed stream — exclude from the WER mean, count via errored
+            pass
+    return {
+        "streams": n,
+        "errored": errored,
+        "lag_mean_s": round(sum(lag_means) / len(lag_means), 2) if lag_means else None,
+        "lag_max_s": round(max(lag_maxes), 2) if lag_maxes else None,
+        "wer_mean": round(sum(wers) / len(wers), 2) if wers else None,
+        "fin_delay_max_s": round(max(fin), 2) if fin else None,
+    }
+
+
+def _print_concurrency_row(row: dict) -> None:
+    print(
+        f"  streams={row['streams']}: lagμ={row['lag_mean_s']} lagX={row['lag_max_s']} "
+        f"WERμ={row['wer_mean']} finΔX={row['fin_delay_max_s']} errored={row['errored']}",
+        flush=True,
+    )
+
+
 async def run_concurrency_sweep(
     wav: Path,
     cfg: LiveConfig,
     *,
     counts: list[int],
     stagger_s: float,
+    per_tap_instance: bool,
     use_mlx: bool,
     speed: float,
     warmup_s: float,
     ready_timeout: float,
     verbose: bool,
 ) -> list[dict]:
-    """Stress ONE WlK server with N concurrent gated streams of `wav` and
-    report how lag / WER degrade as N grows.
+    """Stress WlK with N concurrent gated streams of `wav` and report how
+    lag / WER degrade as N grows — the multi-speaker reproduction.
 
-    This is the multi-speaker reproduction: production gives every active
-    `/tap` its own relay into the single shared whisperlivekit-server (one
-    model, one GPU), so simultaneous talkers contend for one decoder. One
-    channel is reused across all N values so the model loads once;
-    connections are independent per run.
+    Two topologies:
+      * default — ONE WlK server, N connections (production today: every
+        active `/tap` relays into one shared whisperlivekit-server). The
+        server loads once and is reused across all N.
+      * `per_tap_instance` — N WlK servers, ONE connection each (the
+        "process per tap" hypothesis). If the bottleneck is per-connection
+        overhead inside one shared process rather than raw GPU compute,
+        this stays flat where the shared server collapses. Costs N× model
+        memory and N× load time; servers are spawned fresh per N value.
 
-    `stagger_s` controls how much the streams' SPEECH overlaps, which is
-    the variable that actually matters: each stream is offset by
-    `stagger_s * index` using leading/trailing silence (which the gate
-    drops). stagger=0 is full overlap (every gate open at once — the case
-    the gate can't help); stagger >= clip length is pure turn-taking (gates
-    open one at a time — what the gate is designed to collapse to ~1×
-    load). Sweeping stagger between those finds where real overlap breaks."""
+    `stagger_s` controls how much the streams' SPEECH overlaps (the variable
+    that actually matters): each stream is offset by `stagger_s * index` via
+    silence the gate drops. stagger=0 is full overlap; stagger >= clip length
+    is pure turn-taking."""
     reference = _read_reference(wav)
+    frames = frame_pcm(read_wav_as_pcm_bytes(wav))
+    lead_frames = int(round(stagger_s / FRAME_INTERVAL_S))
+
+    if per_tap_instance:
+        return await _run_per_tap_instance_sweep(
+            cfg,
+            counts=counts,
+            frames=frames,
+            lead_frames=lead_frames,
+            reference=reference,
+            use_mlx=use_mlx,
+            speed=speed,
+            warmup_s=warmup_s,
+            ready_timeout=ready_timeout,
+            verbose=verbose,
+        )
+
     channel = WhisperLiveKitChannel(config=cfg, use_mlx=use_mlx)
     ok, msg = channel.start()
     if not ok:
@@ -402,21 +479,9 @@ async def run_concurrency_sweep(
             print(f"whisperlivekit-server not ready: {err}", file=sys.stderr)
             return []
         host, port = channel.config.host, channel.config.port
-        frames = frame_pcm(read_wav_as_pcm_bytes(wav))
-        silence = b"\x00" * FRAME_BYTES
-        lead_frames = int(round(stagger_s / FRAME_INTERVAL_S))
 
         for n in counts:
-            total_pad = lead_frames * (n - 1)
-            # Offset each stream's speech by stagger_s via leading/trailing
-            # silence so all streams stay the same length and run
-            # concurrently; only the speech offset differs. The gate drops
-            # the silence, so this changes how much real overlap WlK sees
-            # without changing what each stream transcribes.
-            stream_frames = [
-                [silence] * (lead_frames * i) + frames + [silence] * (total_pad - lead_frames * i)
-                for i in range(n)
-            ]
+            stream_frames = _build_stream_frames(frames, n, lead_frames)
             t0 = time.perf_counter()
             outs = await asyncio.gather(
                 *(
@@ -426,33 +491,77 @@ async def run_concurrency_sweep(
                     for fr in stream_frames
                 )
             )
-            errored = sum(1 for m, _, _ in outs if "error" in m)
-            lag_means = [m["lag_mean_s"] for m, _, _ in outs if m.get("lag_mean_s") is not None]
-            lag_maxes = [m["lag_max_s"] for m, _, _ in outs if m.get("lag_max_s") is not None]
-            fin = [m["final_delay_s"] for m, _, _ in outs if "final_delay_s" in m]
-            wers: list[float] = []
-            for _m, hyp, _l in outs:
-                try:
-                    wers.append(score_text(reference, hyp).wer)
-                except Exception:  # empty/failed stream — exclude from the WER mean, count via errored
-                    pass
-            row = {
-                "streams": n,
-                "errored": errored,
-                "lag_mean_s": round(sum(lag_means) / len(lag_means), 2) if lag_means else None,
-                "lag_max_s": round(max(lag_maxes), 2) if lag_maxes else None,
-                "wer_mean": round(sum(wers) / len(wers), 2) if wers else None,
-                "fin_delay_max_s": round(max(fin), 2) if fin else None,
-            }
+            row = _aggregate_streams(outs, n, reference)
             rows.append(row)
             if verbose:
-                print(
-                    f"  streams={n}: lagμ={row['lag_mean_s']} lagX={row['lag_max_s']} "
-                    f"WERμ={row['wer_mean']} finΔX={row['fin_delay_max_s']} errored={errored}",
-                    flush=True,
-                )
+                _print_concurrency_row(row)
     finally:
         channel.stop()
+    return rows
+
+
+async def _run_per_tap_instance_sweep(
+    cfg: LiveConfig,
+    *,
+    counts: list[int],
+    frames: list[bytes],
+    lead_frames: int,
+    reference: str,
+    use_mlx: bool,
+    speed: float,
+    warmup_s: float,
+    ready_timeout: float,
+    verbose: bool,
+) -> list[dict]:
+    """One WlK server per stream (process-per-tap). Servers are spawned
+    fresh for each N so a higher count can't inherit residual state, and
+    they all share the one GPU — so flat lag here vs. the shared-server
+    collapse means the bottleneck was per-connection process overhead."""
+    rows: list[dict] = []
+    for n in counts:
+        channels: list[WhisperLiveKitChannel] = []
+        try:
+            for _ in range(n):
+                ch = WhisperLiveKitChannel(config=cfg, use_mlx=use_mlx)
+                ok, msg = ch.start()
+                if not ok:
+                    print(f"start failed (streams={n}): {msg}", file=sys.stderr)
+                    break
+                channels.append(ch)
+            if len(channels) != n:
+                continue
+            ready_err = None
+            for ch in channels:
+                ready_err = await _wait_until_ready(ch, timeout=ready_timeout)
+                if ready_err is not None:
+                    break
+            if ready_err is not None:
+                print(f"server not ready (streams={n}): {ready_err}", file=sys.stderr)
+                continue
+
+            stream_frames = _build_stream_frames(frames, n, lead_frames)
+            t0 = time.perf_counter()
+            outs = await asyncio.gather(
+                *(
+                    _drive_one_stream(
+                        host=ch.config.host,
+                        port=ch.config.port,
+                        cfg=cfg,
+                        frames=fr,
+                        speed=speed,
+                        warmup_s=warmup_s,
+                        t0=t0,
+                    )
+                    for ch, fr in zip(channels, stream_frames, strict=True)
+                )
+            )
+            row = _aggregate_streams(outs, n, reference)
+            rows.append(row)
+            if verbose:
+                _print_concurrency_row(row)
+        finally:
+            for ch in channels:
+                ch.stop()
     return rows
 
 
@@ -660,9 +769,14 @@ def write_results_json(results: list[RunResult], *, use_mlx: bool, speed: float)
     return path
 
 
-def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig, stagger_s: float) -> None:
+def print_concurrency_table(
+    rows: list[dict], *, wav: Path, cfg: LiveConfig, stagger_s: float, per_tap_instance: bool = False
+) -> None:
     overlap = "full overlap" if stagger_s == 0 else f"speech staggered {stagger_s:g}s/stream"
-    print(f"concurrency stress — fixture={wav.stem} model={cfg.model} gate={cfg.gate_kind} ({overlap})")
+    topo = "1 server per tap" if per_tap_instance else "1 shared server"
+    print(
+        f"concurrency stress — fixture={wav.stem} model={cfg.model} gate={cfg.gate_kind} ({overlap}, {topo})"
+    )
     cols = [
         ("streams", 8, lambda r: r.get("streams")),
         ("lagμ", 7, lambda r: r.get("lag_mean_s")),
@@ -679,12 +793,12 @@ def print_concurrency_table(rows: list[dict], *, wav: Path, cfg: LiveConfig, sta
         print(" ".join(_fmt(get(r), w) for _name, w, get in cols))
     print("=" * len(header))
     print(
-        "N concurrent streams into one WlK server. lagμ/lagX climbing with N = the single shared "
-        "model serializing inference; WERμ rising / errored>0 = streams starved past WlK's"
+        "lag counted only while actively sending (dropped silence no longer inflates it). "
+        "lagμ/lagX climbing with N = decode contention; WERμ rising / errored>0 = dropped speech."
     )
     print(
-        "buffer-trim window (dropped speech). Compare stagger=0 (full overlap) vs a large stagger "
-        "(turn-taking): if turn-taking stays flat, the gate is doing its job and overlap is the killer."
+        "Compare topologies: if '1 server per tap' stays flat where '1 shared server' collapses, the "
+        "bottleneck is per-connection process overhead, not GPU compute."
     )
 
 
@@ -920,6 +1034,14 @@ def main() -> None:
         "gate drops). 0 = full overlap (gate's blind spot); >= clip length = pure turn-taking (gate "
         "collapses to ~1x load). Sweep it to find where real overlap breaks.",
     )
+    p.add_argument(
+        "--per-tap-instance",
+        dest="per_tap_instance",
+        action="store_true",
+        help="With --concurrency: spawn one WlK server PER stream (process-per-tap) instead of one "
+        "shared server with N connections. Tests whether the collapse is per-connection process "
+        "overhead (flat here) vs raw GPU compute (still collapses). Costs Nx model memory.",
+    )
     p.add_argument("--fixture-dir", default=str(DEFAULT_FIXTURE_DIR), help="Fixture directory for --sweep")
     p.add_argument(
         "--model", default="tiny.en", help="WhisperLiveKit model (default: tiny.en, the prod default)"
@@ -1008,9 +1130,11 @@ def main() -> None:
             print(f"ERROR: {wav} not found", file=sys.stderr)
             sys.exit(1)
         cfg = build_base_config(args)
+        topo = "one-server-per-tap" if args.per_tap_instance else "one shared server"
         print(
             f"backend: {'mlx-whisper' if use_mlx else 'faster-whisper'}  "
-            f"concurrency {counts} stagger={args.stagger:g}s on {wav.stem}  config: {_config_summary(cfg)}",
+            f"concurrency {counts} stagger={args.stagger:g}s topology={topo} on {wav.stem}  "
+            f"config: {_config_summary(cfg)}",
             flush=True,
         )
         rows = asyncio.run(
@@ -1019,6 +1143,7 @@ def main() -> None:
                 cfg,
                 counts=counts,
                 stagger_s=args.stagger,
+                per_tap_instance=args.per_tap_instance,
                 use_mlx=use_mlx,
                 speed=args.speed,
                 warmup_s=args.warmup_s,
@@ -1029,7 +1154,9 @@ def main() -> None:
         if not rows:
             sys.exit(1)
         print()
-        print_concurrency_table(rows, wav=wav, cfg=cfg, stagger_s=args.stagger)
+        print_concurrency_table(
+            rows, wav=wav, cfg=cfg, stagger_s=args.stagger, per_tap_instance=args.per_tap_instance
+        )
         return
 
     if args.sweep:
