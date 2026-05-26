@@ -148,6 +148,13 @@ class LiveConfig:
     # equivalent knob — this filter lives entirely in SpeechGate.
     gate_min_speech_ms: int = 0
     confidence_validation: bool = True
+    # WlK transcription policy. None = use WlK's default ("simulstreaming",
+    # AlignAtt — commits tokens as it decodes, keeps no unvalidated buffer,
+    # so `buffer_transcription` stays empty and the dashboard's in-flight
+    # preview never shows). "localagreement" holds tokens until they agree
+    # across chunks, which populates `buffer_transcription`. Only emitted to
+    # argv for non-nb models; nb-whisper always forces localagreement.
+    backend_policy: str | None = None
     # Forwarded to whisperlivekit-server when set — see build_live_cmd.
     min_chunk_size: float | None = None
     buffer_trimming: str | None = None  # "sentence" | "segment"
@@ -220,6 +227,8 @@ def build_live_cmd(
         cmd.extend(["--model", config.model])
         if use_mlx:
             cmd.extend(["--backend", "mlx-whisper"])
+        if config.backend_policy is not None:
+            cmd.extend(["--backend-policy", config.backend_policy])
 
     if init_prompt:
         cmd.extend(["--init-prompt", init_prompt])

@@ -849,6 +849,8 @@ def build_base_config(args) -> LiveConfig:
         kwargs["gate_min_speech_ms"] = args.gate_min_speech_ms
     if args.confidence_validation is not None:
         kwargs["confidence_validation"] = args.confidence_validation
+    if args.backend_policy is not None:
+        kwargs["backend_policy"] = args.backend_policy
     return LiveConfig(**kwargs)
 
 
@@ -937,6 +939,15 @@ def main() -> None:
         dest="confidence_validation",
         action="store_false",
         help="Turn confidence-validation off (LocalAgreement; populates the in-flight buffer preview).",
+    )
+    p.add_argument(
+        "--backend-policy",
+        dest="backend_policy",
+        choices=("simulstreaming", "localagreement"),
+        default=None,
+        help="WlK transcription policy. Default (None) = WlK's own default (simulstreaming: commits "
+        "as it decodes, empty in-flight buffer). 'localagreement' holds tokens until they agree, "
+        "populating buffer_transcription (the dashboard's in-flight preview).",
     )
     p.add_argument("--min-chunk-size", type=float, default=None)
     p.add_argument("--buffer-trimming", choices=("sentence", "segment"), default=None)
