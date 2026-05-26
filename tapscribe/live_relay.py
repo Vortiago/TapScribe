@@ -104,13 +104,6 @@ class WlKRelay:
         # consecutive same-speaker segments — see
         # `tokens_alignment.py`) only emits the new suffix.
         self._emitted_by_key: dict[tuple, str] = {}
-        # Non-tail entries are immutable in WlK's wire format — the
-        # merger case only ever modifies the CURRENT tail in place;
-        # once a newer entry appears after a position, that position
-        # is frozen. Cache the lower bound of the scan so we don't
-        # re-walk hundreds of stable lines on every snapshot for long
-        # sessions.
-        self._last_emit_scan_upto: int = 0
         # Tail-stability bookkeeping: counts how many consecutive
         # snapshots the tail's `(key, text)` has matched while the
         # buffer was empty. Reset whenever the tail changes or buffer
@@ -245,17 +238,19 @@ class WlKRelay:
                 if not isinstance(snapshot, list):
                     continue
                 self._last_snapshot = snapshot
-                # Emit every newly-non-tail entry. Non-tail positions
-                # are immutable in WlK's wire format, so we only need
-                # to scan from the last upto we processed. The dedup
-                # in `_consider_emit_line` covers a tail-becoming-
-                # non-tail whose text already settled (no re-emit) and
-                # the rare same-key text-change case (emits the diff).
+                # Emit every non-tail entry (the tail is held back for the
+                # stability flush below). We re-scan ALL non-tail positions
+                # each snapshot rather than caching a lower bound: although
+                # WlK normally only mutates the current tail, a late
+                # LocalAgreement correction can grow an already-committed
+                # line, and freezing non-tail positions would silently drop
+                # that suffix until close (then deliver it out of order).
+                # `_consider_emit_line` is keyed + idempotent, so re-walking
+                # settled lines is a no-op beyond a dict lookup per line —
+                # negligible at WlK's few-Hz snapshot rate.
                 upto = max(0, len(snapshot) - 1)
-                for i in range(self._last_emit_scan_upto, upto):
+                for i in range(upto):
                     self._consider_emit_line(snapshot[i])
-                if upto > self._last_emit_scan_upto:
-                    self._last_emit_scan_upto = upto
                 # Tail-stability flush: once the tail text has held
                 # steady (with the in-flight buffer empty) for enough
                 # consecutive snapshots, WlK has nothing more to

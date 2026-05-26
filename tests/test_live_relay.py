@@ -228,6 +228,40 @@ async def test_relay_consumes_lines_into_callback_with_close_drain(fake_wlk: _Fa
     assert list(lines) == ["hello world", "second line"]
 
 
+async def test_relay_emits_growth_of_a_committed_non_tail_line(fake_wlk: _FakeWlk):
+    """Regression (subagent Finding 3): when an already-committed,
+    non-tail line's text GROWS in a later snapshot, the new suffix must
+    still be emitted promptly — not silently held until close (and then
+    delivered out of order).
+
+    WlK normally only grows the current tail, but a late LocalAgreement
+    correction / cross-position merge can extend a line that already has a
+    newer line after it. The relay must not freeze non-tail positions, or
+    those words are lost mid-session."""
+    lines = _SignalList()
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=lines.append,
+    )
+    await relay.connect()
+    l0 = {"text": "hello", "speaker": 1, "start": 0.0, "end": 1.0}
+    l1 = {"text": "second", "speaker": 1, "start": 1.0, "end": 2.0}
+    # Snapshot 1: single line, held as the in-flight tail.
+    await fake_wlk.push_lines_snapshot([l0])
+    # Snapshot 2: a newer line appears, so l0 settles and is emitted.
+    await fake_wlk.push_lines_snapshot([dict(l0, text="hello world"), l1])
+    await lines.wait_count(1)
+    assert list(lines) == ["hello world"]
+    # Snapshot 3: the now-non-tail l0 grows. Its suffix must be emitted
+    # immediately, in order — before the still-held tail (l1).
+    await fake_wlk.push_lines_snapshot([dict(l0, text="hello world again"), l1])
+    await lines.wait_count(2)
+    assert list(lines) == ["hello world", "again"]
+    await relay.close()
+
+
 async def test_relay_dedupes_lines_across_repeated_snapshots(fake_wlk: _FakeWlk):
     """WlK re-sends the full lines list on every tick. The relay must
     NOT re-emit a line just because it appeared in three consecutive
