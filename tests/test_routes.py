@@ -393,8 +393,7 @@ def test_api_state_runs_gather_sessions_off_event_loop(client, recorder_under_te
 
     assert client.get("/api/state").status_code == 200
     assert seen["gather"] != seen["loop"], (
-        "gather_sessions ran on the event-loop thread — /api/state blocks "
-        "click POSTs during the disk walk"
+        "gather_sessions ran on the event-loop thread — /api/state blocks click POSTs during the disk walk"
     )
 
 

@@ -678,9 +678,7 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
 
             await page.route("**/api/state", _kill_state)
 
-            await page.locator(
-                f'.wav-list [data-toggle-wav="{rec.session_start}/{wav_name}"]'
-            ).click()
+            await page.locator(f'.wav-list [data-toggle-wav="{rec.session_start}/{wav_name}"]').click()
             # The 1500ms bound is below what any rescuing poll could deliver
             # (polls are dead) — so a pass means the expand rendered from
             # cache on click, not from a network round trip.
