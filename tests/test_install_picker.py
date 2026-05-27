@@ -368,6 +368,7 @@ def test_main_skips_pip_on_unchanged_rerun(tmp_state, tmp_stamp, monkeypatch):
     """The behaviour the operator asked for: an unchanged re-run installs
     once, stamps it, and skips pip the second time."""
     monkeypatch.setattr(install_picker, "detect_caps", lambda *, force_no_mlx=False: _caps())
+    monkeypatch.setattr(install_picker, "package_is_installed", lambda: True)
     calls = _patch_run_install_counter(monkeypatch)
 
     assert install_picker.main(["--non-interactive"]) == 0
@@ -376,6 +377,22 @@ def test_main_skips_pip_on_unchanged_rerun(tmp_state, tmp_stamp, monkeypatch):
 
     assert install_picker.main(["--non-interactive"]) == 0
     assert len(calls) == 1  # second, unchanged run skips pip
+
+
+def test_main_reinstalls_when_package_missing_despite_current_stamp(tmp_state, tmp_stamp, monkeypatch):
+    """A current stamp must NOT short-circuit pip when the package itself is
+    gone (manual `pip uninstall`, out-of-band venv recreation) — otherwise
+    the picker would leave a broken install with no pip run."""
+    monkeypatch.setattr(install_picker, "detect_caps", lambda *, force_no_mlx=False: _caps())
+    calls = _patch_run_install_counter(monkeypatch)
+
+    monkeypatch.setattr(install_picker, "package_is_installed", lambda: True)
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1  # installed + stamped
+
+    monkeypatch.setattr(install_picker, "package_is_installed", lambda: False)
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 2  # stamp current, but package gone → reinstall
 
 
 def test_main_reinstalls_when_selection_changes(tmp_state, tmp_stamp, monkeypatch):

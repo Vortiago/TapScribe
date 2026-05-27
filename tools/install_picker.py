@@ -951,6 +951,19 @@ def install_is_current(stamp: dict | None, extras: list[str], fingerprint: str) 
     return stamp.get("extras") == extras and stamp.get("pyproject") == fingerprint
 
 
+def package_is_installed(module: str = "tapscribe") -> bool:
+    """Whether the TapScribe package is importable in this venv. Guards the
+    skip-install fast path against a stamp that outlived the package it
+    describes — e.g. the operator ran `pip uninstall tapscribe`, or the
+    venv was recreated by something other than start.sh. The picker runs
+    from tools/ with the repo root NOT on sys.path, so `find_spec` only
+    finds the module when an actual install put it there; a missing module
+    means we must run pip even when the stamp looks current."""
+    from importlib.util import find_spec
+
+    return find_spec(module) is not None
+
+
 def write_install_stamp(path: Path, extras: list[str], fingerprint: str) -> None:
     """Record a successful install so the next unchanged run can skip pip."""
     body = {"extras": extras, "pyproject": fingerprint}
@@ -1056,15 +1069,17 @@ def main(argv: list[str] | None = None) -> int:
     selection.save(STATE_FILE)
 
     # Skip pip entirely when nothing that affects the installed package set
-    # has changed since the last successful install. The editable install
-    # (`pip install -e`) already reflects source-tree edits without a
-    # reinstall, so the only things that force a real install are a changed
-    # extras selection or a changed pyproject.toml (dependency bump). Re-
-    # running pip on an unchanged selection just uninstalls and rebuilds the
-    # project package for no reason — exactly the churn this guards against.
+    # has changed since the last successful install AND the package is still
+    # actually importable. The editable install (`pip install -e`) already
+    # reflects source-tree edits without a reinstall, so the only things that
+    # force a real install are a changed extras selection or a changed
+    # pyproject.toml (dependency bump). The `package_is_installed()` check
+    # keeps us from trusting a stamp that outlived its package (manual
+    # uninstall, out-of-band venv recreation), which would otherwise leave a
+    # broken install with no pip run.
     fingerprint = pyproject_fingerprint()
     stamp = read_install_stamp(STAMP_FILE)
-    if install_is_current(stamp, extras, fingerprint):
+    if install_is_current(stamp, extras, fingerprint) and package_is_installed():
         spec = f".[{','.join(extras)}]" if extras else "."
         print(
             f"[install-picker] '{spec}' already installed and unchanged since "
