@@ -377,10 +377,11 @@ def test_api_state_active_rows_include_level_for_the_dashboard_meter(client, rec
     field — if a future refactor switches to a manual dict instead of
     asdict() and forgets `level`, the meter silently stops moving
     without any backend error. Pin it explicitly."""
-    import asyncio
+    import anyio.from_thread
 
-    asyncio.get_event_loop().run_until_complete(
-        recorder_under_test.streams.register(
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.streams.register,
             ActiveStream(
                 conn_id="abc-meter",
                 identity="meter-test",
@@ -388,9 +389,8 @@ def test_api_state_active_rows_include_level_for_the_dashboard_meter(client, rec
                 filename="meter.wav",
                 started_at=datetime.now(UTC),
                 level=0.73,
-            )
+            ),
         )
-    )
 
     body = client.get("/api/state").json()
     row = next(a for a in body["active"] if a["identity"] == "meter-test")
@@ -402,10 +402,11 @@ def test_api_state_active_rows_include_buffer_transcription(client, recorder_und
     """The dashboard's per-tap in-flight indicator reads
     `buffer_transcription` off each entry. JSON contract pin so an
     asdict refactor that drops the new field surfaces immediately."""
-    import asyncio
+    import anyio.from_thread
 
-    asyncio.get_event_loop().run_until_complete(
-        recorder_under_test.streams.register(
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.streams.register,
             ActiveStream(
                 conn_id="abc-buf",
                 identity="buf-test",
@@ -413,9 +414,8 @@ def test_api_state_active_rows_include_buffer_transcription(client, recorder_und
                 filename="buf.wav",
                 started_at=datetime.now(UTC),
                 buffer_transcription="words in flight",
-            )
+            ),
         )
-    )
 
     body = client.get("/api/state").json()
     row = next(a for a in body["active"] if a["identity"] == "buf-test")
@@ -511,10 +511,11 @@ def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_t
     per-identity preference (which is what the PUT mutates), not the
     WS-open snapshot — otherwise a click PUTs the new pref but the
     button never visually flips."""
-    import asyncio
+    import anyio.from_thread
 
-    asyncio.get_event_loop().run_until_complete(
-        recorder_under_test.streams.register(
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.streams.register,
             ActiveStream(
                 conn_id="abc-bob",
                 identity="bob",
@@ -523,9 +524,8 @@ def test_api_state_active_rows_reflect_current_tap_pref(client, recorder_under_t
                 started_at=datetime.now(UTC),
                 record=True,
                 live=True,
-            )
+            ),
         )
-    )
 
     recorder_under_test.tap_settings.set("bob", record=False, live=False)
 
@@ -1371,24 +1371,23 @@ def test_absorb_moves_new_layout_transcripts_directory(client, recorder_under_te
 
 
 def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
-    import asyncio
-    from datetime import datetime
+    import anyio.from_thread
 
     from tapscribe.recorder import JobState
 
     root = recorder_under_test.recordings_dir
     _seed_session(root, "tgt", [])
     _seed_session(root, "src", [])
-    asyncio.get_event_loop().run_until_complete(
-        recorder_under_test.jobs.claim(
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.jobs.claim,
             JobState(
                 session="src",
                 kind="transcribe",
                 current=0,
                 total=1,
                 started_at=datetime.now(UTC),
-            )
+            ),
         )
-    )
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 409
