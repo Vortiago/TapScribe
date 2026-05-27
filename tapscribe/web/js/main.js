@@ -390,6 +390,14 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     renderSessionDetail(selected);
   }
 
+  // Re-render the sessions pane from the last polled state — no network
+  // round trip. Click handlers that only change local UI state use this
+  // instead of tick() so the click lands instantly; the 500ms poll loop
+  // keeps the underlying data fresh.
+  function rerenderFromCache() {
+    if (lastJson) renderSessionsIfChanged(lastJson);
+  }
+
   /**
    * @param {import('./types.js').Session[]} sessions
    * @param {string | null} selectedId
@@ -400,7 +408,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       selectedId,
       filter: sessionFilter,
       metaFor: effectiveMeta,
-      onSelect: (/** @type {string} */ id) => { selectedSessionId = id; lastSessionsSig = ""; tick(); },
+      onSelect: (/** @type {string} */ id) => { selectedSessionId = id; lastSessionsSig = ""; rerenderFromCache(); },
       onDelete: (/** @type {string} */ id) => deleteSession(id),
     });
   }
@@ -499,13 +507,22 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         if (!tx) return;
         expandedWav = expandedWav === wk ? null : wk;
         lastSessionsSig = "";
-        tick();
+        rerenderFromCache();
       },
       onRangeEdit: (sk, k, v) => {
         rangeState[sk] = rangeState[sk] || {};
         rangeState[sk][k] = v;
       },
-      onModelChange: (v) => { batchModel = v; lastSessionsSig = ""; tick(); },
+      onModelChange: (v) => {
+        batchModel = v;
+        lastSessionsSig = "";
+        // The change fires from the focused <select>, which trips the
+        // focused-input guard in renderSessionsIfChanged. Blur it so the
+        // re-render runs — the pane is rebuilt anyway, so losing focus on
+        // the (recreated) select is harmless.
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        rerenderFromCache();
+      },
       onBackendChange: (v) => {
         batchBackend = v;
         // The selected model may not be valid on the new backend — leave
@@ -513,7 +530,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         // can pick a compatible one. Force a re-render so the chip
         // active-state updates immediately.
         lastSessionsSig = "";
-        tick();
+        rerenderFromCache();
       },
       onSourcePick: (sk, v) => { sourcePick.set(sk, v); },
       onStripRun: stripSession,
@@ -535,7 +552,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         stripOpts = { ...STRIP_OPT_DEFAULTS };
         saveStripOpts();
         lastSessionsSig = "";
-        tick();
+        rerenderFromCache();
       },
       onNameEdit: (sk, value) => {
         localMeta[sk] = { ...effectiveMeta(s), label: value };
@@ -560,7 +577,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         lastSessionsSig = "";
       },
       onAbsorbSession: (target, source) => absorbSession(target, source),
-      onRxToggle: (sk) => { rxOpen = !rxOpen; rxOwnerSession = sk; lastSessionsSig = ""; tick(); },
+      onRxToggle: (sk) => { rxOpen = !rxOpen; rxOwnerSession = sk; lastSessionsSig = ""; rerenderFromCache(); },
       onRxPatternInput: (sk, v) => { rxPattern = v; rxOwnerSession = sk; updateRegexResult(s); },
       onRxFlagsInput: (sk, v) => { rxFlags = v; rxOwnerSession = sk; updateRegexResult(s); },
       onRxSeed: (sk, seed) => {
@@ -570,7 +587,7 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
         if (inp) inp.value = seed;
         updateRegexResult(s);
       },
-      onAuditToggle: () => { showAudit = !showAudit; lastSessionsSig = ""; tick(); },
+      onAuditToggle: () => { showAudit = !showAudit; lastSessionsSig = ""; rerenderFromCache(); },
     }));
   }
 
