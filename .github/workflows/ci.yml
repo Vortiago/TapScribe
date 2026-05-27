@@ -182,11 +182,11 @@ jobs:
       - name: Install runtime dependencies
         # The pip-audit action can't parse `pyproject.toml` directly (it
         # expects requirements.txt syntax), so install the runtime deps
-        # into the runner's env and audit what's actually installed. We
-        # skip the heavy `[whisper] / [voxtral] / [mlx]` optional extras
-        # — operators opt into those on a per-deploy basis and the
-        # vulnerability surface that matters for tapscribe-the-server
-        # is the runtime deps only.
+        # into the runner's env and freeze the resolved set for the audit
+        # (below). We skip the heavy `[whisper] / [voxtral] / [mlx]`
+        # optional extras — operators opt into those on a per-deploy basis
+        # and the vulnerability surface that matters for
+        # tapscribe-the-server is the runtime deps only.
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
@@ -204,22 +204,24 @@ jobs:
         # job is actually here to catch.
         run: pip uninstall -y torch silero-vad
 
-      - name: Ensure the audit env has the patched urllib3
-        # `local: true` (below) audits *every* package in this runner's
-        # environment — which includes pip-audit's own transitive deps
-        # (pip-audit → requests → urllib3), not just TapScribe's runtime
-        # surface. urllib3 < 2.7.0 carries CVE-2026-44431 (cross-origin
-        # redirect leak via the low-level ProxyManager API) and
-        # CVE-2026-44432 (redirect responses decompressed past the
-        # configured read limit — a decompression bomb), both fixed in
-        # 2.7.0. Pin the patched line explicitly so a stray older
-        # urllib3 pulled in while installing pip-audit can't fail this
-        # job on tooling deps unrelated to TapScribe itself.
-        run: python -m pip install --upgrade "urllib3>=2.7.0"
+      - name: Freeze TapScribe's resolved dependency closure for the audit
+        # The pip-audit action installs pip-audit — and its own transitive
+        # deps (requests, urllib3, cyclonedx-python-lib, rich, …) — into
+        # this same environment. With `local: true` those tooling deps get
+        # audited alongside ours: noise unrelated to TapScribe's runtime
+        # surface, and a recurring source of red CI when a CVE lands in one
+        # of them (e.g. urllib3 CVE-2026-44431 / CVE-2026-44432). Freeze our
+        # closure *before* the action installs pip-audit, then point the
+        # audit at the frozen file (see `inputs` below) so it scans only
+        # what `pip install -e .` actually pulled in. `--exclude-editable`
+        # drops the tapscribe self-reference (not on PyPI; nothing to audit).
+        run: pip freeze --exclude-editable > audit-requirements.txt
 
       - name: Run pip-audit
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
-          # `local: true` audits the packages installed in this runner's
-          # Python environment. Resolved versions, deterministic results.
-          local: true
+          # Audit only TapScribe's frozen closure, not the live runner env
+          # (which also carries pip-audit's own deps). The freeze is fully
+          # pinned, so `no-deps` audits exactly those resolved versions.
+          inputs: audit-requirements.txt
+          no-deps: true
