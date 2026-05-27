@@ -322,7 +322,7 @@ def _wav_to_frames(path: Path, frame_bytes: int = 640) -> list[bytes]:
 
 
 async def test_write_frame_level_tracks_real_speech_wav(recorder: Recorder):
-    """End-to-end: stream a real ~12 s speech recording through
+    """End-to-end: stream a real ~9 s speech recording through
     TapFanOut frame by frame and verify the per-tap volume meter
     behaves like a real-world meter would.
 

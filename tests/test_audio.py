@@ -153,7 +153,7 @@ def _wav_to_frames(path: Path, frame_bytes: int = FRAME_BYTES) -> list[bytes]:
 
 
 def test_int16_peak_norm_armstrong_speech_wav():
-    """Stream a real 12 s speech WAV through int16_peak_norm frame by
+    """Stream a real ~9 s speech WAV through int16_peak_norm frame by
     frame. The peak series must:
 
       - stay strictly within the 0.0..1.0 contract the renderer relies on
@@ -175,7 +175,7 @@ def test_int16_peak_norm_armstrong_speech_wav():
     synthesised silent WAV instead, not a real clip."""
     fixture = FIXTURES_DIR / "armstrong-en.wav"
     frames = _wav_to_frames(fixture)
-    assert len(frames) > 500, "expected ~600 frames in a 12 s WAV"
+    assert len(frames) > 400, "expected ~460 frames in the ~9 s WAV"
     peaks = [audio.int16_peak_norm(f) for f in frames]
     assert all(0.0 <= p <= 1.0 for p in peaks), "peak outside [0,1] would break renderer"
     assert max(peaks) > 0.5, "real speech should peg the meter into the 'hot' zone somewhere"
