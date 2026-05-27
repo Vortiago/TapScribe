@@ -371,7 +371,7 @@ def test_api_state_runs_gather_sessions_off_event_loop(client, recorder_under_te
     gather_sessions must run on a *different* thread."""
     import threading
 
-    import tapscribe.app as app_mod
+    from tapscribe.app import gather_sessions as _real_gather
 
     seen: dict[str, int] = {}
 
@@ -383,13 +383,11 @@ def test_api_state_runs_gather_sessions_off_event_loop(client, recorder_under_te
 
     monkeypatch.setattr(recorder_under_test.jobs, "snapshot", snapshot_spy)
 
-    real_gather = app_mod.gather_sessions
-
     def gather_spy(**kw):
         seen["gather"] = threading.get_ident()
-        return real_gather(**kw)
+        return _real_gather(**kw)
 
-    monkeypatch.setattr(app_mod, "gather_sessions", gather_spy)
+    monkeypatch.setattr("tapscribe.app.gather_sessions", gather_spy)
 
     assert client.get("/api/state").status_code == 200
     assert seen["gather"] != seen["loop"], (
