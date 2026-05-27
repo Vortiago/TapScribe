@@ -1074,6 +1074,7 @@ def main() -> None:
         sys.exit(1)
 
     if args.concurrency:
+        counts: list[int] = []
         try:
             counts = [int(x) for x in args.concurrency.split(",") if x.strip()]
         except ValueError:
