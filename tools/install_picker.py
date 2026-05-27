@@ -17,6 +17,12 @@ Backend choices map to per-family atomic extras in `pyproject.toml`
 the live-socket server). The picker composes the final
 `pip install -e ".[…]"` argv from those atoms.
 
+To keep re-launches quiet, the picker stamps each successful install
+(resolved extras + a pyproject.toml fingerprint) inside the venv and
+skips pip on the next run when neither changed — so an unchanged
+selection no longer triggers the editable package's
+uninstall/rebuild/reinstall churn.
+
 Stdlib-only by design: this file runs before the operator has agreed to
 install anything, and certainly before TapScribe's runtime deps exist in
 the venv. Don't import third-party modules here.
@@ -25,6 +31,7 @@ the venv. Don't import third-party modules here.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -36,6 +43,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = REPO_ROOT / ".tapscribe-install.json"
 STATE_VERSION = 2
+
+# Install stamp: records the extras + pyproject fingerprint of the last
+# successful `pip install`, so a re-run with an unchanged selection skips
+# pip instead of triggering the editable package's noisy
+# uninstall/rebuild/reinstall churn (which `pip install -e` does on EVERY
+# invocation, even when nothing changed). Kept inside the venv
+# (`sys.prefix`) rather than next to STATE_FILE so that blowing away
+# `.venv` naturally invalidates it and forces a fresh install.
+STAMP_FILE = Path(sys.prefix) / ".tapscribe-install-stamp.json"
 
 # Backend key sentinels — used both in the FamilyDef declarations and in
 # persisted state, so spelling matters.
@@ -898,6 +914,57 @@ def run_install(extras: list[str], *, dry_run: bool = False) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Skip-install stamp — avoids re-running pip when nothing changed.
+# ---------------------------------------------------------------------------
+
+
+def pyproject_fingerprint() -> str:
+    """SHA-256 of pyproject.toml. A dependency bump (e.g. after a
+    `git pull`) changes this, invalidating the skip-install stamp even
+    when the operator's family/backend selection is byte-for-byte
+    identical to last run."""
+    try:
+        return hashlib.sha256((REPO_ROOT / "pyproject.toml").read_bytes()).hexdigest()
+    except OSError:
+        # No readable pyproject means the pip install would fail anyway;
+        # return a sentinel that can't match a stored fingerprint so we
+        # never skip on the strength of a missing file.
+        return ""
+
+
+def read_install_stamp(path: Path) -> dict | None:
+    """Load the last-successful-install stamp, or None if it's
+    absent/unreadable — both of which mean 'don't skip, run pip'."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def install_is_current(stamp: dict | None, extras: list[str], fingerprint: str) -> bool:
+    """True iff a prior install recorded these exact extras AND the same
+    pyproject fingerprint — i.e. re-running pip would change nothing
+    (modulo the editable package's own rebuild churn we're avoiding)."""
+    if not stamp:
+        return False
+    return stamp.get("extras") == extras and stamp.get("pyproject") == fingerprint
+
+
+def write_install_stamp(path: Path, extras: list[str], fingerprint: str) -> None:
+    """Record a successful install so the next unchanged run can skip pip."""
+    body = {"extras": extras, "pyproject": fingerprint}
+    try:
+        path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
+    except OSError:
+        # The stamp is a pure optimisation. If `sys.prefix` isn't writable
+        # (read-only venv, odd permissions) we just lose the skip fast-path
+        # and re-run pip next time — wasteful but harmless, and not worth
+        # failing an otherwise-successful install over.
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Entry point.
 # ---------------------------------------------------------------------------
 
@@ -980,14 +1047,39 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     extras = resolve_extras(selection, caps)
-    # Dry-run is purely read-only: don't persist the selection so the
-    # operator can preview the pip command without committing to it.
-    if not args.dry_run:
-        selection.save(STATE_FILE)
-    rc = run_install(extras, dry_run=args.dry_run)
+
+    # Dry-run is purely read-only: don't persist the selection or stamp so
+    # the operator can preview the pip command without committing to it.
+    if args.dry_run:
+        return run_install(extras, dry_run=True)
+
+    selection.save(STATE_FILE)
+
+    # Skip pip entirely when nothing that affects the installed package set
+    # has changed since the last successful install. The editable install
+    # (`pip install -e`) already reflects source-tree edits without a
+    # reinstall, so the only things that force a real install are a changed
+    # extras selection or a changed pyproject.toml (dependency bump). Re-
+    # running pip on an unchanged selection just uninstalls and rebuilds the
+    # project package for no reason — exactly the churn this guards against.
+    fingerprint = pyproject_fingerprint()
+    stamp = read_install_stamp(STAMP_FILE)
+    if install_is_current(stamp, extras, fingerprint):
+        spec = f".[{','.join(extras)}]" if extras else "."
+        print(
+            f"[install-picker] '{spec}' already installed and unchanged since "
+            "the last run — skipping pip. (Editable install: source edits are "
+            "already live. Change the selection to force a reinstall.)",
+            flush=True,
+        )
+        return 0
+
+    rc = run_install(extras)
     if rc != 0:
         print(f"[install-picker] pip exited with status {rc}.", file=sys.stderr)
-    return rc
+        return rc
+    write_install_stamp(STAMP_FILE, extras, fingerprint)
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover — exercised by start.sh

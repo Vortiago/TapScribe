@@ -22,7 +22,10 @@
 #      asks which model families (Whisper / Voxtral / Parakeet / Canary)
 #      to install. Pre-checks the previous selection from
 #      .tapscribe-install.json so re-runs are one keystroke (Enter).
-#   4. The picker runs `pip install -e ".[…]"` for the chosen extras.
+#   4. The picker runs `pip install -e ".[…]"` for the chosen extras —
+#      but only when the selection or pyproject.toml actually changed
+#      since the last install. An unchanged re-run skips pip entirely
+#      instead of re-doing the editable package's uninstall/reinstall.
 #      On Apple Silicon the MLX-flavoured extras are added automatically
 #      (mlx-whisper / parakeet-mlx / …) — `--no-mlx` opts out.
 #   5. Launch the TapScribe recorder (port 8001) — which then spawns

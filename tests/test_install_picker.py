@@ -304,6 +304,131 @@ def test_build_pip_argv_drops_extras_brackets_when_empty():
     assert argv[-1] == "."
 
 
+# ── Skip-install stamp ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def tmp_stamp(monkeypatch, tmp_path):
+    """Point STAMP_FILE at a tmpdir so tests don't read/write the real
+    venv's install stamp."""
+    stamp = tmp_path / ".tapscribe-install-stamp.json"
+    monkeypatch.setattr(install_picker, "STAMP_FILE", stamp)
+    return stamp
+
+
+def test_install_stamp_round_trips(tmp_stamp):
+    install_picker.write_install_stamp(tmp_stamp, ["whisper-live", "whisper-cpu"], "abc123")
+    stamp = install_picker.read_install_stamp(tmp_stamp)
+    assert stamp == {"extras": ["whisper-live", "whisper-cpu"], "pyproject": "abc123"}
+
+
+def test_read_install_stamp_missing_file_returns_none(tmp_stamp):
+    assert install_picker.read_install_stamp(tmp_stamp) is None
+
+
+def test_read_install_stamp_malformed_returns_none(tmp_stamp):
+    tmp_stamp.write_text("not json")
+    assert install_picker.read_install_stamp(tmp_stamp) is None
+
+
+def test_install_is_current_true_when_extras_and_fingerprint_match():
+    stamp = {"extras": ["whisper-live", "whisper-cpu"], "pyproject": "fp"}
+    assert install_picker.install_is_current(stamp, ["whisper-live", "whisper-cpu"], "fp") is True
+
+
+def test_install_is_current_false_when_extras_differ():
+    stamp = {"extras": ["whisper-live", "whisper-cpu"], "pyproject": "fp"}
+    assert install_picker.install_is_current(stamp, ["whisper-live", "whisper-mlx"], "fp") is False
+
+
+def test_install_is_current_false_when_fingerprint_differs():
+    """A pyproject bump (e.g. after git pull) must re-trigger pip even
+    when the operator's selection is identical."""
+    stamp = {"extras": ["whisper-live", "whisper-cpu"], "pyproject": "old"}
+    assert install_picker.install_is_current(stamp, ["whisper-live", "whisper-cpu"], "new") is False
+
+
+def test_install_is_current_false_when_no_stamp():
+    assert install_picker.install_is_current(None, ["whisper-live"], "fp") is False
+
+
+def _patch_run_install_counter(monkeypatch) -> list[list[str]]:
+    """Replace run_install with a no-op that records each call's extras."""
+    calls: list[list[str]] = []
+
+    def fake_run_install(extras, *, dry_run=False):
+        calls.append(list(extras))
+        return 0
+
+    monkeypatch.setattr(install_picker, "run_install", fake_run_install)
+    return calls
+
+
+def test_main_skips_pip_on_unchanged_rerun(tmp_state, tmp_stamp, monkeypatch):
+    """The behaviour the operator asked for: an unchanged re-run installs
+    once, stamps it, and skips pip the second time."""
+    monkeypatch.setattr(install_picker, "detect_caps", lambda *, force_no_mlx=False: _caps())
+    calls = _patch_run_install_counter(monkeypatch)
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1  # first run installs
+    assert tmp_stamp.exists()
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1  # second, unchanged run skips pip
+
+
+def test_main_reinstalls_when_selection_changes(tmp_state, tmp_stamp, monkeypatch):
+    """Flipping a family back on between runs must re-run pip — the stamp
+    only suppresses genuinely-unchanged re-runs."""
+    monkeypatch.setattr(install_picker, "detect_caps", lambda *, force_no_mlx=False: _caps())
+    calls = _patch_run_install_counter(monkeypatch)
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1
+
+    # Operator edits their saved selection (here: enable Voxtral too).
+    sel = Selection.load(tmp_state, _caps())
+    sel.choices["voxtral"] = FamilyChoice(enabled=True, backend=BACKEND_CPU)
+    sel.save(tmp_state)
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 2  # changed selection forces a fresh install
+
+
+def test_main_reinstalls_when_pyproject_fingerprint_changes(tmp_state, tmp_stamp, monkeypatch):
+    """Simulate a dependency bump landing between runs: same selection,
+    different pyproject fingerprint → pip runs again."""
+    monkeypatch.setattr(install_picker, "detect_caps", lambda *, force_no_mlx=False: _caps())
+    calls = _patch_run_install_counter(monkeypatch)
+    monkeypatch.setattr(install_picker, "pyproject_fingerprint", lambda: "fp-before")
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1
+
+    monkeypatch.setattr(install_picker, "pyproject_fingerprint", lambda: "fp-after")
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 2
+
+
+def test_main_does_not_stamp_on_pip_failure(tmp_state, tmp_stamp, monkeypatch):
+    """A failed install must not write the stamp — otherwise the next run
+    would wrongly skip pip on a broken install."""
+    monkeypatch.setattr(install_picker, "detect_caps", lambda *, force_no_mlx=False: _caps())
+    monkeypatch.setattr(install_picker, "run_install", lambda extras, *, dry_run=False: 1)
+
+    assert install_picker.main(["--non-interactive"]) == 1
+    assert not tmp_stamp.exists()
+
+
+def test_main_dry_run_does_not_write_stamp(tmp_state, tmp_stamp, monkeypatch):
+    """--dry-run is read-only: it must not persist a stamp that would let
+    a later real run skip the install."""
+    monkeypatch.setattr(install_picker, "detect_caps", lambda *, force_no_mlx=False: _caps())
+    assert install_picker.main(["--non-interactive", "--dry-run"]) == 0
+    assert not tmp_stamp.exists()
+
+
 # ── Picker command parsing (numbered fallback) ──────────────────────
 
 
