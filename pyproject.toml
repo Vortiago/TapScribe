@@ -73,7 +73,7 @@ voxtral-cpu = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
 # Two independent adapters; no shared piece between them.
 parakeet-cpu = [
     # On Linux/Windows the upstream NeMo line is free to float forward.
-    "nemo_toolkit[asr]>=2.5; sys_platform != 'darwin'",
+    "nemo_toolkit[asr]>=2.5,<2.8; sys_platform != 'darwin'",
     # NeMo 2.6+ adds `Requires-Dist: kaldialign<=0.9.1`, but kaldialign
     # 0.9.1 has no cp313 macOS wheel — only 0.9.2 and 0.9.3 do, and
     # `kaldialign 0.10.0` (released 2026-05-06) dropped macOS wheels
@@ -109,7 +109,7 @@ canary-cpu = [
     # Duplicated rather than hoisted into a shared extra so an operator
     # who installs only Canary still gets the constraint without
     # depending on an opaque indirection.
-    "nemo_toolkit[asr]>=2.5; sys_platform != 'darwin'",
+    "nemo_toolkit[asr]>=2.5,<2.8; sys_platform != 'darwin'",
     "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
     "torch>=2.1",
     "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
