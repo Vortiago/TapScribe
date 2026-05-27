@@ -16,7 +16,7 @@ Skipped automatically when `faster-whisper` isn't installed
 
 ```
 tests/fixtures/audio/
-├── armstrong-en.wav            # 12 s, 16 kHz mono int16, NASA PD
+├── armstrong-en.wav            # ~9 s, 16 kHz mono int16, NASA PD
 ├── armstrong-en.reference.txt
 ├── marlene-nb.wav              # 15 s, 16 kHz mono int16, CC-BY-SA 4.0
 ├── marlene-nb.reference.txt
@@ -33,9 +33,17 @@ rather than producing garbled transcripts later.
 
 ### `armstrong-en.wav`
 
-First ~12 seconds of [`Armstrong_Small_Step.ogg`](https://commons.wikimedia.org/wiki/File:Armstrong_Small_Step.ogg)
-from Wikimedia Commons, downsampled from 11 025 Hz mono OGG/Vorbis to
-16 kHz mono int16 WAV with `soundfile` + `scipy.signal.resample_poly`.
+The ~9 s segment containing Armstrong's iconic line (≈14.0–23.3 s of the
+24 s [`Armstrong_Small_Step.ogg`](https://commons.wikimedia.org/wiki/File:Armstrong_Small_Step.ogg)
+from Wikimedia Commons), resampled to 16 kHz mono int16 WAV with
+`soundfile` + `scipy.signal.resample_poly`.
+
+The segment boundaries are located by word-timestamp transcription, not a
+fixed offset: the source opens with a *different* utterance — "I'm going
+to step off the LM now" — so the original "first ~12 s" trim captured the
+wrong sentence and scored the reference below against audio that never
+contained it. Regenerate with `python tools/recut_armstrong.py` (needs
+outbound network + faster-whisper).
 
 - **Source**: https://upload.wikimedia.org/wikipedia/commons/d/dd/Armstrong_Small_Step.ogg
 - **Original work**: NASA recording of Neil Armstrong stepping onto
@@ -44,8 +52,8 @@ from Wikimedia Commons, downsampled from 11 025 Hz mono OGG/Vorbis to
   federal government ("NASA material is not protected by copyright
   unless noted").
 - **Reference transcript**: `"That's one small step for man, one giant
-  leap for mankind."` — the well-known phrase Armstrong utters in the
-  clip.
+  leap for mankind."` — the iconic phrase, now the actual content of the
+  trimmed clip.
 
 ### `marlene-nb.wav`
 

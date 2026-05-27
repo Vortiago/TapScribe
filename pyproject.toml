@@ -142,6 +142,11 @@ parakeet = [
     "tapscribe[parakeet-cpu]; sys_platform != 'darwin' or platform_machine != 'arm64'",
 ]
 canary = ["tapscribe[canary-cpu]"]
+# Scoring deps for the live-path benchmark harness (tools/bench_live.py):
+# jiwer computes WER/CER + the hit/sub/del/ins breakdown the sweep
+# reports. Kept out of `dev` so the unit-test CI install stays lean —
+# only operators running the benchmark pull it in.
+bench = ["jiwer>=3.0"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -199,6 +204,7 @@ markers = [
     "chaos: race-condition / error-recovery test exercising background tasks, abnormal close paths, or repeated rapid mutations. Opt out with -m 'not chaos'.",
     "browser_e2e: requires Playwright + Chromium (`pip install -e .[dev] && python -m playwright install chromium`). Opt out with -m 'not browser_e2e'.",
     "real_silero: opt out of the autouse silero stub in tests/conftest.py — exercises the real `detect_speech_silero` import path (only set on tests that need it).",
+    "real_live: drives the full live path (whisperlivekit-server child + SpeechGate + WlKRelay) on a real audio fixture and asserts a WER threshold. Skipped unless whisperlivekit + faster-whisper + jiwer are importable and the model can load. Heavy + downloads weights — not in the default CI matrix.",
 ]
 
 [tool.ruff]

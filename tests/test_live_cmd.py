@@ -247,6 +247,15 @@ def test_nb_whisper_uses_model_path_and_backend_policy_not_model_flag(tmp_path: 
     assert "--backend" not in cmd
 
 
+def test_backend_policy_emitted_only_when_set():
+    base = LiveConfig(model="small.en", language="en", host="h", port=8000)
+    assert "--backend-policy" not in build_live_cmd(EXE, base, use_mlx=True)
+
+    cfg = LiveConfig(model="small.en", language="en", host="h", port=8000, backend_policy="localagreement")
+    cmd = build_live_cmd(EXE, cfg, use_mlx=True)
+    assert cmd[cmd.index("--backend-policy") + 1] == "localagreement"
+
+
 def test_nb_whisper_ignores_use_mlx_true_in_argv(tmp_path: Path):
     """NB-Whisper routing forces faster-whisper regardless of operator
     MLX preference. The argv reflects that — no --backend mlx-whisper."""

@@ -322,7 +322,7 @@ def _wav_to_frames(path: Path, frame_bytes: int = 640) -> list[bytes]:
 
 
 async def test_write_frame_level_tracks_real_speech_wav(recorder: Recorder):
-    """End-to-end: stream a real ~12 s speech recording through
+    """End-to-end: stream a real ~9 s speech recording through
     TapFanOut frame by frame and verify the per-tap volume meter
     behaves like a real-world meter would.
 
@@ -337,7 +337,7 @@ async def test_write_frame_level_tracks_real_speech_wav(recorder: Recorder):
     """
     fixture = FIXTURES_AUDIO / "armstrong-en.wav"
     frames = _wav_to_frames(fixture)
-    assert len(frames) > 500, "expected ~600 frames from a 12 s WAV"
+    assert len(frames) > 400, "expected ~460 frames from the ~9 s WAV"
 
     levels: list[float] = []
     async with await TapFanOut.open(
@@ -376,7 +376,10 @@ async def test_write_frame_level_decays_through_silence_after_real_audio(recorde
     fixture = FIXTURES_AUDIO / "armstrong-en.wav"
     frames = _wav_to_frames(fixture)
     silence_frame = b"\x00" * 640
-    silent_tail = [silence_frame] * 30  # 30 * 20 ms = 600 ms — well past half-life
+    # 50 * 20 ms = 1 s. The recut clip ends on the loud "...for mankind"
+    # (held level ~0.65), so it needs ~1 s to drain below 0.05 at the ~165 ms
+    # half-life — vs the old clip's quiet tail that cleared in 600 ms.
+    silent_tail = [silence_frame] * 50
 
     peak_during_speech = 0.0
 
@@ -398,7 +401,7 @@ async def test_write_frame_level_decays_through_silence_after_real_audio(recorde
 
     assert peak_during_speech > 0.3, f"meter never lit up during real speech (peak={peak_during_speech:.3f})"
     assert final_level_after_silence < 0.05, (
-        f"meter failed to decay through 600 ms of silence (final={final_level_after_silence:.4f})"
+        f"meter failed to decay through 1 s of silence (final={final_level_after_silence:.4f})"
     )
 
 
@@ -841,6 +844,95 @@ async def test_gate_open_state_propagates_to_active_stream(
         await fan_out.write_frame(PCM_FRAME)
         snap = await recorder_with_relay.streams.snapshot()
         assert snap[0].gate_open is False
+
+
+async def test_lag_only_reported_while_gate_open(
+    recorder_with_relay: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A per-tap lag must only show while the gate is open. WlK's
+    `remaining_time_transcription` is wall_clock - last_processed_audio, so
+    it climbs during the silence we gate out even though no audio is in
+    flight — reporting that would paint a phantom, ever-growing backlog for
+    a speaker who has gone quiet. So: lag is surfaced while the gate is
+    open, cleared the instant it closes, and suppressed afterwards."""
+    from dataclasses import replace as dc_replace
+
+    from tapscribe.speech_gate import SpeechGate
+
+    recorder_with_relay.live.config = dc_replace(
+        recorder_with_relay.live.config, gate_kind="tapscribe", gate_pre_roll_ms=0
+    )
+
+    # VAD queue: open on call #1, hold, then close on call #3 (same shape as
+    # test_gate_open_state_propagates_to_active_stream).
+    def _open_then_close(*args, **kwargs):
+        events = [{"start": 0}, None, {"end": 0}]
+
+        def analyze(chunk):
+            return events.pop(0) if events else None
+
+        return SpeechGate(vad=analyze, pre_roll_ms=0)
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _open_then_close)
+
+    async def _lag():
+        snap = await recorder_with_relay.streams.snapshot()
+        return snap[0].lag_s
+
+    async with await TapFanOut.open(
+        recorder_with_relay,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-lag-gate",
+        do_record=True,
+        do_live=True,
+    ) as fan_out:
+        # Frames 1-2 open the gate; a metric arriving while open is genuine.
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out._on_metrics(2.0)
+        assert await _lag() is not None
+
+        # Frames 3-5 drive the gate closed → stale lag cleared immediately.
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out.write_frame(PCM_FRAME)
+        await fan_out.write_frame(PCM_FRAME)
+        assert await _lag() is None
+
+        # WlK keeps reporting a climbing remaining_time through the silence;
+        # it must stay suppressed, not resurface as phantom backlog.
+        await fan_out._on_metrics(99.0)
+        assert await _lag() is None
+
+
+async def test_bench_drive_one_stream_uses_production_fan_out(
+    recorder_with_relay: Recorder,
+    fake_wlk: FakeWlkThread,
+):
+    """tools/bench_live._drive_one_stream must run through the production
+    TapFanOut/Recorder path — not a parallel reimplementation. Drive it
+    against the fake WlK (no model needed) and confirm it opens a real tap,
+    feeds frames, samples per-tap state, reads settled lines back from
+    recorder.transcripts, and tears the tap down. Guards the contract that
+    the benchmark and production share one code path."""
+    from tools.bench_live import _drive_one_stream
+
+    frames = [PCM_FRAME] * 20
+    metrics, hypothesis, lines = await _drive_one_stream(
+        recorder_with_relay, identity="alice", name="Alice", frames=frames, speed=8.0
+    )
+
+    # Production-shaped results, read from the real recorder sinks.
+    assert isinstance(lines, list)
+    assert isinstance(hypothesis, str)
+    assert metrics["frames_in"] == len(frames)
+    for key in ("lag_mean_s", "lag_max_s", "gate_open_pct", "final_delay_s", "buffer_nonempty"):
+        assert key in metrics, f"missing production metric {key!r}"
+    # Frames reached the WlK relay (production path, not a side channel).
+    assert sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME)
+    # The tap was registered and then torn down via TapFanOut._close.
+    assert await recorder_with_relay.streams.snapshot() == []
 
 
 async def test_level_meter_reads_zero_while_gate_is_closed_even_on_loud_input(

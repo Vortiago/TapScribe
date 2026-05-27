@@ -23,6 +23,9 @@ recordings/
 # next run so re-launching is one Enter keystroke.
 .tapscribe-install.json
 
+# Live-benchmark results (tools/bench_live.py) — generated per run.
+bench-results/
+
 # Frontend typecheck tooling (devDep only, never shipped)
 frontend/node_modules/
 frontend/package-lock.json
