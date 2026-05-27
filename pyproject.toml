@@ -199,6 +199,7 @@ markers = [
     "chaos: race-condition / error-recovery test exercising background tasks, abnormal close paths, or repeated rapid mutations. Opt out with -m 'not chaos'.",
     "browser_e2e: requires Playwright + Chromium (`pip install -e .[dev] && python -m playwright install chromium`). Opt out with -m 'not browser_e2e'.",
     "real_silero: opt out of the autouse silero stub in tests/conftest.py — exercises the real `detect_speech_silero` import path (only set on tests that need it).",
+    "real_pip: end-to-end test that creates a throwaway venv and runs a real `pip install -e` through the install picker. Self-skips when a trivial editable install can't be built (no network / no build backend). Opt out with -m 'not real_pip'.",
 ]
 
 [tool.ruff]
