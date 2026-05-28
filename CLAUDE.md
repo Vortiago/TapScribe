@@ -160,6 +160,28 @@ green, check what's in the CI matrix you're not running:
 - The dashboard-UI CI job runs `pytest tests/e2e/test_dashboard_ui.py
   -q -m "not real_audio"`. Run the same locally before pushing.
 
+### The pre-push hook will stop a red push for you
+
+`.claude/hooks/pre-push.sh` (wired into `.claude/settings.json` as a
+`PreToolUse` hook on `Bash`) inspects every Bash command Claude is
+about to run. When the command actually invokes `git push`, the hook
+runs the same two checks CI's `tests` job runs — `ruff check
+tapscribe tools tests bridges/local-test-bridge` and `pytest tests` —
+and exits **2** if either is red, blocking the push and feeding the
+failure back to Claude. Anything that isn't a `git push` is passed
+through with exit 0, so the rest of the session pays no overhead.
+
+Don't treat the hook as a substitute for running the suite yourself
+while iterating: a 37-second wait at push time is *much* longer than
+the 5-second feedback loop of running pytest as you change code, and
+each blocked push wastes a turn. Run `pytest tests` before you call
+the work done; let the hook catch the cases you missed.
+
+Genuine emergency bypass: prefix the push with `CLAUDE_SKIP_PRE_PUSH=1`
+(e.g. mid-debug branch reset where the working tree is intentionally
+broken). It's an audible escape, not a silent one — don't reach for it
+just because the gate is annoying.
+
 ### Local playwright setup
 
 `pytest tests/e2e/test_dashboard_ui.py` skips itself if `playwright`
