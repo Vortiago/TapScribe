@@ -304,6 +304,276 @@ def test_build_pip_argv_drops_extras_brackets_when_empty():
     assert argv[-1] == "."
 
 
+# ── Skip-install stamp ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def tmp_stamp(monkeypatch, tmp_path):
+    """Point STAMP_FILE at a tmpdir so tests don't read/write the real
+    venv's install stamp."""
+    stamp = tmp_path / ".tapscribe-install-stamp.json"
+    monkeypatch.setattr(install_picker, "STAMP_FILE", stamp)
+    return stamp
+
+
+def test_install_stamp_round_trips(tmp_stamp):
+    install_picker.write_install_stamp(tmp_stamp, ["whisper-live", "whisper-cpu"], "abc123")
+    stamp = install_picker.read_install_stamp(tmp_stamp)
+    assert stamp == {"extras": ["whisper-live", "whisper-cpu"], "pyproject": "abc123"}
+
+
+def test_read_install_stamp_missing_file_returns_none(tmp_stamp):
+    assert install_picker.read_install_stamp(tmp_stamp) is None
+
+
+def test_read_install_stamp_malformed_returns_none(tmp_stamp):
+    tmp_stamp.write_text("not json")
+    assert install_picker.read_install_stamp(tmp_stamp) is None
+
+
+def test_install_is_current_true_when_extras_and_fingerprint_match():
+    stamp = {"extras": ["whisper-live", "whisper-cpu"], "pyproject": "fp"}
+    assert install_picker.install_is_current(stamp, ["whisper-live", "whisper-cpu"], "fp") is True
+
+
+def test_install_is_current_false_when_extras_differ():
+    stamp = {"extras": ["whisper-live", "whisper-cpu"], "pyproject": "fp"}
+    assert install_picker.install_is_current(stamp, ["whisper-live", "whisper-mlx"], "fp") is False
+
+
+def test_install_is_current_false_when_fingerprint_differs():
+    """A pyproject bump (e.g. after git pull) must re-trigger pip even
+    when the operator's selection is identical."""
+    stamp = {"extras": ["whisper-live", "whisper-cpu"], "pyproject": "old"}
+    assert install_picker.install_is_current(stamp, ["whisper-live", "whisper-cpu"], "new") is False
+
+
+def test_install_is_current_false_when_no_stamp():
+    assert install_picker.install_is_current(None, ["whisper-live"], "fp") is False
+
+
+# ── pyproject_fingerprint / package_is_installed / STAMP_FILE (real behaviour) ──
+
+
+@pytest.fixture
+def tmp_repo_root(monkeypatch, tmp_path):
+    """Point REPO_ROOT at a tmpdir with a writable pyproject.toml so tests
+    can exercise the REAL fingerprint against a file they control (and edit
+    mid-test), instead of monkeypatching pyproject_fingerprint to a constant."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    pyproject = root / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'tapscribe'\nversion = '0.1.0'\ndependencies = []\n")
+    monkeypatch.setattr(install_picker, "REPO_ROOT", root)
+    return pyproject
+
+
+def test_pyproject_fingerprint_is_sha256_of_file_and_stable(tmp_repo_root):
+    import hashlib
+
+    expected = hashlib.sha256(tmp_repo_root.read_bytes()).hexdigest()
+    assert install_picker.pyproject_fingerprint() == expected
+    # Stable: identical content hashes identically across calls.
+    assert install_picker.pyproject_fingerprint() == expected
+
+
+def test_pyproject_fingerprint_changes_when_file_content_changes(tmp_repo_root):
+    """The core invalidation signal: a real edit to pyproject.toml (a
+    dependency bump) must yield a different fingerprint."""
+    before = install_picker.pyproject_fingerprint()
+    tmp_repo_root.write_text(
+        "[project]\nname = 'tapscribe'\nversion = '0.1.0'\ndependencies = ['torch>=2.2']\n"
+    )
+    after = install_picker.pyproject_fingerprint()
+    assert before != after
+
+
+def test_pyproject_fingerprint_empty_string_when_missing(monkeypatch, tmp_path):
+    """No readable pyproject → sentinel "" that can never equal a stored
+    fingerprint, so we never skip on the strength of a missing file."""
+    empty = tmp_path / "no-repo"
+    empty.mkdir()
+    monkeypatch.setattr(install_picker, "REPO_ROOT", empty)
+    assert install_picker.pyproject_fingerprint() == ""
+
+
+def test_package_is_installed_true_for_importable_module():
+    # Exercises the real importlib.find_spec wiring against a stdlib module
+    # that is always importable.
+    assert install_picker.package_is_installed("json") is True
+
+
+def test_package_is_installed_false_for_absent_module():
+    assert install_picker.package_is_installed("tapscribe_not_a_real_pkg_zzz") is False
+
+
+def test_stamp_file_lives_inside_the_venv_prefix():
+    """The skip-stamp must live under sys.prefix so that start.sh's
+    `rm -rf .venv` (venv recreation) drops it and forces a fresh install.
+    Pin the location so a refactor can't silently move it to a
+    venv-surviving path like REPO_ROOT and re-introduce the stale-stamp bug."""
+    assert install_picker.STAMP_FILE == Path(sys.prefix) / ".tapscribe-install-stamp.json"
+
+
+def _patch_run_install_counter(monkeypatch) -> list[list[str]]:
+    """Replace run_install with a no-op that records each call's extras."""
+    calls: list[list[str]] = []
+
+    def fake_run_install(extras, *, dry_run=False):
+        calls.append(list(extras))
+        return 0
+
+    monkeypatch.setattr(install_picker, "run_install", fake_run_install)
+    return calls
+
+
+# Named stubs for monkeypatching install_picker's module-level functions in
+# the tests below. Defined as proper functions (not lambdas) so CodeQL's
+# "Unnecessary lambda" rule stays clean — every stub here has to match the
+# real signature even though the body ignores the arguments.
+
+
+def _detect_caps_cpu(*, force_no_mlx=False):
+    """Stand-in for `install_picker.detect_caps` that returns a deterministic
+    Linux/x86_64 CPU-only profile regardless of the host or the --no-mlx flag.
+    Lets the main() tests run identically across CI runners."""
+    return _caps()
+
+
+def _package_present():
+    return True
+
+
+def _package_missing():
+    return False
+
+
+def _pip_install_fails(extras, *, dry_run=False):
+    """Stand-in for `install_picker.run_install` that pretends pip exited
+    non-zero, so tests can verify failure paths without invoking real pip."""
+    return 1
+
+
+def test_main_skips_pip_on_unchanged_rerun(tmp_state, tmp_stamp, monkeypatch, capsys):
+    """The behaviour the operator asked for: an unchanged re-run installs
+    once, stamps it, and skips pip the second time — telling the operator
+    why instead of silently doing nothing."""
+    monkeypatch.setattr(install_picker, "detect_caps", _detect_caps_cpu)
+    monkeypatch.setattr(install_picker, "package_is_installed", _package_present)
+    calls = _patch_run_install_counter(monkeypatch)
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1  # first run installs
+    assert tmp_stamp.exists()
+    capsys.readouterr()  # drop first-run output
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1  # second, unchanged run skips pip
+    assert "skipping pip" in capsys.readouterr().out
+
+
+def test_main_reinstalls_when_package_missing_despite_current_stamp(tmp_state, tmp_stamp, monkeypatch):
+    """A current stamp must NOT short-circuit pip when the package itself is
+    gone (manual `pip uninstall`, out-of-band venv recreation) — otherwise
+    the picker would leave a broken install with no pip run."""
+    monkeypatch.setattr(install_picker, "detect_caps", _detect_caps_cpu)
+    calls = _patch_run_install_counter(monkeypatch)
+
+    monkeypatch.setattr(install_picker, "package_is_installed", _package_present)
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1  # installed + stamped
+
+    monkeypatch.setattr(install_picker, "package_is_installed", _package_missing)
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 2  # stamp current, but package gone → reinstall
+
+
+def test_main_reinstalls_when_selection_changes(tmp_state, tmp_stamp, monkeypatch):
+    """Flipping a family back on between runs must re-run pip — the stamp
+    only suppresses genuinely-unchanged re-runs."""
+    monkeypatch.setattr(install_picker, "detect_caps", _detect_caps_cpu)
+    calls = _patch_run_install_counter(monkeypatch)
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1
+
+    # Operator edits their saved selection (here: enable Voxtral too).
+    sel = Selection.load(tmp_state, _caps())
+    sel.choices["voxtral"] = FamilyChoice(enabled=True, backend=BACKEND_CPU)
+    sel.save(tmp_state)
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 2  # changed selection forces a fresh install
+
+
+def test_main_reinstalls_when_pyproject_actually_changes(tmp_state, tmp_stamp, tmp_repo_root, monkeypatch):
+    """End-to-end for the dependency-bump path, with NO mocking of the
+    fingerprint: a real edit to pyproject.toml re-runs pip, and the fresh
+    stamp re-stabilises so the next unchanged run skips again. Exercises
+    pyproject_fingerprint + read/write_install_stamp against real files."""
+    monkeypatch.setattr(install_picker, "detect_caps", _detect_caps_cpu)
+    monkeypatch.setattr(install_picker, "package_is_installed", _package_present)
+    calls = _patch_run_install_counter(monkeypatch)
+
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1  # first install
+    # Same selection, untouched pyproject → skip.
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 1
+
+    # A real dependency bump lands in pyproject.toml between runs.
+    tmp_repo_root.write_text(
+        "[project]\nname = 'tapscribe'\nversion = '0.1.0'\ndependencies = ['torch>=2.2']\n"
+    )
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 2  # changed fingerprint forces a reinstall
+
+    # The reinstall re-stamped with the new fingerprint, so a fourth
+    # unchanged run skips again — proving the stamp was actually refreshed.
+    assert install_picker.main(["--non-interactive"]) == 0
+    assert len(calls) == 2
+
+
+def test_main_stamp_records_resolved_extras_and_real_fingerprint(tmp_state, tmp_stamp, monkeypatch):
+    """The stamp the install writes must be exactly what install_is_current
+    later compares: the real resolved extras and the real pyproject
+    fingerprint. A drift between what's written and what's read would make
+    every run either always-skip (stale install) or never-skip (the churn
+    we set out to remove)."""
+    monkeypatch.setattr(install_picker, "detect_caps", _detect_caps_cpu)
+    monkeypatch.setattr(install_picker, "package_is_installed", _package_present)
+    _patch_run_install_counter(monkeypatch)
+
+    assert install_picker.main(["--non-interactive"]) == 0
+
+    written = json.loads(tmp_stamp.read_text())
+    expected_extras = install_picker.resolve_extras(Selection.load(tmp_state, _caps()), _caps())
+    # Default selection on a plain CPU box is Whisper/CPU.
+    assert expected_extras == ["whisper-live", "whisper-cpu"]
+    assert written["extras"] == expected_extras
+    assert written["pyproject"] == install_picker.pyproject_fingerprint()
+    # And the round-trip predicate agrees the install is current.
+    assert install_picker.install_is_current(written, expected_extras, install_picker.pyproject_fingerprint())
+
+
+def test_main_does_not_stamp_on_pip_failure(tmp_state, tmp_stamp, monkeypatch):
+    """A failed install must not write the stamp — otherwise the next run
+    would wrongly skip pip on a broken install."""
+    monkeypatch.setattr(install_picker, "detect_caps", _detect_caps_cpu)
+    monkeypatch.setattr(install_picker, "run_install", _pip_install_fails)
+
+    assert install_picker.main(["--non-interactive"]) == 1
+    assert not tmp_stamp.exists()
+
+
+def test_main_dry_run_does_not_write_stamp(tmp_state, tmp_stamp, monkeypatch):
+    """--dry-run is read-only: it must not persist a stamp that would let
+    a later real run skip the install."""
+    monkeypatch.setattr(install_picker, "detect_caps", _detect_caps_cpu)
+    assert install_picker.main(["--non-interactive", "--dry-run"]) == 0
+    assert not tmp_stamp.exists()
+
+
 # ── Picker command parsing (numbered fallback) ──────────────────────
 
 

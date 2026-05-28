@@ -53,7 +53,9 @@ Write-Host "[start] Upgrading pip…"
 # Hands the install decision to tools/install_picker.py: prompts the
 # operator for which model families (Whisper / Voxtral / Parakeet /
 # Canary) to install, pre-checks the saved selection so re-runs are one
-# keystroke, then runs `pip install -e ".[…]"` for the resolved extras.
+# keystroke, then runs `pip install -e ".[…]"` for the resolved extras —
+# skipping pip entirely when the selection and pyproject.toml are
+# unchanged since the last install (no more uninstall/reinstall churn).
 $PickerArgs = @()
 if ($NoMlx)           { $PickerArgs += "--no-mlx" }
 if ($NonInteractive)  { $PickerArgs += "--non-interactive" }
