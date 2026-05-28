@@ -599,3 +599,183 @@ async def test_dashboard_with_real_audio_and_whisper(
             )
         finally:
             await browser.close()
+
+
+async def test_ui_only_click_updates_dom_without_a_fresh_poll(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,
+    tmp_path: Path,
+):
+    """The dashboard's responsiveness guard: a click that only changes
+    local UI state (here, expanding a WAV's inline transcript) must apply
+    from the client-side cache, NOT wait on a fresh /api/state fetch.
+
+    We transcribe a WAV, let the dashboard cache it, then kill every
+    further /api/state poll and click to expand. If the expand still
+    happens, the re-render came from cache. Before the fix the handler
+    awaited /api/state (now dead), so the expand never rendered — exactly
+    the "I click and nothing happens until I wait" symptom.
+    """
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    scripted = "responsive expand check from Alice"
+    fake_transcriber.text_by_speaker["Alice"] = scripted
+
+    src = synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src,
+        utterance_id="utt-resp-expand",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+    recorded = sorted(rec.session_dir.glob("*.wav"))
+    assert len(recorded) == 1, f"expected one recorded WAV, got {[w.name for w in recorded]}"
+    wav_name = recorded[0].name
+
+    import httpx
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            "/api/transcribe",
+            json={"session": rec.session_start, "name": wav_name, "model": "tiny.en"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+
+            # Wait for the transcribed WAV row to render — proves a poll
+            # has populated the client cache with this WAV's transcript.
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const row = document.querySelector(
+                    '[data-toggle-wav="{rec.session_start}/{wav_name}"]'
+                  )?.closest('.wav-row');
+                  return row && /took\\s+\\d/.test(row.innerText);
+                }}
+                """,
+                timeout=10000,
+            )
+
+            # Kill every further /api/state poll. From here the dashboard
+            # has no fresh server data; a UI-only click must apply from
+            # the client-side cache or not at all.
+            async def _kill_state(route):
+                await route.fulfill(status=503, body="down")
+
+            await page.route("**/api/state", _kill_state)
+
+            await page.locator(f'.wav-list [data-toggle-wav="{rec.session_start}/{wav_name}"]').click()
+            # The 1500ms bound is below what any rescuing poll could deliver
+            # (polls are dead) — so a pass means the expand rendered from
+            # cache on click, not from a network round trip.
+            await page.wait_for_function(
+                f"""
+                () => Array.from(document.querySelectorAll('.wav-list .expand-tx'))
+                  .some((el) => el.innerText.includes({scripted!r}))
+                """,
+                timeout=1500,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_model_select_change_does_not_block_re_render(
+    running_recorder: RunningRecorder,
+    tmp_path: Path,
+):
+    """The model picker is a <select> inside the detail pane. Changing it
+    leaves the select focused, which trips the focused-input guard in
+    renderSessionsIfChanged and would block a cache re-render entirely —
+    so the model-change handler must blur the select before re-rendering.
+
+    With polls killed, the only thing that can re-render the pane is the
+    change handler itself; the fix rebuilds the pane, so focus leaves the
+    (recreated) select. Self-skips where the catalog has <2 models (the
+    synthetic CI e2e job installs no transcriber backends), since a change
+    event needs a second option to select.
+    """
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    src = synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src,
+        utterance_id="utt-resp-model",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+
+            await page.wait_for_selector("[data-model-pick]", timeout=10000)
+            # The change handler needs a second option to switch to.
+            values = await page.eval_on_selector_all(
+                "[data-model-pick] option", "els => els.map(e => e.value)"
+            )
+            current = await page.eval_on_selector("[data-model-pick]", "el => el.value")
+            target = next((v for v in values if v and v != current), None)
+            if target is None:
+                pytest.skip("model catalog has <2 options in this env")
+
+            # Kill further polls so only the change handler can re-render.
+            async def _kill_state(route):
+                await route.fulfill(status=503, body="down")
+
+            await page.route("**/api/state", _kill_state)
+
+            # Reproduce the real-user precondition: the <select> is the
+            # focused element when its change event fires. `select_option`
+            # alone doesn't DOM-focus it, so focus + value + change are
+            # dispatched together — exactly the state that trips the
+            # focused-input guard in renderSessionsIfChanged.
+            await page.eval_on_selector(
+                "[data-model-pick]",
+                """
+                (el, value) => {
+                  el.focus();
+                  el.value = value;
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                """,
+                target,
+            )
+            # The handler must blur the select and re-render the pane, so
+            # focus leaves it. Before the fix the select kept focus and the
+            # dependent UI never updated until a later poll.
+            await page.wait_for_function(
+                """
+                () => {
+                  const el = document.activeElement;
+                  return !el || !el.hasAttribute('data-model-pick');
+                }
+                """,
+                timeout=1500,
+            )
+        finally:
+            await browser.close()

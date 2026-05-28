@@ -359,6 +359,42 @@ def test_new_session_rotates_recorder_session(client, recorder_under_test):
 # ---------------------------------------------------------------------------
 
 
+def test_api_state_runs_gather_sessions_off_event_loop(client, recorder_under_test, monkeypatch):
+    """The 500ms /api/state poll walks every session + WAV on disk
+    (gather_sessions). If that runs inline on the single-threaded event
+    loop, an operator's click POST queues behind the scan and the UI
+    feels dead until it finishes. The walk must be offloaded to a worker
+    thread (asyncio.to_thread) so the loop stays free.
+
+    Deterministic check: recorder.jobs.snapshot() runs on the event-loop
+    thread before the offload, so it pins the loop-thread id;
+    gather_sessions must run on a *different* thread."""
+    import threading
+
+    from tapscribe.app import gather_sessions as _real_gather
+
+    seen: dict[str, int] = {}
+
+    real_snapshot = recorder_under_test.jobs.snapshot
+
+    def snapshot_spy():
+        seen["loop"] = threading.get_ident()
+        return real_snapshot()
+
+    monkeypatch.setattr(recorder_under_test.jobs, "snapshot", snapshot_spy)
+
+    def gather_spy(**kw):
+        seen["gather"] = threading.get_ident()
+        return _real_gather(**kw)
+
+    monkeypatch.setattr("tapscribe.app.gather_sessions", gather_spy)
+
+    assert client.get("/api/state").status_code == 200
+    assert seen["gather"] != seen["loop"], (
+        "gather_sessions ran on the event-loop thread — /api/state blocks click POSTs during the disk walk"
+    )
+
+
 def test_api_state_returns_recorder_view(client, recorder_under_test):
     r = client.get("/api/state")
     assert r.status_code == 200

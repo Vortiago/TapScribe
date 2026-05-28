@@ -312,15 +312,32 @@ async def api_new_session(recorder: Recorder = Depends(get_recorder)):
 # ---------------------------------------------------------------------------
 
 
+def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The blocking, disk-bound half of /api/state: walk every session +
+    WAV (gather_sessions) and read the editable config files. Pulled into
+    one function so api_state can run it on a worker thread — left inline
+    it would block the single event loop for the duration of the walk and
+    serialise the operator's click POSTs behind the poll."""
+    return {
+        "sessions": gather_sessions(current_session=current_session, jobs=jobs_snapshot),
+        "prompt": read_prompt(),
+        "live_prompt": read_live_prompt(),
+        "hotwords": read_hotwords(),
+        "halluc_rules": hallucinations_mod.parse_rules(),
+        "inputs_support": _compute_inputs_support(),
+    }
+
+
 @app.get("/api/state")
 async def api_state(recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
-    prompt = read_prompt()
-    live_prompt = read_live_prompt()
-    hotwords = read_hotwords()
-    halluc_rules = hallucinations_mod.parse_rules()
-    inputs_support = _compute_inputs_support()
+    blob = await asyncio.to_thread(_build_state_blob, recorder.session_start, jobs_snapshot)
+    prompt = blob["prompt"]
+    live_prompt = blob["live_prompt"]
+    hotwords = blob["hotwords"]
+    halluc_rules = blob["halluc_rules"]
+    inputs_support = blob["inputs_support"]
     # The per-row rec/live toggles control the per-identity preference,
     # not the in-flight WS snapshot — so the button state needs to track
     # the current preference, otherwise clicks land server-side but the
@@ -332,10 +349,7 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
         row["record"] = pref.record
         row["live"] = pref.live
         active.append(row)
-    sessions_list = gather_sessions(
-        current_session=recorder.session_start,
-        jobs=jobs_snapshot,
-    )
+    sessions_list = blob["sessions"]
     # Powers the "· N sessions override this" footer in the default config panel.
     override_counts = {"prompt": 0, "hotwords": 0}
     for s in sessions_list:
