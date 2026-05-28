@@ -193,6 +193,14 @@ filterwarnings = [
     # deprecated jit.load. Tracked at github.com/snakers4/silero-vad —
     # remove when silero migrates to torch.export.
     "ignore:.*torch\\.jit\\.load.*is deprecated.*:DeprecationWarning",
+    # starlette 1.x started nagging that `httpx` should become `httpx2`
+    # in TestClient. fastapi.testclient -> starlette.testclient imports
+    # raise this at module load, which breaks every collection that uses
+    # TestClient under filterwarnings=error. The warning class is its own
+    # `UserWarning` subclass (NOT a DeprecationWarning), so the filter
+    # has to name it explicitly. Remove once starlette finalises the
+    # httpx2 migration (or pins httpx2 itself).
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
 markers = [
     "real_audio: end-to-end test that streams real audio fixtures and runs a real Whisper backend. Skipped unless tests/fixtures/audio/ is populated and faster-whisper is installed.",
