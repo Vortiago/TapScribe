@@ -144,7 +144,6 @@ function drawWaveform(canvas, peaks, durationS, regions, opts = {}) {
 
   // 4. peaks — green where inside a kept region, gray where dropped/silence
   const inRegion = (t) => regions.some((r) => t >= r.startS && t <= r.endS);
-  const step = Math.max(1, Math.floor(n / w)); // sub-pixel decimation
   for (let i = 0; i < n; i += 1) {
     const t = (i / n) * durationS;
     const v = peaks[i];
@@ -176,25 +175,6 @@ function drawWaveform(canvas, peaks, durationS, regions, opts = {}) {
     const x = tToX(r.startS) + 3;
     ctx.fillText(`#${i + 1}`, x, 12);
   });
-}
-
-// talk-time stacked SVG bar already done in DOM; level history grid:
-function drawLevelHistory(canvas, levels, color) {
-  const { ctx, w, h } = dpiSetup(canvas, 64);
-  ctx.clearRect(0, 0, w, h);
-  ctx.strokeStyle = "#141a22"; ctx.lineWidth = 1;
-  for (let gy = 0; gy <= 4; gy++) {
-    const y = (gy / 4) * h;
-    ctx.beginPath(); ctx.moveTo(0, y + .5); ctx.lineTo(w, y + .5); ctx.stroke();
-  }
-  const n = levels.length, bw = w / n;
-  ctx.fillStyle = color;
-  for (let i = 0; i < n; i++) {
-    const bh = Math.max(1, levels[i] * (h - 2));
-    ctx.globalAlpha = .85;
-    ctx.fillRect(i * bw + 0.5, h - bh, Math.max(1.5, bw - 2), bh);
-  }
-  ctx.globalAlpha = 1;
 }
 
 // ===========================================================================
