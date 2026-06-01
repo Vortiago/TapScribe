@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe · Clarity</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Left nav sidebar -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand__mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" fill="none">
+              <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#bg)" />
+              <path d="M9 16h2.2l1.6-5.2L16 22l2.4-9.4L20 18h3" stroke="#fff" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" />
+              <defs>
+                <linearGradient id="bg" x1="2" y1="2" x2="30" y2="30">
+                  <stop stop-color="#6b8bf5" />
+                  <stop offset="1" stop-color="#9d7af0" />
+                </linearGradient>
+              </defs>
+            </svg>
+          </span>
+          <span class="brand__text">TapScribe</span>
+        </div>
+
+        <nav class="nav" id="navItems"><!-- nav items injected --></nav>
+
+        <div class="sidebar__foot">
+          <div class="rec-status">
+            <span class="rec-status__dot"></span>
+            <div class="rec-status__text">
+              <div class="rec-status__title">Recording</div>
+              <div class="rec-status__sub">Nordic Sync · 2 live</div>
+            </div>
+          </div>
+          <button class="theme-btn" onclick="toggleTheme()" aria-label="Toggle dark mode">
+            <span class="theme-btn__ic theme-btn__ic--sun">☀</span>
+            <span class="theme-btn__ic theme-btn__ic--moon">☾</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Main content (view injected here) -->
+      <main class="main" id="main"></main>
+    </div>
+
+    <!-- Setup wizard slide-over -->
+    <div class="wizard-scrim" id="wizard">
+      <div class="wizard" id="wizardPanel"><!-- wizard injected --></div>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -299,14 +299,14 @@ body {
 
 /* the lane (canvas waveform) */
 .lane {
-  position: relative; min-height: 96px;
+  position: relative; min-height: 84px;
   background:
     linear-gradient(180deg, rgba(255,255,255,0.015), transparent 40%),
     var(--bg-3);
 }
 .lane canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .lane__center { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: rgba(255,255,255,0.06); }
-.track.is-open .lane { min-height: 168px; }
+.track.is-open .lane { min-height: 150px; }
 
 /* overlay readout chip pinned on the focused lane */
 .lane__tag {
@@ -335,7 +335,7 @@ body {
 .livelog {
   border-top: 1px solid var(--line);
   background: linear-gradient(180deg, var(--bg-2), var(--bg-rail));
-  max-height: 248px; display: flex; flex-direction: column;
+  height: 172px; min-height: 172px; display: flex; flex-direction: column;
 }
 .livelog__head {
   display: flex; align-items: center; justify-content: space-between;
@@ -514,7 +514,6 @@ select.selectish { appearance: none; background-image: linear-gradient(45deg, tr
 .wavitem__dur { font-family: var(--mono); font-size: 11px; color: var(--ink-3); flex: 0 0 auto; }
 .minibar { position: relative; height: 26px; margin-top: 9px; border-radius: 5px; background: #11141b; overflow: hidden; border: 1px solid var(--line-soft); }
 .minibar canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.minibar__clip { position: absolute; top: 0; bottom: 0; background: var(--spk0-soft); border-left: 1.5px solid var(--cut); border-right: 1.5px solid var(--cut); }
 .wavitem__foot { display: flex; gap: 7px; margin-top: 8px; flex-wrap: wrap; }
 .cliptag { font-family: var(--mono); font-size: 10px; color: var(--ink-1); background: var(--bg-2); border: 1px solid var(--line); padding: 2px 7px; border-radius: 4px; }
 .cliptag b { color: var(--spk3); }
