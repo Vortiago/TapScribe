@@ -521,21 +521,20 @@ def _move_sidecars_with_wav(src_wav: Path, dst_wav: Path) -> None:
         shutil.move(str(transcripts), str(dst_wav.with_suffix(".transcripts")))
 
 
+def _safe_size(p: Path) -> int:
+    """Size of `p` in bytes, or 0 if it isn't a file or can't be statted.
+    The `bytes_freed` the delete endpoints report is advisory, so a stat
+    race (a path vanishing mid-walk) must never abort the delete."""
+    try:
+        return p.stat().st_size if p.is_file() else 0
+    except OSError:
+        return 0
+
+
 def _dir_size(d: Path) -> int:
-    """Best-effort sum of file sizes under `d`, for the `bytes_freed`
-    figure reported by the delete endpoints. Purely informational — a
-    stat race (a file vanishing mid-walk) must not abort a delete, so
-    each stat swallows OSError and contributes 0."""
-    total = 0
-    for f in d.rglob("*"):
-        try:
-            if f.is_file():
-                total += f.stat().st_size
-        except OSError:
-            # Advisory size only; a vanished/locked entry shouldn't fail
-            # the surrounding delete. Skip it.
-            continue
-    return total
+    """Best-effort sum of file sizes under `d`, for the delete endpoints'
+    advisory `bytes_freed`."""
+    return sum(_safe_size(f) for f in d.rglob("*"))
 
 
 def _delete_wav_with_sidecars(wav: Path) -> int:
@@ -552,19 +551,10 @@ def _delete_wav_with_sidecars(wav: Path) -> int:
     filename — so the `safe_name` round-trip rule (which guards path
     construction against `py/path-injection`) does not apply here; deleting
     an already-validated Path is safe."""
-    freed = 0
-    try:
-        freed += wav.stat().st_size
-    except OSError:
-        # Advisory size only (see _dir_size); proceed with the delete.
-        pass
+    freed = _safe_size(wav)
     legacy = wav.with_suffix(".json")
     if legacy.is_file():
-        try:
-            freed += legacy.stat().st_size
-        except OSError:
-            # Advisory size only; proceed with the delete.
-            pass
+        freed += _safe_size(legacy)
         legacy.unlink(missing_ok=True)
     transcripts = wav.with_suffix(".transcripts")
     if transcripts.is_dir():

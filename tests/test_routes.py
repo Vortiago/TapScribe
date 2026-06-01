@@ -978,12 +978,16 @@ def test_delete_wav_stripped_region_only(client, recorder_under_test):
 def test_delete_wav_rejects_bad_input(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
-    # Non-.wav name → 404 (resolve_wav rejects non-audio).
-    assert client.delete("/api/wav/s/session-meta.json").status_code == 404
+    # Non-.wav name → 404 (resolve_wav rejects non-audio). Assign first —
+    # an HTTP call inside `assert` would vanish under `python -O`.
+    r = client.delete("/api/wav/s/session-meta.json")
+    assert r.status_code == 404
     # Unknown source → 400 (whitelisted before any filesystem touch).
-    assert client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav?source=bogus").status_code == 400
+    r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav?source=bogus")
+    assert r.status_code == 400
     # Missing WAV → 404.
-    assert client.delete("/api/wav/s/20260101T999999Z__nope__zzz.wav").status_code == 404
+    r = client.delete("/api/wav/s/20260101T999999Z__nope__zzz.wav")
+    assert r.status_code == 404
     # The real WAV is untouched by any of the above.
     assert (sd / "20260101T000000Z__alice__abc.wav").is_file()
 

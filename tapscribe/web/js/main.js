@@ -812,7 +812,10 @@ The source folder will be deleted. The target's merged transcript (if any) will 
       + (source === "stripped" ? "?source=stripped" : "");
     try { await del(url); }
     catch (e) { alert(`Delete WAV failed: ${e}`); return; }
-    if (expandedWav?.startsWith(`${session}/${name}`)) expandedWav = null;
+    // Drop the expanded-row key if it pointed at the deleted WAV (original
+    // key is "<session>/<name>"; a stripped region carries the @stripped suffix).
+    const key = `${session}/${name}`;
+    if (expandedWav === key || expandedWav === `${key}@stripped`) expandedWav = null;
     lastSessionsSig = "";
     await refresh();
   }
