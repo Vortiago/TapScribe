@@ -52,7 +52,6 @@ function shapePeaks(base, { gain = 1, bias = 0, phase = 0, bursts = null }) {
     return Math.max(0, Math.min(1, v));
   });
 }
-const PPS = REP_WAV.peaksPerS;
 const TRACK_PEAKS = {
   atle: REP_WAV.peaks,
   // Oslo room: two diarized speakers occupy different time windows
@@ -72,6 +71,8 @@ const OSLO_DIA = [
 
 const TAP_ORDER = ["atle", "room-oslo", "mette", "james"];
 const tapByIdentity = (id) => LIVE_TAPS.find((t) => t.identity === id);
+// Escape for safe interpolation into innerHTML (text + attribute contexts).
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // ----------------------------------------------------------------------------
 // Canvas waveform drawing
@@ -460,7 +461,7 @@ function buildInspector() {
     </div>
     <div class="model-card">
       <div class="model-card__top">
-        <span class="model-card__fam">${state.family}</span>
+        <span class="model-card__fam">${esc(state.family)}</span>
         <span class="model-card__id">${md.display}</span>
       </div>
       <div class="model-card__desc">${md.desc}</div>

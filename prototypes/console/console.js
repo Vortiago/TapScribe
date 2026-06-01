@@ -22,7 +22,7 @@ const langChip = (code, extra = "") => {
   const l = helpers.lang(code);
   return `<span class="lang-chip ${extra}"><span class="fl">${l.flag}</span>${l.code.toUpperCase()}</span>`;
 };
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // ---------------------------------------------------------------------------
 // TOP BAR

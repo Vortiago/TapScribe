@@ -2,7 +2,6 @@
 // All data comes from the shared canonical fixture; nothing here is real.
 import {
   MOCK,
-  LANGS,
   SPEAKERS,
   MODELS,
   selectedModel,
