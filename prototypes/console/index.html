@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TapScribe Console</title>
+<link rel="stylesheet" href="./console.css" />
+</head>
+<body>
+<div id="app" aria-busy="true">
+  <!-- ===================== TOP STATUS BAR ===================== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M2 13 L6 13 L8 5 L11 19 L14 9 L16 13 L22 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
+      </span>
+      <span class="brand-name">TapScribe</span>
+      <span class="brand-sub">console</span>
+      <span class="brand-ver" id="appVer">v0.0.0</span>
+    </div>
+
+    <div class="topbar-mid">
+      <span class="rec-pill" id="recPill" title="Recording armed">
+        <span class="rec-dot"></span><span class="rec-label">REC</span>
+      </span>
+      <span class="topbar-sep"></span>
+      <div class="backend-chips" id="topBackends" aria-label="compute backends"></div>
+    </div>
+
+    <div class="topbar-right">
+      <div class="net-stat" title="ingest / drain throughput">
+        <span class="net-k">IN</span><span class="net-v" id="statIn">— msg/s</span>
+        <span class="net-k">DRAIN</span><span class="net-v" id="statDrain">— q</span>
+      </div>
+      <span class="topbar-sep"></span>
+      <span class="clock" id="clock" title="session uptime">00:00:00</span>
+      <button class="cmdk-hint" id="cmdkBtn" title="Open command palette">
+        <kbd>⌘</kbd><kbd>K</kbd>
+      </button>
+    </div>
+  </header>
+
+  <!-- ===================== VIEW: BOARD ===================== -->
+  <main class="board" id="view-board">
+    <section class="tile tile-taps span-7" aria-label="Live taps">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph live"></span>LIVE TAPS</h2>
+        <div class="tile-meta">
+          <span class="badge badge-ok" id="tapsActive">0 active</span>
+          <span class="tile-key"><kbd>T</kbd> arm tap</span>
+        </div>
+      </div>
+      <div class="tile-body no-pad">
+        <table class="dtable taps-table" id="tapsTable">
+          <thead>
+            <tr>
+              <th class="col-spk">Speaker</th>
+              <th class="col-mic">Mic</th>
+              <th class="col-lang">Lang</th>
+              <th class="col-level">Level</th>
+              <th class="col-spark">Activity</th>
+              <th class="num col-lag">Lag</th>
+              <th class="col-gate">Gate</th>
+              <th class="col-toggles">R / L</th>
+            </tr>
+          </thead>
+          <tbody id="tapsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tile tile-now span-5" aria-label="Now speaking">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph cyan"></span>NOW SPEAKING</h2>
+        <span class="tile-meta dim" id="nowCount">—</span>
+      </div>
+      <div class="tile-body" id="nowLane"></div>
+    </section>
+
+    <section class="tile tile-feed span-5" aria-label="Live caption feed">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph mag"></span>LIVE FEED</h2>
+        <span class="tile-meta dim">captions · settling</span>
+      </div>
+      <div class="tile-body feed-body" id="feedBody"></div>
+    </section>
+
+    <section class="tile tile-diar span-3" aria-label="Diarization">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph amber"></span>DIARIZATION</h2>
+        <span class="tile-meta dim">room split</span>
+      </div>
+      <div class="tile-body" id="diarBody"></div>
+    </section>
+
+    <section class="tile tile-strip span-4" aria-label="Strip silence">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph green"></span>STRIP&nbsp;SILENCE</h2>
+        <span class="tile-meta mono dim" id="stripFile">—</span>
+      </div>
+      <div class="tile-body" id="stripMini"></div>
+    </section>
+
+    <section class="tile tile-sessions span-7" aria-label="Sessions">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph"></span>SESSIONS</h2>
+        <span class="tile-meta dim">sortable · click to open</span>
+      </div>
+      <div class="tile-body no-pad">
+        <table class="dtable sessions-table" id="sessionsTable">
+          <thead>
+            <tr>
+              <th data-sort="label">Session</th>
+              <th data-sort="startedAt">Started</th>
+              <th class="num" data-sort="durationS">Dur</th>
+              <th class="num" data-sort="wavCount">WAV</th>
+              <th>Languages</th>
+              <th class="col-tx">Tx</th>
+            </tr>
+          </thead>
+          <tbody id="sessionsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tile tile-speakers span-5" aria-label="Speaker profiles">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph"></span>PROFILES <span class="dim xsub">/ per-mic · cross-session</span></h2>
+        <span class="tile-meta dim">keyed by mic</span>
+      </div>
+      <div class="tile-body no-pad">
+        <table class="dtable spk-table" id="spkTable">
+          <thead>
+            <tr>
+              <th>Speaker</th>
+              <th>Mic</th>
+              <th>Langs</th>
+              <th class="num">Gate</th>
+              <th class="num">Floor</th>
+              <th class="num">Seen</th>
+            </tr>
+          </thead>
+          <tbody id="spkBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== VIEW: STRIP + MODEL ===================== -->
+  <main class="board board-focus" id="view-strip" hidden>
+    <section class="tile tile-stripbig span-8" aria-label="Strip silence detail">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph green"></span>STRIP&nbsp;SILENCE <span class="dim xsub">/ cut preview</span></h2>
+        <span class="tile-meta mono dim" id="stripFileBig">—</span>
+      </div>
+      <div class="tile-body" id="stripBig"></div>
+    </section>
+
+    <section class="tile tile-model span-4" aria-label="Transcription model">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph cyan"></span>MODEL</h2>
+        <span class="tile-meta dim">engine · catalog</span>
+      </div>
+      <div class="tile-body" id="modelPanel"></div>
+    </section>
+  </main>
+
+  <!-- ===================== VIEW: SPEAKERS ===================== -->
+  <main class="board board-focus" id="view-speakers" hidden>
+    <section class="tile tile-prof-full span-8" aria-label="Speaker profiles full">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph"></span>SPEAKER&nbsp;PROFILES <span class="dim xsub">/ reusable per-mic configs</span></h2>
+        <span class="tile-meta dim">stored across sessions · keyed by microphone</span>
+      </div>
+      <div class="tile-body" id="profCards"></div>
+    </section>
+
+    <section class="tile tile-diar-full span-4" aria-label="Room diarization full">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph amber"></span>ROOM&nbsp;DIARIZATION</h2>
+        <span class="tile-meta mono dim" id="diarMic">—</span>
+      </div>
+      <div class="tile-body" id="diarFull"></div>
+    </section>
+  </main>
+
+  <!-- ===================== VIEW: TRANSCRIPT ===================== -->
+  <main class="board board-focus" id="view-transcript" hidden>
+    <section class="tile tile-tx span-8" aria-label="Merged transcript">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph"></span>MERGED&nbsp;TRANSCRIPT <span class="dim xsub" id="txHeadMeta">—</span></h2>
+        <div class="tile-meta" id="txBadges"></div>
+      </div>
+      <div class="tile-body tx-body" id="txBody"></div>
+    </section>
+
+    <aside class="tile tile-txside span-4" aria-label="Transcript side panels">
+      <div class="tile-head">
+        <h2 class="tile-title"><span class="t-glyph cyan"></span>SPEAKING&nbsp;TIME</h2>
+      </div>
+      <div class="tile-body" id="txSpeak"></div>
+      <div class="tile-head tile-head-inner">
+        <h2 class="tile-title"><span class="t-glyph green"></span>PER-WAV <span class="dim xsub">/ originals + clips</span></h2>
+      </div>
+      <div class="tile-body no-pad" id="txWavs"></div>
+    </aside>
+  </main>
+
+  <!-- ===================== BOTTOM NAV ===================== -->
+  <nav class="botnav" id="botnav" aria-label="Views">
+    <button data-view="board"><kbd>1</kbd> Board</button>
+    <button data-view="strip"><kbd>2</kbd> Strip + Model</button>
+    <button data-view="speakers"><kbd>3</kbd> Profiles</button>
+    <button data-view="transcript"><kbd>4</kbd> Transcript</button>
+    <span class="botnav-spacer"></span>
+    <span class="botnav-hint">press <kbd>⌘</kbd><kbd>K</kbd> for commands · <kbd>1</kbd>–<kbd>4</kbd> to switch view</span>
+  </nav>
+
+  <!-- ===================== ⌘K COMMAND PALETTE ===================== -->
+  <div class="palette-scrim" id="palette" hidden>
+    <div class="palette" role="dialog" aria-label="Command palette" aria-modal="true">
+      <div class="palette-input">
+        <span class="palette-prompt">›</span>
+        <input id="palInput" type="text" value="" placeholder="Type a command…  (try “strip”, “atle”, “transcribe”)" autocomplete="off" spellcheck="false" />
+        <kbd class="palette-esc">esc</kbd>
+      </div>
+      <div class="palette-list" id="palList" role="listbox"></div>
+      <div class="palette-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> run</span>
+        <span class="dim">TapScribe command palette</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- toast for fired commands -->
+  <div class="toast" id="toast" hidden></div>
+</div>
+
+<script type="module" src="./console.js"></script>
+</body>
+</html>
