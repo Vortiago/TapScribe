@@ -26,11 +26,6 @@ const langChip = (code, extra = "") => {
   const l = helpers.lang(code);
   return `<span class="lang-chip ${extra}"><span class="fl">${l.flag}</span>${l.code.toUpperCase()}</span>`;
 };
-// initials for a transcript/feed line whose "speaker" may be "Oslo Room · Speaker B"
-const lineInitials = (name) =>
-  name.includes("Speaker A") ? "A" :
-  name.includes("Speaker B") ? "B" :
-  (SPEAKERS.find((s) => s.name === name)?.initials ?? name.slice(0, 2).toUpperCase());
 
 // ---------------------------------------------------------------------------
 // TOP BAR
@@ -264,7 +259,7 @@ function renderDetail() {
   $("#detailLabel").textContent = (s.label || "Untitled") + (s.current ? "  · LIVE" : "");
   renderTranscript(s);
   renderRecordings(s);
-  renderEngine(s);
+  renderEngine();
 }
 
 // --- session sub-tabs ---
