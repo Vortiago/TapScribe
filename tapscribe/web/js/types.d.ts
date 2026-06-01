@@ -393,6 +393,8 @@ export interface SessionDetailCtx {
   onSourcePick: (sessKey: string, source: "original" | "stripped") => void;
   onStripRun: (sessId: string) => void;
   onStripRemove: (sessId: string) => void;
+  onDeleteAudio: (sessId: string) => void;
+  onDeleteWav: (session: string, name: string, source: string) => void;
   // strip-silence operator knobs (added in #58). stripOpts holds the
   // currently-selected values; the inputs in session-detail.js render
   // them and call onStripOptEdit per keystroke (empty string → reset to

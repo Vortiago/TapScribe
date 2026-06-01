@@ -521,6 +521,61 @@ def _move_sidecars_with_wav(src_wav: Path, dst_wav: Path) -> None:
         shutil.move(str(transcripts), str(dst_wav.with_suffix(".transcripts")))
 
 
+def _dir_size(d: Path) -> int:
+    """Best-effort sum of file sizes under `d`, for the `bytes_freed`
+    figure reported by the delete endpoints. Purely informational — a
+    stat race (a file vanishing mid-walk) must not abort a delete, so
+    each stat swallows OSError and contributes 0."""
+    total = 0
+    for f in d.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            # Advisory size only; a vanished/locked entry shouldn't fail
+            # the surrounding delete. Skip it.
+            continue
+    return total
+
+
+def _delete_wav_with_sidecars(wav: Path) -> int:
+    """Delete one WAV plus whichever transcript-cache layout it carries —
+    the legacy `<wav>.json` file, the new `<wav>.transcripts/` directory,
+    or both. Returns the bytes reclaimed (WAV + sidecars).
+
+    The destructive analog of `_move_sidecars_with_wav` above: both
+    enumerate the SAME two sidecar layouts, so if a third layout is ever
+    added, update both functions.
+
+    `wav` is a Path discovered by globbing a `resolve_session_dir`-checked
+    folder (or returned by `resolve_wav`), not a path BUILT from a parsed
+    filename — so the `safe_name` round-trip rule (which guards path
+    construction against `py/path-injection`) does not apply here; deleting
+    an already-validated Path is safe."""
+    freed = 0
+    try:
+        freed += wav.stat().st_size
+    except OSError:
+        # Advisory size only (see _dir_size); proceed with the delete.
+        pass
+    legacy = wav.with_suffix(".json")
+    if legacy.is_file():
+        try:
+            freed += legacy.stat().st_size
+        except OSError:
+            # Advisory size only; proceed with the delete.
+            pass
+        legacy.unlink(missing_ok=True)
+    transcripts = wav.with_suffix(".transcripts")
+    if transcripts.is_dir():
+        freed += _dir_size(transcripts)
+        # Best-effort: a locked cache dir shouldn't block reclaiming the
+        # WAV; an orphaned cache dir is harmless and re-cleanable.
+        shutil.rmtree(transcripts, ignore_errors=True)
+    wav.unlink(missing_ok=True)
+    return freed
+
+
 def absorb_session(target: str, source: str) -> dict[str, Any]:
     """Move every WAV (and its `<name>.json` sidecar) from `source` into
     `target`, fold the source's `session-meta.json` aliases into the
@@ -627,3 +682,52 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         "aliases_added": aliases_added,
         "transcript_invalidated": transcript_invalidated,
     }
+
+
+# ---------------------------------------------------------------------------
+# Audio deletion (operator-triggered, used by the delete endpoints)
+# ---------------------------------------------------------------------------
+
+
+def delete_session_audio(session: str) -> dict[str, Any]:
+    """Delete ALL of a session's audio to reclaim disk: every original WAV
+    in `<session>/`, the entire `<session>/stripped/` folder, and each
+    WAV's per-WAV transcript-cache sidecars. KEEPS the merged
+    `session-transcript.json` / `.txt` and `session-meta.json`, so the
+    session survives `prune-empty` and the operator's result + label are
+    preserved.
+
+    Route-level guards (current-session refusal, in-flight-job refusal)
+    live in the handler; this is purely the filesystem op. Returns
+    `{session, wavs_deleted, bytes_freed}` — `wavs_deleted` counts the
+    originals (matching the dashboard's "N wavs" header); `stripped/`
+    bytes still fold into `bytes_freed`."""
+    session_dir = resolve_session_dir(session)
+    wavs_deleted = 0
+    bytes_freed = 0
+    for w in sorted(session_dir.glob("*.wav")):
+        bytes_freed += _delete_wav_with_sidecars(w)
+        wavs_deleted += 1
+    stripped = session_dir / "stripped"
+    if stripped.is_dir():
+        bytes_freed += _dir_size(stripped)
+        try:
+            shutil.rmtree(stripped)
+        except OSError as e:
+            raise HTTPException(500, f"delete failed: {e}") from None
+    return {"session": session, "wavs_deleted": wavs_deleted, "bytes_freed": bytes_freed}
+
+
+def delete_session_wav(session: str, name: str, source: str = "original") -> dict[str, Any]:
+    """Delete a single WAV (validated via `resolve_wav`) plus its sidecars.
+
+    No region cascade: deleting an original does NOT sweep its derived
+    `stripped/` regions, because regions bucket on `(speaker_slug, ident)`
+    which is not unique per original (multiple WAVs from one tap identity
+    share it), so a cascade could over-delete a sibling original's regions.
+    Use the bulk `delete_session_audio` to free everything.
+
+    Returns `{session, name, source, bytes_freed}`."""
+    wav = resolve_wav(session, name, source)
+    bytes_freed = _delete_wav_with_sidecars(wav)
+    return {"session": session, "name": name, "source": source, "bytes_freed": bytes_freed}

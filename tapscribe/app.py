@@ -61,6 +61,8 @@ from .batch_transcribe import (
 from .recorder import JobState, Recorder
 from .sessions import (
     absorb_session,
+    delete_session_audio,
+    delete_session_wav,
     gather_sessions,
     read_session_meta,
     resolve_session_dir,
@@ -765,6 +767,30 @@ async def api_session_stripped_delete(session: str, recorder: Recorder = Depends
     return {"ok": True, "deleted": True}
 
 
+@app.delete("/api/sessions/{session}/audio")
+async def api_session_audio_delete(session: str, recorder: Recorder = Depends(get_recorder)):
+    """Delete ALL of a session's audio (original WAVs + stripped/ + per-WAV
+    transcript-cache sidecars) to reclaim disk. KEEPS the merged
+    session-transcript + session-meta. Refuses the CURRENT session and any
+    session with a transcribe/strip job in flight."""
+    if session == recorder.session_start:
+        raise HTTPException(409, "cannot delete audio from the current session — rotate to a new one first")
+    resolve_session_dir(session)
+    if recorder.jobs.get(session) is not None:
+        raise HTTPException(409, "a transcribe or strip job is in flight on this session")
+    # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
+    # ~1 Hz /api/state poll stays responsive — same as strip-silence.
+    summary = await asyncio.to_thread(delete_session_audio, session)
+    # NB: do NOT release jobs here — unlike whole-session delete, the
+    # session survives, and the guard above already ensures none is running.
+    print(
+        f"[tapscribe] deleted audio from session {session}: "
+        f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed",
+        flush=True,
+    )
+    return {"ok": True, **summary}
+
+
 @app.post("/api/sessions/{target}/absorb")
 async def api_session_absorb(
     target: str,
@@ -847,6 +873,35 @@ async def get_wav(session: str, name: str, source: str = "original"):
     path = resolve_wav(session, name, source)
     dl_name = ("stripped-" + name) if source == "stripped" else name
     return FileResponse(path, media_type="audio/wav", filename=dl_name)
+
+
+@app.delete("/api/wav/{session}/{name}")
+async def api_wav_delete(
+    session: str,
+    name: str,
+    source: str = "original",
+    recorder: Recorder = Depends(get_recorder),
+):
+    """Delete one WAV + its transcript-cache sidecars. source=stripped
+    targets a region under <session>/stripped/. No region cascade — see
+    `delete_session_wav`. Refuses the CURRENT session and any session with
+    a transcribe/strip job in flight."""
+    # Whitelist the query param before it flows into resolve_wav — CodeQL
+    # treats query params as untrusted (mirrors the source checks elsewhere).
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    if session == recorder.session_start:
+        raise HTTPException(409, "cannot delete WAVs from the current session — rotate to a new one first")
+    resolve_session_dir(session)
+    if recorder.jobs.get(session) is not None:
+        raise HTTPException(409, "a transcribe or strip job is in flight on this session")
+    summary = await asyncio.to_thread(delete_session_wav, session, name, source)
+    print(
+        f"[tapscribe] deleted wav {name} ({source}) from session {session}: "
+        f"{summary['bytes_freed']} bytes freed",
+        flush=True,
+    )
+    return {"ok": True, **summary}
 
 
 @app.put("/api/wav/{session}/{name}/primary")

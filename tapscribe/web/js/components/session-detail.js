@@ -230,6 +230,15 @@ function buildActionRow(host, s, sessKey, ctx) {
     copy.dataset.copySess = sessKey;
     host.appendChild(copy);
   }
+
+  // Reclaim disk by deleting the session's audio once it's transcribed.
+  // Hidden on the current session (the backend refuses it — rotate first),
+  // mirroring how the sidebar hides whole-session delete on the current one.
+  if (!s.is_current && (s.wav_count || 0) > 0) {
+    const del = /** @type {HTMLButtonElement} */ (tpl("tpl-sess-delete-audio-button").firstElementChild);
+    del.dataset.deleteAudio = sessKey;
+    host.appendChild(del);
+  }
 }
 
 /**
@@ -513,6 +522,15 @@ function buildWavRow(f, sessKey, ctx) {
     txBtn.textContent = f.transcript ? "re-tx" : "transcribe";
   }
 
+  const delBtn = /** @type {HTMLButtonElement} */ (pick(row, "deleteBtn"));
+  if (ctx.lastJson?.current_session === sessKey) {
+    delBtn.remove();  // no audio deletion on the live session (backend refuses it)
+  } else {
+    delBtn.dataset.delWav = wavKey;
+    delBtn.dataset.delSource = "original";
+    if (busy) delBtn.disabled = true;
+  }
+
   // Append the inline transcript after the row when expanded. Returning a
   // fragment of (row, expand?) keeps both at the same level under wav-list.
   const out = document.createDocumentFragment();
@@ -584,6 +602,17 @@ function appendRegionSub(host, r, sessKey, ctx) {
     txBtn.replaceChildren(tpl("tpl-wav-tx-busy"));
   } else {
     txBtn.textContent = r.transcript ? "re-tx" : "transcribe";
+  }
+
+  // Same key shape as the transcribe button — the region's own filename —
+  // so the delete dispatch passes that name with source=stripped.
+  const delBtn = /** @type {HTMLButtonElement} */ (pick(row, "deleteBtn"));
+  if (ctx.lastJson?.current_session === sessKey) {
+    delBtn.remove();  // no audio deletion on the live session (backend refuses it)
+  } else {
+    delBtn.dataset.delWav = wavKey;
+    delBtn.dataset.delSource = "stripped";
+    if (busy) delBtn.disabled = true;
   }
 
   host.appendChild(frag);
@@ -773,6 +802,20 @@ function wire(host, s, sessKey, ctx) {
       const wk = btn.dataset.txWav || "";
       const idx = wk.indexOf("/");
       ctx.onTranscribeWav(wk.slice(0, idx), wk.slice(idx + 1), btn.dataset.txSource || null);
+    });
+  }
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-delete-audio]"))) {
+    btn.addEventListener("click", () => ctx.onDeleteAudio(btn.dataset.deleteAudio || ""));
+  }
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-del-wav]"))) {
+    btn.addEventListener("click", () => {
+      // wavKey is "<session>/<name>" — same shape the transcribe dispatch
+      // splits — so the name (region's own filename for stripped rows) goes
+      // straight to the delete endpoint with the row's source.
+      const wk = btn.dataset.delWav || "";
+      const idx = wk.indexOf("/");
+      if (idx < 0) return;
+      ctx.onDeleteWav(wk.slice(0, idx), wk.slice(idx + 1), btn.dataset.delSource || "original");
     });
   }
   for (const a of /** @type {NodeListOf<HTMLElement>} */ (host.querySelectorAll("[data-toggle-wav]"))) {

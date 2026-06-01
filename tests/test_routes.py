@@ -854,6 +854,140 @@ def test_absorb_refuses_self(client, recorder_under_test):
     assert r.status_code == 400
 
 
+# ---------------------------------------------------------------------------
+# Audio deletion — DELETE /api/sessions/{session}/audio + /api/wav/{s}/{name}
+# ---------------------------------------------------------------------------
+
+
+def test_delete_session_audio_removes_all_keeps_transcript(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(
+        root,
+        "s",
+        ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"],
+    )
+    # Legacy sidecar on one WAV, new-layout cache dir on the other.
+    (sd / "20260101T000000Z__alice__abc.wav").with_suffix(".json").write_text("{}")
+    txdir = (sd / "20260101T010000Z__bob__def.wav").with_suffix(".transcripts")
+    txdir.mkdir()
+    (txdir / "faster-whisper__small.en.json").write_text("{}")
+    # A stripped region + the merged transcript + session meta.
+    (sd / "stripped").mkdir()
+    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    (sd / "session-transcript.json").write_text('{"merged": true}')
+    (sd / "session-transcript.txt").write_text("merged")
+    (sd / "session-meta.json").write_text('{"label": "kickoff"}')
+
+    r = client.delete("/api/sessions/s/audio")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["wavs_deleted"] == 2  # originals only; stripped folds into bytes
+    assert body["bytes_freed"] > 0
+
+    assert sorted(sd.glob("*.wav")) == []
+    assert not (sd / "stripped").exists()
+    assert not (sd / "20260101T000000Z__alice__abc.json").exists()
+    assert not (sd / "20260101T010000Z__bob__def.transcripts").exists()
+    # The transcript + meta survive — the whole point of audio-only delete.
+    assert (sd / "session-transcript.json").is_file()
+    assert (sd / "session-transcript.txt").is_file()
+    assert (sd / "session-meta.json").is_file()
+
+
+def test_delete_session_audio_refuses_current_session(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    cur = recorder_under_test.session_start
+    sd = _seed_session(root, cur, ["20260101T000000Z__alice__abc.wav"])
+    r = client.delete(f"/api/sessions/{cur}/audio")
+    assert r.status_code == 409
+    assert "current session" in r.json()["detail"]
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # untouched
+
+
+def test_delete_session_audio_refuses_inflight_job(client, recorder_under_test):
+    from tapscribe.recorder import JobState
+
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+
+    # Pre-claim a job slot the way the transcribe-session busy test does —
+    # JobTracker.claim is async, driven via anyio's sync→async portal.
+    import anyio.from_thread
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.jobs.claim,
+            JobState(
+                session="s",
+                kind="strip",
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+                status="running",
+            ),
+        )
+
+    r = client.delete("/api/sessions/s/audio")
+    assert r.status_code == 409
+    assert "in flight" in r.json()["detail"]
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # untouched
+
+
+def test_delete_session_audio_missing_session_404(client, recorder_under_test):  # noqa: ARG001
+    r = client.delete("/api/sessions/does-not-exist/audio")
+    assert r.status_code == 404
+
+
+def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(
+        root,
+        "s",
+        ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"],
+    )
+    (sd / "20260101T000000Z__alice__abc.wav").with_suffix(".json").write_text("{}")
+    # A stripped region sharing the deleted original's speaker — the no-cascade
+    # contract means it must survive a per-file delete of the original.
+    (sd / "stripped").mkdir()
+    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+
+    r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav")
+    assert r.status_code == 200, r.text
+    assert r.json()["bytes_freed"] > 0
+
+    assert not (sd / "20260101T000000Z__alice__abc.wav").exists()
+    assert not (sd / "20260101T000000Z__alice__abc.json").exists()
+    # Second original + the stripped region both survive (no cascade).
+    assert (sd / "20260101T010000Z__bob__def.wav").is_file()
+    assert (sd / "stripped" / "20260101T000000Z__alice__reg.wav").is_file()
+
+
+def test_delete_wav_stripped_region_only(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    (sd / "stripped").mkdir()
+    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+
+    r = client.delete("/api/wav/s/20260101T000000Z__alice__reg.wav?source=stripped")
+    assert r.status_code == 200, r.text
+    assert not (sd / "stripped" / "20260101T000000Z__alice__reg.wav").exists()
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # original kept
+
+
+def test_delete_wav_rejects_bad_input(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    # Non-.wav name → 404 (resolve_wav rejects non-audio).
+    assert client.delete("/api/wav/s/session-meta.json").status_code == 404
+    # Unknown source → 400 (whitelisted before any filesystem touch).
+    assert client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav?source=bogus").status_code == 400
+    # Missing WAV → 404.
+    assert client.delete("/api/wav/s/20260101T999999Z__nope__zzz.wav").status_code == 404
+    # The real WAV is untouched by any of the above.
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()
+
+
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     _seed_session(root, "tgt", [])

@@ -4,7 +4,7 @@
 // sessions browser only when something structural changed so user scroll +
 // inputs survive across ticks.
 
-import { cssEscape, fmtClock, fmtElapsedShort } from "./formatters.js";
+import { cssEscape, fmtBytes, fmtClock, fmtElapsedShort } from "./formatters.js";
 import { fetchState, postJson, putJson, del } from "./api.js";
 import { loadTemplates } from "./templates.js";
 import { aliasOf } from "./speakers.js";
@@ -535,6 +535,8 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       onSourcePick: (sk, v) => { sourcePick.set(sk, v); },
       onStripRun: stripSession,
       onStripRemove: removeStripped,
+      onDeleteAudio: deleteSessionAudio,
+      onDeleteWav: deleteWav,
       // Strip-silence parameter inputs. Edits don't tick — re-rendering on
       // every keystroke would steal focus and the focused-input guard in
       // renderSessionsIfChanged already protects the live inputs anyway.
@@ -772,6 +774,45 @@ The source folder will be deleted. The target's merged transcript (if any) will 
     try { await del(`/api/sessions/${encodeURIComponent(session)}/stripped`); }
     catch (e) { alert(`Remove stripped failed: ${e}`); return; }
     if (sourcePick.get(session) === "stripped") sourcePick.delete(session);
+    lastSessionsSig = "";
+    await refresh();
+  }
+
+  /** @param {string} session */
+  async function deleteSessionAudio(session) {
+    const s = lastJson?.sessions?.find((x) => x.session === session);
+    const n = s?.wav_count || 0;
+    const totalBytes = (s?.files || []).reduce(
+      (sum, f) => sum + (f.size || 0) + (f.regions || []).reduce((rs, r) => rs + (r.size || 0), 0),
+      0,
+    );
+    const msg = `Delete all audio for this session?\n\n`
+      + `${n} WAV${n === 1 ? "" : "s"} + stripped regions + per-WAV transcript cache `
+      + `(~${fmtBytes(totalBytes)}) will be permanently removed.\n\n`
+      + `The merged transcript and session name are KEPT.`;
+    if (!confirm(msg)) return;
+    try { await del(`/api/sessions/${encodeURIComponent(session)}/audio`); }
+    catch (e) { alert(`Delete audio failed: ${e}`); return; }
+    sourcePick.delete(session);              // stripped source no longer exists
+    if (expandedWav?.startsWith(`${session}/`)) expandedWav = null;
+    lastSessionsSig = "";
+    await refresh();
+  }
+
+  /**
+   * @param {string} session
+   * @param {string} name
+   * @param {string} source
+   */
+  async function deleteWav(session, name, source) {
+    const label = source === "stripped" ? "stripped region" : "WAV";
+    const msg = `Delete this ${label}?\n\n${name}\n\nThis permanently deletes the audio + its transcript cache.`;
+    if (!confirm(msg)) return;
+    const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}`
+      + (source === "stripped" ? "?source=stripped" : "");
+    try { await del(url); }
+    catch (e) { alert(`Delete WAV failed: ${e}`); return; }
+    if (expandedWav?.startsWith(`${session}/${name}`)) expandedWav = null;
     lastSessionsSig = "";
     await refresh();
   }
