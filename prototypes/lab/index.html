@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TapScribe · Signal Rack</title>
+  <link rel="stylesheet" href="lab.css" />
+</head>
+<body>
+  <!-- ===================== TRANSPORT (global rail) ===================== -->
+  <header id="transport">
+    <div class="tx-brand">
+      <span class="tx-logo">▚▚</span>
+      <div class="tx-title">
+        <b>TapScribe</b><span class="tx-sub">SIGNAL&nbsp;RACK</span>
+      </div>
+    </div>
+
+    <nav id="rooms" aria-label="rack rooms">
+      <button class="room-btn" data-room="rack"><span class="rk">F1</span>Live Rack</button>
+      <button class="room-btn" data-room="cutlab"><span class="rk">F2</span>Cut&nbsp;Lab</button>
+      <button class="room-btn" data-room="identity"><span class="rk">F3</span>Identity&nbsp;Bank</button>
+      <button class="room-btn" data-room="transcript"><span class="rk">F4</span>Transcript&nbsp;Ledger</button>
+    </nav>
+
+    <div class="tx-session" id="tx-session"><!-- session pill --></div>
+
+    <div class="tx-state">
+      <span class="tx-rec" id="tx-rec" title="recording master toggle">
+        <span class="dot"></span><b>REC</b>
+      </span>
+      <span class="tx-clock" id="tx-clock">--:--</span>
+      <span class="tx-be" id="tx-backend"><!-- resolved backend --></span>
+    </div>
+  </header>
+
+  <!-- ===================== MAIN: ROOM + INSPECTOR ===================== -->
+  <main id="stage">
+    <section id="room-host"><!-- active room renders here --></section>
+    <aside id="inspector" aria-label="node inspector">
+      <div class="insp-head">
+        <span class="insp-kicker" id="insp-kicker">INSPECTOR</span>
+        <span class="insp-hint" id="insp-hint">click any node in a rail</span>
+      </div>
+      <div id="insp-body"><!-- contextual readout --></div>
+    </aside>
+  </main>
+
+  <footer id="statusbar">
+    <span id="sb-left"></span>
+    <span id="sb-mid"></span>
+    <span id="sb-right"></span>
+  </footer>
+
+  <script type="module" src="lab.js"></script>
+</body>
+</html>
