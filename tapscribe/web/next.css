@@ -641,30 +641,11 @@ body::before { display: none; }
 .pick__chev { color: var(--fg-3); font-size: 9px; }
 
 /* ====================================================================== */
-/* PHASE 3 · PEOPLE — the registry of humans. REAL per-session alias       */
-/* editor (the participants strip) + the MOCK cross-session Person cards    */
-/* (language quick-switch + mapped taps/voices) + Unidentified voices.      */
+/* PHASE 3 · PEOPLE — the registry of humans. Two REAL panels, both from    */
+/* per-session session_meta.aliases: the per-session alias editor (the      */
+/* participants strip) + the across-sessions named-people registry.         */
 /* Sharp / dense, same :root tokens as Phase 1–2.                           */
 /* ====================================================================== */
-
-/* concept note (blue, like the info banner) + the real-feature note (accent) */
-.peoplenote, .realnote {
-  display: flex; align-items: flex-start; gap: 8px;
-  font-size: 10.5px; line-height: 1.6;
-}
-.peoplenote {
-  color: var(--info); background: var(--info-bg);
-  border: 1px solid color-mix(in srgb, var(--info) 32%, transparent);
-  border-radius: var(--next-r); padding: 8px 11px; margin-bottom: 13px;
-}
-.peoplenote .ic { font-size: 13px; flex: none; line-height: 1.3; }
-.peoplenote b { color: var(--fg-0); font-weight: 600; }
-.realnote { color: var(--fg-2); margin-bottom: 11px; }
-.realnote b { color: var(--fg-0); font-weight: 600; }
-.mocktag--warn {
-  color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
-}
 
 /* REAL: per-session participants — identity + editable display name */
 .partlist { display: flex; flex-direction: column; gap: 1px; }
@@ -700,86 +681,27 @@ body::before { display: none; }
 .av.spk-2 { background: var(--warn); }
 .av.spk-3 { background: var(--ok); }
 .av.spk-4 { background: var(--spk-4); }
-.av.unid {
-  background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--warn) 30%, var(--bg-2)) 0 3px, var(--bg-2) 3px 6px);
-  color: var(--warn);
-}
-.ink-spk-0 { color: var(--info); }
-.ink-spk-1 { color: var(--magenta); }
-.ink-spk-2 { color: var(--warn); }
-.ink-spk-3 { color: var(--ok); }
-.ink-spk-4 { color: var(--spk-4); }
 
-/* MOCK: Person cards (registry of humans) */
-.people { display: flex; flex-direction: column; gap: 11px; }
-.next-app .person {
-  background: var(--bg-1); border: 1px solid var(--hairline);
-  border-radius: var(--next-r); overflow: hidden;
+/* REAL: across-sessions named-people registry — one de-bubbled row per
+   distinct assigned name (avatar · name · N sessions · identity codes). */
+.preg { display: flex; flex-direction: column; gap: 1px; }
+.pregrow {
+  display: grid; grid-template-columns: 17px minmax(0, auto) auto minmax(0, 1fr);
+  gap: 10px; align-items: center;
+  padding: 6px 2px; border-top: 1px solid var(--hairline-2);
 }
-.person.is-unid { border-style: dashed; border-color: color-mix(in srgb, var(--warn) 42%, transparent); }
-.person__head {
-  display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 11px;
-  padding: 9px 12px; border-bottom: 1px solid var(--hairline); background: var(--bg-2);
-}
-.person.is-unid .person__head { background: var(--warn-bg); }
-.person__id { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.person__name { font-weight: 650; font-size: 13px; display: flex; align-items: center; gap: 6px; color: var(--fg-0); }
-.person__name--unid { color: var(--fg-2); }
-.person__note { font-size: 10px; color: var(--fg-3); }
-.person__seen { font-size: 9.5px; font-family: var(--mono); color: var(--fg-3); text-align: right; flex: none; }
-.person__seen b { color: var(--fg-0); }
-.person__cols { display: grid; grid-template-columns: 1fr 1.15fr; }
-.person__col { padding: 10px 12px; }
-.person__col + .person__col { border-left: 1px solid var(--hairline); }
-.person__col--full { grid-column: 1 / -1; border-left: 0; }
-.subhead {
-  font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-3);
-  font-weight: 600; margin-bottom: 7px; display: flex; align-items: center; gap: 6px;
-}
+.pregrow:first-child { border-top: 0; }
+.pregrow__name { font-size: 12.5px; font-weight: 650; color: var(--fg-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pregrow__count { font-size: 9.5px; color: var(--fg-3); white-space: nowrap; flex: none; }
+.pregrow__ids { font-size: 10.5px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 
-/* language pair + the (mock, disabled) "transcribe as" quick-switch */
-.flag { font-size: 11px; line-height: 1; }
-.langpair { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; flex-wrap: wrap; }
-.langpill {
-  display: inline-flex; align-items: center; gap: 5px;
-  border: 1px solid var(--hairline); border-radius: var(--next-r); padding: 3px 8px; font-size: 11px;
-  background: var(--bg-2); font-family: var(--mono); color: var(--fg-1);
-}
-.langpill.primary { border-color: color-mix(in srgb, var(--next-accent) 40%, transparent); }
-.langpill__role { font-size: 8px; color: var(--fg-3); text-transform: uppercase; }
-.langsep { color: var(--fg-3); font-size: 10px; }
-.langnone { font-size: 10px; }
-.quickswitch { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.quickswitch__lab { font-size: 9.5px; color: var(--fg-3); font-family: var(--mono); }
-.qbtn {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 10.5px; font-family: var(--mono);
-  border: 1px solid var(--hairline); border-radius: var(--next-r); padding: 3px 8px;
-  background: var(--bg-2); color: var(--fg-2); cursor: default;
-  &:disabled { opacity: .85; }
-  &.is-active { border-color: var(--next-accent); background: color-mix(in srgb, var(--next-accent) 12%, transparent); color: var(--next-accent); opacity: 1; }
-}
-
-/* mapped tap / voice rows (mock) */
-.idrow { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-top: 1px solid var(--hairline-2); font-size: 11px; }
-.idrow:first-of-type { border-top: 0; }
-.idrow__code { font-family: var(--mono); color: var(--fg-1); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.idrow__tail { margin-left: auto; flex: none; }
-.idrow-empty { font-size: 10.5px; padding: 4px 0; }
-.person__col .act { margin-top: 9px; }
-
-/* small tag chip — used for input badges + live/idle + lang in People */
+/* small tag chip — used for input badges + the partrow source badge */
 .next-app .tag {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: 9px; font-family: var(--mono);
   border: 1px solid var(--hairline-2); border-radius: var(--next-r-sm);
   padding: 2px 6px; color: var(--fg-2); background: var(--bg-2); white-space: nowrap;
 }
-.tag.is-live { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 35%, transparent); background: var(--rec-bg); }
-.tag.is-idle { color: var(--fg-3); }
-.tag.inp--microphone { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, transparent); }
-.tag.inp--line-in { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
-.tag.inp--stereo-mix { color: var(--magenta); border-color: color-mix(in srgb, var(--magenta) 35%, transparent); }
 
 /* mini WAV picker (Transcript stage · per-WAV re-transcribe). Reuses the
    .wavlist / .wavrow block; just caps its height so it scrolls inside the

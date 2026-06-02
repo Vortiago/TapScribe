@@ -1,19 +1,20 @@
 <!-- ======================================================================
-     Stages · People (GLOBAL · Registry) — Phase 3.
-     The canonical registry of HUMANS. The ONE real backend piece is the
-     per-session participants strip: each speaker actually present in the
-     focused session gets an editable DISPLAY NAME saved to the session's
-     session_meta.aliases (PUT /api/session-meta/{session}). Everything
-     else — the global cross-session Person cards (primary/secondary
-     language + "transcribe as" quick-switch + mapped taps/voices + "seen
-     in N sessions") and the Unidentified-voices resolution — is the
-     prototype's intended shape, rendered but clearly tagged "mock · not
-     wired". Mounted into #viewRoot by js/next/views/people.js.
+     Stages · People (GLOBAL · Registry).
+     Two REAL panels, both derived from /api/state's session_meta.aliases —
+     no mock data:
+       1. "In this session · names" — the per-session alias editor: every
+          speaker present in the focused session gets an editable DISPLAY
+          NAME saved to that session's session_meta.aliases
+          (PUT /api/session-meta/{session}).
+       2. "People · across all sessions" — the names the operator has
+          assigned anywhere, aggregated into one row per person (avatar,
+          name, "N session(s)", the identity code(s) mapped to them).
+     Mounted into #viewRoot by js/next/views/people.js.
      ====================================================================== -->
 <template id="tpl-next-view-people">
   <div data-slot="head"></div>
 
-  <!-- ============ REAL: this session's participants (alias editor) ============ -->
+  <!-- ============ this session's participants (alias editor) ============ -->
   <div class="panel panel--accent">
     <div class="panel__head">
       <div class="panel__title"><span class="ic">📍</span>In this session · names</div>
@@ -26,86 +27,15 @@
 
   <div class="spacer"></div>
 
-  <!-- ============ MOCK: the canonical Person registry ============ -->
+  <!-- ============ the named-people registry (across all sessions) ============ -->
   <div class="panel">
     <div class="panel__head">
-      <div class="panel__title"><span class="ic">🗂️</span>Person registry · humans only</div>
-      <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
+      <div class="panel__title"><span class="ic">🗂️</span>People · across all sessions</div>
+      <div class="panel__hint mono" data-slot="regHint"></div>
     </div>
     <div class="panel__body">
-      <div class="people" data-slot="people"></div>
+      <div class="preg" data-slot="people"></div>
     </div>
-  </div>
-</template>
-
-<!-- one Person card (mock): head (avatar · name · note · seen) + two cols
-     (language quick-switch | mapped taps/voices). -->
-<template id="tpl-next-person">
-  <div class="person">
-    <div class="person__head">
-      <span class="av lg" data-slot="av"></span>
-      <span class="person__id">
-        <span class="person__name" data-slot="name"></span>
-        <span class="person__note" data-slot="note"></span>
-      </span>
-      <span class="person__seen">seen in<br><b data-slot="seen"></b> sessions</span>
-    </div>
-    <div class="person__cols">
-      <div class="person__col">
-        <div class="subhead">🗣️ Language <span class="mocktag">primary + secondary · mock</span></div>
-        <div class="langpair" data-slot="langpair"></div>
-        <div class="quickswitch" data-slot="quickswitch"><span class="quickswitch__lab">transcribe as →</span></div>
-      </div>
-      <div class="person__col">
-        <div class="subhead">🔗 Mapped taps / voices</div>
-        <div data-slot="maps"></div>
-        <button class="act act--sm" type="button" data-slot="mapBtn" disabled>+ map a tap / voice</button>
-      </div>
-    </div>
-  </div>
-</template>
-
-<!-- the Unidentified-voices card (mock): diarized voices not yet tied to a
-     human — each offers "map to a Person". -->
-<template id="tpl-next-person-unid">
-  <div class="person is-unid">
-    <div class="person__head">
-      <span class="av lg unid">?</span>
-      <span class="person__id">
-        <span class="person__name person__name--unid">Unidentified voices <span class="mocktag mocktag--warn">map to a Person</span></span>
-      </span>
-      <span class="person__seen">&nbsp;</span>
-    </div>
-    <div class="person__cols">
-      <div class="person__col person__col--full" data-slot="unid"></div>
-    </div>
-  </div>
-</template>
-
-<!-- one language pill (role 1st/2nd · flag · name) -->
-<template id="tpl-next-langpill">
-  <span class="langpill">
-    <span class="langpill__role" data-slot="role"></span>
-    <span class="flag" data-slot="flag"></span>
-    <span data-slot="name"></span>
-  </span>
-</template>
-
-<!-- one "transcribe as" quick-switch button (mock, disabled) -->
-<template id="tpl-next-qbtn">
-  <button class="qbtn" type="button" disabled>
-    <span class="flag" data-slot="flag"></span>
-    <span data-slot="name"></span>
-  </button>
-</template>
-
-<!-- one mapped tap / voice row (mock) -->
-<template id="tpl-next-idrow">
-  <div class="idrow">
-    <span class="av sm" data-slot="av"></span>
-    <span class="idrow__code" data-slot="code"></span>
-    <span class="tag inp" data-slot="input"></span>
-    <span class="idrow__tail" data-slot="tail"></span>
   </div>
 </template>
 
@@ -117,5 +47,16 @@
     <span class="tag partrow__src" data-slot="src"></span>
     <input class="partrow__name" type="text" data-slot="name" autocomplete="off" spellcheck="false">
     <span class="partrow__status mono dim" data-slot="status"></span>
+  </div>
+</template>
+
+<!-- one REAL registry row: a named person aggregated across all sessions —
+     avatar (initials) · name · "N session(s)" · the identity code(s). -->
+<template id="tpl-next-pregrow">
+  <div class="pregrow">
+    <span class="av sm" data-slot="av"></span>
+    <span class="pregrow__name" data-slot="name"></span>
+    <span class="pregrow__count mono" data-slot="count"></span>
+    <span class="pregrow__ids mono" data-slot="ids"></span>
   </div>
 </template>
