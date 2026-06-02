@@ -17,16 +17,23 @@ when:
   - torch is already a CUDA build (``torch.version.cuda`` set — e.g. on
     Linux, whose default wheel bundles CUDA, or after a previous run).
 
-Otherwise it reinstalls the **same** torch version from PyTorch's CUDA
-wheel index with ``--force-reinstall --no-deps`` — so the resolved
-dependency graph is untouched and the self-contained Windows CUDA wheel
-(which bundles cuBLAS/cuDNN) simply swaps in for the CPU one. The CUDA
-channel defaults to ``cu124`` and is overridable via
-``$TAPSCRIBE_TORCH_CUDA`` (one of the allow-listed channels below).
+Otherwise it installs the **newest CUDA-12.x torch** with
+``--force-reinstall --no-deps`` — the resolved dependency graph is left
+intact and the self-contained Windows CUDA wheel (bundling cuBLAS/cuDNN)
+swaps in for the CPU one. We don't pin the version (PyTorch freezes old
+CUDA wheel lines at old torch versions, so an exact pin fails wherever it
+isn't published); we just take whatever the channel offers.
 
-Stdlib-only: it runs at bring-up and probes only the torch the picker has
-already installed. Failure is non-fatal — a GPU optimisation must never
-block the recorder from booting on CPU.
+Why CUDA-12.x only by default: pip will install *any* wheel regardless of
+the driver, but a ``cu130`` (CUDA 13) wheel needs a CUDA-13 driver — on a
+12.x driver it installs "successfully" yet ``cuda.is_available()`` stays
+``False``. Within the 12.x series CUDA minor-version compatibility means a
+``cu128`` wheel runs on *any* 12.x driver, so ``cu128`` is the safe newest
+default. An operator on a CUDA-13 box can opt in with
+``$TAPSCRIBE_TORCH_CUDA=cu130`` (any ``cuNNN`` value is accepted).
+
+Stdlib-only; failure is non-fatal — a GPU optimisation must never block the
+recorder from booting on CPU.
 """
 
 from __future__ import annotations
@@ -37,21 +44,23 @@ import shutil
 import subprocess  # nosec B404 — fixed argv list, never shell=True.
 import sys
 
-DEFAULT_CHANNEL = "cu124"
-# Allow-list the channel so an operator-supplied env var can't inject
-# arbitrary text into the pip `--index-url`. Covers the CUDA 12.1–12.8
-# wheel lines PyTorch currently publishes.
-ALLOWED_CHANNELS = ("cu121", "cu124", "cu126", "cu128")
+# Auto-search order (no override): newest CUDA-12.x first. All of these run
+# on any 12.x driver via CUDA minor-version compatibility, so cu128 is the
+# safe "newest". cu130+ is deliberately NOT auto-tried (needs a CUDA-13
+# driver) — opt in via the override.
+AUTO_CHANNELS = ("cu128", "cu126", "cu124", "cu121")
 PYTORCH_INDEX = "https://download.pytorch.org/whl/"
-# torch.__version__ without the local build tag, e.g. "2.6.0".
-_VERSION_RE = re.compile(r"\A[0-9]+(?:\.[0-9]+)*\Z")
+# An operator override must look like a PyTorch CUDA channel ("cu" + 2-3
+# digits) — a tight pattern that both documents the shape and stops an env
+# var from injecting arbitrary text into pip's --index-url.
+_CHANNEL_RE = re.compile(r"\Acu[0-9]{2,3}\Z")
 
 
 def torch_build() -> tuple[str, str | None] | None:
     """Return ``(version, cuda_tag)`` for the installed torch, or ``None``
     if torch isn't importable. ``cuda_tag`` is ``torch.version.cuda``
     (``None`` on a CPU build); ``version`` is stripped of the local
-    ``+cpu`` / ``+cu126`` suffix."""
+    ``+cpu`` / ``+cu128`` suffix and is used only for messaging."""
     try:
         import torch  # type: ignore  # noqa: PLC0415 — probed lazily; not a module-level dep.
     except Exception:  # noqa: BLE001 — a broken/absent torch fails import many ways; treat as "no torch".
@@ -59,27 +68,22 @@ def torch_build() -> tuple[str, str | None] | None:
     return (torch.__version__.split("+")[0], torch.version.cuda or None)
 
 
-def resolve_channel(raw: str | None) -> str:
-    """Map an operator-supplied channel to a safe, allow-listed value,
-    falling back to the default for unset/unknown input."""
-    if raw and raw in ALLOWED_CHANNELS:
-        return raw
-    if raw:
-        print(
-            f"[ensure-cuda-torch] ignoring TAPSCRIBE_TORCH_CUDA={raw!r} "
-            f"(not one of {', '.join(ALLOWED_CHANNELS)}); using {DEFAULT_CHANNEL}.",
-            file=sys.stderr,
-            flush=True,
-        )
-    return DEFAULT_CHANNEL
+def channels_to_try(override: str | None) -> list[str]:
+    """The channels to attempt, in order. A well-formed operator override
+    pins a single channel; anything else (unset or malformed) falls back to
+    the newest→oldest CUDA-12.x auto-search."""
+    if override and _CHANNEL_RE.match(override):
+        return [override]
+    return list(AUTO_CHANNELS)
 
 
-def pip_argv(version: str, channel: str, *, python: str = sys.executable) -> list[str]:
-    """``pip install --force-reinstall --no-deps torch==<v> --index-url <cuda>``.
+def pip_argv(channel: str, *, python: str = sys.executable) -> list[str]:
+    """``pip install --force-reinstall --no-deps torch --index-url <cuda>``.
 
-    ``--no-deps`` keeps the picker-resolved graph intact; the Windows CUDA
-    wheel is self-contained (bundles cuBLAS/cuDNN), so no nvidia-* deps are
-    needed for the swap."""
+    No version pin — pip takes the newest torch the channel publishes for
+    this interpreter. ``--no-deps`` keeps the picker-resolved graph intact;
+    the Windows CUDA wheel is self-contained (bundles cuBLAS/cuDNN), so no
+    nvidia-* deps are needed for the swap."""
     return [
         python,
         "-m",
@@ -87,7 +91,7 @@ def pip_argv(version: str, channel: str, *, python: str = sys.executable) -> lis
         "install",
         "--force-reinstall",
         "--no-deps",
-        f"torch=={version}",
+        "torch",
         "--index-url",
         f"{PYTORCH_INDEX}{channel}",
     ]
@@ -105,38 +109,47 @@ def main() -> int:
     version, cuda_tag = build
     if cuda_tag:
         return 0  # already a CUDA build (Linux wheel, or a prior run swapped it).
-    if not _VERSION_RE.match(version):
-        print(
-            f"[ensure-cuda-torch] unexpected torch version {version!r}; leaving it alone.",
-            file=sys.stderr,
-            flush=True,
-        )
-        return 0
 
-    channel = resolve_channel(os.environ.get("TAPSCRIBE_TORCH_CUDA"))
-    print(
-        f"[ensure-cuda-torch] NVIDIA GPU detected but torch {version} is the CPU build — "
-        f"reinstalling torch=={version} from the CUDA index ({channel}). "
-        f"Override the channel with TAPSCRIBE_TORCH_CUDA ({'/'.join(ALLOWED_CHANNELS)}).",
-        flush=True,
-    )
-    rc = subprocess.call(pip_argv(version, channel))  # nosec B603 — fixed argv, no shell.
-    if rc != 0:
+    override = os.environ.get("TAPSCRIBE_TORCH_CUDA") or None
+    if override and not _CHANNEL_RE.match(override):
         print(
-            f"[ensure-cuda-torch] reinstall failed (rc={rc}). Live + batch will run on CPU. "
-            f"If torch {version} isn't published for {channel}, set TAPSCRIBE_TORCH_CUDA to a "
-            "channel that has it (try cu126 or cu128), or install torch manually from "
-            "https://pytorch.org/get-started/locally/.",
+            f"[ensure-cuda-torch] ignoring malformed TAPSCRIBE_TORCH_CUDA={override!r} "
+            "(expected e.g. cu128); auto-searching CUDA-12.x channels instead.",
             file=sys.stderr,
             flush=True,
         )
-        return 0  # non-fatal: never block bring-up over a GPU optimisation.
+        override = None
+    channels = channels_to_try(override)
+
     print(
-        "[ensure-cuda-torch] CUDA torch installed — the GPU should now be available "
-        "to both the live channel and batch transcription.",
+        f"[ensure-cuda-torch] NVIDIA GPU detected but torch {version} is the CPU build. "
+        f"Installing the newest CUDA torch — trying channels: {', '.join(channels)}.",
         flush=True,
     )
-    return 0
+    for idx, channel in enumerate(channels, start=1):
+        print(
+            f"[ensure-cuda-torch] [{idx}/{len(channels)}] installing newest torch from {channel} …",
+            flush=True,
+        )
+        rc = subprocess.call(pip_argv(channel))  # nosec B603 — fixed argv, no shell.
+        if rc == 0:
+            print(
+                f"[ensure-cuda-torch] installed a CUDA torch from {channel} — the GPU should now be "
+                "available to both the live channel and batch transcription.",
+                flush=True,
+            )
+            return 0
+
+    print(
+        f"[ensure-cuda-torch] no reachable channel served a torch wheel (tried "
+        f"{', '.join(channels)}). Live + batch will run on CPU. If you're on a CUDA-13 driver try "
+        "TAPSCRIBE_TORCH_CUDA=cu130; otherwise pick your channel at "
+        "https://download.pytorch.org/whl/torch/ or install torch manually from "
+        "https://pytorch.org/get-started/locally/.",
+        file=sys.stderr,
+        flush=True,
+    )
+    return 0  # non-fatal: never block bring-up over a GPU optimisation.
 
 
 if __name__ == "__main__":  # pragma: no cover — exercised via start.ps1 / start.sh

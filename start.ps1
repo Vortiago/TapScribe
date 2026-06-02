@@ -95,11 +95,11 @@ if ($LASTEXITCODE -ne 0) {
 # CUDA), so on an NVIDIA box the GPU goes unused — TapScribe's probe reports
 # "Available backends: ['cpu']" and the live channel's whisperlivekit warmup
 # can't load cublas64_12.dll. When a GPU is present and the venv's torch is the
-# CPU build, swap in the same-version CUDA wheel from PyTorch's index. No-op
-# without nvidia-smi, or when torch is already a CUDA build. Override the
-# channel with $env:TAPSCRIBE_TORCH_CUDA (cu121/cu124/cu126/cu128); skip
-# entirely with $env:TAPSCRIBE_NO_CUDA_TORCH=1. Non-fatal: CPU fallback on
-# failure.
+# CPU build, install the newest CUDA torch from PyTorch's index (searching
+# newest→oldest CUDA channels). No-op without nvidia-smi, or when torch is
+# already a CUDA build. Force a single channel with $env:TAPSCRIBE_TORCH_CUDA
+# (e.g. cu128); skip entirely with $env:TAPSCRIBE_NO_CUDA_TORCH=1. Non-fatal:
+# CPU fallback on failure.
 & python tools\ensure_cuda_torch.py
 
 # --- Configuration ----------------------------------------------------------
