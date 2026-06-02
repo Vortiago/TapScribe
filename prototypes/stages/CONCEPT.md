@@ -14,12 +14,39 @@ it is in, what it needs). You work IN one stage at a time; the spine is always
 visible so you always know *where the session is* and *what each stage still
 needs* — but only ONE rich, logically-grouped workspace fills the canvas.
 
-## The three stages
+## Taps — the GLOBAL ingress (above the journey, not part of it)
 
-1. **Capture** — live taps streaming in: level, lag, speech gate, rec/live
-   toggles, the language each is transcribed as, and *diarization shown inline
-   as a property of the room tap* (Oslo room → Speaker A nb / Speaker B en).
-   The live captions feed renders as a **tight IRC stream** (see below).
+A **Tap** (a Bridge's `/tap` connection) and its settings are **global**: they
+persist across sessions. The session is just *where the captured audio lands* —
+the taps are "always there." So **Taps** is pinned at the **top of the spine**
+as a distinct, **un-numbered**, always-on entry, set apart from the numbered
+journey by a small live indicator and a `session` divider, and it does **not**
+contribute to the session's progress fill.
+
+The **Taps view** is the dense, single-focus place to see and configure every
+tap: each row carries its identity + device, a live level meter, lag, gate
+state, rec/live toggles, the language it is transcribed as, and — the **key
+control** — a **single-person vs multi-person** switch:
+
+- **Single** — one speaker on this tap (Atle, Mette, James).
+- **Multi** — diarize the tap into multiple speakers. The **Oslo Conference
+  Room** is multi → **Speaker A (nb, 58%)** / **Speaker B (en, 42%)**, each with
+  its language and talk-share shown right under the tap.
+
+Incoming taps (a Bridge mid-handshake) appear here too, so you can set their
+mode the moment they connect. This is the go-to place to turn diarization on or
+off for a room.
+
+## The three journey stages (per-session)
+
+1. **Capture** — now **session-scoped**: this session's live recording. It keeps
+   the **live captions** IRC feed (with diarized A/B attribution *visible*),
+   **Capture health** (gates / recording / lag / languages), and **Capture
+   settings** (recording, prompt, hotwords, hallucination rules). The per-tap
+   *configuration* (single/multi, gate, the heavy knobs) has moved to **Taps**;
+   Capture shows only a **lighter read-only "taps feeding this session"**
+   reference (name + level + which are recording) with a `configure →` jump to
+   Taps. Diarization stays **visible** in Capture but is **configured** in Taps.
    Status: `2 live` (or `no taps yet` for a fresh session).
 2. **Transcript** — the merged stage, and the heart of the tool. The
    **dense IRC merged transcript dominates the canvas** as the single primary
@@ -32,14 +59,33 @@ needs* — but only ONE rich, logically-grouped workspace fills the canvas.
 
 A **New session** button sits right under the session picker in the spine
 header. It drops you into a fresh, empty journey at Capture ("no taps yet"),
-with the later stages reading "nothing yet / not run".
+with the later stages reading "nothing yet / not run". Because taps are global,
+the **Taps** entry stays pinned and live even for a brand-new session.
 
 ## What changed in this iteration (and why)
 
 This is a refinement of the well-liked Stages direction — same spine, same dark
-dense aesthetic, same one-focus-at-a-time flow — with five targeted changes:
+dense aesthetic, same one-focus-at-a-time flow.
 
-### 1. The transcript (and live captions) are now true IRC
+### Latest: Taps split out as a GLOBAL view; Capture trimmed to session scope
+
+Taps and their settings are **global** (they persist across sessions), so they
+no longer belong inside a single session's Capture stage:
+
+- **Taps** is added as a **pinned, un-numbered** spine entry *above* the session
+  block (small live indicator + a `session` divider). It does not count toward
+  the session progress fill. Its dense view is the **single place to configure
+  single-person vs multi-person** (diarization) per tap, plus language and the
+  rec/live + gate readout. The Oslo room is **multi → Speaker A / Speaker B**.
+- **Capture** is trimmed to **this session**: live captions, health, and capture
+  settings stay, but the per-tap *configuration* moved to Taps. Capture now shows
+  only a **read-only "taps feeding this session"** reference and a `configure →`
+  jump. Diarized A/B attribution stays **visible** in Capture; it's just
+  **configured** in Taps.
+
+The earlier refinements below still hold.
+
+### The transcript (and live captions) are true IRC
 
 The earlier merged transcript was columnar — time, speaker and text in three
 wide columns with big gutters — which read "message-like" and airy. Both the
@@ -52,7 +98,7 @@ dim with a `⨯ rule` chip; a translation badge reads `nb→en`. A compact
 speaking-time bar sits on top of the transcript, and a collapsible filter audit
 folds in at the bottom.
 
-### 2. Recordings folded into Transcript (4 stages → 3)
+### Recordings folded into Transcript (4 stages → 3)
 
 Recordings and Transcript used to be two co-equal stages. They are now **one
 Transcript stage** where the transcript is unambiguously the primary focus and
@@ -71,7 +117,7 @@ recordings are a *contextual* secondary:
 This is the crucial discipline: density with **one clear primary focus** and
 **contextual disclosure**, never an everything-at-once wall.
 
-### 3. The advance-CTAs are gone
+### The advance-CTAs are gone
 
 The journey-gate buttons ("Tune the recordings →", "Run the transcript →",
 "Review people →") are removed. **The spine is the navigation** — click any
@@ -79,24 +125,26 @@ stage to go there. Genuine actions remain, but styled as ordinary actions
 (`.act`), not forced next-step gates: **Re-run / Transcribe**, strip-silence
 **re-cut / reset**, and **New session**.
 
-### 4. New session + empty states
+### New session + empty states
 
 A prominent **New session** button, plus a real fresh/empty state across all
 three stages (Capture: "no taps yet"; Transcript: "nothing to transcribe yet";
-the recordings panel: "no recordings yet").
+the recordings panel: "no recordings yet"). Taps stays pinned and live — global
+ingress is independent of any one session.
 
 ## Why this is "not too much at once / logically grouped"
 
-- **One focus, always.** The canvas shows exactly one stage; the other two
-  collapse to a single line each on the spine (icon + label + live chip). On
-  the Transcript stage, the transcript is the dominant panel and everything
-  else is secondary or disclosed on demand.
-- **Dense within, calm between.** Inside a stage we pack tightly (the IRC log,
-  the taps table); *between* stages there is hard separation — you cross a
-  boundary to change concern.
+- **One focus, always.** The canvas shows exactly one view (global Taps, or one
+  journey stage); the rest collapse to a single line each on the spine (icon +
+  label + live chip). On the Transcript stage, the transcript is the dominant
+  panel and everything else is secondary or disclosed on demand.
+- **Dense within, calm between.** Inside a view we pack tightly (the IRC log, the
+  taps cards); *between* views there is hard separation — you cross a boundary to
+  change concern.
 - **Grouping follows the data's own lifecycle.** Capture → Transcript → People
   is the real order a recording passes through (or, for People, the config that
-  spans sessions). That causal grouping is stronger than an arbitrary tab bar.
+  spans sessions); Taps sits *outside* that order because it's global, always-on
+  ingress. That causal grouping is stronger than an arbitrary tab bar.
 - **The journey carries progress.** Each chip answers "what does this stage
   need from me?"; a faint progress fill on the spine shows how far the session
   has advanced. Picking a *different session* (or New session) re-seeds it.

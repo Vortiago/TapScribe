@@ -1,12 +1,17 @@
 // =============================================================================
 // TapScribe · Stages — the meeting's life as a guided journey.
-// A slim ordered "spine" (Capture → Transcript → People) with live state on
-// each stop; one dense, logically-grouped workspace at a time.
+// A slim left spine: the GLOBAL "Taps" ingress pinned at the top (un-numbered,
+// always-there — a Bridge's /tap and its settings persist across sessions),
+// then the ordered per-session journey (Capture → Transcript → People) with
+// live state on each stop. One dense, logically-grouped workspace at a time.
 //
-// Transcript is the merged-stage focus: a tight IRC-style merged transcript
-// dominates, with recordings + waveform + strip-silence tuning folded in as a
-// secondary side panel and the engine controls living in a compact header
-// popover. One clear focus per screen, dense within, calm between.
+// Taps is where each tap is configured as a single speaker or a multi-person
+// (diarized) room. Capture is session-scoped: live captions + health + settings
+// + a lighter read-only reference to the taps feeding THIS session. Transcript
+// is the merged-stage focus: a tight IRC merged transcript dominates, with
+// recordings + waveform + strip-silence tuning folded in as a secondary side
+// panel and the engine controls in a compact header popover. One clear focus
+// per screen, dense within, calm between.
 // =============================================================================
 
 import {
@@ -21,7 +26,9 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 
 // ----- live, mutable UI state ------------------------------------------------
 const state = {
-  stage: "capture",
+  // `view` is either the GLOBAL "taps" ingress or one of the numbered journey
+  // stages (capture/transcript/people). Taps is NOT a journey stage.
+  view: "capture",
   sessionId: SESSIONS.find((s) => s.current)?.id || SESSIONS[0].id,
   knobs: { ...STRIP_DEFAULTS },
   selectedClip: null,          // null → recordings panel collapsed to the clip list
@@ -31,7 +38,14 @@ const state = {
   isFresh: false,              // "New session" empty state overlaying the live one
   // per-speaker "transcribe as" quick switch (defaults to primary lang)
   transcribeAs: Object.fromEntries(SPEAKERS.map((s) => [s.id, s.primaryLang])),
+  // per-tap single-vs-multi mode: rooms default to multi (diarized), others single
+  tapMode: Object.fromEntries(LIVE_TAPS.map((t) => [t.identity, speakerById(t.identity)?.isRoom ? "multi" : "single"])),
 };
+
+// The numbered journey, in order. Taps lives ABOVE this and is excluded from
+// both the numbering and the progress fill.
+const STAGE_ORDER = ["capture", "transcript", "people"];
+const isStage = (v) => STAGE_ORDER.includes(v);
 
 // A synthetic, empty session used by the "New session" button.
 const FRESH_SESSION = {
@@ -116,6 +130,13 @@ function clipModel() {
 // =============================================================================
 function renderSpine() {
   const sess = session();
+
+  // Taps entry (global ingress) — always-on readout, set apart from the journey
+  const liveTaps = LIVE_TAPS.filter((t) => t.live).length;
+  document.getElementById("tapsSub").textContent = `${LIVE_TAPS.length} connected · global`;
+  document.getElementById("tapsLiveN").textContent = liveTaps;
+  document.getElementById("tapsEntry").classList.toggle("is-active", state.view === "taps");
+
   document.getElementById("sessionLabel").textContent = sess.label || "(untitled session)";
   document.getElementById("sessionMeta").textContent = sess.fresh
     ? "fresh · 0 clips"
@@ -126,7 +147,7 @@ function renderSpine() {
   nav.innerHTML = "";
   const defs = stageDefs();
   for (const d of defs) {
-    const active = d.id === state.stage;
+    const active = d.id === state.view;
     const node = el(`
       <button class="stage ${active ? "is-active" : ""} ${d.done ? "is-done" : ""}" data-stage="${d.id}">
         <span class="stage__rail"><span class="stage__num">${d.done && !active ? "✓" : d.n}</span></span>
@@ -139,12 +160,15 @@ function renderSpine() {
     nav.appendChild(node);
   }
 
-  // journey progress fill: how far down the pipeline the session sits
-  const idx = defs.findIndex((d) => d.id === state.stage);
-  const fill = Math.round(((idx + 1) / defs.length) * 100);
+  // journey progress fill: how far down the pipeline the session sits. Taps is
+  // global, so when it's the active view the journey shows no advance.
+  const idx = defs.findIndex((d) => d.id === state.view);
+  const onStage = idx >= 0;
+  const fill = onStage ? Math.round(((idx + 1) / defs.length) * 100) : 0;
   document.getElementById("journeyFill").style.width = `${fill}%`;
-  document.getElementById("journeyCap").innerHTML =
-    `<span>Stage ${idx + 1} of ${defs.length}</span><span>${fill}%</span>`;
+  document.getElementById("journeyCap").innerHTML = onStage
+    ? `<span>Stage ${idx + 1} of ${defs.length}</span><span>${fill}%</span>`
+    : `<span>Taps · global</span><span>—</span>`;
 }
 
 // session menu
@@ -166,7 +190,7 @@ function renderSessionMenu() {
       state.sessionId = s.id;
       menu.hidden = true;
       // switching session re-seeds the journey at the most relevant stage
-      state.stage = s.current ? "capture" : "transcript";
+      state.view = s.current ? "capture" : "transcript";
       state.selectedClip = null;
       render();
     });
@@ -182,7 +206,7 @@ document.getElementById("sessionPick").addEventListener("click", () => {
 // "New session" — drop into a fresh, empty journey at Capture.
 document.getElementById("newSession").addEventListener("click", () => {
   state.isFresh = true;
-  state.stage = "capture";
+  state.view = "capture";
   state.selectedClip = null;
   state.auditOpen = false;
   document.getElementById("sessionMenu").hidden = true;
@@ -213,18 +237,24 @@ function render() {
   const root = document.getElementById("workInner");
   root.innerHTML = "";
   let frag;
-  switch (state.stage) {
+  switch (state.view) {
+    case "taps": frag = viewTaps(); break;
     case "capture": frag = viewCapture(); break;
     case "transcript": frag = viewTranscript(); break;
     case "people": frag = viewPeople(); break;
     default: frag = viewCapture();
   }
   root.appendChild(frag);
-  // stage-specific post-render hooks
-  if (state.stage === "transcript") afterTranscript();
+  // view-specific post-render hooks
+  if (state.view === "transcript") afterTranscript();
 }
 
-function goStage(id) { state.stage = id; render(); window.scrollTo(0, 0); }
+// Navigate to a journey stage (capture/transcript/people).
+function goStage(id) { state.view = id; render(); window.scrollTo(0, 0); }
+// Navigate to the global Taps ingress (not a journey stage).
+function goTaps() { state.view = "taps"; render(); window.scrollTo(0, 0); }
+
+document.getElementById("tapsEntry").addEventListener("click", goTaps);
 
 // =============================================================================
 // IRC line builder — shared by the live captions feed and the merged transcript
@@ -253,7 +283,163 @@ function ircLine(ln, { inflight = false } = {}) {
 }
 
 // =============================================================================
-// STAGE 1 — CAPTURE  (live taps + gate + rec/live + diarization + IRC captions)
+// TAPS — the GLOBAL live ingress (NOT a journey stage). Every connected tap +
+// any incoming ones, each with its identity/device, live meter, lag, gate,
+// rec/live, language and the KEY single-vs-multi (diarization) switch. Settings
+// here are global and persist across sessions; the session is just where the
+// captured audio lands.
+// =============================================================================
+
+// A synthetic "incoming" tap — a Bridge mid-handshake, not yet streaming. Shows
+// the incoming state without bloating the canonical LIVE_TAPS fixture.
+const INCOMING_TAP = {
+  identity: "__incoming__", name: "lenovo-x1 · meeting-room-2",
+  device: "Poly Sync 20", lang: "auto", incoming: true,
+};
+
+function viewTaps() {
+  const wrap = el(`<div></div>`);
+  const live = LIVE_TAPS.filter((t) => t.live).length;
+  wrap.innerHTML = header({
+    eyebrow: "Global · Live ingress",
+    title: "Taps",
+    sub: `${LIVE_TAPS.length} connected · <span style="color:var(--good)">${live} live</span> · 1 incoming · settings persist across sessions`,
+  });
+
+  // short header note: taps are global, configure single vs multi here
+  wrap.appendChild(el(`
+    <div class="tapnote">
+      <span class="ic">🛰️</span>
+      <div>Taps persist across sessions — set each as a <b>single speaker</b> or a <b>multi-person room</b> here. The session is just where their captured audio lands.</div>
+    </div>`));
+
+  const panel = el(`
+    <div class="panel panel--primary">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">🛰️</span>Connected taps</div>
+        <div class="panel__hint">identity · device · level · lag · gate · rec/live · single/multi</div>
+      </div>
+      <div class="panel__body"><div class="taplist"></div></div>
+    </div>`);
+  const list = panel.querySelector(".taplist");
+  for (const t of LIVE_TAPS) list.appendChild(tapCard(t));
+  list.appendChild(tapCard(INCOMING_TAP));
+  wrap.appendChild(panel);
+
+  queueMicrotask(() => drawSparks(wrap));
+  return wrap;
+}
+
+// One dense tap card: main row (identity/device · meter · lag · gate · rec/live)
+// + a config strip (language + single/multi switch) + the resulting speakers.
+function tapCard(t) {
+  if (t.incoming) {
+    const card = el(`
+      <div class="tapc is-incoming">
+        <div class="tapc__main">
+          <span class="gtap__ic" style="border-style:dashed">📡</span>
+          <span class="tapc__id">
+            <span class="tapc__name">${esc(t.name)} <span class="tag warn">incoming</span></span>
+            <span class="tapc__meta"><span class="ic">🎚️</span>${esc(t.device)}</span>
+          </span>
+          <span class="muted" style="font-size:11px">handshaking — negotiating gate &amp; identity…</span>
+          <span></span>
+          <span class="toggles"><span class="tg rec">● REC</span><span class="tg live">LIVE</span></span>
+        </div>
+        <div class="tapc__cfg">
+          <span class="cfgblk"><span class="cfgblk__k">Language</span>
+            <span class="langsel">${LANGS.auto.flag} auto-detect <span class="langsel__chev">⌄</span></span></span>
+          <span class="cfgsep"></span>
+          <span class="cfgblk"><span class="cfgblk__k">Mode</span>
+            <span class="segsw">
+              <button class="segsw__opt is-on"><span class="ic">👤</span>Single</button>
+              <button class="segsw__opt multi"><span class="ic">👥</span>Multi</button>
+            </span></span>
+          <span class="muted" style="font-size:10.5px;margin-left:auto">set once it connects</span>
+        </div>
+      </div>`);
+    return card;
+  }
+
+  const sp = speakerById(t.identity);
+  const idle = !t.gateOpen && t.level < 0.02;
+  const mode = state.tapMode[t.identity] || (sp?.isRoom ? "multi" : "single");
+  const card = el(`
+    <div class="tapc ${idle ? "is-idle" : ""}">
+      <div class="tapc__main">
+        <span class="av spk-${t.spk}">${esc(sp?.initials || "??")}</span>
+        <span class="tapc__id">
+          <span class="tapc__name spk-ink-${t.spk}">${esc(t.name)}</span>
+          <span class="tapc__meta"><span class="ic">🎚️</span>${esc(sp?.mic.label || "—")} · <span class="dim">${esc(sp?.mic.id || t.identity)}</span></span>
+        </span>
+        <span class="meter">
+          <span class="meter__bar"><span class="meter__fill spk-bar-${t.spk}" style="width:${Math.round(t.level * 100)}%"></span></span>
+          <canvas class="meter__spark" width="160" height="36" data-spark='${JSON.stringify(t.levels)}' data-spk="${t.spk}"></canvas>
+        </span>
+        <span class="gate">
+          <span class="gate__led ${t.gateOpen ? "open" : ""}"></span>
+          <span class="gate__txt ${t.gateOpen ? "open" : ""}">${t.gateOpen ? "open" : "shut"}</span>
+          <span class="lag ${t.lagS > 1.2 ? "hot" : ""}">${t.lagS ? t.lagS.toFixed(1) + "s" : "—"}</span>
+        </span>
+        <span class="toggles">
+          <span class="tg rec ${t.record ? "on" : ""}">● REC</span>
+          <span class="tg live ${t.live ? "on" : ""}">LIVE</span>
+        </span>
+      </div>
+      <div class="tapc__cfg">
+        <span class="cfgblk"><span class="cfgblk__k">Language</span>
+          <span class="langsel"><span class="flag">${LANGS[t.lang]?.flag || ""}</span>${esc(LANGS[t.lang]?.name || t.lang)} <span class="langsel__chev">⌄</span></span></span>
+        <span class="cfgsep"></span>
+        <span class="cfgblk"><span class="cfgblk__k">Mode</span>
+          <span class="segsw" data-tap="${esc(t.identity)}">
+            <button class="segsw__opt ${mode === "single" ? "is-on" : ""}" data-mode="single"><span class="ic">👤</span>Single</button>
+            <button class="segsw__opt multi ${mode === "multi" ? "is-on" : ""}" data-mode="multi"><span class="ic">👥</span>Multi</button>
+          </span></span>
+        <span class="muted" style="font-size:10.5px;margin-left:auto">${mode === "multi" ? "diarized into speakers" : "one speaker per tap"}</span>
+      </div>
+      <div class="tapc__rest"></div>
+    </div>`);
+
+  // resulting speakers: a MULTI tap diarizes into Speaker A/B (lang + share); a
+  // SINGLE tap is one speaker, stated plainly.
+  const rest = card.querySelector(".tapc__rest");
+  if (mode === "multi") {
+    const voices = sp?.diarizedInto || [];
+    const block = el(`
+      <div class="tapc__spk">
+        <div class="tapc__spkcap">↳ diarized into ${voices.length} speakers</div>
+      </div>`);
+    for (const d of voices) {
+      block.appendChild(el(`
+        <div class="spkrow">
+          <span class="av sm spk-${d.spk}">${d.spk}</span>
+          <span class="spkrow__name">${esc(d.label)} <span class="flag">${LANGS[d.lang]?.flag || ""}</span> <span class="dim mono" style="font-size:10px">${esc(LANGS[d.lang]?.name || d.lang)}</span></span>
+          <span class="spkrow__split"><span class="spkrow__splitfill spk-bar-${d.spk}" style="width:${d.talkPct}%"></span></span>
+          <span class="spkrow__pct">${d.talkPct}%</span>
+        </div>`));
+    }
+    rest.replaceWith(block);
+  } else {
+    rest.replaceWith(el(`
+      <div class="tapc__single">
+        <span class="ic">👤</span>
+        <span>One speaker: <b class="spk-ink-${t.spk}">${esc(sp?.name || t.name)}</b> — transcribed as ${LANGS[t.lang]?.flag || ""} ${esc(LANGS[t.lang]?.name || t.lang)}.</span>
+      </div>`));
+  }
+
+  // wire the single/multi switch — re-render so the resulting speakers update
+  card.querySelectorAll(".segsw[data-tap] .segsw__opt").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.tapMode[t.identity] = b.dataset.mode;
+      render();
+    });
+  });
+  return card;
+}
+
+// =============================================================================
+// STAGE 1 — CAPTURE  (session-scoped: live captions + health + settings + a
+// lighter read-only reference to the taps feeding THIS session)
 // =============================================================================
 function viewCapture() {
   const sess = session();
@@ -264,90 +450,76 @@ function viewCapture() {
   wrap.innerHTML = header({
     eyebrow: "Stage 1 · Live",
     title: "Capture",
-    sub: `${live} taps streaming into <b>${esc(sess.label)}</b> · recorder ${APP.recordingEnabled ? "<span style='color:var(--good)'>on</span>" : "<span class='muted'>paused</span>"} · backend <span class='mono'>${esc(APP.backend)}</span>`,
+    sub: `${live} taps recording into <b>${esc(sess.label)}</b> · recorder ${APP.recordingEnabled ? "<span style='color:var(--good)'>on</span>" : "<span class='muted'>paused</span>"} · backend <span class='mono'>${esc(APP.backend)}</span>`,
+    actions: `<button class="act" id="toTaps">🛰️ Taps <span class="act__val">configure ingress</span></button>`,
   });
 
   const grid = el(`<div class="grid cols-cap"></div>`);
 
-  // ---- LEFT: live taps table (dense, with inline diarization) ----
-  const tapsPanel = el(`
-    <div class="panel">
-      <div class="panel__head">
-        <div class="panel__title"><span class="ic">🎙️</span>Live taps</div>
-        <div class="panel__hint">level · lag · gate · rec/live</div>
-      </div>
-      <div class="panel__body flush"><div class="taps"></div></div>
-    </div>`);
-  const taps = tapsPanel.querySelector(".taps");
-  for (const t of LIVE_TAPS) {
-    const sp = speakerById(t.identity);
-    const idle = !t.gateOpen && t.level < 0.02;
-    const row = el(`
-      <div class="tap ${idle ? "is-idle" : ""}">
-        <span class="av spk-${t.spk}">${esc(sp?.initials || "??")}</span>
-        <span class="tap__id">
-          <span class="tap__name">${esc(t.name)}</span>
-          <span class="tap__meta"><span class="flag">${LANGS[t.lang]?.flag || ""}</span>${esc(LANGS[t.lang]?.name || t.lang)} · ${esc(sp?.mic.label || "—")}</span>
-        </span>
-        <span class="meter">
-          <span class="meter__bar"><span class="meter__fill spk-bar-${t.spk}" style="width:${Math.round(t.level * 100)}%"></span></span>
-          <canvas class="meter__spark" width="160" height="36" data-spark='${JSON.stringify(t.levels)}' data-spk="${t.spk}"></canvas>
-        </span>
-        <span class="gate">
-          <span class="gate__led ${t.gateOpen ? "open" : ""}"></span>
-          <span class="gate__txt ${t.gateOpen ? "open" : ""}">${t.gateOpen ? "gate open" : "gate shut"}</span>
-          <span class="lag ${t.lagS > 1.2 ? "hot" : ""}">${t.lagS ? t.lagS.toFixed(1) + "s lag" : ""}</span>
-        </span>
-        <span class="toggles">
-          <span class="tg rec ${t.record ? "on" : ""}">● REC</span>
-          <span class="tg live ${t.live ? "on" : ""}">LIVE</span>
-        </span>
-      </div>`);
-    taps.appendChild(row);
-
-    // diarization rendered INLINE as a property of this tap (room mic only)
-    if (sp?.isRoom && sp.diarizedInto) {
-      const diar = el(`
-        <div class="diar">
-          <div class="diar__head">↳ diarized into ${sp.diarizedInto.length} voices <span class="tag warn">multi-voice tap</span></div>
-        </div>`);
-      for (const d of sp.diarizedInto) {
-        diar.appendChild(el(`
-          <div class="diar__row">
-            <span class="av sm spk-${d.spk}">${d.spk}</span>
-            <span class="diar__name">${esc(d.label)} <span class="flag">${LANGS[d.lang]?.flag || ""}</span> <span class="dim mono" style="font-size:10px">${esc(d.lang)}</span></span>
-            <span class="diar__split"><span class="diar__splitfill spk-bar-${d.spk}" style="width:${d.talkPct}%"></span></span>
-            <span class="diar__pct">${d.talkPct}%</span>
-          </div>`));
-      }
-      taps.appendChild(diar);
-    }
-  }
-  grid.appendChild(tapsPanel);
-
-  // ---- RIGHT: live captions feed — SAME tight IRC stream as the transcript ----
+  // ---- LEFT: live captions feed — SAME tight IRC stream as the transcript ----
+  // (the session's primary live focus; diarized A/B attribution shows here)
   const capsPanel = el(`
-    <div class="panel">
+    <div class="panel panel--primary">
       <div class="panel__head">
         <div class="panel__title"><span class="ic">💬</span>Live captions</div>
-        <div class="panel__hint">speaker · language</div>
+        <div class="panel__hint">speaker · language · this session</div>
       </div>
       <div class="panel__body flush"><div class="irclog caps"></div></div>
     </div>`);
   const caps = capsPanel.querySelector(".irclog");
   for (const c of LIVE_CAPTIONS) caps.appendChild(el(ircLine(c, { inflight: c.inflight })));
   grid.appendChild(capsPanel);
+
+  // ---- RIGHT: lighter READ-ONLY "taps feeding this session" reference ----
+  // Just name + level + which are recording; the per-tap CONFIG (single/multi,
+  // language, gate) lives in the global Taps view, linked from here.
+  const feedPanel = el(`
+    <div class="panel">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">🛰️</span>Taps feeding this session</div>
+        <button class="act act--sm act--ghost" id="toTaps2">configure →</button>
+      </div>
+      <div class="panel__body flush"><div class="taps"></div></div>
+    </div>`);
+  const feed = feedPanel.querySelector(".taps");
+  for (const t of LIVE_TAPS) {
+    const sp = speakerById(t.identity);
+    const idle = !t.gateOpen && t.level < 0.02;
+    feed.appendChild(el(`
+      <div class="feedrow ${idle ? "is-idle" : ""}">
+        <span class="av sm spk-${t.spk}">${esc(sp?.initials || "??")}</span>
+        <span class="feedrow__name spk-ink-${t.spk}">${esc(sp?.name?.split(" ")[0] || t.name)} ${sp?.isRoom ? '<span class="tag" style="font-size:8.5px">multi</span>' : ""}</span>
+        <span class="feedrow__mini"><span class="feedrow__lvl"><span class="feedrow__lvlfill spk-bar-${t.spk}" style="width:${Math.round(t.level * 100)}%"></span></span></span>
+        <span class="tg rec ${t.record ? "on" : ""}" style="cursor:default">${t.record ? "● REC" : "off"}</span>
+      </div>`));
+    // diarized A/B stays VISIBLE here (attribution) — but is configured in Taps
+    if (sp?.isRoom && sp.diarizedInto) {
+      for (const d of sp.diarizedInto) {
+        feed.appendChild(el(`
+          <div class="feedrow" style="padding-left:34px;opacity:.85">
+            <span class="av sm spk-${d.spk}">${d.spk}</span>
+            <span class="feedrow__name">${esc(d.label)} <span class="flag">${LANGS[d.lang]?.flag || ""}</span></span>
+            <span class="muted mono" style="font-size:10px">${d.talkPct}%</span>
+            <span></span>
+          </div>`));
+      }
+    }
+  }
+  grid.appendChild(feedPanel);
   wrap.appendChild(grid);
 
   // ---- BOTTOM ROW: capture health summary + capture settings (grouped) ----
   wrap.appendChild(el(`<div class="spacer"></div>`));
   const bottom = el(`<div class="grid cols-cap"></div>`);
 
-  // health summary — gates open, languages in play, lag health
+  // health summary — gates open, languages in play, lag health, diarized rooms.
+  // Diarization stays VISIBLE here (the A/B attribution) even though it's
+  // CONFIGURED in the global Taps view.
   const openGates = LIVE_TAPS.filter((t) => t.gateOpen).length;
   const recOn = LIVE_TAPS.filter((t) => t.record).length;
   const langSet = [...new Set(LIVE_TAPS.map((t) => t.lang))];
   const maxLag = Math.max(...LIVE_TAPS.map((t) => t.lagS));
+  const multiRooms = LIVE_TAPS.filter((t) => speakerById(t.identity)?.isRoom).length;
   bottom.appendChild(el(`
     <div class="panel">
       <div class="panel__head"><div class="panel__title"><span class="ic">📡</span>Capture health</div><div class="panel__hint">this session, right now</div></div>
@@ -358,6 +530,7 @@ function viewCapture() {
           <div class="profcell"><div class="profcell__k">Max lag</div><div class="profcell__v">${maxLag.toFixed(1)}s</div></div>
           <div class="profcell"><div class="profcell__k">Languages</div><div class="profcell__v" style="font-size:16px">${langSet.map((c) => LANGS[c]?.flag || "").join(" ")}</div></div>
         </div>
+        <div class="muted" style="font-size:10.5px;margin-top:9px">${multiRooms} multi-person room${multiRooms !== 1 ? "s" : ""} diarized into A/B attribution — set single vs multi in <b>Taps</b>.</div>
       </div>
     </div>`));
 
@@ -376,8 +549,10 @@ function viewCapture() {
     </div>`));
   wrap.appendChild(bottom);
 
-  // draw sparklines after mount
-  queueMicrotask(() => drawSparks(wrap));
+  // both "configure ingress" affordances jump to the global Taps view
+  queueMicrotask(() => {
+    wrap.querySelectorAll("#toTaps, #toTaps2").forEach((b) => b.addEventListener("click", goTaps));
+  });
   return wrap;
 }
 
@@ -986,11 +1161,12 @@ render();
 
 // deterministic hooks for the screenshotter
 window.gotoView = (name) => {
-  const map = { capture: "capture", transcript: "transcript", people: "people" };
-  if (map[name]) { state.isFresh = false; goStage(map[name]); }
+  state.isFresh = false;
+  if (name === "taps") { goTaps(); return; }
+  if (isStage(name)) goStage(name);
 };
 window.stagesGo = window.gotoView;
 window.stagesPickSession = (id) => { if (SESSIONS.some((s) => s.id === id)) { state.isFresh = false; state.sessionId = id; render(); } };
 window.stagesNewSession = () => { document.getElementById("newSession").click(); };
-window.stagesSelectClip = (i) => { state.stage = "transcript"; state.selectedClip = i; render(); };
+window.stagesSelectClip = (i) => { state.view = "transcript"; state.selectedClip = i; render(); };
 window.stagesSetKnob = (key, val) => { if (key in state.knobs) { state.knobs[key] = val; render(); } };
