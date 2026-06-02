@@ -381,19 +381,83 @@ body::before { display: none; }
 .taps .stream-buffer { padding: 0 11px 7px 30px; font-size: 10px; color: var(--fg-2); display: flex; align-items: baseline; gap: 5px; font-family: var(--mono); }
 .taps .stream-buffer .buffer-icon { color: var(--fg-3); }
 
-/* live-channel: model/lang/gate form + start/stop. The component emits
-   .live-row / .btn / .input / .select which dashboard.css already styles;
-   we only tune spacing to the Stages density. */
+/* ----------------------------------------------------------------------
+   De-bubbled FORM CONTROLS for every reused component that lands inside the
+   Stages shell (live-channel model/lang/gate form, config-card prompt/
+   hotwords textareas, session-detail range inputs). dashboard.css styles
+   .input/.select/.textarea with a softer `--bg-0` fill + a 1px box-shadow
+   focus glow; the Stages aesthetic (prototypes/stages: .field input/.sel)
+   is a flatter cell on the `--bg-2` elevation, hairline border, 3px radius,
+   monospace, and a border-only focus (no glow ring). Scope strictly to
+   `.next-app` so the classic dashboard keeps its own look.
+   ---------------------------------------------------------------------- */
+.next-app :is(.input, .select, .textarea) {
+  background: var(--bg-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--next-r);
+  color: var(--fg-0);
+  font-family: var(--mono);
+  /* Kill dashboard.css's focus glow — Stages controls signal focus with a
+     border-colour change alone. */
+  &:focus { border-color: var(--info); box-shadow: none; }
+}
+.next-app :is(.input, .select) { padding: 4px 8px; font-size: 11.5px; }
+.next-app .textarea { padding: 5px 8px; font-size: 11.5px; line-height: 1.5; }
+
+/* De-bubbled BUTTONS. The reused components emit .btn / .btn.primary /
+   .btn.danger / .btn.tiny (start · apply · stop · save · view logs). The
+   classic .btn.primary/.danger paint a translucent colour-wash bubble;
+   Stages wants the `.act` treatment — a flat hairline cell, with `primary`
+   a solid amber fill (matches .act--primary) and `danger` an outline in the
+   rec hue. Reuses the same tokens the native `.act` buttons use. */
+.next-app .action-row .btn,
+.next-app .live-log-row .btn,
+.next-app .live-init-prompt .btn {
+  background: var(--bg-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--next-r);
+  color: var(--fg-1);
+  font-family: var(--sans);
+  font-weight: 550;
+  transition: border-color 90ms ease, background 90ms ease, filter 90ms ease;
+  &:hover:not(:disabled) { border-color: var(--rule); background: var(--bg-elev); }
+  &:disabled { opacity: .55; }
+
+  &.primary {
+    background: var(--next-accent);
+    border-color: var(--next-accent);
+    color: var(--bg-0);
+    font-weight: 650;
+    &:hover:not(:disabled) { background: var(--next-accent); filter: brightness(1.07); }
+  }
+  &.danger {
+    background: transparent;
+    border-color: color-mix(in srgb, var(--rec) 38%, transparent);
+    color: var(--rec);
+    &:hover:not(:disabled) { background: var(--rec-bg); border-color: color-mix(in srgb, var(--rec) 55%, transparent); }
+  }
+  &.tiny { padding: 3px 8px; font-size: 10.5px; font-family: var(--mono); }
+}
+
+/* live-channel: model/lang/gate form + start/stop. Component emits
+   .live-row / .btn / .input / .select (de-bubbled above); here we tighten to
+   the Stages density and right-align the value column so the form reads like
+   the prototype's label→value rows. */
 .next-app .live-row { margin-bottom: 6px; }
 .next-app .live-row .lbl { font-size: 10px; color: var(--fg-2); letter-spacing: .05em; text-transform: uppercase; }
-.next-app .action-row { display: flex; gap: 6px; flex-wrap: wrap; }
-.next-app .gate-knob-row .dim { font-size: 9px; }
-.next-app .live-meta { font-size: 9.5px; color: var(--fg-2); border-top: 1px dashed var(--hairline-2); padding-top: 6px; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
-.next-app .live-meta code { font-family: var(--mono); color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: 2px; }
+.next-app .live-row .select { width: 100%; }
+.next-app .action-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+/* Gate knobs: trim the helper text + indent so the four knobs read as a
+   compact sub-group of the speech-filter selector above them. */
+.next-app .gate-knob-row.live-row { padding-left: 10px; row-gap: 1px; margin-bottom: 5px; }
+.next-app .gate-knob-row .lbl { font-size: 9.5px; text-transform: none; letter-spacing: 0; }
+.next-app .gate-knob-row .dim { font-size: 9px; color: var(--fg-3); }
+.next-app .live-meta { font-size: 9.5px; color: var(--fg-2); border-top: 1px dashed var(--hairline-2); padding-top: 6px; margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.next-app .live-meta code { font-family: var(--mono); color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: var(--next-r-sm); }
 .next-app .live-err { margin-top: 6px; color: var(--rec); font-size: 10.5px; background: var(--rec-bg); padding: 4px 6px; border-radius: var(--next-r); border: 1px solid color-mix(in srgb, var(--rec) 25%, transparent); word-break: break-word; }
 .next-app .live-init-prompt { margin-top: 8px; font-size: 10.5px; }
 .next-app .live-init-prompt summary { cursor: pointer; color: var(--fg-2); }
-.next-app .live-log-row { margin-top: 6px; }
+.next-app .live-log-row { margin-top: 8px; }
 
 /* merged-transcript: reuse dashboard.css's .box/.transcript/.spk-bar styling
    verbatim — it already renders cleanly on dark. Just sit it flush in the
