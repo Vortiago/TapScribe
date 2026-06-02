@@ -22,7 +22,7 @@ import {
   speakerById,
 } from "../_shared/mock-data.js";
 
-const { clock, clockH, pct } = helpers;
+const { clock, pct } = helpers;
 const app = document.getElementById("app");
 const stage = document.getElementById("stage");
 const backBtn = document.getElementById("backBtn");

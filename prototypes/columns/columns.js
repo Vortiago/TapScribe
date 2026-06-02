@@ -12,7 +12,7 @@ import {
   speakerById,
 } from "../_shared/mock-data.js";
 
-const { clock, clockH, pct } = helpers;
+const { clock, pct } = helpers;
 const spkVar = (n) => `var(--spk-${n})`;
 const langChip = (code) => {
   const l = LANGS[code] || LANGS.auto;

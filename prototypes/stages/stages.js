@@ -10,7 +10,7 @@ import {
   speakerById, APP,
 } from "../_shared/mock-data.js";
 
-const { clock, clockH, pct } = helpers;
+const { clock, clockH } = helpers;
 const el = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
