@@ -48,7 +48,6 @@ FRAME_BYTES = FRAME_SAMPLES * 2
 # Pure helpers (testable without a mic or a WS server)
 # ---------------------------------------------------------------------------
 
-
 def chunk_into_frames(buf: bytes) -> Iterator[bytes]:
     """Yield exact 640-byte frames from `buf`. Partial trailing frames are
     dropped — the caller is expected to keep them in a buffer for the
@@ -101,7 +100,6 @@ def default_identity() -> str:
 # ---------------------------------------------------------------------------
 # Audio capture — sounddevice puts frames into a thread-safe queue
 # ---------------------------------------------------------------------------
-
 
 class MicCapture:
     """Wraps sounddevice in the simplest shape: start() opens an input
@@ -159,7 +157,6 @@ class MicCapture:
 # /tap session — open WS, stream queue contents, close
 # ---------------------------------------------------------------------------
 
-
 async def run_tap_session(
     *,
     host: str,
@@ -175,11 +172,7 @@ async def run_tap_session(
     """Open one /tap WS and stream queue bytes until stop_event is set or
     the WS dies. Returns the total bytes sent."""
     url = build_tap_url(
-        host=host,
-        port=port,
-        identity=identity,
-        name=name,
-        tls=tls,
+        host=host, port=port, identity=identity, name=name, tls=tls,
         utterance_id=utterance_id,
     )
     subprotocols = build_subprotocols(tap_token)
@@ -195,10 +188,7 @@ async def run_tap_session(
                 # don't block the loop forever — re-check stop_event at ~50Hz.
                 try:
                     chunk = await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        _queue_get_with_timeout,
-                        pcm_queue,
-                        0.02,
+                        None, _queue_get_with_timeout, pcm_queue, 0.02,
                     )
                 except _QueueTimeout:
                     continue
@@ -234,7 +224,6 @@ def _queue_get_with_timeout(q: queue.Queue, timeout: float):
 # ---------------------------------------------------------------------------
 # Main loop — ENTER toggles idle ↔ recording
 # ---------------------------------------------------------------------------
-
 
 async def _main(args: argparse.Namespace) -> int:
     capture = MicCapture(device=args.mic)
@@ -274,10 +263,7 @@ async def _main(args: argparse.Namespace) -> int:
             # Wait for the next ENTER (or quit signal).
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    _queue_get_with_timeout,
-                    enter_queue,
-                    0.1,
+                    None, _queue_get_with_timeout, enter_queue, 0.1,
                 )
             except _QueueTimeout:
                 continue
@@ -300,10 +286,8 @@ async def _main(args: argparse.Namespace) -> int:
                     # Default-arg trick captures the current stop_event so a
                     # later cycle's reassignment doesn't leak into this task.
                     await run_tap_session(
-                        host=args.host,
-                        port=args.port,
-                        identity=args.identity,
-                        name=args.name,
+                        host=args.host, port=args.port,
+                        identity=args.identity, name=args.name,
                         pcm_queue=capture.pcm_queue,
                         stop_event=this_stop,
                         tap_token=args.tap_token,
@@ -340,29 +324,21 @@ def main() -> int:
     p = argparse.ArgumentParser(
         prog="local_test_bridge",
         description="Tap the local mic and stream to the TapScribe Recorder's /tap endpoint. "
-        "ENTER toggles idle/recording.",
+                    "ENTER toggles idle/recording.",
     )
     p.add_argument("--host", default="localhost", help="Recorder host (default: localhost)")
     p.add_argument("--port", type=int, default=8001, help="Recorder port (default: 8001)")
-    p.add_argument(
-        "--identity",
-        default=default_identity(),
-        help="Identity sent on each /tap WS. Defaults to $USER / $USERNAME / 'local-tester'.",
-    )
+    p.add_argument("--identity", default=default_identity(),
+                   help="Identity sent on each /tap WS. Defaults to $USER / $USERNAME / 'local-tester'.")
     p.add_argument("--name", default="Local Tester", help="Display name (shown on the dashboard)")
-    p.add_argument(
-        "--mic", default=None, help="sounddevice input device name or index. Default: system default input."
-    )
-    p.add_argument(
-        "--tap-token",
-        default=os.environ.get("TAPSCRIBE_TAP_TOKEN", ""),
-        help="Bearer token the recorder requires on the /tap WS (carried via "
-        "Sec-WebSocket-Protocol). Defaults to $TAPSCRIBE_TAP_TOKEN or empty "
-        "(use when the recorder runs with --no-auth).",
-    )
-    p.add_argument(
-        "--tls", action="store_true", help="Connect over wss:// (the recorder was started with --tls)."
-    )
+    p.add_argument("--mic", default=None,
+                   help="sounddevice input device name or index. Default: system default input.")
+    p.add_argument("--tap-token", default=os.environ.get("TAPSCRIBE_TAP_TOKEN", ""),
+                   help="Bearer token the recorder requires on the /tap WS (carried via "
+                        "Sec-WebSocket-Protocol). Defaults to $TAPSCRIBE_TAP_TOKEN or empty "
+                        "(use when the recorder runs with --no-auth).")
+    p.add_argument("--tls", action="store_true",
+                   help="Connect over wss:// (the recorder was started with --tls).")
     args = p.parse_args()
 
     try:
