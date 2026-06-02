@@ -2,7 +2,7 @@
    TapScribe · Stages (/next) — Phase 1.
    Sharp, de-bubbled, dense "control surface" layered on the classic
    dashboard's :root tokens (dashboard.css, loaded first). No hardcoded
-   colours — everything derives from --bg-*/--fg-*/--rec/--ok/--warn/--info/
+   colours — everything derives from the --bg / --fg / --rec / --ok / --warn / --info
    --magenta + --mono/--sans. The one warm accent is --warn (amber), doing the
    "where am I / what's live" work; --rec is the live pulse.
 
