@@ -327,6 +327,13 @@ input, select, textarea { font-family: inherit; }
 .tag.warn { color: var(--warn); border-color: #463615; background: #1f1a0f; }
 .tag.info { color: var(--info); border-color: #28435c; background: #101d29; }
 
+/* INPUT-kind badge (microphone | line-in | stereo-mix) — what a tap brings in */
+.tag.inp { font-size: 9px; padding: 2px 6px; }
+.tag.inp .inp__ic { font-size: 10px; line-height: 1; }
+.tag.inp--microphone { color: var(--spk0); border-color: #234868; background: #0e1a26; }
+.tag.inp--line-in { color: var(--spk2); border-color: #463615; background: #1f1a0f; }
+.tag.inp--stereo-mix { color: var(--spk1); border-color: #3a2c52; background: #16101f; }
+
 /* toggle control (record / live) — square, two states */
 .tgs { display: inline-flex; gap: 4px; }
 .tg {
@@ -419,6 +426,11 @@ input, select, textarea { font-family: inherit; }
   padding: 3px 8px; font-size: 11px; font-family: var(--mono); color: var(--ink-2);
 }
 .pick__chev { color: var(--ink-4); font-size: 9px; }
+.pick--sm { font-size: 10px; padding: 2px 6px; gap: 5px; }
+/* an unmapped diarized voice — "Unidentified — map to a Person" */
+.pick--unid { border-color: #463615; color: var(--warn); border-style: dashed; }
+/* a tap that carries several People — stack the per-voice picks */
+.pcell { display: inline-flex; flex-direction: column; gap: 3px; align-items: flex-start; }
 
 /* single|multi segmented (square) */
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
@@ -444,6 +456,9 @@ input, select, textarea { font-family: inherit; }
 .subrow__fill { height: 100%; }
 .subrow__pct { font-size: 9.5px; font-family: var(--mono); color: var(--ink-2); text-align: right; }
 .subcap { font-size: 9px; color: var(--info); text-transform: uppercase; letter-spacing: .07em; padding: 7px 11px 3px 44px; font-family: var(--mono); }
+/* the voice -> Person mapping variant: a diarized voice maps to a Person */
+.subrow--map { grid-template-columns: 18px 130px 1fr 38px 14px max-content; }
+.subrow__arrow { color: var(--ink-4); font-size: 11px; text-align: center; }
 
 /* gate-knob grid (Taps speech-gate section + Settings) */
 .knobgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
@@ -458,6 +473,15 @@ input, select, textarea { font-family: inherit; }
 .checkrow { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-2); }
 .checkbox { width: 14px; height: 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel-2); display: grid; place-items: center; font-size: 10px; color: transparent; }
 .checkbox.on { background: var(--accent); border-color: var(--accent); color: #160f04; }
+
+/* a tap's OWN audio settings (gate/floor + speech-gate LiveConfig), shown as an
+   expanded row under the tap. Remembered per identity across sessions. */
+.tapgate td { background: var(--panel-2); padding: 0; border-bottom: 1px solid var(--line); }
+.tapgate__in { padding: 11px 13px 13px 44px; display: flex; flex-direction: column; gap: 11px; }
+.tapgate__head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tapgate__floor { display: grid; grid-template-columns: repeat(2, minmax(0, 200px)); gap: 16px; }
+.tapgate__sub { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 9px; border-top: 1px solid var(--line-soft); }
+.tapgate .cfgblk__k { font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-4); font-weight: 600; }
 
 /* ====================================================================== */
 /* IRC log — shared by live captions AND the merged transcript.            */
@@ -634,35 +658,33 @@ input, select, textarea { font-family: inherit; }
 }
 
 /* ====================================================================== */
-/* PEOPLE view — registry table + per-Person mics, languages, identities.   */
+/* PEOPLE view — registry of HUMANS. Per-Person: language + the taps/voices    */
+/* mapped to them. NO gate/floor/input here (those live on the Tap).            */
 /* ====================================================================== */
 .person { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
-.person.is-room { border-color: #28435c; }
+.person.is-unid { border-color: #463615; border-style: dashed; }
 .person + .person { margin-top: 11px; }
 .person__head { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 11px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+.person.is-unid .person__head { background: #19150d; }
 .person__id { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .person__name { font-weight: 650; font-size: 13px; display: flex; align-items: center; gap: 6px; }
 .person__note { font-size: 10px; color: var(--ink-3); }
 .person__seen { font-size: 9.5px; font-family: var(--mono); color: var(--ink-3); text-align: right; flex: none; }
 .person__seen b { color: var(--ink); }
-.person__cols { display: grid; grid-template-columns: 1.3fr 1fr; }
+.person__cols { display: grid; grid-template-columns: 1fr 1.15fr; }
 .person__col { padding: 10px 12px; }
 .person__col + .person__col { border-left: 1px solid var(--line); }
 .subhead { font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-4); font-weight: 600; margin-bottom: 7px; display: flex; align-items: center; gap: 6px; }
 
-/* mic profile rows (a person owns several) */
-.microw { display: grid; grid-template-columns: 1fr auto auto; gap: 9px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line-soft); }
-.microw:first-of-type { border-top: 0; }
-.microw__l { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.microw__lab { font-size: 11px; font-family: var(--mono); color: var(--ink-2); white-space: nowrap; }
-.microw__lab b { color: var(--ink); }
-.micval { font-size: 10px; font-family: var(--mono); color: var(--ink-2); }
-.micval__k { color: var(--ink-4); }
-
-/* identities mapped to a person */
+/* taps / diarized voices mapped to a person */
 .idrow { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-top: 1px solid var(--line-soft); font-size: 11px; }
 .idrow:first-of-type { border-top: 0; }
 .idrow__code { font-family: var(--mono); color: var(--ink-2); }
+
+/* Unidentified avatar + chips (a not-yet-mapped diarized voice = a Person TBD) */
+.av.unid { background: repeating-linear-gradient(45deg, #463615, #463615 3px, #2a2110 3px, #2a2110 6px); color: var(--warn); }
+.langpill.unid { border-color: #463615; color: var(--warn); }
+.langpill.unid .muted { color: var(--ink-4); }
 
 /* language pair + quick switch */
 .langpair { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; flex-wrap: wrap; }

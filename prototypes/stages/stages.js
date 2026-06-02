@@ -11,17 +11,26 @@
 // separators, thin borders, monospace data, no pills/bubbles. window.gotoView
 // accepts: taps, people, settings, capture, recordings, transcript.
 //
-// Real TapScribe features each get a home; the net-new ones (per-mic Person
-// profiles, multi-person/diarized taps, primary+secondary language, the
-// waveform cut preview) are mocked UI flagged as such inline.
+// Vocabulary (see CONCEPT.md): a TAP is an incoming audio stream with one INPUT
+// kind (microphone | line-in | stereo-mix); it OWNS its audio settings (gate/
+// floor + the speech-gate LiveConfig + rec/live) per identity, and carries one
+// PERSON or several diarized voices that each map to a Person (or stay
+// Unidentified). A PERSON is a human: name + language + the taps/voices mapped
+// to them. A room / stereo-mix is a TAP, never a Person.
+//
+// Real TapScribe features each get a home; the net-new ones (multi-person/
+// diarized taps, primary+secondary language, the waveform cut preview) are
+// mocked UI flagged as such inline.
 // =============================================================================
 
 import {
-  LANGS, SPEAKERS, MODELS, selectedModel, LIVE_TAPS, LIVE_CAPTIONS,
+  LANGS, MODELS, selectedModel, LIVE_CAPTIONS,
   SESSIONS, STRIP_DEFAULTS, REP_WAV, TRANSCRIPT, computeRegions, helpers,
-  speakerById, APP,
-  GATE_DEFAULTS, GATE_KINDS, PERSONS, personById, TAP_PERSON_MAP,
+  APP, GATE_KINDS,
   HALLUCINATION_RULES, PROMPTS, WAV_TRANSCRIPTS, TRANSCRIBE_JOB,
+  // corrected Tap / Input / Person model
+  inputKind, STAGE_TAPS, stageTapById,
+  STAGE_PEOPLE, stagePersonById, TAP_VOICE_PERSON_MAP, personForVoice,
 } from "../_shared/mock-data.js";
 
 const { clock, clockH } = helpers;
@@ -29,6 +38,21 @@ const el = (html) => { const t = document.createElement("template"); t.innerHTML
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const flagOf = (code) => LANGS[code]?.flag || "";
 const langName = (code) => LANGS[code]?.name || code;
+
+// A tap is "multi" (diarized into several voices) when it has a `voices` list.
+const tapIsMulti = (t) => Array.isArray(t?.voices) && t.voices.length > 0;
+
+// Resolve a palette slot / initials for any id appearing in a session's
+// `speakers` array or in TRANSCRIPT (those are the ORIGINAL, unchanged fixtures
+// and still carry the legacy "room-oslo" id). Prefer a Person, then a Tap, so
+// the corrected names/initials are used; fall back to a tap's stereo-mix label.
+function whoById(id) {
+  const p = stagePersonById(id);
+  if (p) return { name: p.name, initials: p.initials, spk: p.spk, isTap: false };
+  const t = stageTapById(id);
+  if (t) return { name: t.name, initials: t.name.slice(0, 2).toUpperCase(), spk: t.spk, isTap: true };
+  return { name: id, initials: (id || "?").slice(0, 2).toUpperCase(), spk: 0, isTap: false };
+}
 
 // ----- live, mutable UI state ------------------------------------------------
 const state = {
@@ -41,14 +65,16 @@ const state = {
   // engines: Settings holds the DEFAULT; Transcript holds the per-session OVERRIDE
   engineDefault: { ...selectedModel },
   engineOverride: { ...selectedModel },
-  gate: { ...GATE_DEFAULTS }, // speech-gate LiveConfig knobs (Taps)
+  // The speech-gate LiveConfig + gate/floor live ON THE TAP, per identity. Each
+  // tap's settings are seeded from its own STAGE_TAPS entry and edited in place.
+  tapSettings: Object.fromEntries(STAGE_TAPS.map((t) => [t.identity, { ...t.settings }])),
   recordingArmed: APP.recordingEnabled, // global RECORDING_ENABLED toggle
   auditOpen: false,
-  expandedTap: "room-oslo", // which Taps row shows its config strip (room → shows multi → Speaker A/B)
-  // per-tap single|multi mode (rooms default multi)
-  tapMode: Object.fromEntries(LIVE_TAPS.map((t) => [t.identity, speakerById(t.identity)?.isRoom ? "multi" : "single"])),
+  expandedTap: "room-oslo", // which Taps row shows its settings strip (room → multi → Speaker A/B)
+  // per-tap single|multi mode (stereo-mix / room taps default multi)
+  tapMode: Object.fromEntries(STAGE_TAPS.map((t) => [t.identity, tapIsMulti(t) ? "multi" : "single"])),
   // per-Person "transcribe as" quick switch (defaults to primary lang)
-  transcribeAs: Object.fromEntries(PERSONS.map((p) => [p.id, p.primaryLang])),
+  transcribeAs: Object.fromEntries(STAGE_PEOPLE.map((p) => [p.id, p.primaryLang])),
 };
 
 // The numbered journey, in order. The GLOBAL group sits above and is excluded
@@ -72,17 +98,17 @@ function session() {
 // NAV definitions — GLOBAL items + the numbered journey, each with a live chip.
 // =============================================================================
 function globalDefs() {
-  const liveTaps = LIVE_TAPS.filter((t) => t.live).length;
+  const liveTaps = STAGE_TAPS.filter((t) => t.live).length;
   return [
-    { id: "taps", ic: "🛰️", name: "Taps", live: liveTaps, chip: { tone: "mute", text: `${LIVE_TAPS.length} connected` } },
-    { id: "people", ic: "👥", name: "People", chip: { tone: "mute", text: `${PERSONS.length} persons` } },
+    { id: "taps", ic: "🛰️", name: "Taps", live: liveTaps, chip: { tone: "mute", text: `${STAGE_TAPS.length} connected` } },
+    { id: "people", ic: "👥", name: "People", chip: { tone: "mute", text: `${STAGE_PEOPLE.length} people` } },
     { id: "settings", ic: "⚙️", name: "Settings", chip: { tone: "mute", text: `${APP.backend} · ${state.engineDefault.model}` } },
   ];
 }
 function journeyDefs() {
   const sess = session();
   const fresh = !!sess.fresh;
-  const liveCount = sess.current ? LIVE_TAPS.filter((t) => t.live).length : 0;
+  const liveCount = sess.current ? STAGE_TAPS.filter((t) => t.live).length : 0;
   const wavs = wavModel();
   const needTune = wavs.filter((w) => w.needsTune).length;
   const suppressed = TRANSCRIPT.lines.filter((l) => l.suppressed).length;
@@ -390,18 +416,31 @@ function wireEngine(container, eng, ns, rebuild) {
 }
 
 // =============================================================================
-// GLOBAL · TAPS — live ingress. Connected + incoming taps, global recording
-// arm, the speech-gate (LiveConfig) knobs, and per-tap person-map + single/multi.
+// GLOBAL · TAPS — live ingress. Each tap is an incoming audio STREAM with one
+// INPUT kind (microphone | line-in | stereo-mix). A tap carries one Person, or
+// several when diarization splits it (a room mic, a stereo-mix of a video). The
+// tap OWNS its audio settings — gate/floor + the speech-gate LiveConfig + rec/
+// live — and those persist PER IDENTITY across sessions. A row reads:
+//   name · identity · input → mapped Person(s)
+// Clicking a row expands its settings strip (in-flight buffer, the Person each
+// voice maps to, language, single/multi, and the tap's own gate LiveConfig).
 // =============================================================================
-const INCOMING_TAP = { identity: "__incoming__", name: "lenovo-x1 · meeting-room-2", device: "Poly Sync 20", lang: "auto", incoming: true };
+const INCOMING_TAP = { identity: "__incoming__", name: "lenovo-x1 · meeting-room-2", input: "microphone", inputLabel: "Poly Sync 20", lang: "auto", incoming: true };
+
+// Small input badge (icon + kind) used in the Taps table + read-only references.
+function inputBadge(kind) {
+  const k = inputKind(kind);
+  return `<span class="tag inp inp--${esc(k.kind)}"><span class="inp__ic">${k.icon}</span>${esc(k.label)}</span>`;
+}
 
 function viewTaps() {
   const wrap = el(`<div></div>`);
-  const live = LIVE_TAPS.filter((t) => t.live).length;
+  const live = STAGE_TAPS.filter((t) => t.live).length;
+  const multi = STAGE_TAPS.filter(tapIsMulti).length;
   wrap.innerHTML = header({
     eyebrow: "Global · Ingress",
     title: "Taps",
-    sub: `${LIVE_TAPS.length} connected · <span style="color:var(--good)">${esc(String(live))} live</span> · 1 incoming · settings persist across sessions`,
+    sub: `${STAGE_TAPS.length} connected · <span style="color:var(--good)">${esc(String(live))} live</span> · ${esc(String(multi))} multi-person · 1 incoming · each tap's settings persist per identity`,
   });
 
   // global recording arm/pause (RECORDING_ENABLED)
@@ -419,37 +458,52 @@ function viewTaps() {
   arm.querySelectorAll("[data-arm]").forEach((b) => b.addEventListener("click", () => { state.recordingArmed = b.dataset.arm === "1"; render(); }));
   wrap.appendChild(arm);
 
-  // connected taps table (+ incoming). Each row can expand into a config strip.
+  // connected taps table (+ incoming). Each row can expand into a settings strip.
   const panel = el(`
     <div class="panel panel--primary">
       <div class="panel__head">
         <div class="panel__title"><span class="ic">🛰️</span>Taps</div>
-        <div class="panel__hint">click a row to map its Person &amp; set single / multi</div>
+        <div class="panel__hint">click a row for its settings &amp; Person mapping · gate/floor remembered per identity</div>
       </div>
       <div class="panel__body flush">
         <table class="tbl">
           <thead><tr>
-            <th style="width:30px"></th><th>Identity · device</th><th>Person</th>
-            <th style="width:140px">Level</th><th style="width:88px">Spark</th>
-            <th style="width:84px">Gate · lag</th><th class="r" style="width:118px">Rec / live</th>
+            <th style="width:30px"></th><th>Name · identity</th><th style="width:138px">Input</th><th>→ Person(s)</th>
+            <th style="width:128px">Level</th><th style="width:80px">Spark</th>
+            <th style="width:80px">Gate · lag</th><th class="r" style="width:112px">Rec / live</th>
           </tr></thead>
           <tbody id="tapBody"></tbody>
         </table>
       </div>
     </div>`);
   const body = panel.querySelector("#tapBody");
-  for (const t of LIVE_TAPS) tapRows(body, t);
+  for (const t of STAGE_TAPS) tapRows(body, t);
   tapRows(body, INCOMING_TAP);
   wrap.appendChild(panel);
 
-  // speech-gate settings (real LiveConfig knobs that gate every tap)
-  wrap.appendChild(gatePanel());
-
   queueMicrotask(() => {
     drawSparks(wrap);
-    wireGate(wrap);
+    wireTapSettings(wrap);
   });
   return wrap;
+}
+
+// The Person cell for a tap row: a single mapped Person, or — for a multi tap —
+// a compact summary of the voice→Person mapping (mapped + Unidentified).
+function tapPersonCell(t) {
+  if (tapIsMulti(t)) {
+    const chips = t.voices.map((v) => {
+      const p = personForVoice(v.voiceId);
+      return p
+        ? `<span class="pick pick--sm"><span class="av sm spk-${p.spk}">${esc(p.initials)}</span>${esc(p.name.split(" ")[0])}</span>`
+        : `<span class="pick pick--sm pick--unid"><span class="av sm unid">?</span>Unidentified</span>`;
+    }).join("");
+    return `<span class="pcell">${chips}</span>`;
+  }
+  const p = personForVoice(t.identity);
+  return p
+    ? `<span class="pick"><span class="av sm spk-${p.spk}">${esc(p.initials)}</span>${esc(p.name.split(" ")[0])}<span class="pick__chev">⌄</span></span>`
+    : `<span class="pick pick--unid"><span class="av sm unid">?</span>Unidentified<span class="pick__chev">⌄</span></span>`;
 }
 
 function tapRows(tbody, t) {
@@ -457,7 +511,8 @@ function tapRows(tbody, t) {
     const r = el(`
       <tr class="taprow is-incoming">
         <td><span class="navitem__ic" style="font-size:13px">📡</span></td>
-        <td><span class="tapname"><span class="tapname__n">${esc(t.name)} <span class="tag warn">incoming</span></span><span class="tapname__d">${esc(t.device)}</span></span></td>
+        <td><span class="tapname"><span class="tapname__n">${esc(t.name)} <span class="tag warn">incoming</span></span><span class="tapname__d">${esc(t.inputLabel)}</span></span></td>
+        <td>${inputBadge(t.input)}</td>
         <td><span class="muted" style="font-size:10.5px">handshaking…</span></td>
         <td colspan="2"><span class="muted" style="font-size:10.5px">negotiating gate &amp; identity</span></td>
         <td><span class="muted mono" style="font-size:9.5px">—</span></td>
@@ -467,17 +522,16 @@ function tapRows(tbody, t) {
     return;
   }
 
-  const sp = speakerById(t.identity);
-  const person = personById(TAP_PERSON_MAP[t.identity] || t.identity);
   const idle = !t.gateOpen && t.level < 0.02;
   const expanded = state.expandedTap === t.identity;
-  const mode = state.tapMode[t.identity] || (sp?.isRoom ? "multi" : "single");
+  const mode = state.tapMode[t.identity] || (tapIsMulti(t) ? "multi" : "single");
 
   const main = el(`
     <tr class="taprow ${idle ? "is-idle" : ""}" data-tap="${esc(t.identity)}" style="cursor:pointer">
-      <td><span class="av spk-${t.spk}">${esc(sp?.initials || "??")}</span></td>
-      <td><span class="tapname"><span class="tapname__n spk-ink-${t.spk}">${esc(t.name)}</span><span class="tapname__d">${esc(sp?.mic.label || "—")} · ${esc(t.identity)}</span></span></td>
-      <td><span class="pick"><span class="av sm spk-${person?.spk ?? t.spk}">${esc(person?.initials || "?")}</span>${esc(person?.name?.split(" ")[0] || t.identity)}<span class="pick__chev">⌄</span></span></td>
+      <td><span class="av spk-${t.spk}">${esc(t.name.slice(0, 2).toUpperCase())}</span></td>
+      <td><span class="tapname"><span class="tapname__n spk-ink-${t.spk}">${esc(t.name)}</span><span class="tapname__d">${esc(t.inputLabel)} · ${esc(t.identity)}</span></span></td>
+      <td>${inputBadge(t.input)}</td>
+      <td>${tapPersonCell(t)}</td>
       <td><span class="meter"><span class="meter__bar"><span class="meter__fill spk-bar-${t.spk}" style="width:${Math.round(t.level * 100)}%"></span></span><span class="meter__val">${esc(t.level.toFixed(2))}</span></span></td>
       <td><canvas class="spark" width="184" height="44" data-spark='${esc(JSON.stringify(t.levels))}' data-spk="${t.spk}"></canvas></td>
       <td><span class="gate"><span class="gate__led ${t.gateOpen ? "open" : ""}"></span><span class="gate__txt ${t.gateOpen ? "open" : ""}">${t.gateOpen ? "open" : "shut"}</span></span><div class="lag ${t.lagS > 1.2 ? "hot" : ""}" style="margin-top:3px">${t.lagS ? esc(t.lagS.toFixed(1)) + "s" : "—"}</div></td>
@@ -487,19 +541,37 @@ function tapRows(tbody, t) {
   tbody.appendChild(main);
 
   if (!expanded) return;
+  tapSettingsStrip(tbody, t, mode);
+}
 
-  // ---- config strip: in-flight buffer, person map, language, single/multi ----
+// ---- the expanded settings strip for a tap (its OWN, per-identity settings) --
+function tapSettingsStrip(tbody, t, mode) {
+  const k = inputKind(t.input);
   const buffer = t.buffer
     ? `<span class="mono" style="color:var(--ink-2)">${esc(t.buffer)}<span class="irc__cursor">▍</span></span>`
     : `<span class="muted" style="font-size:10.5px">— gate shut, no in-flight audio —</span>`;
+  // For a multi tap, the Person block shows the per-voice mapping; for a single
+  // tap it shows the one mapped Person (or Unidentified).
+  const personBlock = tapIsMulti(t)
+    ? `<span class="cfgblk"><span class="cfgblk__k">People</span>
+        <span class="muted" style="font-size:10px">${esc(String(t.voices.length))} voices — mapped below</span>
+        <a class="act act--sm act--ghost" data-go="people" style="text-decoration:none">→ People</a></span>`
+    : (() => {
+      const p = personForVoice(t.identity);
+      const pick = p
+        ? `<span class="pick"><span class="av sm spk-${p.spk}">${esc(p.initials)}</span>${esc(p.name)}<span class="pick__chev">⌄</span></span>`
+        : `<span class="pick pick--unid"><span class="av sm unid">?</span>Unidentified — map to a Person<span class="pick__chev">⌄</span></span>`;
+      return `<span class="cfgblk"><span class="cfgblk__k">Person</span>${pick}
+        <a class="act act--sm act--ghost" data-go="people" style="text-decoration:none">→ People</a></span>`;
+    })();
+
   const cfg = el(`
-    <tr class="tapcfg"><td colspan="7"><div class="tapcfg__in">
+    <tr class="tapcfg"><td colspan="8"><div class="tapcfg__in">
       <span class="cfgblk"><span class="cfgblk__k">In-flight</span>${buffer}</span>
       <span class="cfgsep"></span>
-      <span class="cfgblk"><span class="cfgblk__k">Person</span>
-        <span class="pick"><span class="av sm spk-${person?.spk ?? t.spk}">${esc(person?.initials || "?")}</span>${esc(person?.name || t.identity)}<span class="pick__chev">⌄</span></span>
-        <a class="act act--sm act--ghost" data-go="people" style="text-decoration:none">→ People</a>
-      </span>
+      <span class="cfgblk"><span class="cfgblk__k">Input</span>${inputBadge(t.input)}<span class="muted" style="font-size:10px">${esc(k.note)}</span></span>
+      <span class="cfgsep"></span>
+      ${personBlock}
       <span class="cfgsep"></span>
       <span class="cfgblk"><span class="cfgblk__k">Language</span>
         <span class="pick"><span class="flag">${flagOf(t.lang)}</span>${esc(langName(t.lang))} <span class="muted">(from Person)</span><span class="pick__chev">⌄</span></span></span>
@@ -509,7 +581,7 @@ function tapRows(tbody, t) {
           <button class="seg__opt ${mode === "single" ? "is-on" : ""}" data-mode="single">👤 single</button>
           <button class="seg__opt multi ${mode === "multi" ? "is-on" : ""}" data-mode="multi">👥 multi</button>
         </span>
-        <span class="muted" style="font-size:10px">${mode === "multi" ? "diarized → speakers" : "one speaker"}</span></span>
+        <span class="muted" style="font-size:10px">${mode === "multi" ? "diarized → People" : "one Person"}</span></span>
     </div></td></tr>`);
   cfg.querySelector(".seg")?.querySelectorAll(".seg__opt").forEach((b) => {
     b.addEventListener("click", (e) => { e.stopPropagation(); state.tapMode[t.identity] = b.dataset.mode; render(); });
@@ -517,152 +589,204 @@ function tapRows(tbody, t) {
   cfg.querySelector('[data-go="people"]')?.addEventListener("click", (e) => { e.stopPropagation(); goView("people"); });
   tbody.appendChild(cfg);
 
-  // resulting diarized speakers for a MULTI tap (Speaker A/B + lang + share)
-  if (mode === "multi") {
-    const voices = sp?.diarizedInto || [];
-    const sub = el(`<tr class="subrows"><td colspan="7"><div class="subcap">↳ ${esc(String(voices.length))} diarized speakers <span class="tag info">mock UI</span></div></td></tr>`);
+  // diarized voices for a MULTI tap — each maps to a Person (or Unidentified).
+  if (mode === "multi" && tapIsMulti(t)) {
+    const sub = el(`<tr class="subrows"><td colspan="8"><div class="subcap">↳ ${esc(String(t.voices.length))} diarized voices → map each to a Person <span class="tag info">mock UI</span></div></td></tr>`);
     const cell = sub.querySelector("td");
-    for (const d of voices) {
+    for (const v of t.voices) {
+      const p = personForVoice(v.voiceId);
+      const mapped = p
+        ? `<span class="pick pick--sm"><span class="av sm spk-${p.spk}">${esc(p.initials)}</span>${esc(p.name)}<span class="pick__chev">⌄</span></span>`
+        : `<span class="pick pick--sm pick--unid"><span class="av sm unid">?</span>Unidentified — map to a Person<span class="pick__chev">⌄</span></span>`;
       cell.appendChild(el(`
-        <div class="subrow">
-          <span class="av sm spk-${d.spk}">${esc(d.label.replace("Speaker ", ""))}</span>
-          <span class="subrow__name">${esc(d.label)} <span class="flag">${flagOf(d.lang)}</span></span>
-          <span class="subrow__bar"><span class="subrow__fill spk-bar-${d.spk}" style="width:${d.talkPct}%"></span></span>
-          <span class="subrow__pct">${d.talkPct}%</span>
+        <div class="subrow subrow--map">
+          <span class="av sm spk-${v.spk}">${esc(v.label.replace("Speaker ", ""))}</span>
+          <span class="subrow__name">${esc(v.label)} <span class="flag">${flagOf(v.lang)}</span></span>
+          <span class="subrow__bar"><span class="subrow__fill spk-bar-${v.spk}" style="width:${v.talkPct}%"></span></span>
+          <span class="subrow__pct">${v.talkPct}%</span>
+          <span class="subrow__arrow">→</span>
+          ${mapped}
         </div>`));
     }
     tbody.appendChild(sub);
   }
+
+  // the tap's OWN audio settings: gate/floor + the speech-gate LiveConfig.
+  tbody.appendChild(tapGateRow(t));
 }
 
-function gatePanel() {
-  const g = state.gate;
-  const panel = el(`
-    <div class="panel" id="gatePanel">
-      <div class="panel__head">
-        <div class="panel__title"><span class="ic">🚪</span>Speech gate · LiveConfig</div>
-        <div class="panel__hint">governs how every tap is gated</div>
+// Per-identity gate/floor + speech-gate LiveConfig, edited in place. Remembered
+// for this identity across sessions (matches the real backend's per-identity
+// tap settings).
+function tapGateRow(t) {
+  const g = state.tapSettings[t.identity];
+  const row = el(`
+    <tr class="tapgate" data-gate="${esc(t.identity)}"><td colspan="8"><div class="tapgate__in">
+      <div class="tapgate__head">
+        <span class="cfgblk__k">Tap audio settings</span>
+        <span class="muted" style="font-size:10px">owned by this tap · <b style="color:var(--ink-2)">${esc(t.identity)}</b> · remembered per identity across sessions</span>
       </div>
-      <div class="panel__body">
-        <div class="eng-row" style="margin-bottom:13px">
-          <span class="eng-cap">gate_kind</span>
-          <div class="chips" id="gateKind">
-            ${GATE_KINDS.map((k) => `<button class="chip ${k.kind === g.gate_kind ? "is-sel" : ""}" data-kind="${esc(k.kind)}" ${k.available ? "" : "disabled"}>${esc(k.label)}${k.available ? "" : '<span class="chip__x">n/a</span>'}</button>`).join("")}
-          </div>
-        </div>
-        <div class="knobgrid">
-          ${gateKnob("gate_speech_threshold", "gate_speech_threshold", g.gate_speech_threshold, 0, 1, 0.01, "")}
-          ${gateKnob("gate_hangover_ms", "gate_hangover_ms", g.gate_hangover_ms, 0, 10000, 50, "ms")}
-          ${gateKnob("gate_pre_roll_ms", "gate_pre_roll_ms", g.gate_pre_roll_ms, 0, 5000, 50, "ms")}
-          ${gateKnob("gate_min_speech_ms", "gate_min_speech_ms", g.gate_min_speech_ms, 0, 5000, 50, "ms")}
-        </div>
-        <div class="checkrow" style="margin-top:13px">
-          <span class="checkbox ${g.confidence_validation ? "on" : ""}" id="gateConf">${g.confidence_validation ? "✓" : ""}</span>
-          <span><b style="color:var(--ink)">confidence_validation</b> — drop low-confidence hypotheses before they reach the merge</span>
+      <div class="tapgate__floor">
+        ${gateKnob(t.identity, "gateThreshold", "gate threshold", g.gateThreshold, 0, 1, 0.01, "")}
+        ${gateKnob(t.identity, "noiseFloorDb", "noise floor", g.noiseFloorDb, -120, 0, 1, "dB")}
+      </div>
+      <div class="tapgate__sub">
+        <span class="cfgblk__k">Speech gate · LiveConfig</span>
+        <div class="chips" data-gatekind="${esc(t.identity)}">
+          ${GATE_KINDS.map((kk) => `<button class="chip ${kk.kind === g.gate_kind ? "is-sel" : ""}" data-kind="${esc(kk.kind)}" ${kk.available ? "" : "disabled"}>${esc(kk.label)}${kk.available ? "" : '<span class="chip__x">n/a</span>'}</button>`).join("")}
         </div>
       </div>
-    </div>`);
-  return panel;
+      <div class="knobgrid">
+        ${gateKnob(t.identity, "gate_speech_threshold", "gate_speech_threshold", g.gate_speech_threshold, 0, 1, 0.01, "")}
+        ${gateKnob(t.identity, "gate_hangover_ms", "gate_hangover_ms", g.gate_hangover_ms, 0, 10000, 50, "ms")}
+        ${gateKnob(t.identity, "gate_pre_roll_ms", "gate_pre_roll_ms", g.gate_pre_roll_ms, 0, 5000, 50, "ms")}
+        ${gateKnob(t.identity, "gate_min_speech_ms", "gate_min_speech_ms", g.gate_min_speech_ms, 0, 5000, 50, "ms")}
+      </div>
+      <div class="checkrow" style="margin-top:11px">
+        <span class="checkbox ${g.confidence_validation ? "on" : ""}" data-conf="${esc(t.identity)}">${g.confidence_validation ? "✓" : ""}</span>
+        <span><b style="color:var(--ink)">confidence_validation</b> — drop low-confidence hypotheses before they reach the merge</span>
+      </div>
+    </div></td></tr>`);
+  return row;
 }
-function gateKnob(key, label, val, min, max, step, unit) {
+
+function gateKnob(identity, key, label, val, min, max, step, unit) {
+  const gid = `gv_${identity}_${key}`;
   return `
     <div class="kfield">
-      <div class="kfield__top"><span class="kfield__k">${esc(label)}</span><span class="kfield__v" id="gv_${esc(key)}">${esc(String(val))}${esc(unit ? " " + unit : "")}</span></div>
-      <input type="range" min="${min}" max="${max}" step="${step}" value="${val}" data-key="${esc(key)}" data-unit="${esc(unit)}">
+      <div class="kfield__top"><span class="kfield__k">${esc(label)}</span><span class="kfield__v" id="${esc(gid)}">${esc(String(val))}${esc(unit ? " " + unit : "")}</span></div>
+      <input type="range" min="${min}" max="${max}" step="${step}" value="${val}" data-tap="${esc(identity)}" data-key="${esc(key)}" data-unit="${esc(unit)}">
       <div class="kfield__rng"><span>${esc(String(min))}</span><span>${esc(String(max))}</span></div>
     </div>`;
 }
-function wireGate(scope) {
-  scope.querySelectorAll("#gateKind .chip").forEach((b) => {
+
+// Wire the expanded tap's own settings (gate/floor + LiveConfig), in place.
+function wireTapSettings(scope) {
+  scope.querySelectorAll(".tapgate [data-gatekind] .chip").forEach((b) => {
     if (b.disabled) return;
-    b.addEventListener("click", () => { state.gate.gate_kind = b.dataset.kind; render(); });
-  });
-  scope.querySelectorAll('#gatePanel input[type="range"]').forEach((inp) => {
-    inp.addEventListener("input", () => {
-      const k = inp.dataset.key;
-      state.gate[k] = Number(inp.value);
-      document.getElementById(`gv_${k}`).textContent = `${inp.value}${inp.dataset.unit ? " " + inp.dataset.unit : ""}`;
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = b.closest("[data-gatekind]").dataset.gatekind;
+      state.tapSettings[id].gate_kind = b.dataset.kind;
+      render();
     });
   });
-  const conf = scope.querySelector("#gateConf");
-  if (conf) conf.addEventListener("click", () => { state.gate.confidence_validation = !state.gate.confidence_validation; render(); });
+  scope.querySelectorAll('.tapgate input[type="range"]').forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      e.stopPropagation();
+      const id = inp.dataset.tap, k = inp.dataset.key;
+      state.tapSettings[id][k] = Number(inp.value);
+      document.getElementById(`gv_${id}_${k}`).textContent = `${inp.value}${inp.dataset.unit ? " " + inp.dataset.unit : ""}`;
+    });
+  });
+  scope.querySelectorAll(".tapgate [data-conf]").forEach((c) => {
+    c.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = c.dataset.conf;
+      state.tapSettings[id].confidence_validation = !state.tapSettings[id].confidence_validation;
+      render();
+    });
+  });
 }
 
 // =============================================================================
-// GLOBAL · PEOPLE — canonical Persons registry. Per-Person: name, primary +
-// secondary language (+ "transcribe as" quick switch), MULTIPLE per-microphone
-// profiles (gate threshold + noise floor each), the taps/identities mapped here,
-// "seen in N sessions". Plus per-session participation.
+// GLOBAL · PEOPLE — canonical registry of HUMANS ONLY. A Person holds ONLY:
+// name, primary + secondary language (+ a "transcribe as EN/NB/DA" quick
+// switch), and the list of taps / diarized voices mapped to them. A Person has
+// NO gate / noise-floor / input profile — those are Tap settings now. A room or
+// a stereo-mix is a Tap, never a Person; the humans heard through such a tap are
+// real People here, one mapped from the room voice and one still Unidentified.
 // =============================================================================
+
+// Build, for each Person, the taps/voices mapped to them (from the corrected
+// TAP_VOICE_PERSON_MAP). Returns { single:[tap], voices:[{tap, voice}] }.
+function mappingsForPerson(personId) {
+  const single = [];
+  const voices = [];
+  for (const t of STAGE_TAPS) {
+    if (tapIsMulti(t)) {
+      for (const v of t.voices) {
+        if (TAP_VOICE_PERSON_MAP[v.voiceId] === personId) voices.push({ tap: t, voice: v });
+      }
+    } else if (TAP_VOICE_PERSON_MAP[t.identity] === personId) {
+      single.push(t);
+    }
+  }
+  return { single, voices };
+}
+
+// The diarized voices across all taps that are NOT yet mapped to any Person.
+function unidentifiedVoices() {
+  const out = [];
+  for (const t of STAGE_TAPS) {
+    if (!tapIsMulti(t)) continue;
+    for (const v of t.voices) {
+      if (!TAP_VOICE_PERSON_MAP[v.voiceId]) out.push({ tap: t, voice: v });
+    }
+  }
+  return out;
+}
+
 function viewPeople() {
   const sess = session();
   const wrap = el(`<div></div>`);
   wrap.innerHTML = header({
     eyebrow: "Global · Registry",
     title: "People",
-    sub: `${PERSONS.length} canonical persons · per-<b>microphone</b> profiles reused across every session`,
+    sub: `${STAGE_PEOPLE.length} people · humans only · each holds a name + language + the taps/voices mapped to them`,
   });
 
   wrap.appendChild(el(`
-    <div class="note"><span class="ic">👥</span><div>A <b>Person</b> can own several <b>microphone profiles</b> (each with its own gate + noise floor) and have multiple taps mapped to it. Per-mic profiles &amp; dual language are <b>mock UI</b>; the per-session alias is the real backend piece.</div></div>`));
+    <div class="note"><span class="ic">👥</span><div>A <b>Person</b> is a human: name + primary/secondary language + the taps/voices mapped to them. Gate, noise-floor and input live on the <b>Tap</b> now, not here. A room or stereo-mix is a Tap — the people heard through it are mapped from its diarized voices (some still <b>Unidentified</b>). Dual language is <b>mock UI</b>; the per-session alias is the real backend piece.</div></div>`));
 
-  // per-session participation strip
+  // per-session participation strip (humans in the current session)
   if (!sess.fresh && sess.speakers.length) {
     const chips = sess.speakers.map((id) => {
-      const p = personById(id) || speakerById(id);
-      return `<span class="langpill"><span class="av sm spk-${p?.spk ?? 0}">${esc(p?.initials || "?")}</span>${esc(p?.name || id)}</span>`;
+      const who = whoById(id);
+      // a tap id (e.g. the room) in the session list resolves to the People it
+      // carries, not to a "room Person".
+      if (who.isTap) {
+        const t = stageTapById(id);
+        return (t.voices || []).map((v) => {
+          const p = personForVoice(v.voiceId);
+          return p
+            ? `<span class="langpill"><span class="av sm spk-${p.spk}">${esc(p.initials)}</span>${esc(p.name)}</span>`
+            : `<span class="langpill unid"><span class="av sm unid">?</span>Unidentified <span class="muted">(${esc(v.label.replace("Speaker ", ""))} · ${esc(t.name.split(" ")[0])})</span></span>`;
+        }).join("");
+      }
+      return `<span class="langpill"><span class="av sm spk-${who.spk}">${esc(who.initials)}</span>${esc(who.name)}</span>`;
     }).join("");
     wrap.appendChild(el(`
-      <div class="panel" style="margin-bottom:11px"><div class="panel__head"><div class="panel__title"><span class="ic">📍</span>In this session · ${esc(sess.label || "(untitled)")}</div><div class="panel__hint">${esc(String(sess.speakers.length))} participants</div></div>
+      <div class="panel" style="margin-bottom:11px"><div class="panel__head"><div class="panel__title"><span class="ic">📍</span>In this session · ${esc(sess.label || "(untitled)")}</div><div class="panel__hint">participants</div></div>
       <div class="panel__body"><div class="langpair" style="margin:0">${chips}</div></div></div>`));
   }
 
-  for (const p of PERSONS) wrap.appendChild(personCard(p));
+  for (const p of STAGE_PEOPLE) wrap.appendChild(personCard(p));
+
+  // an Unidentified placeholder card so the "map to a Person" state is explicit
+  wrap.appendChild(unidentifiedCard());
   return wrap;
 }
 
 function personCard(p) {
   const card = el(`
-    <div class="person ${p.isRoom ? "is-room" : ""}">
+    <div class="person">
       <div class="person__head">
         <span class="av lg spk-${p.spk}">${esc(p.initials)}</span>
         <span class="person__id">
-          <span class="person__name spk-ink-${p.spk}">${esc(p.name)} ${p.isRoom ? '<span class="tag warn">room · multi</span>' : ""}</span>
+          <span class="person__name spk-ink-${p.spk}">${esc(p.name)}</span>
           <span class="person__note">${esc(p.note)}</span>
         </span>
         <span class="person__seen">seen in<br><b>${esc(String(p.sessionsSeen))}</b> sessions</span>
       </div>
       <div class="person__cols">
-        <div class="person__col" data-col="mics"></div>
         <div class="person__col" data-col="lang"></div>
+        <div class="person__col" data-col="maps"></div>
       </div>
     </div>`);
 
-  // LEFT col: microphone profiles (a Person can have several) + identities
-  const mics = card.querySelector('[data-col="mics"]');
-  mics.appendChild(el(`<div class="subhead">🎚️ Microphone profiles <span class="tag info">multi-mic · mock</span></div>`));
-  for (const m of p.mics) {
-    mics.appendChild(el(`
-      <div class="microw">
-        <span class="microw__l"><span class="microw__lab"><b>${esc(m.label)}</b> ${m.primary ? '<span class="tag" style="font-size:8px">primary</span>' : ""}</span></span>
-        <span class="micval"><span class="micval__k">gate </span>${esc(m.gateThreshold.toFixed(2))}</span>
-        <span class="micval"><span class="micval__k">floor </span>${esc(String(m.noiseFloorDb))} dB</span>
-      </div>`));
-  }
-  mics.appendChild(el(`<div class="subhead" style="margin-top:11px">🔗 Mapped taps / identities</div>`));
-  for (const id of p.identities) {
-    const t = LIVE_TAPS.find((x) => x.identity === id);
-    mics.appendChild(el(`
-      <div class="idrow">
-        <span class="idrow__code">${esc(id)}</span>
-        ${t ? `<span class="tag ${t.live ? "live" : "off"}">${t.live ? "live" : "idle"}</span>` : '<span class="tag off">saved</span>'}
-        <span class="muted" style="margin-left:auto;font-size:10px">${esc(speakerById(id)?.mic.label || "—")}</span>
-      </div>`));
-  }
-  mics.appendChild(el(`<button class="act act--sm act--ghost" data-map="1" style="margin-top:9px">+ map another tap / mic</button>`));
-  mics.querySelector("[data-map]")?.addEventListener("click", (e) => pulse(e.currentTarget));
-
-  // RIGHT col: language pair + quick switch (+ diarization for rooms)
+  // LEFT col: language pair + "transcribe as" quick switch (the only Person-
+  // owned audio-adjacent setting — language, NOT gate/floor/input).
   const lang = card.querySelector('[data-col="lang"]');
   lang.appendChild(el(`<div class="subhead">🗣️ Language <span class="tag info">primary + secondary · mock</span></div>`));
   const secondary = p.secondaryLang
@@ -685,18 +809,66 @@ function personCard(p) {
   }
   lang.appendChild(qs);
 
-  if (p.isRoom && p.diarizedInto) {
-    lang.appendChild(el(`<div class="subhead" style="margin-top:11px">👥 Diarizes into</div>`));
-    for (const d of p.diarizedInto) {
-      lang.appendChild(el(`
-        <div class="idrow">
-          <span class="av sm spk-${d.spk}">${esc(d.label.replace("Speaker ", ""))}</span>
-          <span>${esc(d.label)}</span>
-          <span class="tag"><span class="flag">${flagOf(d.lang)}</span>${esc(langName(d.lang))}</span>
-          <span class="mono dim" style="margin-left:auto;font-size:10px">${d.talkPct}%</span>
-        </div>`));
-    }
+  // RIGHT col: the taps / diarized voices mapped to this Person.
+  const maps = card.querySelector('[data-col="maps"]');
+  maps.appendChild(el(`<div class="subhead">🔗 Mapped taps / voices</div>`));
+  const { single, voices } = mappingsForPerson(p.id);
+  for (const t of single) {
+    maps.appendChild(el(`
+      <div class="idrow">
+        <span class="idrow__code">${esc(t.identity)}</span>
+        ${inputBadge(t.input)}
+        <span class="tag ${t.live ? "live" : "off"}" style="margin-left:auto">${t.live ? "live" : "idle"}</span>
+      </div>`));
   }
+  for (const { tap, voice } of voices) {
+    maps.appendChild(el(`
+      <div class="idrow">
+        <span class="av sm spk-${voice.spk}">${esc(voice.label.replace("Speaker ", ""))}</span>
+        <span class="idrow__code">${esc(tap.identity)}<span class="dim"> · ${esc(voice.label)}</span></span>
+        ${inputBadge(tap.input)}
+      </div>`));
+  }
+  if (!single.length && !voices.length) {
+    maps.appendChild(el(`<div class="muted" style="font-size:10.5px;padding:4px 0">no taps mapped yet</div>`));
+  }
+  maps.appendChild(el(`<button class="act act--sm act--ghost" data-map="1" style="margin-top:9px">+ map a tap / voice</button>`));
+  maps.querySelector("[data-map]")?.addEventListener("click", (e) => pulse(e.currentTarget));
+  return card;
+}
+
+// A Person-less placeholder for diarized voices that haven't been identified.
+// This makes the "Speaker = Person, but not yet mapped" state explicit in the
+// registry (one voice from the Oslo room + one from the played clip).
+function unidentifiedCard() {
+  const card = el(`
+    <div class="person is-unid">
+      <div class="person__head">
+        <span class="av lg unid">?</span>
+        <span class="person__id">
+          <span class="person__name" style="color:var(--ink-2)">Unidentified voices <span class="tag warn">map to a Person</span></span>
+          <span class="person__note">Diarized voices not yet tied to a human — pick a Person, or create one.</span>
+        </span>
+        <span class="person__seen">&nbsp;</span>
+      </div>
+      <div class="person__cols">
+        <div class="person__col" data-col="unid" style="grid-column:1 / -1;border-left:0"></div>
+      </div>
+    </div>`);
+  const col = card.querySelector('[data-col="unid"]');
+  const unid = unidentifiedVoices();
+  for (const { tap, voice } of unid) {
+    col.appendChild(el(`
+      <div class="idrow">
+        <span class="av sm spk-${voice.spk}">${esc(voice.label.replace("Speaker ", ""))}</span>
+        <span class="idrow__code">${esc(tap.identity)}<span class="dim"> · ${esc(voice.label)}</span></span>
+        ${inputBadge(tap.input)}
+        <span class="tag"><span class="flag">${flagOf(voice.lang)}</span>${esc(langName(voice.lang))}</span>
+        <button class="act act--sm act--ghost" data-mapunid="1" style="margin-left:auto">→ map to a Person</button>
+      </div>`));
+  }
+  if (!unid.length) col.appendChild(el(`<div class="muted" style="font-size:10.5px;padding:4px 0">all voices identified</div>`));
+  col.querySelectorAll("[data-mapunid]").forEach((b) => b.addEventListener("click", (e) => pulse(e.currentTarget)));
   return card;
 }
 
@@ -773,7 +945,7 @@ function viewCapture() {
   if (!sess.current) return viewCaptureArchived(sess);
 
   const wrap = el(`<div></div>`);
-  const live = LIVE_TAPS.filter((t) => t.live).length;
+  const live = STAGE_TAPS.filter((t) => t.live).length;
   wrap.innerHTML = header({
     eyebrow: "Stage 1 · Live",
     title: "Capture",
@@ -790,7 +962,9 @@ function viewCapture() {
       <div class="panel__body flush"><div class="irclog caps"></div></div>
     </div>`);
   const caps = capsPanel.querySelector(".irclog");
-  for (const c of LIVE_CAPTIONS) caps.appendChild(el(ircLine(c, { inflight: c.inflight })));
+  // Captions carry the legacy "Oslo Room · Speaker A/B" labels; show the
+  // corrected speaker (Person, or "Unidentified (B)") via the same transform.
+  for (const c of LIVE_CAPTIONS) caps.appendChild(el(ircLine(txLineView(c), { inflight: c.inflight })));
   grid.appendChild(capsPanel);
 
   // RIGHT aside: live channel control + read-only taps-feeding + health
@@ -831,7 +1005,7 @@ function liveChannelPanel() {
           <span class="muted" style="font-size:9.5px">live transcribe</span>
         </div>
         <div class="logpeek"><span class="t">09:11:38</span> tap atle gate=open lvl=0.62
-<span class="t">09:11:39</span> room-oslo → Speaker B (en)
+<span class="t">09:11:39</span> room-oslo voice Speaker B (en) → Unidentified
 <span class="t">09:11:40</span> <span class="ok">flushed</span> 1.6s · nb-whisper-medium
 <span class="t">09:11:41</span> mette gate=shut (idle 2.1s)</div>
       </div>
@@ -848,7 +1022,8 @@ function liveChannelPanel() {
 }
 
 function feedPanel() {
-  // read-only reference: taps feeding THIS session (configure → Taps)
+  // read-only reference: taps feeding THIS session (configure → Taps). Shows
+  // each tap's Input kind and, for a multi tap, its voices mapping to People.
   const panel = el(`
     <div class="panel">
       <div class="panel__head"><div class="panel__title"><span class="ic">🛰️</span>Taps feeding this session</div>
@@ -856,21 +1031,22 @@ function feedPanel() {
       <div class="panel__body flush"><table class="tbl"><tbody id="feedBody"></tbody></table></div>
     </div>`);
   const body = panel.querySelector("#feedBody");
-  for (const t of LIVE_TAPS) {
-    const sp = speakerById(t.identity);
+  for (const t of STAGE_TAPS) {
     const idle = !t.gateOpen && t.level < 0.02;
     body.appendChild(el(`
       <tr class="${idle ? "is-idle" : ""}" style="${idle ? "opacity:.6" : ""}">
-        <td style="width:24px"><span class="av sm spk-${t.spk}">${esc(sp?.initials || "??")}</span></td>
-        <td><span class="spk-ink-${t.spk}" style="font-weight:600">${esc(sp?.name?.split(" ")[0] || t.name)}</span> ${sp?.isRoom ? '<span class="tag info" style="font-size:8px">multi</span>' : ""}</td>
+        <td style="width:24px"><span class="av sm spk-${t.spk}">${esc(t.name.slice(0, 2).toUpperCase())}</span></td>
+        <td><span class="spk-ink-${t.spk}" style="font-weight:600">${esc(t.name.split(" ")[0])}</span> ${tapIsMulti(t) ? '<span class="tag info" style="font-size:8px">multi</span>' : ""}<div>${inputBadge(t.input)}</div></td>
         <td style="width:80px"><span class="meter"><span class="meter__bar"><span class="meter__fill spk-bar-${t.spk}" style="width:${Math.round(t.level * 100)}%"></span></span></span></td>
         <td class="r" style="width:54px"><span class="tg rec ${t.record ? "on" : ""}">${t.record ? "● REC" : "off"}</span></td>
       </tr>`));
-    if (sp?.isRoom && sp.diarizedInto) {
-      for (const d of sp.diarizedInto) {
+    if (tapIsMulti(t)) {
+      for (const v of t.voices) {
+        const p = personForVoice(v.voiceId);
+        const who = p ? `${esc(p.name.split(" ")[0])}` : `<span style="color:var(--warn)">Unidentified</span>`;
         body.appendChild(el(`
           <tr style="opacity:.85"><td></td>
-            <td colspan="3" style="padding-left:6px"><span class="av sm spk-${d.spk}">${esc(d.label.replace("Speaker ", ""))}</span> <span class="mono" style="font-size:10px;color:var(--ink-3)">${esc(d.label)} ${flagOf(d.lang)} ${d.talkPct}%</span></td>
+            <td colspan="3" style="padding-left:6px"><span class="av sm spk-${v.spk}">${esc(v.label.replace("Speaker ", ""))}</span> <span class="mono" style="font-size:10px;color:var(--ink-3)">${esc(v.label)} ${flagOf(v.lang)} → ${who}</span></td>
           </tr>`));
       }
     }
@@ -880,17 +1056,17 @@ function feedPanel() {
 }
 
 function healthPanel() {
-  const openGates = LIVE_TAPS.filter((t) => t.gateOpen).length;
-  const recOn = LIVE_TAPS.filter((t) => t.record).length;
-  const langSet = [...new Set(LIVE_TAPS.map((t) => t.lang))];
-  const maxLag = Math.max(...LIVE_TAPS.map((t) => t.lagS));
+  const openGates = STAGE_TAPS.filter((t) => t.gateOpen).length;
+  const recOn = STAGE_TAPS.filter((t) => t.record).length;
+  const langSet = [...new Set(STAGE_TAPS.map((t) => t.lang))];
+  const maxLag = Math.max(...STAGE_TAPS.map((t) => t.lagS));
   return el(`
     <div class="panel">
       <div class="panel__head"><div class="panel__title"><span class="ic">📊</span>Capture health</div><div class="panel__hint">right now</div></div>
       <div class="panel__body">
         <div class="statgrid c4">
-          <div class="statcell"><div class="statcell__k">Gates open</div><div class="statcell__v">${openGates}<span class="dim"> / ${LIVE_TAPS.length}</span></div></div>
-          <div class="statcell"><div class="statcell__k">Recording</div><div class="statcell__v">${recOn}<span class="dim"> / ${LIVE_TAPS.length}</span></div></div>
+          <div class="statcell"><div class="statcell__k">Gates open</div><div class="statcell__v">${openGates}<span class="dim"> / ${STAGE_TAPS.length}</span></div></div>
+          <div class="statcell"><div class="statcell__k">Recording</div><div class="statcell__v">${recOn}<span class="dim"> / ${STAGE_TAPS.length}</span></div></div>
           <div class="statcell"><div class="statcell__k">Max lag</div><div class="statcell__v">${esc(maxLag.toFixed(1))}s</div></div>
           <div class="statcell"><div class="statcell__k">Languages</div><div class="statcell__v" style="font-size:14px">${esc(langSet.map(flagOf).join(" "))}</div></div>
         </div>
@@ -952,17 +1128,33 @@ function viewCaptureArchived(sess) {
     sub: `<b>${esc(sess.label)}</b> finished · ${esc(String(sess.speakers.length))} sources · ${esc(String(sess.wavCount))} clips`,
   });
   const panel = el(`
-    <div class="panel"><div class="panel__head"><div class="panel__title"><span class="ic">🎙️</span>Captured sources</div><div class="panel__hint">closed · no longer live</div></div>
+    <div class="panel"><div class="panel__head"><div class="panel__title"><span class="ic">🎙️</span>Captured taps</div><div class="panel__hint">closed · no longer live</div></div>
       <div class="panel__body flush"><table class="tbl"><tbody id="archBody"></tbody></table></div></div>`);
   const body = panel.querySelector("#archBody");
+  // session.speakers carries identities; a tap id (the room) resolves to its Tap
+  // and the People it carried, a person id resolves to that Person directly.
   for (const id of sess.speakers) {
-    const sp = speakerById(id);
-    if (!sp) continue;
+    const t = stageTapById(id);
+    if (t) {
+      const carries = tapIsMulti(t)
+        ? t.voices.map((v) => { const p = personForVoice(v.voiceId); return p ? p.name.split(" ")[0] : "Unidentified"; }).join(", ")
+        : (personForVoice(t.identity)?.name || t.name);
+      body.appendChild(el(`
+        <tr>
+          <td style="width:24px"><span class="av sm spk-${t.spk}">${esc(t.name.slice(0, 2).toUpperCase())}</span></td>
+          <td><span style="font-weight:600">${esc(t.name)}</span> ${tapIsMulti(t) ? '<span class="tag info" style="font-size:8px">multi</span>' : ""}<div class="muted" style="font-size:10px">carries: ${esc(carries)}</div></td>
+          <td>${inputBadge(t.input)}</td>
+          <td class="r"><span class="tag on">recorded</span></td>
+        </tr>`));
+      continue;
+    }
+    const p = stagePersonById(id);
+    if (!p) continue;
     body.appendChild(el(`
       <tr>
-        <td style="width:24px"><span class="av sm spk-${sp.spk}">${esc(sp.initials)}</span></td>
-        <td><span style="font-weight:600">${esc(sp.name)}</span> ${sp.isRoom ? '<span class="tag info" style="font-size:8px">multi</span>' : ""}</td>
-        <td><span class="flag">${flagOf(sp.primaryLang)}</span> <span class="mono" style="font-size:10px;color:var(--ink-3)">${esc(sp.mic.label)}</span></td>
+        <td style="width:24px"><span class="av sm spk-${p.spk}">${esc(p.initials)}</span></td>
+        <td><span style="font-weight:600">${esc(p.name)}</span></td>
+        <td><span class="flag">${flagOf(p.primaryLang)}</span> <span class="mono" style="font-size:10px;color:var(--ink-3)">${esc(langName(p.primaryLang))}</span></td>
         <td class="r"><span class="tag on">recorded</span></td>
       </tr>`));
   }
@@ -1059,13 +1251,13 @@ function wavListPanel(wavs) {
     </div>`);
   const list = panel.querySelector("#wavList");
   wavs.forEach((w, i) => {
-    const sp = speakerById(w.sp);
+    const who = whoById(w.sp);
     const sel = i === state.selectedWav;
     const node = el(`
       <button class="wavbtn ${sel ? "is-sel" : ""}" data-wav="${i}">
         <span class="wavbtn__l">
           <span class="wavbtn__n">…${esc(w.t.replace(/:/g, ""))}_${esc(w.sp)}.wav</span>
-          <span class="wavbtn__sub"><span class="av sm spk-${sp?.spk ?? 0}">${esc(sp?.initials || "?")}</span>${esc(sp?.name?.split(" ")[0] || w.sp)} · original</span>
+          <span class="wavbtn__sub"><span class="av sm spk-${who.spk}">${esc(who.initials)}</span>${esc(who.name.split(" ")[0])} · original</span>
         </span>
         <span class="wavbtn__r"><span class="wavbtn__dur">${esc(clock(w.dur))}</span><span class="tag ${w.needsTune ? "warn" : "on"}">${w.needsTune ? "tune" : "ok"}</span></span>
       </button>`);
@@ -1243,6 +1435,30 @@ function drawWaveform() {
 // identity, language, confidence, matched_rule with restore, translation badge),
 // speaking-time bar, models/backends used, + a VISIBLE engine override.
 // =============================================================================
+
+// Map a TRANSCRIPT speaker (which still carries the legacy "Oslo Room · Speaker
+// A/B" label + a palette `spk`) onto the CORRECTED Tap/Person model:
+//  - a room/clip diarized voice "Speaker A" → its mapped Person (Henrik) via the
+//    Oslo room tap; "Speaker B" → Unidentified.
+//  - anyone else → the Person on that palette slot.
+// Returns { name, identity } for both the transcript lines and the time bar.
+function txSpeakerView(speaker, spk) {
+  const m = /Speaker\s+([A-Z])/.exec(speaker || "");
+  if (m) {
+    const voiceId = `room-oslo#${m[1]}`;
+    const p = personForVoice(voiceId);
+    return p
+      ? { name: p.name, identity: p.id }
+      : { name: `Unidentified (${m[1]})`, identity: voiceId };
+  }
+  const p = STAGE_PEOPLE.find((x) => x.spk === spk);
+  return { name: p?.name || speaker, identity: p?.id || null };
+}
+function txLineView(ln) {
+  const v = txSpeakerView(ln.speaker, ln.spk);
+  return { ...ln, speaker: v.name, identity: v.identity };
+}
+
 function viewTranscript() {
   const sess = session();
   if (sess.fresh || !sess.hasTranscript) return viewTranscriptEmpty(sess);
@@ -1260,10 +1476,12 @@ function viewTranscript() {
 
   const grid = el(`<div class="grid cols-tx"></div>`);
 
-  // PRIMARY: IRC merged transcript
-  const stBar = tx.speakingTime.map((s) =>
-    `<span class="sptiny spk-ink-${s.spk}" style="flex:${s.pct}" title="${esc(s.speaker)} ${s.pct}%"><span class="sptiny__bar spk-bar-${s.spk}"></span><span class="sptiny__lab">${esc(s.speaker.replace("Oslo Room · ", ""))} ${s.pct}%</span></span>`
-  ).join("");
+  // PRIMARY: IRC merged transcript. Time-bar labels use the corrected speaker
+  // names (Person, or "Unidentified (A/B)" for an unmapped diarized voice).
+  const stBar = tx.speakingTime.map((s) => {
+    const name = txSpeakerView(s.speaker, s.spk).name;
+    return `<span class="sptiny spk-ink-${s.spk}" style="flex:${s.pct}" title="${esc(name)} ${s.pct}%"><span class="sptiny__bar spk-bar-${s.spk}"></span><span class="sptiny__lab">${esc(name)} ${s.pct}%</span></span>`;
+  }).join("");
   const txPanel = el(`
     <div class="panel panel--primary">
       <div class="panel__head"><div class="panel__title"><span class="ic">📝</span>Merged transcript</div>
@@ -1273,11 +1491,10 @@ function viewTranscript() {
       <div class="audit" id="audit"></div>
     </div>`);
   const txBody = txPanel.querySelector("#txBody");
-  // attach identity to lines so the IRC badge shows speaker + identity
-  for (const ln of tx.lines) {
-    const idForSpeaker = SPEAKERS.find((s) => s.spk === ln.spk)?.id || null;
-    txBody.appendChild(el(ircLine({ ...ln, identity: idForSpeaker }, { restorable: true })));
-  }
+  // Render each line with the CORRECTED speaker: a human → their Person; an
+  // unmapped diarized room/clip voice → "Unidentified (A/B)". The identity badge
+  // shows the Person id, or the diarized voice key for an Unidentified voice.
+  for (const ln of tx.lines) txBody.appendChild(el(ircLine(txLineView(ln), { restorable: true })));
   // filter audit (suppressed/low-confidence; restore affordance)
   const flagged = tx.lines.filter((l) => l.suppressed || l.lowConfidence);
   const audit = txPanel.querySelector("#audit");
@@ -1291,10 +1508,11 @@ function viewTranscript() {
     for (const l of flagged) {
       const kind = l.suppressed ? `suppressed · ${l.matchedRule}` : `low confidence ${(l.confidence ?? 0).toFixed(2)}`;
       const tone = l.suppressed ? "sup" : "low";
+      const who = txSpeakerView(l.speaker, l.spk).name;
       abody.appendChild(el(`
         <div class="audit__item">
           <div class="row-between" style="margin-bottom:3px">
-            <span class="mono dim" style="font-size:10px">${esc(clock(l.t))} · ${esc(l.speaker)}</span>
+            <span class="mono dim" style="font-size:10px">${esc(clock(l.t))} · ${esc(who)}</span>
             <span class="ircb ${tone}">${esc(kind)}</span>
           </div>
           <div style="font-size:11px;color:var(--ink-3);font-style:italic">"${esc(l.text)}"</div>

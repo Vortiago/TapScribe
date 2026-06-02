@@ -18,10 +18,34 @@ is always visible so you know where the session is and what each stage needs.
 **GLOBAL** — pinned at the top, **un-numbered**, set apart by a group divider.
 These are *not* part of the session journey; they persist across sessions:
 
-- **Taps** — live ingress. Connected + incoming taps, the global recording
-  arm, the speech-gate config, and per-tap Person mapping + single/multi.
-- **People** — the canonical Persons registry.
+- **Taps** — live ingress. Connected + incoming taps; each tap's **Input**
+  kind, its **own** audio settings, and its Person mapping + single/multi.
+- **People** — the canonical registry of **humans**.
 - **Settings** — global engine/prompt/rule defaults.
+
+### Vocabulary (Tap · Input · Person — used exactly this way everywhere)
+
+- **Tap** — an incoming audio **stream** from a Bridge, keyed by `identity`
+  (plus a `name`). A tap **owns** its audio settings — gate threshold,
+  noise-floor, the speech-gate LiveConfig (`gate_kind` /
+  `gate_speech_threshold` / `gate_hangover_ms` / `gate_pre_roll_ms` /
+  `gate_min_speech_ms` / `confidence_validation`), and rec/live — and these
+  persist **per identity** across sessions (matching the real backend's
+  per-identity tap settings). A tap carries **one Person**, or **several**
+  when diarization splits it.
+- **Input** — the **kind** of audio a tap brings in: **microphone**,
+  **line-in**, or **stereo-mix** (system / file / video audio). This replaces
+  the old "device"/"microphone" framing of a tap. "Input" is a Tap property,
+  never a Person attribute.
+- **Person** — a canonical **human**. Holds **only** a name, a primary +
+  secondary **language** (+ the "transcribe as EN/NB/DA" quick-switch), and the
+  list of taps / diarized voices mapped to them. A Person has **no**
+  gate/noise-floor/input profile — those are Tap settings.
+- **Speaker = Person**: a tap's diarized voices ("Speaker A/B") are
+  **not-yet-identified People**; each maps to a canonical Person or is left
+  **"Unidentified — map to a Person."** A **room** or a **stereo-mix** is a
+  **Tap**, never a Person — the humans heard through it are mapped from its
+  diarized voices.
 
 **THIS SESSION** — the numbered journey, with the **session picker** and a
 **New session** button living in this group. It reads top-to-bottom as the real
@@ -58,31 +82,44 @@ ones (flagged inline as `mock UI`).
 
 ### GLOBAL · Taps (live ingress)
 
-- A dense table of connected taps + one **incoming** (handshaking) tap. Per
-  tap: device/mic label, live **level meter** (0–1) + sparkline, **lag**,
-  **gate** open/shut, **rec/live** toggles. Clicking a row expands a config
-  strip: the in-flight buffer text, the **Person** it maps to (→ People), the
-  language (Person-owned), and the **single ⇄ multi** switch. A **multi** tap
-  (the Oslo Conference Room) diarizes into **Speaker A (nb 58%) / Speaker B
-  (en 42%)** shown inline.
-- A global **Recording armed / paused** switch (`RECORDING_ENABLED`).
-- A **Speech gate · LiveConfig** section with the real knobs that gate every
-  tap: `gate_kind` (tapscribe | backend — *backend greyed/unsupported*),
+- A dense table of connected taps + one **incoming** (handshaking) tap. A row
+  reads **name · identity · Input → mapped Person(s)**, plus a live **level
+  meter** (0–1) + sparkline, **lag**, **gate** open/shut, and **rec/live**
+  toggles. The **Input** column shows the tap's kind — *microphone*,
+  *line-in*, or *stereo-mix*. The scenario shows variety: Atle's personal
+  **microphone**, Mette's personal **microphone**, James on a **line-in**, the
+  former Oslo Conference Room now a **stereo-mix** room tap carrying two
+  People, and a played video/file as a second **stereo-mix** tap.
+- Clicking a row expands the tap's **settings strip**: the in-flight buffer,
+  the **Person** each voice maps to (→ People), the language (Person-owned),
+  the **single ⇄ multi** switch, and — labelled as the tap's own settings,
+  *"remembered per identity across sessions"* — its **gate threshold + noise
+  floor** and the full **speech-gate LiveConfig** (`gate_kind`,
   `gate_speech_threshold`, `gate_hangover_ms`, `gate_pre_roll_ms`,
-  `gate_min_speech_ms`, and a `confidence_validation` toggle. No language here
-  (that's Person-owned now).
-- *Net-new (mock):* multi-person/diarized taps (Speaker A/B).
+  `gate_min_speech_ms`, `confidence_validation`). For a **multi** tap, each
+  diarized voice (Speaker A/B) maps to a Person; at least one is mapped to a
+  named Person and at least one is left **Unidentified**.
+- A global **Recording armed / paused** switch (`RECORDING_ENABLED`).
+- *Net-new (mock):* multi-person/diarized taps (Speaker A/B), the per-tap
+  gate/floor settings UI.
 
-### GLOBAL · People (registry)
+### GLOBAL · People (registry of humans)
 
-- Canonical **Persons**. Each: name, **primary + secondary language** with a
-  "transcribe as EN/NB/DA" quick-switch, **multiple per-microphone profiles**
-  (each mic carries its own gate threshold + noise floor), the **taps /
-  identities mapped** to the Person, and "seen in N sessions". A "+ map another
-  tap / mic" affordance ties more identities to one Person.
-- A per-session **participation** strip (who's in the current session).
-- The real backend piece here is the per-session alias (identity → name); the
-  per-mic profiles and dual-language are *net-new (mock)*.
+- Canonical **People** — **humans only**. Each holds **only**: name, a
+  **primary + secondary language** with a "transcribe as EN/NB/DA"
+  quick-switch, and the **taps / diarized voices mapped** to them, plus "seen
+  in N sessions". There is **no** gate/noise-floor/input profile here — those
+  moved to the **Tap**. A "+ map a tap / voice" affordance ties more
+  identities/voices to one Person.
+- The former "Oslo Conference Room" is **gone** from People (it's a Tap). The
+  two humans heard through it are real People: one (Henrik) is mapped from the
+  room's diarized **Speaker A**, while the room's **Speaker B** stays in an
+  **Unidentified voices** card — making the *Speaker = Person, not yet mapped*
+  state explicit.
+- A per-session **participation** strip (who's in the current session;
+  multi-person taps expand to the People they carry).
+- The real backend piece here is the per-session alias (identity → name);
+  dual-language is *net-new (mock)*.
 
 ### GLOBAL · Settings (defaults)
 
@@ -97,12 +134,14 @@ ones (flagged inline as `mock UI`).
 
 ### SESSION · 1 Capture (live)
 
-- Dense **IRC live captions** (`[m:ss] Speaker: text`, speaker-coloured,
-  language flag, an in-flight cursor line).
+- Dense **IRC live captions** (`[m:ss] Person: text`, coloured per speaker,
+  language flag, an in-flight cursor line). A room/clip voice that isn't mapped
+  yet shows as **Unidentified (A/B)**, a mapped one as its Person.
 - A **Live channel** control: state (running LED, start/stop switch), live
   **model** + **language** + backend, and a live-log peek.
 - A read-only **"taps feeding this session"** reference (→ configure in Taps),
-  with the room's diarized A/B attribution still *visible*.
+  showing each tap's **Input** kind and, for a multi tap, its voices mapping to
+  People (mapped + Unidentified) — all still *visible*.
 - **Capture health** (gates open x/y, recording x/y, max lag, languages).
 - **Session overrides**: a per-session recording toggle and prompt/hotwords
   override that falls back to the global Settings values.
@@ -126,12 +165,13 @@ This is the dedicated home for strip-silence, given the full width:
 
 ### SESSION · 3 Transcript (merged result)
 
-- A tight **IRC merged transcript**: each segment carries speaker (+ identity
-  badge), language, **confidence** (low-confidence dimmed + dashed), a
-  **matched_rule** (suppressed hallucination struck through, audited, and
-  **restorable**), and a **translation badge** (`nb→en`). A speaking-time bar
-  sits on top; `models_used` / `backends_used` in the header; a collapsible
-  filter audit folds in at the bottom.
+- A tight **IRC merged transcript**: each segment carries its **Person** (or
+  **Unidentified (A/B)** for an unmapped diarized voice) + an identity badge,
+  language, **confidence** (low-confidence dimmed + dashed), a **matched_rule**
+  (suppressed hallucination struck through, audited, and **restorable**), and a
+  **translation badge** (`nb→en`). A speaking-time bar sits on top;
+  `models_used` / `backends_used` in the header; a collapsible filter audit
+  folds in at the bottom.
 - A **visible engine selector** that is the **per-session override** of the
   Settings default (backend chips + model-by-family + Canary source/target) —
   shown as a real side panel, **not** a popover.

@@ -579,6 +579,268 @@ export const WAV_TRANSCRIPTS = [
 // --- A per-session transcription job (one job per session; current/total) ----
 export const TRANSCRIBE_JOB = { running: true, current: 23, total: 37, wav: "…090921_atle.wav" };
 
+// =============================================================================
+// CORRECTED Tap / Input / Person model (Stages rebuild — additive only).
+//
+// The earlier fixtures conflated three distinct things; these NEW exports keep
+// them separate and match the real backend's per-identity tap settings:
+//
+//   Tap     — an incoming audio STREAM from a Bridge, keyed by `identity`. It
+//             OWNS its audio settings (gate threshold, noise floor, the
+//             speech-gate LiveConfig, and rec/live). Those persist PER IDENTITY
+//             across sessions. Each tap has exactly one INPUT kind and carries
+//             ONE Person, or SEVERAL when diarization splits it.
+//   Input   — the KIND of audio a tap brings in: microphone | line-in |
+//             stereo-mix (system / file / video audio). Replaces "device"/"mic"
+//             as the thing a tap is. NOT a Person attribute.
+//   Person  — a canonical HUMAN: name + primary/secondary language (+ a
+//             "transcribe as" quick-switch) + the taps/voices mapped to them.
+//             A Person has NO gate/floor/input — those live on the Tap.
+//
+// Speaker = Person: a tap's diarized voices ("Speaker A/B") are not-yet-
+// identified People; each maps to a canonical Person or is left Unidentified.
+// A room or a stereo-mix is a TAP, never a Person.
+// =============================================================================
+
+// --- Input kinds (what a tap brings in) --------------------------------------
+// The label/icon source of truth so every view names inputs identically.
+export const INPUT_KINDS = {
+  microphone: { kind: "microphone", label: "microphone", icon: "🎙️", note: "a personal mic — one speaker" },
+  "line-in": { kind: "line-in", label: "line-in", icon: "🔌", note: "a hardware line input" },
+  "stereo-mix": { kind: "stereo-mix", label: "stereo-mix", icon: "🎚️", note: "system / file / video audio — often several speakers" },
+};
+export const inputKind = (kind) => INPUT_KINDS[kind] || INPUT_KINDS.microphone;
+
+// --- Stage taps (incoming streams; each owns its per-identity audio settings) -
+// A superset of LIVE_TAPS that carries the corrected model: an `input` kind, the
+// per-identity audio settings (gate threshold + noise floor + the speech-gate
+// LiveConfig + rec/live) that the real backend remembers per identity, and the
+// Person(s) the tap carries. The two personal-mic taps each carry one Person;
+// the former "Oslo Conference Room" is now a stereo-mix/room TAP carrying two
+// People (one mapped, one Unidentified); a played video/file is a second
+// stereo-mix tap to show that Input kind. `voices` lists diarized speakers for a
+// multi-person tap (each maps to a Person via TAP_VOICE_PERSON_MAP).
+export const STAGE_TAPS = [
+  {
+    identity: "atle",
+    name: "Atle Håvsø",
+    spk: 0,
+    input: "microphone",
+    inputLabel: "Shure MV7 (USB)",
+    level: 0.62,
+    lagS: 0.8,
+    record: true,
+    live: true,
+    gateOpen: true,
+    lang: "nb",
+    buffer: "…så hvis vi ser på tallene fra forrige",
+    levels: [0.1, 0.2, 0.5, 0.7, 0.62, 0.4, 0.55, 0.7, 0.66, 0.5, 0.6, 0.62],
+    // per-identity audio settings the tap OWNS (remembered across sessions)
+    settings: {
+      gateThreshold: 0.55,
+      noiseFloorDb: -45,
+      gate_kind: "tapscribe",
+      gate_speech_threshold: 0.55,
+      gate_hangover_ms: 400,
+      gate_pre_roll_ms: 300,
+      gate_min_speech_ms: 0,
+      confidence_validation: true,
+    },
+    voices: null, // single-person tap
+  },
+  {
+    identity: "room-oslo",
+    name: "Oslo room (Jabra Speak 710)",
+    spk: 2,
+    input: "stereo-mix",
+    inputLabel: "Jabra Speak 710 · room mix",
+    level: 0.38,
+    lagS: 1.6,
+    record: true,
+    live: true,
+    gateOpen: true,
+    lang: "nb",
+    buffer: "I think the numbers look",
+    levels: [0.2, 0.3, 0.25, 0.4, 0.38, 0.3, 0.45, 0.5, 0.42, 0.3, 0.36, 0.38],
+    settings: {
+      gateThreshold: 0.45,
+      noiseFloorDb: -40,
+      gate_kind: "tapscribe",
+      gate_speech_threshold: 0.45,
+      gate_hangover_ms: 600,
+      gate_pre_roll_ms: 400,
+      gate_min_speech_ms: 0,
+      confidence_validation: true,
+    },
+    // diarization splits this one stream into who-spoke-when. Each voice maps
+    // to a Person (or is left Unidentified) via TAP_VOICE_PERSON_MAP.
+    voices: [
+      { voiceId: "room-oslo#A", label: "Speaker A", spk: 3, lang: "nb", talkPct: 58 },
+      { voiceId: "room-oslo#B", label: "Speaker B", spk: 4, lang: "en", talkPct: 42 },
+    ],
+  },
+  {
+    identity: "mette",
+    name: "Mette Sørensen",
+    spk: 1,
+    input: "microphone",
+    inputLabel: "AirPods Pro 2",
+    level: 0.0,
+    lagS: 0.0,
+    record: true,
+    live: true,
+    gateOpen: false,
+    lang: "da",
+    buffer: "",
+    levels: [0, 0, 0, 0.05, 0, 0, 0, 0.02, 0, 0, 0, 0],
+    settings: {
+      gateThreshold: 0.5,
+      noiseFloorDb: -42,
+      gate_kind: "tapscribe",
+      gate_speech_threshold: 0.5,
+      gate_hangover_ms: 400,
+      gate_pre_roll_ms: 300,
+      gate_min_speech_ms: 0,
+      confidence_validation: true,
+    },
+    voices: null,
+  },
+  {
+    identity: "james",
+    name: "James Park",
+    spk: 4,
+    input: "line-in",
+    inputLabel: "Focusrite 2i2 · input 1",
+    level: 0.0,
+    lagS: 0.0,
+    record: false, // operator paused recording for the guest
+    live: true,
+    gateOpen: false,
+    lang: "en",
+    buffer: "",
+    levels: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    settings: {
+      gateThreshold: 0.6,
+      noiseFloorDb: -38,
+      gate_kind: "tapscribe",
+      gate_speech_threshold: 0.6,
+      gate_hangover_ms: 350,
+      gate_pre_roll_ms: 250,
+      gate_min_speech_ms: 0,
+      confidence_validation: false,
+    },
+    voices: null,
+  },
+  {
+    identity: "demo-clip",
+    name: "Vortiago launch clip",
+    spk: 1,
+    input: "stereo-mix",
+    inputLabel: "system audio · played video/file",
+    level: 0.21,
+    lagS: 0.4,
+    record: true,
+    live: true,
+    gateOpen: true,
+    lang: "en",
+    buffer: "…and that's how the rollout will work",
+    levels: [0.1, 0.18, 0.21, 0.16, 0.22, 0.2, 0.24, 0.19, 0.21, 0.17, 0.2, 0.21],
+    settings: {
+      gateThreshold: 0.4,
+      noiseFloorDb: -50,
+      gate_kind: "tapscribe",
+      gate_speech_threshold: 0.4,
+      gate_hangover_ms: 500,
+      gate_pre_roll_ms: 350,
+      gate_min_speech_ms: 0,
+      confidence_validation: true,
+    },
+    // a played video can carry several voices too — narrator mapped, a second
+    // voice still Unidentified.
+    voices: [
+      { voiceId: "demo-clip#A", label: "Speaker A", spk: 1, lang: "en", talkPct: 71 },
+      { voiceId: "demo-clip#B", label: "Speaker B", spk: 3, lang: "en", talkPct: 29 },
+    ],
+  },
+];
+export const stageTapById = (identity) => STAGE_TAPS.find((t) => t.identity === identity);
+
+// --- People registry (HUMANS ONLY) -------------------------------------------
+// A Person holds ONLY: name + primary/secondary language (+ the "transcribe as"
+// quick switch, defaulting to primaryLang) + a note. NO gate / noise-floor /
+// input profile — those moved to the Tap. The former "Oslo Conference Room" is
+// GONE from here (it's a Tap); the two humans heard in that room are real
+// People below: Henrik (named) and one voice that stays Unidentified, which is
+// represented in TAP_VOICE_PERSON_MAP as a null mapping rather than a Person.
+export const STAGE_PEOPLE = [
+  {
+    id: "atle",
+    name: "Atle Håvsø",
+    initials: "AH",
+    spk: 0,
+    primaryLang: "nb",
+    secondaryLang: "en",
+    sessionsSeen: 14,
+    note: "Host. Norwegian, switches to English for guests.",
+  },
+  {
+    id: "mette",
+    name: "Mette Sørensen",
+    initials: "MS",
+    spk: 1,
+    primaryLang: "da",
+    secondaryLang: "en",
+    sessionsSeen: 9,
+    note: "Danish, comfortable in English.",
+  },
+  {
+    id: "henrik",
+    name: "Henrik Lie",
+    initials: "HL",
+    spk: 3,
+    primaryLang: "nb",
+    secondaryLang: "en",
+    sessionsSeen: 4,
+    note: "Often joins from the Oslo room mic — diarized as a room voice.",
+  },
+  {
+    id: "james",
+    name: "James Park",
+    initials: "JP",
+    spk: 4,
+    primaryLang: "en",
+    secondaryLang: null,
+    sessionsSeen: 2,
+    note: "Guest. English only.",
+  },
+];
+export const stagePersonById = (id) => STAGE_PEOPLE.find((p) => p.id === id);
+
+// --- Tap / voice -> Person mapping (Speaker = Person) ------------------------
+// Keys are either a tap `identity` (single-person tap) or a diarized
+// `voiceId` (multi-person tap). A `null` value means the voice is NOT YET
+// identified ("Unidentified — map to a Person"). This shows BOTH states: at
+// least one room voice maps to a named Person (Henrik), at least one stays
+// Unidentified.
+export const TAP_VOICE_PERSON_MAP = {
+  // single-person taps
+  atle: "atle",
+  mette: "mette",
+  james: "james",
+  // Oslo room (stereo-mix tap): Speaker A is Henrik, Speaker B is Unidentified
+  "room-oslo#A": "henrik",
+  "room-oslo#B": null,
+  // played video/file (stereo-mix tap): narrator is Mette (she presents it),
+  // the second voice in the clip is Unidentified
+  "demo-clip#A": "mette",
+  "demo-clip#B": null,
+};
+// Resolve a tap/voice key to its Person (or null if Unidentified).
+export const personForVoice = (key) => {
+  const id = TAP_VOICE_PERSON_MAP[key];
+  return id ? stagePersonById(id) : null;
+};
+
 // Convenience: everything under one namespace too.
 export const MOCK = {
   APP,
@@ -605,5 +867,14 @@ export const MOCK = {
   PROMPTS,
   WAV_TRANSCRIPTS,
   TRANSCRIBE_JOB,
+  // additive (Stages terminology fix) — corrected Tap / Input / Person model
+  INPUT_KINDS,
+  inputKind,
+  STAGE_TAPS,
+  stageTapById,
+  STAGE_PEOPLE,
+  stagePersonById,
+  TAP_VOICE_PERSON_MAP,
+  personForVoice,
 };
 export default MOCK;
