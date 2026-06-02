@@ -301,6 +301,19 @@ async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
     )
 
 
+def _session_state(recorder: Recorder, *, previous: str, pruned: dict[str, Any]) -> dict[str, Any]:
+    """The new-session response body shared by `/api/new-session` and
+    `/api/tap/new-session` — one source of truth for the shape so the rotate
+    and no-op paths can't drift. Reads `recorder.session_start`/`session_dir`,
+    so call it AFTER any rotation."""
+    return {
+        "previous": previous,
+        "current": recorder.session_start,
+        "path": str(recorder.session_dir),
+        "pruned": pruned,
+    }
+
+
 def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
     """Rotate to a fresh session, THEN prune now-empty sessions. Order
     matters: rotating first makes the previous (now-abandoned, empty) session
@@ -312,12 +325,7 @@ def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
         f"[tapscribe] new session {current} (previous: {prev}); pruned {prune['count']} empty",
         flush=True,
     )
-    return {
-        "previous": prev,
-        "current": current,
-        "path": str(recorder.session_dir),
-        "pruned": prune,
-    }
+    return _session_state(recorder, previous=prev, pruned=prune)
 
 
 @app.post("/api/new-session")
@@ -355,13 +363,11 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     if rotated:
         result = _rotate_and_prune(recorder)
     else:
-        current = recorder.session_start
-        result = {
-            "previous": current,
-            "current": current,
-            "path": str(recorder.session_dir),
-            "pruned": prune_empty_sessions(current),
-        }
+        result = _session_state(
+            recorder,
+            previous=recorder.session_start,
+            pruned=prune_empty_sessions(recorder.session_start),
+        )
     return {"ok": True, "rotated": rotated, **result}
 
 
