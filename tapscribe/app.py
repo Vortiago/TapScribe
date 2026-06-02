@@ -23,6 +23,7 @@ The big-picture route map:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import math
 import shutil
@@ -64,6 +65,7 @@ from .sessions import (
     delete_session_audio,
     delete_session_wav,
     gather_sessions,
+    prune_empty_sessions,
     read_session_meta,
     resolve_session_dir,
     resolve_wav,
@@ -299,14 +301,65 @@ async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
     )
 
 
+def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
+    """Rotate to a fresh session, THEN prune now-empty sessions. Order
+    matters: rotating first makes the previous (now-abandoned, empty) session
+    eligible for pruning, while the freshly-minted current session is
+    protected by `prune_empty_sessions`' current-session skip."""
+    prev, current = recorder.rotate_session()
+    prune = prune_empty_sessions(current)
+    print(
+        f"[tapscribe] new session {current} (previous: {prev}); pruned {prune['count']} empty",
+        flush=True,
+    )
+    return {
+        "previous": prev,
+        "current": current,
+        "path": str(recorder.session_dir),
+        "pruned": prune,
+    }
+
+
 @app.post("/api/new-session")
 async def api_new_session(recorder: Recorder = Depends(get_recorder)):
-    """Rotate the current session. Already-open /record WebSockets keep
-    writing to their original folder (captured at WS open); only new
-    opens land in the new folder."""
-    prev, current = recorder.rotate_session()
-    print(f"[tapscribe] new session pending: {recorder.session_dir} (previous: {prev})", flush=True)
-    return {"ok": True, "previous": prev, "current": current, "path": str(recorder.session_dir)}
+    """Rotate the current session and prune now-empty sessions. Already-open
+    /tap WebSockets keep writing to their original folder (captured at WS
+    open); only new opens land in the new folder."""
+    return {"ok": True, **_rotate_and_prune(recorder)}
+
+
+@app.post("/api/tap/new-session")
+async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_recorder)):
+    """Bridge-initiated session rotation, authenticated by the TAP token
+    (`Authorization: Bearer <token>`) — NOT dashboard Basic auth — so a browser
+    bridge that holds only the tap token can rotate sessions without the
+    operator switching to the dashboard. Exempt from the Basic-auth middleware
+    (`config.AUTH_EXEMPT_ROUTES`); the bearer check below is the gate.
+
+    Rotates then prunes empty sessions, exactly like the dashboard's
+    `/api/new-session`. No filesystem path is derived from the request — the
+    new session id is a server-minted UTC timestamp and the prune walks a
+    constant `RECORDINGS_DIR` glob — so there is no path-injection surface here.
+    """
+    if config.AUTH_ENABLED:
+        scheme, _, token = (req.headers.get("authorization") or "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(token.strip(), recorder.tap.value):
+            return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+
+    # Idempotency guard (tap path only): a fresh/empty current session means a
+    # rotation would only churn the timestamp. No-op the rotate but still prune
+    # so any stale empties from earlier rotations get swept. The dashboard
+    # button keeps always-rotate semantics.
+    if not any(recorder.session_dir.glob("*.wav")):
+        return {
+            "ok": True,
+            "rotated": False,
+            "current": recorder.session_start,
+            "path": str(recorder.session_dir),
+            "pruned": prune_empty_sessions(recorder.session_start),
+        }
+
+    return {"ok": True, "rotated": True, **_rotate_and_prune(recorder)}
 
 
 # ---------------------------------------------------------------------------
@@ -636,27 +689,9 @@ async def api_config_put(key: str, req: Request):
 async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
     """Delete every session folder that has zero WAVs, no merged
     transcript, and no operator-set label. Skips the CURRENT session."""
-    pruned: list[str] = []
-    failed: list[dict[str, str]] = []
-    for sd in config.RECORDINGS_DIR.glob("*"):
-        if not sd.is_dir():
-            continue
-        if sd.name == recorder.session_start:
-            continue
-        if any(sd.glob("*.wav")):
-            continue
-        if (sd / "session-transcript.json").exists():
-            continue
-        meta = read_session_meta(sd.name)
-        if meta.get("label"):
-            continue
-        try:
-            shutil.rmtree(sd)
-            pruned.append(sd.name)
-        except OSError as e:
-            failed.append({"session": sd.name, "error": str(e)})
-    print(f"[tapscribe] pruned {len(pruned)} empty sessions", flush=True)
-    return {"ok": True, "pruned": pruned, "count": len(pruned), "failed": failed}
+    result = prune_empty_sessions(recorder.session_start)
+    print(f"[tapscribe] pruned {result['count']} empty sessions", flush=True)
+    return {"ok": True, **result}
 
 
 @app.post("/api/sessions/{session}/strip-silence")

@@ -156,6 +156,8 @@ function makeChromeMock(initialSettings) {
 function createBridge({ settings = {}, location: locationOverride } = {}) {
   FakeWebSocket.reset();
   const clock = createClock();
+  // Records every fetch() the content script makes (the new-session POST).
+  const fetchCalls = [];
   const chrome = makeChromeMock({
     // Default to localhost so the mixed-content guard (ws:// from
     // https:// blocked unless host is trustworthy) doesn't fire in the
@@ -227,6 +229,10 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     },
     chrome,
     WebSocket: FakeWebSocket,
+    fetch: (url, options) => {
+      fetchCalls.push({ url, options: options || {} });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    },
     crypto: { randomUUID: () => "u-" + Math.random().toString(36).slice(2) },
     URLSearchParams,
     setTimeout: clock.setTimeout,
@@ -271,6 +277,12 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     chrome._fireChange({ useTls: { newValue: !!useTls, oldValue: !useTls } });
   }
 
+  // Simulate the operator toggling "start new session on room change" in the
+  // popup — fires the same onChanged listener content.js registered at boot.
+  function flipAutoNewSession(on) {
+    chrome._fireChange({ autoNewSessionOnRoomChange: { newValue: !!on, oldValue: !on } });
+  }
+
   // The in-page status pill lives in a shadow root attached to a host
   // element appended to documentElement. The harness mocks documentElement
   // and createElement above, so we can find the host by its id and dig
@@ -313,9 +325,11 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     status,
     openSockets: () => FakeWebSocket._all,
     lastSocket: () => FakeWebSocket._all[FakeWebSocket._all.length - 1],
+    fetches: () => fetchCalls,
     clock,
     flushMicrotasks,
     flipUseTls,
+    flipAutoNewSession,
     indicator,
     detachIndicator,
   };

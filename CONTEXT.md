@@ -261,6 +261,13 @@ disk. Bridges don't talk to WhisperLiveKit themselves and don't POST
 settled lines back; the verb the Bridge performs is "tap," and the
 endpoint name reflects that.
 
+Besides the audio `tap`, a Bridge may issue one **control** verb:
+`POST /api/tap/new-session` (authenticated by the tap token as an
+`Authorization: Bearer` header) asks the Recorder to rotate to a fresh
+session and prune empty ones — e.g. the SpatialChat Bridge's "New session"
+button or its opt-in "new session on room change." It's the only thing a
+Bridge sends over HTTP; everything else is PCM over `/tap`.
+
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
 
 ## Utterance

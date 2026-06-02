@@ -77,12 +77,16 @@ TLS_KEY_FILE: Path = BASE_DIR / ".tapscribe-key.pem"
 # Method-aware routes that bypass auth. /health and /healthz are for
 # monitors (the latter is the richer probe shape); the live-transcript
 # ingest is exempt because the browser bridge can't easily inject Basic
-# credentials on a fire-and-forget POST.
+# credentials on a fire-and-forget POST. /api/tap/new-session is exempt
+# for the same reason — it carries its OWN gate (a tap-token bearer header
+# validated in the handler), not dashboard Basic auth, so a bridge that
+# holds only the tap token can rotate sessions.
 AUTH_EXEMPT_ROUTES = frozenset(
     {
         ("GET", "/health"),
         ("GET", "/healthz"),
         ("POST", "/api/live-transcript"),
+        ("POST", "/api/tap/new-session"),
     }
 )
 

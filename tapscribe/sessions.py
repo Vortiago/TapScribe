@@ -380,6 +380,37 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
     return out
 
 
+def prune_empty_sessions(current_session: str) -> dict[str, Any]:
+    """Delete every session folder under RECORDINGS_DIR that has zero WAVs,
+    no merged transcript, and no operator-set label. Never deletes
+    `current_session`. Returns ``{"pruned": [...], "count": N, "failed": [...]}``.
+
+    Pure filesystem walk over the ``RECORDINGS_DIR`` glob (a constant): no path
+    is built from request input, so the module's path-injection guard doesn't
+    apply here. Shared by the manual `/api/sessions/prune-empty` endpoint and
+    the rotate-then-prune flow behind every new-session trigger.
+    """
+    pruned: list[str] = []
+    failed: list[dict[str, str]] = []
+    for sd in config.RECORDINGS_DIR.glob("*"):
+        if not sd.is_dir():
+            continue
+        if sd.name == current_session:
+            continue
+        if any(sd.glob("*.wav")):
+            continue
+        if (sd / "session-transcript.json").exists():
+            continue
+        if read_session_meta(sd.name).get("label"):
+            continue
+        try:
+            shutil.rmtree(sd)
+            pruned.append(sd.name)
+        except OSError as e:
+            failed.append({"session": sd.name, "error": str(e)})
+    return {"pruned": pruned, "count": len(pruned), "failed": failed}
+
+
 # ---------------------------------------------------------------------------
 # Strip-silence (operator-triggered, used by /api/sessions/{session}/strip-silence)
 # ---------------------------------------------------------------------------

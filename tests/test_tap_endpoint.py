@@ -593,6 +593,59 @@ class TestTapAuth:
         assert list(recorder_with_fake_wlk.session_dir.glob("*.wav")) == []
 
 
+class TestTapNewSession:
+    """POST /api/tap/new-session is the bridge's HTTP control verb: rotate the
+    session (and prune empties), authenticated by the tap token as a bearer
+    header rather than dashboard Basic auth. The route is exempt from the
+    Basic-auth middleware; the in-handler bearer check is the gate."""
+
+    @pytest.fixture
+    def auth_client(self, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(_config, "AUTH_ENABLED", True)
+        app.dependency_overrides[get_recorder] = lambda: recorder_with_fake_wlk
+        app.state.recorder = recorder_with_fake_wlk
+        with TestClient(app) as c:
+            yield c
+        app.dependency_overrides.clear()
+
+    @staticmethod
+    def _seed_wav(recorder: Recorder) -> None:
+        # The empty-current guard only checks for *.wav presence (not
+        # contents), so a placeholder file is enough to make rotation fire.
+        recorder.session_dir.mkdir(parents=True, exist_ok=True)
+        (recorder.session_dir / "seed.wav").write_bytes(b"")
+
+    def test_accepts_valid_bearer_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
+        self._seed_wav(recorder_with_fake_wlk)
+        prev = recorder_with_fake_wlk.session_start
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.post("/api/tap/new-session", headers={"Authorization": "Bearer " + token})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["rotated"] is True
+        # _utc_session_id() has 1s resolution; a same-second rotation reuses
+        # the id, so assert on the rotated flag + previous, not on a changed id.
+        assert body["previous"] == prev
+
+    def test_rejects_missing_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
+        self._seed_wav(recorder_with_fake_wlk)
+        prev = recorder_with_fake_wlk.session_start
+        r = auth_client.post("/api/tap/new-session")
+        assert r.status_code == 401
+        assert recorder_with_fake_wlk.session_start == prev  # not rotated
+
+    def test_rejects_wrong_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
+        self._seed_wav(recorder_with_fake_wlk)
+        prev = recorder_with_fake_wlk.session_start
+        r = auth_client.post(
+            "/api/tap/new-session",
+            headers={"Authorization": "Bearer definitely-not-the-token"},
+        )
+        assert r.status_code == 401
+        assert recorder_with_fake_wlk.session_start == prev
+
+
 def test_pick_tap_subprotocol_returns_match():
     """Pure helper test — the heart of the auth gate, exercised in isolation."""
     from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX, pick_tap_subprotocol
