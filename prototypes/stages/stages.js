@@ -1,7 +1,12 @@
 // =============================================================================
 // TapScribe · Stages — the meeting's life as a guided journey.
-// A slim ordered "spine" (Capture → Recordings → Transcript → People) with live
-// state on each stop; one dense, logically-grouped workspace at a time.
+// A slim ordered "spine" (Capture → Transcript → People) with live state on
+// each stop; one dense, logically-grouped workspace at a time.
+//
+// Transcript is the merged-stage focus: a tight IRC-style merged transcript
+// dominates, with recordings + waveform + strip-silence tuning folded in as a
+// secondary side panel and the engine controls living in a compact header
+// popover. One clear focus per screen, dense within, calm between.
 // =============================================================================
 
 import {
@@ -19,20 +24,43 @@ const state = {
   stage: "capture",
   sessionId: SESSIONS.find((s) => s.current)?.id || SESSIONS[0].id,
   knobs: { ...STRIP_DEFAULTS },
-  selectedClip: 0,
+  selectedClip: null,          // null → recordings panel collapsed to the clip list
   engine: { ...selectedModel },
+  enginePopover: false,        // compact engine control opens as a popover
+  auditOpen: false,            // collapsible filter audit under the transcript
+  isFresh: false,              // "New session" empty state overlaying the live one
   // per-speaker "transcribe as" quick switch (defaults to primary lang)
   transcribeAs: Object.fromEntries(SPEAKERS.map((s) => [s.id, s.primaryLang])),
 };
 
-const session = () => SESSIONS.find((s) => s.id === state.sessionId) || SESSIONS[0];
+// A synthetic, empty session used by the "New session" button.
+const FRESH_SESSION = {
+  id: "__fresh__",
+  label: "New session",
+  folder: "recordings/(pending)",
+  startedAt: new Date().toISOString(),
+  durationS: 0,
+  wavCount: 0,
+  speakers: [],
+  current: true,
+  hasTranscript: false,
+  langs: [],
+  fresh: true,
+};
+
+function session() {
+  if (state.isFresh) return FRESH_SESSION;
+  return SESSIONS.find((s) => s.id === state.sessionId) || SESSIONS[0];
+}
 
 // =============================================================================
-// Stage definitions — the ORDERED journey. Each carries a live status chip
-// derived from the current session/data, so the spine doubles as a readout.
+// Stage definitions — the ORDERED journey (Capture → Transcript → People).
+// Each carries a live status chip derived from the current session/data, so the
+// spine doubles as a readout.
 // =============================================================================
 function stageDefs() {
   const sess = session();
+  const fresh = !!sess.fresh;
   const liveCount = sess.current ? LIVE_TAPS.filter((t) => t.live).length : 0;
   const recs = clipModel();
   const needTune = recs.filter((c) => c.needsTune).length;
@@ -40,25 +68,24 @@ function stageDefs() {
   return [
     {
       id: "capture", n: 1, ic: "🎙️", name: "Capture",
-      chip: sess.current
-        ? (liveCount ? { tone: "live", text: `${liveCount} live` } : { tone: "mute", text: "idle" })
-        : { tone: "good", text: `${sess.speakers.length} sources` },
-      done: !sess.current,
+      chip: fresh
+        ? { tone: "mute", text: "no taps yet" }
+        : sess.current
+          ? (liveCount ? { tone: "live", text: `${liveCount} live` } : { tone: "mute", text: "idle" })
+          : { tone: "good", text: `${sess.speakers.length} sources` },
+      done: !fresh && !sess.current,
     },
     {
-      id: "recordings", n: 2, ic: "🌊", name: "Recordings",
-      chip: needTune ? { tone: "warn", text: `${needTune} need tuning` } : { tone: "good", text: `${recs.length} clips` },
-      done: sess.wavCount > 0,
+      id: "transcript", n: 2, ic: "📝", name: "Transcript",
+      chip: fresh
+        ? { tone: "mute", text: "nothing yet" }
+        : sess.hasTranscript
+          ? (suppressed ? { tone: "warn", text: `${suppressed} suppressed` } : { tone: "good", text: "reviewed" })
+          : (needTune ? { tone: "warn", text: `${needTune} to tune` } : { tone: "mute", text: "not run" }),
+      done: !fresh && sess.hasTranscript,
     },
     {
-      id: "transcript", n: 3, ic: "📝", name: "Transcript",
-      chip: sess.hasTranscript
-        ? (suppressed ? { tone: "warn", text: `${suppressed} suppressed` } : { tone: "good", text: "reviewed" })
-        : { tone: "mute", text: "not run" },
-      done: sess.hasTranscript,
-    },
-    {
-      id: "people", n: 4, ic: "👥", name: "People",
+      id: "people", n: 3, ic: "👥", name: "People",
       chip: { tone: "mute", text: `${SPEAKERS.length} profiles` },
       done: false,
     },
@@ -67,13 +94,15 @@ function stageDefs() {
 
 // Recordings model: synthesize a small clip list for THIS session from REP_WAV +
 // strip-silence so the "needs tuning" status is real (clips whose default cut
-// produced >1 region are flagged as "tune").
+// produced >1 region are flagged as "tune"). Empty for a fresh session.
 function clipModel() {
+  const sess = session();
+  if (sess.fresh || sess.wavCount === 0) return [];
   const names = [
     { sp: "atle", t: "09:04:12" }, { sp: "mette", t: "09:05:48" },
     { sp: "room-oslo", t: "09:07:03" }, { sp: "atle", t: "09:09:21" },
     { sp: "james", t: "09:11:40" },
-  ].slice(0, Math.min(5, Math.max(2, Math.round(session().wavCount / 8))));
+  ].slice(0, Math.min(5, Math.max(2, Math.round(sess.wavCount / 8))));
   return names.map((c, i) => {
     const dur = [48, 31, 62, 22, 18][i] ?? 30;
     const clips = computeRegions(REP_WAV.peaks, REP_WAV.durationS, STRIP_DEFAULTS).clips;
@@ -88,7 +117,9 @@ function clipModel() {
 function renderSpine() {
   const sess = session();
   document.getElementById("sessionLabel").textContent = sess.label || "(untitled session)";
-  document.getElementById("sessionMeta").textContent = `${clockH(sess.durationS)} · ${sess.wavCount} clips`;
+  document.getElementById("sessionMeta").textContent = sess.fresh
+    ? "fresh · 0 clips"
+    : `${clockH(sess.durationS)} · ${sess.wavCount} clips`;
   document.getElementById("sessionLive").style.display = sess.current ? "" : "none";
 
   const nav = document.getElementById("stagesNav");
@@ -108,7 +139,7 @@ function renderSpine() {
     nav.appendChild(node);
   }
 
-  // journey progress fill: how far down the pipeline the session has advanced
+  // journey progress fill: how far down the pipeline the session sits
   const idx = defs.findIndex((d) => d.id === state.stage);
   const fill = Math.round(((idx + 1) / defs.length) * 100);
   document.getElementById("journeyFill").style.width = `${fill}%`;
@@ -122,7 +153,7 @@ function renderSessionMenu() {
   menu.innerHTML = "";
   for (const s of SESSIONS) {
     const item = el(`
-      <button class="smitem ${s.id === state.sessionId ? "is-current" : ""}">
+      <button class="smitem ${!state.isFresh && s.id === state.sessionId ? "is-current" : ""}">
         <span class="smitem__dot"></span>
         <span class="smitem__body">
           <span class="smitem__label">${esc(s.label || "(untitled)")}</span>
@@ -131,11 +162,12 @@ function renderSessionMenu() {
         ${s.current ? '<span class="smitem__badge" style="color:#ffb3b3;border-color:#4a2626">live</span>' : (s.hasTranscript ? '<span class="smitem__badge">tx</span>' : '<span class="smitem__badge">raw</span>')}
       </button>`);
     item.addEventListener("click", () => {
+      state.isFresh = false;
       state.sessionId = s.id;
       menu.hidden = true;
       // switching session re-seeds the journey at the most relevant stage
-      state.stage = s.current ? "capture" : (s.hasTranscript ? "transcript" : "recordings");
-      state.selectedClip = 0;
+      state.stage = s.current ? "capture" : "transcript";
+      state.selectedClip = null;
       render();
     });
     menu.appendChild(item);
@@ -147,13 +179,23 @@ document.getElementById("sessionPick").addEventListener("click", () => {
   m.hidden = !m.hidden;
 });
 
+// "New session" — drop into a fresh, empty journey at Capture.
+document.getElementById("newSession").addEventListener("click", () => {
+  state.isFresh = true;
+  state.stage = "capture";
+  state.selectedClip = null;
+  state.auditOpen = false;
+  document.getElementById("sessionMenu").hidden = true;
+  render();
+  window.scrollTo(0, 0);
+});
+
 // =============================================================================
 // WORKSPACE shell
 // =============================================================================
-function header({ eyebrow, title, sub, next }) {
-  const nextBtn = next
-    ? `<button class="nextstep ${next.ghost ? "is-ghost" : ""}" id="nextStep">${esc(next.label)} <span class="arr">→</span></button>`
-    : "";
+// `actions` is raw trusted HTML built locally (ordinary action buttons — NOT
+// forced next-step gates). Title/eyebrow are escaped; sub is trusted markup.
+function header({ eyebrow, title, sub, actions }) {
   return `
     <div class="whead">
       <div class="whead__l">
@@ -161,7 +203,7 @@ function header({ eyebrow, title, sub, next }) {
         <h1 class="whead__title">${esc(title)}</h1>
         <div class="whead__sub">${sub}</div>
       </div>
-      <div class="whead__r">${nextBtn}</div>
+      <div class="whead__r">${actions || ""}</div>
     </div>`;
 }
 
@@ -173,26 +215,49 @@ function render() {
   let frag;
   switch (state.stage) {
     case "capture": frag = viewCapture(); break;
-    case "recordings": frag = viewRecordings(); break;
     case "transcript": frag = viewTranscript(); break;
     case "people": frag = viewPeople(); break;
     default: frag = viewCapture();
   }
   root.appendChild(frag);
-  // wire the "advance the journey" button if present
-  const nb = document.getElementById("nextStep");
-  if (nb && nb.dataset.go) nb.addEventListener("click", () => goStage(nb.dataset.go));
   // stage-specific post-render hooks
-  if (state.stage === "recordings") afterRecordings();
+  if (state.stage === "transcript") afterTranscript();
 }
 
 function goStage(id) { state.stage = id; render(); window.scrollTo(0, 0); }
 
 // =============================================================================
-// STAGE 1 — CAPTURE  (live taps + gate + rec/live + diarization + captions)
+// IRC line builder — shared by the live captions feed and the merged transcript
+// so both read as ONE tight stream: `[m:ss] Speaker: text`, speaker coloured,
+// monospace, minimal gutters. Treatments (low-conf, suppressed, translation
+// badge) ride on the same row.
+// =============================================================================
+function ircLine(ln, { inflight = false } = {}) {
+  const cls = [
+    "irc",
+    ln.suppressed ? "is-sup" : "",
+    ln.lowConfidence ? "is-low" : "",
+    inflight ? "is-inflight" : "",
+  ].filter(Boolean).join(" ");
+  let badges = "";
+  if (ln.translatedFrom) badges += `<span class="ircb tr">${esc(ln.translatedFrom)}→en</span>`;
+  if (ln.lowConfidence) badges += `<span class="ircb low">${(ln.confidence ?? 0).toFixed(2)}</span>`;
+  if (ln.suppressed) badges += `<span class="ircb sup">⨯ ${esc(ln.matchedRule || "rule")}</span>`;
+  const cursor = inflight ? `<span class="irc__cursor">▍</span>` : "";
+  return `
+    <div class="${cls}">
+      <span class="irc__t">${clock(ln.t)}</span>
+      <span class="irc__who spk-ink-${ln.spk}">${esc(ln.speaker)}<span class="irc__lang flag">${LANGS[ln.lang]?.flag || ""}</span>:</span>
+      <span class="irc__txt">${esc(ln.text)}${cursor}${badges}</span>
+    </div>`;
+}
+
+// =============================================================================
+// STAGE 1 — CAPTURE  (live taps + gate + rec/live + diarization + IRC captions)
 // =============================================================================
 function viewCapture() {
   const sess = session();
+  if (sess.fresh) return viewCaptureFresh(sess);
   if (!sess.current) return viewCaptureArchived(sess);
   const live = LIVE_TAPS.filter((t) => t.live).length;
   const wrap = el(`<div></div>`);
@@ -200,7 +265,6 @@ function viewCapture() {
     eyebrow: "Stage 1 · Live",
     title: "Capture",
     sub: `${live} taps streaming into <b>${esc(sess.label)}</b> · recorder ${APP.recordingEnabled ? "<span style='color:var(--good)'>on</span>" : "<span class='muted'>paused</span>"} · backend <span class='mono'>${esc(APP.backend)}</span>`,
-    next: { label: "Tune the recordings", go: "recordings" },
   });
 
   const grid = el(`<div class="grid cols-cap"></div>`);
@@ -261,26 +325,17 @@ function viewCapture() {
   }
   grid.appendChild(tapsPanel);
 
-  // ---- RIGHT: live captions feed (settled + in-flight) ----
+  // ---- RIGHT: live captions feed — SAME tight IRC stream as the transcript ----
   const capsPanel = el(`
     <div class="panel">
       <div class="panel__head">
         <div class="panel__title"><span class="ic">💬</span>Live captions</div>
-        <div class="panel__hint">tagged by speaker · language</div>
+        <div class="panel__hint">speaker · language</div>
       </div>
-      <div class="panel__body flush"><div class="caps"></div></div>
+      <div class="panel__body flush"><div class="irclog caps"></div></div>
     </div>`);
-  const caps = capsPanel.querySelector(".caps");
-  for (const c of LIVE_CAPTIONS) {
-    caps.appendChild(el(`
-      <div class="cap ${c.inflight ? "inflight" : ""}">
-        <span class="cap__t">${clock(c.t)}</span>
-        <span class="cap__body">
-          <span class="cap__who spk-ink-${c.spk}"><span class="av sm spk-${c.spk}"></span>${esc(c.speaker)} <span class="flag">${LANGS[c.lang]?.flag || ""}</span></span>
-          <span class="cap__txt">${esc(c.text)}</span>
-        </span>
-      </div>`));
-  }
+  const caps = capsPanel.querySelector(".irclog");
+  for (const c of LIVE_CAPTIONS) caps.appendChild(el(ircLine(c, { inflight: c.inflight })));
   grid.appendChild(capsPanel);
   wrap.appendChild(grid);
 
@@ -300,7 +355,7 @@ function viewCapture() {
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
           <div class="profcell"><div class="profcell__k">Gates open</div><div class="profcell__v">${openGates}<span class="dim" style="font-size:11px"> / ${LIVE_TAPS.length}</span></div></div>
           <div class="profcell"><div class="profcell__k">Recording</div><div class="profcell__v">${recOn}<span class="dim" style="font-size:11px"> / ${LIVE_TAPS.length}</span></div></div>
-          <div class="profcell"><div class="profcell__k">Max lag</div><div class="profcell__v ${maxLag > 1.2 ? "" : ""}">${maxLag.toFixed(1)}s</div></div>
+          <div class="profcell"><div class="profcell__k">Max lag</div><div class="profcell__v">${maxLag.toFixed(1)}s</div></div>
           <div class="profcell"><div class="profcell__k">Languages</div><div class="profcell__v" style="font-size:16px">${langSet.map((c) => LANGS[c]?.flag || "").join(" ")}</div></div>
         </div>
       </div>
@@ -321,10 +376,46 @@ function viewCapture() {
     </div>`));
   wrap.appendChild(bottom);
 
-  // hook next button
-  queueMicrotask(() => { const n = document.getElementById("nextStep"); if (n) n.dataset.go = "recordings"; });
   // draw sparklines after mount
   queueMicrotask(() => drawSparks(wrap));
+  return wrap;
+}
+
+// Fresh "New session" capture — nothing has streamed in yet.
+function viewCaptureFresh(sess) {
+  const wrap = el(`<div></div>`);
+  wrap.innerHTML = header({
+    eyebrow: "Stage 1 · New session",
+    title: "Capture",
+    sub: `<b>${esc(sess.label)}</b> is armed · waiting for the first tap to connect`,
+  });
+  wrap.appendChild(el(`
+    <div class="panel"><div class="panel__body"><div class="empty">
+      <div style="font-size:30px;margin-bottom:8px">🎙️</div>
+      <div style="font-weight:600;color:var(--ink-2);margin-bottom:4px">No taps yet</div>
+      <div>This session is recording-ready. As Bridges connect, each appears here with its level, lag, gate and rec/live state — room mics split into diarized voices inline.</div>
+    </div></div></div>`));
+  // a calm hint of what's next, without forcing the journey
+  wrap.appendChild(el(`<div class="spacer"></div>`));
+  const bottom = el(`<div class="grid cols-cap"></div>`);
+  bottom.appendChild(el(`
+    <div class="panel">
+      <div class="panel__head"><div class="panel__title"><span class="ic">📡</span>Capture health</div><div class="panel__hint">nothing yet</div></div>
+      <div class="panel__body">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+          <div class="profcell"><div class="profcell__k">Gates open</div><div class="profcell__v dim">0 <span style="font-size:11px">/ 0</span></div></div>
+          <div class="profcell"><div class="profcell__k">Recording</div><div class="profcell__v dim">0 <span style="font-size:11px">/ 0</span></div></div>
+          <div class="profcell"><div class="profcell__k">Max lag</div><div class="profcell__v dim">—</div></div>
+          <div class="profcell"><div class="profcell__k">Languages</div><div class="profcell__v dim">—</div></div>
+        </div>
+      </div>
+    </div>`));
+  bottom.appendChild(el(`
+    <div class="panel">
+      <div class="panel__head"><div class="panel__title"><span class="ic">💬</span>Live captions</div><div class="panel__hint">speaker · language</div></div>
+      <div class="panel__body"><div class="empty" style="padding:24px 12px">No captions yet — they stream in as speech is transcribed.</div></div>
+    </div>`));
+  wrap.appendChild(bottom);
   return wrap;
 }
 
@@ -336,7 +427,6 @@ function viewCaptureArchived(sess) {
     eyebrow: "Stage 1 · Archived",
     title: "Capture",
     sub: `<b>${esc(sess.label)}</b> finished · ${sess.speakers.length} sources captured · ${sess.wavCount} clips recorded`,
-    next: { label: "Open the recordings", go: "recordings" },
   });
   const panel = el(`
     <div class="panel">
@@ -373,7 +463,6 @@ function viewCaptureArchived(sess) {
     }
   }
   wrap.appendChild(panel);
-  queueMicrotask(() => { const n = document.getElementById("nextStep"); if (n) n.dataset.go = "recordings"; });
   return wrap;
 }
 
@@ -398,33 +487,136 @@ function drawSparks(scope) {
 }
 
 // =============================================================================
-// STAGE 2 — RECORDINGS  (clip list + live waveform cut preview + knobs)
+// STAGE 2 — TRANSCRIPT  (merged stage: IRC transcript PRIMARY; recordings +
+// waveform + strip-silence folded in as a secondary side panel; engine controls
+// in a compact header popover)
 // =============================================================================
-function viewRecordings() {
-  const clips = clipModel();
-  const sel = clips[state.selectedClip] || clips[0];
-  const regions = computeRegions(REP_WAV.peaks, REP_WAV.durationS, state.knobs);
+function viewTranscript() {
+  const sess = session();
   const wrap = el(`<div></div>`);
-  const needTune = clips.filter((c) => c.needsTune).length;
+
+  if (sess.fresh || !sess.hasTranscript) return viewTranscriptEmpty(sess, wrap);
+
+  const tx = TRANSCRIPT;
+  const suppressed = tx.lines.filter((l) => l.suppressed).length;
+  const low = tx.lines.filter((l) => l.lowConfidence).length;
   wrap.innerHTML = header({
-    eyebrow: "Stage 2 · Recordings",
-    title: "Recordings",
-    sub: `${clips.length} WAV clips in <b>${esc(session().folder)}</b> · ${needTune ? `<span style='color:var(--warn)'>${needTune} need silence tuning</span>` : "all tuned"}`,
-    next: { label: "Run the transcript", go: "transcript" },
+    eyebrow: "Stage 2 · Transcript",
+    title: "Transcript",
+    sub: `merged · <span class='mono'>${esc(tx.model)}</span> on <span class='mono'>${esc(tx.backend)}</span> · ${tx.translated ? "<span style='color:#8fd0ff'>contains translations</span>" : "no translation"}`,
+    actions: `
+      <button class="act" id="enginePop">⚙️ Engine <span class="act__val mono">${esc(state.engine.model)}</span> <span class="act__chev">⌄</span></button>
+      <button class="act act--primary" id="rerunBtn">↻ Re-run transcript</button>`,
   });
 
-  const grid = el(`<div class="grid cols-rec"></div>`);
+  // engine popover (compact control, NOT a co-equal panel)
+  wrap.appendChild(buildEnginePopover());
 
-  // ---- LEFT: clip list ----
+  // ---- PRIMARY: dense IRC merged transcript dominates the canvas ----
+  const main = el(`<div class="grid cols-tx"></div>`);
+
+  const stBar = tx.speakingTime.map((s) =>
+    `<span class="sptiny spk-ink-${s.spk}" style="flex:${s.pct}" title="${esc(s.speaker)} ${s.pct}%"><span class="sptiny__bar spk-bar-${s.spk}"></span><span class="sptiny__lab">${esc(s.speaker.replace("Oslo Room · ", ""))} ${s.pct}%</span></span>`
+  ).join("");
+
+  const txPanel = el(`
+    <div class="panel panel--primary">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">📝</span>Merged transcript</div>
+        <div class="panel__hint">${tx.lines.length} lines · ${low} low-conf · ${suppressed} suppressed</div>
+      </div>
+      <div class="sptbar" title="speaking time">${stBar}</div>
+      <div class="panel__body flush"><div class="irclog tx"></div></div>
+      <div class="audit" id="audit"></div>
+    </div>`);
+  const txBody = txPanel.querySelector(".irclog");
+  for (const ln of tx.lines) txBody.appendChild(el(ircLine(ln)));
+
+  // collapsible filter audit, folded at the bottom of the transcript itself
+  const flagged = tx.lines.filter((l) => l.suppressed || l.lowConfidence);
+  const audit = txPanel.querySelector(".audit");
+  audit.appendChild(el(`
+    <button class="audit__toggle" id="auditToggle">
+      <span>🛡️ Filter audit <span class="dim">· ${flagged.length} flagged (${suppressed} suppressed, ${low} low-conf)</span></span>
+      <span class="audit__chev">${state.auditOpen ? "⌃" : "⌄"}</span>
+    </button>`));
+  if (state.auditOpen) {
+    const body = el(`<div class="audit__body"></div>`);
+    for (const l of flagged) {
+      const kind = l.suppressed ? `suppressed · ${esc(l.matchedRule)}` : `low confidence ${(l.confidence ?? 0).toFixed(2)}`;
+      const tone = l.suppressed ? "sup" : "low";
+      body.appendChild(el(`
+        <div class="audit__item">
+          <div class="row-between" style="margin-bottom:3px">
+            <span class="mono dim" style="font-size:10px">${clock(l.t)} · ${esc(l.speaker)}</span>
+            <span class="ircb ${tone}">${kind}</span>
+          </div>
+          <div style="font-size:11.5px;color:var(--ink-3);font-style:italic">"${esc(l.text)}"</div>
+        </div>`));
+    }
+    body.appendChild(el(`<div class="muted" style="font-size:10.5px;padding-top:8px">Suppressed lines stay out of the merge but are logged here so a wrong filter can be audited and restored.</div>`));
+    audit.appendChild(body);
+  }
+  main.appendChild(txPanel);
+
+  // ---- SECONDARY: "Recordings & tuning" side panel (contextual disclosure) ----
+  main.appendChild(buildRecordingsPanel());
+
+  wrap.appendChild(main);
+  return wrap;
+}
+
+// Empty transcript — either a fresh session or a recorded-but-not-transcribed
+// one. Keeps the recordings side panel so the clips are still reachable.
+function viewTranscriptEmpty(sess, wrap) {
+  const clips = clipModel();
+  wrap.innerHTML = header({
+    eyebrow: "Stage 2 · Transcript",
+    title: "Transcript",
+    sub: sess.fresh
+      ? `<b>${esc(sess.label)}</b> — nothing recorded yet`
+      : `<b>${esc(sess.label)}</b> · ${clips.length} clips recorded, not transcribed yet`,
+    actions: sess.fresh ? "" : `
+      <button class="act" id="enginePop">⚙️ Engine <span class="act__val mono">${esc(state.engine.model)}</span> <span class="act__chev">⌄</span></button>
+      <button class="act act--primary" id="rerunBtn">▶ Transcribe ${clips.length} clips</button>`,
+  });
+  if (!sess.fresh) wrap.appendChild(buildEnginePopover());
+
+  const main = el(`<div class="grid cols-tx"></div>`);
+  main.appendChild(el(`
+    <div class="panel panel--primary"><div class="panel__body"><div class="empty">
+      <div style="font-size:30px;margin-bottom:8px">📝</div>
+      <div style="font-weight:600;color:var(--ink-2);margin-bottom:4px">${sess.fresh ? "Nothing to transcribe yet" : "Not transcribed yet"}</div>
+      <div>${sess.fresh
+        ? "Once taps record into this session, tune their recordings on the right, then run the engine to produce the merged transcript."
+        : `Tune the ${clips.length} clips on the right if needed, then run the engine to produce the merged transcript.`}</div>
+    </div></div></div>`));
+  main.appendChild(buildRecordingsPanel());
+  wrap.appendChild(main);
+  return wrap;
+}
+
+// ---- SECONDARY side panel: recordings list → reveal waveform + knobs ----
+// Collapsed = just the clip list. Select a clip → waveform with live re-cut
+// markers + the strip-silence knobs appear (contextual disclosure, so the
+// transcript stays the dominant focus).
+function buildRecordingsPanel() {
+  const clips = clipModel();
+  const aside = el(`<div class="aside"></div>`);
+
+  const needTune = clips.filter((c) => c.needsTune).length;
   const listPanel = el(`
     <div class="panel">
       <div class="panel__head">
-        <div class="panel__title"><span class="ic">📁</span>Clips</div>
-        <div class="panel__hint">${clips.length} WAVs</div>
+        <div class="panel__title"><span class="ic">📁</span>Recordings &amp; tuning</div>
+        <div class="panel__hint">${clips.length} WAV${needTune ? ` · ${needTune} to tune` : ""}</div>
       </div>
       <div class="panel__body flush"><div class="cliplist"></div></div>
     </div>`);
   const list = listPanel.querySelector(".cliplist");
+  if (!clips.length) {
+    list.appendChild(el(`<div class="empty" style="padding:22px 12px">No recordings yet.</div>`));
+  }
   clips.forEach((c, i) => {
     const sp = speakerById(c.sp);
     const node = el(`
@@ -438,82 +630,119 @@ function viewRecordings() {
           <span class="clip__flag ${c.needsTune ? "tune" : "ok"}">${c.needsTune ? "tune" : "ok"}</span>
         </span>
       </button>`);
-    node.addEventListener("click", () => { state.selectedClip = i; render(); });
+    node.addEventListener("click", () => { state.selectedClip = (state.selectedClip === i ? null : i); render(); });
     list.appendChild(node);
   });
-  grid.appendChild(listPanel);
+  aside.appendChild(listPanel);
 
-  // ---- RIGHT: waveform + knobs (two grouped panels) ----
-  const right = el(`<div class="grid" style="gap:14px"></div>`);
+  // contextual disclosure: only when a clip is selected do the waveform + knobs
+  // appear — the marquee strip-silence live re-cut, kept secondary to the tx.
+  if (state.selectedClip != null && clips[state.selectedClip]) {
+    aside.appendChild(buildTuningPanel(clips[state.selectedClip]));
+  } else if (clips.length) {
+    aside.appendChild(el(`
+      <div class="panel panel--ghost">
+        <div class="panel__body"><div class="tunehint">
+          <span class="tunehint__ic">🌊</span>
+          <div>Select a clip to open its <b>waveform</b> and the <b>strip-silence</b> knobs — cuts re-compute live as you drag.</div>
+        </div></div>
+      </div>`));
+  }
+  return aside;
+}
 
-  const wavePanel = el(`
-    <div class="panel">
+function buildTuningPanel(sel) {
+  const regions = computeRegions(REP_WAV.peaks, REP_WAV.durationS, state.knobs);
+  const k = state.knobs;
+  const panel = el(`
+    <div class="panel" id="tunePanel">
       <div class="panel__head">
-        <div class="panel__title"><span class="ic">🌊</span>Waveform · strip-silence preview</div>
-        <div class="panel__hint">re-cuts live as you drag</div>
+        <div class="panel__title"><span class="ic">🌊</span>${esc(sel.t)} · strip-silence</div>
+        <button class="panel__x" id="tuneClose" title="close">✕</button>
       </div>
       <div class="wavewrap">
         <div class="wave-meta">
-          <span class="wave-meta__name">${esc(sel.t)} · ${esc(speakerById(sel.sp)?.name || sel.sp)} · ${clock(REP_WAV.durationS)}</span>
+          <span class="wave-meta__name">${esc(speakerById(sel.sp)?.name || sel.sp)} · ${clock(REP_WAV.durationS)}</span>
           <div class="wave-stats">
             <div class="wstat"><span class="wstat__v accent" id="statClips">${regions.clips}</span><span class="wstat__k">clips</span></div>
             <div class="wstat"><span class="wstat__v" id="statSpeech">${regions.speechS}s</span><span class="wstat__k">speech</span></div>
             <div class="wstat"><span class="wstat__v" id="statTrim">${(REP_WAV.durationS - regions.speechS).toFixed(1)}s</span><span class="wstat__k">trimmed</span></div>
           </div>
         </div>
-        <div class="wavecanvas-wrap"><canvas id="waveCanvas" width="1640" height="336"></canvas></div>
+        <div class="wavecanvas-wrap"><canvas id="waveCanvas" width="1280" height="280"></canvas></div>
         <div class="wave-axis"><span>0:00</span><span>${clock(REP_WAV.durationS / 2)}</span><span>${clock(REP_WAV.durationS)}</span></div>
         <div class="wave-legend">
-          <span><span class="sw" style="background:linear-gradient(180deg,#f5a623,#b87a12)"></span>kept (speech clip)</span>
-          <span><span class="sw" style="background:#2a313c"></span>dropped (silence)</span>
-          <span class="dim">│ = cut point</span>
+          <span><span class="sw" style="background:linear-gradient(180deg,#f5a623,#b87a12)"></span>kept</span>
+          <span><span class="sw" style="background:#2a313c"></span>dropped</span>
+          <span class="dim">│ cut</span>
         </div>
-      </div>
-    </div>`);
-  right.appendChild(wavePanel);
-
-  const k = state.knobs;
-  const knobPanel = el(`
-    <div class="panel">
-      <div class="panel__head"><div class="panel__title"><span class="ic">🎚️</span>Strip-silence knobs</div><div class="panel__hint">drag → re-cut</div></div>
-      <div class="panel__body">
         <div class="knobs">
           <div class="knob">
             <div class="knob__top"><span class="knob__label">Min silence gap</span><span class="knob__val" id="vGap">${k.minSilenceMs} ms</span></div>
-            <input type="range" id="kGap" min="150" max="1500" step="50" value="${k.minSilenceMs}">
-            <div class="knob__desc">Longer gap → fewer, longer clips (merges across short pauses).</div>
+            <input type="range" id="kGap" min="150" max="4000" step="50" value="${k.minSilenceMs}">
           </div>
           <div class="knob">
             <div class="knob__top"><span class="knob__label">Speech floor</span><span class="knob__val" id="vFloor">${k.speechFloorDb} dB</span></div>
             <input type="range" id="kFloor" min="-60" max="-25" step="1" value="${k.speechFloorDb}">
-            <div class="knob__desc">Lower toward −60 → room tone counts as speech, gaps vanish → 1 clip.</div>
           </div>
           <div class="knob">
             <div class="knob__top"><span class="knob__label">Edge pad</span><span class="knob__val" id="vPad">${k.padMs} ms</span></div>
             <input type="range" id="kPad" min="0" max="500" step="25" value="${k.padMs}">
-            <div class="knob__desc">Padding added before/after each kept region.</div>
           </div>
           <div class="recount">
-            <span>⤷</span><span>This WAV cuts into <b id="reCount">${regions.clips}</b> speech clip${regions.clips !== 1 ? "s" : ""}, keeping <b id="reSpeech">${regions.speechS}s</b> of ${REP_WAV.durationS}s.</span>
+            <span>⤷ cuts into <b id="reCount">${regions.clips}</b> clip${regions.clips !== 1 ? "s" : ""}, keeping <b id="reSpeech">${regions.speechS}s</b> of ${REP_WAV.durationS}s</span>
+            <div class="recount__act">
+              <button class="act act--sm" id="recutBtn">re-cut</button>
+              <button class="act act--sm act--ghost" id="resetBtn">reset</button>
+            </div>
           </div>
         </div>
       </div>
     </div>`);
-  right.appendChild(knobPanel);
-  grid.appendChild(right);
-
-  wrap.appendChild(grid);
-  queueMicrotask(() => { const n = document.getElementById("nextStep"); if (n) n.dataset.go = "transcript"; });
-  return wrap;
+  return panel;
 }
 
-function afterRecordings() {
+function afterTranscript() {
+  // engine popover toggle
+  const pop = document.getElementById("enginePop");
+  if (pop) pop.addEventListener("click", () => { state.enginePopover = !state.enginePopover; syncPopover(); });
+  // ordinary actions (no-op visual feedback — these are real-action affordances)
+  const rerun = document.getElementById("rerunBtn");
+  if (rerun) rerun.addEventListener("click", () => pulse(rerun));
+  // audit toggle
+  const at = document.getElementById("auditToggle");
+  if (at) at.addEventListener("click", () => { state.auditOpen = !state.auditOpen; render(); });
+  syncPopover();
+  wireEnginePopover();
+  // tuning panel (only present when a clip is selected)
+  if (state.selectedClip != null) wireTuning();
+}
+
+function syncPopover() {
+  const pop = document.getElementById("enginePopover");
+  if (pop) pop.classList.toggle("is-open", state.enginePopover);
+  const chev = document.querySelector("#enginePop .act__chev");
+  if (chev) chev.textContent = state.enginePopover ? "⌃" : "⌄";
+}
+
+function pulse(btn) {
+  btn.classList.add("is-pulse");
+  setTimeout(() => btn.classList.remove("is-pulse"), 450);
+}
+
+function wireTuning() {
   drawWaveform();
-  const wire = (id, vId, fmt, key, mul = 1) => {
+  const close = document.getElementById("tuneClose");
+  if (close) close.addEventListener("click", () => { state.selectedClip = null; render(); });
+  const recut = document.getElementById("recutBtn");
+  if (recut) recut.addEventListener("click", () => pulse(recut));
+  const reset = document.getElementById("resetBtn");
+  if (reset) reset.addEventListener("click", () => { state.knobs = { ...STRIP_DEFAULTS }; render(); });
+  const wire = (id, vId, fmt, key) => {
     const inp = document.getElementById(id);
     if (!inp) return;
     inp.addEventListener("input", () => {
-      state.knobs[key] = Number(inp.value) * mul;
+      state.knobs[key] = Number(inp.value);
       document.getElementById(vId).textContent = fmt(Number(inp.value));
       const r = computeRegions(REP_WAV.peaks, REP_WAV.durationS, state.knobs);
       document.getElementById("reCount").textContent = r.clips;
@@ -522,8 +751,6 @@ function afterRecordings() {
       document.getElementById("statSpeech").textContent = `${r.speechS}s`;
       document.getElementById("statTrim").textContent = `${(REP_WAV.durationS - r.speechS).toFixed(1)}s`;
       drawWaveform();
-      // keep the spine chip honest: the journey reflects current cut state
-      renderSpine();
     });
   };
   wire("kGap", "vGap", (v) => `${v} ms`, "minSilenceMs");
@@ -587,131 +814,17 @@ function drawWaveform() {
   ctx.setLineDash([]);
 }
 
-// =============================================================================
-// STAGE 3 — TRANSCRIPT  (dense line-oriented + engine picker + audit)
-// =============================================================================
-function viewTranscript() {
-  const sess = session();
-  const wrap = el(`<div></div>`);
-
-  if (!sess.hasTranscript) {
-    wrap.innerHTML = header({
-      eyebrow: "Stage 3 · Transcript",
-      title: "Transcript",
-      sub: `<b>${esc(sess.label)}</b> has not been transcribed yet`,
-    });
-    wrap.appendChild(el(`
-      <div class="panel"><div class="panel__body"><div class="empty">
-        <div style="font-size:30px;margin-bottom:8px">📝</div>
-        <div style="font-weight:600;color:var(--ink-2);margin-bottom:4px">No transcript for this session yet</div>
-        <div>Pick an engine and run it on the ${sess.wavCount} recorded clips. This stage stays empty until the journey reaches it.</div>
-      </div></div></div>`));
-    return wrap;
-  }
-
-  const tx = TRANSCRIPT;
-  const suppressed = tx.lines.filter((l) => l.suppressed).length;
-  const low = tx.lines.filter((l) => l.lowConfidence).length;
-  wrap.innerHTML = header({
-    eyebrow: "Stage 3 · Transcript",
-    title: "Transcript",
-    sub: `merged · <span class='mono'>${esc(tx.model)}</span> on <span class='mono'>${esc(tx.backend)}</span> · ${tx.translated ? "<span style='color:#8fd0ff'>contains translations</span>" : "no translation"}`,
-    next: { label: "Review people", go: "people", ghost: true },
-  });
-
-  const grid = el(`<div class="grid cols-tx"></div>`);
-
-  // ---- LEFT: dense line-oriented transcript ----
-  const txPanel = el(`
-    <div class="panel">
-      <div class="panel__head">
-        <div class="panel__title"><span class="ic">📝</span>Merged transcript</div>
-        <div class="panel__hint">${tx.lines.length} lines · ${low} low-conf · ${suppressed} suppressed</div>
-      </div>
-      <div class="panel__body flush"><div class="tx"></div></div>
-    </div>`);
-  const txBody = txPanel.querySelector(".tx");
-  for (const ln of tx.lines) {
-    const cls = ln.suppressed ? "sup" : ln.lowConfidence ? "low" : "";
-    let badges = "";
-    if (ln.translatedFrom) badges += `<span class="txbadge tr">${esc(ln.translatedFrom)}→en</span>`;
-    if (ln.lowConfidence) badges += `<span class="txbadge low">low ${(ln.confidence ?? 0).toFixed(2)}</span>`;
-    if (ln.suppressed) badges += `<span class="txbadge sup">suppressed · ${esc(ln.matchedRule || "rule")}</span>`;
-    txBody.appendChild(el(`
-      <div class="txline ${cls}">
-        <span class="txline__t">${clock(ln.t)}</span>
-        <span class="txline__who"><span class="av sm spk-${ln.spk}"></span><span class="txline__whoname spk-ink-${ln.spk}">${esc(ln.speaker)}</span><span class="flag">${LANGS[ln.lang]?.flag || ""}</span></span>
-        <span class="txline__txt">${esc(ln.text)}${badges}</span>
-      </div>`));
-  }
-  grid.appendChild(txPanel);
-
-  // ---- RIGHT: stacked grouped panels (speaking time, engine, audit) ----
-  const right = el(`<div class="grid" style="gap:14px"></div>`);
-
-  // speaking time
-  const stPanel = el(`
-    <div class="panel">
-      <div class="panel__head"><div class="panel__title"><span class="ic">⏱️</span>Speaking time</div><div class="panel__hint">${clockH(tx.durationS)} total</div></div>
-      <div class="panel__body"><div class="spk-time"></div></div>
-    </div>`);
-  const st = stPanel.querySelector(".spk-time");
-  for (const s of tx.speakingTime) {
-    st.appendChild(el(`
-      <div class="sptrow">
-        <span class="sptrow__name spk-ink-${s.spk}"><span class="av sm spk-${s.spk}"></span><span class="sptrow__nm">${esc(s.speaker)}</span></span>
-        <span class="sptrow__bar"><span class="sptrow__fill spk-bar-${s.spk}" style="width:${s.pct}%"></span></span>
-        <span class="sptrow__pct">${s.pct}%</span>
-      </div>`));
-  }
-  right.appendChild(stPanel);
-
-  // engine / model picker
-  right.appendChild(viewEnginePanel());
-
-  // audit panel for suppressed/low lines
-  const auditPanel = el(`
-    <div class="panel">
-      <div class="panel__head"><div class="panel__title"><span class="ic">🛡️</span>Filter audit</div><div class="panel__hint">${suppressed + low} flagged</div></div>
-      <div class="panel__body"></div>
-    </div>`);
-  const ab = auditPanel.querySelector(".panel__body");
-  const flagged = tx.lines.filter((l) => l.suppressed || l.lowConfidence);
-  for (const l of flagged) {
-    const kind = l.suppressed ? `suppressed · ${esc(l.matchedRule)}` : `low confidence ${(l.confidence ?? 0).toFixed(2)}`;
-    const tone = l.suppressed ? "sup" : "low";
-    ab.appendChild(el(`
-      <div style="padding:8px 0;border-bottom:1px solid var(--line-soft)">
-        <div class="row-between" style="margin-bottom:3px">
-          <span class="mono dim" style="font-size:10px">${clock(l.t)} · ${esc(l.speaker)}</span>
-          <span class="txbadge ${tone}">${kind}</span>
-        </div>
-        <div style="font-size:11.5px;color:var(--ink-3);font-style:italic">“${esc(l.text)}”</div>
-      </div>`));
-  }
-  ab.appendChild(el(`<div class="muted" style="font-size:10.5px;padding-top:8px">Suppressed lines are kept out of the merge but logged here so a wrong filter can be audited and restored.</div>`));
-  right.appendChild(auditPanel);
-
-  grid.appendChild(right);
-  wrap.appendChild(grid);
-  queueMicrotask(() => wireEnginePanel());
-  return wrap;
-}
-
-function viewEnginePanel() {
+// ---- compact engine popover (model-by-family, backend chips, Canary langs) ----
+function buildEnginePopover() {
   const e = state.engine;
-  const panel = el(`
-    <div class="panel" id="enginePanel">
-      <div class="panel__head"><div class="panel__title"><span class="ic">⚙️</span>Engine</div><div class="panel__hint">family · backend</div></div>
-      <div class="panel__body"><div class="engine"></div></div>
-    </div>`);
-  const eng = panel.querySelector(".engine");
+  const pop = el(`<div class="popover" id="enginePopover"><div class="popover__inner"></div></div>`);
+  const inner = pop.querySelector(".popover__inner");
 
   // backend chips (cuda disabled)
   const beChips = APP.backends.map((b) =>
     `<button class="chip ${b.kind === e.backend ? "is-sel" : ""}" data-backend="${b.kind}" ${b.available ? "" : "disabled"}>${esc(b.label)}${b.available ? "" : '<span class="chip__x">n/a</span>'}</button>`
   ).join("");
-  eng.appendChild(el(`<div class="eng-row"><span class="eng-cap">Backend</span><div class="chips">${beChips}</div></div>`));
+  inner.appendChild(el(`<div class="eng-row"><span class="eng-cap">Backend</span><div class="chips">${beChips}</div></div>`));
 
   // model by family
   const fam = el(`<div class="eng-row"><span class="eng-cap">Model · by family</span><div class="famgrid"></div></div>`);
@@ -721,22 +834,21 @@ function viewEnginePanel() {
     const fm = block.querySelector(".fam__models");
     for (const m of f.models) {
       const seld = e.family === f.family && e.model === m.id;
-      const node = el(`
+      fm.appendChild(el(`
         <button class="model ${seld ? "is-sel" : ""}" data-family="${esc(f.family)}" data-model="${esc(m.id)}">
           <span class="model__l"><span class="model__name">${esc(m.display)}</span><span class="model__desc">${esc(m.desc)}</span></span>
           <span class="model__dot"></span>
-        </button>`);
-      fm.appendChild(node);
+        </button>`));
     }
     fg.appendChild(block);
   }
-  eng.appendChild(fam);
+  inner.appendChild(fam);
 
   // Canary source/target selects (only when canary selected)
   if (e.family === "canary") {
     const langOpts = (selCode) => ["nb", "da", "en", "sv", "de", "fr"].map((c) =>
       `<option value="${c}" ${c === selCode ? "selected" : ""}>${LANGS[c].flag} ${LANGS[c].name}</option>`).join("");
-    eng.appendChild(el(`
+    inner.appendChild(el(`
       <div class="eng-row">
         <span class="eng-cap">Canary translation</span>
         <div class="selrow">
@@ -744,24 +856,26 @@ function viewEnginePanel() {
           <div style="align-self:flex-end;padding-bottom:9px;color:var(--ink-4)">→</div>
           <div class="selfield"><label>Target</label><select id="tgtLang">${langOpts(e.targetLang)}</select></div>
         </div>
-        <div class="translate-note">🌐 Canary translates <b id="trSrc">${LANGS[e.sourceLang].name}</b> → <b id="trTgt">${LANGS[e.targetLang].name}</b> during transcription.</div>
+        <div class="translate-note">🌐 <b id="trSrc">${LANGS[e.sourceLang].name}</b> → <b id="trTgt">${LANGS[e.targetLang].name}</b> during transcription.</div>
       </div>`));
   }
-  return panel;
+  return pop;
 }
 
-function wireEnginePanel() {
-  const panel = document.getElementById("enginePanel");
-  if (!panel) return;
-  panel.querySelectorAll("[data-backend]").forEach((b) => {
+function wireEnginePopover() {
+  const pop = document.getElementById("enginePopover");
+  if (!pop) return;
+  pop.querySelectorAll("[data-backend]").forEach((b) => {
     if (b.disabled) return;
-    b.addEventListener("click", () => { state.engine.backend = b.dataset.backend; rerenderEngine(); });
+    b.addEventListener("click", () => { state.engine.backend = b.dataset.backend; rerenderPopover(); });
   });
-  panel.querySelectorAll("[data-model]").forEach((m) => {
+  pop.querySelectorAll("[data-model]").forEach((m) => {
     m.addEventListener("click", () => {
       state.engine.family = m.dataset.family;
       state.engine.model = m.dataset.model;
-      rerenderEngine();
+      rerenderPopover();
+      const lbl = document.querySelector("#enginePop .act__val");
+      if (lbl) lbl.textContent = state.engine.model;
     });
   });
   const src = document.getElementById("srcLang"), tgt = document.getElementById("tgtLang");
@@ -769,21 +883,22 @@ function wireEnginePanel() {
   if (tgt) tgt.addEventListener("change", () => { state.engine.targetLang = tgt.value; document.getElementById("trTgt").textContent = LANGS[tgt.value].name; });
 }
 
-function rerenderEngine() {
-  const old = document.getElementById("enginePanel");
+function rerenderPopover() {
+  const old = document.getElementById("enginePopover");
   if (!old) return;
-  const fresh = viewEnginePanel();
+  const fresh = buildEnginePopover();
+  fresh.classList.toggle("is-open", state.enginePopover);
   old.replaceWith(fresh);
-  wireEnginePanel();
+  wireEnginePopover();
 }
 
 // =============================================================================
-// STAGE 4 — PEOPLE  (cross-session per-mic profiles + dual language + switch)
+// STAGE 3 — PEOPLE  (cross-session per-mic profiles + dual language + switch)
 // =============================================================================
 function viewPeople() {
   const wrap = el(`<div></div>`);
   wrap.innerHTML = header({
-    eyebrow: "Stage 4 · People",
+    eyebrow: "Stage 3 · People",
     title: "People",
     sub: `${SPEAKERS.length} profiles · settings keyed by <b>microphone</b>, reused across every session`,
   });
@@ -871,9 +986,11 @@ render();
 
 // deterministic hooks for the screenshotter
 window.gotoView = (name) => {
-  const map = { capture: "capture", recordings: "recordings", transcript: "transcript", people: "people" };
-  if (map[name]) goStage(map[name]);
+  const map = { capture: "capture", transcript: "transcript", people: "people" };
+  if (map[name]) { state.isFresh = false; goStage(map[name]); }
 };
 window.stagesGo = window.gotoView;
-window.stagesPickSession = (id) => { if (SESSIONS.some((s) => s.id === id)) { state.sessionId = id; render(); } };
+window.stagesPickSession = (id) => { if (SESSIONS.some((s) => s.id === id)) { state.isFresh = false; state.sessionId = id; render(); } };
+window.stagesNewSession = () => { document.getElementById("newSession").click(); };
+window.stagesSelectClip = (i) => { state.stage = "transcript"; state.selectedClip = i; render(); };
 window.stagesSetKnob = (key, val) => { if (key in state.knobs) { state.knobs[key] = val; render(); } };
