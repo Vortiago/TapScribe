@@ -364,9 +364,7 @@ def test_pyproject_declares_cuda_libs_extra_gated_off_macos():
     for pkg in ("nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
         req = _requirement_for(lines, pkg)
         assert req.marker is not None, f"{pkg} in cuda-libs must stay sys_platform-gated"
-        assert "darwin" in str(req.marker), (
-            f"cuda-libs → {pkg} marker {req.marker!r} dropped the macOS gate"
-        )
+        assert "darwin" in str(req.marker), f"cuda-libs → {pkg} marker {req.marker!r} dropped the macOS gate"
 
 
 # ── pip argv construction ───────────────────────────────────────────
