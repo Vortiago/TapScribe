@@ -44,12 +44,21 @@ def test_argv_for_standard_whisper_model_includes_model_flag():
     assert cmd[cmd.index("--model") + 1] == "tiny.en"
 
 
-def test_mlx_backend_only_appended_when_use_mlx_true():
+def test_regular_model_pins_backend_explicitly_by_mlx_flag():
+    """The backend is a pure function of (model, MLX), OS-independent:
+    use_mlx=True → mlx-whisper, use_mlx=False → faster-whisper. We pin
+    --backend explicitly on BOTH paths so WhisperLiveKit never falls back
+    to its own default (SimulStreaming), which would mismatch the
+    `info["backend"]` label and diverge from the batch path."""
     cpu_cmd = build_live_cmd(EXE, DEFAULT_CFG, use_mlx=False)
     mlx_cmd = build_live_cmd(EXE, DEFAULT_CFG, use_mlx=True)
-    assert "--backend" not in cpu_cmd
+    assert "--backend" in cpu_cmd
+    assert cpu_cmd[cpu_cmd.index("--backend") + 1] == "faster-whisper"
+    assert "mlx-whisper" not in cpu_cmd
     assert "--backend" in mlx_cmd
     assert mlx_cmd[mlx_cmd.index("--backend") + 1] == "mlx-whisper"
+    # MLX path must NOT also carry faster-whisper.
+    assert "faster-whisper" not in mlx_cmd
 
 
 def test_no_vac_flag_appended_when_gate_kind_is_tapscribe():

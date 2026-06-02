@@ -115,6 +115,18 @@ canary-cpu = [
     "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
 ]
 
+# --- CUDA runtime libs (faster-whisper / CTranslate2 GPU path) --------------
+# CUDA runtime libs for the faster-whisper / CTranslate2 GPU path. CTranslate2
+# does NOT bundle cuBLAS/cuDNN (unlike Torch, which ships its own), so the
+# Whisper CPU/CUDA backend can't use the GPU without them — the operator's
+# "cublas64_12.dll is not found" on Windows+CUDA. The install picker appends
+# this extra automatically when nvidia-smi is present AND a Whisper CPU/CUDA
+# backend is selected. Not published for macOS (no CUDA there).
+cuda-libs = [
+    "nvidia-cublas-cu12; sys_platform != 'darwin'",
+    "nvidia-cudnn-cu12; sys_platform != 'darwin'",
+]
+
 # --- Convenience aliases (back-compat) --------------------------------------
 # Older docs, the Dockerfile, and test-skip messages still reference the
 # pre-split umbrella names. They self-reference the atomic extras above

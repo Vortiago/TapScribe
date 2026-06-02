@@ -217,8 +217,17 @@ def build_live_cmd(
         # `--model-path` exists specifically to sidestep.
     else:
         cmd.extend(["--model", config.model])
+        # Pin the backend explicitly so it's a pure function of (model, MLX)
+        # and OS-independent. Without an explicit --backend on the non-MLX
+        # path, WhisperLiveKit falls back to its OWN default (now
+        # SimulStreaming), which both mismatches the `info["backend"]`
+        # status label below and diverges from the batch path's
+        # faster-whisper. MLX boxes get mlx-whisper; everywhere else
+        # (Windows AND Linux/CUDA) gets faster-whisper.
         if use_mlx:
             cmd.extend(["--backend", "mlx-whisper"])
+        else:
+            cmd.extend(["--backend", "faster-whisper"])
 
     if init_prompt:
         cmd.extend(["--init-prompt", init_prompt])

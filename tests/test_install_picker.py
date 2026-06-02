@@ -284,6 +284,91 @@ def test_resolve_extras_preserves_family_order_for_reproducibility():
     assert extras.index("parakeet-cpu") < extras.index("canary-cpu")
 
 
+# ── CUDA runtime libs (faster-whisper / CTranslate2 GPU path) ────────
+
+
+def test_resolve_extras_appends_cuda_libs_for_whisper_cpu_on_cuda_box():
+    """CTranslate2 (faster-whisper) doesn't bundle cuBLAS/cuDNN, so a CUDA
+    box that installs the Whisper CPU/CUDA backend gets `cuda-libs`
+    appended automatically — otherwise the GPU path fails with
+    'cublas64_12.dll is not found'."""
+    sel = Selection()
+    _enable(sel, "whisper", BACKEND_CPU)
+    extras = install_picker.resolve_extras(sel, _caps(cuda=True))
+    assert install_picker.CUDA_RUNTIME_EXTRA in extras
+    # Appended after the family atoms it backs, not before them.
+    assert extras.index("whisper-cpu") < extras.index(install_picker.CUDA_RUNTIME_EXTRA)
+    # Whole resolved set, pinned for reproducibility.
+    assert extras == ["whisper-live", "whisper-cpu", "cuda-libs"]
+
+
+def test_resolve_extras_no_cuda_libs_without_cuda():
+    """No nvidia-smi → no CUDA → don't drag in the runtime libs even with
+    the Whisper CPU backend selected (it'll just run on CPU)."""
+    sel = Selection()
+    _enable(sel, "whisper", BACKEND_CPU)
+    extras = install_picker.resolve_extras(sel, _caps(cuda=False))
+    assert install_picker.CUDA_RUNTIME_EXTRA not in extras
+
+
+def test_resolve_extras_no_cuda_libs_for_mlx_only_whisper():
+    """An MLX-only Whisper selection (Apple Silicon) has no faster-whisper
+    atom and isn't on CUDA, so the libs must not be added — even if caps
+    somehow reported cuda=True (Apple boxes never do, but tie the gate to
+    the whisper-cpu atom, not the OS)."""
+    sel = Selection()
+    _enable(sel, "whisper", BACKEND_MLX)
+    # Apple caps (cuda=False) — the realistic case.
+    extras_apple = install_picker.resolve_extras(sel, _apple_caps())
+    assert "whisper-cpu" not in extras_apple
+    assert install_picker.CUDA_RUNTIME_EXTRA not in extras_apple
+    # And even with a contrived cuda=True on an MLX-capable box: still no
+    # whisper-cpu atom → still no cuda-libs.
+    cuda_mlx = MachineCaps(os_name="Darwin", arch="arm64", mlx=True, cuda=True)
+    extras_both = install_picker.resolve_extras(sel, cuda_mlx)
+    assert "whisper-cpu" not in extras_both
+    assert install_picker.CUDA_RUNTIME_EXTRA not in extras_both
+
+
+def test_resolve_extras_no_cuda_libs_for_nemo_only_selection():
+    """Parakeet/Canary (NeMo, Torch-based) get CUDA from Torch's own
+    bundle — no whisper-cpu atom in the install means no cuda-libs, even
+    on a CUDA box."""
+    sel = Selection()
+    _enable(sel, "parakeet", BACKEND_CPU)
+    _enable(sel, "canary", BACKEND_CPU)
+    extras = install_picker.resolve_extras(sel, _caps(cuda=True))
+    assert "whisper-cpu" not in extras
+    assert install_picker.CUDA_RUNTIME_EXTRA not in extras
+
+
+def test_resolve_extras_whisper_both_on_cuda_box_still_adds_cuda_libs():
+    """'Both' includes whisper-cpu, so a CUDA box gets the libs once,
+    appended after the MLX atom (which the Linux host can't use but the
+    selection still resolves cleanly)."""
+    sel = Selection()
+    _enable(sel, "whisper", BACKEND_BOTH)
+    # Linux+CUDA: MLX atom downgrades out (host can't run it), CPU stays.
+    extras = install_picker.resolve_extras(sel, _caps(cuda=True))
+    assert "whisper-cpu" in extras
+    assert install_picker.CUDA_RUNTIME_EXTRA in extras
+    # Dedupe: the libs appear exactly once.
+    assert extras.count(install_picker.CUDA_RUNTIME_EXTRA) == 1
+
+
+def test_pyproject_declares_cuda_libs_extra_gated_off_macos():
+    """The `cuda-libs` extra must exist and keep its non-darwin marker so
+    a macOS install (no CUDA there) skips the wheels instead of failing
+    to resolve them."""
+    lines = _atomic_extras(install_picker.CUDA_RUNTIME_EXTRA)
+    for pkg in ("nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
+        req = _requirement_for(lines, pkg)
+        assert req.marker is not None, f"{pkg} in cuda-libs must stay sys_platform-gated"
+        assert "darwin" in str(req.marker), (
+            f"cuda-libs → {pkg} marker {req.marker!r} dropped the macOS gate"
+        )
+
+
 # ── pip argv construction ───────────────────────────────────────────
 
 
@@ -702,6 +787,27 @@ def test_render_shows_planned_pip_command_with_atomic_extras():
     _enable(sel, "whisper", BACKEND_MLX)
     text = install_picker.render(sel, _apple_caps())
     assert "pip install -e '.[whisper-live,whisper-mlx]'" in text
+
+
+def test_render_surfaces_cuda_libs_line_on_cuda_box():
+    """When the resolved set includes cuda-libs (CUDA + Whisper CPU), the
+    operator sees an explicit note that the faster-whisper GPU runtime
+    libs are coming along."""
+    sel = Selection()
+    _enable(sel, "whisper", BACKEND_CPU)
+    text = install_picker.render(sel, _caps(cuda=True))
+    assert "cuda-libs" in text  # in the pip command itself
+    assert "+ CUDA runtime libs" in text
+    assert "nvidia-cublas-cu12" in text
+    assert "faster-whisper GPU" in text
+
+
+def test_render_omits_cuda_libs_line_without_cuda():
+    """No CUDA → no extra line, even with the Whisper CPU backend on."""
+    sel = Selection()
+    _enable(sel, "whisper", BACKEND_CPU)
+    text = install_picker.render(sel, _caps(cuda=False))
+    assert "+ CUDA runtime libs" not in text
 
 
 def test_render_with_empty_selection_explains_consequences():
