@@ -1,0 +1,146 @@
+<!-- ======================================================================
+     Stages · People (GLOBAL · Registry) — Phase 3.
+     The canonical registry of HUMANS. The ONE real backend piece is the
+     per-session participants strip: each speaker actually present in the
+     focused session gets an editable DISPLAY NAME saved to the session's
+     session_meta.aliases (PUT /api/session-meta/{session}). Everything
+     else — the global cross-session Person cards (primary/secondary
+     language + "transcribe as" quick-switch + mapped taps/voices + "seen
+     in N sessions") and the Unidentified-voices resolution — is the
+     prototype's intended shape, rendered but clearly tagged "mock · not
+     wired". Mounted into #viewRoot by js/next/views/people.js.
+     ====================================================================== -->
+<template id="tpl-next-view-people">
+  <div data-slot="head"></div>
+
+  <!-- Concept note: what a Person is, and what's real here. -->
+  <div class="peoplenote">
+    <span class="ic">👥</span>
+    <div>
+      A <b>Person</b> is a human — a name, a primary/secondary <b>language</b>, and the
+      taps/voices mapped to them. Gate, noise-floor and input live on the <b>Tap</b>, not
+      here; a room or stereo-mix is a <b>Tap</b>, never a Person. The real backend piece on
+      this page is the per-session <b>display name</b> (alias) below; the global registry and
+      languages are <span class="mocktag">mock · not wired</span>.
+    </div>
+  </div>
+
+  <!-- ============ REAL: this session's participants (alias editor) ============ -->
+  <div class="panel panel--accent">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">📍</span>In this session · names</div>
+      <div class="panel__hint mono" data-slot="partHint"></div>
+    </div>
+    <div class="panel__body">
+      <div class="realnote">
+        Speakers actually present in <b data-slot="partSess">this session</b>. Type a
+        <b>display name</b> for each <span class="mono">identity</span> — it saves to this
+        session's <span class="mono">session_meta.aliases</span> and renames the speaker in
+        the merged transcript. This is the genuine TapScribe alias feature.
+      </div>
+      <div class="partlist" data-slot="partList"></div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- ============ MOCK: the canonical Person registry ============ -->
+  <div class="panel">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">🗂️</span>Person registry · humans only</div>
+      <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
+    </div>
+    <div class="panel__body">
+      <div class="mocknote">
+        A cross-session <b>registry of humans</b> — each Person's primary/secondary
+        <b>language</b>, the <b>transcribe-as EN/NB/DA</b> quick-switch, the taps/diarized
+        voices <b>mapped</b> to them, and <b>seen in N sessions</b> — is designed but not yet
+        wired to a backend. The cards below preview the intended shape.
+      </div>
+      <div class="people" data-slot="people"></div>
+    </div>
+  </div>
+</template>
+
+<!-- one Person card (mock): head (avatar · name · note · seen) + two cols
+     (language quick-switch | mapped taps/voices). -->
+<template id="tpl-next-person">
+  <div class="person">
+    <div class="person__head">
+      <span class="av lg" data-slot="av"></span>
+      <span class="person__id">
+        <span class="person__name" data-slot="name"></span>
+        <span class="person__note" data-slot="note"></span>
+      </span>
+      <span class="person__seen">seen in<br><b data-slot="seen"></b> sessions</span>
+    </div>
+    <div class="person__cols">
+      <div class="person__col">
+        <div class="subhead">🗣️ Language <span class="mocktag">primary + secondary · mock</span></div>
+        <div class="langpair" data-slot="langpair"></div>
+        <div class="quickswitch" data-slot="quickswitch"><span class="quickswitch__lab">transcribe as →</span></div>
+      </div>
+      <div class="person__col">
+        <div class="subhead">🔗 Mapped taps / voices</div>
+        <div data-slot="maps"></div>
+        <button class="act act--sm" type="button" data-slot="mapBtn" disabled>+ map a tap / voice</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- the Unidentified-voices card (mock): diarized voices not yet tied to a
+     human — each offers "map to a Person". -->
+<template id="tpl-next-person-unid">
+  <div class="person is-unid">
+    <div class="person__head">
+      <span class="av lg unid">?</span>
+      <span class="person__id">
+        <span class="person__name person__name--unid">Unidentified voices <span class="mocktag mocktag--warn">map to a Person</span></span>
+        <span class="person__note">Diarized voices not yet tied to a human — pick a Person, or create one.</span>
+      </span>
+      <span class="person__seen">&nbsp;</span>
+    </div>
+    <div class="person__cols">
+      <div class="person__col person__col--full" data-slot="unid"></div>
+    </div>
+  </div>
+</template>
+
+<!-- one language pill (role 1st/2nd · flag · name) -->
+<template id="tpl-next-langpill">
+  <span class="langpill">
+    <span class="langpill__role" data-slot="role"></span>
+    <span class="flag" data-slot="flag"></span>
+    <span data-slot="name"></span>
+  </span>
+</template>
+
+<!-- one "transcribe as" quick-switch button (mock, disabled) -->
+<template id="tpl-next-qbtn">
+  <button class="qbtn" type="button" disabled>
+    <span class="flag" data-slot="flag"></span>
+    <span data-slot="name"></span>
+  </button>
+</template>
+
+<!-- one mapped tap / voice row (mock) -->
+<template id="tpl-next-idrow">
+  <div class="idrow">
+    <span class="av sm" data-slot="av"></span>
+    <span class="idrow__code" data-slot="code"></span>
+    <span class="tag inp" data-slot="input"></span>
+    <span class="idrow__tail" data-slot="tail"></span>
+  </div>
+</template>
+
+<!-- one REAL per-session participant row: identity code + editable name. -->
+<template id="tpl-next-partrow">
+  <div class="partrow">
+    <span class="av sm" data-slot="av"></span>
+    <span class="partrow__id mono" data-slot="code"></span>
+    <span class="tag partrow__src" data-slot="src"></span>
+    <input class="partrow__name" type="text" data-slot="name" autocomplete="off" spellcheck="false">
+    <span class="partrow__status mono dim" data-slot="status"></span>
+  </div>
+</template>

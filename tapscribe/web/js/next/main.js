@@ -23,6 +23,7 @@ import * as transcriptView from "./views/transcript.js";
 import * as settingsView from "./views/settings.js";
 import * as recordingsView from "./views/recordings.js";
 import * as tapsView from "./views/taps.js";
+import * as peopleView from "./views/people.js";
 
 /** @param {string} id */
 const $ = (id) => {
@@ -184,8 +185,9 @@ function renderView(j, session) {
   }
 
   if (!built) {
-    // Placeholder views (People) render fresh each time; they have no live
-    // state to preserve.
+    // All six views now build a real BuiltView, so this is a defensive
+    // fallback only — a future view that returns null from buildView lands
+    // here and renders a fresh "coming later" card with no live state.
     mountedKey = null;
     renderPlaceholder(root, currentView, session);
     return;
@@ -251,22 +253,30 @@ function buildView(view, session) {
     });
     return { ...b, key: "taps" };
   }
-  return null; // people → placeholder
+  if (view === "people") {
+    const b = peopleView.build({
+      afterMutate: () => { refresh(); },
+    });
+    return { ...b, key: "people" };
+  }
+  return null;
 }
 
 /**
+ * Generic "coming in a later phase" fallback. No view falls here today (all
+ * six build a real BuiltView); kept so a future null-returning view degrades
+ * gracefully instead of mounting nothing.
  * @param {Element} root
  * @param {import('./shell.js').ViewId} view
  * @param {import('../types.js').Session | null} _session
  */
 function renderPlaceholder(root, view, _session) {
-  if (view === "people") {
-    placeholderView(root, {
-      eyebrow: "Global · Registry", title: "People", icon: "👥",
-      heading: "People registry",
-      detail: "Canonical humans — name, languages, and the taps/voices mapped to them — land here.",
-    });
-  }
+  const title = view.charAt(0).toUpperCase() + view.slice(1);
+  placeholderView(root, {
+    eyebrow: "Stages", title, icon: "🚧",
+    heading: `${title} view`,
+    detail: "This view is not built yet.",
+  });
 }
 
 // ---- Spine ------------------------------------------------------------------
@@ -366,6 +376,7 @@ await loadTemplates(
   "/web/components/next/views.html",
   "/web/components/next/recordings.html",
   "/web/components/next/taps.html",
+  "/web/components/next/people.html",
 );
 
 async function loadModelCatalogs() {
