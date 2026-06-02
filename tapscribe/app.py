@@ -1028,6 +1028,10 @@ async def tap(ws: WebSocket):
                 if buf:
                     await fan_out.write_frame(buf)
         except WebSocketDisconnect:
+            # The Bridge closing the /tap WS (end of utterance, or a network
+            # drop) raises this — it's the normal termination path, not an
+            # error. Swallow it and let the TapFanOut context manager finalize
+            # the WAV on exit; nothing is lost.
             pass
         except Exception as e:  # pragma: no cover
             print(f"[tapscribe] /tap error for {utterance_id}: {e}", flush=True)
