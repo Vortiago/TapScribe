@@ -113,6 +113,11 @@
 </template>
 
 <!-- ===================== SESSION · 3 TRANSCRIPT ===================== -->
+<!-- The merged transcript (main/left) + the transcription control column
+     (right): the engine selector (backend chips + compact model dropdown +
+     Canary src/tgt), the transcribe controls (session range + force + per-WAV
+     re-transcribe), and the per-WAV transcript cache (set-primary). Built by
+     js/next/views/transcript.js, which owns the REAL transcribe wiring. -->
 <template id="tpl-next-view-transcript">
   <div data-slot="head"></div>
   <div class="grid cols-tx">
@@ -122,14 +127,77 @@
       <div class="panel__body flush"><div data-slot="mergedHost"></div></div>
     </div>
 
-    <!-- SECONDARY: a VISIBLE engine selector (backend chips + model-by-family
-         + Canary source/target), built like session-detail's. -->
+    <!-- CONTROL COLUMN: engine selector + transcribe + per-WAV cache. -->
     <div class="aside">
       <div class="panel panel--accent">
         <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Engine</div><div class="panel__hint">batch backend &amp; model</div></div>
         <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
       </div>
+
+      <div class="panel">
+        <div class="panel__head"><div class="panel__title"><span class="ic">▶</span>Transcribe</div><div class="panel__hint">one job per session</div></div>
+        <div class="panel__body">
+          <div class="field" style="margin-bottom:9px">
+            <label>session range <span class="dim">(blank → whole session)</span></label>
+            <div class="rangeform">
+              <div class="field"><label>from</label><input class="inp-txt mono" type="text" data-slot="rangeFrom" placeholder="ISO"></div>
+              <div class="field"><label>to</label><input class="inp-txt mono" type="text" data-slot="rangeTo" placeholder="ISO"></div>
+              <label class="checkrow"><input type="checkbox" data-slot="forceBox"> force</label>
+            </div>
+          </div>
+          <button class="act act--sm act--primary act--wide" type="button" data-slot="txRangeBtn">▶ transcribe range</button>
+          <div class="dim mono ovr-note" data-slot="txNote"></div>
+
+          <!-- job progress (one job per session, transcribe OR strip) -->
+          <div class="jobbar" data-slot="jobBar" hidden>
+            <div class="jobbar__top"><span data-slot="jobLabel">Job running</span><span class="jobbar__pct mono" data-slot="jobCount"></span></div>
+            <div class="progress"><div class="progress__fill" data-slot="jobFill"></div></div>
+            <div class="jobbar__wav mono" data-slot="jobWav"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title"><span class="ic">🎯</span>Per-WAV re-transcribe</div>
+          <button class="act act--sm" type="button" data-slot="txOneBtn" disabled>transcribe</button>
+        </div>
+        <div class="panel__body">
+          <div class="dim mono ovr-note" data-slot="txSelLabel" style="margin-top:0;margin-bottom:8px">Selected WAV</div>
+          <div class="wavlist wavlist--mini" data-slot="wavList"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__head"><div class="panel__title"><span class="ic">🗂️</span>Transcript cache</div><div class="panel__hint mono" data-slot="cacheHint"></div></div>
+        <div class="panel__body flush"><div class="cache" data-slot="cacheBody"></div></div>
+      </div>
     </div>
+  </div>
+</template>
+
+<!-- one WAV row in the Transcript transcribe panel (pick a WAV → re-transcribe
+     it / see its cache). Originals selectable; stripped clips are indented. -->
+<template id="tpl-next-txwavrow">
+  <button class="wavrow" type="button">
+    <span class="wavrow__l">
+      <span class="wavrow__n mono" data-slot="name"></span>
+      <span class="wavrow__sub mono" data-slot="sub"></span>
+    </span>
+    <span class="wavrow__r">
+      <span class="wavrow__dur mono" data-slot="dur"></span>
+      <span class="wavrow__tx" data-slot="txTag"></span>
+    </span>
+  </button>
+</template>
+
+<!-- one transcript-cache row (a cached backend·model variant + set-primary) -->
+<template id="tpl-next-cacherow">
+  <div class="cacherow">
+    <span class="cacherow__id mono" data-slot="id"></span>
+    <span class="cacherow__src" data-slot="src"></span>
+    <span class="cacherow__meta mono" data-slot="meta"></span>
+    <button class="pickprimary" type="button" data-slot="primary"></button>
   </div>
 </template>
 
@@ -167,18 +235,12 @@
   <button class="chip" type="button"></button>
 </template>
 
-<template id="tpl-next-fam">
-  <div class="fam">
-    <div class="fam__head"><span data-slot="family"></span><span class="fam__tag" data-slot="tag"></span></div>
-    <div class="fam__models" data-slot="models"></div>
-  </div>
-</template>
-
-<template id="tpl-next-model">
-  <button class="model" type="button">
-    <span class="model__l"><span class="model__name" data-slot="name"></span><span class="model__desc" data-slot="desc"></span></span>
-    <span class="model__dot"></span>
-  </button>
+<!-- Compact model dropdown — a single <select> grouped by family with
+     <optgroup>, mirroring the classic dashboard's session-detail model pick.
+     Replaces the older model-by-family LIST (too tall for the few models we
+     ship). Options are added by js/next/components/engine.js. -->
+<template id="tpl-next-modelsel">
+  <select class="sel sel--model" data-slot="select" aria-label="Model"></select>
 </template>
 
 <template id="tpl-next-sel">

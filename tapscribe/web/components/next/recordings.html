@@ -1,9 +1,10 @@
 <!-- ======================================================================
-     Stages · Recordings (SESSION stage 2) — Phase 2.
-     The WIDE per-session recording stage: waveform-cut PLACEHOLDER + the
-     real strip-silence knobs, the per-WAV list (originals + indented
-     stripped region clips), transcribe (one WAV + session range), and the
-     per-WAV transcript cache (set-primary). Mounted into #viewRoot by
+     Stages · Recordings (SESSION stage 2).
+     The per-session AUDIO-FILES stage: a waveform-cut PLACEHOLDER + the real
+     strip-silence knobs, and the per-WAV list (originals + indented stripped
+     region clips, with the original/stripped source toggle). Transcription
+     (engine + transcribe + per-WAV cache) lives in the Transcript stage now;
+     Recordings is files + silence-stripping only. Mounted into #viewRoot by
      js/next/views/recordings.js, which fills every data-slot with live
      /api/state data and wires the real endpoints. No mock data here — the
      only stub is the waveform preview, tagged inline.
@@ -64,48 +65,14 @@
 
   <div class="spacer"></div>
 
-  <div class="grid cols-tx">
-    <!-- LEFT: per-WAV list (originals + indented stripped region clips) -->
-    <div class="panel">
-      <div class="panel__head">
-        <div class="panel__title"><span class="ic">📁</span>WAVs &amp; stripped clips</div>
-        <div class="panel__hint mono" data-slot="wavHint"></div>
-      </div>
-      <div class="panel__body flush"><div class="wavlist" data-slot="wavList"></div></div>
+  <!-- per-WAV list (originals + indented stripped region clips). Transcription
+       moved to the Transcript stage; this is the files view only. -->
+  <div class="panel">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">📁</span>WAVs &amp; stripped clips</div>
+      <div class="panel__hint mono" data-slot="wavHint"></div>
     </div>
-
-    <!-- RIGHT: transcribe (engine + one-WAV + range) + transcript cache -->
-    <div class="aside">
-      <div class="panel panel--accent">
-        <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Engine</div><div class="panel__hint">batch backend &amp; model</div></div>
-        <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
-      </div>
-
-      <div class="panel">
-        <div class="panel__head"><div class="panel__title"><span class="ic">▶</span>Transcribe</div><div class="panel__hint">one job per session</div></div>
-        <div class="panel__body">
-          <div class="row-between" style="margin-bottom:10px">
-            <span class="ovr-lab" data-slot="txSelLabel">Selected WAV</span>
-            <button class="act act--sm" type="button" data-slot="txOneBtn" disabled>transcribe</button>
-          </div>
-          <div class="field" style="margin-bottom:9px">
-            <label>session range <span class="dim">(blank → whole session)</span></label>
-            <div class="rangeform">
-              <div class="field"><label>from</label><input class="inp-txt mono" type="text" data-slot="rangeFrom" placeholder="ISO"></div>
-              <div class="field"><label>to</label><input class="inp-txt mono" type="text" data-slot="rangeTo" placeholder="ISO"></div>
-              <label class="checkrow"><input type="checkbox" data-slot="forceBox"> force</label>
-            </div>
-          </div>
-          <button class="act act--sm act--primary act--wide" type="button" data-slot="txRangeBtn">▶ transcribe range</button>
-          <div class="dim mono ovr-note" data-slot="txNote"></div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel__head"><div class="panel__title"><span class="ic">🗂️</span>Transcript cache</div><div class="panel__hint mono" data-slot="cacheHint"></div></div>
-        <div class="panel__body flush"><div class="cache" data-slot="cacheBody"></div></div>
-      </div>
-    </div>
+    <div class="panel__body flush"><div class="wavlist" data-slot="wavList"></div></div>
   </div>
 </template>
 
@@ -131,7 +98,9 @@
   </button>
 </template>
 
-<!-- one indented stripped region clip under its parent original -->
+<!-- one indented stripped region clip under its parent original. Shows the
+     clip's span/size/duration + transcript status; re-transcribe lives in the
+     Transcript stage now, so there's no per-clip action here. -->
 <template id="tpl-next-wavclip">
   <div class="wavrow is-clip">
     <span class="wavrow__l">
@@ -140,17 +109,7 @@
     </span>
     <span class="wavrow__r">
       <span class="wavrow__dur mono" data-slot="dur"></span>
-      <button class="act act--sm act--xs" type="button" data-slot="clipTx"></button>
+      <span class="wavrow__tx" data-slot="txTag"></span>
     </span>
-  </div>
-</template>
-
-<!-- one transcript-cache row (a cached backend·model variant) -->
-<template id="tpl-next-cacherow">
-  <div class="cacherow">
-    <span class="cacherow__id mono" data-slot="id"></span>
-    <span class="cacherow__src" data-slot="src"></span>
-    <span class="cacherow__meta mono" data-slot="meta"></span>
-    <button class="pickprimary" type="button" data-slot="primary"></button>
   </div>
 </template>

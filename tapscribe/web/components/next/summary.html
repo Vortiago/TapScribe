@@ -1,0 +1,91 @@
+<!-- ======================================================================
+     Stages · Summary (SESSION stage 4) — PREVIEW, mock, NOT wired.
+     A preview of a future "summarize this session" feature so the operator
+     can see the intended shape. No backend calls: the source selector,
+     prompt field, and Generate button are all disabled, and the output area
+     shows placeholder content. Tagged "mock · not wired" throughout.
+     Mounted into #viewRoot by js/next/views/summary.js.
+     ====================================================================== -->
+<template id="tpl-next-view-summary">
+  <div data-slot="head"></div>
+
+  <div class="grid cols-tx">
+    <!-- LEFT: a sample summary OUTPUT (placeholder content). -->
+    <div class="panel panel--primary">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">📄</span>Summary</div>
+        <span class="panel__hint"><span class="mocktag">sample output</span></span>
+      </div>
+      <div class="panel__body">
+        <div class="sumout">
+          <div class="sumout__title">Weekly sync — decisions &amp; next steps</div>
+          <div class="sumblk">
+            <div class="sumblk__k">✅ Decisions</div>
+            <ul class="sumlist">
+              <li>Ship the Stages dashboard behind <code>/next</code> for internal review.</li>
+              <li>Keep ffmpeg out of the batch path — pre-decode stays.</li>
+            </ul>
+          </div>
+          <div class="sumblk">
+            <div class="sumblk__k">📌 Action items</div>
+            <ul class="sumlist">
+              <li><b>Atle</b> — wire the strip-silence knobs into the dashboard.</li>
+              <li><b>Mette</b> — draft the People registry backend.</li>
+            </ul>
+          </div>
+          <div class="sumblk">
+            <div class="sumblk__k">❓ Open questions</div>
+            <ul class="sumlist">
+              <li>Which summarizer ships as the bundled default?</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: the (disabled) Summarizer controls. -->
+    <div class="aside">
+      <div class="panel panel--accent">
+        <div class="panel__head">
+          <div class="panel__title"><span class="ic">🪄</span>Summarizer</div>
+          <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
+        </div>
+        <div class="panel__body">
+          <!-- 1. summarizer SOURCE (segmented, all disabled) -->
+          <div class="field" style="margin-bottom:11px">
+            <label>source</label>
+            <span class="seg seg--wide">
+              <button class="seg__opt is-on" type="button" disabled>🖥️ Local</button>
+              <button class="seg__opt" type="button" disabled>🌐 API</button>
+              <button class="seg__opt" type="button" disabled>⌨️ Command</button>
+            </span>
+          </div>
+
+          <!-- per-source detail (all disabled). Local: bundled default. -->
+          <div class="srcdetail">
+            <div class="srcdetail__lab">🖥️ Local <span class="dim">— bundled default model · runs offline</span></div>
+          </div>
+          <div class="srcdetail is-off">
+            <div class="srcdetail__lab">🌐 API <span class="dim">— Ollama / OpenAI-compatible</span></div>
+            <div class="field"><label>base url</label><input class="inp-txt mono" type="text" value="http://localhost:11434/v1" disabled></div>
+            <div class="field"><label>model</label><input class="inp-txt mono" type="text" value="llama3.1:8b" disabled></div>
+            <div class="field"><label>api key <span class="dim">(optional)</span></label><input class="inp-txt mono" type="password" value="" placeholder="sk-…" disabled></div>
+          </div>
+          <div class="srcdetail is-off">
+            <div class="srcdetail__lab">⌨️ Command <span class="dim">— a CLI command</span></div>
+            <div class="field"><label>command template</label><input class="inp-txt mono" type="text" value="claude -p" disabled></div>
+          </div>
+
+          <!-- 2. prompt / template (disabled, with a sensible default) -->
+          <div class="field" style="margin-top:11px">
+            <label>prompt</label>
+            <textarea class="ta" rows="3" disabled>Summarize this meeting into decisions, action items, and open questions.</textarea>
+          </div>
+
+          <!-- 3. Generate (disabled) -->
+          <button class="act act--sm act--primary act--wide" type="button" disabled style="margin-top:10px">🪄 Generate summary</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>

@@ -1,9 +1,9 @@
 // @ts-check
 // Stages spine — the slim left rail in two groups. GLOBAL (Taps · People ·
 // Settings, pinned + un-numbered) and THIS SESSION (the numbered Capture →
-// Recordings → Transcript journey, with the session picker + New session).
-// Rebuilt every poll tick from /api/state; live status chips show real data
-// where we have it.
+// Recordings → Transcript → Summary journey, with the session picker + New
+// session). Rebuilt every poll tick from /api/state; live status chips show
+// real data where we have it.
 
 import { tpl, pick } from "../../templates.js";
 import { fmtSessionLabel } from "../../formatters.js";
@@ -81,6 +81,13 @@ function journeyDefs(j, sess) {
       chip: tx
         ? (suppressed ? { tone: "warn", text: `${suppressed} suppressed` } : { tone: "good", text: "merged" })
         : { tone: "mute", text: "not run" },
+    },
+    {
+      // Summary is a preview of a future feature — no backend yet (mock UI), so
+      // it never marks done and shows a mute "preview" chip.
+      id: "summary", name: "Summary", lead: "4", numbered: true,
+      done: false,
+      chip: { tone: "mute", text: "preview" },
     },
   ];
 }

@@ -1,26 +1,24 @@
 // @ts-check
-// Stages · Recordings (SESSION stage 2). The WIDE per-session stage: a
+// Stages · Recordings (SESSION stage 2). The per-session AUDIO-FILES stage: a
 // waveform-cut PLACEHOLDER (net-new, no backend) sitting above the REAL
 // strip-silence knobs + the per-WAV list (originals + indented stripped
-// region clips), a source (original/stripped) toggle, transcribe (one WAV +
-// session range with from/to + force) driven by the REUSED Stages engine
-// selector, and the per-WAV transcript cache with set-primary.
+// region clips) with an original/stripped source toggle. Transcription (the
+// engine selector, transcribe controls, and per-WAV cache) moved to the
+// Transcript stage — Recordings is files + silence-stripping only.
 //
-// Mirrors session-detail.js's data flow (the classic dashboard) but is
-// FRESH /next code — it builds the WAV list / strip controls / transcribe /
-// cache from /api/state and the same endpoints (POST /api/transcribe,
-// POST /api/transcribe-session, POST /api/sessions/{s}/strip-silence,
-// DELETE /api/sessions/{s}/stripped, PUT /api/wav/{s}/{name}/primary). No
-// mock data — the only stub is the waveform canvas, tagged inline.
+// Mirrors session-detail.js's data flow (the classic dashboard) for the strip
+// pieces but is FRESH /next code — it builds the WAV list / strip controls
+// from /api/state and the same endpoints (POST
+// /api/sessions/{s}/strip-silence, DELETE /api/sessions/{s}/stripped). No mock
+// data — the only stub is the waveform canvas, tagged inline.
 //
 // Built once for the page; `update(j, session)` re-renders the WAV list /
-// stats / job progress each tick (signature-gated so an in-progress strip
-// slider or range edit isn't clobbered), and the engine panel is rebuilt by
-// main on engine state changes (rebuildEngine).
+// stats / strip-job progress each tick (signature-gated so an in-progress
+// strip slider isn't clobbered).
 
 import { tpl, pick } from "../../templates.js";
-import { postJson, putJson, del } from "../../api.js";
-import { fmtBytes, fmtDur, fmtMs, fmtClock, truncMid } from "../../formatters.js";
+import { postJson, del } from "../../api.js";
+import { fmtBytes, fmtDur, fmtClock, truncMid } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
 
 /** Strip-silence knob defaults — mirror STRIP_OPT_DEFAULTS / the server-side
@@ -32,18 +30,15 @@ const STRIP_DEFAULTS = Object.freeze({ min_silence_ms: 500, pad_ms: 200, speech_
 /**
  * @param {{
  *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
- *   engineState: () => import('../components/engine.js').EngineState,
- *   rebuildEngine: (host: Element) => void,
  *   afterMutate: () => void,
  * }} ctx
- * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void, rebuildEngine: () => void }}
+ * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { metaFor, engineState, rebuildEngine, afterMutate } = ctx;
+  const { metaFor, afterMutate } = ctx;
   const frag = tpl("tpl-next-view-recordings");
 
   const headHost = pick(frag, "head");
-  const engineHost = pick(frag, "engineHost");
   const waveName = pick(frag, "waveName");
   const stats = {
     clips: pick(frag, "sClips"),
@@ -65,17 +60,6 @@ export function build(ctx) {
   const jobWav = pick(frag, "jobWav");
   const wavHint = pick(frag, "wavHint");
   const wavList = pick(frag, "wavList");
-  const txSelLabel = pick(frag, "txSelLabel");
-  const txOneBtn = /** @type {HTMLButtonElement} */ (pick(frag, "txOneBtn"));
-  const rangeFrom = /** @type {HTMLInputElement} */ (pick(frag, "rangeFrom"));
-  const rangeTo = /** @type {HTMLInputElement} */ (pick(frag, "rangeTo"));
-  const forceBox = /** @type {HTMLInputElement} */ (pick(frag, "forceBox"));
-  const txRangeBtn = /** @type {HTMLButtonElement} */ (pick(frag, "txRangeBtn"));
-  const txNote = pick(frag, "txNote");
-  const cacheHint = pick(frag, "cacheHint");
-  const cacheBody = pick(frag, "cacheBody");
-
-  rebuildEngine(engineHost);
 
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').AppState | null} */
@@ -87,7 +71,7 @@ export function build(ctx) {
   /** Source toggle, per session id. */
   /** @type {Map<string, "original" | "stripped">} */
   const sourcePick = new Map();
-  /** Selected original WAV name, per session id (drives the cache panel). */
+  /** Selected original WAV name, per session id (drives the waveform header). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
   /** Last strip-silence response stats, per session id (overlay on s.stripped). */
@@ -96,9 +80,6 @@ export function build(ctx) {
   /** Sessions with a strip POST in flight (the job snapshot also flags this). */
   /** @type {Set<string>} */
   const stripInflight = new Set();
-  /** wavKey ("session/name[@stripped]") currently transcribing optimistically. */
-  /** @type {Set<string>} */
-  const txInflight = new Set();
   let lastSig = " "; // sentinel so the first update always renders the body
 
   // ---- Helpers --------------------------------------------------------------
@@ -171,83 +152,6 @@ export function build(ctx) {
     afterMutate();
   });
 
-  // ---- Transcribe (REAL) ----------------------------------------------------
-
-  /** Read the Canary source/target lang from the engine panel's selects. */
-  const langValues = () => {
-    /** @param {string} name */
-    const valOf = (name) => /** @type {HTMLSelectElement | null} */ (
-      engineHost.querySelector(`select[data-input-name="${name}"]`))?.value || "";
-    return { source_lang: valOf("source_lang"), target_lang: valOf("target_lang") };
-  };
-
-  /** @param {string} name @param {"original"|"stripped"} src */
-  const transcribeWav = async (name, src) => {
-    if (!session) return;
-    const sid = session.session;
-    const eng = engineState();
-    const key = `${sid}/${name}${src === "stripped" ? "@stripped" : ""}`;
-    txInflight.add(key);
-    lastSig = " ";
-    afterMutate();
-    try {
-      await postJson("/api/transcribe", {
-        session: sid, name, source: src,
-        model: eng.model, backend: eng.backend, ...langValues(),
-      });
-    } catch (e) {
-      alert(`Transcribe failed: ${String(e).replace(/^Error:\s*/, "")}`);
-    } finally {
-      txInflight.delete(key);
-      afterMutate();
-    }
-  };
-
-  txOneBtn.addEventListener("click", () => {
-    const sel = selectedFor();
-    if (sel) transcribeWav(sel.name, effectiveSource(session?.session || ""));
-  });
-
-  txRangeBtn.addEventListener("click", async () => {
-    if (!session) return;
-    const sid = session.session;
-    const eng = engineState();
-    txRangeBtn.disabled = true;
-    try {
-      await postJson("/api/transcribe-session", {
-        session: sid,
-        model: eng.model, backend: eng.backend,
-        from_iso: rangeFrom.value.trim(),
-        to_iso: rangeTo.value.trim(),
-        source: effectiveSource(sid),
-        force: forceBox.checked,
-        ...langValues(),
-      });
-    } catch (e) {
-      alert(`Session transcribe failed: ${String(e).replace(/^Error:\s*/, "")}`);
-    } finally {
-      txRangeBtn.disabled = false;
-      afterMutate();
-    }
-  });
-
-  // ---- Set primary (REAL) ---------------------------------------------------
-
-  /** @param {string} name @param {string} backend @param {string} model @param {"original"|"stripped"} src */
-  const setPrimary = async (name, backend, model, src) => {
-    if (!session) return;
-    const sid = session.session;
-    try {
-      await putJson(`/api/wav/${encodeURIComponent(sid)}/${encodeURIComponent(name)}/primary`,
-        { backend, model, source: src });
-    } catch (e) {
-      alert(`Set primary failed: ${String(e).replace(/^Error:\s*/, "")}`);
-    } finally {
-      lastSig = " ";
-      afterMutate();
-    }
-  };
-
   // ---- WAV list -------------------------------------------------------------
 
   /** @param {import('../../types.js').WavFile} f @param {"original"|"stripped"} src @param {boolean} selected */
@@ -261,9 +165,7 @@ export function build(ctx) {
     pick(node, "sub").textContent = `${who}${fmtBytes(f.size)}`;
     pick(node, "dur").textContent = fmtDur(f.duration_s);
     const tag = pick(node, "txTag");
-    const inflight = txInflight.has(`${session?.session || ""}/${f.name}`);
-    if (inflight) { tag.textContent = "⟳ tx"; tag.className = "wavrow__tx is-busy"; }
-    else if (f.transcript) { tag.textContent = "✓ tx"; tag.className = "wavrow__tx is-done"; }
+    if (f.transcript) { tag.textContent = "✓ tx"; tag.className = "wavrow__tx is-done"; }
     else { tag.textContent = "no tx"; tag.className = "wavrow__tx is-none"; }
     btn.addEventListener("click", () => {
       if (session) { selectedWav.set(session.session, f.name); lastSig = " "; afterMutate(); }
@@ -280,55 +182,13 @@ export function build(ctx) {
           : "stripped region";
         pick(clip, "sub").textContent = `${span} · ${fmtBytes(r.size)}`;
         pick(clip, "dur").textContent = fmtDur(r.duration_s);
-        const cbtn = /** @type {HTMLButtonElement} */ (pick(clip, "clipTx"));
-        const cInflight = txInflight.has(`${session?.session || ""}/${r.name}@stripped`);
-        if (cInflight) { cbtn.textContent = "⟳"; cbtn.disabled = true; }
-        else cbtn.textContent = r.transcript ? "re-tx" : "transcribe";
-        cbtn.addEventListener("click", () => transcribeWav(r.name, "stripped"));
+        const ctag = pick(clip, "txTag");
+        if (r.transcript) { ctag.textContent = "✓ tx"; ctag.className = "wavrow__tx is-done"; }
+        else { ctag.textContent = "no tx"; ctag.className = "wavrow__tx is-none"; }
         out.appendChild(clip);
       }
     }
     return out;
-  };
-
-  // ---- Transcript cache -----------------------------------------------------
-
-  /** @param {import('../../types.js').WavFile | null} sel @param {"original"|"stripped"} src */
-  const renderCache = (sel, src) => {
-    cacheBody.replaceChildren();
-    cacheHint.textContent = sel ? truncMid(sel.name, 30) : "no WAV";
-    const variants = sel?.transcripts || [];
-    if (!sel) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = "Pick a WAV to see its cached transcripts.";
-      cacheBody.appendChild(empty);
-      return;
-    }
-    if (!variants.length) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = "No cached transcripts yet — transcribe this WAV first.";
-      cacheBody.appendChild(empty);
-      return;
-    }
-    // The primary is whichever variant matches sel.transcript's backend+model.
-    const primary = sel.transcript;
-    for (const v of variants) {
-      const row = tpl("tpl-next-cacherow");
-      pick(row, "id").textContent = `${v.backend || "?"} · ${v.model || "?"}`;
-      const srcTag = pick(row, "src");
-      srcTag.textContent = v.source || "original";
-      srcTag.classList.add(v.source === "stripped" ? "is-stripped" : "is-original");
-      const wordCount = (v.text || "").trim() ? (v.text || "").trim().split(/\s+/).length : 0;
-      pick(row, "meta").textContent = `${wordCount} w · ${fmtMs(v.transcribe_ms)}`;
-      const isPrimary = !!primary && primary.backend === v.backend && primary.model === v.model && primary.source === v.source;
-      const pbtn = /** @type {HTMLButtonElement} */ (pick(row, "primary"));
-      pbtn.textContent = isPrimary ? "● primary" : "set";
-      if (isPrimary) pbtn.classList.add("is-primary");
-      else pbtn.addEventListener("click", () => setPrimary(sel.name, v.backend, v.model, /** @type {"original"|"stripped"} */ (v.source || src)));
-      cacheBody.appendChild(row);
-    }
   };
 
   // ---- Source toggle (header actions) ---------------------------------------
@@ -369,26 +229,25 @@ export function build(ctx) {
     const sel = selectedFor();
 
     // Signature gate — only rebuild the DOM-heavy body when something the body
-    // depends on actually changed. Skips while a strip slider / range box is
-    // focused so an edit-in-progress isn't wiped. (The knob value labels are
-    // updated by their own input listeners, not here.)
+    // depends on actually changed. Skips while a strip slider is focused so an
+    // edit-in-progress isn't wiped. (The knob value labels are updated by their
+    // own input listeners, not here.)
     const job = sess?.progress || null;
-    const txSig = files.map((f) => `${f.name}:${f.transcript?.transcribed_at || ""}:${(f.transcripts || []).length}:${(f.regions || []).length}`).join("|");
+    const txSig = files.map((f) => `${f.name}:${!!f.transcript}:${(f.regions || []).length}`).join("|");
     const sig = [
       sid, src, sel?.name || "",
       stripped ? `${stripped.count}:${stripped.stripped_at}` : "",
       job ? `${job.kind}:${job.current}/${job.total}:${job.current_file || ""}` : "",
       stripInflight.has(sid) ? "S" : "",
-      [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(","),
       lastStrip.has(sid) ? JSON.stringify(lastStrip.get(sid)) : "",
       txSig,
     ].join("§");
     const focused = /** @type {HTMLElement | null} */ (document.activeElement);
-    const editing = !!focused && (focused.dataset?.stripKnob != null || focused === rangeFrom || focused === rangeTo);
+    const editing = !!focused && focused.dataset?.stripKnob != null;
     // Skip the DOM-heavy rebuild when nothing the body depends on changed, or
-    // while a knob / range box is mid-edit. Everything Recordings shows is
-    // captured in the signature (job progress included), so there's no
-    // live-only chrome to repaint on the skip path.
+    // while a knob is mid-edit. Everything Recordings shows is captured in the
+    // signature (strip-job progress included), so there's no live-only chrome
+    // to repaint on the skip path.
     if ((sig === lastSig || editing) && sess) return;
     lastSig = sig;
 
@@ -412,11 +271,6 @@ export function build(ctx) {
         ? "No recordings yet. Once taps record into this session, each WAV appears here."
         : "Pick a session from the spine to manage its recordings.";
       wavList.replaceChildren(empty);
-      txSelLabel.textContent = "Selected WAV";
-      txOneBtn.disabled = true;
-      txOneBtn.textContent = "transcribe";
-      txNote.textContent = sess ? "record into this session to enable transcription" : "";
-      renderCache(null, src);
       stripBtn.disabled = !sess;
       clearBtn.disabled = !stripped;
       jobBar.hidden = true;
@@ -453,7 +307,8 @@ export function build(ctx) {
     stripBtn.textContent = stripBusy ? "⟳ stripping…" : "✂ strip";
     clearBtn.disabled = !stripped || stripBusy;
 
-    // Job progress bar (one job per session — transcribe OR strip).
+    // Job progress bar (one job per session — surfaced here for strip; the
+    // transcribe job is driven from the Transcript stage but shows here too).
     if (job) {
       jobBar.hidden = false;
       const pct = job.total > 0 ? Math.round(100 * job.current / job.total) : 0;
@@ -470,19 +325,7 @@ export function build(ctx) {
     const listFrag = document.createDocumentFragment();
     for (const f of files) listFrag.appendChild(wavRow(f, src, f.name === sel?.name));
     wavList.replaceChildren(listFrag);
-
-    // Transcribe panel
-    txSelLabel.textContent = sel ? `Selected: ${truncMid(sel.name, 24)}` : "Selected WAV";
-    const oneBusy = !!sel && txInflight.has(`${sid}/${sel.name}${src === "stripped" ? "@stripped" : ""}`);
-    txOneBtn.disabled = !sel || oneBusy;
-    txOneBtn.textContent = oneBusy ? "⟳ transcribing" : (sel?.transcript ? "re-transcribe" : "transcribe");
-    if (!rangeFrom.value) rangeFrom.placeholder = sess.earliest_iso || "ISO";
-    if (!rangeTo.value) rangeTo.placeholder = sess.latest_iso || "ISO";
-    txNote.textContent = `source: ${src}${stripped ? "" : " · (run strip to enable stripped)"}`;
-
-    // Transcript cache for the selected WAV
-    renderCache(sel, src);
   };
 
-  return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };
+  return { node: frag, update };
 }

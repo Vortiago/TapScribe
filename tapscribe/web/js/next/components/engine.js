@@ -1,29 +1,28 @@
 // @ts-check
-// Stages engine selector — a VISIBLE backend-chip row + model-by-family
-// picker + (for Canary) source/target language selects. Used in two places:
+// Stages engine selector — a VISIBLE backend-chip row + a COMPACT model
+// dropdown + (for Canary) source/target language selects. Used in two places:
 //   - Settings (the global batch DEFAULT engine), and
-//   - Transcript (the engine for the open session).
+//   - Transcript (the engine for the open session, drives its transcribe jobs).
 // Mirrors the data flow of the classic dashboard's session-detail engine
-// controls (backend chips from `available_backends`, models grouped by
-// family from /api/models, Canary's source_lang/target_lang from the model's
-// declared `inputs`) but rendered as the prototype's de-bubbled chip/grid UI.
+// controls (backend chips from `available_backends`, a model <select> grouped
+// by family with <optgroup> from /api/models, Canary's source_lang/target_lang
+// from the model's declared `inputs`). The model list used to be a tall
+// model-by-family grid; we ship few models, so it's now a single dropdown that
+// matches the classic UI's session-detail model <select>.
 
 import { tpl, pick } from "../../templates.js";
 
-// Family display labels + order — same set the classic dashboard uses
-// (session-detail.js FAMILY_LABELS).
+// Family display labels + order — used as <optgroup> labels in the model
+// dropdown, same set + order the classic dashboard uses (session-detail.js
+// FAMILY_LABELS); order here drives the group order in the dropdown.
 /** @type {[string, string][]} */
 const FAMILY_LABELS = [
-  ["whisper", "whisper"],
-  ["nb-whisper", "nb-whisper"],
-  ["voxtral", "voxtral"],
-  ["parakeet", "parakeet"],
-  ["canary", "canary"],
+  ["whisper", "Whisper"],
+  ["nb-whisper", "NB-Whisper (Norwegian)"],
+  ["voxtral", "Voxtral (Mistral)"],
+  ["parakeet", "Parakeet (NVIDIA)"],
+  ["canary", "Canary (NVIDIA, translation)"],
 ];
-
-// Which families run live + batch vs batch-only. Drives the per-family tag.
-// Only Whisper / NB-Whisper / Voxtral are live-eligible (see CONTEXT.md).
-const LIVE_FAMILIES = new Set(["whisper", "nb-whisper", "voxtral"]);
 
 /** @type {Record<string, string>} */
 const BACKEND_LABELS = { auto: "auto", mlx: "mlx", cuda: "cuda", cpu: "cpu" };
@@ -89,49 +88,50 @@ export function render(host, { state, catalog, onChange }) {
   }
   frag.appendChild(row("Backend", chips));
 
-  // ---- Model, grouped by family ----
+  // ---- Model · compact dropdown grouped by family ----
+  // Mirrors session-detail.js buildModelSelect: one <select>, <optgroup> per
+  // family (FAMILY_LABELS order), an "Other" group for unknown families, and
+  // each option labelled "display_name — description" like the classic UI.
   const candidates = filterByBackend(models, state.backend);
+  const sel = /** @type {HTMLSelectElement} */ (tpl("tpl-next-modelsel").firstElementChild);
+  /** @type {Map<string, import('../../types.js').ModelEntry[]>} */
   const byFamily = new Map();
   for (const m of candidates) {
     const fam = m.family || "other";
     if (!byFamily.has(fam)) byFamily.set(fam, []);
-    byFamily.get(fam).push(m);
+    (byFamily.get(fam) ?? []).push(m);
   }
-  const famGrid = document.createElement("div");
-  famGrid.className = "famgrid";
-  /** @param {string} fam @param {string} label @param {import('../../types.js').ModelEntry[]} entries */
-  const addFamily = (fam, label, entries) => {
-    const block = tpl("tpl-next-fam");
-    pick(block, "family").textContent = label;
-    pick(block, "tag").textContent = LIVE_FAMILIES.has(fam) ? "live + batch" : "batch only";
-    const fm = pick(block, "models");
+  /** @param {string} label @param {import('../../types.js').ModelEntry[]} entries */
+  const addGroup = (label, entries) => {
+    const group = document.createElement("optgroup");
+    group.label = label;
     for (const m of entries) {
-      const btn = /** @type {HTMLButtonElement} */ (tpl("tpl-next-model").firstElementChild);
-      pick(btn, "name").textContent = m.display_name || m.model_id;
-      pick(btn, "desc").textContent = m.description || "";
-      if (m.model_id === state.model) btn.classList.add("is-sel");
-      btn.addEventListener("click", () => {
-        if (m.model_id === state.model) return;
-        onChange({ ...state, model: m.model_id });
-      });
-      fm.appendChild(btn);
+      const txt = m.description ? `${m.display_name || m.model_id} — ${m.description}` : (m.display_name || m.model_id);
+      group.appendChild(new Option(txt, m.model_id, false, m.model_id === state.model));
     }
-    famGrid.appendChild(block);
+    sel.appendChild(group);
   };
   for (const [fam, label] of FAMILY_LABELS) {
     const entries = byFamily.get(fam);
     if (!entries?.length) continue;
-    addFamily(fam, label, entries);
+    addGroup(label, entries);
     byFamily.delete(fam);
   }
-  for (const [fam, entries] of byFamily) addFamily(fam, fam, entries);
-  if (!candidates.length) {
-    const none = document.createElement("div");
-    none.className = "dim mono eng-none";
-    none.textContent = "no models for this backend";
-    famGrid.appendChild(none);
+  if (byFamily.size) {
+    /** @type {import('../../types.js').ModelEntry[]} */
+    const rest = [];
+    for (const [, entries] of byFamily) rest.push(...entries);
+    addGroup("Other", rest);
   }
-  frag.appendChild(row("Model · grouped by family", famGrid));
+  if (!candidates.length) {
+    sel.add(new Option("no models for this backend", "", true, true));
+    sel.disabled = true;
+  }
+  sel.addEventListener("change", () => {
+    if (!sel.value || sel.value === state.model) return;
+    onChange({ ...state, model: sel.value });
+  });
+  frag.appendChild(row("Model", sel));
 
   // ---- Canary translation: source_lang → target_lang (from the model's
   // declared SelectInputs, exactly like the classic dashboard) ----

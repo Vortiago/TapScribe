@@ -4,14 +4,14 @@
 
 import { tpl, pick } from "../templates.js";
 
-/** The six Stages views. GLOBAL group is pinned + un-numbered; the THIS
- * SESSION group is the numbered Capture → Recordings → Transcript journey. */
-/** @typedef {"capture"|"transcript"|"settings"|"taps"|"recordings"|"people"} ViewId */
+/** The Stages views. GLOBAL group is pinned + un-numbered; the THIS SESSION
+ * group is the numbered Capture → Recordings → Transcript → Summary journey. */
+/** @typedef {"capture"|"transcript"|"summary"|"settings"|"taps"|"recordings"|"people"} ViewId */
 
 /** @type {ViewId[]} */
 export const GLOBAL_VIEWS = ["taps", "people", "settings"];
 /** @type {ViewId[]} */
-export const JOURNEY_VIEWS = ["capture", "recordings", "transcript"];
+export const JOURNEY_VIEWS = ["capture", "recordings", "transcript", "summary"];
 /** @type {ViewId[]} */
 export const ALL_VIEWS = [...GLOBAL_VIEWS, ...JOURNEY_VIEWS];
 

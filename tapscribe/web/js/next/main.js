@@ -2,11 +2,11 @@
 // TapScribe · Stages — Phase-1 entry point for the /next dashboard.
 //
 // Boots a slim left SPINE (two groups: GLOBAL Taps·People·Settings, pinned;
-// THIS SESSION Capture·Recordings·Transcript, numbered) + one dense view at a
-// time in the view container. Polls /api/state every 500ms (same `api.js` as
-// the classic dashboard), re-renders the spine each tick, and runs the active
-// view's per-tick update. Views are BUILT once (or once per session, for
-// Transcript) and cached so the reused dashboard components keep their
+// THIS SESSION Capture·Recordings·Transcript·Summary, numbered) + one dense
+// view at a time in the view container. Polls /api/state every 500ms (same
+// `api.js` as the classic dashboard), re-renders the spine each tick, and runs
+// the active view's per-tick update. Views are BUILT once (or once per session,
+// for Transcript) and cached so the reused dashboard components keep their
 // scroll/focus/signature state across ticks.
 //
 // Client-side view routing only — clicking a spine item sets currentView and
@@ -20,6 +20,7 @@ import * as spine from "./components/spine.js";
 import * as engine from "./components/engine.js";
 import * as captureView from "./views/capture.js";
 import * as transcriptView from "./views/transcript.js";
+import * as summaryView from "./views/summary.js";
 import * as settingsView from "./views/settings.js";
 import * as recordingsView from "./views/recordings.js";
 import * as tapsView from "./views/taps.js";
@@ -47,18 +48,16 @@ let modelCatalog = { context: "batch", available_backends: [], models: [] };
 /** @type {import('../types.js').ModelCatalog} */
 let liveModelCatalog = { context: "live", available_backends: [], models: [] };
 
-// Engine states: Settings holds the global batch DEFAULT, Transcript holds the
-// engine for the open session. Phase 1 keeps both client-side (the transcribe
-// wiring lands with Recordings in a later phase); they default to the first
-// catalog model once it loads.
+// Engine states: Settings holds the global batch DEFAULT; Transcript holds the
+// engine for the open session AND drives its transcribe jobs (one WAV / session
+// range). Both are kept client-side and seeded from the first catalog model
+// once it loads. (Recordings no longer has its own engine — transcription moved
+// to the Transcript stage, so one engine state covers Transcript's selector +
+// transcribe.)
 /** @type {import('./components/engine.js').EngineState} */
 let defaultEngine = { backend: "auto", model: "" };
 /** @type {import('./components/engine.js').EngineState} */
 let overrideEngine = { backend: "auto", model: "" };
-// Recordings holds the engine for the open session's transcribe jobs (one WAV
-// / session range). Kept client-side like the others; seeded from the catalog.
-/** @type {import('./components/engine.js').EngineState} */
-let recordingsEngine = { backend: "auto", model: "" };
 
 // Built-view cache. Capture + Settings are page-singletons; Transcript is
 // keyed by session id so a new session rebuilds its merged transcript.
@@ -92,7 +91,6 @@ function seedEngineModels() {
   if (!first) return;
   if (!defaultEngine.model) defaultEngine = { ...defaultEngine, model: first.model_id };
   if (!overrideEngine.model) overrideEngine = { ...overrideEngine, model: first.model_id };
-  if (!recordingsEngine.model) recordingsEngine = { ...recordingsEngine, model: first.model_id };
 }
 
 /**
@@ -112,7 +110,9 @@ function renderDefaultEngine(host) {
 }
 
 /**
- * Render the session-override (Transcript) engine selector into a host.
+ * Render the session (Transcript) engine selector into a host. This engine
+ * state also drives the Transcript stage's transcribe jobs (one WAV / session
+ * range).
  * @param {Element} host
  */
 function renderOverrideEngine(host) {
@@ -123,22 +123,6 @@ function renderOverrideEngine(host) {
       overrideEngine = next;
       const v = viewCache.get(`transcript:${selectedSessionId || ""}`);
       v?.rebuildEngine?.();
-    },
-  });
-}
-
-/**
- * Render the Recordings engine selector into a host. Drives the one-WAV /
- * session-range transcribe jobs for the open session.
- * @param {Element} host
- */
-function renderRecordingsEngine(host) {
-  engine.render(host, {
-    state: recordingsEngine,
-    catalog: modelCatalog,
-    onChange: (next) => {
-      recordingsEngine = next;
-      viewCache.get("recordings")?.rebuildEngine?.();
     },
   });
 }
@@ -232,14 +216,21 @@ function buildView(view, session) {
     return { ...b, update: (j) => b.update(j), key: "settings" };
   }
   if (view === "transcript") {
-    const b = transcriptView.build({ metaFor, rebuildEngine: renderOverrideEngine });
+    const b = transcriptView.build({
+      metaFor,
+      engineState: () => overrideEngine,
+      rebuildEngine: renderOverrideEngine,
+      afterMutate: () => { refresh(); },
+    });
     return { ...b, key: viewKey("transcript", session) };
+  }
+  if (view === "summary") {
+    const b = summaryView.build();
+    return { ...b, key: "summary" };
   }
   if (view === "recordings") {
     const b = recordingsView.build({
       metaFor,
-      engineState: () => recordingsEngine,
-      rebuildEngine: renderRecordingsEngine,
       afterMutate: () => { refresh(); },
     });
     return { ...b, key: "recordings" };
@@ -377,6 +368,7 @@ await loadTemplates(
   "/web/components/next/recordings.html",
   "/web/components/next/taps.html",
   "/web/components/next/people.html",
+  "/web/components/next/summary.html",
 );
 
 async function loadModelCatalogs() {
