@@ -371,10 +371,10 @@ def test_new_session_prunes_empty_sessions(client, recorder_under_test):
     assert cur.exists()  # WAV-bearing previous session kept
 
 
-def test_tap_new_session_rotates_and_prunes(client, recorder_under_test):
-    """The bridge-facing endpoint rotates (when the current session has
-    audio) and prunes empties. Auth is disabled in this fixture, so no
-    bearer header is required."""
+def test_tap_new_session_rotates_without_pruning(client, recorder_under_test):
+    """The bridge-facing endpoint rotates (when the current session has audio)
+    but — unlike the dashboard — does NOT prune: deleting folders stays a
+    Basic-auth action. Auth is disabled in this fixture, so no header needed."""
     cur = recorder_under_test.session_dir
     cur.mkdir(parents=True, exist_ok=True)
     _seed_wav(cur / "cur.wav")
@@ -387,17 +387,19 @@ def test_tap_new_session_rotates_and_prunes(client, recorder_under_test):
     assert body["ok"] is True
     assert body["rotated"] is True
     # NB: _utc_session_id() has 1s resolution, so a same-second rotation can
-    # reuse the id — assert on the rotated flag + previous, like the dashboard
-    # new-session test, not on current != previous.
+    # reuse the id — assert on the rotated flag + previous, not current != prev.
     assert body["previous"] == prev
     assert recorder_under_test.session_start == body["current"]
-    assert not empty.exists()
+    assert "pruned" not in body  # tap path never prunes
+    assert empty.exists()  # the empty session is NOT deleted by the tap path
     assert cur.exists()
 
 
 def test_tap_new_session_noop_when_current_empty(client, recorder_under_test):
     """A fresh/empty current session means a tap-initiated rotation is a
-    no-op — don't churn the session-id timestamp."""
+    no-op — don't churn the session-id timestamp (and never delete)."""
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
     prev = recorder_under_test.session_start
     r = client.post("/api/tap/new-session")
     assert r.status_code == 200
@@ -406,17 +408,8 @@ def test_tap_new_session_noop_when_current_empty(client, recorder_under_test):
     assert body["rotated"] is False
     assert body["current"] == prev
     assert recorder_under_test.session_start == prev
-    assert "pruned" in body
-
-
-def test_tap_new_session_noop_still_prunes(client, recorder_under_test):
-    """Even when the rotation no-ops, stale empties are still swept."""
-    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
-    empty.mkdir()
-    r = client.post("/api/tap/new-session")
-    assert r.status_code == 200
-    assert r.json()["rotated"] is False
-    assert not empty.exists()
+    assert "pruned" not in body
+    assert empty.exists()  # the tap path leaves empties alone
 
 
 def test_prune_empty_endpoint_still_works(client, recorder_under_test):

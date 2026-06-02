@@ -301,31 +301,35 @@ async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
     )
 
 
-def _session_state(recorder: Recorder, *, previous: str, pruned: dict[str, Any]) -> dict[str, Any]:
-    """The new-session response body shared by `/api/new-session` and
-    `/api/tap/new-session` — one source of truth for the shape so the rotate
-    and no-op paths can't drift. Reads `recorder.session_start`/`session_dir`,
-    so call it AFTER any rotation."""
-    return {
-        "previous": previous,
-        "current": recorder.session_start,
-        "path": str(recorder.session_dir),
-        "pruned": pruned,
-    }
-
-
 def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
-    """Rotate to a fresh session, THEN prune now-empty sessions. Order
-    matters: rotating first makes the previous (now-abandoned, empty) session
-    eligible for pruning, while the freshly-minted current session is
-    protected by `prune_empty_sessions`' current-session skip."""
+    """Rotate to a fresh session, THEN prune now-empty sessions. Order matters:
+    rotating first makes the previous (now-abandoned, empty) session eligible
+    for pruning, while the freshly-minted current session is protected by
+    `prune_empty_sessions`' current-session skip.
+
+    Used by the Basic-auth dashboard `/api/new-session` only — the tap endpoint
+    deliberately does NOT prune (deleting folders stays an operator action; see
+    `api_tap_new_session`).
+
+    Prune runs synchronously (not offloaded to a thread): single-threaded
+    asyncio then guarantees no `/tap` upload can interleave and have its
+    just-created session folder deleted mid-walk. Keep it synchronous — and
+    `TapFanOut._open` await-free between mkdir and wave-open — or that race
+    reopens. (With `--workers > 1` each worker has its own Recorder and the
+    guarantee weakens; TapScribe runs single-worker by design.)
+    """
     prev, current = recorder.rotate_session()
     prune = prune_empty_sessions(current)
     print(
         f"[tapscribe] new session {current} (previous: {prev}); pruned {prune['count']} empty",
         flush=True,
     )
-    return _session_state(recorder, previous=prev, pruned=prune)
+    return {
+        "previous": prev,
+        "current": current,
+        "path": str(recorder.session_dir),
+        "pruned": prune,
+    }
 
 
 @app.post("/api/new-session")
@@ -340,35 +344,38 @@ async def api_new_session(recorder: Recorder = Depends(get_recorder)):
 async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_recorder)):
     """Bridge-initiated session rotation, authenticated by the TAP token
     (`Authorization: Bearer <token>`) — NOT dashboard Basic auth — so a browser
-    bridge that holds only the tap token can rotate sessions without the
+    bridge that holds only the tap token can start a fresh session without the
     operator switching to the dashboard. Exempt from the Basic-auth middleware
     (`config.AUTH_EXEMPT_ROUTES`); the bearer check below is the gate.
 
-    Rotates then prunes empty sessions, exactly like the dashboard's
-    `/api/new-session`. No filesystem path is derived from the request — the
-    new session id is a server-minted UTC timestamp and the prune walks a
-    constant `RECORDINGS_DIR` glob — so there is no path-injection surface here.
+    Rotates ONLY — unlike the dashboard's `/api/new-session`, this does NOT
+    prune empty sessions. The tap token is a deliberately lower-privilege
+    credential handed to browser extensions, so deleting session folders stays
+    a Basic-auth action (the dashboard's "+ new session" / "prune empty"). No
+    filesystem path is derived from the request (the new session id is a
+    server-minted UTC timestamp), so there is no path-injection surface here.
     """
     if config.AUTH_ENABLED and not auth.check_tap_bearer(
         req.headers.get("authorization"), recorder.tap.value
     ):
         return JSONResponse({"detail": "invalid tap token"}, status_code=401)
 
-    # Idempotency guard (tap path only): if the current session holds nothing
-    # worth keeping, a rotation would only churn the session-id timestamp. Skip
-    # the rotate (the dashboard button keeps always-rotate) but still prune so
-    # stale empties from earlier rotations get swept. `session_is_empty` is the
-    # shared definition prune uses, so "empty" means the same thing both places.
+    # Idempotency guard (tap path only): if the current session is empty, a
+    # rotation would only churn the session-id timestamp — no-op it. The
+    # dashboard button keeps always-rotate semantics.
     rotated = not session_is_empty(recorder.session_dir)
     if rotated:
-        result = _rotate_and_prune(recorder)
+        previous, current = recorder.rotate_session()
+        print(f"[tapscribe] tap new session {current} (previous: {previous})", flush=True)
     else:
-        result = _session_state(
-            recorder,
-            previous=recorder.session_start,
-            pruned=prune_empty_sessions(recorder.session_start),
-        )
-    return {"ok": True, "rotated": rotated, **result}
+        previous = recorder.session_start
+    return {
+        "ok": True,
+        "rotated": rotated,
+        "previous": previous,
+        "current": recorder.session_start,
+        "path": str(recorder.session_dir),
+    }
 
 
 # ---------------------------------------------------------------------------

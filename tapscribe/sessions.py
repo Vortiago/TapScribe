@@ -411,6 +411,11 @@ def prune_empty_sessions(current_session: str) -> dict[str, Any]:
     pruned: list[str] = []
     failed: list[dict[str, str]] = []
     for sd in config.RECORDINGS_DIR.glob("*"):
+        # Skip symlinks BEFORE is_dir() (which follows them): a symlink planted
+        # in RECORDINGS_DIR must never let this delete an out-of-tree target.
+        # (shutil.rmtree also refuses symlinks, but don't rely on that internal.)
+        if sd.is_symlink():
+            continue
         if not sd.is_dir():
             continue
         if sd.name == current_session:

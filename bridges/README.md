@@ -126,15 +126,16 @@ missing or incorrect token returns `401` and does not rotate.
 
 **Effect:** the Recorder rotates `session_start`/`session_dir` to a fresh
 UTC-stamped folder (already-open `/tap` WebSockets keep writing to their
-original folder; only new opens land in the new one) and then **prunes
-empty sessions** — any folder with no WAVs, no merged transcript, and no
-operator label is removed. The dashboard's "+ new session" button does the
-same rotate-and-prune.
+original folder; only new opens land in the new one). It **rotates only — it
+deletes nothing.** Removing empty session folders stays a dashboard
+(Basic-auth) action: the dashboard's "+ new session" button rotates *and*
+prunes empties, and there's a separate "prune empty" action. The tap token is
+a lower-privilege credential, so it can start a session but not delete folders.
 
-**Idempotency:** if the current session has received no audio yet, the
-call is a no-op rotation (it won't churn the session timestamp) but still
-prunes stale empties. The JSON response is `{"ok": true, "rotated":
-true|false, "current": "<session-id>", "pruned": {...}}`.
+**Idempotency:** if the current session has received no audio yet, the call is
+a no-op rotation (it won't churn the session timestamp). The JSON response is
+`{"ok": true, "rotated": true|false, "previous": "...", "current":
+"<session-id>", "path": "..."}`.
 
 The `spacialchat-bridge` calls this from its popup's **New session** button
 and — when the operator ticks **"start new session on room change"** —
