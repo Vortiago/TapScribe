@@ -494,6 +494,8 @@ function tapRows(tbody, t) {
     : `<span class="muted" style="font-size:10.5px">— gate shut, no in-flight audio —</span>`;
   const cfg = el(`
     <tr class="tapcfg"><td colspan="7"><div class="tapcfg__in">
+      <span class="cfgblk"><span class="cfgblk__k">In-flight</span>${buffer}</span>
+      <span class="cfgsep"></span>
       <span class="cfgblk"><span class="cfgblk__k">Person</span>
         <span class="pick"><span class="av sm spk-${person?.spk ?? t.spk}">${esc(person?.initials || "?")}</span>${esc(person?.name || t.identity)}<span class="pick__chev">⌄</span></span>
         <a class="act act--sm act--ghost" data-go="people" style="text-decoration:none">→ People</a>
