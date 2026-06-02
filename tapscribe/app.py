@@ -1041,6 +1041,12 @@ DASHBOARD_HTML_PATH = config.WEB_DIR / "dashboard.html"
 DASHBOARD_CSS_PATH = config.WEB_DIR / "dashboard.css"
 DASHBOARD_JS_DIR = config.WEB_DIR / "js"
 DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
+# "Stages" dashboard (Phase 1) — a second, in-development control surface
+# served alongside the classic dashboard at /next. Shares the dashboard's
+# JS/component mounts (/web/...); only the shell HTML + its extra stylesheet
+# are served by their own routes here.
+NEXT_HTML_PATH = config.WEB_DIR / "next.html"
+NEXT_CSS_PATH = config.WEB_DIR / "next.css"
 
 
 def _read_dashboard_html() -> str:
@@ -1065,6 +1071,26 @@ async def dashboard_css():
     if not DASHBOARD_CSS_PATH.is_file():
         raise HTTPException(404, "dashboard.css not found")
     return FileResponse(DASHBOARD_CSS_PATH, media_type="text/css")
+
+
+@app.get("/next", response_class=HTMLResponse)
+async def next_dashboard():
+    try:
+        return HTMLResponse(NEXT_HTML_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return HTMLResponse(
+            "<!doctype html><html><body>"
+            "<h1>Stages dashboard HTML missing</h1>"
+            "<p>Expected at <code>" + str(NEXT_HTML_PATH) + "</code>.</p>"
+            "</body></html>"
+        )
+
+
+@app.get("/next.css")
+async def next_css():
+    if not NEXT_CSS_PATH.is_file():
+        raise HTTPException(404, "next.css not found")
+    return FileResponse(NEXT_CSS_PATH, media_type="text/css")
 
 
 # Dashboard JS modules and HTML component templates. StaticFiles handles

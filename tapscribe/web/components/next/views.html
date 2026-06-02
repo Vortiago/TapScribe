@@ -1,0 +1,189 @@
+<!-- ======================================================================
+     Stages view templates (Phase 1). Each `tpl-next-view-*` is mounted into
+     #viewRoot by js/next/main.js when its spine entry is active. Component
+     host elements (data-slot=…) are filled by the REUSED existing dashboard
+     components (live-feed, active-taps, live-channel, merged-transcript,
+     config-card) — see js/next/components/*.js.
+     ====================================================================== -->
+
+<!-- Shared stage header (eyebrow + title + sub + an actions slot). -->
+<template id="tpl-next-head">
+  <div class="whead">
+    <div class="whead__l">
+      <div class="whead__eyebrow" data-slot="eyebrow"></div>
+      <h1 class="whead__title" data-slot="title"></h1>
+      <div class="whead__sub" data-slot="sub"></div>
+    </div>
+    <div class="whead__r" data-slot="actions"></div>
+  </div>
+</template>
+
+<!-- Generic placeholder for the not-yet-built views (Taps / Recordings /
+     People). Keeps the shell navigable while those land in a later phase. -->
+<template id="tpl-next-placeholder">
+  <div class="panel">
+    <div class="panel__body">
+      <div class="empty">
+        <div class="empty__ic" data-slot="icon"></div>
+        <div class="empty__h" data-slot="heading"></div>
+        <div data-slot="detail"></div>
+        <div class="empty__phase">Coming in a later phase</div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- ===================== SESSION · 1 CAPTURE ===================== -->
+<template id="tpl-next-view-capture">
+  <div data-slot="head"></div>
+  <div class="grid cols-cap">
+    <!-- PRIMARY: live IRC captions (reuses live-feed.js) -->
+    <div class="panel panel--primary">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">💬</span>Live captions</div>
+        <div class="panel__hint">
+          <label class="autoscroll"><input type="checkbox" data-slot="liveAutoScroll" checked> autoscroll</label>
+          <span class="mono" data-slot="liveFeedCount">0</span>
+        </div>
+      </div>
+      <div class="panel__body flush"><div class="feed" data-slot="liveFeedShell"></div></div>
+    </div>
+
+    <!-- ASIDE: live channel control + active taps feeding this session -->
+    <div class="aside">
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title"><span class="ic">📡</span>Live channel</div>
+          <span class="chip" data-slot="liveStateBadge">stopped</span>
+        </div>
+        <div class="panel__body">
+          <div class="live-mlx-note dim mono" data-slot="liveMlxNote"></div>
+          <div data-slot="liveChannelBody"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title"><span class="ic">🛰️</span>Taps feeding this session</div>
+          <span class="panel__hint"><span data-slot="activeTapsBadge"></span> · <span class="mono" data-slot="activeCount">0</span></span>
+        </div>
+        <div class="panel__body flush"><div class="taps" data-slot="activeTapsBody"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="grid cols-cap">
+    <!-- Capture health — derived from active[] / live_info -->
+    <div class="panel">
+      <div class="panel__head"><div class="panel__title"><span class="ic">📊</span>Capture health</div><div class="panel__hint">right now</div></div>
+      <div class="panel__body">
+        <div class="statgrid c4">
+          <div class="statcell"><div class="statcell__k">Live taps</div><div class="statcell__v" data-slot="hLive">0</div></div>
+          <div class="statcell"><div class="statcell__k">Recording</div><div class="statcell__v" data-slot="hRec">0</div></div>
+          <div class="statcell"><div class="statcell__k">Max lag</div><div class="statcell__v" data-slot="hLag">—</div></div>
+          <div class="statcell"><div class="statcell__k">Live channel</div><div class="statcell__v" data-slot="hChan">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session overrides: per-session recording toggle + prompt/hotwords. -->
+    <div class="panel">
+      <div class="panel__head"><div class="panel__title"><span class="ic">⚙️</span>Session overrides</div><div class="panel__hint">else inherits Settings</div></div>
+      <div class="panel__body">
+        <div class="row-between" style="margin-bottom:11px">
+          <span class="ovr-lab">Recording (global arm)</span>
+          <button class="recpill" type="button" data-slot="recPill">● recording</button>
+        </div>
+        <div class="field" style="margin-bottom:9px">
+          <label>prompt override <span class="dim">(blank → global)</span></label>
+          <textarea class="ta" rows="2" data-slot="capPrompt" data-cfg-key="prompt-ovr"></textarea>
+          <div class="field__row"><button class="act act--sm" type="button" data-slot="capPromptSave">save</button><span class="dim mono" data-slot="capPromptStatus"></span></div>
+        </div>
+        <div class="field">
+          <label>hotwords override</label>
+          <textarea class="ta" rows="2" data-slot="capHotwords" data-cfg-key="hotwords-ovr"></textarea>
+          <div class="field__row"><button class="act act--sm" type="button" data-slot="capHotwordsSave">save</button><span class="dim mono" data-slot="capHotwordsStatus"></span></div>
+        </div>
+        <div class="dim mono ovr-note" data-slot="ovrNote"></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- ===================== SESSION · 3 TRANSCRIPT ===================== -->
+<template id="tpl-next-view-transcript">
+  <div data-slot="head"></div>
+  <div class="grid cols-tx">
+    <!-- PRIMARY: the merged transcript (reuses merged-transcript.js) -->
+    <div class="panel panel--primary">
+      <div class="panel__head"><div class="panel__title"><span class="ic">📝</span>Merged transcript</div><div class="panel__hint mono" data-slot="txHint"></div></div>
+      <div class="panel__body flush"><div data-slot="mergedHost"></div></div>
+    </div>
+
+    <!-- SECONDARY: a VISIBLE engine selector (backend chips + model-by-family
+         + Canary source/target), built like session-detail's. -->
+    <div class="aside">
+      <div class="panel panel--accent">
+        <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Engine</div><div class="panel__hint">batch backend &amp; model</div></div>
+        <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- ===================== GLOBAL · SETTINGS ===================== -->
+<template id="tpl-next-view-settings">
+  <div data-slot="head"></div>
+  <div class="grid cols-tx">
+    <!-- LEFT: default engine (backend chips + model-by-family + Canary). -->
+    <div class="panel panel--primary">
+      <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Default engine</div><div class="panel__hint">backend · model · translation</div></div>
+      <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
+    </div>
+
+    <!-- RIGHT: prompts / hotwords / hallucination rules (reuses config-card.js). -->
+    <div class="aside">
+      <div class="panel">
+        <div class="panel__head"><div class="panel__title"><span class="ic">✍️</span>Prompts, hotwords &amp; rules</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
+        <div class="panel__body"><div class="cfg-grid" data-slot="configGrid"></div></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- ===================== ENGINE selector pieces ===================== -->
+<!-- Backend chip-row + model-by-family + (Canary) source/target. Built by
+     js/next/components/engine.js and mounted into [data-slot=engineHost]. -->
+<template id="tpl-next-eng-row">
+  <div class="eng-row">
+    <span class="eng-cap" data-slot="cap"></span>
+    <div class="eng-row__body" data-slot="body"></div>
+  </div>
+</template>
+
+<template id="tpl-next-chip">
+  <button class="chip" type="button"></button>
+</template>
+
+<template id="tpl-next-fam">
+  <div class="fam">
+    <div class="fam__head"><span data-slot="family"></span><span class="fam__tag" data-slot="tag"></span></div>
+    <div class="fam__models" data-slot="models"></div>
+  </div>
+</template>
+
+<template id="tpl-next-model">
+  <button class="model" type="button">
+    <span class="model__l"><span class="model__name" data-slot="name"></span><span class="model__desc" data-slot="desc"></span></span>
+    <span class="model__dot"></span>
+  </button>
+</template>
+
+<template id="tpl-next-sel">
+  <div class="selfield">
+    <label data-slot="label"></label>
+    <select class="sel" data-slot="select"></select>
+  </div>
+</template>

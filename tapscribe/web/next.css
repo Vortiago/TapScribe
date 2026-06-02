@@ -1,0 +1,417 @@
+/* =========================================================================
+   TapScribe · Stages (/next) — Phase 1.
+   Sharp, de-bubbled, dense "control surface" layered on the classic
+   dashboard's :root tokens (dashboard.css, loaded first). No hardcoded
+   colours — everything derives from --bg-*/--fg-*/--rec/--ok/--warn/--info/
+   --magenta + --mono/--sans. The one warm accent is --warn (amber), doing the
+   "where am I / what's live" work; --rec is the live pulse.
+
+   Aesthetic rules (from prototypes/stages): minimal radius (<=3px), no pills,
+   1px hairline separators, tight padding, dense rows, monospace for all data.
+   ========================================================================= */
+
+:root {
+  --next-r: 3px;          /* the one radius — hard, minimal */
+  --next-r-sm: 2px;
+  --next-accent: var(--warn);   /* warm amber: active view + highlights */
+  --next-spine-w: 232px;
+}
+
+/* The Stages page reuses dashboard.css's body reset (dark bg, sans, tnum).
+   Drop the radial vignette the classic shell paints via body::before so the
+   control surface reads flat. */
+body::before { display: none; }
+
+.next-app {
+  display: grid;
+  grid-template-columns: var(--next-spine-w) 1fr;
+  min-height: 100vh;
+}
+
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.dim { color: var(--fg-3); }
+.muted { color: var(--fg-2); }
+
+/* ============================ SPINE ============================ */
+.spine {
+  background: var(--bg-0);
+  border-right: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-self: start;
+  overflow: hidden;
+}
+.spine__head { padding: 13px 12px 8px; }
+.brand { display: flex; align-items: center; gap: 7px; }
+.brand__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--next-accent); }
+.brand__name { font-weight: 650; letter-spacing: 0.3px; font-size: 12.5px; color: var(--fg-0); }
+.brand__tag {
+  margin-left: auto; font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-3); font-family: var(--mono);
+}
+
+.grouplab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 7px;
+  font-size: 9px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--fg-3); font-family: var(--mono); font-weight: 600;
+}
+.grouplab::after { content: ""; height: 1px; background: var(--hairline-2); flex: 1; }
+
+.nav { padding: 0 8px; display: flex; flex-direction: column; gap: 1px; }
+.navitem {
+  position: relative;
+  display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 9px;
+  width: 100%; text-align: left;
+  padding: 7px 8px;
+  border-radius: var(--next-r);
+  background: none; border: 1px solid transparent; color: var(--fg-1);
+  cursor: pointer;
+  transition: background 90ms ease, border-color 90ms ease;
+
+  &:hover { background: var(--bg-1); }
+  &.is-active { background: var(--bg-2); border-color: var(--hairline); }
+  &.is-active::before {
+    content: ""; position: absolute; left: 0; top: 6px; bottom: 6px;
+    width: 2px; background: var(--next-accent);
+  }
+}
+.navitem__ic { width: 22px; height: 20px; display: grid; place-items: center; font-size: 13px; opacity: .92; flex: none; }
+.navitem__n {
+  width: 18px; height: 18px; display: grid; place-items: center;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  background: var(--bg-2); color: var(--fg-2);
+  border: 1px solid var(--hairline); border-radius: var(--next-r-sm); flex: none;
+}
+.navitem.is-active .navitem__n { background: var(--next-accent); color: var(--bg-0); border-color: var(--next-accent); }
+.navitem.is-done .navitem__n {
+  color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+.navitem__body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.navitem__name { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg-1); }
+.navitem.is-active .navitem__name { color: var(--fg-0); }
+.navitem__chip {
+  font-size: 9.5px; color: var(--fg-3); font-family: var(--mono);
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+
+  & .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--fg-3); flex: none; }
+  &.tone-live { color: color-mix(in srgb, var(--rec) 70%, var(--fg-0)); }
+  &.tone-live .dot { background: var(--rec); animation: nextpulse 2s infinite; }
+  &.tone-warn { color: var(--warn); }
+  &.tone-warn .dot { background: var(--warn); }
+  &.tone-good { color: var(--ok); }
+  &.tone-good .dot { background: var(--ok); }
+}
+.navitem__live {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 8.5px; font-family: var(--mono); font-weight: 600; letter-spacing: .03em;
+  color: color-mix(in srgb, var(--rec) 70%, var(--fg-0)); flex: none;
+
+  & .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--rec); animation: nextpulse 2s infinite; }
+}
+
+/* the rail tick that makes the numbered journey read as a pipeline */
+.nav--journey .navitem { grid-template-columns: 18px 1fr auto; }
+.nav--journey .navitem__n { position: relative; }
+.nav--journey .navitem.is-numbered:not(:last-child) .navitem__n::after {
+  content: ""; position: absolute; left: 8px; width: 1px; height: 10px; top: 27px;
+  background: var(--hairline);
+}
+.nav--journey .navitem.is-done:not(:last-child) .navitem__n::after {
+  background: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+
+/* session picker + new-session button */
+.sessionbox { padding: 0 8px 2px; display: flex; flex-direction: column; gap: 5px; }
+.sessionpick {
+  width: 100%;
+  background: var(--bg-1); border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 6px 8px; font-size: 11.5px; color: var(--fg-0); font-family: var(--mono);
+  cursor: pointer;
+  &:hover { border-color: var(--rule); }
+  &:focus { outline: none; border-color: var(--info); }
+}
+.newsession {
+  width: 100%;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: color-mix(in srgb, var(--next-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--next-accent) 32%, transparent);
+  color: var(--next-accent);
+  border-radius: var(--next-r);
+  padding: 6px 10px; font-weight: 600; font-size: 11px; cursor: pointer;
+  transition: background 90ms ease, border-color 90ms ease;
+  &:hover { background: color-mix(in srgb, var(--next-accent) 18%, transparent); border-color: var(--next-accent); }
+}
+.newsession__plus { font-size: 13px; line-height: 1; font-weight: 600; }
+
+.spine__scroll { flex: 1; overflow-y: auto; padding-bottom: 10px; }
+.spine__foot { padding: 9px 12px 11px; border-top: 1px solid var(--hairline-2); }
+.journey { height: 3px; background: var(--bg-2); overflow: hidden; border-radius: var(--next-r-sm); }
+.journey__fill { height: 100%; width: 0; background: var(--next-accent); transition: width .35s ease; }
+.journey__cap { margin-top: 6px; font-size: 9px; color: var(--fg-3); font-family: var(--mono); letter-spacing: .04em; }
+
+/* ============================ WORKSPACE ============================ */
+.work { min-width: 0; }
+.work__inner { padding: 16px 22px 28px; max-width: 1280px; }
+
+/* stage header */
+.whead {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+  margin-bottom: 14px; padding-bottom: 11px; border-bottom: 1px solid var(--hairline);
+}
+.whead__l { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.whead__eyebrow { font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--next-accent); font-weight: 600; font-family: var(--mono); }
+.whead__title { font-size: 18px; font-weight: 680; letter-spacing: -0.2px; margin: 0; color: var(--fg-0); }
+.whead__sub { font-size: 11.5px; color: var(--fg-3); }
+.whead__sub b { color: var(--fg-1); font-weight: 600; }
+.whead__r { display: flex; align-items: center; gap: 7px; flex: none; }
+
+/* generic panel — thin border, flat top bar, hard corners */
+.next-app .panel {
+  background: var(--bg-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--next-r);
+  overflow: hidden;
+}
+.panel__head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 11px; border-bottom: 1px solid var(--hairline);
+  background: var(--bg-2);
+}
+.panel__title { font-size: 10px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-1); display: flex; align-items: center; gap: 6px; }
+.panel__title .ic { font-size: 11px; opacity: .85; }
+.panel__hint { font-size: 9.5px; color: var(--fg-3); font-family: var(--mono); display: inline-flex; align-items: center; gap: 8px; }
+.panel__body { padding: 11px; }
+.panel__body.flush { padding: 0; }
+.panel--primary { border-color: var(--rule); }
+.panel--accent { border-color: color-mix(in srgb, var(--next-accent) 35%, transparent); }
+.panel + .panel { margin-top: 11px; }
+
+.grid { display: grid; gap: 11px; align-items: start; }
+.cols-tx { grid-template-columns: minmax(0, 1.9fr) minmax(300px, 0.9fr); }
+.cols-cap { grid-template-columns: minmax(0, 1fr) 340px; }
+.aside { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+.spacer { height: 11px; }
+.row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+@container (max-width: 760px) {
+  .cols-tx, .cols-cap { grid-template-columns: 1fr; }
+}
+/* container query needs a container; the workspace inner is it */
+.work__inner { container-type: inline-size; }
+
+/* action buttons (shared with engine + overrides) */
+.act {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-2); color: var(--fg-1);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 5px 10px; font-size: 11px; font-weight: 550; cursor: pointer;
+  transition: border-color 90ms ease, background 90ms ease;
+  &:hover { border-color: var(--rule); background: var(--bg-elev); }
+  &:disabled { opacity: .55; cursor: default; }
+  &.act--sm { padding: 3px 8px; font-size: 10.5px; }
+  &.act--primary { background: color-mix(in srgb, var(--next-accent) 16%, transparent); border-color: color-mix(in srgb, var(--next-accent) 40%, transparent); color: var(--next-accent); font-weight: 650; }
+}
+
+/* recording arm pill */
+.recpill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: var(--next-r); cursor: pointer;
+  font-size: 10.5px; letter-spacing: .08em; font-family: var(--mono);
+  background: var(--rec-bg); color: var(--rec);
+  border: 1px solid color-mix(in srgb, var(--rec) 35%, transparent);
+  &.is-paused { background: var(--bg-elev); color: var(--fg-2); border-color: var(--hairline); }
+  &:disabled { opacity: .55; cursor: default; }
+}
+.ovr-lab { font-size: 11.5px; color: var(--fg-1); }
+.ovr-note { margin-top: 9px; font-size: 9.5px; }
+
+/* fields (textarea + label + save row) */
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field > label { font-size: 9px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .06em; }
+.field__row { display: flex; align-items: center; gap: 8px; }
+.ta {
+  width: 100%; resize: vertical; line-height: 1.5;
+  background: var(--bg-0); color: var(--fg-0);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 5px 8px; font-size: 11.5px; font-family: var(--mono);
+  &:focus { outline: none; border-color: var(--info); }
+}
+
+/* capture-health stat cells */
+.statgrid { display: grid; gap: 9px; }
+.statgrid.c4 { grid-template-columns: repeat(4, 1fr); }
+.statcell { background: var(--bg-2); border: 1px solid var(--hairline-2); border-radius: var(--next-r); padding: 8px 10px; }
+.statcell__k { font-size: 8.5px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .06em; }
+.statcell__v { font-family: var(--mono); font-size: 15px; font-weight: 650; color: var(--fg-0); margin-top: 2px; }
+
+/* autoscroll label in the captions panel head */
+.autoscroll { display: inline-flex; align-items: center; gap: 4px; font-size: 9.5px; color: var(--fg-3); cursor: pointer; }
+.autoscroll input { accent-color: var(--next-accent); }
+.live-mlx-note { font-size: 9.5px; margin-bottom: 7px; }
+
+/* empty / placeholder */
+.empty { padding: 34px 18px; text-align: center; color: var(--fg-3); }
+.empty__ic { font-size: 26px; margin-bottom: 7px; opacity: .8; }
+.empty__h { font-weight: 600; color: var(--fg-1); margin-bottom: 4px; }
+.empty__phase {
+  margin-top: 12px; display: inline-block;
+  font-size: 9.5px; font-family: var(--mono); letter-spacing: .06em;
+  color: var(--next-accent);
+  border: 1px dashed color-mix(in srgb, var(--next-accent) 40%, transparent);
+  border-radius: var(--next-r); padding: 4px 9px;
+}
+
+/* ====================================================================== */
+/* ENGINE controls — backend chips, model-by-family, Canary langs.         */
+/* ====================================================================== */
+.eng { display: grid; gap: 13px; }
+.eng-row { display: flex; flex-direction: column; gap: 6px; }
+.eng-cap { font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-3); font-weight: 600; }
+.chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.next-app .chip {
+  font-size: 10.5px; font-family: var(--mono);
+  padding: 4px 9px; border-radius: var(--next-r);
+  border: 1px solid var(--hairline); background: var(--bg-2); color: var(--fg-1);
+  cursor: pointer;
+  &:hover:not(:disabled) { border-color: var(--rule); }
+  &.is-sel { border-color: var(--next-accent); background: color-mix(in srgb, var(--next-accent) 12%, transparent); color: var(--next-accent); }
+  &.is-off, &:disabled { opacity: .4; cursor: not-allowed; text-decoration: line-through; }
+}
+.eng-none { font-size: 10px; padding: 4px 0; }
+
+.famgrid { display: flex; flex-direction: column; gap: 4px; }
+.fam { border: 1px solid var(--hairline); border-radius: var(--next-r); overflow: hidden; }
+.fam__head {
+  padding: 5px 9px; font-size: 9px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--fg-2); background: var(--bg-2); font-family: var(--mono);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.fam__tag { font-size: 8px; color: var(--fg-3); }
+.model {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 9px; background: none; border: 0; width: 100%; text-align: left; cursor: pointer;
+  border-top: 1px solid var(--hairline-2);
+  &:hover { background: var(--bg-2); }
+  &.is-sel { background: color-mix(in srgb, var(--next-accent) 10%, transparent); }
+}
+.model__l { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.model__name { font-size: 11px; font-weight: 600; font-family: var(--mono); color: var(--fg-0); }
+.model.is-sel .model__name { color: var(--next-accent); }
+.model__desc { font-size: 9px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.model__dot { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--hairline); flex: none; }
+.model.is-sel .model__dot { background: var(--next-accent); border-color: var(--next-accent); }
+
+.selrow { display: flex; gap: 9px; align-items: flex-end; flex-wrap: wrap; }
+.selfield { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 4px; }
+.selfield label { font-size: 9px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .05em; }
+.sel {
+  width: 100%;
+  background: var(--bg-0); color: var(--fg-0); border: 1px solid var(--hairline);
+  border-radius: var(--next-r); padding: 5px 8px; font-size: 11.5px; font-family: var(--mono);
+  &:focus { outline: none; border-color: var(--info); }
+}
+
+/* ====================================================================== */
+/* Hosting the REUSED dashboard components — give their internal class      */
+/* names a home that matches the Stages density without editing them.       */
+/* ====================================================================== */
+
+/* live-feed: the IRC captions stream */
+.feed { max-height: 380px; overflow-y: auto; }
+.feed .feed-body, .feed .feed-empty { padding: 4px 0; }
+.feed .line {
+  display: grid; grid-template-columns: max-content max-content 1fr;
+  gap: 0 7px; padding: 1px 11px; align-items: baseline;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+}
+.feed .line:hover { background: rgba(255,255,255,.03); }
+.feed .ts { color: var(--fg-3); font-size: 10.5px; }
+.feed .who { font-weight: 650; white-space: nowrap; color: var(--fg-0); }
+.feed .who[data-spk="0"] { color: var(--info); }
+.feed .who[data-spk="1"] { color: var(--magenta); }
+.feed .who[data-spk="2"] { color: var(--warn); }
+.feed .who[data-spk="3"] { color: var(--ok); }
+.feed .who[data-spk="4"] { color: var(--spk-4); }
+.feed .txt { color: var(--fg-1); min-width: 0; overflow-wrap: anywhere; }
+.feed .feed-empty { padding: 26px 12px; text-align: center; color: var(--fg-3); }
+.feed .feed-empty .ascii { font-family: var(--mono); white-space: pre; font-size: 11px; color: var(--fg-3); margin-bottom: 8px; line-height: 1.2; }
+.feed .feed-empty .mt-s { margin-top: 6px; }
+
+/* active-taps: the "taps feeding this session" rows */
+.taps { padding: 2px 0; }
+.taps .empty { padding: 20px 12px; font-size: 10.5px; }
+.taps .stream-row-wrap { border-bottom: 1px solid var(--hairline-2); }
+.taps .stream-row-wrap:last-child { border-bottom: 0; }
+.taps .stream-row {
+  display: grid; grid-template-columns: 10px 1fr auto auto; gap: 9px; align-items: center;
+  padding: 7px 11px;
+}
+.taps .stream-row .dot.rec { width: 7px; height: 7px; border-radius: 50%; background: var(--rec); }
+.taps .who { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.taps .who .name { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 11.5px; color: var(--fg-0); }
+.taps .who .spk-marker { font-size: 9px; }
+.taps .who .spk-marker[data-spk="0"] { color: var(--info); }
+.taps .who .spk-marker[data-spk="1"] { color: var(--magenta); }
+.taps .who .spk-marker[data-spk="2"] { color: var(--warn); }
+.taps .who .spk-marker[data-spk="3"] { color: var(--ok); }
+.taps .who .spk-marker[data-spk="4"] { color: var(--spk-4); }
+.taps .ident { font-size: 9px; color: var(--fg-3); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.taps .level-meter { height: 4px; background: var(--bg-2); border-radius: var(--next-r-sm); overflow: hidden; }
+.taps .level-fill { height: 100%; background: var(--ok); transition: width .12s linear; }
+.taps .level-meter[data-zone="silent"] .level-fill { background: var(--fg-3); }
+.taps .level-meter[data-zone="hot"] .level-fill { background: var(--warn); }
+.taps .level-meter[data-zone="clip"] .level-fill { background: var(--rec); }
+.taps .tap-toggles { display: inline-flex; gap: 4px; }
+.taps .tap-toggle {
+  font-size: 9px; font-family: var(--mono); font-weight: 600; cursor: pointer;
+  border: 1px solid var(--hairline); border-radius: var(--next-r-sm); padding: 3px 7px;
+  background: var(--bg-2); color: var(--fg-3);
+  &.rec.on { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 35%, transparent); background: var(--rec-bg); }
+  &.live.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); background: var(--ok-bg); }
+}
+.taps .stats { font-size: 9px; font-family: var(--mono); color: var(--fg-3); text-align: right; display: flex; flex-direction: column; gap: 2px; }
+.taps .stats .lag { color: var(--fg-3); }
+.taps .stats .lag.lag-warn { color: var(--warn); }
+.taps .stats .lag.lag-bad { color: var(--rec); }
+.taps .stream-buffer { padding: 0 11px 7px 30px; font-size: 10px; color: var(--fg-2); display: flex; align-items: baseline; gap: 5px; font-family: var(--mono); }
+.taps .stream-buffer .buffer-icon { color: var(--fg-3); }
+
+/* live-channel: model/lang/gate form + start/stop. The component emits
+   .live-row / .btn / .input / .select which dashboard.css already styles;
+   we only tune spacing to the Stages density. */
+.next-app .live-row { margin-bottom: 6px; }
+.next-app .live-row .lbl { font-size: 10px; color: var(--fg-2); letter-spacing: .05em; text-transform: uppercase; }
+.next-app .action-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.next-app .gate-knob-row .dim { font-size: 9px; }
+.next-app .live-meta { font-size: 9.5px; color: var(--fg-2); border-top: 1px dashed var(--hairline-2); padding-top: 6px; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.next-app .live-meta code { font-family: var(--mono); color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: 2px; }
+.next-app .live-err { margin-top: 6px; color: var(--rec); font-size: 10.5px; background: var(--rec-bg); padding: 4px 6px; border-radius: var(--next-r); border: 1px solid color-mix(in srgb, var(--rec) 25%, transparent); word-break: break-word; }
+.next-app .live-init-prompt { margin-top: 8px; font-size: 10.5px; }
+.next-app .live-init-prompt summary { cursor: pointer; color: var(--fg-2); }
+.next-app .live-log-row { margin-top: 6px; }
+
+/* merged-transcript: reuse dashboard.css's .box/.transcript/.spk-bar styling
+   verbatim — it already renders cleanly on dark. Just sit it flush in the
+   panel body (the component brings its own .box chrome). */
+.next-app [data-slot="mergedHost"] .box { border: 0; border-radius: 0; background: transparent; }
+.next-app [data-slot="mergedHost"] .box-hd { background: var(--bg-2); }
+
+/* config-card: a grid of the prompt / hotwords / hallucination editor cols. */
+.cfg-grid { display: grid; gap: 12px; }
+.cfg-grid .cfg-col { display: flex; flex-direction: column; gap: 6px; }
+.cfg-grid .cfg-col > .k {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-2); font-weight: 600;
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+}
+.cfg-grid .cfg-col > .k .meta { color: var(--fg-3); font-family: var(--mono); text-transform: none; letter-spacing: 0; font-weight: 400; }
+.cfg-grid .cfg-editor-text { width: 100%; }
+.cfg-grid .cfg-editor-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.cfg-grid code { font-family: var(--mono); font-size: 10.5px; color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: var(--next-r-sm); }
+.cfg-grid .empty { padding: 6px 0; text-align: left; font-size: 10.5px; }
+
+@keyframes nextpulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }

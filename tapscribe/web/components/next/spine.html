@@ -1,0 +1,46 @@
+<!-- Stages spine — two groups: GLOBAL (pinned, un-numbered) + THIS SESSION
+     (the numbered Capture → Recordings → Transcript journey, with the session
+     picker + New session). Rebuilt every poll tick from /api/state. -->
+<template id="tpl-next-spine">
+  <div class="spine__head">
+    <div class="brand">
+      <span class="brand__dot"></span>
+      <span class="brand__name">TapScribe</span>
+      <span class="brand__tag">stages</span>
+    </div>
+  </div>
+
+  <div class="spine__scroll">
+    <!-- GLOBAL — pinned, un-numbered, NOT part of the session journey -->
+    <div class="grouplab">Global</div>
+    <nav class="nav" data-slot="globalNav" aria-label="Global"></nav>
+
+    <!-- THIS SESSION — the numbered journey + session picker -->
+    <div class="grouplab" style="margin-top:12px">This session</div>
+    <div class="sessionbox">
+      <select class="sessionpick" data-slot="sessionPick" aria-label="Select session"></select>
+      <button class="newsession" type="button" data-slot="newSession" title="Start a new session">
+        <span class="newsession__plus">+</span><span class="newsession__lab">New session</span>
+      </button>
+    </div>
+    <nav class="nav nav--journey" data-slot="journeyNav" aria-label="Session stages"></nav>
+  </div>
+
+  <div class="spine__foot">
+    <div class="journey"><div class="journey__fill" data-slot="journeyFill"></div></div>
+    <div class="journey__cap" data-slot="journeyCap"></div>
+  </div>
+</template>
+
+<!-- One nav entry — shared by GLOBAL items and the numbered journey stages.
+     `lead` holds either the icon (global) or the step number (journey). -->
+<template id="tpl-next-navitem">
+  <button class="navitem" type="button">
+    <span class="navitem__lead" data-slot="lead"></span>
+    <span class="navitem__body">
+      <span class="navitem__name" data-slot="name"></span>
+      <span class="navitem__chip"><span class="dot"></span><span data-slot="chip"></span></span>
+    </span>
+    <span class="navitem__live" data-slot="live" hidden><span class="dot"></span><span data-slot="liveCount"></span></span>
+  </button>
+</template>

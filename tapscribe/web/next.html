@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe · Stages</title>
+    <!-- Reuse the classic dashboard's design tokens + primitives first, then
+         layer the Stages-specific (sharp / de-bubbled / dense) styles on top. -->
+    <link rel="stylesheet" href="/dashboard.css" />
+    <link rel="stylesheet" href="/next.css" />
+  </head>
+  <body>
+    <div id="next-app" class="next-app">
+      <!-- ============ SPINE: two groups (GLOBAL · THIS SESSION) ============ -->
+      <aside class="spine" id="spine"><!-- spine rendered here --></aside>
+
+      <!-- ============ VIEW CONTAINER (one view at a time) ============ -->
+      <main class="work" id="work">
+        <div class="work__inner" id="viewRoot"><!-- active view rendered here --></div>
+      </main>
+    </div>
+
+    <script type="module" src="/web/js/next/main.js"></script>
+  </body>
+</html>
