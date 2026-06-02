@@ -609,14 +609,14 @@ class TestTapNewSession:
         app.dependency_overrides.clear()
 
     @staticmethod
-    def _seed_wav(recorder: Recorder) -> None:
+    def _touch_wav(recorder: Recorder) -> None:
         # The empty-current guard only checks for *.wav presence (not
         # contents), so a placeholder file is enough to make rotation fire.
         recorder.session_dir.mkdir(parents=True, exist_ok=True)
         (recorder.session_dir / "seed.wav").write_bytes(b"")
 
     def test_accepts_valid_bearer_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
-        self._seed_wav(recorder_with_fake_wlk)
+        self._touch_wav(recorder_with_fake_wlk)
         prev = recorder_with_fake_wlk.session_start
         token = recorder_with_fake_wlk.tap.value
         r = auth_client.post("/api/tap/new-session", headers={"Authorization": "Bearer " + token})
@@ -629,14 +629,14 @@ class TestTapNewSession:
         assert body["previous"] == prev
 
     def test_rejects_missing_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
-        self._seed_wav(recorder_with_fake_wlk)
+        self._touch_wav(recorder_with_fake_wlk)
         prev = recorder_with_fake_wlk.session_start
         r = auth_client.post("/api/tap/new-session")
         assert r.status_code == 401
         assert recorder_with_fake_wlk.session_start == prev  # not rotated
 
     def test_rejects_wrong_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
-        self._seed_wav(recorder_with_fake_wlk)
+        self._touch_wav(recorder_with_fake_wlk)
         prev = recorder_with_fake_wlk.session_start
         r = auth_client.post(
             "/api/tap/new-session",

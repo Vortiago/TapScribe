@@ -380,9 +380,27 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
     return out
 
 
+def session_is_empty(session_dir: Path) -> bool:
+    """True when a session folder holds nothing worth keeping: no WAVs, no
+    merged transcript, and no operator label.
+
+    The single definition of "empty session", shared by `prune_empty_sessions`
+    (which folders to delete) and the tap new-session idempotency guard
+    (whether rotating would just churn an untouched session) — so "empty"
+    means the same thing in both places.
+    """
+    if any(session_dir.glob("*.wav")):
+        return False
+    if (session_dir / "session-transcript.json").exists():
+        return False
+    if read_session_meta(session_dir.name).get("label"):
+        return False
+    return True
+
+
 def prune_empty_sessions(current_session: str) -> dict[str, Any]:
-    """Delete every session folder under RECORDINGS_DIR that has zero WAVs,
-    no merged transcript, and no operator-set label. Never deletes
+    """Delete every session folder under RECORDINGS_DIR that `session_is_empty`
+    (no WAVs, no merged transcript, no operator label). Never deletes
     `current_session`. Returns ``{"pruned": [...], "count": N, "failed": [...]}``.
 
     Pure filesystem walk over the ``RECORDINGS_DIR`` glob (a constant): no path
@@ -397,17 +415,19 @@ def prune_empty_sessions(current_session: str) -> dict[str, Any]:
             continue
         if sd.name == current_session:
             continue
-        if any(sd.glob("*.wav")):
-            continue
-        if (sd / "session-transcript.json").exists():
-            continue
-        if read_session_meta(sd.name).get("label"):
+        if not session_is_empty(sd):
             continue
         try:
             shutil.rmtree(sd)
             pruned.append(sd.name)
         except OSError as e:
-            failed.append({"session": sd.name, "error": str(e)})
+            # Log the raw OSError (it embeds the filesystem path + errno)
+            # server-side only — this dict flows out of the tap-facing
+            # /api/tap/new-session response, so surfacing it would leak
+            # internals (CodeQL py/stack-trace-exposure). Return a generic
+            # marker; the operator reads the real cause in the server log.
+            print(f"[tapscribe] prune failed for {sd.name}: {e}", flush=True)
+            failed.append({"session": sd.name, "error": "delete failed"})
     return {"pruned": pruned, "count": len(pruned), "failed": failed}
 
 

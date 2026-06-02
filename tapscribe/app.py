@@ -23,7 +23,6 @@ The big-picture route map:
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
 import math
 import shutil
@@ -69,6 +68,7 @@ from .sessions import (
     read_session_meta,
     resolve_session_dir,
     resolve_wav,
+    session_is_empty,
     strip_one_wav,
     stripped_dir,
     write_session_meta,
@@ -341,25 +341,28 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     new session id is a server-minted UTC timestamp and the prune walks a
     constant `RECORDINGS_DIR` glob — so there is no path-injection surface here.
     """
-    if config.AUTH_ENABLED:
-        scheme, _, token = (req.headers.get("authorization") or "").partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(token.strip(), recorder.tap.value):
-            return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+    if config.AUTH_ENABLED and not auth.check_tap_bearer(
+        req.headers.get("authorization"), recorder.tap.value
+    ):
+        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
 
-    # Idempotency guard (tap path only): a fresh/empty current session means a
-    # rotation would only churn the timestamp. No-op the rotate but still prune
-    # so any stale empties from earlier rotations get swept. The dashboard
-    # button keeps always-rotate semantics.
-    if not any(recorder.session_dir.glob("*.wav")):
-        return {
-            "ok": True,
-            "rotated": False,
-            "current": recorder.session_start,
+    # Idempotency guard (tap path only): if the current session holds nothing
+    # worth keeping, a rotation would only churn the session-id timestamp. Skip
+    # the rotate (the dashboard button keeps always-rotate) but still prune so
+    # stale empties from earlier rotations get swept. `session_is_empty` is the
+    # shared definition prune uses, so "empty" means the same thing both places.
+    rotated = not session_is_empty(recorder.session_dir)
+    if rotated:
+        result = _rotate_and_prune(recorder)
+    else:
+        current = recorder.session_start
+        result = {
+            "previous": current,
+            "current": current,
             "path": str(recorder.session_dir),
-            "pruned": prune_empty_sessions(recorder.session_start),
+            "pruned": prune_empty_sessions(current),
         }
-
-    return {"ok": True, "rotated": True, **_rotate_and_prune(recorder)}
+    return {"ok": True, "rotated": rotated, **result}
 
 
 # ---------------------------------------------------------------------------

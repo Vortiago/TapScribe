@@ -34,11 +34,13 @@ async function load() {
   await refresh();
 }
 
-function setSaveStatus(text, kind) {
-  const el = $("saveStatus");
+function setStatus(id, text, kind) {
+  const el = $(id);
   el.textContent = text;
   el.className = "status " + (kind || "");
 }
+
+function setSaveStatus(text, kind) { setStatus("saveStatus", text, kind); }
 
 function setPill(id, ok, label) {
   const el = $(id);
@@ -58,12 +60,6 @@ async function probeHealth(host, port, signal) {
   }
 }
 
-function setNewSessionStatus(text, kind) {
-  const el = $("newSessionStatus");
-  el.textContent = text;
-  el.className = "status " + (kind || "");
-}
-
 // POST /api/tap/new-session with the tap token as a bearer header. The
 // recorder rotates to a fresh session folder and prunes empty ones. Same
 // token as the /tap WS, but over an HTTP header — fetch can set headers,
@@ -72,22 +68,22 @@ function setNewSessionStatus(text, kind) {
 async function postNewSession() {
   const url = httpScheme() + "://" + currentHost + ":" + currentPort + "/api/tap/new-session";
   const headers = currentTapToken ? { Authorization: "Bearer " + currentTapToken } : {};
-  setNewSessionStatus("Starting new session…", "");
+  setStatus("newSessionStatus", "Starting new session…", "");
   const ctrl = new AbortController();
   const tmo = setTimeout(() => ctrl.abort(), 4000);
   try {
     const r = await fetch(url, { method: "POST", headers, signal: ctrl.signal });
     if (!r.ok) {
-      setNewSessionStatus("New session failed (HTTP " + r.status + ").", "err");
+      setStatus("newSessionStatus", "New session failed (HTTP " + r.status + ").", "err");
       return;
     }
     const body = await r.json().catch(() => ({}));
     const label = body && body.rotated === false
       ? "Already on a fresh session — nothing to rotate."
       : "New session started" + (body && body.current ? " (" + body.current + ")" : "") + ".";
-    setNewSessionStatus(label, "ok");
+    setStatus("newSessionStatus", label, "ok");
   } catch (e) {
-    setNewSessionStatus("New session failed: " + String(e && e.message || e), "err");
+    setStatus("newSessionStatus", "New session failed: " + String(e && e.message || e), "err");
   } finally {
     clearTimeout(tmo);
   }
