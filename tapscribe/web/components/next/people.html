@@ -13,18 +13,6 @@
 <template id="tpl-next-view-people">
   <div data-slot="head"></div>
 
-  <!-- Concept note: what a Person is, and what's real here. -->
-  <div class="peoplenote">
-    <span class="ic">👥</span>
-    <div>
-      A <b>Person</b> is a human — a name, a primary/secondary <b>language</b>, and the
-      taps/voices mapped to them. Gate, noise-floor and input live on the <b>Tap</b>, not
-      here; a room or stereo-mix is a <b>Tap</b>, never a Person. The real backend piece on
-      this page is the per-session <b>display name</b> (alias) below; the global registry and
-      languages are <span class="mocktag">mock · not wired</span>.
-    </div>
-  </div>
-
   <!-- ============ REAL: this session's participants (alias editor) ============ -->
   <div class="panel panel--accent">
     <div class="panel__head">
@@ -32,12 +20,6 @@
       <div class="panel__hint mono" data-slot="partHint"></div>
     </div>
     <div class="panel__body">
-      <div class="realnote">
-        Speakers actually present in <b data-slot="partSess">this session</b>. Type a
-        <b>display name</b> for each <span class="mono">identity</span> — it saves to this
-        session's <span class="mono">session_meta.aliases</span> and renames the speaker in
-        the merged transcript. This is the genuine TapScribe alias feature.
-      </div>
       <div class="partlist" data-slot="partList"></div>
     </div>
   </div>
@@ -51,12 +33,6 @@
       <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
     </div>
     <div class="panel__body">
-      <div class="mocknote">
-        A cross-session <b>registry of humans</b> — each Person's primary/secondary
-        <b>language</b>, the <b>transcribe-as EN/NB/DA</b> quick-switch, the taps/diarized
-        voices <b>mapped</b> to them, and <b>seen in N sessions</b> — is designed but not yet
-        wired to a backend. The cards below preview the intended shape.
-      </div>
       <div class="people" data-slot="people"></div>
     </div>
   </div>
@@ -97,7 +73,6 @@
       <span class="av lg unid">?</span>
       <span class="person__id">
         <span class="person__name person__name--unid">Unidentified voices <span class="mocktag mocktag--warn">map to a Person</span></span>
-        <span class="person__note">Diarized voices not yet tied to a human — pick a Person, or create one.</span>
       </span>
       <span class="person__seen">&nbsp;</span>
     </div>

@@ -3,8 +3,8 @@
 // /tap streams (level/lag/gate/in-flight buffer + rec/live toggles) and the
 // speech-gate LiveConfig (gate_kind/threshold/hangover/pre-roll/min-speech +
 // confidence), plus a clearly-tagged MOCK strip for the net-new Tap-model
-// concepts (input kind, single/multi, voice→Person mapping, per-identity
-// persistence) that the prototype designs but the backend doesn't yet expose.
+// concepts (single/multi, voice→Person mapping, per-identity persistence)
+// that the prototype designs but the backend doesn't yet expose.
 //
 // REUSES the classic dashboard components verbatim (imported, not copied):
 //   - active-taps.js   → the connected-tap rows + rec/live toggle DOM
@@ -93,7 +93,7 @@ export function build(ctx) {
       sub: inline(
         `${active.length} connected · `,
         strong(`${liveCount} live`),
-        " · per-tap input, gate & Person mapping",
+        " · per-tap gate & Person mapping",
       ),
     });
 

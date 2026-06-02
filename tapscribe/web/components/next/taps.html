@@ -4,8 +4,8 @@
      /api/state active[]) with level/lag/gate + rec/live toggles, the
      speech-gate LiveConfig (REAL, reuses live-channel.js → /api/live/start),
      and a clearly-tagged MOCK strip for the net-new Tap-model concepts
-     (input kind, single/multi, voice→Person mapping, per-identity
-     persistence). Mounted into #viewRoot by js/next/views/taps.js.
+     (single/multi, voice→Person mapping, per-identity persistence).
+     Mounted into #viewRoot by js/next/views/taps.js.
      ====================================================================== -->
 <template id="tpl-next-view-taps">
   <div data-slot="head"></div>
@@ -52,27 +52,10 @@
   <!-- ============ NET-NEW Tap model — MOCK, not wired ============ -->
   <div class="panel">
     <div class="panel__head">
-      <div class="panel__title"><span class="ic">🧩</span>Tap model · input · people</div>
+      <div class="panel__title"><span class="ic">🧩</span>Tap model · people</div>
       <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
     </div>
     <div class="panel__body">
-      <div class="mocknote">
-        Per-tap <b>input kind</b>, the <b>single vs multi-person</b> switch, the diarized
-        <b>voices → Person</b> mapping, and <b>per-identity</b> audio-setting persistence
-        are designed but not yet functional. The rows below preview the intended shape.
-      </div>
-
-      <!-- input kind picker (mock) -->
-      <div class="mockblk">
-        <span class="cfgblk__k">Input</span>
-        <span class="chips">
-          <button class="chip is-sel" type="button" disabled>🎙 microphone</button>
-          <button class="chip" type="button" disabled>🎚 line-in</button>
-          <button class="chip" type="button" disabled>🔀 stereo-mix</button>
-        </span>
-        <span class="dim mock-hint">how this tap presents — a room / video stereo-mix carries several people</span>
-      </div>
-
       <!-- single vs multi (mock) -->
       <div class="mockblk">
         <span class="cfgblk__k">Mode</span>
@@ -80,7 +63,6 @@
           <button class="seg__opt is-on" type="button" disabled>👤 single</button>
           <button class="seg__opt seg__opt--multi" type="button" disabled>👥 multi</button>
         </span>
-        <span class="dim mock-hint">multi diarizes the tap into voices, each mapped to a Person</span>
       </div>
 
       <!-- diarized voices → Person (mock) -->
@@ -104,10 +86,6 @@
         </div>
       </div>
 
-      <div class="mockblk mockblk--persist">
-        <span class="cfgblk__k">Persistence</span>
-        <span class="dim mock-hint">the gate / noise-floor / input each tap owns will be remembered per <b>identity</b> across sessions</span>
-      </div>
     </div>
   </div>
 </template>

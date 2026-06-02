@@ -298,7 +298,6 @@ export function build(ctx) {
 
   const headHost = pick(frag, "head");
   const partHint = pick(frag, "partHint");
-  const partSess = pick(frag, "partSess");
   const partList = pick(frag, "partList");
   const peopleHost = pick(frag, "people");
 
@@ -407,15 +406,13 @@ export function build(ctx) {
     const focused = /** @type {HTMLElement | null} */ (document.activeElement);
     const editing = focused instanceof HTMLInputElement && partList.contains(focused);
     if (sig === lastSig || editing) {
-      // Still refresh the small header counts on the skip path (cheap, no DOM
+      // Still refresh the small header count on the skip path (cheap, no DOM
       // churn in the list itself).
-      partSess.textContent = sess ? (sess.session_meta?.label || sess.session) : "this session";
       partHint.textContent = sess ? `${parts.length} speaker${parts.length === 1 ? "" : "s"}` : "no session";
       return;
     }
     lastSig = sig;
 
-    partSess.textContent = sess ? (sess.session_meta?.label || sess.session) : "this session";
     partHint.textContent = sess ? `${parts.length} speaker${parts.length === 1 ? "" : "s"}` : "no session";
 
     if (!sess || !parts.length) {
