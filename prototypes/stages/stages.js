@@ -55,7 +55,6 @@ const state = {
 // from both numbering and the progress fill.
 const JOURNEY = ["capture", "recordings", "transcript"];
 const GLOBAL = ["taps", "people", "settings"];
-const isJourney = (v) => JOURNEY.includes(v);
 const ALL_VIEWS = [...GLOBAL, ...JOURNEY];
 
 // A synthetic, empty session for the "New session" button.
