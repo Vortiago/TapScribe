@@ -437,6 +437,148 @@ export const helpers = {
   },
 };
 
+// =============================================================================
+// ADDITIVE fixtures (appended for the Stages rebuild). These are NET-NEW exports
+// only — nothing above is changed or removed, so the other prototypes that
+// import the original names keep rendering the identical scenario. Everything
+// below is either (a) a richer view of data already implied by SPEAKERS/APP, or
+// (b) a faithful stand-in for a real TapScribe API/setting that the original
+// fixtures didn't spell out (gate LiveConfig knobs, hallucination-rule files,
+// prompt/hotwords config files, the per-WAV transcript cache).
+// =============================================================================
+
+// --- Speech-gate LiveConfig defaults (real /api/state live_config knobs) -----
+// These govern how every tap is gated. `gate_kind="tapscribe"` is the per-tap
+// silero gate; "backend" defers to the model's own VAD and is unavailable here.
+export const GATE_DEFAULTS = {
+  gate_kind: "tapscribe", // "tapscribe" | "backend"
+  gate_speech_threshold: 0.5, // 0..1
+  gate_hangover_ms: 400, // 0..10000
+  gate_pre_roll_ms: 300, // 0..5000
+  gate_min_speech_ms: 0, // 0..5000
+  confidence_validation: true,
+};
+export const GATE_KINDS = [
+  { kind: "tapscribe", label: "tapscribe", available: true },
+  { kind: "backend", label: "backend", available: false }, // grey: unsupported here
+];
+
+// --- Persons registry (canonical, derived-and-enriched from SPEAKERS) --------
+// The real backend piece here is the per-session alias (identity -> display
+// name). Everything else is NET-NEW UI: a person can own MULTIPLE microphone
+// profiles (each carrying its own gate threshold + noise floor), and multiple
+// taps/identities can map to one Person. `mics` is a superset of the single
+// `SPEAKERS[].mic`, so the canonical scenario still lines up.
+export const PERSONS = [
+  {
+    id: "atle",
+    name: "Atle Håvsø",
+    initials: "AH",
+    spk: 0,
+    primaryLang: "nb",
+    secondaryLang: "en",
+    sessionsSeen: 14,
+    note: "Host. Norwegian, switches to English for guests.",
+    isRoom: false,
+    mics: [
+      { id: "shure-mv7-usb", label: "Shure MV7", gateThreshold: 0.55, noiseFloorDb: -45, primary: true },
+      { id: "airpods-pro-2-atle", label: "AirPods Pro 2", gateThreshold: 0.5, noiseFloorDb: -41, primary: false },
+    ],
+    identities: ["atle"], // taps/identities mapped to this Person
+  },
+  {
+    id: "mette",
+    name: "Mette Sørensen",
+    initials: "MS",
+    spk: 1,
+    primaryLang: "da",
+    secondaryLang: "en",
+    sessionsSeen: 9,
+    note: "Danish. AirPods = noisier floor, higher gate.",
+    isRoom: false,
+    mics: [
+      { id: "airpods-pro-2", label: "AirPods Pro 2", gateThreshold: 0.5, noiseFloorDb: -42, primary: true },
+    ],
+    identities: ["mette"],
+  },
+  {
+    id: "room-oslo",
+    name: "Oslo Conference Room",
+    initials: "OR",
+    spk: 2,
+    primaryLang: "nb",
+    secondaryLang: "en",
+    sessionsSeen: 6,
+    note: "Shared room mic — multiple people. Diarized into A/B.",
+    isRoom: true,
+    mics: [
+      { id: "jabra-speak-710", label: "Jabra Speak 710", gateThreshold: 0.45, noiseFloorDb: -40, primary: true },
+    ],
+    identities: ["room-oslo"],
+    diarizedInto: [
+      { label: "Speaker A", spk: 3, lang: "nb", talkPct: 58 },
+      { label: "Speaker B", spk: 4, lang: "en", talkPct: 42 },
+    ],
+  },
+  {
+    id: "james",
+    name: "James Park",
+    initials: "JP",
+    spk: 4,
+    primaryLang: "en",
+    secondaryLang: null,
+    sessionsSeen: 2,
+    note: "Guest. English only, laptop mic — clips easily.",
+    isRoom: false,
+    mics: [
+      { id: "macbook-builtin", label: "MacBook built-in", gateThreshold: 0.6, noiseFloorDb: -38, primary: true },
+    ],
+    identities: ["james"],
+  },
+];
+export const personById = (id) => PERSONS.find((p) => p.id === id);
+
+// --- Tap -> Person mapping (which live identity resolves to which Person) -----
+// Mirrors how the recorder ties an incoming /tap identity to a saved alias.
+export const TAP_PERSON_MAP = {
+  atle: "atle",
+  "room-oslo": "room-oslo",
+  mette: "mette",
+  james: "james",
+};
+
+// --- Hallucination rules (real session-hallucinations.json format) -----------
+// Three rule kinds: plain substring, `exact:` prefix, `re:` regex. `kind` is
+// derived from the stored string's prefix; `display` is what the operator typed.
+export const HALLUCINATION_RULES = [
+  { display: "thank you for watching", kind: "substring", note: "YouTube outro leak" },
+  { display: "please subscribe", kind: "substring", note: "outro leak" },
+  { display: "exact:[mm-hmm]", kind: "exact", note: "backchannel filler" },
+  { display: "re:^\\s*(uh+|um+)\\s*$", kind: "regex", note: "lone hesitation tokens" },
+  { display: "re:tekst af .*", kind: "regex", note: "Danish subtitle credit" },
+];
+
+// --- Prompt / live-prompt / hotwords config (real /api/config/{key} files) ---
+// Separate global and live-only prompts plus a shared hotword list.
+export const PROMPTS = {
+  prompt: "Nordic Sync — quarterly product review. Speakers discuss revenue, the Nordic segment, KPIs and the Vortiago launch.",
+  livePrompt: "Quarterly review. Proper nouns: Vortiago, Nordic, KPI. Keep punctuation light for live captions.",
+  hotwords: "Vortiago\nNordic\nKPI\nHåvsø\nSørensen",
+};
+
+// --- Per-WAV transcript cache (a WAV can hold multiple backend/model runs) ----
+// Mirrors the on-disk *.transcript.json cache keyed by (backend, model). The
+// operator picks which cached run is the WAV's `primary`. `source` is whether
+// the run was over the original WAV or its stripped region clips.
+export const WAV_TRANSCRIPTS = [
+  { backend: "mlx", model: "canary-1b-v2", source: "stripped", words: 142, avgLogprob: -0.21, primary: true },
+  { backend: "mlx", model: "nb-whisper-medium", source: "stripped", words: 138, avgLogprob: -0.27, primary: false },
+  { backend: "cpu", model: "small.en", source: "original", words: 121, avgLogprob: -0.44, primary: false },
+];
+
+// --- A per-session transcription job (one job per session; current/total) ----
+export const TRANSCRIBE_JOB = { running: true, current: 23, total: 37, wav: "…090921_atle.wav" };
+
 // Convenience: everything under one namespace too.
 export const MOCK = {
   APP,
@@ -453,5 +595,15 @@ export const MOCK = {
   computeRegions,
   helpers,
   speakerById,
+  // additive (Stages rebuild) — new keys only, originals above untouched
+  GATE_DEFAULTS,
+  GATE_KINDS,
+  PERSONS,
+  personById,
+  TAP_PERSON_MAP,
+  HALLUCINATION_RULES,
+  PROMPTS,
+  WAV_TRANSCRIPTS,
+  TRANSCRIBE_JOB,
 };
 export default MOCK;
