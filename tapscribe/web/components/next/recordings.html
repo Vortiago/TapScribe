@@ -1,0 +1,157 @@
+<!-- ======================================================================
+     Stages · Recordings (SESSION stage 2) — Phase 2.
+     The WIDE per-session recording stage: waveform-cut PLACEHOLDER + the
+     real strip-silence knobs, the per-WAV list (originals + indented
+     stripped region clips), transcribe (one WAV + session range), and the
+     per-WAV transcript cache (set-primary). Mounted into #viewRoot by
+     js/next/views/recordings.js, which fills every data-slot with live
+     /api/state data and wires the real endpoints. No mock data here — the
+     only stub is the waveform preview, tagged inline.
+     ====================================================================== -->
+<template id="tpl-next-view-recordings">
+  <div data-slot="head"></div>
+
+  <!-- HERO: waveform-cut PLACEHOLDER (net-new, no backend) + REAL strip
+       knobs/stats/job. The strip RUN is wired; the canvas is a stub. -->
+  <div class="panel panel--primary wavehero">
+    <div class="wave-top">
+      <span class="wave-top__name mono" data-slot="waveName">no WAV selected</span>
+      <div class="wave-stats">
+        <div class="wstat"><span class="wstat__v accent" data-slot="sClips">—</span><span class="wstat__k">clips</span></div>
+        <div class="wstat"><span class="wstat__v good" data-slot="sSpeech">—</span><span class="wstat__k">speech_seconds</span></div>
+        <div class="wstat"><span class="wstat__v" data-slot="sIn">—</span><span class="wstat__k">in_seconds</span></div>
+        <div class="wstat"><span class="wstat__v" data-slot="sKept">—</span><span class="wstat__k">kept</span></div>
+      </div>
+    </div>
+
+    <!-- waveform cut preview — net-new, NOT wired to any backend -->
+    <div class="wavestub">
+      <div class="wavestub__ic">🌊</div>
+      <div class="wavestub__h">waveform preview — coming soon</div>
+      <div class="wavestub__d">the wide cut preview (kept vs dropped regions, cut markers, speech-floor line) renders here · the strip-silence RUN below is real</div>
+      <div class="wavestub__tag">mock · not wired</div>
+    </div>
+
+    <!-- strip-silence: REAL knobs → POST /api/sessions/{session}/strip-silence -->
+    <div class="knobbar">
+      <div class="kfield">
+        <div class="kfield__top"><span class="kfield__k">min_silence_ms</span><span class="kfield__v" data-slot="kvMinSilence"></span></div>
+        <input type="range" min="100" max="600000" step="100" data-strip-knob="min_silence_ms" data-unit="ms">
+        <div class="kfield__rng"><span>100</span><span>600000</span></div>
+      </div>
+      <div class="kfield">
+        <div class="kfield__top"><span class="kfield__k">pad_ms</span><span class="kfield__v" data-slot="kvPad"></span></div>
+        <input type="range" min="0" max="5000" step="50" data-strip-knob="pad_ms" data-unit="ms">
+        <div class="kfield__rng"><span>0</span><span>5000</span></div>
+      </div>
+      <div class="kfield">
+        <div class="kfield__top"><span class="kfield__k">speech_floor_db</span><span class="kfield__v" data-slot="kvFloor"></span></div>
+        <input type="range" min="-120" max="0" step="1" data-strip-knob="speech_floor_db" data-unit="dB">
+        <div class="kfield__rng"><span>-120</span><span>0</span></div>
+      </div>
+      <div class="knobbar__act">
+        <button class="act act--sm act--primary" type="button" data-slot="stripBtn">✂ strip</button>
+        <button class="act act--sm" type="button" data-slot="clearBtn">clear</button>
+      </div>
+    </div>
+
+    <!-- job progress (one job per session, transcribe OR strip) -->
+    <div class="jobbar" data-slot="jobBar" hidden>
+      <div class="jobbar__top"><span data-slot="jobLabel">Job running</span><span class="jobbar__pct mono" data-slot="jobCount"></span></div>
+      <div class="progress"><div class="progress__fill" data-slot="jobFill"></div></div>
+      <div class="jobbar__wav mono" data-slot="jobWav"></div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="grid cols-tx">
+    <!-- LEFT: per-WAV list (originals + indented stripped region clips) -->
+    <div class="panel">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">📁</span>WAVs &amp; stripped clips</div>
+        <div class="panel__hint mono" data-slot="wavHint"></div>
+      </div>
+      <div class="panel__body flush"><div class="wavlist" data-slot="wavList"></div></div>
+    </div>
+
+    <!-- RIGHT: transcribe (engine + one-WAV + range) + transcript cache -->
+    <div class="aside">
+      <div class="panel panel--accent">
+        <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Engine</div><div class="panel__hint">batch backend &amp; model</div></div>
+        <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__head"><div class="panel__title"><span class="ic">▶</span>Transcribe</div><div class="panel__hint">one job per session</div></div>
+        <div class="panel__body">
+          <div class="row-between" style="margin-bottom:10px">
+            <span class="ovr-lab" data-slot="txSelLabel">Selected WAV</span>
+            <button class="act act--sm" type="button" data-slot="txOneBtn" disabled>transcribe</button>
+          </div>
+          <div class="field" style="margin-bottom:9px">
+            <label>session range <span class="dim">(blank → whole session)</span></label>
+            <div class="rangeform">
+              <div class="field"><label>from</label><input class="inp-txt mono" type="text" data-slot="rangeFrom" placeholder="ISO"></div>
+              <div class="field"><label>to</label><input class="inp-txt mono" type="text" data-slot="rangeTo" placeholder="ISO"></div>
+              <label class="checkrow"><input type="checkbox" data-slot="forceBox"> force</label>
+            </div>
+          </div>
+          <button class="act act--sm act--primary act--wide" type="button" data-slot="txRangeBtn">▶ transcribe range</button>
+          <div class="dim mono ovr-note" data-slot="txNote"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__head"><div class="panel__title"><span class="ic">🗂️</span>Transcript cache</div><div class="panel__hint mono" data-slot="cacheHint"></div></div>
+        <div class="panel__body flush"><div class="cache" data-slot="cacheBody"></div></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- source toggle (original / stripped) — lives in the header actions slot. -->
+<template id="tpl-next-srcsw">
+  <span class="srcsw">
+    <button class="srcsw__opt" type="button" data-src="original">original</button>
+    <button class="srcsw__opt" type="button" data-src="stripped">stripped</button>
+  </span>
+</template>
+
+<!-- one WAV-list row (original, selectable) -->
+<template id="tpl-next-wavrow">
+  <button class="wavrow" type="button">
+    <span class="wavrow__l">
+      <span class="wavrow__n mono" data-slot="name"></span>
+      <span class="wavrow__sub mono" data-slot="sub"></span>
+    </span>
+    <span class="wavrow__r">
+      <span class="wavrow__dur mono" data-slot="dur"></span>
+      <span class="wavrow__tx" data-slot="txTag"></span>
+    </span>
+  </button>
+</template>
+
+<!-- one indented stripped region clip under its parent original -->
+<template id="tpl-next-wavclip">
+  <div class="wavrow is-clip">
+    <span class="wavrow__l">
+      <span class="wavrow__n mono" data-slot="name"></span>
+      <span class="wavrow__sub mono" data-slot="sub"></span>
+    </span>
+    <span class="wavrow__r">
+      <span class="wavrow__dur mono" data-slot="dur"></span>
+      <button class="act act--sm act--xs" type="button" data-slot="clipTx"></button>
+    </span>
+  </div>
+</template>
+
+<!-- one transcript-cache row (a cached backend·model variant) -->
+<template id="tpl-next-cacherow">
+  <div class="cacherow">
+    <span class="cacherow__id mono" data-slot="id"></span>
+    <span class="cacherow__src" data-slot="src"></span>
+    <span class="cacherow__meta mono" data-slot="meta"></span>
+    <button class="pickprimary" type="button" data-slot="primary"></button>
+  </div>
+</template>

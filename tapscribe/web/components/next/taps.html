@@ -1,0 +1,113 @@
+<!-- ======================================================================
+     Stages · Taps (GLOBAL · Ingress) — Phase 2.
+     The global ingress stage: the connected /tap streams (REAL, from
+     /api/state active[]) with level/lag/gate + rec/live toggles, the
+     speech-gate LiveConfig (REAL, reuses live-channel.js → /api/live/start),
+     and a clearly-tagged MOCK strip for the net-new Tap-model concepts
+     (input kind, single/multi, voice→Person mapping, per-identity
+     persistence). Mounted into #viewRoot by js/next/views/taps.js.
+     ====================================================================== -->
+<template id="tpl-next-view-taps">
+  <div data-slot="head"></div>
+
+  <!-- global recording arm — REAL, POST /api/recording/toggle -->
+  <div class="panel">
+    <div class="panel__body">
+      <div class="row-between">
+        <span class="ovr-lab">Recording <span class="dim">— global arm for every tap (RECORDING_ENABLED)</span></span>
+        <button class="recpill" type="button" data-slot="recPill">● recording</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="grid cols-cap">
+    <!-- PRIMARY: connected taps (reuses active-taps.js) -->
+    <div class="panel panel--primary">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">🛰️</span>Connected taps</div>
+        <span class="panel__hint"><span data-slot="activeTapsBadge"></span> · <span class="mono" data-slot="activeCount">0</span></span>
+      </div>
+      <div class="panel__body flush"><div class="taps" data-slot="activeTapsBody"></div></div>
+    </div>
+
+    <!-- ASIDE: the speech-gate LiveConfig (reuses live-channel.js) -->
+    <div class="aside">
+      <div class="panel panel--accent">
+        <div class="panel__head">
+          <div class="panel__title"><span class="ic">📡</span>Speech gate · LiveConfig</div>
+          <span class="chip" data-slot="liveStateBadge">stopped</span>
+        </div>
+        <div class="panel__body">
+          <div class="live-mlx-note dim mono" data-slot="liveMlxNote"></div>
+          <div data-slot="liveChannelBody"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- ============ NET-NEW Tap model — MOCK, not wired ============ -->
+  <div class="panel">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">🧩</span>Tap model · input · people</div>
+      <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
+    </div>
+    <div class="panel__body">
+      <div class="mocknote">
+        Per-tap <b>input kind</b>, the <b>single vs multi-person</b> switch, the diarized
+        <b>voices → Person</b> mapping, and <b>per-identity</b> audio-setting persistence
+        are designed but not yet functional. The rows below preview the intended shape.
+      </div>
+
+      <!-- input kind picker (mock) -->
+      <div class="mockblk">
+        <span class="cfgblk__k">Input</span>
+        <span class="chips">
+          <button class="chip is-sel" type="button" disabled>🎙 microphone</button>
+          <button class="chip" type="button" disabled>🎚 line-in</button>
+          <button class="chip" type="button" disabled>🔀 stereo-mix</button>
+        </span>
+        <span class="dim mock-hint">how this tap presents — a room / video stereo-mix carries several people</span>
+      </div>
+
+      <!-- single vs multi (mock) -->
+      <div class="mockblk">
+        <span class="cfgblk__k">Mode</span>
+        <span class="seg">
+          <button class="seg__opt is-on" type="button" disabled>👤 single</button>
+          <button class="seg__opt seg__opt--multi" type="button" disabled>👥 multi</button>
+        </span>
+        <span class="dim mock-hint">multi diarizes the tap into voices, each mapped to a Person</span>
+      </div>
+
+      <!-- diarized voices → Person (mock) -->
+      <div class="mockblk mockblk--col">
+        <span class="cfgblk__k">Diarized voices → Person</span>
+        <div class="voicemap">
+          <div class="voicerow">
+            <span class="voicerow__v mono">Speaker A</span>
+            <span class="voicerow__bar"><span class="voicerow__fill" style="width:62%"></span></span>
+            <span class="voicerow__pct mono">62%</span>
+            <span class="voicerow__arrow">→</span>
+            <span class="pick"><span class="pick__av">AB</span>mapped Person<span class="pick__chev">⌄</span></span>
+          </div>
+          <div class="voicerow">
+            <span class="voicerow__v mono">Speaker B</span>
+            <span class="voicerow__bar"><span class="voicerow__fill" style="width:38%"></span></span>
+            <span class="voicerow__pct mono">38%</span>
+            <span class="voicerow__arrow">→</span>
+            <span class="pick pick--unid"><span class="pick__av pick__av--unid">?</span>Unidentified<span class="pick__chev">⌄</span></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="mockblk mockblk--persist">
+        <span class="cfgblk__k">Persistence</span>
+        <span class="dim mock-hint">the gate / noise-floor / input each tap owns will be remembered per <b>identity</b> across sessions</span>
+      </div>
+    </div>
+  </div>
+</template>

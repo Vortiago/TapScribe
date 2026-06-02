@@ -21,6 +21,8 @@ import * as engine from "./components/engine.js";
 import * as captureView from "./views/capture.js";
 import * as transcriptView from "./views/transcript.js";
 import * as settingsView from "./views/settings.js";
+import * as recordingsView from "./views/recordings.js";
+import * as tapsView from "./views/taps.js";
 
 /** @param {string} id */
 const $ = (id) => {
@@ -52,10 +54,14 @@ let liveModelCatalog = { context: "live", available_backends: [], models: [] };
 let defaultEngine = { backend: "auto", model: "" };
 /** @type {import('./components/engine.js').EngineState} */
 let overrideEngine = { backend: "auto", model: "" };
+// Recordings holds the engine for the open session's transcribe jobs (one WAV
+// / session range). Kept client-side like the others; seeded from the catalog.
+/** @type {import('./components/engine.js').EngineState} */
+let recordingsEngine = { backend: "auto", model: "" };
 
 // Built-view cache. Capture + Settings are page-singletons; Transcript is
 // keyed by session id so a new session rebuilds its merged transcript.
-/** @typedef {{ node: DocumentFragment | Node, update: (j: import('../types.js').AppState, session: import('../types.js').Session | null) => void, rebuildEngine?: () => void, key: string }} BuiltView */
+/** @typedef {{ node: DocumentFragment | Node, host?: HTMLElement, update: (j: import('../types.js').AppState, session: import('../types.js').Session | null) => void, rebuildEngine?: () => void, key: string }} BuiltView */
 /** @type {Map<string, BuiltView>} */
 const viewCache = new Map();
 /** @type {string | null} */
@@ -85,6 +91,7 @@ function seedEngineModels() {
   if (!first) return;
   if (!defaultEngine.model) defaultEngine = { ...defaultEngine, model: first.model_id };
   if (!overrideEngine.model) overrideEngine = { ...overrideEngine, model: first.model_id };
+  if (!recordingsEngine.model) recordingsEngine = { ...recordingsEngine, model: first.model_id };
 }
 
 /**
@@ -119,6 +126,22 @@ function renderOverrideEngine(host) {
   });
 }
 
+/**
+ * Render the Recordings engine selector into a host. Drives the one-WAV /
+ * session-range transcribe jobs for the open session.
+ * @param {Element} host
+ */
+function renderRecordingsEngine(host) {
+  engine.render(host, {
+    state: recordingsEngine,
+    catalog: modelCatalog,
+    onChange: (next) => {
+      recordingsEngine = next;
+      viewCache.get("recordings")?.rebuildEngine?.();
+    },
+  });
+}
+
 const liveStart = async () => {
   try {
     const { formValues } = await import("../components/live-channel.js");
@@ -147,19 +170,29 @@ function renderView(j, session) {
   let built = viewCache.get(key) ?? null;
   if (!built) {
     built = buildView(currentView, session);
-    if (built) viewCache.set(key, built);
+    if (built) {
+      // Wrap the view's fragment in a STABLE, layout-transparent host element.
+      // A DocumentFragment empties when its children are moved into the DOM, so
+      // caching + re-mounting the fragment itself goes blank on the second
+      // visit; a host element can be detached and re-appended freely.
+      const host = document.createElement("div");
+      host.style.display = "contents";
+      host.appendChild(built.node);
+      built.host = host;
+      viewCache.set(key, built);
+    }
   }
 
   if (!built) {
-    // Placeholder views (Taps / Recordings / People) render fresh each time;
-    // they have no live state to preserve.
+    // Placeholder views (People) render fresh each time; they have no live
+    // state to preserve.
     mountedKey = null;
     renderPlaceholder(root, currentView, session);
     return;
   }
 
   if (mountedKey !== key) {
-    root.replaceChildren(built.node);
+    root.replaceChildren(built.host ?? built.node);
     mountedKey = key;
   }
   built.update(j, session);
@@ -200,30 +233,34 @@ function buildView(view, session) {
     const b = transcriptView.build({ metaFor, rebuildEngine: renderOverrideEngine });
     return { ...b, key: viewKey("transcript", session) };
   }
-  return null; // taps / recordings / people → placeholder
+  if (view === "recordings") {
+    const b = recordingsView.build({
+      metaFor,
+      engineState: () => recordingsEngine,
+      rebuildEngine: renderRecordingsEngine,
+      afterMutate: () => { refresh(); },
+    });
+    return { ...b, key: "recordings" };
+  }
+  if (view === "taps") {
+    const b = tapsView.build({
+      liveCatalog: liveModelCatalog,
+      onLiveStart: liveStart,
+      onLiveStop: liveStop,
+      afterMutate: () => { refresh(); },
+    });
+    return { ...b, key: "taps" };
+  }
+  return null; // people → placeholder
 }
 
 /**
  * @param {Element} root
  * @param {import('./shell.js').ViewId} view
- * @param {import('../types.js').Session | null} session
+ * @param {import('../types.js').Session | null} _session
  */
-function renderPlaceholder(root, view, session) {
-  if (view === "taps") {
-    placeholderView(root, {
-      eyebrow: "Global · Ingress", title: "Taps", icon: "🛰️",
-      heading: "Live taps ingress",
-      detail: "Per-tap input kind, audio settings, gate config and Person mapping land here.",
-    });
-  } else if (view === "recordings") {
-    const n = session?.wav_count || 0;
-    placeholderView(root, {
-      eyebrow: "Session · 2 Recordings", title: "Recordings", icon: "🌊",
-      sub: n ? `${n} WAV${n === 1 ? "" : "s"} on disk` : undefined,
-      heading: "Strip-silence + transcribe",
-      detail: "The wide waveform, strip-silence knobs, per-WAV list and transcribe jobs land here.",
-    });
-  } else if (view === "people") {
+function renderPlaceholder(root, view, _session) {
+  if (view === "people") {
     placeholderView(root, {
       eyebrow: "Global · Registry", title: "People", icon: "👥",
       heading: "People registry",
@@ -327,6 +364,8 @@ await loadTemplates(
   // New Stages templates:
   "/web/components/next/spine.html",
   "/web/components/next/views.html",
+  "/web/components/next/recordings.html",
+  "/web/components/next/taps.html",
 );
 
 async function loadModelCatalogs() {
