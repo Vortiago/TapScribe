@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe · Stages</title>
+    <link rel="stylesheet" href="stages.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <!-- ============ SPINE (the ordered journey) ============ -->
+      <aside class="spine" id="spine">
+        <header class="spine__head">
+          <div class="brand">
+            <span class="brand__dot"></span>
+            <span class="brand__name">TapScribe</span>
+          </div>
+          <!-- Session picker — switching re-seeds the journey -->
+          <button class="sessionpick" id="sessionPick" aria-haspopup="listbox">
+            <span class="sessionpick__live" id="sessionLive"></span>
+            <span class="sessionpick__body">
+              <span class="sessionpick__label" id="sessionLabel">Nordic Sync</span>
+              <span class="sessionpick__meta" id="sessionMeta">— · — clips</span>
+            </span>
+            <span class="sessionpick__chev">⌄</span>
+          </button>
+          <div class="sessionmenu" id="sessionMenu" hidden></div>
+        </header>
+
+        <nav class="stages" id="stagesNav" aria-label="Session stages"></nav>
+
+        <footer class="spine__foot">
+          <div class="journey" id="journeyBar">
+            <div class="journey__fill" id="journeyFill"></div>
+          </div>
+          <div class="journey__cap" id="journeyCap">Session journey</div>
+        </footer>
+      </aside>
+
+      <!-- ============ WORKSPACE (one stage at a time) ============ -->
+      <main class="work" id="work">
+        <div class="work__inner" id="workInner"><!-- stage rendered here --></div>
+      </main>
+    </div>
+
+    <script type="module" src="stages.js"></script>
+  </body>
+</html>

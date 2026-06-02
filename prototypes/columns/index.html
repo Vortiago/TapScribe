@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe — Columns</title>
+    <link rel="stylesheet" href="columns.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <!-- Top bar: brand + breadcrumb path + global recorder state -->
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">▚</span>
+          <span class="brand-name">TapScribe</span>
+          <span class="brand-sub">Columns</span>
+        </div>
+        <nav class="crumbs" id="crumbs" aria-label="Drill path"></nav>
+        <div class="topbar-right">
+          <span class="rec-state" id="recState" title="Recording master switch">
+            <span class="rec-dot"></span><span id="recLabel">Recording on</span>
+          </span>
+          <button class="settings-btn" id="settingsBtn" title="Settings" aria-label="Settings">⚙</button>
+        </div>
+      </header>
+
+      <!-- The columns surface -->
+      <main class="cols" id="cols">
+        <!-- col 0: roots rail (fixed) -->
+        <section class="col col-roots" id="colRoots" aria-label="Roots"></section>
+        <!-- col 1: navigator (fluid, scannable) -->
+        <section class="col col-nav" id="colNav" aria-label="Navigator"></section>
+        <!-- col 2: detail / work pane (fluid, dense) -->
+        <section class="col col-detail" id="colDetail" aria-label="Detail"></section>
+      </main>
+
+      <!-- Settings drawer (progressive disclosure; hidden by default) -->
+      <aside class="drawer" id="settingsDrawer" hidden></aside>
+      <div class="drawer-scrim" id="drawerScrim" hidden></div>
+    </div>
+    <script type="module" src="columns.js"></script>
+  </body>
+</html>
