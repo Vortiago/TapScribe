@@ -143,6 +143,13 @@ function navItem(d, currentView, onSelect) {
  * }} ctx
  */
 export function render(host, j, ctx) {
+  // The spine rebuilds on every /api/state poll (~2×/s). If the operator has
+  // the session <select> open, replacing its node would snap the native
+  // dropdown shut on every tick — so skip the rebuild while that select is
+  // focused. The change handler blur()s on pick (so the post-selection rebuild
+  // still runs), and once focus leaves the select, ticks rebuild normally.
+  const focused = document.activeElement;
+  if (focused instanceof HTMLSelectElement && host.contains(focused)) return;
   const { currentView, session, metaFor, onSelectView, onSelectSession, onNewSession } = ctx;
   const frag = tpl("tpl-next-spine");
 
@@ -165,7 +172,9 @@ export function render(host, j, ctx) {
       pickSel.add(opt);
     }
   }
-  pickSel.addEventListener("change", () => { if (pickSel.value) onSelectSession(pickSel.value); });
+  // blur() on pick so the per-tick render above no longer sees this <select>
+  // focused and rebuilds the spine for the newly-selected session.
+  pickSel.addEventListener("change", () => { if (pickSel.value) { pickSel.blur(); onSelectSession(pickSel.value); } });
 
   const newBtn = /** @type {HTMLButtonElement} */ (pick(frag, "newSession"));
   newBtn.addEventListener("click", onNewSession);
