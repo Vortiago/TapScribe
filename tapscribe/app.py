@@ -41,6 +41,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -256,6 +257,10 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="TapScribe recorder", lifespan=_lifespan)
+# Compress responses (the dashboard polls /api/state ~1-2×/s; even the slimmed
+# listing is highly compressible JSON). minimum_size skips tiny bodies where the
+# gzip header would cost more than it saves.
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
