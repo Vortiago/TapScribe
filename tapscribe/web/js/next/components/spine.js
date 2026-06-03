@@ -5,7 +5,7 @@
 // session). Rebuilt every poll tick from /api/state; live status chips show
 // real data where we have it.
 
-import { tpl, pick } from "../../templates.js";
+import { tpl, pick, renderRegion } from "../../templates.js";
 import { fmtSessionLabel } from "../../formatters.js";
 import { GLOBAL_VIEWS, JOURNEY_VIEWS } from "../shell.js";
 
@@ -143,57 +143,64 @@ function navItem(d, currentView, onSelect) {
  * }} ctx
  */
 export function render(host, j, ctx) {
-  // The spine rebuilds on every /api/state poll (~2×/s). If the operator has
-  // the session <select> open, replacing its node would snap the native
-  // dropdown shut on every tick — so skip the rebuild while that select is
-  // focused. The change handler blur()s on pick (so the post-selection rebuild
-  // still runs), and once focus leaves the select, ticks rebuild normally.
-  const focused = document.activeElement;
-  if (focused instanceof HTMLSelectElement && host.contains(focused)) return;
   const { currentView, session, metaFor, onSelectView, onSelectSession, onNewSession } = ctx;
-  const frag = tpl("tpl-next-spine");
 
-  // GLOBAL group
-  const gnav = pick(frag, "globalNav");
-  for (const d of globalDefs(j, session)) gnav.appendChild(navItem(d, currentView, onSelectView));
+  // Build the whole spine fragment. Invoked by renderRegion only when it
+  // actually swaps, so a skipped tick (operator interacting with a control
+  // inside the spine) never builds.
+  const buildFrag = () => {
+    const frag = tpl("tpl-next-spine");
 
-  // Session picker — real sessions from /api/state, newest first.
-  const pickSel = /** @type {HTMLSelectElement} */ (pick(frag, "sessionPick"));
-  const sessions = [...(j.sessions || [])].sort((a, b) => (a.session < b.session ? 1 : -1));
-  if (!sessions.length) {
-    pickSel.add(new Option("no sessions yet", "", true, true));
-    pickSel.disabled = true;
-  } else {
-    for (const s of sessions) {
-      const meta = metaFor(s);
-      const label = meta.label || fmtSessionLabel(s.session) || s.session;
-      const tag = s.is_current ? " ● live" : s.session_transcript ? " · tx" : "";
-      const opt = new Option(`${label}${tag}`, s.session, false, s.session === session?.session);
-      pickSel.add(opt);
+    // GLOBAL group
+    const gnav = pick(frag, "globalNav");
+    for (const d of globalDefs(j, session)) gnav.appendChild(navItem(d, currentView, onSelectView));
+
+    // Session picker — real sessions from /api/state, newest first.
+    const pickSel = /** @type {HTMLSelectElement} */ (pick(frag, "sessionPick"));
+    const sessions = [...(j.sessions || [])].sort((a, b) => (a.session < b.session ? 1 : -1));
+    if (!sessions.length) {
+      pickSel.add(new Option("no sessions yet", "", true, true));
+      pickSel.disabled = true;
+    } else {
+      for (const s of sessions) {
+        const meta = metaFor(s);
+        const label = meta.label || fmtSessionLabel(s.session) || s.session;
+        const tag = s.is_current ? " ● live" : s.session_transcript ? " · tx" : "";
+        const opt = new Option(`${label}${tag}`, s.session, false, s.session === session?.session);
+        pickSel.add(opt);
+      }
     }
-  }
-  // blur() on pick so the per-tick render above no longer sees this <select>
-  // focused and rebuilds the spine for the newly-selected session.
-  pickSel.addEventListener("change", () => { if (pickSel.value) { pickSel.blur(); onSelectSession(pickSel.value); } });
+    // blur() on pick so the per-tick render no longer sees this <select>
+    // focused (renderRegion skips while it is) and rebuilds the spine for the
+    // newly-selected session.
+    pickSel.addEventListener("change", () => { if (pickSel.value) { pickSel.blur(); onSelectSession(pickSel.value); } });
 
-  const newBtn = /** @type {HTMLButtonElement} */ (pick(frag, "newSession"));
-  newBtn.addEventListener("click", onNewSession);
+    const newBtn = /** @type {HTMLButtonElement} */ (pick(frag, "newSession"));
+    newBtn.addEventListener("click", onNewSession);
 
-  // THIS SESSION journey
-  const jnav = pick(frag, "journeyNav");
-  const jdefs = journeyDefs(j, session);
-  for (const d of jdefs) jnav.appendChild(navItem(d, currentView, onSelectView));
+    // THIS SESSION journey
+    const jnav = pick(frag, "journeyNav");
+    const jdefs = journeyDefs(j, session);
+    for (const d of jdefs) jnav.appendChild(navItem(d, currentView, onSelectView));
 
-  // Progress fill — journey views advance it; global views show "—".
-  const idx = jdefs.findIndex((d) => d.id === currentView);
-  const onJourney = idx >= 0;
-  const fillPct = onJourney ? Math.round(((idx + 1) / jdefs.length) * 100) : 0;
-  /** @type {HTMLElement} */ (pick(frag, "journeyFill")).style.width = `${fillPct}%`;
-  pick(frag, "journeyCap").textContent = onJourney
-    ? `Stage ${idx + 1} of ${jdefs.length} · ${fillPct}%`
-    : (GLOBAL_VIEWS.includes(currentView) ? "Global view" : "Session journey");
+    // Progress fill — journey views advance it; global views show "—".
+    const idx = jdefs.findIndex((d) => d.id === currentView);
+    const onJourney = idx >= 0;
+    const fillPct = onJourney ? Math.round(((idx + 1) / jdefs.length) * 100) : 0;
+    /** @type {HTMLElement} */ (pick(frag, "journeyFill")).style.width = `${fillPct}%`;
+    pick(frag, "journeyCap").textContent = onJourney
+      ? `Stage ${idx + 1} of ${jdefs.length} · ${fillPct}%`
+      : (GLOBAL_VIEWS.includes(currentView) ? "Global view" : "Session journey");
 
-  host.replaceChildren(frag);
+    return frag;
+  };
+
+  // renderRegion supersedes the old hand-rolled focus guard: the spine rebuilds
+  // on every /api/state poll (~2×/s), but renderRegion skips the swap while any
+  // control inside the spine (today the session <select>; tomorrow any input/
+  // textarea) holds focus, so the native dropdown / caret survives the tick.
+  // Always-fresh otherwise (no sig), except during interaction.
+  renderRegion(host, buildFrag, {});
 }
 
 // Re-export for callers that need the group membership of the active view.

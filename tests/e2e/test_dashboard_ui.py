@@ -779,3 +779,227 @@ async def test_model_select_change_does_not_block_re_render(
             )
         finally:
             await browser.close()
+
+
+# The six /next views, in the order window.gotoView accepts them. Drives the
+# poll-safety sweep below across every stage so a new dropdown in any view
+# can't silently regress the renderRegion guard.
+_NEXT_VIEWS = ("capture", "recordings", "transcript", "taps", "people", "settings")
+
+# > one /next poll period (500ms in next/main.js) so the sweep crosses at least
+# one re-render boundary. The sweep also asserts a poll actually fired during
+# this window, so a vacuous pass (polls somehow stalled) can't hide a regression.
+_NEXT_POLL_CROSS_MS = 750
+
+
+async def test_next_poll_render_does_not_clobber_open_controls(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,
+    tmp_path: Path,
+):
+    """The /next dashboard re-renders every per-tick region on each 500ms
+    /api/state poll via host.replaceChildren(...). Replacing a node that holds
+    a focused <select> / <input> / <textarea> would snap a dropdown shut or
+    drop the caret mid-edit. The shared `renderRegion` primitive (templates.js)
+    guards every per-tick region against that, and the spine adopts it as the
+    reference.
+
+    This sweep is the regression net: for each of the six views, it focuses
+    every focusable control currently rendered in `#viewRoot` (plus the spine's
+    session <select>), stamps a unique JS property on the live node, lets more
+    than one poll elapse, and asserts the SAME node is still in the DOM with the
+    stamp intact AND still document.activeElement. A clobbering re-render would
+    have built a fresh node — dropping the JS property and the focus — so the
+    assertion fails loudly.
+
+    A control that can't actually take focus (e.g. a disabled engine <select>
+    on the synthetic CI box with no transcriber backends installed) carries no
+    live interaction state to protect, so the sweep skips it after confirming
+    focus didn't land. Views with no focusable controls in this state are
+    skipped too; the test asserts it exercised at least one control overall so
+    it can't pass by finding nothing anywhere.
+    """
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    # Seed a session with two recorded WAVs so Recordings/Transcript render
+    # their WAV-list controls and People derives participants to name. Transcribe
+    # one so the Transcript cache panel and merged view populate too.
+    fake_transcriber.text_by_speaker["Alice"] = "Seeded line for the persistence sweep."
+    src = synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src,
+        utterance_id="utt-persist-1",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+    recorded = sorted(rec.session_dir.glob("*.wav"))
+    assert len(recorded) == 1, f"expected one recorded WAV, got {[w.name for w in recorded]}"
+    wav_name = recorded[0].name
+
+    import httpx
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            "/api/transcribe",
+            json={"session": rec.session_start, "name": wav_name, "model": "tiny.en"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            # Count /api/state hits so the sweep can prove a poll actually
+            # crossed the focus window (otherwise a stalled poll would let a
+            # would-be clobber pass unnoticed).
+            await page.expose_function("__noteStatePoll", lambda: None)
+            await page.add_init_script(
+                """
+                window.__statePolls = 0;
+                const _fetch = window.fetch;
+                window.fetch = (...args) => {
+                  try {
+                    const u = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+                    if (u.includes('/api/state')) window.__statePolls++;
+                  } catch (_e) { /* never let bookkeeping break the real fetch */ }
+                  return _fetch.apply(window, args);
+                };
+                """
+            )
+            await page.goto(f"{base}/next", wait_until="domcontentloaded")
+
+            # Boot done once the spine has rendered its session <select> with the
+            # seeded session as an option (proves /api/state + the model catalog
+            # load have both landed).
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const sel = document.querySelector('[data-slot="sessionPick"]');
+                  return sel && Array.from(sel.options).some(
+                    (o) => o.value === {rec.session_start!r}
+                  );
+                }}
+                """,
+                timeout=10000,
+            )
+
+            # One sweep over a single view: focus + mark each focusable control,
+            # cross a poll, assert each marked node survived intact & focused.
+            # Returns the number of controls actually exercised in this view.
+            async def sweep_view(view: str) -> int:
+                await page.evaluate("(v) => window.gotoView(v)", view)
+                # Let the view mount + its first per-tick update run.
+                await page.wait_for_function(
+                    "() => document.querySelector('#viewRoot')?.childElementCount > 0",
+                    timeout=5000,
+                )
+
+                # Tag every candidate control with a stable index so each can
+                # be reacquired by selector after a re-render. Tagging is inert
+                # (no focus) — focus happens one control at a time below, so
+                # focusing control N never steals focus from control N-1 and
+                # muddies its result. The spine's session <select> rides along
+                # (it's a per-tick region too, and lives outside #viewRoot).
+                count = await page.evaluate(
+                    """
+                    () => {
+                      const root = document.getElementById('viewRoot');
+                      const spineSel = document.querySelector('[data-slot="sessionPick"]');
+                      const sel =
+                        'select, input[type="text"], input[type="search"], ' +
+                        'input[type="number"], input:not([type]), textarea';
+                      const controls = root ? [...root.querySelectorAll(sel)] : [];
+                      if (spineSel) controls.push(spineSel);
+                      controls.forEach((el, i) => el.setAttribute('data-sweep-idx', String(i)));
+                      return controls.length;
+                    }
+                    """
+                )
+
+                exercised = 0
+                for idx in range(count):
+                    sweep_sel = f'[data-sweep-idx="{idx}"]'
+                    # Focus + stamp this ONE control, then report whether it
+                    # actually took focus. A control that can't (disabled, or a
+                    # type that ignores .focus()) has no interaction state to
+                    # protect — renderRegion is allowed to replace it — so skip.
+                    mark = f"{view}:{idx}"
+                    took_focus = await page.evaluate(
+                        """
+                        ([sel, mark]) => {
+                          const el = document.querySelector(sel);
+                          if (!el || el.disabled) return false;
+                          el.focus();
+                          if (document.activeElement !== el) return false;
+                          el.__persistMark = mark;          // JS property a fresh node won't carry
+                          el.setAttribute('data-persist-mark', mark);
+                          return true;
+                        }
+                        """,
+                        [sweep_sel, mark],
+                    )
+                    if not took_focus:
+                        continue
+
+                    polls_before = await page.evaluate("() => window.__statePolls || 0")
+                    # Cross more than one poll period with this control focused.
+                    # renderRegion must keep its node in place; a clobbering
+                    # re-render would build a fresh node (no __persistMark) and
+                    # drop focus.
+                    await page.wait_for_timeout(_NEXT_POLL_CROSS_MS)
+                    polls_after = await page.evaluate("() => window.__statePolls || 0")
+                    assert polls_after > polls_before, (
+                        f"view {view!r} control {mark}: no /api/state poll fired during the "
+                        f"{_NEXT_POLL_CROSS_MS}ms window ({polls_before} → {polls_after}); "
+                        "the sweep would pass vacuously"
+                    )
+
+                    # Same live node (JS property survives — a node minted by
+                    # replaceChildren never would) AND still focused.
+                    failure = await page.evaluate(
+                        """
+                        (mark) => {
+                          const el = document.querySelector('[data-persist-mark="' + mark + '"]');
+                          if (!el) return 'node gone (region was rebuilt)';
+                          if (el.__persistMark !== mark) return 'JS mark lost (node was replaced)';
+                          if (el !== document.activeElement) {
+                            const a = document.activeElement;
+                            return 'lost focus (active=' + (a ? a.tagName : 'none') + ')';
+                          }
+                          return '';
+                        }
+                        """,
+                        mark,
+                    )
+                    assert not failure, f"view {view!r} control {mark}: clobbered by poll re-render — {failure}"
+                    exercised += 1
+
+                    # Blur before the next control so its focus result is clean.
+                    await page.evaluate(
+                        "() => { const a = document.activeElement; if (a && a.blur) a.blur(); }"
+                    )
+                return exercised
+
+            total_controls = 0
+            per_view: dict[str, int] = {}
+            for view in _NEXT_VIEWS:
+                n = await sweep_view(view)
+                per_view[view] = n
+                total_controls += n
+
+            # The sweep must have actually exercised controls — otherwise a
+            # render that quietly stopped emitting inputs would pass for free.
+            assert total_controls > 0, (
+                f"persistence sweep exercised no focusable controls across any view: {per_view}"
+            )
+        finally:
+            await browser.close()

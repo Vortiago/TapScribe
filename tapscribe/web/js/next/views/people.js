@@ -249,6 +249,9 @@ export function build(ctx) {
       sess?.session || "",
       parts.map((p) => `${p.id}:${p.live ? 1 : 0}:${aliases[p.id] || ""}`).join("|"),
     ].join("§");
+    // Bespoke focus+signature guard for the alias editor (battle-tested,
+    // mirrors session-detail.js). NEW /next per-tick regions should render via
+    // renderRegion (templates.js) rather than hand-rolling this.
     const focused = /** @type {HTMLElement | null} */ (document.activeElement);
     const editing = focused instanceof HTMLInputElement && partList.contains(focused);
     if (sig === lastSig || editing) {

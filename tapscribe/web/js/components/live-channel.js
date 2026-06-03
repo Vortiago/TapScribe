@@ -37,6 +37,9 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
   // wipe a slider value they're typing, wipe their in-progress
   // init-prompt edit, or (if an init-prompt save is in flight) detach
   // the status element the awaiting putJson will try to write to.
+  // (This bespoke guard predates renderRegion and is shared with the classic
+  // dashboard. NEW /next per-tick regions should use renderRegion from
+  // templates.js instead of hand-rolling this.)
   // The dataset.cfgKey check covers the init-prompt textarea AND its
   // save button + status span so a click-then-poll-tick race can't
   // tear the DOM out from under the save handler.

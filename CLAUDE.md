@@ -16,6 +16,20 @@
   unused binding (the canonical case is an async closure that mutates a
   variable consumed via a post-await cast — see `stripSession` in
   `main.js`), prefix the name with `_`.
+- `/next` re-renders every per-tick region on each 500ms `/api/state`
+  poll via `replaceChildren`, which would snap a focused `<select>`
+  shut or drop a caret mid-edit. Any `/next` region that's rebuilt on
+  the tick AND can hold an interactive control (`<select>`/`<input>`/
+  `<textarea>`/contenteditable) MUST render through `renderRegion`
+  (`web/js/templates.js`) rather than raw `replaceChildren` — it skips
+  the swap while a control inside the host is focused (see `spine.js`
+  for the reference adoption). The bespoke focus guards in
+  `live-channel.js`, `config-card.js`, and the People editor predate it
+  and are left as-is; `renderRegion` is the pattern for NEW regions. The
+  `test_next_poll_render_does_not_clobber_open_controls` sweep in
+  `tests/e2e/test_dashboard_ui.py` enforces this — it focuses every
+  control in each view, crosses a poll, and fails if a node is rebuilt
+  out from under the focus, so a new unguarded dropdown trips CI.
 
 ## Runtime deps the install picker does NOT cover
 

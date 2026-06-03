@@ -94,6 +94,9 @@ function buildEditor({ key, content, placeholder, overrideCount }) {
  * @param {import('../types.js').ConfigCardCtx} ctx
  */
 export function render(j, { gridEl, headerNoteEl }) {
+  // Bespoke focus guard (shared with the classic dashboard, predates
+  // renderRegion). NEW /next per-tick regions should render via renderRegion
+  // from templates.js rather than hand-rolling this.
   const active = /** @type {HTMLElement | null} */ (document.activeElement);
   if (active && active.dataset && active.dataset.cfgKey && gridEl.contains(active)) return;
 
