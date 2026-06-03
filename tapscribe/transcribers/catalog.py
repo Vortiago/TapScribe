@@ -101,6 +101,14 @@ def set_available_backends_for_testing(kinds: frozenset[BackendKind] | None) -> 
 
 
 _INSTALLED_MODULES_OVERRIDE: frozenset[str] | None = None
+# Memoised find_spec() results, keyed by module name. Installed packages
+# don't appear or vanish within a running process, so a probe's answer is
+# stable for the process lifetime — yet `/api/models` and the once-per-second
+# /api/state poll (via `_compute_inputs_support`) probe every registry entry
+# on every call. Cache the real-probe answer; the test override is checked
+# first and never cached, and `set_installed_modules_for_testing` clears this
+# so a test that toggles between override and real probing starts clean.
+_FIND_SPEC_CACHE: dict[str, bool] = {}
 
 
 def _is_module_available(name: str) -> bool:
@@ -110,9 +118,14 @@ def _is_module_available(name: str) -> bool:
     without touching the real environment."""
     if _INSTALLED_MODULES_OVERRIDE is not None:
         return name in _INSTALLED_MODULES_OVERRIDE
+    cached = _FIND_SPEC_CACHE.get(name)
+    if cached is not None:
+        return cached
     import importlib.util
 
-    return importlib.util.find_spec(name) is not None
+    available = importlib.util.find_spec(name) is not None
+    _FIND_SPEC_CACHE[name] = available
+    return available
 
 
 def set_installed_modules_for_testing(names: frozenset[str] | None) -> None:
@@ -120,6 +133,9 @@ def set_installed_modules_for_testing(names: frozenset[str] | None) -> None:
     real probing. Use `frozenset()` to simulate "nothing installed"."""
     global _INSTALLED_MODULES_OVERRIDE
     _INSTALLED_MODULES_OVERRIDE = names
+    # Drop memoised real-probe answers so a test toggling between override
+    # and real probing never sees a stale find_spec result.
+    _FIND_SPEC_CACHE.clear()
 
 
 # `auto` resolves to the first kind in this list that's available. MLX first

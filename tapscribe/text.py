@@ -47,10 +47,39 @@ def read_text_file(path: Path) -> str:
         return ""
 
 
+# Memoise the editable config files on their (mtime_ns, size) so the
+# once-per-second /api/state poll doesn't re-read prompt / live-prompt /
+# hotwords every tick. Writes always go through an atomic replace, which
+# changes the stat signature and invalidates. Keyed by path string so a test
+# that repoints these config paths can't get a stale hit. `read_text_file`
+# itself stays uncached — it's the primitive other callers (and parse_rules,
+# which has its own cache) rely on for an always-fresh read.
+_CONFIG_TEXT_CACHE: dict[str, tuple[tuple[int, int] | None, str]] = {}
+
+
+def _read_config_text_cached(path: Path) -> str:
+    pathkey = str(path)
+    try:
+        st = path.stat()
+        sig: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        # Missing/unreadable: don't cache (re-reading a missing file is a
+        # single cheap stat that returns "" fast), and drop any stale entry.
+        _CONFIG_TEXT_CACHE.pop(pathkey, None)
+        return read_text_file(path)
+    hit = _CONFIG_TEXT_CACHE.get(pathkey)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    value = read_text_file(path)
+    _CONFIG_TEXT_CACHE[pathkey] = (sig, value)
+    return value
+
+
 def read_prompt() -> str:
-    """Return the Whisper `initial_prompt` from prompt.txt. Read on every
-    call so edits take effect without restarting the recorder."""
-    return read_text_file(config.PROMPT_FILE)
+    """Return the Whisper `initial_prompt` from prompt.txt. Re-read whenever
+    the file changes (stat-signature cache) so edits take effect without
+    restarting the recorder."""
+    return _read_config_text_cached(config.PROMPT_FILE)
 
 
 def read_live_prompt() -> str:
@@ -61,13 +90,13 @@ def read_live_prompt() -> str:
     separate editors and operators are expected to set each explicitly
     (live and batch typically run different cadences and sometimes
     different model families)."""
-    return read_text_file(config.LIVE_PROMPT_FILE)
+    return _read_config_text_cached(config.LIVE_PROMPT_FILE)
 
 
 def read_hotwords() -> str:
     """Return the faster-whisper `hotwords` string from hotwords.txt — a
     comma- or space-separated list of proper nouns / tricky vocabulary."""
-    return read_text_file(config.HOTWORDS_FILE)
+    return _read_config_text_cached(config.HOTWORDS_FILE)
 
 
 # Cap pasted prompts/hotwords at 4000 chars. Whisper's init_prompt is

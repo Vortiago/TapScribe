@@ -29,6 +29,26 @@ _MAX_REGEX_PATTERN_LEN = 256
 _NESTED_QUANTIFIER_RE = re.compile(r"[+*]\)[+*]")
 
 
+# Single-slot cache of the parsed/compiled rules, keyed on the rules file's
+# (path, mtime_ns, size). parse_rules runs on every /api/state poll AND once
+# per transcribe; re-reading the file and recompiling every regex each time is
+# pure CPU waste when the operator-edited file rarely changes. Any write goes
+# through an atomic replace, which moves the stat signature and invalidates.
+_RULES_CACHE: tuple[tuple[str, int, int] | None, list[dict[str, Any]]] | None = None
+
+
+def _rules_file_sig() -> tuple[str, int, int] | None:
+    """Stat signature of the rules file, or None when it's missing/unreadable.
+    Includes the path so a test that repoints `config.HALLUCINATIONS_FILE`
+    can't get a stale hit from a previous file with the same size+mtime."""
+    path = config.HALLUCINATIONS_FILE
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
 def parse_rules() -> list[dict[str, Any]]:
     """Parse hallucinations.txt into a list of compiled match rules.
 
@@ -42,7 +62,21 @@ def parse_rules() -> list[dict[str, Any]]:
       <none> case-insensitive substring match
 
     Lines starting with `#` and blank lines are ignored.
+
+    Memoised on the rules file's stat signature (see `_RULES_CACHE`). The
+    returned list is shared and treated read-only by every caller — callers
+    that need to own it (e.g. the batch invocation) copy it themselves.
     """
+    global _RULES_CACHE
+    sig = _rules_file_sig()
+    if sig is not None and _RULES_CACHE is not None and _RULES_CACHE[0] == sig:
+        return _RULES_CACHE[1]
+    rules = _parse_rules_uncached()
+    _RULES_CACHE = (sig, rules)
+    return rules
+
+
+def _parse_rules_uncached() -> list[dict[str, Any]]:
     raw = read_text_file(config.HALLUCINATIONS_FILE)
     rules: list[dict[str, Any]] = []
     for line in raw.splitlines():
