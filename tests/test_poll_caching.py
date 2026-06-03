@@ -8,6 +8,7 @@ invalidate-on-change paths.
 
 from __future__ import annotations
 
+import os
 import wave
 from pathlib import Path
 
@@ -108,12 +109,25 @@ def test_describe_wav_invalidates_when_transcript_written(tmp_path: Path):
 def test_cache_signature_changes_on_inplace_retranscribe(tmp_path: Path):
     """Re-transcribing the same (backend, model) overwrites the sidecar in
     place — the directory mtime may not move, but the `_primary` pointer's
-    does, so the signature must change (else the dashboard shows stale text)."""
+    does, so the signature must change (else the dashboard shows stale text).
+
+    A real re-transcribe runs a model for hundreds of ms–seconds and writes
+    the sidecar afterwards, so its `_primary` write always lands on a later
+    mtime than the previous one. We bump the pointer's mtime explicitly rather
+    than transcribing twice back-to-back, so the test doesn't depend on the
+    filesystem's mtime granularity (~15 ms on Windows, which two *instant* stub
+    transcribes collide inside)."""
     w = _seed_wav(tmp_path / "20260101T010000Z__alice__abc.wav")
     stub = TranscriberStub(backend="faster-whisper", model="small.en", text="v1")
     cached_transcribe(w, stub, initial_prompt=None, hotwords=None, hallucination_rules=[], force=True)
     sig1 = cache_signature(w)
-    cached_transcribe(w, stub, initial_prompt=None, hotwords=None, hallucination_rules=[], force=True)
+
+    # Stand in for the seconds a real re-transcribe takes: force the _primary
+    # pointer's mtime forward so the signature is guaranteed to advance.
+    primary = w.with_suffix(".transcripts") / "_primary"
+    future = primary.stat().st_mtime + 10
+    os.utime(primary, (future, future))
+
     sig2 = cache_signature(w)
     assert sig1 != sig2
 

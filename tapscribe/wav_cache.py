@@ -103,6 +103,11 @@ def cache_signature(wav_path: Path) -> tuple:
     alter what the dashboard shows. Falls back to the legacy `<wav>.json`
     mtime when the new-layout directory doesn't exist; legacy sidecars are
     immutable once migrated, so their mtime alone is a sufficient signature.
+
+    Relies on a re-transcribe's write landing on a later mtime than the
+    previous one — safe in practice because a real transcribe runs a model for
+    far longer than any filesystem's mtime granularity (~15 ms on Windows)
+    before writing the sidecar.
     """
     d = _transcripts_dir(wav_path)
     try:
