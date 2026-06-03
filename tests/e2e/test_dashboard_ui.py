@@ -980,7 +980,9 @@ async def test_next_poll_render_does_not_clobber_open_controls(
                         """,
                         mark,
                     )
-                    assert not failure, f"view {view!r} control {mark}: clobbered by poll re-render — {failure}"
+                    assert not failure, (
+                        f"view {view!r} control {mark}: clobbered by poll re-render — {failure}"
+                    )
                     exercised += 1
 
                     # Blur before the next control so its focus result is clean.
