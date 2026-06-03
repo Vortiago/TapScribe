@@ -151,6 +151,32 @@ def test_api_models_emits_no_inputs_for_parakeet(client):
     assert pk["inputs"] == []
 
 
+def test_api_models_cache_clear_evicts_idle_models(client, monkeypatch):
+    """DELETE /api/models/cache reclaims idle (not-in-use) cached models and
+    reports how many it freed. We seed one resident model via the factory's
+    own acquire/release with eviction disabled, then assert the endpoint
+    drops it."""
+    from test_transcribers_cache_eviction import _GenericSpy, _loader_for, _Registry
+
+    from tapscribe import transcribers
+
+    # ttl<0 keeps the model resident on release so the manual evict has a
+    # target instead of it being dropped immediately on release.
+    monkeypatch.setenv("TAPSCRIBE_MODEL_IDLE_TTL_S", "-1")
+    reg = _Registry("cpu", _loader_for(_GenericSpy, []))
+    try:
+        t = transcribers.load_transcriber("m", backend="cpu", registry=reg)
+        transcribers.release_transcriber(t)
+        assert t._model is not None  # resident before the call
+
+        r = client.delete("/api/models/cache")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "evicted": 1}
+        assert t._model is None  # reclaimed
+    finally:
+        transcribers.clear_cache()
+
+
 def test_api_models_hides_families_whose_adapters_are_not_installed(client):
     """The install picker can pull in only some family extras (e.g.
     Whisper but not Parakeet). The /api/models filter mirrors that so

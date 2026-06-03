@@ -31,7 +31,7 @@ from .recorder import JobState, Recorder
 from .session_merge import merge_session, select_session_wavs
 from .sessions import read_session_meta, resolve_session_dir, resolve_wav
 from .text import read_hotwords, read_prompt
-from .transcribers import load_transcriber
+from .transcribers import load_transcriber, release_transcriber
 from .wav_cache import cached_transcribe, read_primary_payload
 
 # ---------------------------------------------------------------------------
@@ -199,28 +199,35 @@ async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # n
         )
 
     transcriber = await asyncio.to_thread(load_transcriber, req.model, backend=req.backend)
-    inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
+    try:
+        inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
 
-    await asyncio.to_thread(
-        cached_transcribe,
-        path,
-        transcriber,
-        initial_prompt=inv.initial_prompt,
-        hotwords=inv.hotwords,
-        source_lang=inv.source_lang,
-        target_lang=inv.target_lang,
-        hallucination_rules=list(inv.hallucination_rules),
-        force=True,
-        source=req.source,
-    )
+        await asyncio.to_thread(
+            cached_transcribe,
+            path,
+            transcriber,
+            initial_prompt=inv.initial_prompt,
+            hotwords=inv.hotwords,
+            source_lang=inv.source_lang,
+            target_lang=inv.target_lang,
+            hallucination_rules=list(inv.hallucination_rules),
+            force=True,
+            source=req.source,
+        )
 
-    payload = read_primary_payload(path)
-    if payload is None:
-        # cached_transcribe just wrote the sidecar — read_primary_payload
-        # returning None here means the cache layout migration or write
-        # silently failed. Bubble as a 500-equivalent rather than masking.
-        raise BatchTranscribeError("cached_transcribe completed but no sidecar landed on disk")
-    return payload
+        payload = read_primary_payload(path)
+        if payload is None:
+            # cached_transcribe just wrote the sidecar — read_primary_payload
+            # returning None here means the cache layout migration or write
+            # silently failed. Bubble as a 500-equivalent rather than masking.
+            raise BatchTranscribeError("cached_transcribe completed but no sidecar landed on disk")
+        return payload
+    finally:
+        # Release our use of the model so the configured idle-TTL policy can
+        # unload it (default: immediately, freeing several GB). Offloaded
+        # because eviction may run gc + GPU-cache reclaim; a no-op when
+        # load_transcriber was monkeypatched to a fake in tests.
+        await asyncio.to_thread(release_transcriber, transcriber)
 
 
 async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> dict:
@@ -248,50 +255,56 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
         raise NoUsableWavs("no usable WAVs in the given range")
 
     transcriber = await asyncio.to_thread(load_transcriber, req.model, backend=req.backend)
-    inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
-
-    claimed = await recorder.jobs.claim(
-        JobState(
-            session=req.session,
-            kind="transcribe",
-            current=0,
-            total=len(selection.wavs),
-            started_at=datetime.now(UTC),
-            model=req.model,
-            status="running",
-        )
-    )
-    if not claimed:
-        raise SessionBusy("session is already busy (transcribe or strip in flight)")
-
     try:
-        for idx, wav in enumerate(selection.wavs):
-            await recorder.jobs.update(req.session, current=idx, current_file=wav.name)
-            await asyncio.to_thread(
-                cached_transcribe,
-                wav,
-                transcriber,
-                initial_prompt=inv.initial_prompt,
-                hotwords=inv.hotwords,
-                source_lang=inv.source_lang,
-                target_lang=inv.target_lang,
-                hallucination_rules=list(inv.hallucination_rules),
-                force=req.force,
-                source=selection.source,
+        inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
+
+        claimed = await recorder.jobs.claim(
+            JobState(
+                session=req.session,
+                kind="transcribe",
+                current=0,
+                total=len(selection.wavs),
+                started_at=datetime.now(UTC),
+                model=req.model,
+                status="running",
             )
+        )
+        if not claimed:
+            raise SessionBusy("session is already busy (transcribe or strip in flight)")
 
-        transcript = merge_session(selection)
-        merged = transcript.to_dict()
-        if not merged.get("model"):
-            merged["model"] = req.model
+        try:
+            for idx, wav in enumerate(selection.wavs):
+                await recorder.jobs.update(req.session, current=idx, current_file=wav.name)
+                await asyncio.to_thread(
+                    cached_transcribe,
+                    wav,
+                    transcriber,
+                    initial_prompt=inv.initial_prompt,
+                    hotwords=inv.hotwords,
+                    source_lang=inv.source_lang,
+                    target_lang=inv.target_lang,
+                    hallucination_rules=list(inv.hallucination_rules),
+                    force=req.force,
+                    source=selection.source,
+                )
 
-        out_path = session_dir / "session-transcript.json"
-        out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-        (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
+            transcript = merge_session(selection)
+            merged = transcript.to_dict()
+            if not merged.get("model"):
+                merged["model"] = req.model
 
-        return merged
-    except Exception as e:
-        await recorder.jobs.update(req.session, status="error: " + str(e))
-        raise
+            out_path = session_dir / "session-transcript.json"
+            out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+            (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
+
+            return merged
+        except Exception as e:
+            await recorder.jobs.update(req.session, status="error: " + str(e))
+            raise
+        finally:
+            await recorder.jobs.release(req.session)
     finally:
-        await recorder.jobs.release(req.session)
+        # Release our use of the model on every exit path (success, the
+        # SessionBusy short-circuit, or a per-WAV failure) so the idle-TTL
+        # policy can unload it. Offloaded for the same reason as transcribe_one.
+        await asyncio.to_thread(release_transcriber, transcriber)

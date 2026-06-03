@@ -83,6 +83,7 @@ from .text import (
     write_live_prompt,
     write_prompt,
 )
+from .transcribers import evict_idle_now
 from .transcribers.catalog import REGISTRY, available_backends
 from .wav_cache import set_primary_transcript
 
@@ -606,6 +607,23 @@ async def api_models(context: str = "batch"):
         "available_backends": sorted(_available_backends_snapshot()),
         "models": [e.to_mapping() for e in entries],
     }
+
+
+@app.delete("/api/models/cache")
+async def api_models_cache_clear(recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """Evict every idle (not-in-use) transcription model from the in-process
+    cache, freeing its weights + pooled GPU memory now.
+
+    Batch models are unloaded automatically per the TAPSCRIBE_MODEL_IDLE_TTL_S
+    policy (default: immediately after each job). This endpoint is the manual
+    lever for operators who set a keep-warm TTL (or disabled eviction) and
+    want to reclaim RAM/VRAM on demand. An in-flight transcribe keeps its
+    model, so clicking this can't yank a model out from under a running job.
+    The live channel runs in its own subprocess and is unaffected — stop it
+    via /api/live/stop to reclaim that memory."""
+    freed = await asyncio.to_thread(evict_idle_now)
+    print(f"[tapscribe] evicted {freed} idle transcription model(s) from cache", flush=True)
+    return {"ok": True, "evicted": freed}
 
 
 @app.delete("/api/live-transcript")
