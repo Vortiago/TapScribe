@@ -96,6 +96,22 @@ function seedEngineModels() {
 }
 
 /**
+ * Per-(selected default model) input support — mirrors the server's
+ * _compute_inputs_support, but for the ONE model chosen in Settings' "Default
+ * engine" selector, so the prompt/hotwords editors gate on the picked model
+ * (Whisper declares both `initial_prompt` + `hotwords`; Parakeet/Voxtral
+ * declare neither). Returns null when the model isn't in the catalog yet, so
+ * config-card falls back to the registry-wide inputs_support.
+ * @returns {{ batch_prompt: boolean, batch_hotwords: boolean } | null}
+ */
+function defaultEngineSupport() {
+  const m = modelCatalog.models.find((x) => x.model_id === defaultEngine.model);
+  if (!m) return null;
+  const names = new Set((m.inputs || []).map((i) => i.name));
+  return { batch_prompt: names.has("initial_prompt"), batch_hotwords: names.has("hotwords") };
+}
+
+/**
  * Render the DEFAULT (Settings) engine selector into a host.
  * @param {Element} host
  */
@@ -107,6 +123,12 @@ function renderDefaultEngine(host) {
       defaultEngine = next;
       const v = viewCache.get("settings");
       v?.rebuildEngine?.();
+      // Re-gate the prompt/hotwords editors on the newly-picked model right
+      // away (don't wait for the next poll tick). config-card's signature
+      // includes the support flags, so this is a no-op repaint when the new
+      // model has the same prompt/hotwords support as the old one. (Settings'
+      // update ignores the session arg — it renders global defaults.)
+      if (lastJson) v?.update?.(lastJson, null);
     },
   });
 }
@@ -283,7 +305,10 @@ function buildView(view, session) {
     return { ...b, key: "capture" };
   }
   if (view === "settings") {
-    const b = settingsView.build({ rebuildEngine: renderDefaultEngine });
+    const b = settingsView.build({
+      rebuildEngine: renderDefaultEngine,
+      selectedSupport: defaultEngineSupport,
+    });
     return { ...b, update: (j) => b.update(j), key: "settings" };
   }
   if (view === "transcript") {

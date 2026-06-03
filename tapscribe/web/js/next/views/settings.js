@@ -18,6 +18,7 @@ import * as configCard from "../../components/config-card.js";
 /**
  * @param {{
  *   rebuildEngine: (host: Element) => void,
+ *   selectedSupport: () => { batch_prompt: boolean, batch_hotwords: boolean } | null,
  * }} ctx
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState) => void, rebuildEngine: () => void }}
  */
@@ -43,7 +44,14 @@ export function build(ctx) {
 
   /** @param {import('../../types.js').AppState} j */
   const update = (j) => {
-    configCard.render(j, configCardCtx);
+    // Gate the prompt/hotwords editors on the model picked in the Default
+    // engine selector (not the registry-wide flag), and drop the per-session
+    // override-count footnote — these are the global defaults, not a session.
+    configCard.render(j, {
+      ...configCardCtx,
+      supportOverride: ctx.selectedSupport(),
+      showOverrideCounts: false,
+    });
   };
 
   return { node: frag, update, rebuildEngine: () => ctx.rebuildEngine(engineHost) };

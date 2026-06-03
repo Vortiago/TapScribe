@@ -93,7 +93,7 @@ function buildEditor({ key, content, placeholder, overrideCount }) {
  * @param {import('../types.js').AppState} j
  * @param {import('../types.js').ConfigCardCtx} ctx
  */
-export function render(j, { gridEl, headerNoteEl }) {
+export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOverrideCounts = true }) {
   // Bespoke focus guard (shared with the classic dashboard, predates
   // renderRegion). NEW /next per-tick regions should render via renderRegion
   // from templates.js rather than hand-rolling this.
@@ -103,8 +103,22 @@ export function render(j, { gridEl, headerNoteEl }) {
   const p = j.prompt || { path: "", content: "", length: 0 };
   const h = j.hotwords || { path: "", content: "", length: 0 };
   const hl = j.hallucinations || { path: "", rules: [], count: 0 };
-  const support = j.inputs_support || { live_prompt: true, batch_prompt: true, batch_hotwords: true };
-  const counts = j.default_override_counts || { prompt: 0, hotwords: 0 };
+  // Editor gating. By default we use the registry-wide inputs_support (any
+  // installed batch model declaring the input) — that's the classic dashboard.
+  // The Stages Settings view passes `supportOverride` so the prompt/hotwords
+  // editors gate on the ONE model picked in its "Default engine" selector
+  // (Whisper → both; Parakeet/Voxtral → neither), which is what makes that
+  // selector consequential.
+  const baseSupport = j.inputs_support || { live_prompt: true, batch_prompt: true, batch_hotwords: true };
+  const support = supportOverride
+    ? { live_prompt: baseSupport.live_prompt, batch_prompt: supportOverride.batch_prompt, batch_hotwords: supportOverride.batch_hotwords }
+    : baseSupport;
+  // The "N sessions override this" footnote is opt-out (Stages passes false);
+  // zeroing the counts both hides the footnote (buildEditor skips it at 0) and
+  // keeps the signature stable across ticks.
+  const counts = showOverrideCounts
+    ? (j.default_override_counts || { prompt: 0, hotwords: 0 })
+    : { prompt: 0, hotwords: 0 };
   const sig = [
     p.length || 0, p.content || "",
     h.length || 0, h.content || "",

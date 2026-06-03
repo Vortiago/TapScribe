@@ -348,6 +348,13 @@ export interface LiveChannelCtx {
 export interface ConfigCardCtx {
   gridEl: HTMLElement;
   headerNoteEl: HTMLElement;
+  // Stages Settings only: gate the batch prompt/hotwords editors on a SPECIFIC
+  // model's declared inputs (the "Default engine" selection) instead of the
+  // registry-wide inputs_support. Classic dashboard omits it → unchanged.
+  supportOverride?: { batch_prompt: boolean; batch_hotwords: boolean } | null;
+  // Show the "N sessions override this" footnote (default true; Stages passes
+  // false — its global defaults don't surface per-session override counts).
+  showOverrideCounts?: boolean;
 }
 
 export interface SessionSidebarCtx {
