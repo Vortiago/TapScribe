@@ -91,6 +91,14 @@ export function build(ctx) {
     return (want === "stripped" && !s?.stripped) ? "original" : want;
   };
 
+  /** Set a wave-stat value, dimming empty/em-dash placeholders so they recede
+   * while real numbers (clips/speech accent + good) stay bright. */
+  /** @param {HTMLElement} el @param {string} value */
+  const setStat = (el, value) => {
+    el.textContent = value;
+    el.classList.toggle("is-empty", value === "" || value === "—");
+  };
+
   /** Resolve the selected original WAV for the focused session (first if unset). */
   const selectedFor = () => {
     if (!session) return null;
@@ -263,7 +271,7 @@ export function build(ctx) {
 
     if (!sess || !files.length) {
       waveName.textContent = sess ? "no WAVs recorded yet" : "no session selected";
-      for (const v of Object.values(stats)) v.textContent = "—";
+      for (const v of Object.values(stats)) setStat(v, "—");
       wavHint.textContent = "0 files";
       const empty = document.createElement("div");
       empty.className = "empty";
@@ -285,20 +293,20 @@ export function build(ctx) {
     const ls = lastStrip.get(sid);
     if (ls) {
       const kept = ls.in_seconds > 0 ? Math.round(100 * ls.speech_seconds / ls.in_seconds) : 0;
-      stats.clips.textContent = String(ls.files_written ?? 0);
-      stats.speech.textContent = `${Math.round(ls.speech_seconds)}s`;
-      stats.in.textContent = `${Math.round(ls.in_seconds)}s`;
-      stats.kept.textContent = `${kept}%`;
+      setStat(stats.clips, String(ls.files_written ?? 0));
+      setStat(stats.speech, `${Math.round(ls.speech_seconds)}s`);
+      setStat(stats.in, `${Math.round(ls.in_seconds)}s`);
+      setStat(stats.kept, `${kept}%`);
     } else if (stripped) {
-      stats.clips.textContent = String(stripped.count);
-      stats.speech.textContent = `${Math.round(stripped.speech_seconds)}s`;
-      stats.in.textContent = "—";
-      stats.kept.textContent = "—";
+      setStat(stats.clips, String(stripped.count));
+      setStat(stats.speech, `${Math.round(stripped.speech_seconds)}s`);
+      setStat(stats.in, "—");
+      setStat(stats.kept, "—");
     } else {
-      stats.clips.textContent = "—";
-      stats.speech.textContent = "—";
-      stats.in.textContent = "—";
-      stats.kept.textContent = "—";
+      setStat(stats.clips, "—");
+      setStat(stats.speech, "—");
+      setStat(stats.in, "—");
+      setStat(stats.kept, "—");
     }
 
     // Strip + clear button states (busy reflects the job snapshot too).

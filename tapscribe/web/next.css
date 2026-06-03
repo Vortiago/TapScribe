@@ -15,7 +15,7 @@
   --next-r-sm: 2px;
   --next-accent: var(--warn);   /* warm amber: active view + highlights */
   --next-spine-w: 232px;
-  --next-rail-w: 300px;   /* global "active taps" rail; 0 when collapsed */
+  --next-rail-w: 260px;   /* global "active taps" rail; 0 when collapsed */
 }
 
 /* The Stages page reuses dashboard.css's body reset (dark bg, sans, tnum).
@@ -216,6 +216,58 @@ body::before { display: none; }
   display: flex; align-items: center; gap: 6px;
 }
 
+/* ---------------------------------------------------------------------------
+   RAIL tap-row density. The rail reuses active-taps.js verbatim (shared with
+   the Taps view), so this RESTYLES that component's output — no JS edit — but
+   ONLY inside the narrow `#tapsRail` (the Taps view's wider panel keeps the
+   roomier default layout). The default `.taps .stream-row` is a 4-col grid
+   (dot | who | toggles | stats) that, in a 260px rail, stacks REC over LIVE
+   and the byte/buffer/lag meta as ~3 right-aligned lines, leaving a vertical
+   seam of whitespace. Reflow to ~3 tight rows per tap:
+     row 1  dot · name · REC/LIVE chips (one row)
+     row 2  identity (the id line)
+     row 3  size · ~buffer · lag (one dim mono line beneath the id)
+   The `# quiet` buffer status line + the collapse toggle are unchanged. The
+   level meter is dropped here (the buffer status line already signals activity)
+   to keep the tap to three tight rows. Specificity (.rail .taps …) beats both
+   next.css `.taps …` and dashboard.css `.stream-row …`.
+   --------------------------------------------------------------------------- */
+.rail .taps .stream-row {
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "dot who   toggles"
+    ".   meta  meta";
+  align-items: start;
+  gap: 3px 8px;
+  padding: 8px 12px 9px;
+}
+.rail .taps .stream-row > .dot.rec { grid-area: dot; margin-top: 4px; }
+.rail .taps .stream-row > .who { grid-area: who; gap: 2px; }
+.rail .taps .stream-row > .tap-toggles { grid-area: toggles; flex-direction: row; align-self: start; gap: 4px; }
+/* The volume bar is redundant with the buffer status line in this dense rail;
+   drop it so each tap is three tight rows (it stays in the Taps view panel). */
+.rail .taps .level-meter { display: none; }
+/* size · ~buffer · lag on ONE dim mono line beneath the id (was a 3-line
+   right-aligned column). The empty trailing lag wrapper (its span is `hidden`
+   until the relay reports lag) is dropped so it leaves no gap; populated divs
+   get a middot separator. */
+.rail .taps .stream-row > .stats {
+  grid-area: meta;
+  flex-direction: row; flex-wrap: nowrap; align-items: baseline;
+  gap: 0; text-align: left; color: var(--fg-3); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.rail .taps .stream-row > .stats > div { white-space: nowrap; flex: none; }
+.rail .taps .stream-row > .stats > div:has([hidden]) { display: none; }
+.rail .taps .stream-row > .stats > div + div::before {
+  content: "·"; color: var(--hairline); margin: 0 6px;
+}
+/* Dim the neutral size/buffer text (their shared rules paint them bright
+   `--fg-0`/`--fg-2`); the lag keeps its warn/bad hue from the shared rules. */
+.rail .taps .stream-row > .stats .b,
+.rail .taps .stream-row > .stats .m { color: var(--fg-3); }
+.rail .taps .stream-buffer { padding: 2px 12px 0 29px; }
+
 /* Floating "show taps" button — fixed top-right, only while the rail is
    hidden. Reuses the .act cell treatment so it reads as the same surface. */
 .rail-show {
@@ -403,6 +455,9 @@ body::before { display: none; }
 .statcell { background: var(--bg-2); border: 1px solid var(--hairline-2); border-radius: var(--next-r); padding: 8px 10px; }
 .statcell__k { font-size: 8.5px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .06em; }
 .statcell__v { font-family: var(--mono); font-size: 15px; font-weight: 650; color: var(--fg-0); margin-top: 2px; }
+/* Empty/em-dash metrics recede (the label `--fg-3`) so a missing value doesn't
+   shout as loud as a real number — set by views/capture.js::setHealth. */
+.statcell__v.is-empty { color: var(--fg-3); font-weight: 550; }
 
 /* autoscroll label in the captions panel head */
 .autoscroll { display: inline-flex; align-items: center; gap: 4px; font-size: 9.5px; color: var(--fg-3); cursor: pointer; }
@@ -700,6 +755,10 @@ body::before { display: none; }
 .wstat__v { font-family: var(--mono); font-size: 15px; font-weight: 650; line-height: 1.1; color: var(--fg-0); }
 .wstat__v.accent { color: var(--next-accent); }
 .wstat__v.good { color: var(--ok); }
+/* Empty/em-dash stats recede to the label colour (overrides accent/good so a
+   placeholder clips/speech em-dash doesn't keep its bright hue) — set by
+   views/recordings.js::setStat. Declared after accent/good to win on the tie. */
+.wstat__v.is-empty { color: var(--fg-3); font-weight: 550; }
 .wstat__k { font-size: 8.5px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .07em; margin-top: 2px; }
 
 /* waveform cut preview — net-new, not wired. Slimmed to a single banner row

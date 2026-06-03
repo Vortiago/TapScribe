@@ -38,19 +38,19 @@
     <!-- strip-silence: REAL knobs → POST /api/sessions/{session}/strip-silence -->
     <div class="knobbar">
       <div class="kfield">
-        <div class="kfield__top"><span class="kfield__k">min_silence_ms</span><span class="kfield__v" data-slot="kvMinSilence"></span></div>
-        <input type="range" min="100" max="600000" step="100" data-strip-knob="min_silence_ms" data-unit="ms">
-        <div class="kfield__rng"><span>100</span><span>600000</span></div>
+        <div class="kfield__top"><span class="kfield__k">Min silence</span><span class="kfield__v" data-slot="kvMinSilence"></span></div>
+        <input type="range" min="100" max="5000" step="50" data-strip-knob="min_silence_ms" data-unit="ms">
+        <div class="kfield__rng"><span>100 ms</span><span>5000 ms</span></div>
       </div>
       <div class="kfield">
-        <div class="kfield__top"><span class="kfield__k">pad_ms</span><span class="kfield__v" data-slot="kvPad"></span></div>
-        <input type="range" min="0" max="5000" step="50" data-strip-knob="pad_ms" data-unit="ms">
-        <div class="kfield__rng"><span>0</span><span>5000</span></div>
+        <div class="kfield__top"><span class="kfield__k">Padding</span><span class="kfield__v" data-slot="kvPad"></span></div>
+        <input type="range" min="0" max="2000" step="25" data-strip-knob="pad_ms" data-unit="ms">
+        <div class="kfield__rng"><span>0 ms</span><span>2000 ms</span></div>
       </div>
       <div class="kfield">
-        <div class="kfield__top"><span class="kfield__k">speech_floor_db</span><span class="kfield__v" data-slot="kvFloor"></span></div>
+        <div class="kfield__top"><span class="kfield__k">Silence floor</span><span class="kfield__v" data-slot="kvFloor"></span></div>
         <input type="range" min="-120" max="0" step="1" data-strip-knob="speech_floor_db" data-unit="dB">
-        <div class="kfield__rng"><span>-120</span><span>0</span></div>
+        <div class="kfield__rng"><span>-120 dB</span><span>0 dB</span></div>
       </div>
       <div class="knobbar__act">
         <button class="act act--sm act--primary" type="button" data-slot="stripBtn">✂ strip</button>
