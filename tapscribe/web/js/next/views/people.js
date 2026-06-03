@@ -39,18 +39,42 @@ const spkClass = (spk) => `spk-${((spk % 5) + 5) % 5}`;
 const initials = (s) => (s || "?").trim().slice(0, 2).toUpperCase() || "?";
 
 /**
+ * Recover the speaker slug from a recorder filename — the JS mirror of
+ * `parse_wav_speaker_slug` (tapscribe/text.py). Recorder names follow
+ * `<iso>_<speaker_slug>_<ident>_<uuid8>.wav`, so the slug is the middle chunk
+ * between the leading timestamp and the trailing `<ident>_<uuid8>`. Returns ""
+ * for anything that isn't a real recorded name (e.g. an active stream whose
+ * record flag is off carries `filename = "(record off)"`).
+ * @param {string} filename
+ */
+function speakerSlugFromFilename(filename) {
+  const base = (filename || "").replace(/\.[^.]*$/, "");
+  const parts = base.split("_");
+  if (parts.length < 4) return "";
+  return parts.slice(1, -2).join("_");
+}
+
+/**
  * Speaker identities actually present in `s`, mirroring session-detail's
  * deriveSpeakerKeys: the merged transcript's speakers[] + per-WAV
- * speaker_name. For the CURRENT session we also fold in the live active[]
- * identities so a recording-but-not-yet-transcribed session still lists who's
- * talking. Each carries whether it's live for the source badge.
+ * speaker_name. For the CURRENT session we also fold in live active[] streams
+ * so a recording-but-not-yet-transcribed session still lists who's talking —
+ * but ONE row per human, not two. The recorded key is the speaker slug
+ * (`speaker_name` = parse_wav_speaker_slug(filename), e.g. "Atle_Havso"),
+ * which is also the key the alias editor saves under; a live stream's
+ * `identity` ("atle") is a DIFFERENT token for the same person. We bridge them
+ * via the active stream's `filename`, which is the canonical recorder name, so
+ * the slug we parse from it is exactly the recorded `speaker_name`. A live
+ * stream that maps onto a recorded speaker just flips that existing row live
+ * (preferring the canonical recorded key so naming still writes the right
+ * alias); only a live identity with no recorded counterpart adds its own row.
  * @param {import('../../types.js').AppState} j
  * @param {import('../../types.js').Session} s
  * @returns {{ id: string, live: boolean }[]}
  */
 function deriveParticipants(j, s) {
   /** @type {Map<string, boolean>} */
-  const seen = new Map(); // id → live (active in the current session right now)
+  const seen = new Map(); // canonical key → live (active right now)
   const add = /** @param {string} id @param {boolean} live */ (id, live) => {
     if (!id) return;
     seen.set(id, (seen.get(id) ?? false) || live);
@@ -58,7 +82,20 @@ function deriveParticipants(j, s) {
   const t = s.session_transcript;
   if (t && Array.isArray(t.speakers)) for (const sp of t.speakers) add(sp, false);
   for (const f of (s.files || [])) if (f.speaker_name) add(f.speaker_name, false);
-  if (s.is_current) for (const a of (j.active || [])) add(a.identity, a.live !== false);
+  // The recorded speaker keys we already have — a live stream that resolves to
+  // one of these must NOT add a second (identity-keyed) row for the same human.
+  const recordedKeys = new Set(seen.keys());
+  if (s.is_current) {
+    for (const a of (j.active || [])) {
+      const live = a.live !== false;
+      // Prefer the recorded slug parsed from this stream's filename: when it
+      // matches a recorded speaker we flip that canonical row live instead of
+      // emitting a duplicate. Otherwise (no recording yet / record off) fall
+      // back to the identity, which becomes this person's single row.
+      const slug = speakerSlugFromFilename(a.filename);
+      add(slug && recordedKeys.has(slug) ? slug : (slug || a.identity), live);
+    }
+  }
   return [...seen.entries()].map(([id, live]) => ({ id, live })).sort((a, b) => a.id.localeCompare(b.id));
 }
 

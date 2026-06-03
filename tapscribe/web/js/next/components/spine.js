@@ -49,6 +49,21 @@ function globalDefs(j, sess) {
 }
 
 /**
+ * The three REAL session milestones, each reflecting its own deliverable —
+ * shared by journeyDefs (per-stage ✓) and the progress fill so the bar and
+ * the checkmarks can't disagree. Summary is a mock stage with no backend and
+ * is deliberately NOT a milestone (it can never be "done").
+ * @param {import('../../types.js').Session | null} sess
+ */
+function realMilestones(sess) {
+  return {
+    captured: (sess?.wav_count || 0) > 0,   // audio actually recorded
+    stripped: !!sess?.stripped,             // silence-stripped clips exist
+    transcribed: !!sess?.session_transcript, // a merged transcript exists
+  };
+}
+
+/**
  * @param {import('../../types.js').AppState} j
  * @param {import('../../types.js').Session | null} sess
  * @returns {NavDef[]}
@@ -57,27 +72,32 @@ function journeyDefs(j, sess) {
   const isCurrent = !!sess?.is_current;
   const liveCount = isCurrent ? (j.active || []).filter((a) => a.live !== false).length : 0;
   const wavCount = sess?.wav_count || 0;
-  const stripped = !!sess?.stripped;
   const tx = sess?.session_transcript || null;
   const suppressed = tx?.suppressed_count || 0;
+  const { captured, stripped, transcribed } = realMilestones(sess);
   return [
     {
+      // Done once audio has actually been captured — NOT once the session is
+      // archived. The session you're actively recording is "done capturing"
+      // the moment it has WAVs; its chip then shows live/idle for liveness.
       id: "capture", name: "Capture", lead: "1", numbered: true,
-      done: !!sess && !isCurrent,
+      done: captured,
       chip: !sess ? { tone: "mute", text: "no session" }
-        : isCurrent ? (liveCount ? { tone: "live", text: `${liveCount} live` } : { tone: "mute", text: "idle" })
-          : { tone: "good", text: "archived" },
+        : isCurrent ? (liveCount ? { tone: "live", text: `${liveCount} live` } : captured ? { tone: "good", text: "captured" } : { tone: "mute", text: "idle" })
+          : captured ? { tone: "good", text: `${wavCount} WAVs` } : { tone: "mute", text: "no audio" },
     },
     {
+      // Done when silence has been stripped (its own deliverable) — NOT when a
+      // transcript exists. Chip tone matches: green only once stripped.
       id: "recordings", name: "Recordings", lead: "2", numbered: true,
-      done: !!tx,
+      done: stripped,
       chip: !wavCount ? { tone: "mute", text: "no WAVs" }
-        : stripped ? { tone: "good", text: `${wavCount} WAVs` }
+        : stripped ? { tone: "good", text: `${wavCount} stripped` }
           : { tone: "warn", text: `${wavCount} to strip` },
     },
     {
       id: "transcript", name: "Transcript", lead: "3", numbered: true,
-      done: !!tx,
+      done: transcribed,
       chip: tx
         ? (suppressed ? { tone: "warn", text: `${suppressed} suppressed` } : { tone: "good", text: "merged" })
         : { tone: "mute", text: "not run" },
@@ -183,14 +203,18 @@ export function render(host, j, ctx) {
     const jdefs = journeyDefs(j, session);
     for (const d of jdefs) jnav.appendChild(navItem(d, currentView, onSelectView));
 
-    // Progress fill — journey views advance it; global views show "—".
-    const idx = jdefs.findIndex((d) => d.id === currentView);
-    const onJourney = idx >= 0;
-    const fillPct = onJourney ? Math.round(((idx + 1) / jdefs.length) * 100) : 0;
+    // Progress fill — driven by how many of the session's REAL milestones
+    // (captured → stripped → transcribed) are actually done, NOT by which tab
+    // is selected. Summary is a mock stage with no backend, so it's excluded:
+    // an empty session reads 0% and a transcribed one reads 100% of real work.
+    const ms = realMilestones(session);
+    const realStages = 3; // captured, stripped, transcribed
+    const reached = (ms.captured ? 1 : 0) + (ms.stripped ? 1 : 0) + (ms.transcribed ? 1 : 0);
+    const fillPct = Math.round((reached / realStages) * 100);
     /** @type {HTMLElement} */ (pick(frag, "journeyFill")).style.width = `${fillPct}%`;
-    pick(frag, "journeyCap").textContent = onJourney
-      ? `Stage ${idx + 1} of ${jdefs.length} · ${fillPct}%`
-      : (GLOBAL_VIEWS.includes(currentView) ? "Global view" : "Session journey");
+    pick(frag, "journeyCap").textContent = session
+      ? `${reached}/${realStages} stages · ${fillPct}%`
+      : (GLOBAL_VIEWS.includes(currentView) ? "Global view" : "no session");
 
     return frag;
   };
