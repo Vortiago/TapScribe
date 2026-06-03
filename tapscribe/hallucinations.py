@@ -34,7 +34,9 @@ _NESTED_QUANTIFIER_RE = re.compile(r"[+*]\)[+*]")
 # per transcribe; re-reading the file and recompiling every regex each time is
 # pure CPU waste when the operator-edited file rarely changes. Any write goes
 # through an atomic replace, which moves the stat signature and invalidates.
-_RULES_CACHE: tuple[tuple | None, list[dict[str, Any]]] | None = None
+# A mutated dict (rather than a rebound scalar global) so it follows the same
+# shape as the other poll caches and avoids a dead-store on the `global` write.
+_RULES_CACHE: dict[str, Any] = {}
 
 
 def _rules_file_sig() -> tuple | None:
@@ -62,12 +64,12 @@ def parse_rules() -> list[dict[str, Any]]:
     returned list is shared and treated read-only by every caller — callers
     that need to own it (e.g. the batch invocation) copy it themselves.
     """
-    global _RULES_CACHE
     sig = _rules_file_sig()
-    if sig is not None and _RULES_CACHE is not None and _RULES_CACHE[0] == sig:
-        return _RULES_CACHE[1]
+    if sig is not None and _RULES_CACHE.get("sig") == sig:
+        return _RULES_CACHE["rules"]
     rules = _parse_rules_uncached()
-    _RULES_CACHE = (sig, rules)
+    _RULES_CACHE["sig"] = sig
+    _RULES_CACHE["rules"] = rules
     return rules
 
 

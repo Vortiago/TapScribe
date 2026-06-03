@@ -41,7 +41,7 @@ def _clear_poll_caches():
         sessions._WAV_DESC_CACHE.clear()
         sessions._SESSION_JSON_CACHE.clear()
         text._CONFIG_TEXT_CACHE.clear()
-        hallucinations._RULES_CACHE = None
+        hallucinations._RULES_CACHE.clear()
         catalog._FIND_SPEC_CACHE.clear()
 
     _reset()
