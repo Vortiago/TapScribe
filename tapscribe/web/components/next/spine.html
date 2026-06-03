@@ -27,9 +27,24 @@
   </div>
 
   <div class="spine__foot">
+    <!-- Session Information — editable name + at-a-glance stats for the focused
+         session, always visible so renaming isn't buried in the Sessions view. -->
+    <div class="sessinfo" data-slot="sessInfo"></div>
     <div class="journey"><div class="journey__fill" data-slot="journeyFill"></div></div>
     <div class="journey__cap" data-slot="journeyCap"></div>
   </div>
+</template>
+
+<!-- Session Information card (spine foot): editable name + compact stats for the
+     focused session. The name input persists via PUT /api/session-meta/{id}. -->
+<template id="tpl-next-sessinfo">
+  <div class="sessinfo__head">
+    <span class="sessinfo__lab">Session</span>
+    <span class="sessinfo__status mono" data-slot="status"></span>
+  </div>
+  <input class="sessinfo__name" type="text" data-slot="name" autocomplete="off" spellcheck="false" aria-label="Session name">
+  <div class="sessinfo__stats mono" data-slot="stats"></div>
+  <div class="sessinfo__id mono" data-slot="id"></div>
 </template>
 
 <!-- One nav entry — shared by GLOBAL items and the numbered journey stages.

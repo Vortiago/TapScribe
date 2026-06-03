@@ -6,8 +6,42 @@
 // real data where we have it.
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { fmtSessionLabel } from "../../formatters.js";
+import { putJson } from "../../api.js";
+import { fmtSessionLabel, fmtDur } from "../../formatters.js";
 import { GLOBAL_VIEWS, JOURNEY_VIEWS } from "../shell.js";
+
+// Optimistic rename overlay (sid → edited label) so a rename typed in the
+// Session Information card shows instantly in the name field AND the session
+// picker, without waiting for the next /api/state poll. Cleared per session once
+// the server's meta catches up (see buildSessInfo).
+/** @type {Map<string, string>} */
+const localLabels = new Map();
+/** @type {Map<string, ReturnType<typeof setTimeout>>} */
+const labelSaveTimers = new Map();
+
+/**
+ * Debounced PUT /api/session-meta/{sid} {label}. The server merges partial meta,
+ * so aliases/prompt/hotwords are preserved. Mirrors sessions.js's rename save.
+ * @param {string} sid @param {HTMLElement} statusEl
+ */
+function persistLabel(sid, statusEl) {
+  clearTimeout(labelSaveTimers.get(sid));
+  labelSaveTimers.set(sid, setTimeout(async () => {
+    labelSaveTimers.delete(sid);
+    const label = localLabels.get(sid);
+    if (label == null) return;
+    statusEl.textContent = "saving…";
+    try {
+      await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { label });
+      if (statusEl.textContent === "saving…") {
+        statusEl.textContent = "saved";
+        setTimeout(() => { if (statusEl.textContent === "saved") statusEl.textContent = ""; }, 1400);
+      }
+    } catch (e) {
+      statusEl.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+    }
+  }, 600));
+}
 
 /**
  * @typedef {{ tone: "live"|"good"|"warn"|"mute", text: string }} Chip
@@ -157,6 +191,47 @@ function navItem(d, currentView, onSelect) {
 }
 
 /**
+ * Build the Session Information card (spine foot): editable name + compact
+ * stats for the focused session. Wires the name input to a debounced rename
+ * with an optimistic overlay; renderRegion keeps the input alive while it's
+ * focused so a poll tick can't wipe an in-progress edit.
+ * @param {import('../../types.js').Session} session
+ * @param {(s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta} metaFor
+ */
+function buildSessInfo(session, metaFor) {
+  const sid = session.session;
+  // Drop the optimistic overlay once the server's meta reflects the save.
+  if (localLabels.has(sid) && metaFor(session).label === localLabels.get(sid)) {
+    localLabels.delete(sid);
+  }
+  const card = tpl("tpl-next-sessinfo");
+  const nameInput = /** @type {HTMLInputElement} */ (pick(card, "name"));
+  const statusEl = pick(card, "status");
+
+  nameInput.value = localLabels.get(sid) ?? metaFor(session).label ?? "";
+  nameInput.placeholder = fmtSessionLabel(sid) || "name this session";
+  nameInput.addEventListener("input", () => {
+    localLabels.set(sid, nameInput.value);
+    persistLabel(sid, statusEl);
+  });
+
+  const live = !!session.is_current;
+  statusEl.textContent = live ? "● live" : "idle";
+  statusEl.classList.add(live ? "is-live" : "is-idle");
+
+  const files = session.files || [];
+  const totalDur = files.reduce((a, f) => a + (f.duration_s || 0), 0);
+  const wn = session.wav_count || files.length;
+  const tx = session.session_transcript ? "tx ✓" : "no tx";
+  pick(card, "stats").textContent = `${wn} WAV${wn === 1 ? "" : "s"} · ${fmtDur(totalDur)} · ${tx}`;
+
+  const idEl = pick(card, "id");
+  idEl.textContent = sid;
+  idEl.title = sid;
+  return card;
+}
+
+/**
  * @param {Element} host
  * @param {import('../../types.js').AppState} j
  * @param {{
@@ -190,7 +265,7 @@ export function render(host, j, ctx) {
     } else {
       for (const s of sessions) {
         const meta = metaFor(s);
-        const label = meta.label || fmtSessionLabel(s.session) || s.session;
+        const label = (localLabels.get(s.session) ?? meta.label) || fmtSessionLabel(s.session) || s.session;
         const tag = s.is_current ? " ● live" : s.session_transcript ? " · tx" : "";
         const opt = new Option(`${label}${tag}`, s.session, false, s.session === session?.session);
         pickSel.add(opt);
@@ -221,6 +296,16 @@ export function render(host, j, ctx) {
     pick(frag, "journeyCap").textContent = session
       ? `${reached}/${realStages} stages · ${fillPct}%`
       : (GLOBAL_VIEWS.includes(currentView) ? "Global view" : "no session");
+
+    // Session Information card (foot) — editable name + stats, or a muted
+    // placeholder when no session is focused.
+    const sessInfoHost = pick(frag, "sessInfo");
+    if (session) {
+      sessInfoHost.appendChild(buildSessInfo(session, metaFor));
+    } else {
+      sessInfoHost.classList.add("is-empty");
+      sessInfoHost.textContent = "no session — pick or start one above";
+    }
 
     return frag;
   };
