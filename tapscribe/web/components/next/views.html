@@ -199,28 +199,43 @@
 </template>
 
 <!-- ===================== GLOBAL · SETTINGS ===================== -->
+<!-- Two clearly-separated engine cards so live vs batch is never ambiguous:
+     LIVE (streaming model + live initial prompt) on top, BATCH (recordings
+     model + batch prompt + hotwords + hallucination filter) filling below.
+     Each card's prompt/hotwords gate on THAT card's selected model. The live
+     model is a saved DEFAULT — the card flags "restart to apply" when it
+     differs from the running channel (live_info.model). Built by
+     js/next/views/settings.js. -->
 <template id="tpl-next-view-settings">
   <div data-slot="head"></div>
-  <!-- A balanced two-column board that fills width AND height: the default
-       engine (left) + the prompts/hotwords/hallucination card (right). Both
-       columns fill down to the footer (the #1 fix); the config card lays its
-       prompt/hotwords editors side-by-side and the hallucination rules across
-       the bottom so it uses the wider column (next.css `.cfg-grid`). -->
-  <div class="grid cols-settings fillcol">
-    <!-- LEFT: default engine (backend chips + compact model dropdown + Canary).
-         KEEP the dropdown — the operator chose it over the grouped list. -->
-    <div class="panel panel--primary panel--fill">
-      <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Default engine</div><div class="panel__hint">backend · model · translation</div></div>
-      <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
-    </div>
 
-    <!-- RIGHT: prompts / hotwords / hallucination rules (reuses config-card.js).
-         Title shortened to one line ("Prompts & rules") so the panel header
-         doesn't wrap. -->
-    <div class="panel panel--fill">
-      <div class="panel__head"><div class="panel__title"><span class="ic">✍️</span>Prompts &amp; rules</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
-      <div class="panel__body"><div class="cfg-grid" data-slot="configGrid"></div></div>
-    </div>
+  <!-- LIVE engine — streaming model + initial prompt. renderRegion-guarded: it
+       holds a <select> + <textarea> rebuilt each poll tick. -->
+  <div class="panel panel--accent">
+    <div class="panel__head"><div class="panel__title"><span class="ic">📡</span>Live engine</div><div class="panel__hint">streaming · model + initial prompt</div></div>
+    <div class="panel__body"><div class="liveeng" data-slot="liveCardHost"></div></div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- BATCH engine — recordings model + batch prompt + hotwords + hallucination
+       filter (reuses engine.js + config-card.js). Fills the rest of the height. -->
+  <div class="panel panel--primary panel--fill">
+    <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Batch engine</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
+    <div class="panel__body"><div class="eng" data-slot="engineHost"></div><div class="cfg-grid" data-slot="configGrid" style="margin-top:11px"></div></div>
+  </div>
+</template>
+
+<!-- Live engine card content (renderRegion target): the model row, the
+     "restart to apply" affordance, and the live-prompt editor. Rebuilt per
+     tick; the swap is skipped while a control inside is focused. -->
+<template id="tpl-next-liveeng">
+  <div data-slot="modelRow"></div>
+  <div class="liveeng__restart" data-slot="restart" hidden></div>
+  <div class="field" data-slot="promptField" style="margin-top:11px">
+    <label>live initial prompt <span class="dim">(applied to whisperlivekit on restart)</span></label>
+    <textarea class="ta" rows="3" data-slot="promptTa" data-cfg-key="live-prompt" placeholder="terse always-on context for the live channel"></textarea>
+    <div class="field__row"><button class="act act--sm" type="button" data-slot="promptSave">save</button><span class="dim mono" data-slot="promptStatus"></span></div>
   </div>
 </template>
 

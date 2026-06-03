@@ -77,9 +77,11 @@ from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
     read_hotwords,
+    read_live_model,
     read_live_prompt,
     read_prompt,
     write_hotwords,
+    write_live_model,
     write_live_prompt,
     write_prompt,
 )
@@ -128,6 +130,7 @@ def _compute_inputs_support() -> dict[str, bool]:
 _CONFIG_WRITERS = {
     "prompt": write_prompt,
     "live-prompt": write_live_prompt,
+    "live-model": write_live_model,
     "hotwords": write_hotwords,
 }
 
@@ -394,6 +397,7 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
         "sessions": gather_sessions(current_session=current_session, jobs=jobs_snapshot),
         "prompt": read_prompt(),
         "live_prompt": read_live_prompt(),
+        "live_model_default": read_live_model(),
         "hotwords": read_hotwords(),
         "halluc_rules": hallucinations_mod.parse_rules(),
         "inputs_support": _compute_inputs_support(),
@@ -459,6 +463,7 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
             "length": len(hotwords),
         },
         "inputs_support": inputs_support,
+        "live_model_default": blob["live_model_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "rules": [r["raw"] for r in halluc_rules],

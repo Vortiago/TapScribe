@@ -163,6 +163,15 @@ const liveStop = async () => {
   catch (e) { alert(`Live stop failed: ${e}`); }
   finally { await refresh(); }
 };
+// Restart the live channel with a specific model — the Settings Live card's
+// "apply (restart)". Sends ONLY the model; the server keeps the rest of the
+// live config (omitted fields = "unchanged"), matching the classic apply.
+/** @param {string} model */
+const applyLiveModel = async (model) => {
+  try { await postJson("/api/live/start", { model }); }
+  catch (e) { alert(`Live start/restart failed: ${e}`); }
+  finally { await refresh(); }
+};
 
 // ---- Active-taps rail -------------------------------------------------------
 // The global, collapsible right rail. Hosts the reused active-taps component
@@ -308,6 +317,9 @@ function buildView(view, session) {
     const b = settingsView.build({
       rebuildEngine: renderDefaultEngine,
       selectedSupport: defaultEngineSupport,
+      liveCatalog: liveModelCatalog,
+      applyLiveModel,
+      afterMutate: () => { refresh(); },
     });
     return { ...b, update: (j) => b.update(j), key: "settings" };
   }

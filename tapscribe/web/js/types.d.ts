@@ -28,6 +28,10 @@ export interface AppState {
   recording_enabled: boolean;
   prompt: ConfigFile;
   live_prompt: ConfigFile;
+  // Operator's saved DEFAULT live-channel model id (live-model.txt); "" when
+  // unset. Distinct from live_info.model (what's actually running) — the Live
+  // engine card flags "restart to apply" while they differ.
+  live_model_default: string;
   hotwords: ConfigFile;
   inputs_support: InputsSupport;
   hallucinations: HallucinationsConfig;

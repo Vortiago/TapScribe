@@ -503,6 +503,16 @@ body::before { display: none; }
 .eng { display: grid; gap: 13px; }
 .eng-row { display: flex; flex-direction: column; gap: 6px; }
 .eng-cap { font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-3); font-weight: 600; }
+
+/* Live engine card (Settings) — "restart to apply" row: the saved default
+   model differs from the running channel, mirroring the classic apply button. */
+.liveeng__restart {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 9px; padding: 7px 9px;
+  border: 1px solid var(--warn); border-radius: var(--next-r-sm);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+}
+.restartnote { font-size: 10px; color: color-mix(in srgb, var(--warn) 80%, var(--fg-0)); }
 .chips { display: flex; gap: 5px; flex-wrap: wrap; }
 .next-app .chip {
   font-size: 10.5px; font-family: var(--mono);
