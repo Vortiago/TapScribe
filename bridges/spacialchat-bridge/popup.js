@@ -18,9 +18,10 @@ function httpScheme() { return currentUseTls ? "https" : "http"; }
 function wsScheme()   { return currentUseTls ? "wss" : "ws"; }
 
 async function load() {
-  const { recorderHost, recorderPort, tapToken, useTls } = await chrome.storage.local.get(
-    ["recorderHost", "recorderPort", "tapToken", "useTls"],
-  );
+  const { recorderHost, recorderPort, tapToken, useTls, autoNewSessionOnRoomChange } =
+    await chrome.storage.local.get(
+      ["recorderHost", "recorderPort", "tapToken", "useTls", "autoNewSessionOnRoomChange"],
+    );
   currentHost = (recorderHost || "localhost").trim();
   currentPort = Number(recorderPort) || 8001;
   currentTapToken = (tapToken || "").trim();
@@ -29,14 +30,17 @@ async function load() {
   $("port").value = String(currentPort);
   $("tapToken").value = currentTapToken;
   $("useTls").checked = currentUseTls;
+  $("autoNewSessionOnRoomChange").checked = !!autoNewSessionOnRoomChange;
   await refresh();
 }
 
-function setSaveStatus(text, kind) {
-  const el = $("saveStatus");
+function setStatus(id, text, kind) {
+  const el = $(id);
   el.textContent = text;
   el.className = "status " + (kind || "");
 }
+
+function setSaveStatus(text, kind) { setStatus("saveStatus", text, kind); }
 
 function setPill(id, ok, label) {
   const el = $(id);
@@ -53,6 +57,35 @@ async function probeHealth(host, port, signal) {
     return { ok: true, body, url };
   } catch (e) {
     return { ok: false, error: String(e && e.message || e), url };
+  }
+}
+
+// POST /api/tap/new-session with the tap token as a bearer header. The
+// recorder rotates to a fresh session folder and prunes empty ones. Same
+// token as the /tap WS, but over an HTTP header — fetch can set headers,
+// whereas the WS handshake can't, which is why /tap uses the subprotocol
+// slot and this uses Authorization: Bearer.
+async function postNewSession() {
+  const url = httpScheme() + "://" + currentHost + ":" + currentPort + "/api/tap/new-session";
+  const headers = currentTapToken ? { Authorization: "Bearer " + currentTapToken } : {};
+  setStatus("newSessionStatus", "Starting new session…", "");
+  const ctrl = new AbortController();
+  const tmo = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const r = await fetch(url, { method: "POST", headers, signal: ctrl.signal });
+    if (!r.ok) {
+      setStatus("newSessionStatus", "New session failed (HTTP " + r.status + ").", "err");
+      return;
+    }
+    const body = await r.json().catch(() => ({}));
+    const label = body && body.rotated === false
+      ? "Already on a fresh session — nothing to rotate."
+      : "New session started" + (body && body.current ? " (" + body.current + ")" : "") + ".";
+    setStatus("newSessionStatus", label, "ok");
+  } catch (e) {
+    setStatus("newSessionStatus", "New session failed: " + String(e && e.message || e), "err");
+  } finally {
+    clearTimeout(tmo);
   }
 }
 
@@ -257,6 +290,14 @@ $("save").addEventListener("click", async () => {
 });
 
 $("recheck").addEventListener("click", probeAll);
+
+$("newSession").addEventListener("click", postNewSession);
+
+// Persist the room-change toggle immediately (not gated on Save) so
+// content.js picks it up via chrome.storage.onChanged without a tab reload.
+$("autoNewSessionOnRoomChange").addEventListener("change", () => {
+  chrome.storage.local.set({ autoNewSessionOnRoomChange: $("autoNewSessionOnRoomChange").checked });
+});
 
 $("openDash").addEventListener("click", (ev) => {
   ev.preventDefault();

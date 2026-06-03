@@ -354,6 +354,83 @@ def test_new_session_rotates_recorder_session(client, recorder_under_test):
     assert body["previous"] == prev
 
 
+def test_new_session_prunes_empty_sessions(client, recorder_under_test):
+    """Rotating via the dashboard button now sweeps stale empty sessions,
+    while WAV-bearing folders survive."""
+    cur = recorder_under_test.session_dir
+    cur.mkdir(parents=True, exist_ok=True)
+    _seed_wav(cur / "cur.wav")
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
+    r = client.post("/api/new-session")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "2020-01-01T00-00-00Z" in body["pruned"]["pruned"]
+    assert not empty.exists()  # empty session swept
+    assert cur.exists()  # WAV-bearing previous session kept
+
+
+def test_tap_new_session_rotates_without_pruning(client, recorder_under_test):
+    """The bridge-facing endpoint rotates (when the current session has audio)
+    but — unlike the dashboard — does NOT prune: deleting folders stays a
+    Basic-auth action. Auth is disabled in this fixture, so no header needed."""
+    cur = recorder_under_test.session_dir
+    cur.mkdir(parents=True, exist_ok=True)
+    _seed_wav(cur / "cur.wav")
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
+    prev = recorder_under_test.session_start
+    r = client.post("/api/tap/new-session")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["rotated"] is True
+    # NB: _utc_session_id() has 1s resolution, so a same-second rotation can
+    # reuse the id — assert on the rotated flag + previous, not current != prev.
+    assert body["previous"] == prev
+    assert recorder_under_test.session_start == body["current"]
+    assert "pruned" not in body  # tap path never prunes
+    assert empty.exists()  # the empty session is NOT deleted by the tap path
+    assert cur.exists()
+
+
+def test_tap_new_session_noop_when_current_empty(client, recorder_under_test):
+    """A fresh/empty current session means a tap-initiated rotation is a
+    no-op — don't churn the session-id timestamp (and never delete)."""
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
+    prev = recorder_under_test.session_start
+    r = client.post("/api/tap/new-session")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["rotated"] is False
+    assert body["current"] == prev
+    assert recorder_under_test.session_start == prev
+    assert "pruned" not in body
+    assert empty.exists()  # the tap path leaves empties alone
+
+
+def test_prune_empty_endpoint_still_works(client, recorder_under_test):
+    """Refactor guard: /api/sessions/prune-empty still returns the
+    documented shape and preserves labelled sessions."""
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
+    labelled = recorder_under_test.recordings_dir / "2020-02-02T00-00-00Z"
+    labelled.mkdir()
+    (labelled / "session-meta.json").write_text('{"label": "keep me"}')
+    r = client.post("/api/sessions/prune-empty")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "2020-01-01T00-00-00Z" in body["pruned"]
+    assert body["count"] == 1
+    assert body["failed"] == []
+    assert not empty.exists()
+    assert labelled.exists()  # operator label keeps a WAV-less session
+
+
 # ---------------------------------------------------------------------------
 # /api/state
 # ---------------------------------------------------------------------------

@@ -161,7 +161,9 @@ function loadPageScript({
     Blob: function Blob() { return {}; },
     crypto: { randomUUID: () => "u-" + Math.random().toString(36).slice(2) },
     console: { log: () => {}, warn: () => {}, error: () => {} },
-    setInterval: () => 0,          // disable the 250ms room poll
+    // Capture the 250ms room-poll callback (don't auto-run it) so a test
+    // can drive a deterministic room swap via sandbox.__pollFn().
+    setInterval: (fn) => { sandbox.__pollFn = fn; return 0; },
     clearInterval: () => {},
     setTimeout: (fn, _ms) => { fn(); return 0; },
     clearTimeout: () => {},
@@ -505,5 +507,53 @@ test("tap setup failure surfaces as ctx-state='failed' so the popup banner fires
   assert.equal(
     findMessages(env.posted, "tap-start", "g").length, 0,
     "no tap-start when audio graph couldn't be built",
+  );
+});
+
+// ---- room-changed (drives the opt-in "new session on room change") --------
+// page-script emits a single `room-changed` when SpatialChat swaps
+// window.room for a fresh connected instance — and ONLY then. Opening the
+// tab (first attach) or leaving a room (disconnect) must stay silent, else
+// the bridge would rotate the recorder's session at the wrong moments.
+
+test("first room attach does NOT emit room-changed", async () => {
+  const env = loadPageScript({ startWithRoom: true });
+  await flush();
+  assert.equal(
+    findMessages(env.posted, "room-changed").length, 0,
+    "opening the tab is not a room change",
+  );
+});
+
+test("swapping window.room emits exactly one room-changed", async () => {
+  const env = loadPageScript({ startWithRoom: true });
+  await flush();
+  assert.equal(findMessages(env.posted, "room-changed").length, 0);
+
+  // SpatialChat replaces window.room with a fresh connected Room when the
+  // user moves rooms; re-run the captured poll fn against the new instance.
+  env.sandbox.window.room = makeRoom();
+  env.sandbox.__pollFn();
+  await flush();
+
+  assert.equal(
+    findMessages(env.posted, "room-changed").length, 1,
+    "exactly one room-changed on a real swap",
+  );
+});
+
+test("leaving a room (disconnect) does NOT emit room-changed", async () => {
+  const env = loadPageScript({ startWithRoom: true });
+  await flush();
+
+  // Attached room drops to disconnected: the bridge tears down taps but a
+  // departure is not a new-room arrival.
+  env.room.state = "disconnected";
+  env.sandbox.__pollFn();
+  await flush();
+
+  assert.equal(
+    findMessages(env.posted, "room-changed").length, 0,
+    "leaving a room is not a room change",
   );
 });
