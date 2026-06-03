@@ -36,7 +36,7 @@
 <!-- ===================== SESSION · 1 CAPTURE ===================== -->
 <template id="tpl-next-view-capture">
   <div data-slot="head"></div>
-  <div class="grid cols-cap">
+  <div class="grid cols-cap fillcol">
     <!-- PRIMARY: live IRC captions (reuses live-feed.js) -->
     <div class="panel panel--primary livecap">
       <div class="panel__head">
@@ -114,11 +114,14 @@
      js/next/views/transcript.js, which owns the REAL transcribe wiring. -->
 <template id="tpl-next-view-transcript">
   <div data-slot="head"></div>
-  <div class="grid cols-tx">
-    <!-- PRIMARY: the merged transcript (reuses merged-transcript.js) -->
-    <div class="panel panel--primary">
+  <div class="grid cols-tx fillcol">
+    <!-- PRIMARY: the merged transcript (reuses merged-transcript.js). Fills the
+         column height; the transcript lines scroll inside it and are capped to
+         a comfortable measure (next.css `.txbody`) so they don't run the full
+         panel width like a log dump. -->
+    <div class="panel panel--primary panel--fill txpanel">
       <div class="panel__head"><div class="panel__title"><span class="ic">📝</span>Merged transcript</div><div class="panel__hint mono" data-slot="txHint"></div></div>
-      <div class="panel__body flush"><div data-slot="mergedHost"></div></div>
+      <div class="panel__body flush txbody"><div data-slot="mergedHost"></div></div>
     </div>
 
     <!-- CONTROL COLUMN: engine selector + transcribe + per-WAV cache. -->
@@ -162,7 +165,7 @@
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel panel--fill">
         <div class="panel__head"><div class="panel__title"><span class="ic">🗂️</span>Transcript cache</div><div class="panel__hint mono" data-slot="cacheHint"></div></div>
         <div class="panel__body flush"><div class="cache" data-slot="cacheBody"></div></div>
       </div>
@@ -198,19 +201,25 @@
 <!-- ===================== GLOBAL · SETTINGS ===================== -->
 <template id="tpl-next-view-settings">
   <div data-slot="head"></div>
-  <div class="grid cols-tx">
-    <!-- LEFT: default engine (backend chips + model-by-family + Canary). -->
-    <div class="panel panel--primary">
+  <!-- A balanced two-column board that fills width AND height: the default
+       engine (left) + the prompts/hotwords/hallucination card (right). Both
+       columns fill down to the footer (the #1 fix); the config card lays its
+       prompt/hotwords editors side-by-side and the hallucination rules across
+       the bottom so it uses the wider column (next.css `.cfg-grid`). -->
+  <div class="grid cols-settings fillcol">
+    <!-- LEFT: default engine (backend chips + compact model dropdown + Canary).
+         KEEP the dropdown — the operator chose it over the grouped list. -->
+    <div class="panel panel--primary panel--fill">
       <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Default engine</div><div class="panel__hint">backend · model · translation</div></div>
       <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
     </div>
 
-    <!-- RIGHT: prompts / hotwords / hallucination rules (reuses config-card.js). -->
-    <div class="aside">
-      <div class="panel">
-        <div class="panel__head"><div class="panel__title"><span class="ic">✍️</span>Prompts, hotwords &amp; rules</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
-        <div class="panel__body"><div class="cfg-grid" data-slot="configGrid"></div></div>
-      </div>
+    <!-- RIGHT: prompts / hotwords / hallucination rules (reuses config-card.js).
+         Title shortened to one line ("Prompts & rules") so the panel header
+         doesn't wrap. -->
+    <div class="panel panel--fill">
+      <div class="panel__head"><div class="panel__title"><span class="ic">✍️</span>Prompts &amp; rules</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
+      <div class="panel__body"><div class="cfg-grid" data-slot="configGrid"></div></div>
     </div>
   </div>
 </template>

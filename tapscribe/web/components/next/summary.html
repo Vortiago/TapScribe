@@ -9,9 +9,10 @@
 <template id="tpl-next-view-summary">
   <div data-slot="head"></div>
 
-  <div class="grid cols-tx">
-    <!-- LEFT: a sample summary OUTPUT (placeholder content). -->
-    <div class="panel panel--primary">
+  <div class="grid cols-tx fillcol">
+    <!-- LEFT: a sample summary OUTPUT (placeholder content). Fills the column
+         height (consistent with the other stages) and scrolls its own body. -->
+    <div class="panel panel--primary panel--fill">
       <div class="panel__head">
         <div class="panel__title"><span class="ic">📄</span>Summary</div>
         <span class="panel__hint"><span class="mocktag">sample output</span></span>

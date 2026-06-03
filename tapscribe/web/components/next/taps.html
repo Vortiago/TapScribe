@@ -22,9 +22,10 @@
 
   <div class="spacer"></div>
 
-  <div class="grid cols-cap">
-    <!-- PRIMARY: connected taps (reuses active-taps.js) -->
-    <div class="panel panel--primary">
+  <div class="grid cols-cap fillcol">
+    <!-- PRIMARY: connected taps (reuses active-taps.js). Fills the column
+         height so a short list doesn't strand the panel mid-screen. -->
+    <div class="panel panel--primary panel--fill">
       <div class="panel__head">
         <div class="panel__title"><span class="ic">🛰️</span>Connected taps</div>
         <span class="panel__hint"><span data-slot="activeTapsBadge"></span> · <span class="mono" data-slot="activeCount">0</span></span>

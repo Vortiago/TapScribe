@@ -14,8 +14,11 @@
 <template id="tpl-next-view-people">
   <div data-slot="head"></div>
 
-  <!-- ============ this session's participants (alias editor) ============ -->
-  <div class="panel panel--accent">
+  <!-- ============ this session's participants (alias editor) ============
+       Both People panels fill the column (the #1 fix) — they split the
+       leftover height and scroll their own rows, so a short roster doesn't
+       strand the panels at ~45%. -->
+  <div class="panel panel--accent panel--fill">
     <div class="panel__head">
       <div class="panel__title"><span class="ic">📍</span>In this session · names</div>
       <div class="panel__hint mono" data-slot="partHint"></div>
@@ -28,7 +31,7 @@
   <div class="spacer"></div>
 
   <!-- ============ the named-people registry (across all sessions) ============ -->
-  <div class="panel">
+  <div class="panel panel--fill">
     <div class="panel__head">
       <div class="panel__title"><span class="ic">🗂️</span>People · across all sessions</div>
       <div class="panel__hint mono" data-slot="regHint"></div>

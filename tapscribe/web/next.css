@@ -26,7 +26,15 @@ body::before { display: none; }
 .next-app {
   display: grid;
   grid-template-columns: var(--next-spine-w) 1fr var(--next-rail-w);
-  min-height: 100vh;
+  /* The shell fills the viewport exactly and never scrolls itself — so each
+     view's fill panel (`.panel--fill`) scrolls its OWN body internally and its
+     bottom hairline lands at the footer instead of pushing the page taller.
+     The spine + rail are 100vh sticky inside this; the workspace column scrolls
+     internally only when a stacked/narrow layout overflows (`.work__inner`
+     overflow below). The mobile rail is position:fixed, so overflow:hidden
+     here doesn't clip its overlay. */
+  height: 100vh;
+  overflow: hidden;
 }
 /* Collapsed: the rail track shrinks to 0 so the workspace takes the full
    remaining width, and the floating "show taps" button is revealed. */
@@ -243,9 +251,48 @@ body::before { display: none; }
      the overlay's own visibility (handled by `.rail-hidden .rail` above). */
 }
 
-/* ============================ WORKSPACE ============================ */
-.work { min-width: 0; }
-.work__inner { padding: 16px 24px 28px; }
+/* ============================ WORKSPACE ============================
+   The workspace is a full-height flex COLUMN so each view's primary work panel
+   can grow to fill the viewport (the #1 design-review fix) instead of ending
+   mid-screen. The grid track already stretches to 100vh (align-self: stretch);
+   making .work a column + .work__inner a flex:1 column lets a view opt its main
+   region into `flex: 1` so its bottom hairline lands near the footer.
+
+   The view fragment is mounted inside a `display: contents` host (main.js), so
+   the fragment's own children (the [data-slot=head] header + the grid/panel
+   blocks) are the flex items here — the header keeps its natural height and the
+   designated fill region (`.fillcol`) takes the rest. Generalises the .livecap
+   pattern from Capture to every view. */
+.work { min-width: 0; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.work__inner {
+  padding: 16px 24px 28px;
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  /* Internal scroll fallback: on a narrow/stacked layout where the fill grids
+     fall back to content height (align-items:start), the workspace scrolls here
+     rather than the (overflow:hidden) shell. On the wide layout nothing
+     overflows — the fill panels scroll their own bodies instead. */
+  overflow-y: auto;
+}
+
+/* A view-level block that should consume the leftover column height and lay
+   its own children out vertically. Applied to the PRIMARY grid/panel of each
+   view (the merged transcript, the WAV list, the Sessions table, the People
+   lists, the connected-taps grid, the Settings board). Grids that fill keep
+   their row alignment stretched so a tall aside and a flex panel share height. */
+.fillcol { flex: 1 1 auto; min-height: 0; }
+.grid.fillcol { align-items: stretch; }
+
+/* A panel that fills its flex parent and scrolls its OWN body — the generic
+   form of .livecap. The head stays pinned; .panel__body grows + scrolls.
+   `flex: 1` lets it consume slack in a flex-column parent (a view body or an
+   .aside); it's inert in a grid cell, where the row's stretch does the filling. */
+.panel--fill { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+.panel--fill > .panel__head { flex: none; }
+.panel--fill > .panel__body { flex: 1; min-height: 0; overflow-y: auto; }
+/* When the fill panel's body is flush (a list/feed that brings its own
+   scroller), don't double-scroll: let the inner list own the overflow. */
+.panel--fill > .panel__body.flush { overflow: hidden; display: flex; flex-direction: column; }
 
 /* stage header */
 .whead {
@@ -283,12 +330,25 @@ body::before { display: none; }
 .grid { display: grid; gap: 11px; align-items: start; }
 .cols-tx { grid-template-columns: minmax(0, 1.9fr) minmax(300px, 0.9fr); }
 .cols-cap { grid-template-columns: minmax(0, 1fr) 340px; }
+/* Settings board — balanced columns (engine | prompts+rules) that fill the
+   workspace width, not the 1.9/0.9 transcript split. The config column is a
+   touch wider since it carries the prompt + hotwords editors + the rules. */
+.cols-settings { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
 .aside { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
 .spacer { height: 11px; }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 
 @container (max-width: 760px) {
-  .cols-tx, .cols-cap { grid-template-columns: 1fr; }
+  .cols-tx, .cols-cap, .cols-settings { grid-template-columns: 1fr; }
+  /* When a fill-grid stacks to one column its rows must NOT all stretch to the
+     viewport (two full-height panels would each demand 100%); fall back to
+     content height so the page scrolls normally on a narrow workspace. */
+  .grid.fillcol { align-items: start; }
+}
+/* The Settings config board also collapses to a single column on a narrow
+   workspace so the prompt/hotwords/hallucination editors don't crush. */
+@container (max-width: 620px) {
+  .cfg-grid { grid-template-columns: 1fr; }
 }
 /* container query needs a container; the workspace inner is it */
 .work__inner { container-type: inline-size; }
@@ -427,6 +487,9 @@ body::before { display: none; }
 
 /* active-taps: the "taps feeding this session" rows */
 .taps { padding: 2px 0; }
+/* In the Taps view the connected-taps panel is `panel--fill`, so its rows
+   scroll inside the panel and fill the reclaimed height. */
+.panel--fill > .panel__body.flush > .taps { flex: 1; min-height: 0; overflow-y: auto; }
 .taps .empty { padding: 20px 12px; font-size: 10.5px; }
 .taps .stream-row-wrap { border-bottom: 1px solid var(--hairline-2); }
 .taps .stream-row-wrap:last-child { border-bottom: 0; }
@@ -548,9 +611,55 @@ body::before { display: none; }
 .next-app [data-slot="mergedHost"] .box { border: 0; border-radius: 0; background: transparent; }
 .next-app [data-slot="mergedHost"] .box-hd { background: var(--bg-2); }
 
-/* config-card: a grid of the prompt / hotwords / hallucination editor cols. */
-.cfg-grid { display: grid; gap: 12px; }
-.cfg-grid .cfg-col { display: flex; flex-direction: column; gap: 6px; }
+/* Transcript stage · fill height + cap the line measure. The merged-transcript
+   component mounts this into mergedHost (see merged-transcript.html):
+       .box > .box-hd  (header)
+            + .box-bd  (spk-bar · spk-legend · meta strip)
+            + .rule-top  (the .transcript lines + the audit wrapper)
+   To make the panel grow to the footer (the #1 fix) the chain has to be a flex
+   column: the header + spk-bar block keep their natural height and `.rule-top`
+   flexes, with `.transcript` (the scroll container) dropping its inline + theme
+   380px cap so the lines fill + scroll. The lines themselves are capped to a
+   readable measure (~92ch) so the transcript reads like prose, not a full-width
+   log dump — the freed width becomes margin, and the spk-bar shares the cap. */
+.txbody { padding: 0; }
+.txbody, .txpanel > .panel__body { min-height: 0; }
+.next-app .txbody [data-slot="mergedHost"] { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.next-app .txbody .box { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.next-app .txbody .box-hd,
+.next-app .txbody .box-bd { flex: none; }
+/* .rule-top is the wrapper that actually holds the lines — it takes the slack */
+.next-app .txbody .box > .rule-top { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* override the component's inline + dashboard.css max-height:380px so the lines
+   fill the panel and scroll inside it instead of capping at 380px. */
+.next-app .txbody .transcript { flex: 1; min-height: 0; max-height: none !important; }
+/* cap the prose measure — each transcript LINE wraps at ~92ch (mono) so the
+   block reads like a document, with the freed panel width becoming right
+   margin. The proportional speaker bar + legend stay full-width as an overview
+   strip above the prose; only the line + meta text take the measure. */
+.next-app .txbody [data-slot="metaStrip"],
+.next-app .txbody .transcript > div { max-width: 92ch; }
+
+/* config-card: a grid of the prompt / hotwords / hallucination editor cols.
+   In Settings the host panel is `panel--fill`, so the grid fills the panel
+   body and reads as a dense board: the prompt + hotwords editors sit
+   side-by-side on the top row and the hallucination filter spans the full
+   width beneath them (using the wider Settings column instead of stacking in a
+   skinny strip). The component appends the hallucination col LAST, so the
+   last-child span below is stable regardless of how many cols the server
+   reports. Degrades to a single column on a narrow workspace. */
+.cfg-grid {
+  display: grid; gap: 12px 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 0; flex: 1;
+  align-content: start;
+}
+/* hallucination filter is appended LAST by config-card, so the last col spans
+   both columns + anchors the bottom. Robust to the column count: with all
+   three (prompt | hotwords / hallucination) it's the wide bottom row; if the
+   server reports only the hallucination col it simply spans full width. */
+.cfg-grid > .cfg-col:last-child { grid-column: 1 / -1; min-height: 0; }
+.cfg-grid .cfg-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .cfg-grid .cfg-col > .k {
   font-size: 9.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-2); font-weight: 600;
   display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
@@ -593,7 +702,9 @@ body::before { display: none; }
 .wstat__v.good { color: var(--ok); }
 .wstat__k { font-size: 8.5px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .07em; margin-top: 2px; }
 
-/* waveform cut preview — net-new, not wired */
+/* waveform cut preview — net-new, not wired. Slimmed to a single banner row
+   (icon · label · chip) so the WAV list below reclaims the height the tall
+   stub used to waste. */
 .wavestub {
   margin: 13px; padding: 26px 18px; text-align: center;
   border: 1px dashed var(--hairline); border-radius: var(--next-r);
@@ -609,6 +720,14 @@ body::before { display: none; }
   border: 1px dashed color-mix(in srgb, var(--info) 40%, transparent);
   border-radius: var(--next-r); padding: 3px 8px;
 }
+/* slim variant: one horizontal row, no vertical stacking margins */
+.wavestub--slim {
+  display: flex; align-items: center; gap: 10px;
+  margin: 10px 13px; padding: 7px 12px; text-align: left;
+}
+.wavestub--slim .wavestub__ic { font-size: 15px; margin-top: 0; }
+.wavestub--slim .wavestub__h { margin-top: 0; font-size: 11px; color: var(--fg-2); }
+.wavestub--slim .wavestub__tag { margin-top: 0; margin-left: auto; }
 
 /* strip-silence knob bar (REAL run) */
 .knobbar {
@@ -631,8 +750,11 @@ body::before { display: none; }
 .progress__fill { height: 100%; width: 0; background: var(--next-accent); transition: width .3s ease; }
 .jobbar__wav { margin-top: 5px; font-size: 9.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* per-WAV list: originals + indented stripped region clips */
+/* per-WAV list: originals + indented stripped region clips. Inside a fill
+   panel (Recordings) the list scrolls to fill the reclaimed height; the mini
+   variant in the Transcript aside keeps its own cap (further down). */
 .wavlist { padding: 2px 0; }
+.panel--fill > .panel__body.flush > .wavlist { flex: 1; min-height: 0; overflow-y: auto; }
 .wavlist .empty { padding: 22px 12px; font-size: 10.5px; }
 .wavrow {
   width: 100%; text-align: left; cursor: pointer;
@@ -669,7 +791,10 @@ body::before { display: none; }
 .checkrow input { accent-color: var(--next-accent); }
 .act--wide { width: 100%; justify-content: center; }
 
-/* transcript cache rows + set-primary */
+/* transcript cache rows + set-primary. In the Transcript aside the cache panel
+   is `panel--fill`, so the list scrolls inside it (fills the leftover column
+   height instead of stranding the aside mid-screen). */
+.cache { flex: 1; min-height: 0; overflow-y: auto; }
 .cache .empty { padding: 18px 12px; font-size: 10.5px; }
 .cacherow {
   display: grid; grid-template-columns: 1fr auto auto auto; gap: 9px; align-items: center;
@@ -876,8 +1001,15 @@ body::before { display: none; }
 .sesslist__filter::-webkit-search-cancel-button { -webkit-appearance: none; }
 .sesslist__count { font-size: 9.5px; flex: none; white-space: nowrap; }
 
-/* the rows. .sessrows just scrolls the body when there are many sessions. */
-.sessrows { max-height: 62vh; overflow-y: auto; }
+/* The session list fills the panel height (the #1 fix): the search row pins,
+   the column header pins (sticky), and .sessrows takes the leftover height +
+   scrolls. The host panel is `panel--fill`, so the chain listHost → .sesslist
+   → .sessrows is a flex column down to the scroller. */
+.next-app [data-slot="listHost"] { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.sesslist { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.sesslist__search { flex: none; }
+.sessrow--head { flex: none; }
+.sessrows { flex: 1; min-height: 0; overflow-y: auto; }
 .sessrow {
   display: grid; grid-template-columns: var(--sess-cols); gap: 10px;
   align-items: center; padding: 7px 13px;

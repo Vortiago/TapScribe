@@ -18,7 +18,9 @@
 <template id="tpl-next-view-sessions">
   <div data-slot="head"></div>
 
-  <div class="panel">
+  <!-- Fills the workspace height (the #1 fix): the table scrolls inside the
+       panel so a short list doesn't strand the panel at ~25%. -->
+  <div class="panel panel--fill">
     <div class="panel__head">
       <div class="panel__title"><span class="ic">🗂️</span>All sessions</div>
       <div class="panel__hint mono">newest first</div>

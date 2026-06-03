@@ -25,11 +25,14 @@
       </div>
     </div>
 
-    <!-- waveform cut preview — net-new, NOT wired to any backend -->
-    <div class="wavestub">
-      <div class="wavestub__ic">🌊</div>
-      <div class="wavestub__h">waveform preview — coming soon</div>
-      <div class="wavestub__tag">mock · not wired</div>
+    <!-- waveform cut preview — net-new, NOT wired to any backend. Slimmed to a
+         single-row banner (was a tall stub) so the real WAV list below sits
+         higher and fills the reclaimed height. Keeps the `mock · not wired`
+         chip. -->
+    <div class="wavestub wavestub--slim">
+      <span class="wavestub__ic">🌊</span>
+      <span class="wavestub__h">waveform preview — coming soon</span>
+      <span class="wavestub__tag">mock · not wired</span>
     </div>
 
     <!-- strip-silence: REAL knobs → POST /api/sessions/{session}/strip-silence -->
@@ -66,8 +69,9 @@
   <div class="spacer"></div>
 
   <!-- per-WAV list (originals + indented stripped region clips). Transcription
-       moved to the Transcript stage; this is the files view only. -->
-  <div class="panel">
+       moved to the Transcript stage; this is the files view only. Fills the
+       reclaimed height (the #1 fix) and scrolls its own rows. -->
+  <div class="panel panel--fill">
     <div class="panel__head">
       <div class="panel__title"><span class="ic">📁</span>WAVs &amp; stripped clips</div>
       <div class="panel__hint mono" data-slot="wavHint"></div>
