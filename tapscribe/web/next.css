@@ -926,16 +926,22 @@ body::before { display: none; }
 .mock-hint { font-size: 9.5px; }
 .mock-hint b { color: var(--fg-1); }
 
-/* single / multi segmented control (mock, disabled) */
-.seg { display: inline-flex; border: 1px solid var(--hairline); border-radius: var(--next-r); overflow: hidden; }
-.seg__opt {
+/* single / multi segmented control (mock, disabled). Named .segctl — NOT
+   .seg — because merged-transcript.html uses .seg for transcript segments
+   (.seg.lowconf / .seg.suppressed, styled by dashboard.css); when this rule
+   was called .seg it silently boxed every low-confidence segment in the
+   Transcript stage into an inline-flex chip that broke the one-visual-line
+   contract (caught by the merged-transcript layout assertion in
+   tests/e2e/test_dashboard_ui.py). */
+.segctl { display: inline-flex; border: 1px solid var(--hairline); border-radius: var(--next-r); overflow: hidden; }
+.segctl__opt {
   font-size: 10px; font-family: var(--mono); background: var(--bg-2); color: var(--fg-3);
   border: 0; padding: 4px 9px; cursor: default;
   &:disabled { opacity: .7; }
 }
-.seg__opt + .seg__opt { border-left: 1px solid var(--hairline); }
-.seg__opt.is-on { background: color-mix(in srgb, var(--next-accent) 16%, transparent); color: var(--next-accent); opacity: 1; }
-.seg__opt--multi.is-on { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+.segctl__opt + .segctl__opt { border-left: 1px solid var(--hairline); }
+.segctl__opt.is-on { background: color-mix(in srgb, var(--next-accent) 16%, transparent); color: var(--next-accent); opacity: 1; }
+.segctl__opt--multi.is-on { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
 
 /* diarized voice → Person rows (mock) */
 .voicemap { display: flex; flex-direction: column; gap: 6px; }
@@ -1031,10 +1037,11 @@ body::before { display: none; }
 /* Summarizer controls + a sample summary output. Same :root tokens.        */
 /* ====================================================================== */
 
-/* full-width segmented control (summarizer source). Reuses .seg / .seg__opt
-   (already styled for the mock Taps strip) but stretches across the column. */
-.seg--wide { display: flex; width: 100%; }
-.seg--wide .seg__opt { flex: 1; text-align: center; }
+/* full-width segmented control (summarizer source). Reuses .segctl /
+   .segctl__opt (already styled for the mock Taps strip) but stretches across
+   the column. */
+.segctl--wide { display: flex; width: 100%; }
+.segctl--wide .segctl__opt { flex: 1; text-align: center; }
 
 /* per-source detail block; the non-active sources read dimmed (is-off). */
 .srcdetail {

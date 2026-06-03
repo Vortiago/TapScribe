@@ -15,14 +15,33 @@ export const JOURNEY_VIEWS = ["capture", "recordings", "transcript", "summary"];
 /** @type {ViewId[]} */
 export const ALL_VIEWS = [...GLOBAL_VIEWS, ...JOURNEY_VIEWS];
 
+/** Last-rendered signature per header host. The per-tick views (Capture,
+ * Taps, Sessions, People) call header() on every poll; without a gate each
+ * call cloned the template and replaceChildren'd even when nothing changed —
+ * ~10 collectable nodes + a layout pass per view per tick, the same churn
+ * class the idle-OOM fix killed elsewhere. Renders with `actions` are never
+ * gated (the Node carries fresh listeners a string signature can't capture)
+ * and clear the stored sig so a following gated render can't skip falsely. */
+/** @type {WeakMap<Element, string>} */
+const _headerSig = new WeakMap();
+
 /**
  * Build the shared stage header into a view's `[data-slot=head]` host.
  * `sub`/`actions` accept either a string (→ textContent) or a Node to append,
  * so callers never inject HTML strings (XSS-safe, like the rest of the code).
+ * Skips the rebuild when eyebrow/title/sub text are unchanged (see above).
  * @param {Element} host
  * @param {{ eyebrow: string, title: string, sub?: string | Node, actions?: Node }} opts
  */
 export function header(host, { eyebrow, title, sub, actions }) {
+  const subText = sub instanceof Node ? sub.textContent || "" : sub ?? "";
+  if (!actions) {
+    const sig = `${eyebrow}§${title}§${subText}`;
+    if (_headerSig.get(host) === sig) return;
+    _headerSig.set(host, sig);
+  } else {
+    _headerSig.delete(host);
+  }
   const frag = tpl("tpl-next-head");
   pick(frag, "eyebrow").textContent = eyebrow;
   pick(frag, "title").textContent = title;

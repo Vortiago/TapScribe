@@ -136,7 +136,7 @@ Two kinds today:
 
 `ModelInput = TextInput | SelectInput` is the union. New input
 kinds are added by extending the union, adding a renderer in
-`web/js/components/session-detail.js`, and giving them a
+`web/js/next/components/engine.js`, and giving them a
 discriminator value in `to_mapping()`.
 
 ## LiveChannel · WhisperLiveKitChannel

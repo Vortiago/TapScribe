@@ -27,6 +27,9 @@ recordings/
 frontend/node_modules/
 frontend/package-lock.json
 
+# Perf soak reports (tests/e2e/test_next_perf_soak.py) — local measurements
+perf-reports/
+
 # OS / editor
 .DS_Store
 Thumbs.db

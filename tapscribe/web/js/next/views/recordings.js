@@ -17,8 +17,8 @@
 // strip slider isn't clobbered).
 
 import { tpl, pick } from "../../templates.js";
-import { postJson, del } from "../../api.js";
-import { fmtBytes, fmtDur, fmtClock, truncMid } from "../../formatters.js";
+import { postJson, del, fetchWavTranscript, peekWavTranscript } from "../../api.js";
+import { fmtBytes, fmtDur, fmtClock, fmtMs, truncMid } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
 
 /** Strip-silence knob defaults — mirror STRIP_OPT_DEFAULTS / the server-side
@@ -74,6 +74,16 @@ export function build(ctx) {
   /** Selected original WAV name, per session id (drives the waveform header). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
+  /** WAV rows whose inline transcript is EXPANDED. Keyed by the same
+   * "session/name@source" shape the transcribe/delete dispatch uses so a clip
+   * and its parent original never collide. Lives in view-local state + is
+   * folded into the render signature so the expanded set survives poll ticks. */
+  /** @type {Set<string>} */
+  const expandedKeys = new Set();
+  /** Expand keys we've already scheduled a re-render for after the lazy
+   * fetchWavTranscript lands — dedupes repeated misses across ticks. */
+  /** @type {Set<string>} */
+  const txRerenderPending = new Set();
   /** Last strip-silence response stats, per session id (overlay on s.stripped). */
   /** @type {Map<string, import('../../types.js').StripSilenceResult>} */
   const lastStrip = new Map();
@@ -160,25 +170,219 @@ export function build(ctx) {
     afterMutate();
   });
 
+  // ---- Per-WAV transcript expand (inline, lazy) -----------------------------
+
+  /** The expand key for a WAV row — same "session/name@source" shape as the
+   * transcribe/delete dispatch so a clip and its parent never collide. */
+  /** @param {string} sid @param {string} name @param {"original"|"stripped"} src */
+  const expandKey = (sid, name, src) => `${sid}/${name}${src === "stripped" ? "@stripped" : ""}`;
+
+  /** Resolve the OPEN row's FULL cached transcript from the lazy client cache.
+   * /api/state ships only a slim marker; on a cache miss this fires the fetch
+   * once (keyed on the marker's transcribed_at, so a re-transcribe re-fetches)
+   * and re-renders via afterMutate when it lands. Returns undefined while the
+   * fetch is in flight (→ show the loading placeholder), or the resolved body
+   * (possibly null) once settled. */
+  /**
+   * @param {string} sid
+   * @param {string} name
+   * @param {"original"|"stripped"} src
+   * @param {import('../../types.js').WavTranscriptMarker} marker
+   * @returns {import('../../types.js').WavTranscript | null | undefined}
+   */
+  const resolveWavTx = (sid, name, src, marker) => {
+    const stamp = marker.transcribed_at || "";
+    const cached = peekWavTranscript(sid, name, src, stamp);
+    if (cached !== undefined) return cached;
+    const key = `${sid}/${name}@${src}@${stamp}`;
+    if (!txRerenderPending.has(key)) {
+      txRerenderPending.add(key);
+      fetchWavTranscript(sid, name, src, stamp)
+        .catch(() => { /* transient failure — the next poll re-attempts */ })
+        .finally(() => { txRerenderPending.delete(key); lastSig = " "; afterMutate(); });
+    }
+    return undefined;
+  };
+
+  /** Build the inline expanded-transcript node for one WAV. Renders a meta
+   * strip + the segment lines (speaker = the WAV's speaker_name, since per-WAV
+   * sidecars carry no per-segment speaker) with suppressed hallucination lines
+   * struck-through, interleaved in start-time order — the audit lines the
+   * classic expand surfaced. */
+  /**
+   * @param {import('../../types.js').WavTranscript} t
+   * @param {string} speakerName
+   */
+  const buildExpand = (t, speakerName) => {
+    const frag = tpl("tpl-next-txexpand");
+    const metaHost = pick(frag, "meta");
+    /** @type {[string, string][]} */
+    const fields = [
+      ["device", t.device || "?"],
+      ["backend", t.backend || "?"],
+      ["model", t.model || "?"],
+      ["lang", t.language || "?"],
+      ["took", fmtMs(t.transcribe_ms)],
+    ];
+    if (t.source) fields.push(["source", t.source]);
+    for (const [label, value] of fields) {
+      const field = tpl("tpl-next-txmeta-field");
+      pick(field, "label").textContent = label;
+      pick(field, "value").textContent = value;
+      metaHost.appendChild(field);
+    }
+
+    // Per-WAV sidecars have `segments` (start/end/text) + a parallel
+    // `suppressed_hallucinations` list. The WavTranscript type only declares
+    // `text` + suppressed, so reach the segments[] off the raw record defensively.
+    const raw = /** @type {{ segments?: { start?: number, end?: number, text?: string }[] }} */ (
+      /** @type {unknown} */ (t));
+    /** @type {{ start: number, text: string, sup: boolean, rule: string }[]} */
+    const lines = [];
+    for (const seg of raw.segments || []) {
+      lines.push({ start: Number(seg.start) || 0, text: seg.text || "", sup: false, rule: "" });
+    }
+    for (const sup of t.suppressed_hallucinations || []) {
+      lines.push({ start: Number(sup.start) || 0, text: sup.text || "", sup: true, rule: sup.matched_rule || "" });
+    }
+    lines.sort((a, b) => a.start - b.start);
+
+    const linesHost = pick(frag, "lines");
+    if (!lines.length) {
+      // No segments[] on disk (e.g. older sidecar) — fall back to the joined
+      // plain text as a single line, same content the classic body showed.
+      const line = tpl("tpl-next-txline");
+      pick(line, "ts").textContent = "";
+      pick(line, "speaker").textContent = speakerName ? `${speakerName}:` : "";
+      pick(line, "body").textContent = t.text || "";
+      linesHost.appendChild(line);
+    } else {
+      for (const ln of lines) {
+        const line = tpl("tpl-next-txline");
+        const mins = Math.floor(ln.start / 60);
+        const secs = Math.floor(ln.start % 60);
+        pick(line, "ts").textContent = `[${mins}:${String(secs).padStart(2, "0")}]`;
+        pick(line, "speaker").textContent = speakerName ? `${speakerName}:` : "";
+        const body = pick(line, "body");
+        body.textContent = ln.text;
+        if (ln.sup) {
+          body.className = "seg suppressed";
+          body.title = `suppressed · matched: ${ln.rule}`;
+        }
+        linesHost.appendChild(line);
+      }
+    }
+    return frag;
+  };
+
+  // ---- Delete a single WAV --------------------------------------------------
+
+  /** @param {string} name @param {"original"|"stripped"} src */
+  const deleteWav = async (name, src) => {
+    if (!session) return;
+    const sid = session.session;
+    if (!confirm(`Delete this ${src === "stripped" ? "stripped clip" : "WAV"}?\n\n${name}\n\nThe audio and its cached transcripts are removed.`)) return;
+    const qs = src === "stripped" ? "?source=stripped" : "";
+    try {
+      await del(`/api/wav/${encodeURIComponent(sid)}/${encodeURIComponent(name)}${qs}`);
+    } catch (e) {
+      alert(`Delete failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      return;
+    }
+    expandedKeys.delete(expandKey(sid, name, src));
+    lastSig = " ";
+    afterMutate();
+  };
+
   // ---- WAV list -------------------------------------------------------------
 
-  /** @param {import('../../types.js').WavFile} f @param {"original"|"stripped"} src @param {boolean} selected */
-  const wavRow = (f, src, selected) => {
+  /** Wire one row's tx-tag, expand toggle, download link, and delete button —
+   * shared by originals and clips. Appends the expand body after the row when
+   * the row is in `expandedKeys`. */
+  /**
+   * @param {DocumentFragment} out
+   * @param {DocumentFragment} node
+   * @param {import('../../types.js').WavFile | import('../../types.js').WavRegion} f
+   * @param {"original"|"stripped"} src
+   * @param {boolean} isCurrent
+   */
+  const decorateRow = (out, node, f, src, isCurrent) => {
+    const sid = session?.session || "";
+    const key = expandKey(sid, f.name, src);
+    const open = expandedKeys.has(key);
+
+    // Stable per-row hooks (e2e + debugging): the WAV/clip name + source.
+    const rowEl = /** @type {HTMLElement} */ (pick(node, "row"));
+    rowEl.dataset.wav = f.name;
+    rowEl.dataset.src = src;
+
+    const tag = pick(node, "txTag");
+    if (f.transcript) { tag.textContent = "✓ tx"; tag.className = "wavrow__tx is-done"; }
+    else { tag.textContent = "no tx"; tag.className = "wavrow__tx is-none"; }
+
+    // Expand toggle — only meaningful when a cached transcript exists.
+    const expandBtn = /** @type {HTMLButtonElement} */ (node.querySelector("[data-wav-expand]"));
+    expandBtn.textContent = open ? "▾ tx" : "tx";
+    if (!f.transcript) {
+      expandBtn.disabled = true;
+      expandBtn.title = "no cached transcript — transcribe this WAV first";
+    } else {
+      expandBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (open) expandedKeys.delete(key); else expandedKeys.add(key);
+        lastSig = " ";
+        afterMutate();
+      });
+    }
+
+    // Download — a plain anchor straight to the API (matches classic).
+    const dl = /** @type {HTMLAnchorElement} */ (pick(node, "download"));
+    const dlQs = src === "stripped" ? "?source=stripped" : "";
+    dl.href = `/api/wav/${encodeURIComponent(sid)}/${encodeURIComponent(f.name)}${dlQs}`;
+
+    // Delete — the backend refuses the current session (409), so hide it there.
+    const delBtn = /** @type {HTMLButtonElement} */ (node.querySelector("[data-wav-delete]"));
+    if (isCurrent) {
+      delBtn.remove();
+    } else {
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteWav(f.name, src);
+      });
+    }
+
+    out.appendChild(node);
+
+    if (open && f.transcript) {
+      const full = resolveWavTx(sid, f.name, src, f.transcript);
+      if (full) out.appendChild(buildExpand(full, f.speaker_name || ""));
+      else if (full === undefined) out.appendChild(tpl("tpl-next-txloading"));
+      // `full === null` → no transcript body on disk; nothing to show.
+    }
+  };
+
+  /** @param {import('../../types.js').WavFile} f @param {"original"|"stripped"} src @param {boolean} selected @param {boolean} isCurrent */
+  const wavRow = (f, src, selected, isCurrent) => {
     const out = document.createDocumentFragment();
     const node = tpl("tpl-next-wavrow");
-    const btn = /** @type {HTMLButtonElement} */ (node.firstElementChild);
-    if (selected) btn.classList.add("is-sel");
+    const row = /** @type {HTMLElement} */ (pick(node, "row"));
+    if (selected) row.classList.add("is-sel");
     pick(node, "name").textContent = truncMid(f.name, 40);
     const who = f.speaker_name ? `${f.speaker_name} · ` : "";
     pick(node, "sub").textContent = `${who}${fmtBytes(f.size)}`;
     pick(node, "dur").textContent = fmtDur(f.duration_s);
-    const tag = pick(node, "txTag");
-    if (f.transcript) { tag.textContent = "✓ tx"; tag.className = "wavrow__tx is-done"; }
-    else { tag.textContent = "no tx"; tag.className = "wavrow__tx is-none"; }
-    btn.addEventListener("click", () => {
+
+    // Select the WAV (drives the waveform header) from the name/sub block.
+    const selectEl = /** @type {HTMLElement} */ (node.querySelector("[data-wav-select]"));
+    const select = () => {
       if (session) { selectedWav.set(session.session, f.name); lastSig = " "; afterMutate(); }
+    };
+    selectEl.addEventListener("click", select);
+    selectEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); }
     });
-    out.appendChild(node);
+
+    decorateRow(out, node, f, src, isCurrent);
 
     // Indented stripped region clips (only when the stripped source is active).
     if (src === "stripped") {
@@ -190,10 +394,7 @@ export function build(ctx) {
           : "stripped region";
         pick(clip, "sub").textContent = `${span} · ${fmtBytes(r.size)}`;
         pick(clip, "dur").textContent = fmtDur(r.duration_s);
-        const ctag = pick(clip, "txTag");
-        if (r.transcript) { ctag.textContent = "✓ tx"; ctag.className = "wavrow__tx is-done"; }
-        else { ctag.textContent = "no tx"; ctag.className = "wavrow__tx is-none"; }
-        out.appendChild(clip);
+        decorateRow(out, clip, r, "stripped", isCurrent);
       }
     }
     return out;
@@ -241,14 +442,27 @@ export function build(ctx) {
     // edit-in-progress isn't wiped. (The knob value labels are updated by their
     // own input listeners, not here.)
     const job = sess?.progress || null;
-    const txSig = files.map((f) => `${f.name}:${!!f.transcript}:${(f.regions || []).length}`).join("|");
+    // Include each WAV's transcribed_at so a re-transcribe (new stamp) re-renders
+    // the row's tx-tag and busts an open expand. Regions feed the strip toggle.
+    const txSig = files
+      .map((f) => `${f.name}:${f.transcript?.transcribed_at || ""}:${(f.regions || []).length}`)
+      .join("|");
+    // Fold the open session's expanded set into the signature so toggling a row
+    // open/closed re-renders AND the expanded set survives idle poll ticks (it's
+    // part of what the body is gated on). The "loading… → loaded" transition is
+    // handled separately: resolveWavTx resets lastSig in its .finally when the
+    // lazy fetch lands, forcing one more render that swaps the placeholder for
+    // the real lines.
+    const expandedSig = [...expandedKeys].filter((k) => k.startsWith(`${sid}/`)).sort().join(",");
     const sig = [
       sid, src, sel?.name || "",
       stripped ? `${stripped.count}:${stripped.stripped_at}` : "",
       job ? `${job.kind}:${job.current}/${job.total}:${job.current_file || ""}` : "",
       stripInflight.has(sid) ? "S" : "",
       lastStrip.has(sid) ? JSON.stringify(lastStrip.get(sid)) : "",
+      (j.current_session || "") === sid ? "CUR" : "",
       txSig,
+      expandedSig,
     ].join("§");
     const focused = /** @type {HTMLElement | null} */ (document.activeElement);
     const editing = !!focused && focused.dataset?.stripKnob != null;
@@ -328,10 +542,13 @@ export function build(ctx) {
       jobBar.hidden = true;
     }
 
-    // WAV list
+    // WAV list. Delete is refused on the current (recording) session by the
+    // backend (409), so the row hides its delete button there — matching how
+    // the classic per-WAV row dropped delete on the live session.
+    const isCurrent = (j.current_session || "") === sid;
     wavHint.textContent = `${files.length} original${files.length === 1 ? "" : "s"}`;
     const listFrag = document.createDocumentFragment();
-    for (const f of files) listFrag.appendChild(wavRow(f, src, f.name === sel?.name));
+    for (const f of files) listFrag.appendChild(wavRow(f, src, f.name === sel?.name, isCurrent));
     wavList.replaceChildren(listFrag);
   };
 

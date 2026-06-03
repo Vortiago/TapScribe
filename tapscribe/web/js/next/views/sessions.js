@@ -15,19 +15,29 @@
 //   - Row actions: Open (onSelectSession → focuses + routes into the session,
 //     same as the spine picker), Rename (inline editable label, debounced
 //     optimistic PUT /api/session-meta/{session} {label}, mirrors people.js),
-//     and Delete audio (DELETE /api/sessions/{session}/audio, behind a
-//     confirm() — destructive, reclaims disk; refused by the backend on the
-//     CURRENT session and when a job is in flight, so it's disabled there).
+//     Delete audio (DELETE /api/sessions/{session}/audio, behind a confirm() —
+//     destructive, reclaims disk; refused by the backend on the CURRENT session
+//     and when a job is in flight, so it's disabled there), Absorb into… (a
+//     <select> of OTHER archived sessions; POST /api/sessions/{target}/absorb
+//     {source} folds THIS row's session into the picked target, then deletes
+//     THIS folder — hidden on the current session, which the server refuses as
+//     a source), and Delete (DELETE /api/sessions/{session} — the WHOLE folder:
+//     audio AND merged transcript AND meta; refused on the current session, so
+//     disabled there). Ports the classic dashboard's session management.
+//   - Toolbar action (in the static panel head, wired once): Prune empty
+//     (POST /api/sessions/prune-empty — deletes every session with 0 WAVs, no
+//     merged transcript, no label; skips the current one), surfacing the count.
 //
 // The list is rendered through renderRegion (templates.js): it holds the
-// search box + the rename inputs, so the 500ms poll must not clobber an open
-// edit — renderRegion skips the swap while a control inside the host is
-// focused, and the caller-supplied signature skips the rebuild when nothing
-// the list shows has changed. The header (with its live counts) repaints every
-// tick; only the interactive list region is guarded.
+// search box + the rename inputs + the per-row absorb <select>, so the 500ms
+// poll must not clobber an open edit — renderRegion skips the swap while a
+// control inside the host is focused, and the caller-supplied signature skips
+// the rebuild when nothing the list shows has changed. The header (with its
+// live counts) repaints every tick; only the interactive list region is
+// guarded. The prune button lives OUTSIDE the guarded region (static head).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson, del } from "../../api.js";
+import { putJson, postJson, del } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
 
@@ -74,6 +84,36 @@ export function build(ctx) {
   const headHost = pick(frag, "head");
   const listHost = pick(frag, "listHost");
 
+  // ---- Prune empty (view-level toolbar action) ------------------------------
+  // Lives in the STATIC panel head (part of `frag`, never touched by the poll),
+  // so its listener is wired exactly once here. POST /api/sessions/prune-empty
+  // deletes every session with 0 WAVs, no merged transcript, and no label
+  // (skips the current one); we surface the count the way classic did.
+  const pruneBtn = /** @type {HTMLButtonElement} */ (pick(frag, "prune"));
+  const pruneStatus = pick(frag, "pruneStatus");
+  pruneBtn.addEventListener("click", async () => {
+    if (!confirm(
+      "Delete every session that has 0 WAVs, no merged transcript, and no " +
+      "label?\n\nThe current session is always kept. This can't be undone.",
+    )) return;
+    pruneBtn.disabled = true;
+    pruneStatus.textContent = "pruning…";
+    try {
+      const r = /** @type {{ count?: number }} */ (await postJson("/api/sessions/prune-empty"));
+      const n = r.count || 0;
+      pruneStatus.textContent = `removed ${n} empty session${n === 1 ? "" : "s"}`;
+      setTimeout(() => {
+        if (pruneStatus.textContent?.startsWith("removed")) pruneStatus.textContent = "";
+      }, 2600);
+    } catch (e) {
+      pruneStatus.textContent = "";
+      alert(`Prune empty failed: ${String(e).replace(/^Error:\s*/, "")}`);
+    } finally {
+      pruneBtn.disabled = false;
+      afterMutate();
+    }
+  });
+
   // ---- View-local state -----------------------------------------------------
   /** The focused session id (highlighted row); kept in step with `update`. */
   let focusedId = "";
@@ -87,6 +127,10 @@ export function build(ctx) {
   /** Debounce timers per session id (debounced PUT, like the alias editor). */
   /** @type {Map<string, ReturnType<typeof setTimeout>>} */
   const saveTimers = new Map();
+  /** The sessions array from the most recent tick — the absorb confirm() reads
+   * it to resolve the target's display label. Kept in step with `update`. */
+  /** @type {import('../../types.js').Session[]} */
+  let lastSessions = [];
 
   /** Effective label for a session = local overlay (if any) else server meta. */
   /** @param {import('../../types.js').Session} s */
@@ -120,13 +164,16 @@ export function build(ctx) {
     }, 600));
   };
 
+  /** Human label for a session id, for confirm() copy. */
+  /** @param {import('../../types.js').Session} s */
+  const displayName = (s) => labelFor(s) || fmtSessionLabel(s.session) || s.session;
+
   /** Delete a session's audio (WAVs + stripped/ + per-WAV caches). Destructive,
    * so behind a confirm(); the backend keeps the merged transcript + meta. */
   /** @param {import('../../types.js').Session} s */
   const deleteAudio = async (s) => {
-    const name = labelFor(s) || fmtSessionLabel(s.session) || s.session;
     if (!confirm(
-      `Delete all audio for "${name}"?\n\n` +
+      `Delete all audio for "${displayName(s)}"?\n\n` +
       "Removes the original WAVs, the stripped/ folder, and per-WAV transcript " +
       "caches to reclaim disk. The merged transcript and labels are kept. " +
       "This can't be undone.",
@@ -141,12 +188,88 @@ export function build(ctx) {
     }
   };
 
+  /** Delete a WHOLE session — folder, audio AND merged transcript AND meta.
+   * The classic UI's "Delete" action: maximally destructive, so the confirm()
+   * spells out that BOTH audio and transcript go. The backend refuses the
+   * current session, so this is only offered (button enabled) on archived ones.
+   * @param {import('../../types.js').Session} s */
+  const deleteSession = async (s) => {
+    const wavs = s.wav_count || 0;
+    const tail = wavs
+      ? ` and its ${wavs} WAV${wavs === 1 ? "" : "s"}`
+      : "";
+    if (!confirm(
+      `Delete the ENTIRE session "${displayName(s)}"${tail}?\n\n` +
+      "This removes the whole folder from disk — the audio AND the merged " +
+      "transcript AND the label/aliases. This can't be undone.\n\n" +
+      `(${s.session})`,
+    )) return;
+    try {
+      await del(`/api/sessions/${encodeURIComponent(s.session)}`);
+    } catch (e) {
+      alert(`Delete session failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      return;
+    } finally {
+      // Drop any optimistic label / pending save for the gone session so a
+      // debounced PUT can't 404 after the folder's deleted.
+      clearTimeout(saveTimers.get(s.session));
+      saveTimers.delete(s.session);
+      localLabels.delete(s.session);
+      afterMutate();
+    }
+  };
+
+  /** Absorb (fold) the SOURCE session into the TARGET: source WAVs + sidecars
+   * move into target, source aliases fill gaps in target's, target's merged
+   * transcript is cleared (now stale against the fuller WAV set), and the
+   * SOURCE folder is deleted. Mirrors the classic absorb flow.
+   * POST /api/sessions/{target}/absorb with body { source }.
+   * @param {import('../../types.js').Session} source
+   * @param {string} targetId */
+  const absorbInto = async (source, targetId) => {
+    if (!targetId || targetId === source.session) return;
+    const sessions = lastSessions;
+    const target = sessions.find((x) => x.session === targetId);
+    const targetName = target ? displayName(target) : targetId;
+    const wavs = source.wav_count || 0;
+    if (!confirm(
+      `Move all ${wavs} WAV${wavs === 1 ? "" : "s"} from "${displayName(source)}" ` +
+      `into "${targetName}"?\n\n` +
+      "The source folder will be deleted. The target's merged transcript (if " +
+      "any) is cleared so you can re-run it on the combined audio. Target " +
+      "speaker aliases are kept; source aliases fill in any names the target " +
+      "doesn't already have. This can't be undone.",
+    )) return;
+    try {
+      await postJson(`/api/sessions/${encodeURIComponent(targetId)}/absorb`, { source: source.session });
+    } catch (e) {
+      alert(`Absorb failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      return;
+    } finally {
+      // The source folder is gone — forget its optimistic label + pending
+      // save. Deliberately NO onSelectSession(target) here: that would route
+      // into the target's Transcript view, yanking the operator out of the
+      // Sessions list mid-management (absorbing several sessions in a row is
+      // the normal flow). The row's "open" button is the explicit way in.
+      clearTimeout(saveTimers.get(source.session));
+      saveTimers.delete(source.session);
+      localLabels.delete(source.session);
+      afterMutate();
+    }
+  };
+
   // ---- Row -----------------------------------------------------------------
 
-  /** @param {import('../../types.js').Session} s */
-  const sessionRow = (s) => {
+  /**
+   * @param {import('../../types.js').Session} s
+   * @param {import('../../types.js').Session[]} absorbTargets — archived
+   *   sessions this row could be folded INTO (excludes this row + the current
+   *   session). Empty → the absorb picker is hidden.
+   */
+  const sessionRow = (s, absorbTargets) => {
     const node = tpl("tpl-next-sessrow");
     const row = /** @type {HTMLElement} */ (node.firstElementChild);
+    row.dataset.sid = s.session; // stable per-row hook (e2e + debugging)
     if (s.session === focusedId) row.classList.add("is-focused");
 
     // Label + raw id sub.
@@ -215,6 +338,42 @@ export function build(ctx) {
       delBtn.addEventListener("click", () => deleteAudio(s));
     }
 
+    // ---- Absorb into… (fold THIS session, as source, into a target) ----
+    // The select lives inside the renderRegion host, so the poll's focus guard
+    // protects it while open. The backend refuses the CURRENT session as a
+    // source, so we drop the picker entirely on the current row (and when there
+    // is no other session to absorb into).
+    const absorbSel = /** @type {HTMLSelectElement} */ (pick(node, "absorb"));
+    if (s.is_current || !absorbTargets.length) {
+      absorbSel.remove();
+    } else {
+      for (const t of absorbTargets) {
+        const lbl = labelFor(t) || fmtSessionLabel(t.session) || t.session;
+        absorbSel.add(new Option(`${lbl} (${t.wav_count || 0}w)`, t.session));
+      }
+      absorbSel.addEventListener("change", () => {
+        const targetId = absorbSel.value;
+        if (!targetId) return;
+        // Reset + blur before firing so a refused merge doesn't pin the select
+        // to the failed choice, and so the post-merge re-render isn't blocked by
+        // the renderRegion focus guard.
+        absorbSel.value = "";
+        absorbSel.blur();
+        absorbInto(s, targetId);
+      });
+    }
+
+    // ---- Delete WHOLE session (audio + transcript + meta) ----
+    const delSessBtn = /** @type {HTMLButtonElement} */ (pick(node, "delSession"));
+    // The backend refuses the CURRENT session — disable + explain on it.
+    if (s.is_current) {
+      delSessBtn.disabled = true;
+      delSessBtn.title = "can't delete the current session — rotate to a new one first";
+    } else {
+      delSessBtn.title = "delete the whole session — audio AND transcript";
+      delSessBtn.addEventListener("click", () => deleteSession(s));
+    }
+
     return node;
   };
 
@@ -272,8 +431,17 @@ export function build(ctx) {
       empty.textContent = `No sessions match “${filter}”.`;
       body.replaceChildren(empty);
     } else {
+      // Absorb targets: archived sessions only — the current (recording) one is
+      // never a merge endpoint (classic kept it out of the picker entirely),
+      // and a row can't absorb into itself. Computed once over the FULL list
+      // (not just the filtered `shown`) so a filtered-out session is still a
+      // valid target.
+      const archived = sessions.filter((s) => !s.is_current);
       const list = document.createDocumentFragment();
-      for (const s of shown) list.appendChild(sessionRow(s));
+      for (const s of shown) {
+        const targets = archived.filter((t) => t.session !== s.session);
+        list.appendChild(sessionRow(s, targets));
+      }
       body.replaceChildren(list);
     }
     return region;
@@ -304,6 +472,7 @@ export function build(ctx) {
     // Newest first — session ids are ISO-ish timestamps, so a string sort
     // descending is chronological (same ordering the spine picker uses).
     const sessions = [...(j.sessions || [])].sort((a, b) => (a.session < b.session ? 1 : -1));
+    lastSessions = sessions;
     const total = sessions.length;
     const transcribed = sessions.filter((s) => s.session_transcript).length;
 

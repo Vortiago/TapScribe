@@ -88,25 +88,33 @@
   </span>
 </template>
 
-<!-- one WAV-list row (original, selectable) -->
+<!-- one WAV-list row (original). The name/sub block selects the WAV (drives the
+     waveform header); the right cluster carries the tx tag + per-WAV actions
+     (expand transcript / download / delete). The row is a <div> rather than a
+     <button> so the action controls can nest legally; `data-wav-select` is the
+     click target that selects the row. The expandable transcript host is a
+     sibling appended after the row by recordings.js when expanded. -->
 <template id="tpl-next-wavrow">
-  <button class="wavrow" type="button">
-    <span class="wavrow__l">
+  <div class="wavrow" data-slot="row">
+    <span class="wavrow__l" data-wav-select role="button" tabindex="0">
       <span class="wavrow__n mono" data-slot="name"></span>
       <span class="wavrow__sub mono" data-slot="sub"></span>
     </span>
     <span class="wavrow__r">
       <span class="wavrow__dur mono" data-slot="dur"></span>
       <span class="wavrow__tx" data-slot="txTag"></span>
+      <button class="btn tiny ghost" type="button" data-wav-expand title="Expand the cached transcript">tx</button>
+      <a class="btn tiny ghost" download title="Download WAV" data-slot="download">⬇</a>
+      <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this WAV">🗑</button>
     </span>
-  </button>
+  </div>
 </template>
 
 <!-- one indented stripped region clip under its parent original. Shows the
-     clip's span/size/duration + transcript status; re-transcribe lives in the
-     Transcript stage now, so there's no per-clip action here. -->
+     clip's span/size/duration + transcript status, plus the same per-clip
+     actions (expand transcript / download stripped clip / delete). -->
 <template id="tpl-next-wavclip">
-  <div class="wavrow is-clip">
+  <div class="wavrow is-clip" data-slot="row">
     <span class="wavrow__l">
       <span class="wavrow__n mono" data-slot="name"></span>
       <span class="wavrow__sub mono" data-slot="sub"></span>
@@ -114,6 +122,38 @@
     <span class="wavrow__r">
       <span class="wavrow__dur mono" data-slot="dur"></span>
       <span class="wavrow__tx" data-slot="txTag"></span>
+      <button class="btn tiny ghost" type="button" data-wav-expand title="Expand the cached transcript">tx</button>
+      <a class="btn tiny ghost" download title="Download stripped clip" data-slot="download">⬇</a>
+      <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this stripped clip">🗑</button>
     </span>
   </div>
+</template>
+
+<!-- ── Per-WAV expanded transcript (inline, lazy) ─────────────────────────
+     Appended as a sibling AFTER its WAV row when expanded. The meta strip +
+     the .transcript lines container reuse dashboard.css's .expand-tx /
+     .transcript styling (both stylesheets load on /next). The lines container
+     uses `white-space: pre-wrap`, so every template rendered INSIDE it
+     (tpl-next-txline) must stay on a single line — see merged-transcript.html
+     for the same constraint. -->
+<template id="tpl-next-txexpand">
+  <div class="expand-tx" data-slot="expandHost">
+    <div class="meta" data-slot="meta"></div>
+    <div class="transcript" data-slot="lines"></div>
+  </div>
+</template>
+
+<!-- one meta key/value chip in the expand strip -->
+<template id="tpl-next-txmeta-field">
+  <span><span data-slot="label"></span> <span class="fg" data-slot="value"></span></span>
+</template>
+
+<!-- one transcript line. Single-line markup (pre-wrap container). The literal
+     spaces between the spans are load-bearing layout. The body span carries
+     the .seg.suppressed class on suppressed lines for the strike-through. -->
+<template id="tpl-next-txline"><div><span class="ts" data-slot="ts"></span> <span data-slot="speaker"></span> <span data-slot="body"></span></div></template>
+
+<!-- tiny placeholder shown while the full transcript is being fetched lazily -->
+<template id="tpl-next-txloading">
+  <div class="expand-tx-loading dim small" data-slot="loadingHost">loading transcript…</div>
 </template>

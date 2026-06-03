@@ -823,9 +823,9 @@ def test_session_meta_rejects_oversize_hotwords(client, recorder_under_test):
 
 
 def test_api_state_sessions_include_meta_prompt_and_hotwords(client, recorder_under_test):
-    """The dashboard renders the override badge in the session-detail
-    pane off the meta block. /api/state's per-session entry must surface
-    these so the JS doesn't need a second round-trip per session."""
+    """The dashboard renders per-session override badges off the meta
+    block. /api/state's per-session entry must surface these so the JS
+    doesn't need a second round-trip per session."""
     session_dir = recorder_under_test.recordings_dir / "fakesession"
     session_dir.mkdir()
     client.put("/api/session-meta/fakesession", json={"prompt": "P", "hotwords": "H"})
@@ -1703,3 +1703,46 @@ def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
         )
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Dashboard shell serving — unit-level guards so a broken / route or missing
+# asset is caught by the default suite, not only the Playwright job (which
+# self-skips without a browser).
+# ---------------------------------------------------------------------------
+
+
+def test_root_serves_stages_shell(client):
+    """GET / is the Stages dashboard (next.html): the shell markers and the
+    single module script must be present. The classic dashboard was retired —
+    this is the only UI."""
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert 'id="next-app"' in r.text
+    assert "/web/js/next/main.js" in r.text
+    # The shell layers next.css on top of the shared design tokens.
+    assert "/dashboard.css" in r.text
+    assert "/next.css" in r.text
+
+
+def test_next_route_is_gone(client):
+    """/next was the Stages UI's incubation address; it no longer exists."""
+    assert client.get("/next").status_code == 404
+
+
+def test_dashboard_stylesheets_serve(client):
+    for path in ("/dashboard.css", "/next.css"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert "text/css" in r.headers["content-type"], path
+
+
+def test_stages_assets_serve_from_mounts(client):
+    """The shell's entry module and one template bundle must come back via
+    the /web mounts — this is exactly what a broken package-data glob or a
+    botched StaticFiles mount breaks first."""
+    r = client.get("/web/js/next/main.js")
+    assert r.status_code == 200
+    r = client.get("/web/components/next/views.html")
+    assert r.status_code == 200

@@ -23,7 +23,17 @@
   <div class="panel panel--fill">
     <div class="panel__head">
       <div class="panel__title"><span class="ic">🗂️</span>All sessions</div>
-      <div class="panel__hint mono">newest first</div>
+      <!-- Toolbar: a view-level "prune empty" action + the newest-first hint.
+           Lives in the STATIC panel head (built once in build(), never touched
+           by the per-tick poll), so its listener is wired once and never
+           clobbered. POST /api/sessions/prune-empty deletes every session with
+           0 WAVs / no merged transcript / no label (skips the current one). -->
+      <div class="panel__hint mono">
+        <button class="act act--sm act--danger" type="button" data-slot="prune"
+                title="Delete every session with 0 WAVs, no merged transcript, and no label. The current session is always kept.">prune empty</button>
+        <span data-slot="pruneStatus" class="dim"></span>
+        <span>newest first</span>
+      </div>
     </div>
     <!-- The renderRegion-guarded region: search box + table. flush so the
          table's own row hairlines reach the panel edges. -->
@@ -60,7 +70,11 @@
 </template>
 
 <!-- one session row — label (+ raw id sub) · status chip · WAVs · stripped? ·
-     transcript status · size · inline rename · Open / Delete-audio actions. -->
+     transcript status · size · inline rename · Open / Absorb-into / Delete-audio
+     / Delete-session actions. The absorb <select> and every button live inside
+     the single Actions grid cell (.sessrow__act) so the row's 8-column grid
+     template is untouched, and every control stays inside the renderRegion host
+     (focus-safe across the poll). -->
 <template id="tpl-next-sessrow">
   <div class="sessrow">
     <span class="sesscol sesscol--label sessrow__id">
@@ -82,7 +96,16 @@
     </span>
     <span class="sesscol sesscol--act sessrow__act">
       <button class="act act--sm" type="button" data-slot="open">open</button>
+      <!-- Absorb THIS session (source) into another (target): the row's WAVs +
+           sidecars move into the picked target, source aliases fill gaps, and
+           THIS folder is deleted. POST /api/sessions/{target}/absorb {source}.
+           Hidden on the current session (the server refuses it as a source) and
+           when there's no other session to fold into. -->
+      <select class="select" data-slot="absorb" title="Fold this session into another — moves its WAVs into the picked target, then deletes this folder.">
+        <option value="">absorb into…</option>
+      </select>
       <button class="act act--sm act--danger" type="button" data-slot="del">delete audio</button>
+      <button class="act act--sm act--danger" type="button" data-slot="delSession">delete</button>
     </span>
   </div>
 </template>

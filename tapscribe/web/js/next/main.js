@@ -69,6 +69,23 @@ const viewCache = new Map();
 /** @type {string | null} */
 let mountedKey = null;
 
+// Only transcript:* keys are unbounded (one per visited session); the other
+// views are page-singletons (≤ 7 keys total). An always-open operator tab
+// that focuses many sessions over days would otherwise retain every cached
+// transcript view's DOM + listeners forever. Keep the most recent few — the
+// Map is maintained in LRU order for these keys (re-set on access).
+const MAX_CACHED_TRANSCRIPT_VIEWS = 6;
+function evictStaleTranscriptViews() {
+  const txKeys = [...viewCache.keys()].filter((k) => k.startsWith("transcript:"));
+  let excess = txKeys.length - MAX_CACHED_TRANSCRIPT_VIEWS;
+  for (const key of txKeys) {
+    if (excess <= 0) break;
+    if (key === mountedKey) continue; // never evict the mounted view; evict the next-oldest instead
+    viewCache.delete(key);
+    excess--;
+  }
+}
+
 // ---- Helpers ----------------------------------------------------------------
 
 /**
@@ -255,6 +272,11 @@ function renderView(j, session) {
   const key = viewKey(currentView, session);
 
   let built = viewCache.get(key) ?? null;
+  if (built && key.startsWith("transcript:")) {
+    // Refresh LRU position so eviction drops the least-recently-VIEWED one.
+    viewCache.delete(key);
+    viewCache.set(key, built);
+  }
   if (!built) {
     built = buildView(currentView, session);
     if (built) {
@@ -267,6 +289,7 @@ function renderView(j, session) {
       host.appendChild(built.node);
       built.host = host;
       viewCache.set(key, built);
+      evictStaleTranscriptViews();
     }
   }
 
@@ -484,7 +507,15 @@ async function tick() {
   }
 }
 
+// Mutation-driven re-render. Paint from the last known state FIRST so a
+// UI-only click (expand a transcript, pick a WAV, toggle a row) applies
+// instantly from cache instead of stalling on — or dying with — the
+// /api/state round-trip, then poll for the authoritative state. The classic
+// dashboard had the same contract ("I click and nothing happens until I
+// wait" was a real bug report); test_ui_only_click_updates_dom_without_a_
+// fresh_poll pins it.
 async function refresh() {
+  if (lastJson) renderAll(lastJson);
   await tick();
 }
 

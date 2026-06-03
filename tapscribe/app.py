@@ -7,7 +7,7 @@ and override `app.state.recorder` for isolation.
 
 The big-picture route map:
 
-  GET  /                        — dashboard HTML shell
+  GET  /                        — the Stages dashboard HTML shell (next.html)
   GET  /api/state               — sessions + active streams + live channel
   POST /api/transcribe          — batch transcribe one WAV
   POST /api/transcribe-session  — merge per-WAV transcripts into a session
@@ -219,7 +219,7 @@ class _SuppressPollAccess(logging.Filter):
     /api/transcribe, DELETE /api/sessions/..., websocket records) still
     surfaces."""
 
-    _SILENCED = ("/api/state", "/dashboard.css", "/dashboard.js", "/web/", "/health", "/healthz")
+    _SILENCED = ("/api/state", "/dashboard.css", "/next.css", "/web/", "/health", "/healthz")
 
     def filter(self, record):
         msg = record.getMessage()
@@ -1219,33 +1219,28 @@ async def tap(ws: WebSocket):
 # Dashboard assets
 # ---------------------------------------------------------------------------
 
-DASHBOARD_HTML_PATH = config.WEB_DIR / "dashboard.html"
+# The Stages dashboard ("/next" during its incubation; promoted to "/" once
+# the classic dashboard was retired). The shell is next.html; it layers
+# next.css on top of dashboard.css (the shared design tokens + primitives),
+# and loads everything else through the /web/... mounts below.
 DASHBOARD_CSS_PATH = config.WEB_DIR / "dashboard.css"
 DASHBOARD_JS_DIR = config.WEB_DIR / "js"
 DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
-# "Stages" dashboard (Phase 1) — a second, in-development control surface
-# served alongside the classic dashboard at /next. Shares the dashboard's
-# JS/component mounts (/web/...); only the shell HTML + its extra stylesheet
-# are served by their own routes here.
 NEXT_HTML_PATH = config.WEB_DIR / "next.html"
 NEXT_CSS_PATH = config.WEB_DIR / "next.css"
 
 
-def _read_dashboard_html() -> str:
-    try:
-        return DASHBOARD_HTML_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return (
-            "<!doctype html><html><body>"
-            "<h1>Dashboard HTML missing</h1>"
-            "<p>Expected at <code>" + str(DASHBOARD_HTML_PATH) + "</code>.</p>"
-            "</body></html>"
-        )
-
-
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    return HTMLResponse(_read_dashboard_html())
+    try:
+        return HTMLResponse(NEXT_HTML_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return HTMLResponse(
+            "<!doctype html><html><body>"
+            "<h1>Dashboard HTML missing</h1>"
+            "<p>Expected at <code>" + str(NEXT_HTML_PATH) + "</code>.</p>"
+            "</body></html>"
+        )
 
 
 @app.get("/dashboard.css")
@@ -1253,19 +1248,6 @@ async def dashboard_css():
     if not DASHBOARD_CSS_PATH.is_file():
         raise HTTPException(404, "dashboard.css not found")
     return FileResponse(DASHBOARD_CSS_PATH, media_type="text/css")
-
-
-@app.get("/next", response_class=HTMLResponse)
-async def next_dashboard():
-    try:
-        return HTMLResponse(NEXT_HTML_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return HTMLResponse(
-            "<!doctype html><html><body>"
-            "<h1>Stages dashboard HTML missing</h1>"
-            "<p>Expected at <code>" + str(NEXT_HTML_PATH) + "</code>.</p>"
-            "</body></html>"
-        )
 
 
 @app.get("/next.css")

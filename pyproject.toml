@@ -183,8 +183,12 @@ tapscribe = "tapscribe.__main__:main"
 [tool.setuptools.packages.find]
 include = ["tapscribe*"]
 
+# Recursive globs (setuptools >= 62.3) so NESTED web assets ship in wheels:
+# the old single-level globs silently dropped web/components/**, web/js/
+# components/**, and web/js/next/** — editable installs (start.sh) masked it,
+# but every built wheel / Docker image served a blank dashboard.
 [tool.setuptools.package-data]
-tapscribe = ["web/*.html", "web/*.css", "web/js/*.js"]
+tapscribe = ["web/**/*.html", "web/**/*.css", "web/**/*.js", "web/js/types.d.ts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

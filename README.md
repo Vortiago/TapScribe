@@ -25,15 +25,19 @@ add another.
 
 ## Dashboard
 
-One operator console at `/`. Sessions list on the bottom-left, live
-captions and active taps up top, merged transcript on the right after
-the **▶ transcribe whole session** button runs.
+One operator console at `/` — the "Stages" UI. A slim left spine
+navigates the global views (Taps · Sessions · People · Settings) and the
+per-session journey (Capture → Recordings → Transcript → Summary); the
+active-taps rail on the right follows you across views. Live captions
+stream in Capture; silence-stripping and the per-WAV files live in
+Recordings; the engine picker, **▶ transcribe range** button, and the
+merged transcript live in Transcript.
 
 ![Merged session transcript](docs/dashboard-shots/06-real-audio-transcript.png)
 
 The screenshot is captured live by the browser E2E test described
 under [Tests](#tests), running the real Apollo 11 audio fixture
-through the bridge and a real `faster-whisper` `tiny.en` over CPU.
+through the bridge and a real `faster-whisper` `tiny.en`.
 Whisper self-flagged the imperfect output as low-confidence; bigger
 models clean that up considerably.
 
@@ -198,10 +202,11 @@ Three layers, all fast:
   headless Chromium via Playwright against the running server and
   asserts on actual DOM. Two variants:
   - The fast plumbing check (synthetic WAVs + `FakeTranscriber`)
-    verifies active-taps rows appear while bridges stream, settled
-    lines land in the live transcripts panel with correct per-speaker
-    attribution, and the **▶ transcribe whole session** button
-    renders the merged transcript with both speakers' text.
+    verifies taps-rail rows appear while bridges stream, settled
+    lines land in Capture's captions feed with correct per-speaker
+    attribution, and Transcript's **▶ transcribe range** button
+    renders the merged transcript with both speakers' text — plus the
+    alias-applied copy-to-clipboard contract.
   - The real-audio check (`@pytest.mark.real_audio`) streams the
     committed Apollo 11 fixture through the bridge, clicks the same
     button, and waits for real `faster-whisper` to produce a merged

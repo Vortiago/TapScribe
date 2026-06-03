@@ -115,7 +115,8 @@ function fillRow(scope, a) {
  */
 export function render(j, { countEl, badgeEl, bodyEl }) {
   const list = j.active || [];
-  countEl.textContent = String(list.length);
+  const count = String(list.length);
+  if (countEl.textContent !== count) countEl.textContent = count;
 
   let st = _state.get(bodyEl);
   if (!st) {
@@ -145,20 +146,25 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
   }
 
   const seen = new Set();
+  /** @type {HTMLElement | null} */
+  let prevRow = null;
   for (const a of list) {
     const id = a.identity || "";
     seen.add(id);
     let wrap = st.rows.get(id);
     if (!wrap) {
-      const frag = tpl("tpl-stream-row");
-      wrap = /** @type {HTMLElement} */ (frag.firstElementChild);
-      fillRow(wrap, a);
-      bodyEl.appendChild(frag);
+      wrap = /** @type {HTMLElement} */ (tpl("tpl-stream-row").firstElementChild);
       st.rows.set(id, wrap);
-    } else {
-      fillRow(wrap, a);
-      bodyEl.appendChild(wrap); // re-append in list order (moves the node, no new node)
     }
+    fillRow(wrap, a);
+    // Keep list order WITHOUT re-appending every row each tick: moving an
+    // attached node is a remove+insert even when it lands in the same slot,
+    // which dirties layout (and restarts CSS transitions) K times per tick.
+    // Only rows that are new or genuinely out of order get inserted.
+    if (wrap.parentNode !== bodyEl || wrap.previousElementSibling !== prevRow) {
+      bodyEl.insertBefore(wrap, prevRow ? prevRow.nextSibling : bodyEl.firstChild);
+    }
+    prevRow = wrap;
   }
   // Drop rows for taps that are gone.
   for (const [id, wrap] of st.rows) {

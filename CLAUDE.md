@@ -30,6 +30,20 @@
   `tests/e2e/test_dashboard_ui.py` enforces this — it focuses every
   control in each view, crosses a poll, and fails if a node is rebuilt
   out from under the focus, so a new unguarded dropdown trips CI.
+- Render-signature hygiene on `/next`: a value that changes every tick or
+  every second (job progress, byte counters, live captions) must update
+  its DOM in place or carry its OWN small signature — never share a render
+  signature with an O(content) region. A 3000-segment merged transcript is
+  a 100–200 ms synchronous rebuild; sharing its sig with job progress was
+  the "/next locks up while transcribing" bug (one stall per job tick).
+  Two identity-stamp guards in `tests/e2e/test_dashboard_ui.py`
+  (`test_next_job_ticks_do_not_rebuild_merged_transcript`,
+  `test_next_caption_churn_appends_feed_lines_without_rebuilds`) pin the
+  fixes structurally — no timing thresholds, so they hold on slow CI.
+  To MEASURE render-path changes, run the opt-in CDP soak harness:
+  `TAPSCRIBE_PERF_SOAK=1 pytest tests/e2e/test_next_perf_soak.py -s`
+  (multi-pass scenarios; reports long tasks, poll health, post-GC
+  node/listener/heap growth — see its module docstring for knobs).
 
 ## Runtime deps the install picker does NOT cover
 
@@ -86,7 +100,7 @@ names are exported as module constants from each adapter
 (`ENV_CHUNK_S`, `ENV_OVERLAP_S`) so the dashboard wiring — when it
 lands — has one source of truth. Every operator-tunable setting
 belongs in the dashboard eventually; see the strip-silence knobs in
-`web/components/session-detail.html` for the pattern when adding
+`web/components/next/recordings.html` for the pattern when adding
 these.
 
 If a new runtime dep with the same shape (system binary, or optional
@@ -237,9 +251,10 @@ managed environment.
 The dashboard JS swallows exceptions thrown inside addEventListener
 callbacks; a `ReferenceError` from a removed-but-still-used import will
 *not* surface as a pageerror, the unit test suite will pass, and only
-the playwright job catches it. After any refactor in
-`tapscribe/web/js/components/session-detail.js` that touches the
-top-of-file `import { ... } from "../templates.js"`, grep the file for
-every name you removed (`grep -n '\bslot('`, etc.) before pushing —
-helpers used by `buildExpandTx`, the regex tester, and other rarely
-exercised paths are easy to miss when ripping unused-looking names.
+the playwright job catches it. After any refactor in a Stages view
+(`tapscribe/web/js/next/views/*.js`) that touches the top-of-file
+`import { ... } from "../../templates.js"`, grep the file for every
+name you removed (`grep -n '\bslot('`, etc.) before pushing — helpers
+used by expand/download/delete handlers and other rarely exercised
+paths are easy to miss when ripping unused-looking names. (`tsc`'s
+noUnusedLocals catches the opposite case — an import left behind.)
