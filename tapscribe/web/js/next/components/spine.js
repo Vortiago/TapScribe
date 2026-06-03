@@ -310,12 +310,34 @@ export function render(host, j, ctx) {
     return frag;
   };
 
-  // renderRegion supersedes the old hand-rolled focus guard: the spine rebuilds
-  // on every /api/state poll (~2×/s), but renderRegion skips the swap while any
-  // control inside the spine (today the session <select>; tomorrow any input/
-  // textarea) holds focus, so the native dropdown / caret survives the tick.
-  // Always-fresh otherwise (no sig), except during interaction.
-  renderRegion(host, buildFrag, {});
+  // Signature of everything the spine displays. Without it the spine rebuilt on
+  // EVERY poll (~2×/s) — ~30 nodes + ~11 listeners/tick of collectable garbage
+  // that the operator's tab accumulated between GCs until it OOMed. The sig
+  // gates renderRegion so it only rebuilds on a real change. It must include
+  // every value buildFrag reads — a miss leaves a stale spine. The focused
+  // session's growing WAV duration is deliberately EXCLUDED (it changes every
+  // tick during recording); wav_count covers "a new utterance landed", and the
+  // sessInfo duration stat refreshes on that rebuild.
+  const sessions = j.sessions || [];
+  const active = j.active || [];
+  const people = new Set();
+  for (const s of sessions) for (const k of Object.keys((s.session_meta || {}).aliases || {})) people.add(k);
+  const tx = session?.session_transcript || null;
+  const sig = [
+    currentView,
+    j.backend || "",
+    active.filter((a) => a.live !== false).length,
+    active.length,
+    sessions.length,
+    people.size,
+    sessions.map((s) => `${s.session}~${(localLabels.get(s.session) ?? metaFor(s).label) || ""}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
+    session ? `${session.session}~${session.wav_count || 0}~${tx ? 1 : 0}~${tx?.suppressed_count || 0}~${session.stripped ? 1 : 0}~${session.is_current ? 1 : 0}` : "",
+  ].join("§");
+
+  // renderRegion skips the swap while any control inside the spine holds focus
+  // (so the native dropdown / caret survives a tick) AND when the sig is
+  // unchanged — the latter is what kills the idle churn.
+  renderRegion(host, buildFrag, { sig });
 }
 
 // Re-export for callers that need the group membership of the active view.

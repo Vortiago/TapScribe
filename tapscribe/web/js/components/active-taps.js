@@ -6,6 +6,15 @@ import { tpl, mount, pick } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
 
+// Per-host "empty state already mounted" flag. Keyed by bodyEl (not module
+// scope) because active-taps renders into SEVERAL hosts at once on /next (the
+// global rail + the Taps view), so a shared sentinel would cross-talk. Gating
+// the idle re-mount stops ~15 detached nodes/tick of churn that the operator's
+// always-open tab accumulated between GCs until OOM. The active path is left
+// rebuilding each tick — level meters / lag / buffer text genuinely change.
+/** @type {WeakMap<Element, boolean>} */
+const _emptyMounted = new WeakMap();
+
 /**
  * @param {import('../types.js').AppState} j
  * @param {import('../types.js').ActiveTapsCtx} ctx
@@ -15,10 +24,14 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
   countEl.textContent = String(list.length);
 
   if (!list.length) {
-    mount(badgeEl, tpl("tpl-active-badge-idle"));
-    mount(bodyEl, tpl("tpl-active-empty"));
+    if (!_emptyMounted.get(bodyEl)) {
+      mount(badgeEl, tpl("tpl-active-badge-idle"));
+      mount(bodyEl, tpl("tpl-active-empty"));
+      _emptyMounted.set(bodyEl, true);
+    }
     return;
   }
+  _emptyMounted.set(bodyEl, false); // next idle render re-mounts the empty state
   mount(badgeEl, tpl("tpl-active-badge-capturing"));
 
   const frag = document.createDocumentFragment();

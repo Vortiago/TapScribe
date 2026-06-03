@@ -19,8 +19,15 @@ export function render(j, { countEl, shell, autoscrollEl }) {
   countEl.textContent = String(feed.length);
 
   if (!feed.length) {
-    mount(shell, tpl("tpl-feed-empty"));
-    lastSig = "";
+    // Mount the empty-state ascii ONCE, then skip — re-mounting it every poll
+    // tick (the common idle state) churns ~100 detached nodes/sec, which the
+    // operator's tab accumulates between GCs until it OOMs. A sentinel sig
+    // (can't collide with the length-prefixed live sig) gates the re-mount;
+    // invalidate() resets it, and the empty→live transition rebuilds normally.
+    if (lastSig !== "::empty::") {
+      mount(shell, tpl("tpl-feed-empty"));
+      lastSig = "::empty::";
+    }
     return;
   }
 

@@ -1076,3 +1076,73 @@ async def test_next_poll_render_does_not_clobber_open_controls(
             )
         finally:
             await browser.close()
+
+
+# ---------------------------------------------------------------------------
+# Performance guard: idle polling must not churn DOM nodes / event listeners.
+# ---------------------------------------------------------------------------
+# The dashboard is a polling SPA. A component that re-mounts or rebuilds a DOM
+# region on EVERY /api/state tick (no signature gate) — e.g. re-`mount()`ing an
+# empty-state fragment, or `renderRegion` with no `sig` — produces hundreds of
+# collectable *detached* nodes + listeners per second. They are garbage, but an
+# operator's always-open tab accumulates them between GCs and eventually OOMs
+# (real report: Edge tab, climbing "DOM Nodes"/"JS event listeners", 47 s LCP).
+#
+# This guard measures the exact metrics the browser's Performance Monitor shows
+# (Nodes incl. detached, JSEventListeners) via CDP, across ~10 s of TRUE idle
+# (no taps, empty live feed) on both / and /next. Listener growth must be ~0
+# (any growth = a component re-attaching listeners each tick); node growth gets
+# a benign baseline but must not regress to the per-tick-churn range that the
+# live-feed ascii / spine / active-taps produced before they were sig-gated.
+#
+# Tuning: these are deliberately loose enough to absorb CI poll-count variance
+# and the remaining benign header re-render, but tight enough that reverting any
+# of the sig gates (live-feed.js, active-taps.js, spine.js) trips it.
+_IDLE_MAX_LISTENER_GROWTH = 40
+_IDLE_MAX_NODE_GROWTH = 1400
+
+
+async def _perf_metrics(client) -> tuple[float, float]:
+    res = await client.send("Performance.getMetrics")
+    m = {d["name"]: d["value"] for d in res["metrics"]}
+    return m.get("Nodes", 0), m.get("JSEventListeners", 0)
+
+
+async def test_dashboard_idle_polling_does_not_churn_dom(running_recorder: RunningRecorder):
+    """At idle, neither dashboard may grow DOM nodes/listeners every poll.
+
+    Catches the whole bug class of "render region rebuilt every tick without a
+    change signature", which leaks collectable detached nodes/listeners fast
+    enough to OOM a long-lived operator tab.
+    """
+    base = running_recorder.base_url
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            failures: list[str] = []
+            for path in ("/", "/next"):
+                context = await browser.new_context(viewport={"width": 1400, "height": 900})
+                page = await context.new_page()
+                client = await page.context.new_cdp_session(page)
+                await client.send("Performance.enable")
+                await page.goto(base + path, wait_until="domcontentloaded")
+                # Settle: let first-paint + the first couple of polls land.
+                await page.wait_for_timeout(2500)
+                n0, l0 = await _perf_metrics(client)
+                # Idle through ~10 (/) to ~20 (/next) poll cycles — no input.
+                await page.wait_for_timeout(10000)
+                n1, l1 = await _perf_metrics(client)
+                dn, dl = n1 - n0, l1 - l0
+                print(f"[idle-churn] {path}: Δnodes={dn:+.0f}  Δlisteners={dl:+.0f}")
+                if dl > _IDLE_MAX_LISTENER_GROWTH:
+                    failures.append(f"{path}: +{dl:.0f} listeners over ~10s idle (per-tick listener churn)")
+                if dn > _IDLE_MAX_NODE_GROWTH:
+                    failures.append(f"{path}: +{dn:.0f} DOM nodes over ~10s idle (per-tick DOM churn)")
+                await context.close()
+            assert not failures, "idle DOM churn regression: " + "; ".join(failures)
+        finally:
+            await browser.close()
