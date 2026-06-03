@@ -50,7 +50,8 @@
       <div class="panel__body flush"><div class="feed" data-slot="liveFeedShell"></div></div>
     </div>
 
-    <!-- ASIDE: live channel control + active taps feeding this session -->
+    <!-- ASIDE: live channel control. (The active-taps panel that used to live
+         here is now the global #tapsRail, visible on every view.) -->
     <div class="aside">
       <div class="panel">
         <div class="panel__head">
@@ -61,14 +62,6 @@
           <div class="live-mlx-note dim mono" data-slot="liveMlxNote"></div>
           <div data-slot="liveChannelBody"></div>
         </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel__head">
-          <div class="panel__title"><span class="ic">🛰️</span>Taps feeding this session</div>
-          <span class="panel__hint"><span data-slot="activeTapsBadge"></span> · <span class="mono" data-slot="activeCount">0</span></span>
-        </div>
-        <div class="panel__body flush"><div class="taps" data-slot="activeTapsBody"></div></div>
       </div>
     </div>
   </div>

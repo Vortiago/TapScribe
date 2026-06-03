@@ -13,11 +13,12 @@
 // re-renders; we mirror it into location.hash so a reload lands on the same
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
-import { fetchState, postJson, del } from "../api.js";
-import { loadTemplates } from "../templates.js";
+import { fetchState, postJson, putJson, del } from "../api.js";
+import { loadTemplates, pick } from "../templates.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import * as spine from "./components/spine.js";
 import * as engine from "./components/engine.js";
+import * as activeTaps from "../components/active-taps.js";
 import * as captureView from "./views/capture.js";
 import * as transcriptView from "./views/transcript.js";
 import * as summaryView from "./views/summary.js";
@@ -139,6 +140,75 @@ const liveStop = async () => {
   catch (e) { alert(`Live stop failed: ${e}`); }
   finally { await refresh(); }
 };
+
+// ---- Active-taps rail -------------------------------------------------------
+// The global, collapsible right rail. Hosts the reused active-taps component
+// on every view (Capture used to own it; now it lives here so the operator
+// sees live taps everywhere). The delegated rec/live toggle handler is bound
+// ONCE on the rail body — the body re-renders each tick, but a delegated click
+// on the parent survives every swap (same contract as the classic dashboard's
+// #activeTapsBody handler and the one Capture previously carried).
+
+const RAIL_HIDDEN_KEY = "tapscribe.next.tapsRailHidden";
+
+/** @type {import('../types.js').ActiveTapsCtx} */
+let railCtx;
+
+/** Lazily resolve the rail host slots (the shell is static, so once is fine). */
+function railContext() {
+  if (!railCtx) {
+    railCtx = {
+      countEl: $("tapsRailCount"),
+      badgeEl: pick($("tapsRail"), "activeTapsBadge"),
+      bodyEl: $("tapsRailBody"),
+    };
+    // Delegated rec/live toggle → PUT /api/tap-settings, then refresh(). Flip
+    // the visual state immediately so the click feels responsive; the next
+    // poll repaints from the authoritative state.
+    railCtx.bodyEl.addEventListener("click", async (ev) => {
+      const btn = /** @type {HTMLButtonElement | null} */ (
+        /** @type {Element | null} */ (ev.target)?.closest(".tap-toggle"));
+      if (!btn || btn.disabled) return;
+      const identity = btn.dataset.identity;
+      const which = btn.dataset.toggle;
+      if (!identity || !which) return;
+      const next = btn.dataset.state !== "1";
+      btn.dataset.state = next ? "1" : "0";
+      btn.classList.toggle("on", next);
+      btn.disabled = true;
+      try { await putJson("/api/tap-settings", { identity, [which]: next }); }
+      catch (e) { alert(`Tap setting toggle failed: ${e}`); }
+      finally { btn.disabled = false; await refresh(); }
+    });
+  }
+  return railCtx;
+}
+
+/** @param {boolean} hidden */
+function setRailHidden(hidden) {
+  $("next-app").classList.toggle("rail-hidden", hidden);
+  try { localStorage.setItem(RAIL_HIDDEN_KEY, hidden ? "1" : "0"); }
+  catch { /* private-mode / quota — the rail just won't persist, not fatal. */ }
+}
+
+/** Apply the saved (or narrow-screen default) collapse state + wire the toggles. */
+function initRail() {
+  let saved = null;
+  try { saved = localStorage.getItem(RAIL_HIDDEN_KEY); }
+  catch { /* storage unavailable — fall through to the responsive default. */ }
+  // No explicit preference yet → default hidden on narrow viewports so the
+  // rail doesn't crush the workspace; visible on wide ones.
+  const hidden = saved != null ? saved === "1" : window.matchMedia("(max-width: 1100px)").matches;
+  $("next-app").classList.toggle("rail-hidden", hidden);
+
+  $("tapsRailHide").addEventListener("click", () => setRailHidden(true));
+  $("tapsRailShow").addEventListener("click", () => setRailHidden(false));
+}
+
+/** @param {import('../types.js').AppState} j */
+function renderRail(j) {
+  activeTaps.render(j, railContext());
+}
 
 // ---- View mounting ----------------------------------------------------------
 
@@ -337,6 +407,10 @@ function renderAll(j) {
   if (session && selectedSessionId == null) selectedSessionId = session.session;
   renderSpine(j, session);
   renderView(j, session);
+  // The active-taps rail is global — render it every tick regardless of the
+  // active view. active-taps holds only buttons (no focus state to clobber),
+  // so renderRegion's focus-guard isn't needed here.
+  renderRail(j);
 }
 
 async function tick() {
@@ -395,6 +469,7 @@ async function loadModelCatalogs() {
 }
 
 viewFromHash();
+initRail();
 
 // Expose a screenshot/automation hook (parity with the prototype's gotoView).
 /** @type {any} */ (window).gotoView = gotoView;
