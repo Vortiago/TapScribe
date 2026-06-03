@@ -322,6 +322,14 @@ body::before { display: none; }
 .feed .feed-empty .ascii { font-family: var(--mono); white-space: pre; font-size: 11px; color: var(--fg-3); margin-bottom: 8px; line-height: 1.2; }
 .feed .feed-empty .mt-s { margin-top: 6px; }
 
+/* Capture: let the live-captions panel grow to fill its grid row so a tall
+   taps column (the .aside) doesn't leave whitespace beside a fixed-height
+   feed. .grid is align-items:start, so opt this one panel into stretch and
+   make the feed flex instead of a hard 380px cap. */
+.livecap { align-self: stretch; display: flex; flex-direction: column; min-height: 380px; }
+.livecap > .panel__body.flush { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.livecap .feed { max-height: none; flex: 1; min-height: 0; }
+
 /* active-taps: the "taps feeding this session" rows */
 .taps { padding: 2px 0; }
 .taps .empty { padding: 20px 12px; font-size: 10.5px; }

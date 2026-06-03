@@ -38,12 +38,13 @@
   <div data-slot="head"></div>
   <div class="grid cols-cap">
     <!-- PRIMARY: live IRC captions (reuses live-feed.js) -->
-    <div class="panel panel--primary">
+    <div class="panel panel--primary livecap">
       <div class="panel__head">
         <div class="panel__title"><span class="ic">💬</span>Live captions</div>
         <div class="panel__hint">
           <label class="autoscroll"><input type="checkbox" data-slot="liveAutoScroll" checked> autoscroll</label>
           <span class="mono" data-slot="liveFeedCount">0</span>
+          <button class="act act--sm" type="button" data-slot="liveClear">clear</button>
         </div>
       </div>
       <div class="panel__body flush"><div class="feed" data-slot="liveFeedShell"></div></div>
