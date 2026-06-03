@@ -208,6 +208,27 @@ def test_api_state_carries_backend_preference_and_available_backends(client):
     assert isinstance(body["available_backends"], list)
 
 
+def test_api_state_conditional_get_returns_304_when_unchanged(client):
+    """The poll path emits a weak ETag and answers a matching If-None-Match with
+    a bodyless 304, so an idle dashboard reuses its cached state instead of
+    re-parsing the payload every tick. A stale validator gets the full 200."""
+    r1 = client.get("/api/state")
+    assert r1.status_code == 200
+    etag = r1.headers.get("etag")
+    assert etag and etag.startswith('W/"'), f"expected a weak ETag, got {etag!r}"
+
+    # Same validator + unchanged (idle) state → 304 with no body.
+    r2 = client.get("/api/state", headers={"If-None-Match": etag})
+    assert r2.status_code == 304
+    assert r2.content == b""
+    assert r2.headers.get("etag") == etag
+
+    # A stale validator → full 200 body again.
+    r3 = client.get("/api/state", headers={"If-None-Match": 'W/"0000000000000000"'})
+    assert r3.status_code == 200
+    assert r3.json()["current_session"] == r1.json()["current_session"]
+
+
 # ---------------------------------------------------------------------------
 # /api/state — editable prompt + hotwords blocks. The dashboard renders
 # textareas for each one, gated by `inputs_support`.

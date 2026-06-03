@@ -19,7 +19,29 @@ const _body = (body) => ({
   body: JSON.stringify(body ?? {}),
 });
 
-export const fetchState = () => fetch("/api/state", { cache: "no-store" }).then(_unwrap);
+// /api/state is polled every ~0.5-1s. The server returns a weak ETag; we send
+// it back as If-None-Match and reuse the last parsed state on a 304, so an idle
+// poll skips the body transfer + JSON parse + state-object allocation. Module
+// state is fine — there's one poller per page.
+/** @type {string | null} */
+let _stateEtag = null;
+/** @type {import('./types.js').AppState | null} */
+let _lastState = null;
+export async function fetchState() {
+  const r = await fetch("/api/state", {
+    cache: "no-store",
+    headers: _stateEtag ? { "If-None-Match": _stateEtag } : undefined,
+  });
+  if (r.status === 304 && _lastState !== null) return _lastState;
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch { /* not JSON */ }
+    throw new Error(`${r.status} ${detail}`);
+  }
+  _stateEtag = r.headers.get("ETag");
+  _lastState = /** @type {import('./types.js').AppState} */ (await r.json());
+  return _lastState;
+}
 
 // ---- Lazy transcript fetch + client cache --------------------------------
 //

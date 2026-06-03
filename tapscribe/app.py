@@ -23,6 +23,8 @@ The big-picture route map:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import math
 import shutil
@@ -40,9 +42,10 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config
@@ -412,7 +415,7 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
 
 
 @app.get("/api/state")
-async def api_state(recorder: Recorder = Depends(get_recorder)):
+async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
     blob = await asyncio.to_thread(_build_state_blob, recorder.session_start, jobs_snapshot)
@@ -441,7 +444,7 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
             override_counts["prompt"] += 1
         if m.get("hotwords"):
             override_counts["hotwords"] += 1
-    return {
+    payload = {
         "current_session": recorder.session_start,
         "active": active,
         "sessions": sessions_list,
@@ -477,6 +480,19 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
             "count": len(halluc_rules),
         },
     }
+    # Conditional GET: hash the (compact) body into a weak ETag and answer 304
+    # when the dashboard's If-None-Match still matches. The poll fires every
+    # ~0.5-1s; at idle the payload is byte-identical, so the client reuses its
+    # cached state and skips the parse + state-object allocation. Weak ETag
+    # (W/) because GZipMiddleware re-encodes the body — the validator is over
+    # the semantic content, not the on-wire bytes. During capture the payload
+    # changes each tick, so this only short-circuits genuine no-ops.
+    body = json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode("utf-8")
+    etag = 'W/"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if req.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 # ---------------------------------------------------------------------------
