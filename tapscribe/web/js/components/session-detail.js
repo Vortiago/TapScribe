@@ -469,6 +469,18 @@ function buildAliases(meta, aliasKeys, sessKey) {
   return frag;
 }
 
+// Placeholder shown in an expanded WAV row while its full transcript is being
+// fetched lazily (the row's marker says a transcript exists, but the body
+// isn't cached yet). Replaced on the re-render main.js schedules when the
+// fetch lands. Kept tiny — no `.expand-tx` class so it can't be mistaken for
+// the rendered transcript by tests/selectors that key off that class.
+function buildExpandLoading() {
+  const div = document.createElement("div");
+  div.className = "expand-tx-loading dim small";
+  div.textContent = "loading transcript…";
+  return div;
+}
+
 /**
  * @param {import('../types.js').WavFile} f
  * @param {string} sessKey
@@ -533,9 +545,15 @@ function buildWavRow(f, sessKey, ctx) {
 
   // Append the inline transcript after the row when expanded. Returning a
   // fragment of (row, expand?) keeps both at the same level under wav-list.
+  // `f.transcript` is a slim marker; resolve the full body lazily for the
+  // expand (main.js re-renders when the fetch lands).
   const out = document.createDocumentFragment();
   out.appendChild(frag);
-  if (open && f.transcript) out.appendChild(buildExpandTx(f.transcript));
+  if (open && f.transcript) {
+    const full = ctx.getWavTx(sessKey, f.name, "original", f.transcript);
+    if (full) out.appendChild(buildExpandTx(full));
+    else out.appendChild(buildExpandLoading());
+  }
 
   // Region sub-rows — one per WAV strip-silence produced from this original.
   // Backend buckets them by (speaker_slug, ident); they share the parent's
@@ -616,7 +634,11 @@ function appendRegionSub(host, r, sessKey, ctx) {
   }
 
   host.appendChild(frag);
-  if (open && r.transcript) host.appendChild(buildExpandTx(r.transcript));
+  if (open && r.transcript) {
+    const full = ctx.getWavTx(sessKey, r.name, "stripped", r.transcript);
+    if (full) host.appendChild(buildExpandTx(full));
+    else host.appendChild(buildExpandLoading());
+  }
 }
 
 /**
@@ -671,7 +693,10 @@ export function renderRegexHits(segs, { rxPattern, rxFlags }) {
  * @param {import('../types.js').SessionDetailCtx} ctx
  */
 function buildRegexTester(s, ctx) {
-  const segs = s.session_transcript?.segments || [];
+  // Segments come from the lazily-fetched full merged transcript, not the
+  // slim marker on `s`. getMerged peeks the cache (and fires the fetch on a
+  // miss); empty until it lands, then a re-render fills the seed hits.
+  const segs = ctx.getMerged(s.session_transcript)?.segments || [];
   const existingRules = ctx.lastJson?.hallucinations?.rules || [];
 
   const frag = tpl("tpl-regex-tester");
@@ -765,10 +790,14 @@ export function render(s, host, ctx) {
   side.appendChild(buildWavList(s, sessKey, ctx));
   side.appendChild(buildRegexTester(s, ctx));
 
-  // Main column — merged transcript mount
+  // Main column — merged transcript mount. /api/state ships only a slim
+  // marker; resolve the full body from the lazy cache. A truthy marker with a
+  // not-yet-loaded body renders the empty/loading placeholder for this tick —
+  // main.js schedules a re-render when the fetch lands.
   const mergedHost = pick(frag, "merged");
-  if (s.session_transcript) {
-    mergedHost.appendChild(ctx.renderMerged(s.session_transcript, meta));
+  const mergedFull = ctx.getMerged(s.session_transcript);
+  if (mergedFull) {
+    mergedHost.appendChild(ctx.renderMerged(mergedFull, meta));
   } else {
     mergedHost.appendChild(tpl("tpl-merged-empty"));
   }

@@ -1565,10 +1565,13 @@ def test_api_transcribe_session_returns_409_when_job_already_in_flight(
 
 
 def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_test):
-    """The dashboard reads each WAV's transcript out of /api/state's
-    `sessions[*].files[*].transcript`. With the new multi-cache layout,
-    that field must surface the *primary* transcript so flipping the
-    primary on disk shows up on the next poll."""
+    """The dashboard reads each WAV's transcript MARKER out of /api/state's
+    `sessions[*].files[*].transcript`. With the lazy-transcript change the
+    field is a slim marker (backend/model/transcribed_at/transcribe_ms/source/
+    segment_count) — NOT the full body — but it must still surface the
+    *primary* (backend, model) so flipping the primary on disk shows up on the
+    next poll. The full text is fetched lazily via the per-WAV transcript
+    endpoint instead, asserted below."""
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
@@ -1590,21 +1593,32 @@ def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_
         hallucination_rules=[],
     )
 
-    # Default primary is the most-recent write (voxtral).
+    # Default primary is the most-recent write (voxtral). The marker carries
+    # backend/model but NOT the segment-level text/words.
     body = client.get("/api/state").json()
     s = next(s for s in body["sessions"] if s["session"] == "s")
     file_row = next(f for f in s["files"] if f["name"] == wav.name)
     assert file_row["transcript"] is not None
-    assert file_row["transcript"]["text"] == "voxtral text"
     assert file_row["transcript"]["backend"] == "mlx-voxtral"
+    assert file_row["transcript"]["model"] == "voxtral-mini"
+    assert "text" not in file_row["transcript"], "marker must not embed the transcript body"
+    assert "segments" not in file_row["transcript"]
 
-    # Flip primary back to whisper; the dashboard sees the change.
+    # The full text is reachable via the lazy per-WAV transcript endpoint.
+    full = client.get(f"/api/wav/s/{wav.name}/transcript").json()
+    assert full["text"] == "voxtral text"
+    assert full["backend"] == "mlx-voxtral"
+
+    # Flip primary back to whisper; the dashboard sees the change in the marker.
     set_primary_transcript(wav, backend="faster-whisper", model="small.en")
     body = client.get("/api/state").json()
     s = next(s for s in body["sessions"] if s["session"] == "s")
     file_row = next(f for f in s["files"] if f["name"] == wav.name)
-    assert file_row["transcript"]["text"] == "whisper text"
     assert file_row["transcript"]["backend"] == "faster-whisper"
+    assert file_row["transcript"]["model"] == "small.en"
+    full = client.get(f"/api/wav/s/{wav.name}/transcript").json()
+    assert full["text"] == "whisper text"
+    assert full["backend"] == "faster-whisper"
 
 
 def test_absorb_moves_new_layout_transcripts_directory(client, recorder_under_test):

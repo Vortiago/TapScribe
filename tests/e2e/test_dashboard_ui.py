@@ -762,6 +762,108 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
             await browser.close()
 
 
+async def test_lazy_transcript_fetch_is_cached_not_per_poll(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,
+    tmp_path: Path,
+):
+    """The lazy transcript fetch must be CACHED by (session, transcribed_at):
+    hit ONCE when the session is opened, then NOT re-fetched on every /api/state
+    poll. Otherwise the optimisation just trades DOM churn for network churn.
+
+    Records + transcribes a session so /api/state ships a transcript MARKER,
+    opens the dashboard (which renders the merged transcript via a lazy fetch
+    of GET /api/sessions/{s}/transcript), counts both the poll ticks and the
+    transcript-endpoint hits across ~6 poll cycles, and asserts the transcript
+    endpoint fired exactly once while many polls elapsed.
+    """
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    scripted = "cached fetch check from Alice"
+    fake_transcriber.text_by_speaker["Alice"] = scripted
+
+    src = synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src,
+        utterance_id="utt-cache-count",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    import httpx
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        # Transcribe the whole session so /api/state carries a session_transcript
+        # marker and the dashboard's merged-transcript path fires a lazy fetch.
+        resp = await client.post(
+            "/api/transcribe-session",
+            json={"session": rec.session_start, "model": "tiny.en"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            # Count poll ticks and lazy transcript-endpoint hits from the page.
+            await page.add_init_script(
+                """
+                window.__statePolls = 0;
+                window.__txFetches = 0;
+                const _f = window.fetch;
+                window.fetch = function (input, init) {
+                  const u = typeof input === 'string' ? input : (input && input.url) || '';
+                  if (u.includes('/api/state')) window.__statePolls++;
+                  else if (/\\/api\\/sessions\\/[^/]+\\/transcript/.test(u)) window.__txFetches++;
+                  return _f.apply(this, arguments);
+                };
+                """
+            )
+            await page.goto(base, wait_until="domcontentloaded")
+
+            # Wait until the merged transcript has rendered — proves the lazy
+            # fetch fired and the body painted.
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const region = document.querySelector('.sess-main .transcript');
+                  return region && region.innerText.includes({scripted!r});
+                }}
+                """,
+                timeout=15000,
+            )
+
+            # Let several poll cycles elapse (poll cadence ~500ms) so a
+            # per-poll re-fetch would clearly show up in the counter.
+            await page.wait_for_function(
+                "() => window.__statePolls >= 6",
+                timeout=10000,
+            )
+
+            polls = await page.evaluate("() => window.__statePolls")
+            fetches = await page.evaluate("() => window.__txFetches")
+            assert polls >= 6, f"expected several polls, saw {polls}"
+            # The transcript endpoint must have fired ONCE for this (session,
+            # transcribed_at) — not once per poll. (1 is the contract; allow a
+            # tiny slack only for an initial duplicate render, never per-poll.)
+            assert fetches == 1, (
+                f"lazy transcript fetch not cached: {fetches} hits across {polls} polls "
+                f"(must be 1 per (session, transcribed_at), not per poll)"
+            )
+        finally:
+            await browser.close()
+
+
 async def test_model_select_change_does_not_block_re_render(
     running_recorder: RunningRecorder,
     tmp_path: Path,

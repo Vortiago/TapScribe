@@ -157,6 +157,37 @@ def read_primary_payload(wav_path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def read_primary_marker(wav_path: Path) -> dict[str, Any] | None:
+    """A SLIM marker for the primary transcript — the small subset of fields
+    the dashboard listing reads without rendering the transcript body.
+
+    Returns `{"transcribed_at", "transcribe_ms", "backend", "model",
+    "source", "segment_count"}` (omitting any that are absent) or None when no
+    transcript is cached. Used by the `/api/state` poll so the per-WAV row can
+    show its has-transcript marker, "took Xms" cell, and the set-primary
+    compare key (backend/model/source) WITHOUT embedding the full segments[] /
+    text / suppressed[] payload — the dashboard fetches that lazily via
+    `GET /api/wav/{session}/{name}/transcript` only when a row is expanded.
+
+    Parses the same sidecar `read_primary_payload` would, then projects the
+    marker fields — one read, one parse, like the full read it replaces."""
+    data = read_primary_payload(wav_path)
+    if data is None:
+        return None
+    marker: dict[str, Any] = {}
+    for key in ("transcribed_at", "backend", "model", "source"):
+        val = data.get(key)
+        if val is not None:
+            marker[key] = val
+    transcribe_ms = data.get("transcribe_ms")
+    if transcribe_ms is not None:
+        marker["transcribe_ms"] = transcribe_ms
+    segments = data.get("segments")
+    if isinstance(segments, list):
+        marker["segment_count"] = len(segments)
+    return marker
+
+
 def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
     """Every cached transcript for `wav_path`, one per (backend, model).
     Unparseable sidecars are silently dropped. Order is unspecified."""

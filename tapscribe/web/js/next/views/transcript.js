@@ -20,7 +20,7 @@
 // (rebuildEngine).
 
 import { tpl, pick } from "../../templates.js";
-import { postJson, putJson } from "../../api.js";
+import { postJson, putJson, fetchSessionTranscript, peekSessionTranscript } from "../../api.js";
 import { fmtBytes, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
@@ -71,8 +71,36 @@ export function build(ctx) {
   /** @type {Set<string>} */
   const txInflight = new Set();
   let lastSig = " "; // sentinel so the first update always renders
+  // Keys (session@stamp) we've already scheduled a re-render for after the
+  // lazy merged-transcript fetch lands — dedupes repeated misses.
+  /** @type {Set<string>} */
+  const txRerenderPending = new Set();
 
   // ---- Helpers --------------------------------------------------------------
+
+  // Resolve the OPEN session's FULL merged transcript from the lazy cache.
+  // /api/state ships only a slim marker; on a cache miss this fires the fetch
+  // once and re-renders (via afterMutate) when it lands. Returns null until
+  // then. Keyed by (session, transcribed_at) so a re-transcribe re-fetches.
+  /**
+   * @param {import('../../types.js').MergedTranscriptMarker | null} marker
+   * @param {string} sid
+   * @returns {import('../../types.js').MergedTranscript | null}
+   */
+  const resolveMerged = (marker, sid) => {
+    if (!marker || !marker.transcribed_at || !sid) return null;
+    const stamp = marker.transcribed_at;
+    const cached = peekSessionTranscript(sid, stamp);
+    if (cached !== undefined) return cached;
+    const key = `${sid}@${stamp}`;
+    if (!txRerenderPending.has(key)) {
+      txRerenderPending.add(key);
+      fetchSessionTranscript(sid, stamp)
+        .catch(() => { /* transient failure — next poll retries */ })
+        .finally(() => { txRerenderPending.delete(key); lastSig = " "; afterMutate(); });
+    }
+    return null;
+  };
 
   /** Resolve the selected original WAV for the focused session (first if unset). */
   const selectedFor = () => {
@@ -263,10 +291,22 @@ export function build(ctx) {
         : (sess ? "not transcribed yet — pick a model and transcribe below" : "no session selected — pick one from the spine"),
     });
 
-    // Merged transcript (main/left)
+    // Merged transcript (main/left). `tx` is the slim marker; the body comes
+    // from the lazy cache. While it loads, the marker still drives the "has a
+    // transcript" branch so the hint shows the marker's segment count.
+    const txFull = sess ? resolveMerged(tx, sid) : null;
     if (sess && tx) {
-      txHint.textContent = `${(tx.segments || []).length} seg · model ${tx.model || "?"} · took ${fmtMs(tx.transcribe_ms)}`;
-      mergedHost.replaceChildren(mergedTranscript.render(tx, metaFor(sess), { showAudit: true }));
+      const segCount = txFull ? (txFull.segments || []).length : (tx.segment_count || 0);
+      const model = txFull?.model || "?";
+      txHint.textContent = `${segCount} seg · model ${model} · took ${fmtMs(txFull?.transcribe_ms)}`;
+      if (txFull) {
+        mergedHost.replaceChildren(mergedTranscript.render(txFull, metaFor(sess), { showAudit: true }));
+      } else {
+        const loading = document.createElement("div");
+        loading.className = "empty";
+        loading.textContent = "loading transcript…";
+        mergedHost.replaceChildren(loading);
+      }
     } else {
       txHint.textContent = "not run";
       const empty = document.createElement("div");

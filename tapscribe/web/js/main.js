@@ -5,7 +5,11 @@
 // inputs survive across ticks.
 
 import { cssEscape, fmtBytes, fmtClock, fmtElapsedShort } from "./formatters.js";
-import { fetchState, postJson, putJson, del } from "./api.js";
+import {
+  fetchState, postJson, putJson, del,
+  fetchSessionTranscript, peekSessionTranscript,
+  fetchWavTranscript, peekWavTranscript,
+} from "./api.js";
 import { loadTemplates } from "./templates.js";
 import { aliasOf } from "./speakers.js";
 import * as liveFeed from "./components/live-feed.js";
@@ -398,6 +402,74 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     if (lastJson) renderSessionsIfChanged(lastJson);
   }
 
+  // ---- Lazy transcript resolution -----------------------------------------
+  //
+  // /api/state now ships slim transcript MARKERS, not bodies. The full merged
+  // transcript (for the open session) and the full per-WAV transcript (for an
+  // expanded row) are fetched lazily + cached by (id, transcribed_at) in
+  // api.js. These resolvers peek that cache synchronously for the renderer;
+  // on a miss they fire the fetch ONCE and, when it lands, bust the render
+  // signature + re-render so the now-cached body paints. A miss never recurs
+  // for the same (id, transcribed_at) — an idle poll re-renders straight from
+  // the settled cache with no network.
+
+  // Keys we've already attached a re-render callback to, so repeated renders
+  // while a fetch is in-flight don't pile up redundant re-renders. Cleared
+  // per key when its fetch settles.
+  /** @type {Set<string>} */
+  const _txRerenderPending = new Set();
+
+  // Schedule a re-render after a transcript fetch settles. `key` dedupes so
+  // the .then is attached once per (id, stamp), not on every render pass.
+  /**
+   * @param {string} key
+   * @param {Promise<unknown>} p
+   */
+  function rerenderWhenLoaded(key, p) {
+    if (_txRerenderPending.has(key)) return;
+    _txRerenderPending.add(key);
+    p.then(() => { lastSessionsSig = ""; rerenderFromCache(); })
+      .catch(() => { /* fetch failed (e.g. transient 503) — next poll retries */ })
+      .finally(() => { _txRerenderPending.delete(key); });
+  }
+
+  // Resolve the full merged transcript for the selected session from cache,
+  // kicking off the lazy fetch on a miss. Returns null until it lands.
+  /**
+   * @param {import('./types.js').MergedTranscriptMarker | null | undefined} marker
+   * @param {string} session
+   * @returns {import('./types.js').MergedTranscript | null}
+   */
+  function resolveMergedTranscript(marker, session) {
+    if (!marker || !marker.transcribed_at) return null;
+    const stamp = marker.transcribed_at;
+    const cached = peekSessionTranscript(session, stamp);
+    if (cached !== undefined) return cached;
+    rerenderWhenLoaded(`sess:${session}@${stamp}`, fetchSessionTranscript(session, stamp));
+    return null;
+  }
+
+  // Resolve the full per-WAV transcript for an EXPANDED row from cache,
+  // kicking off the lazy fetch on a miss. Returns null until it lands.
+  /**
+   * @param {string} session
+   * @param {string} name
+   * @param {"original" | "stripped"} source
+   * @param {import('./types.js').WavTranscriptMarker | null | undefined} marker
+   * @returns {import('./types.js').WavTranscript | null}
+   */
+  function resolveWavTranscript(session, name, source, marker) {
+    if (!marker) return null;
+    const stamp = marker.transcribed_at || "";
+    const cached = peekWavTranscript(session, name, source, stamp);
+    if (cached !== undefined) return cached;
+    rerenderWhenLoaded(
+      `wav:${session}/${name}@${source}@${stamp}`,
+      fetchWavTranscript(session, name, source, stamp),
+    );
+    return null;
+  }
+
   /**
    * @param {import('./types.js').Session[]} sessions
    * @param {string | null} selectedId
@@ -482,6 +554,11 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
       },
       // sub-component
       renderMerged: (t, meta) => mergedTranscript.render(t, meta, { showAudit }),
+      // Lazy transcript resolvers — the marker on `s` carries only the
+      // re-fetch stamp; these peek the client cache for the full body the
+      // renderers need, firing the fetch + scheduling a re-render on a miss.
+      getMerged: (marker) => resolveMergedTranscript(marker, s.session),
+      getWavTx: resolveWavTranscript,
       // callbacks
       onTranscribeSession: transcribeSession,
       onCopyMerged: copyMerged,
@@ -599,7 +676,12 @@ let lastSessionsSig = "";        // structural signature; re-renders sessions on
     // Surgical update: don't re-render the whole detail (would lose input focus).
     const out = $("sessDetailRoot").querySelector(".rx-result");
     if (!out) return;
-    const segs = s.session_transcript?.segments || [];
+    // Segments live in the lazily-fetched full merged transcript, not the
+    // slim marker on `s`. Peek the cache; resolveMergedTranscript already
+    // fired the fetch when the detail pane rendered, so by the time the user
+    // is typing a pattern it's settled.
+    const full = resolveMergedTranscript(s.session_transcript, s.session);
+    const segs = full?.segments || [];
     out.replaceChildren(sessionDetail.renderRegexHits(segs, { rxPattern, rxFlags }));
   }
 
@@ -827,14 +909,26 @@ The source folder will be deleted. The target's merged transcript (if any) will 
   async function copyMerged(session, btn) {
     if (!lastJson) return;
     const s = lastJson.sessions.find((x) => x.session === session);
-    if (!s || !s.session_transcript) {
+    if (!s || !s.session_transcript || !s.session_transcript.transcribed_at) {
+      alert("No merged transcript yet for this session.");
+      return;
+    }
+    // The marker on `s` has no segments — pull the full merged transcript from
+    // the lazy cache. It's almost always warm (the merged view rendered it),
+    // but await the fetch on a cold cache so copy still works. The clipboard
+    // write below already awaits, so the extra await costs nothing there; the
+    // non-secure popup fallback peeks first (see below) to stay in-gesture.
+    const stamp = s.session_transcript.transcribed_at;
+    const full = peekSessionTranscript(session, stamp)
+      ?? await fetchSessionTranscript(session, stamp).catch(() => null);
+    if (!full) {
       alert("No merged transcript yet for this session.");
       return;
     }
     // Rebuild the text from segments so display-name aliases match what the
     // user sees on screen — the backend's `plain_text` uses raw speaker keys.
     const aliases = effectiveMeta(s).aliases || {};
-    const segs = s.session_transcript.segments || [];
+    const segs = full.segments || [];
     const lines = [];
     for (const seg of segs) {
       const text = seg.text || "";
@@ -844,7 +938,7 @@ The source folder will be deleted. The target's merged transcript (if any) will 
       if (seg.low_confidence) line += " [uncertain]";
       lines.push(line);
     }
-    const out = lines.join("\n") || s.session_transcript.plain_text || "";
+    const out = lines.join("\n") || full.plain_text || "";
     if (!out) {
       alert("No merged transcript yet for this session.");
       return;

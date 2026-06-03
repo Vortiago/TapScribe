@@ -20,6 +20,124 @@ const _body = (body) => ({
 });
 
 export const fetchState = () => fetch("/api/state", { cache: "no-store" }).then(_unwrap);
+
+// ---- Lazy transcript fetch + client cache --------------------------------
+//
+// /api/state's `session_transcript` and per-WAV `transcript` are now slim
+// MARKERS (transcribed_at + counts), not the full bodies — the poll used to
+// ship megabytes of segments[]/text every ~0.5s. The full transcript is
+// fetched on demand here and cached keyed by (id, transcribed_at), so it
+// crosses the wire ONCE per (session/wav, transcribed_at) — a re-transcribe
+// bumps transcribed_at and busts the key; an idle poll reuses the cached
+// promise and fires no network request. The cached value is a Promise so two
+// near-simultaneous callers (e.g. a render + a prefetch) share one in-flight
+// request.
+
+/**
+ * @template T
+ * @typedef {{ promise: Promise<T>, settled: boolean, value: T | undefined }} TxEntry
+ */
+
+/** @type {Map<string, TxEntry<import('./types.js').MergedTranscript | null>>} */
+const _sessionTxCache = new Map();
+/** @type {Map<string, TxEntry<import('./types.js').WavTranscript | null>>} */
+const _wavTxCache = new Map();
+
+// Bound the caches so a long-lived tab that opens hundreds of (id,
+// transcribed_at) pairs over its lifetime doesn't grow unbounded. Map
+// preserves insertion order, so dropping `keys().next()` evicts the oldest.
+const _TX_CACHE_MAX = 64;
+/** @param {Map<string, unknown>} cache */
+function _capCache(cache) {
+  while (cache.size > _TX_CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+/**
+ * Shared get-or-fetch with a settled-value side-channel. On miss, fires
+ * `make()` once, stores the entry, and records the resolved value on the same
+ * entry so a synchronous peek can read it without touching the Promise. A
+ * rejection evicts the key so a later call retries.
+ * @template T
+ * @param {Map<string, TxEntry<T>>} cache
+ * @param {string} key
+ * @param {() => Promise<T>} make
+ * @returns {Promise<T>}
+ */
+function _getOrFetch(cache, key, make) {
+  const hit = cache.get(key);
+  if (hit) return hit.promise;
+  /** @type {TxEntry<T>} */
+  const entry = { promise: Promise.resolve(/** @type {T} */ (undefined)), settled: false, value: undefined };
+  entry.promise = make()
+    .then((v) => { entry.settled = true; entry.value = v; return v; })
+    .catch((e) => { cache.delete(key); throw e; });
+  cache.set(key, entry);
+  _capCache(cache);
+  return entry.promise;
+}
+
+/**
+ * Full merged session transcript, cached per (session, transcribedAt).
+ * `transcribedAt` comes from the slim marker on /api/state; passing it means a
+ * re-transcribe (new stamp) invalidates the cache while an idle poll reuses
+ * the cached promise and fires no request. Returns null when there's no
+ * merged transcript.
+ * @param {string} session
+ * @param {string} transcribedAt
+ * @returns {Promise<import('./types.js').MergedTranscript | null>}
+ */
+export function fetchSessionTranscript(session, transcribedAt) {
+  return _getOrFetch(_sessionTxCache, `${session}@${transcribedAt}`, () =>
+    fetch(`/api/sessions/${encodeURIComponent(session)}/transcript`, { cache: "no-store" }).then(_unwrap),
+  );
+}
+
+/**
+ * Synchronous peek: the resolved merged transcript for (session,
+ * transcribedAt) if its fetch already settled, else undefined. Lets a render
+ * use the cached value inline without re-rendering when it's already in hand.
+ * @param {string} session
+ * @param {string} transcribedAt
+ * @returns {import('./types.js').MergedTranscript | null | undefined}
+ */
+export function peekSessionTranscript(session, transcribedAt) {
+  const e = _sessionTxCache.get(`${session}@${transcribedAt}`);
+  return e && e.settled ? e.value : undefined;
+}
+
+/**
+ * Full per-WAV transcript, cached per (session, name, source, transcribedAt).
+ * Returns null when the WAV has no cached transcript.
+ * @param {string} session
+ * @param {string} name
+ * @param {"original" | "stripped"} source
+ * @param {string} transcribedAt
+ * @returns {Promise<import('./types.js').WavTranscript | null>}
+ */
+export function fetchWavTranscript(session, name, source, transcribedAt) {
+  const qs = source === "stripped" ? "?source=stripped" : "";
+  const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/transcript${qs}`;
+  return _getOrFetch(_wavTxCache, `${session}/${name}@${source}@${transcribedAt}`, () =>
+    fetch(url, { cache: "no-store" }).then(_unwrap),
+  );
+}
+
+/**
+ * Synchronous peek for a per-WAV transcript — see `peekSessionTranscript`.
+ * @param {string} session
+ * @param {string} name
+ * @param {"original" | "stripped"} source
+ * @param {string} transcribedAt
+ * @returns {import('./types.js').WavTranscript | null | undefined}
+ */
+export function peekWavTranscript(session, name, source, transcribedAt) {
+  const e = _wavTxCache.get(`${session}/${name}@${source}@${transcribedAt}`);
+  return e && e.settled ? e.value : undefined;
+}
 /**
  * @param {string} url
  * @param {unknown} [body]

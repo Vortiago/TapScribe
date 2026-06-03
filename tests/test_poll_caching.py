@@ -101,8 +101,11 @@ def test_describe_wav_invalidates_when_transcript_written(tmp_path: Path):
     )
 
     d2 = sessions._describe_wav(w)  # sidecar signature changed → re-read
+    # `transcript` is now a slim marker (no body); the cache-invalidation is
+    # proven by it flipping from None to a populated marker on the re-read.
     assert d2["transcript"] is not None
-    assert d2["transcript"]["text"] == "hello"
+    assert d2["transcript"]["backend"] == "faster-whisper"
+    assert "text" not in d2["transcript"]  # body fetched lazily, not in the listing
     assert any(t["backend"] == "faster-whisper" for t in d2["transcripts"])
 
 

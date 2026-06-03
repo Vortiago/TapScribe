@@ -52,7 +52,8 @@ function totalBytes(s) {
 function txStatus(s) {
   const tx = s.session_transcript;
   if (!tx) return { text: "not run", tone: "mute" };
-  const segs = (tx.segments || []).length;
+  // Slim marker — segment count is a scalar field now, not segments.length.
+  const segs = tx.segment_count || 0;
   const suppressed = tx.suppressed_count || 0;
   if (suppressed) return { text: `${segs} seg · ${suppressed} supp`, tone: "warn" };
   return { text: `merged · ${segs} seg`, tone: "good" };
@@ -287,7 +288,7 @@ export function build(ctx) {
     filter,
     sessions.map((s) =>
       `${s.session}=${labelFor(s)}/${s.wav_count || 0}/${s.is_current ? 1 : 0}` +
-      `/${s.stripped ? 1 : 0}/${s.session_transcript ? (s.session_transcript.segments || []).length : -1}` +
+      `/${s.stripped ? 1 : 0}/${s.session_transcript ? (s.session_transcript.segment_count || 0) : -1}` +
       `/${totalBytes(s)}/${!!s.progress}`,
     ).join("§"),
   ].join("‖");

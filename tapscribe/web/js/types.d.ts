@@ -113,7 +113,11 @@ export interface Session {
   is_current: boolean;
   earliest_iso: string | null;
   latest_iso: string | null;
-  session_transcript: MergedTranscript | null;
+  // SLIM marker only — /api/state no longer embeds the full merged
+  // transcript. The full body (segments[]/plain_text/suppressed[]) is fetched
+  // lazily via fetchSessionTranscript(session, transcribed_at), cached
+  // client-side. A marker change (new transcribed_at) is the re-fetch signal.
+  session_transcript: MergedTranscriptMarker | null;
   progress: JobStateSnapshot | null;
   session_meta: SessionMeta;
   stripped: StrippedStats | null;
@@ -149,8 +153,8 @@ export interface WavFile {
   name: string;
   size: number;
   duration_s: number;
-  transcript: WavTranscript | null;   // primary cached transcript
-  transcripts: WavTranscript[];       // all cached model variants
+  transcript: WavTranscriptMarker | null;   // SLIM marker of the primary cached transcript
+  transcripts: WavTranscriptVariant[];       // compact cache_listing of cached model variants
   wav_start: string | null;           // ISO 8601 from filename
   wav_end: string | null;
   speaker_name: string;
@@ -162,14 +166,40 @@ export interface WavRegion {
   name: string;
   size: number;
   duration_s: number;
-  transcript: WavTranscript | null;
-  transcripts: WavTranscript[];
+  transcript: WavTranscriptMarker | null;
+  transcripts: WavTranscriptVariant[];
   wav_start: string | null;
   wav_end: string | null;
   speaker_name: string;
 }
 
-// Cached per-WAV transcript (the primary model's result).
+// SLIM per-WAV transcript marker embedded in /api/state — just the fields a
+// listing reads without rendering (has-tx, "took Xms", the set-primary
+// compare key). The full body is fetched lazily via fetchWavTranscript.
+export interface WavTranscriptMarker {
+  transcribed_at?: string; // ISO 8601
+  transcribe_ms?: number;
+  model?: string;
+  backend?: string;
+  source?: "original" | "stripped";
+  segment_count?: number;
+}
+
+// One row of wav_cache.cache_listing — the compact per-(backend,model)
+// variant listing for the cache picker. Not the full transcript.
+export interface WavTranscriptVariant {
+  backend: string;
+  model: string;
+  is_primary: boolean;
+  transcribe_ms?: number;
+  // cache_listing doesn't emit text/source today; the cache panel reads them
+  // defensively (word-count falls back to 0, source to "original").
+  text?: string;
+  source?: "original" | "stripped";
+}
+
+// Full cached per-WAV transcript (the primary model's result) — the lazy
+// fetchWavTranscript result, rendered by buildExpandTx.
 export interface WavTranscript {
   transcribed_at: string; // ISO 8601
   transcribe_ms: number;
@@ -190,9 +220,21 @@ export interface SuppressedHallucination {
 }
 
 // ---------------------------------------------------------------------------
-// Merged (session-level) transcript — /api/transcribe-session response and
-// the session_transcript field embedded in Session above.
+// Merged (session-level) transcript.
+//
+// `MergedTranscriptMarker` is the SLIM shape /api/state embeds per session —
+// just the fields a listing reads without rendering (counts, speakers, the
+// re-fetch stamp). The full `MergedTranscript` (segments[]/plain_text/…) is
+// the /api/transcribe-session response AND the lazy fetchSessionTranscript
+// result that the merged-transcript renderer consumes.
 // ---------------------------------------------------------------------------
+
+export interface MergedTranscriptMarker {
+  transcribed_at: string | null; // ISO 8601 — null only on malformed on-disk JSON
+  segment_count: number;
+  suppressed_count: number;
+  speakers: string[]; // main.js derives its speaker-alias key set from this
+}
 
 export interface MergedTranscript {
   session: string;
@@ -391,8 +433,21 @@ export interface SessionDetailCtx {
   // Derived state helpers
   effectiveMeta: (s: Session | null) => EffectiveMeta;
   deriveSpeakerKeys: (s: Session | null) => string[];
-  // Sub-component delegate
+  // Sub-component delegate — `t` is the FULL merged transcript (resolved via
+  // getMerged from the lazy cache), not the slim marker on Session.
   renderMerged: (t: MergedTranscript, meta: EffectiveMeta) => Node;
+  // Lazy transcript resolvers. The Session/WavFile carry only slim markers;
+  // these return the cached FULL body for rendering (segments[], text,
+  // suppressed[]), or null until the lazy fetch lands (a re-render is then
+  // scheduled by main.js). getMerged resolves the OPEN session's merged
+  // transcript; getWavTx resolves one EXPANDED WAV row's transcript.
+  getMerged: (marker: MergedTranscriptMarker | null) => MergedTranscript | null;
+  getWavTx: (
+    session: string,
+    name: string,
+    source: "original" | "stripped",
+    marker: WavTranscriptMarker | null,
+  ) => WavTranscript | null;
   // Mutation callbacks
   onTranscribeSession: (sessId: string) => void;
   onCopyMerged: (sessId: string, btn: HTMLButtonElement) => void;

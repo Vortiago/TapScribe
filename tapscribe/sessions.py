@@ -33,7 +33,7 @@ from .text import (
     parse_wav_start,
     validate_config_text,
 )
-from .wav_cache import cache_listing, cache_signature, read_primary_payload
+from .wav_cache import cache_listing, cache_signature, read_primary_marker, read_primary_payload
 
 if TYPE_CHECKING:
     pass
@@ -205,6 +205,32 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Lazy full-transcript reads (the bodies /api/state's markers no longer embed)
+# ---------------------------------------------------------------------------
+
+
+def read_session_transcript(session: str) -> dict[str, Any] | None:
+    """The FULL merged session-transcript.json for `session`, or None when the
+    session has no merged transcript. Backs `GET /api/sessions/{session}/
+    transcript`. `session` is validated against path traversal by
+    `resolve_session_dir` (the canonical CodeQL realpath sanitiser); the file
+    is read through `_read_json_or_none`, which re-checks containment so static
+    analysis sees the guard at the point of file access."""
+    session_dir = resolve_session_dir(session)
+    data = _read_json_or_none(session_dir / "session-transcript.json")
+    return data if isinstance(data, dict) else None
+
+
+def read_wav_transcript(session: str, name: str, source: str = "original") -> dict[str, Any] | None:
+    """The FULL primary cached transcript (raw sidecar dict) for one WAV, or
+    None. Backs the per-WAV lazy expand. `resolve_wav` validates session +
+    name + source and returns a path proven to live under RECORDINGS_DIR, so
+    `read_primary_payload` only ever opens a contained sidecar."""
+    wav_path = resolve_wav(session, name, source)
+    return read_primary_payload(wav_path)
+
+
+# ---------------------------------------------------------------------------
 # Session listing for /api/state + /sessions
 # ---------------------------------------------------------------------------
 
@@ -293,6 +319,36 @@ def _read_session_json_cached(path: Path) -> Any:
     return data
 
 
+def _session_transcript_marker(data: Any) -> dict[str, Any] | None:
+    """Project the full merged session-transcript.json down to the SLIM marker
+    the dashboard listing reads without rendering: `transcribed_at`,
+    `segment_count`, `suppressed_count`, and `speakers` (main.js builds its
+    speaker-alias set from it). DROPS the heavy `segments[]`, `suppressed[]`,
+    `plain_text`, and `speaking_seconds` — the dashboard fetches the full
+    merged transcript lazily via `GET /api/sessions/{session}/transcript` only
+    when the session is open. None when there's no merged transcript.
+
+    A marker change (different `transcribed_at`) is the client's signal to
+    re-fetch + re-render; every field a marker-consumer reads is preserved so
+    sig-gates and badges keep working off the listing alone."""
+    if not isinstance(data, dict):
+        return None
+    segments = data.get("segments")
+    suppressed = data.get("suppressed")
+    speakers = data.get("speakers")
+    marker: dict[str, Any] = {
+        "transcribed_at": data.get("transcribed_at"),
+        "segment_count": len(segments) if isinstance(segments, list) else 0,
+        # suppressed_count is already a top-level field on the wire shape, but
+        # fall back to len(suppressed[]) for older files that predate it.
+        "suppressed_count": data.get("suppressed_count")
+        if isinstance(data.get("suppressed_count"), int)
+        else (len(suppressed) if isinstance(suppressed, list) else 0),
+        "speakers": list(speakers) if isinstance(speakers, list) else [],
+    }
+    return marker
+
+
 def _describe_wav_uncached(w: Path, *, size: int) -> dict[str, Any]:
     wav_start = parse_wav_start(w.name)
     dur = round(wav_duration_s(w), 2)
@@ -301,8 +357,12 @@ def _describe_wav_uncached(w: Path, *, size: int) -> dict[str, Any]:
     return {
         "name": w.name,
         "size": size,
+        # SLIM marker only — the full transcript (segments[]/text/suppressed[])
+        # is fetched lazily via GET /api/wav/{session}/{name}/transcript when a
+        # row is expanded. The poll used to embed read_primary_payload(w) here
+        # for EVERY WAV of EVERY session, ballooning /api/state to megabytes.
         "duration_s": dur,
-        "transcript": read_primary_payload(w),
+        "transcript": read_primary_marker(w),
         "transcripts": cache_listing(w),
         "wav_start": wav_start_iso,
         "wav_end": wav_end_iso,
@@ -406,7 +466,14 @@ def _describe_session(
         "is_current": sd.name == current_session,
         "earliest_iso": earliest.isoformat() if earliest else None,
         "latest_iso": latest.isoformat() if latest else None,
-        "session_transcript": _read_session_json_cached(sd / "session-transcript.json"),
+        # SLIM marker only — the full merged transcript (segments[]/plain_text/
+        # suppressed[]/speaking_seconds) is fetched lazily via
+        # GET /api/sessions/{session}/transcript when the session is opened.
+        # The poll formerly embedded the entire (hundreds-of-KB) merged JSON for
+        # EVERY session on disk on every ~0.5s tick.
+        "session_transcript": _session_transcript_marker(
+            _read_session_json_cached(sd / "session-transcript.json")
+        ),
         "progress": jobs.get(sd.name),
         "session_meta": read_session_meta(sd.name),
         "stripped": _stripped_summary(stripped_root, region_buckets),

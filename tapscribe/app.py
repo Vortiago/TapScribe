@@ -67,6 +67,8 @@ from .sessions import (
     gather_sessions,
     prune_empty_sessions,
     read_session_meta,
+    read_session_transcript,
+    read_wav_transcript,
     resolve_session_dir,
     resolve_wav,
     session_is_empty,
@@ -941,6 +943,18 @@ async def api_session_meta_put(session: str, req: Request, recorder: Recorder = 
     return {"ok": True, "meta": read_session_meta(session)}
 
 
+@app.get("/api/sessions/{session}/transcript")
+async def api_session_transcript(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """The FULL merged session-transcript.json (or null when none).
+
+    Lazy companion to `/api/state`, whose `session_transcript` is now a slim
+    marker. The dashboard fetches this once per (session, transcribed_at) when
+    a session is opened and caches it client-side, so the heavy segments[] /
+    plain_text / suppressed[] body crosses the wire on open, not every poll.
+    The disk read is offloaded with to_thread like the rest of the poll path."""
+    return await asyncio.to_thread(read_session_transcript, session)
+
+
 # ---------------------------------------------------------------------------
 # WAV download + transcription
 # ---------------------------------------------------------------------------
@@ -952,6 +966,20 @@ async def get_wav(session: str, name: str, source: str = "original"):
     path = resolve_wav(session, name, source)
     dl_name = ("stripped-" + name) if source == "stripped" else name
     return FileResponse(path, media_type="audio/wav", filename=dl_name)
+
+
+@app.get("/api/wav/{session}/{name}/transcript")
+async def api_wav_transcript(session: str, name: str, source: str = "original"):
+    """The FULL primary cached transcript for one WAV (or null when none).
+
+    Lazy companion to `/api/state`, whose per-WAV `transcript` is now a slim
+    marker. The dashboard fetches this when a WAV row is expanded and caches
+    it per (session, name, source, transcribed_at). Mirrors `get_wav`'s
+    path-safety (resolve_wav validates session/name/source) and offloads the
+    disk read with to_thread."""
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    return await asyncio.to_thread(read_wav_transcript, session, name, source)
 
 
 @app.delete("/api/wav/{session}/{name}")
