@@ -29,6 +29,7 @@ function globalDefs(j, sess) {
     for (const k of Object.keys((s.session_meta || {}).aliases || {})) peopleNames.add(k);
   }
   const liveTaps = (j.active || []).filter((a) => a.live !== false).length;
+  const sessCount = sessions.length;
   return [
     {
       id: "taps", name: "Taps", lead: "🛰️",
@@ -36,6 +37,11 @@ function globalDefs(j, sess) {
       chip: liveTaps
         ? { tone: "live", text: `${liveTaps} live` }
         : { tone: "mute", text: `${(j.active || []).length} connected` },
+    },
+    {
+      // The scannable all-sessions list (the spine <select> doesn't scale).
+      id: "sessions", name: "Sessions", lead: "🗂️",
+      chip: { tone: "mute", text: sessCount ? `${sessCount} session${sessCount === 1 ? "" : "s"}` : "none yet" },
     },
     {
       id: "people", name: "People", lead: "👥",

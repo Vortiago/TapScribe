@@ -304,6 +304,12 @@ body::before { display: none; }
   &:disabled { opacity: .55; cursor: default; }
   &.act--sm { padding: 3px 8px; font-size: 10.5px; }
   &.act--primary { background: color-mix(in srgb, var(--next-accent) 16%, transparent); border-color: color-mix(in srgb, var(--next-accent) 40%, transparent); color: var(--next-accent); font-weight: 650; }
+  /* destructive: an OUTLINE in the rec hue (not a fill) — matches the
+     de-bubbled .btn.danger treatment further down. Greys out when disabled
+     (e.g. delete-audio on the current session). */
+  &.act--danger { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 32%, transparent); }
+  &.act--danger:hover:not(:disabled) { border-color: color-mix(in srgb, var(--rec) 55%, transparent); background: var(--rec-bg); }
+  &.act--danger:disabled { color: var(--fg-3); border-color: var(--hairline); }
 }
 
 /* recording arm pill */
@@ -837,3 +843,114 @@ body::before { display: none; }
 .sumlist li { font-size: 11.5px; color: var(--fg-1); line-height: 1.5; }
 .sumlist li b { color: var(--fg-0); font-weight: 600; }
 .sumlist code { font-family: var(--mono); font-size: 10.5px; color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: var(--next-r-sm); }
+
+/* ====================================================================== */
+/* SESSIONS — the GLOBAL all-sessions list (js/next/views/sessions.js). A    */
+/* dense, scannable table: filter box + one hairline row per session, with   */
+/* inline rename + Open / Delete-audio actions. The de-bubbled, mono-data    */
+/* style; the focused session's row carries the amber left-edge the spine    */
+/* uses for its active item.                                                  */
+/* ====================================================================== */
+
+.sesslist {
+  /* One grid template shared by the header row + every data row so the
+     columns can't drift. Label + rename flex; the metrics are fixed. */
+  --sess-cols: minmax(150px, 1.7fr) 64px 48px 64px minmax(120px, 1fr) 80px minmax(150px, 1.4fr) max-content;
+}
+
+/* search row */
+.sesslist__search {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 13px; border-bottom: 1px solid var(--hairline-2);
+}
+.sesslist__searchic { font-size: 12px; opacity: .7; flex: none; }
+.sesslist__filter {
+  flex: 1; min-width: 0;
+  background: var(--bg-0); color: var(--fg-0);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 5px 9px; font-size: 11.5px; font-family: var(--mono);
+  &::placeholder { color: var(--fg-3); }
+  &:focus { outline: none; border-color: var(--info); }
+}
+/* kill the native search clear affordance — we have our own count instead */
+.sesslist__filter::-webkit-search-cancel-button { -webkit-appearance: none; }
+.sesslist__count { font-size: 9.5px; flex: none; white-space: nowrap; }
+
+/* the rows. .sessrows just scrolls the body when there are many sessions. */
+.sessrows { max-height: 62vh; overflow-y: auto; }
+.sessrow {
+  display: grid; grid-template-columns: var(--sess-cols); gap: 10px;
+  align-items: center; padding: 7px 13px;
+  border-bottom: 1px solid var(--hairline-2);
+  border-left: 2px solid transparent;
+}
+.sessrow:last-child { border-bottom: 0; }
+.sessrows .sessrow:hover { background: var(--bg-2); }
+/* the focused session — amber left-edge, like the spine's active nav item */
+.sessrow.is-focused { background: color-mix(in srgb, var(--next-accent) 9%, transparent); border-left-color: var(--next-accent); }
+
+/* column header row — dim, uppercase, non-interactive */
+.sessrow--head {
+  background: var(--bg-2); padding-top: 6px; padding-bottom: 6px;
+  position: sticky; top: 0; z-index: 1;
+}
+.sessrow--head .sesscol {
+  font-size: 8.5px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--fg-3); font-weight: 600; font-family: var(--mono);
+}
+
+.sesscol { min-width: 0; }
+.sesscol--num, .sesscol--strip, .sesscol--size { text-align: right; }
+.sesscol--status, .sesscol--tx { white-space: nowrap; }
+
+/* label cell: display label + the raw id/date as a dim mono sub */
+.sessrow__id { display: flex; flex-direction: column; gap: 1px; }
+.sessrow__label { font-size: 12px; font-weight: 600; color: var(--fg-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sessrow.is-focused .sessrow__label { color: var(--next-accent); }
+.sessrow__raw { font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* status chip — ● live (rec hue) / archived (muted) */
+.sesschip {
+  font-size: 9px; font-family: var(--mono); font-weight: 600;
+  padding: 2px 7px; border-radius: var(--next-r-sm);
+  border: 1px solid var(--hairline-2); white-space: nowrap;
+  &.is-live { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 35%, transparent); background: var(--rec-bg); }
+  &.is-archived { color: var(--fg-3); }
+}
+
+/* WAVs / stripped numeric cells */
+.sesscol--num { font-size: 11px; color: var(--fg-1); }
+.sesscol--strip.is-yes, .sessrow .sesscol--strip.is-yes { color: var(--ok); }
+.sesscol--strip.is-no { color: var(--fg-3); }
+.sesscol--size { font-size: 9.5px; }
+
+/* transcript status — tone-coloured (good/warn/mute), standalone (the spine's
+   tone-* classes are scoped to .navitem__chip, so define our own here) */
+.sesstx { font-size: 9.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.sesstx.tone-good { color: var(--ok); }
+.sesstx.tone-warn { color: var(--warn); }
+.sesstx.tone-mute { color: var(--fg-3); }
+
+/* inline rename: a flat field + a tiny status badge below it */
+.sesscol--rename { display: flex; flex-direction: column; gap: 2px; }
+.sessrow__rename {
+  width: 100%; background: var(--bg-0); color: var(--fg-0);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 3px 7px; font-size: 11px;
+  &::placeholder { color: var(--fg-3); }
+  &:focus { outline: none; border-color: var(--info); }
+}
+.sessrow--head .sesscol--rename { display: block; }
+.sessrow__status { font-size: 8.5px; min-height: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* row actions */
+.sessrow__act { display: inline-flex; gap: 6px; justify-content: flex-end; flex: none; }
+
+/* Narrow workspace: drop the per-row size + raw-id columns gracefully by
+   letting the grid wrap is overkill; instead collapse to a comfortable min by
+   hiding the lowest-value columns under the container width the workspace can
+   actually hit (rail open on a laptop). Container query on .work__inner. */
+@container (max-width: 880px) {
+  .sesslist { --sess-cols: minmax(120px, 1.6fr) 58px 44px minmax(96px, 1fr) minmax(120px, 1.2fr) max-content; }
+  .sesscol--strip, .sesscol--size { display: none; }
+}

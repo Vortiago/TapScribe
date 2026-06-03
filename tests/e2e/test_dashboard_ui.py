@@ -850,10 +850,12 @@ async def test_model_select_change_does_not_block_re_render(
             await browser.close()
 
 
-# The six /next views, in the order window.gotoView accepts them. Drives the
+# The /next views, in the order window.gotoView accepts them. Drives the
 # poll-safety sweep below across every stage so a new dropdown in any view
-# can't silently regress the renderRegion guard.
-_NEXT_VIEWS = ("capture", "recordings", "transcript", "taps", "people", "settings")
+# can't silently regress the renderRegion guard. The global Sessions list is
+# included because it holds a search box + per-row rename inputs that the
+# 500ms poll must not clobber.
+_NEXT_VIEWS = ("capture", "recordings", "transcript", "taps", "sessions", "people", "settings")
 
 # > one /next poll period (500ms in next/main.js) so the sweep crosses at least
 # one re-render boundary. The sweep also asserts a poll actually fired during

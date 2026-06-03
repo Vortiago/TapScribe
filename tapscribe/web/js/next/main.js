@@ -26,6 +26,7 @@ import * as settingsView from "./views/settings.js";
 import * as recordingsView from "./views/recordings.js";
 import * as tapsView from "./views/taps.js";
 import * as peopleView from "./views/people.js";
+import * as sessionsView from "./views/sessions.js";
 
 /** @param {string} id */
 const $ = (id) => {
@@ -320,6 +321,17 @@ function buildView(view, session) {
     });
     return { ...b, key: "people" };
   }
+  if (view === "sessions") {
+    const b = sessionsView.build({
+      metaFor,
+      // Reuse the spine's session-switch: focus the id, then route into its
+      // Capture (if recording) / Transcript view, so the row "Open" button and
+      // the spine picker drive the exact same flow.
+      onSelectSession,
+      afterMutate: () => { refresh(); },
+    });
+    return { ...b, key: "sessions" };
+  }
   return null;
 }
 
@@ -342,6 +354,22 @@ function renderPlaceholder(root, view, _session) {
 
 // ---- Spine ------------------------------------------------------------------
 
+/**
+ * Focus a session id and route into it: the live (Capture) stage if it's
+ * recording, else its Transcript. Shared by the spine session picker AND the
+ * global Sessions list's per-row "Open" action so both switch identically.
+ * @param {string} id
+ */
+function onSelectSession(id) {
+  selectedSessionId = id;
+  // A fresh session pick lands you on the live stage if it's recording,
+  // else the transcript — matching the prototype's session-switch.
+  const picked = (lastJson?.sessions || []).find((s) => s.session === id);
+  currentView = picked?.is_current ? "capture" : "transcript";
+  syncHash();
+  if (lastJson) renderAll(lastJson);
+}
+
 /** @param {import('../types.js').AppState} j @param {import('../types.js').Session | null} session */
 function renderSpine(j, session) {
   spine.render($("spine"), j, {
@@ -349,15 +377,7 @@ function renderSpine(j, session) {
     session,
     metaFor,
     onSelectView: gotoView,
-    onSelectSession: (id) => {
-      selectedSessionId = id;
-      // A fresh session pick lands you on the live stage if it's recording,
-      // else the transcript — matching the prototype's session-switch.
-      const picked = (lastJson?.sessions || []).find((s) => s.session === id);
-      currentView = picked?.is_current ? "capture" : "transcript";
-      syncHash();
-      if (lastJson) renderAll(lastJson);
-    },
+    onSelectSession,
     onNewSession: async () => {
       if (!confirm("Start a new recording session?\n\nNew utterances land in a fresh folder; in-progress ones finish in their current folder.")) return;
       try { await postJson("/api/new-session"); }
@@ -446,6 +466,7 @@ await loadTemplates(
   "/web/components/next/recordings.html",
   "/web/components/next/taps.html",
   "/web/components/next/people.html",
+  "/web/components/next/sessions.html",
   "/web/components/next/summary.html",
 );
 

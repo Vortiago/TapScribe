@@ -6,10 +6,10 @@ import { tpl, pick } from "../templates.js";
 
 /** The Stages views. GLOBAL group is pinned + un-numbered; the THIS SESSION
  * group is the numbered Capture → Recordings → Transcript → Summary journey. */
-/** @typedef {"capture"|"transcript"|"summary"|"settings"|"taps"|"recordings"|"people"} ViewId */
+/** @typedef {"capture"|"transcript"|"summary"|"settings"|"taps"|"recordings"|"people"|"sessions"} ViewId */
 
 /** @type {ViewId[]} */
-export const GLOBAL_VIEWS = ["taps", "people", "settings"];
+export const GLOBAL_VIEWS = ["taps", "sessions", "people", "settings"];
 /** @type {ViewId[]} */
 export const JOURNEY_VIEWS = ["capture", "recordings", "transcript", "summary"];
 /** @type {ViewId[]} */
