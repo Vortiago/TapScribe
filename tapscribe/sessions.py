@@ -28,6 +28,7 @@ from .audio import wav_duration_s, wav_rms_dbfs
 from .text import (
     atomic_write_text,
     build_recorder_wav_name,
+    file_stat_sig,
     parse_wav_speaker_slug,
     parse_wav_start,
     validate_config_text,
@@ -262,7 +263,7 @@ def _read_json_or_none(path: Path) -> Any:
 # transcript-sidecar signature); see wav_cache.cache_signature.
 _WAV_DESC_CACHE: dict[str, tuple[tuple, dict[str, Any]]] = {}
 # str(path) -> ((mtime_ns, size) | None, parsed-json). For session-transcript.json.
-_SESSION_JSON_CACHE: dict[str, tuple[tuple[int, int] | None, Any]] = {}
+_SESSION_JSON_CACHE: dict[str, tuple[tuple | None, Any]] = {}
 
 
 def _prune_cache(cache: dict[str, Any], keep: set[str]) -> None:
@@ -280,10 +281,8 @@ def _read_session_json_cached(path: Path) -> Any:
     rewrites it (new signature) and invalidates. The returned object is shared
     read-only with the JSON response serialiser."""
     pathkey = str(path)
-    try:
-        st = path.stat()
-        sig: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
-    except OSError:
+    sig = file_stat_sig(path)
+    if sig is None:
         _SESSION_JSON_CACHE.pop(pathkey, None)
         return None
     hit = _SESSION_JSON_CACHE.get(pathkey)
@@ -327,18 +326,17 @@ def _describe_wav(w: Path) -> dict[str, Any]:
     Region WAVs produced by strip-silence (in <session>/stripped/) get
     attached as `regions` by `_describe_session` — they share the same
     row shape as originals (no nested `regions` of their own)."""
-    try:
-        st = w.stat()
-    except OSError:
+    sig = file_stat_sig(w)
+    if sig is None:
         # File vanished mid-walk — describe it uncached and tolerantly
         # (wav_duration_s + the sidecar reads all return empty on error).
         return _describe_wav_uncached(w, size=0)
-    key = (st.st_mtime_ns, st.st_size, cache_signature(w))
+    key = (*sig, cache_signature(w))
     pathkey = str(w)
     hit = _WAV_DESC_CACHE.get(pathkey)
     if hit is not None and hit[0] == key:
         return dict(hit[1])
-    desc = _describe_wav_uncached(w, size=st.st_size)
+    desc = _describe_wav_uncached(w, size=sig[1])
     _WAV_DESC_CACHE[pathkey] = (key, desc)
     return dict(desc)
 

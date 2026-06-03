@@ -47,22 +47,35 @@ def read_text_file(path: Path) -> str:
         return ""
 
 
-# Memoise the editable config files on their (mtime_ns, size) so the
+def file_stat_sig(path: Path, *, include_path: bool = False) -> tuple | None:
+    """A cheap change-detection signature for `path`: `(mtime_ns, size)`, or
+    `(str(path), mtime_ns, size)` when `include_path` is set — for a single-slot
+    cache that must tell different files apart. None when the file is
+    missing/unreadable. Shared by the /api/state poll caches so they recompute
+    only when a file actually changes (writes go through an atomic replace,
+    which always moves the signature)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if include_path:
+        return (str(path), st.st_mtime_ns, st.st_size)
+    return (st.st_mtime_ns, st.st_size)
+
+
+# Memoise the editable config files on their stat signature so the
 # once-per-second /api/state poll doesn't re-read prompt / live-prompt /
-# hotwords every tick. Writes always go through an atomic replace, which
-# changes the stat signature and invalidates. Keyed by path string so a test
-# that repoints these config paths can't get a stale hit. `read_text_file`
-# itself stays uncached — it's the primitive other callers (and parse_rules,
-# which has its own cache) rely on for an always-fresh read.
-_CONFIG_TEXT_CACHE: dict[str, tuple[tuple[int, int] | None, str]] = {}
+# hotwords every tick. Keyed by path string so a test that repoints these
+# config paths can't get a stale hit. `read_text_file` itself stays uncached —
+# it's the primitive other callers (and parse_rules, which has its own cache)
+# rely on for an always-fresh read.
+_CONFIG_TEXT_CACHE: dict[str, tuple[tuple | None, str]] = {}
 
 
 def _read_config_text_cached(path: Path) -> str:
     pathkey = str(path)
-    try:
-        st = path.stat()
-        sig: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
-    except OSError:
+    sig = file_stat_sig(path)
+    if sig is None:
         # Missing/unreadable: don't cache (re-reading a missing file is a
         # single cheap stat that returns "" fast), and drop any stale entry.
         _CONFIG_TEXT_CACHE.pop(pathkey, None)

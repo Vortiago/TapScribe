@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from . import config
-from .text import normalise_for_exact, read_text_file
+from .text import file_stat_sig, normalise_for_exact, read_text_file
 from .transcribers.base import TranscriptionResult
 
 # ReDoS guard. Python's `re` engine is backtracking and has no compile-time
@@ -34,19 +34,14 @@ _NESTED_QUANTIFIER_RE = re.compile(r"[+*]\)[+*]")
 # per transcribe; re-reading the file and recompiling every regex each time is
 # pure CPU waste when the operator-edited file rarely changes. Any write goes
 # through an atomic replace, which moves the stat signature and invalidates.
-_RULES_CACHE: tuple[tuple[str, int, int] | None, list[dict[str, Any]]] | None = None
+_RULES_CACHE: tuple[tuple | None, list[dict[str, Any]]] | None = None
 
 
-def _rules_file_sig() -> tuple[str, int, int] | None:
-    """Stat signature of the rules file, or None when it's missing/unreadable.
-    Includes the path so a test that repoints `config.HALLUCINATIONS_FILE`
-    can't get a stale hit from a previous file with the same size+mtime."""
-    path = config.HALLUCINATIONS_FILE
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    return (str(path), st.st_mtime_ns, st.st_size)
+def _rules_file_sig() -> tuple | None:
+    # include_path so a test that repoints config.HALLUCINATIONS_FILE can't get
+    # a stale hit from a previous file with the same size+mtime (this is a
+    # single-slot cache, unlike the path-keyed dict caches elsewhere).
+    return file_stat_sig(config.HALLUCINATIONS_FILE, include_path=True)
 
 
 def parse_rules() -> list[dict[str, Any]]:

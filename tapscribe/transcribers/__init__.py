@@ -147,10 +147,8 @@ def _free_framework_memory() -> None:
     if mx is not None:
         # `mx.clear_cache` (newer MLX) supersedes `mx.metal.clear_cache`
         # (older); try the current name first, fall back to the legacy one.
-        clear = getattr(mx, "clear_cache", None)
-        if clear is None:
-            metal = getattr(mx, "metal", None)
-            clear = getattr(metal, "clear_cache", None) if metal is not None else None
+        # `getattr(None, ...)` is safe, so the chained fallback needs no guard.
+        clear = getattr(mx, "clear_cache", None) or getattr(getattr(mx, "metal", None), "clear_cache", None)
         if callable(clear):
             try:
                 clear()
@@ -227,6 +225,22 @@ def _key_of(transcriber: Transcriber) -> _Key | None:
     return None
 
 
+def _acquire_slot(key: _Key) -> None:
+    """Mark one more in-flight use of `key`. Caller holds `_lock`."""
+    _inflight[key] = _inflight.get(key, 0) + 1
+
+
+def _release_slot(key: _Key) -> int:
+    """Drop one in-flight use of `key`, removing the counter once it hits zero.
+    Returns the remaining count. Caller holds `_lock`."""
+    remaining = _inflight.get(key, 0) - 1
+    if remaining > 0:
+        _inflight[key] = remaining
+    else:
+        _inflight.pop(key, None)
+    return remaining
+
+
 def load_transcriber(
     model_name: str,
     *,
@@ -265,13 +279,13 @@ def load_transcriber(
             _sweep_idle_locked(ttl)
         cached = _cache.get(key)
         if cached is not None:
-            _inflight[key] = _inflight.get(key, 0) + 1
+            _acquire_slot(key)
             _last_used[key] = time.monotonic()
             return cached
         # Miss: reserve the in-flight slot BEFORE dropping the lock to load,
         # so a concurrent release of this key (once we store it) can't evict
         # before our increment lands, and the idle sweep skips it.
-        _inflight[key] = _inflight.get(key, 0) + 1
+        _acquire_slot(key)
 
     try:
         loaded = resolved.loader(model_name, resolved.kind)
@@ -279,11 +293,7 @@ def load_transcriber(
         # Roll the reserved slot back so a failed load doesn't pin the key
         # forever (blocking future idle sweeps and leaking the refcount).
         with _lock:
-            remaining = _inflight.get(key, 0) - 1
-            if remaining > 0:
-                _inflight[key] = remaining
-            else:
-                _inflight.pop(key, None)
+            _release_slot(key)
         raise
 
     with _lock:
@@ -316,12 +326,9 @@ def release_transcriber(transcriber: Transcriber) -> None:
         key = _key_of(transcriber)
         if key is None:
             return
-        remaining = _inflight.get(key, 0) - 1
-        if remaining > 0:
-            _inflight[key] = remaining
+        if _release_slot(key) > 0:
             _last_used[key] = time.monotonic()
             return
-        _inflight.pop(key, None)
         if _idle_ttl_s() == 0:
             _evict_keys([key])
         else:
