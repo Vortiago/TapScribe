@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from . import config
-from .text import normalise_for_exact, read_text_file
+from .text import file_stat_sig, normalise_for_exact, read_text_file
 from .transcribers.base import TranscriptionResult
 
 # ReDoS guard. Python's `re` engine is backtracking and has no compile-time
@@ -27,6 +27,23 @@ from .transcribers.base import TranscriptionResult
 # the failure mode we actually care about.
 _MAX_REGEX_PATTERN_LEN = 256
 _NESTED_QUANTIFIER_RE = re.compile(r"[+*]\)[+*]")
+
+
+# Single-slot cache of the parsed/compiled rules, keyed on the rules file's
+# (path, mtime_ns, size). parse_rules runs on every /api/state poll AND once
+# per transcribe; re-reading the file and recompiling every regex each time is
+# pure CPU waste when the operator-edited file rarely changes. Any write goes
+# through an atomic replace, which moves the stat signature and invalidates.
+# A mutated dict (rather than a rebound scalar global) so it follows the same
+# shape as the other poll caches and avoids a dead-store on the `global` write.
+_RULES_CACHE: dict[str, Any] = {}
+
+
+def _rules_file_sig() -> tuple | None:
+    # include_path so a test that repoints config.HALLUCINATIONS_FILE can't get
+    # a stale hit from a previous file with the same size+mtime (this is a
+    # single-slot cache, unlike the path-keyed dict caches elsewhere).
+    return file_stat_sig(config.HALLUCINATIONS_FILE, include_path=True)
 
 
 def parse_rules() -> list[dict[str, Any]]:
@@ -42,7 +59,21 @@ def parse_rules() -> list[dict[str, Any]]:
       <none> case-insensitive substring match
 
     Lines starting with `#` and blank lines are ignored.
+
+    Memoised on the rules file's stat signature (see `_RULES_CACHE`). The
+    returned list is shared and treated read-only by every caller — callers
+    that need to own it (e.g. the batch invocation) copy it themselves.
     """
+    sig = _rules_file_sig()
+    if sig is not None and _RULES_CACHE.get("sig") == sig:
+        return _RULES_CACHE["rules"]
+    rules = _parse_rules_uncached()
+    _RULES_CACHE["sig"] = sig
+    _RULES_CACHE["rules"] = rules
+    return rules
+
+
+def _parse_rules_uncached() -> list[dict[str, Any]]:
     raw = read_text_file(config.HALLUCINATIONS_FILE)
     rules: list[dict[str, Any]] = []
     for line in raw.splitlines():

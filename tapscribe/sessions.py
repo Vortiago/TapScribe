@@ -28,11 +28,12 @@ from .audio import wav_duration_s, wav_rms_dbfs
 from .text import (
     atomic_write_text,
     build_recorder_wav_name,
+    file_stat_sig,
     parse_wav_speaker_slug,
     parse_wav_start,
     validate_config_text,
 )
-from .wav_cache import cache_listing, read_primary_payload
+from .wav_cache import cache_listing, cache_signature, read_primary_payload
 
 if TYPE_CHECKING:
     pass
@@ -150,33 +151,6 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     )
 
 
-def stripped_stats(session: str) -> dict[str, Any] | None:
-    """Return directory-level info about <session>/stripped/ or None if the
-    folder is missing/empty. Speech seconds is the total duration of
-    everything under stripped/ (silence has already been removed)."""
-    d = stripped_dir(session)
-    if not d.is_dir():
-        return None
-    wavs = sorted(d.glob("*.wav"))
-    if not wavs:
-        return None
-    speech = 0.0
-    for w in wavs:
-        try:
-            speech += wav_duration_s(w)
-        except OSError:
-            pass
-    try:
-        mtime_iso = datetime.fromtimestamp(d.stat().st_mtime, tz=UTC).isoformat()
-    except OSError:
-        mtime_iso = None
-    return {
-        "count": len(wavs),
-        "speech_seconds": round(speech, 2),
-        "stripped_at": mtime_iso,
-    }
-
-
 def resolve_session_dir(session: str) -> Path:
     """Return `<RECORDINGS_DIR>/<session>` after validating it exists and
     doesn't escape RECORDINGS_DIR. Raises `HTTPException(404)` otherwise.
@@ -268,24 +242,65 @@ def _read_json_or_none(path: Path) -> Any:
         return None
 
 
-def _describe_wav(w: Path) -> dict[str, Any]:
-    """One row in the per-session `files` list — original WAV + parsed
-    sidecar transcript (the primary, when multiple are cached) +
-    `transcripts` listing for the picker UI. The cache reads go through
-    `wav_cache.read_primary_payload` and `cache_listing` so a session
-    with many WAVs doesn't re-walk each transcripts dir multiple times
-    per poll tick.
+# ---------------------------------------------------------------------------
+# Poll-path memoisation
+# ---------------------------------------------------------------------------
+#
+# The dashboard polls /api/state once per second, and gather_sessions walks
+# every session + every WAV on each tick. Without caching, each tick re-opens
+# every WAV (header read for duration) and re-reads + re-parses every
+# transcript sidecar across the whole archive — O(total WAVs) disk + JSON work
+# that grows unbounded as recordings accumulate. The per-WAV descriptor and the
+# (sometimes large) session-transcript.json are stable until their files
+# change, so memoise each on a cheap stat signature and recompute only on a
+# real change. Entries are pruned to the on-disk set at the end of every walk.
+#
+# Lock-free on purpose: gather_sessions runs on a worker thread and two polls
+# can overlap, but every entry is keyed on a stat signature, so the worst a
+# race can do is a redundant recompute — never serve a stale value.
 
-    Region WAVs produced by strip-silence (in <session>/stripped/) get
-    attached as `regions` by `_describe_session` — they share the same
-    row shape as originals (no nested `regions` of their own)."""
+# str(path) -> (cache_key, descriptor). The key is (wav mtime_ns, wav size,
+# transcript-sidecar signature); see wav_cache.cache_signature.
+_WAV_DESC_CACHE: dict[str, tuple[tuple, dict[str, Any]]] = {}
+# str(path) -> ((mtime_ns, size) | None, parsed-json). For session-transcript.json.
+_SESSION_JSON_CACHE: dict[str, tuple[tuple | None, Any]] = {}
+
+
+def _prune_cache(cache: dict[str, Any], keep: set[str]) -> None:
+    """Drop entries whose path wasn't visited in the latest walk, bounding the
+    poll caches to what's actually on disk (sessions and WAVs get deleted)."""
+    for key in list(cache.keys()):
+        if key not in keep:
+            cache.pop(key, None)
+
+
+def _read_session_json_cached(path: Path) -> Any:
+    """`_read_json_or_none` memoised on (mtime_ns, size). session-transcript.json
+    can be hundreds of KB on a long session, so re-parsing it on every poll is
+    the second-biggest poll cost after the per-WAV reads; a re-transcribe/merge
+    rewrites it (new signature) and invalidates. The returned object is shared
+    read-only with the JSON response serialiser."""
+    pathkey = str(path)
+    sig = file_stat_sig(path)
+    if sig is None:
+        _SESSION_JSON_CACHE.pop(pathkey, None)
+        return None
+    hit = _SESSION_JSON_CACHE.get(pathkey)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    data = _read_json_or_none(path)
+    _SESSION_JSON_CACHE[pathkey] = (sig, data)
+    return data
+
+
+def _describe_wav_uncached(w: Path, *, size: int) -> dict[str, Any]:
     wav_start = parse_wav_start(w.name)
     dur = round(wav_duration_s(w), 2)
     wav_start_iso = wav_start.isoformat() if wav_start else None
     wav_end_iso = (wav_start + timedelta(seconds=dur)).isoformat() if wav_start else None
     return {
         "name": w.name,
-        "size": w.stat().st_size,
+        "size": size,
         "duration_s": dur,
         "transcript": read_primary_payload(w),
         "transcripts": cache_listing(w),
@@ -295,14 +310,72 @@ def _describe_wav(w: Path) -> dict[str, Any]:
     }
 
 
+def _describe_wav(w: Path) -> dict[str, Any]:
+    """One row in the per-session `files` list — original WAV + parsed
+    sidecar transcript (the primary, when multiple are cached) +
+    `transcripts` listing for the picker UI. The cache reads go through
+    `wav_cache.read_primary_payload` and `cache_listing` so a session
+    with many WAVs doesn't re-walk each transcripts dir multiple times
+    per poll tick.
+
+    Memoised on (wav mtime_ns, wav size, transcript-sidecar signature) so a
+    re-poll of an unchanged WAV does zero file opens / JSON parses. Returns a
+    shallow copy so `_describe_session` can attach a `regions` list without
+    polluting the cached descriptor.
+
+    Region WAVs produced by strip-silence (in <session>/stripped/) get
+    attached as `regions` by `_describe_session` — they share the same
+    row shape as originals (no nested `regions` of their own)."""
+    sig = file_stat_sig(w)
+    if sig is None:
+        # File vanished mid-walk — describe it uncached and tolerantly
+        # (wav_duration_s + the sidecar reads all return empty on error).
+        return _describe_wav_uncached(w, size=0)
+    key = (*sig, cache_signature(w))
+    pathkey = str(w)
+    hit = _WAV_DESC_CACHE.get(pathkey)
+    if hit is not None and hit[0] == key:
+        return dict(hit[1])
+    desc = _describe_wav_uncached(w, size=sig[1])
+    _WAV_DESC_CACHE[pathkey] = (key, desc)
+    return dict(desc)
+
+
+def _stripped_summary(
+    stripped_root: Path,
+    region_buckets: dict[tuple[str, str], list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Directory-level <session>/stripped/ stats, derived from the region
+    descriptors `_describe_session` already built (so we don't re-open every
+    region WAV a second time the way the old `stripped_stats` did). None when
+    there's no stripped/ content — same contract the dashboard relied on."""
+    regions = [r for bucket in region_buckets.values() for r in bucket]
+    if not regions:
+        return None
+    speech = round(sum(r["duration_s"] for r in regions), 2)
+    try:
+        stripped_at = datetime.fromtimestamp(stripped_root.stat().st_mtime, tz=UTC).isoformat()
+    except OSError:
+        stripped_at = None
+    return {"count": len(regions), "speech_seconds": speech, "stripped_at": stripped_at}
+
+
 def _describe_session(
     sd: Path,
     *,
     jobs: dict[str, Any],
     current_session: str,
+    visited: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Build one entry for the dashboard's session list from `sd`."""
-    wavs = [_describe_wav(w) for w in sorted(sd.glob("*.wav"))]
+    """Build one entry for the dashboard's session list from `sd`.
+
+    `visited`, when supplied by `gather_sessions`, accumulates the str(path)
+    of every WAV described so the per-WAV cache can be pruned to the on-disk
+    set after the walk. Direct callers (tests) may omit it."""
+    originals = sorted(sd.glob("*.wav"))
+    if visited is not None:
+        visited.update(str(w) for w in originals)
+    wavs = [_describe_wav(w) for w in originals]
 
     # Bucket region WAVs from stripped/ by (speaker_slug, ident) so each
     # original WAV's row can render the N regions it was split into as
@@ -316,6 +389,8 @@ def _describe_session(
     stripped_root = sd / "stripped"
     if stripped_root.is_dir():
         for rw in sorted(stripped_root.glob("*.wav")):
+            if visited is not None:
+                visited.add(str(rw))
             key = _split_filename_components(rw.name)
             region_buckets.setdefault(key, []).append(_describe_wav(rw))
     for w in wavs:
@@ -331,10 +406,10 @@ def _describe_session(
         "is_current": sd.name == current_session,
         "earliest_iso": earliest.isoformat() if earliest else None,
         "latest_iso": latest.isoformat() if latest else None,
-        "session_transcript": _read_json_or_none(sd / "session-transcript.json"),
+        "session_transcript": _read_session_json_cached(sd / "session-transcript.json"),
         "progress": jobs.get(sd.name),
         "session_meta": read_session_meta(sd.name),
-        "stripped": stripped_stats(sd.name),
+        "stripped": _stripped_summary(stripped_root, region_buckets),
     }
 
 
@@ -352,11 +427,19 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
     jobs = jobs or {}
     out: list[dict[str, Any]] = []
     seen_names: set[str] = set()
+    visited_wavs: set[str] = set()
+    visited_session_jsons: set[str] = set()
     for sd in sorted(config.RECORDINGS_DIR.glob("*"), reverse=True):
         if not sd.is_dir():
             continue
         seen_names.add(sd.name)
-        out.append(_describe_session(sd, jobs=jobs, current_session=current_session))
+        visited_session_jsons.add(str(sd / "session-transcript.json"))
+        out.append(_describe_session(sd, jobs=jobs, current_session=current_session, visited=visited_wavs))
+
+    # Prune the poll caches down to what this walk actually saw so deleted
+    # sessions/WAVs don't pin descriptors for the process lifetime.
+    _prune_cache(_WAV_DESC_CACHE, visited_wavs)
+    _prune_cache(_SESSION_JSON_CACHE, visited_session_jsons)
 
     # If the current session folder hasn't materialised on disk yet (lazy-
     # creation), the loop above missed it. Surface a synthetic entry so the

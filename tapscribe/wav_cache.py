@@ -88,6 +88,42 @@ def _legacy_sidecar(wav_path: Path) -> Path:
     return wav_path.with_suffix(".json")
 
 
+def cache_signature(wav_path: Path) -> tuple:
+    """A cheap, stat-only signature of this WAV's cached transcripts, so the
+    dashboard listing can memoise `read_primary_payload` / `cache_listing`
+    across the once-per-second /api/state poll without re-reading + re-parsing
+    every sidecar each tick.
+
+    Combines the `<wav>.transcripts/` directory mtime — which bumps when a
+    sidecar is *added or removed* — with the `_primary` pointer file's mtime,
+    which `_write_entry` rewrites on *every* transcribe (including an in-place
+    re-transcribe of the same (backend, model), which overwrites the sidecar
+    without touching the directory mtime) and `set_primary_transcript`
+    rewrites on every re-point. Together they catch every change that can
+    alter what the dashboard shows. Falls back to the legacy `<wav>.json`
+    mtime when the new-layout directory doesn't exist; legacy sidecars are
+    immutable once migrated, so their mtime alone is a sufficient signature.
+
+    Relies on a re-transcribe's write landing on a later mtime than the
+    previous one — safe in practice because a real transcribe runs a model for
+    far longer than any filesystem's mtime granularity (~15 ms on Windows)
+    before writing the sidecar.
+    """
+    d = _transcripts_dir(wav_path)
+    try:
+        dir_mtime = d.stat().st_mtime_ns
+    except OSError:
+        try:
+            return ("legacy", _legacy_sidecar(wav_path).stat().st_mtime_ns)
+        except OSError:
+            return ("none",)
+    try:
+        primary_mtime = (d / _PRIMARY_POINTER).stat().st_mtime_ns
+    except OSError:
+        primary_mtime = 0
+    return ("dir", dir_mtime, primary_mtime)
+
+
 # ---------------------------------------------------------------------------
 # Read API
 # ---------------------------------------------------------------------------
