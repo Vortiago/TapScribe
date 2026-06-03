@@ -378,6 +378,11 @@
           // binding to the new one so we don't keep stale forwarders alive.
           console.log("[tapscribe-bridge/page] window.room replaced; rebinding to new instance");
           cleanupAllTaps();
+          // Real room SWAP (a prior room existed) — tell content.js so it
+          // can start a fresh recording session if the operator opted in.
+          // Deliberately NOT fired on the first attach (else branch) or on
+          // teardown, so opening the tab / leaving a room never rotates.
+          postToContent({ kind: "room-changed", room: (room && room.name) || "" });
         } else {
           console.log("[tapscribe-bridge/page] window.room connected; attaching listeners");
         }

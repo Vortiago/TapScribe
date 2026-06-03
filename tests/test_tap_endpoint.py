@@ -83,6 +83,19 @@ def client(recorder_with_fake_wlk: Recorder) -> Iterator[TestClient]:
     app.dependency_overrides.clear()
 
 
+@pytest.fixture
+def auth_client(recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """Like `client` but with AUTH_ENABLED, so the tap-token gates run: the
+    /tap WS subprotocol check (TestTapAuth) and the /api/tap/new-session bearer
+    check (TestTapNewSession)."""
+    monkeypatch.setattr(_config, "AUTH_ENABLED", True)
+    app.dependency_overrides[get_recorder] = lambda: recorder_with_fake_wlk
+    app.state.recorder = recorder_with_fake_wlk
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -514,17 +527,6 @@ class TestTapAuth:
     succeeds and the server echoes the same subprotocol back; with the
     wrong token (or none) the recorder closes the upgrade with code 4401."""
 
-    @pytest.fixture
-    def auth_client(self, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch):
-        """Same client as the parent test module but with AUTH_ENABLED so
-        the WS handler runs the subprotocol gate."""
-        monkeypatch.setattr(_config, "AUTH_ENABLED", True)
-        app.dependency_overrides[get_recorder] = lambda: recorder_with_fake_wlk
-        app.state.recorder = recorder_with_fake_wlk
-        with TestClient(app) as c:
-            yield c
-        app.dependency_overrides.clear()
-
     def test_tap_accepts_correct_token_and_writes_wav(
         self,
         auth_client: TestClient,
@@ -591,6 +593,50 @@ class TestTapAuth:
             ):
                 pass
         assert list(recorder_with_fake_wlk.session_dir.glob("*.wav")) == []
+
+
+class TestTapNewSession:
+    """POST /api/tap/new-session is the bridge's HTTP control verb: rotate the
+    session (and prune empties), authenticated by the tap token as a bearer
+    header rather than dashboard Basic auth. The route is exempt from the
+    Basic-auth middleware; the in-handler bearer check is the gate."""
+
+    @staticmethod
+    def _touch_wav(recorder: Recorder) -> None:
+        # The empty-current guard only checks for *.wav presence (not
+        # contents), so a placeholder file is enough to make rotation fire.
+        recorder.session_dir.mkdir(parents=True, exist_ok=True)
+        (recorder.session_dir / "seed.wav").write_bytes(b"")
+
+    def test_accepts_valid_bearer_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
+        self._touch_wav(recorder_with_fake_wlk)
+        prev = recorder_with_fake_wlk.session_start
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.post("/api/tap/new-session", headers={"Authorization": "Bearer " + token})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["rotated"] is True
+        # _utc_session_id() has 1s resolution; a same-second rotation reuses
+        # the id, so assert on the rotated flag + previous, not on a changed id.
+        assert body["previous"] == prev
+
+    def test_rejects_missing_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
+        self._touch_wav(recorder_with_fake_wlk)
+        prev = recorder_with_fake_wlk.session_start
+        r = auth_client.post("/api/tap/new-session")
+        assert r.status_code == 401
+        assert recorder_with_fake_wlk.session_start == prev  # not rotated
+
+    def test_rejects_wrong_token(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
+        self._touch_wav(recorder_with_fake_wlk)
+        prev = recorder_with_fake_wlk.session_start
+        r = auth_client.post(
+            "/api/tap/new-session",
+            headers={"Authorization": "Bearer definitely-not-the-token"},
+        )
+        assert r.status_code == 401
+        assert recorder_with_fake_wlk.session_start == prev
 
 
 def test_pick_tap_subprotocol_returns_match():

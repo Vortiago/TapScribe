@@ -45,6 +45,26 @@ def pick_tap_subprotocol(offered: Iterable[str] | None, expected_token: str) -> 
     return None
 
 
+def check_tap_bearer(authorization: str | None, expected_token: str) -> bool:
+    """Validate an HTTP ``Authorization: Bearer <tap-token>`` header against the
+    expected tap token, constant-time. The HTTP twin of
+    ``pick_tap_subprotocol``: the WS handshake can't set arbitrary headers so it
+    carries the token in a subprotocol, whereas ``fetch`` can, so HTTP control
+    endpoints (``POST /api/tap/new-session``) use a bearer header. Returns False
+    on a missing/malformed header or a token mismatch.
+
+    Empty ``expected_token`` → False (mirrors ``pick_tap_subprotocol``); callers
+    gate this behind ``config.AUTH_ENABLED`` exactly as the WS path does, so an
+    auth-disabled recorder never reaches here.
+    """
+    if not expected_token:
+        return False
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer":
+        return False
+    return hmac.compare_digest(token.strip(), expected_token)
+
+
 async def basic_auth_middleware(request: Request, call_next):
     """HTTP Basic auth gate. Skips WebSocket upgrades (FastAPI middlewares
     of this kind don't see WS) and the routes in `AUTH_EXEMPT_ROUTES`.

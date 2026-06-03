@@ -61,10 +61,14 @@ from .batch_transcribe import (
 from .recorder import JobState, Recorder
 from .sessions import (
     absorb_session,
+    delete_session_audio,
+    delete_session_wav,
     gather_sessions,
+    prune_empty_sessions,
     read_session_meta,
     resolve_session_dir,
     resolve_wav,
+    session_is_empty,
     strip_one_wav,
     stripped_dir,
     write_session_meta,
@@ -79,6 +83,7 @@ from .text import (
     write_live_prompt,
     write_prompt,
 )
+from .transcribers import evict_idle_now
 from .transcribers.catalog import REGISTRY, available_backends
 from .wav_cache import set_primary_transcript
 
@@ -297,14 +302,81 @@ async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
     )
 
 
+def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
+    """Rotate to a fresh session, THEN prune now-empty sessions. Order matters:
+    rotating first makes the previous (now-abandoned, empty) session eligible
+    for pruning, while the freshly-minted current session is protected by
+    `prune_empty_sessions`' current-session skip.
+
+    Used by the Basic-auth dashboard `/api/new-session` only — the tap endpoint
+    deliberately does NOT prune (deleting folders stays an operator action; see
+    `api_tap_new_session`).
+
+    Prune runs synchronously (not offloaded to a thread): single-threaded
+    asyncio then guarantees no `/tap` upload can interleave and have its
+    just-created session folder deleted mid-walk. Keep it synchronous — and
+    `TapFanOut._open` await-free between mkdir and wave-open — or that race
+    reopens. (With `--workers > 1` each worker has its own Recorder and the
+    guarantee weakens; TapScribe runs single-worker by design.)
+    """
+    prev, current = recorder.rotate_session()
+    prune = prune_empty_sessions(current)
+    print(
+        f"[tapscribe] new session {current} (previous: {prev}); pruned {prune['count']} empty",
+        flush=True,
+    )
+    return {
+        "previous": prev,
+        "current": current,
+        "path": str(recorder.session_dir),
+        "pruned": prune,
+    }
+
+
 @app.post("/api/new-session")
 async def api_new_session(recorder: Recorder = Depends(get_recorder)):
-    """Rotate the current session. Already-open /record WebSockets keep
-    writing to their original folder (captured at WS open); only new
-    opens land in the new folder."""
-    prev, current = recorder.rotate_session()
-    print(f"[tapscribe] new session pending: {recorder.session_dir} (previous: {prev})", flush=True)
-    return {"ok": True, "previous": prev, "current": current, "path": str(recorder.session_dir)}
+    """Rotate the current session and prune now-empty sessions. Already-open
+    /tap WebSockets keep writing to their original folder (captured at WS
+    open); only new opens land in the new folder."""
+    return {"ok": True, **_rotate_and_prune(recorder)}
+
+
+@app.post("/api/tap/new-session")
+async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_recorder)):
+    """Bridge-initiated session rotation, authenticated by the TAP token
+    (`Authorization: Bearer <token>`) — NOT dashboard Basic auth — so a browser
+    bridge that holds only the tap token can start a fresh session without the
+    operator switching to the dashboard. Exempt from the Basic-auth middleware
+    (`config.AUTH_EXEMPT_ROUTES`); the bearer check below is the gate.
+
+    Rotates ONLY — unlike the dashboard's `/api/new-session`, this does NOT
+    prune empty sessions. The tap token is a deliberately lower-privilege
+    credential handed to browser extensions, so deleting session folders stays
+    a Basic-auth action (the dashboard's "+ new session" / "prune empty"). No
+    filesystem path is derived from the request (the new session id is a
+    server-minted UTC timestamp), so there is no path-injection surface here.
+    """
+    if config.AUTH_ENABLED and not auth.check_tap_bearer(
+        req.headers.get("authorization"), recorder.tap.value
+    ):
+        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+
+    # Idempotency guard (tap path only): if the current session is empty, a
+    # rotation would only churn the session-id timestamp — no-op it. The
+    # dashboard button keeps always-rotate semantics.
+    rotated = not session_is_empty(recorder.session_dir)
+    if rotated:
+        previous, current = recorder.rotate_session()
+        print(f"[tapscribe] tap new session {current} (previous: {previous})", flush=True)
+    else:
+        previous = recorder.session_start
+    return {
+        "ok": True,
+        "rotated": rotated,
+        "previous": previous,
+        "current": recorder.session_start,
+        "path": str(recorder.session_dir),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +609,23 @@ async def api_models(context: str = "batch"):
     }
 
 
+@app.delete("/api/models/cache")
+async def api_models_cache_clear(recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """Evict every idle (not-in-use) transcription model from the in-process
+    cache, freeing its weights + pooled GPU memory now.
+
+    Batch models are unloaded automatically per the TAPSCRIBE_MODEL_IDLE_TTL_S
+    policy (default: immediately after each job). This endpoint is the manual
+    lever for operators who set a keep-warm TTL (or disabled eviction) and
+    want to reclaim RAM/VRAM on demand. An in-flight transcribe keeps its
+    model, so clicking this can't yank a model out from under a running job.
+    The live channel runs in its own subprocess and is unaffected — stop it
+    via /api/live/stop to reclaim that memory."""
+    freed = await asyncio.to_thread(evict_idle_now)
+    print(f"[tapscribe] evicted {freed} idle transcription model(s) from cache", flush=True)
+    return {"ok": True, "evicted": freed}
+
+
 @app.delete("/api/live-transcript")
 async def api_live_transcript_clear(recorder: Recorder = Depends(get_recorder)):
     """Clear the live transcript feed (the dashboard's "clear" button).
@@ -634,27 +723,9 @@ async def api_config_put(key: str, req: Request):
 async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
     """Delete every session folder that has zero WAVs, no merged
     transcript, and no operator-set label. Skips the CURRENT session."""
-    pruned: list[str] = []
-    failed: list[dict[str, str]] = []
-    for sd in config.RECORDINGS_DIR.glob("*"):
-        if not sd.is_dir():
-            continue
-        if sd.name == recorder.session_start:
-            continue
-        if any(sd.glob("*.wav")):
-            continue
-        if (sd / "session-transcript.json").exists():
-            continue
-        meta = read_session_meta(sd.name)
-        if meta.get("label"):
-            continue
-        try:
-            shutil.rmtree(sd)
-            pruned.append(sd.name)
-        except OSError as e:
-            failed.append({"session": sd.name, "error": str(e)})
-    print(f"[tapscribe] pruned {len(pruned)} empty sessions", flush=True)
-    return {"ok": True, "pruned": pruned, "count": len(pruned), "failed": failed}
+    result = prune_empty_sessions(recorder.session_start)
+    print(f"[tapscribe] pruned {result['count']} empty sessions", flush=True)
+    return {"ok": True, **result}
 
 
 @app.post("/api/sessions/{session}/strip-silence")
@@ -765,6 +836,30 @@ async def api_session_stripped_delete(session: str, recorder: Recorder = Depends
     return {"ok": True, "deleted": True}
 
 
+@app.delete("/api/sessions/{session}/audio")
+async def api_session_audio_delete(session: str, recorder: Recorder = Depends(get_recorder)):
+    """Delete ALL of a session's audio (original WAVs + stripped/ + per-WAV
+    transcript-cache sidecars) to reclaim disk. KEEPS the merged
+    session-transcript + session-meta. Refuses the CURRENT session and any
+    session with a transcribe/strip job in flight."""
+    if session == recorder.session_start:
+        raise HTTPException(409, "cannot delete audio from the current session — rotate to a new one first")
+    resolve_session_dir(session)
+    if recorder.jobs.get(session) is not None:
+        raise HTTPException(409, "a transcribe or strip job is in flight on this session")
+    # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
+    # ~1 Hz /api/state poll stays responsive — same as strip-silence.
+    summary = await asyncio.to_thread(delete_session_audio, session)
+    # NB: do NOT release jobs here — unlike whole-session delete, the
+    # session survives, and the guard above already ensures none is running.
+    print(
+        f"[tapscribe] deleted audio from session {session}: "
+        f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed",
+        flush=True,
+    )
+    return {"ok": True, **summary}
+
+
 @app.post("/api/sessions/{target}/absorb")
 async def api_session_absorb(
     target: str,
@@ -847,6 +942,35 @@ async def get_wav(session: str, name: str, source: str = "original"):
     path = resolve_wav(session, name, source)
     dl_name = ("stripped-" + name) if source == "stripped" else name
     return FileResponse(path, media_type="audio/wav", filename=dl_name)
+
+
+@app.delete("/api/wav/{session}/{name}")
+async def api_wav_delete(
+    session: str,
+    name: str,
+    source: str = "original",
+    recorder: Recorder = Depends(get_recorder),
+):
+    """Delete one WAV + its transcript-cache sidecars. source=stripped
+    targets a region under <session>/stripped/. No region cascade — see
+    `delete_session_wav`. Refuses the CURRENT session and any session with
+    a transcribe/strip job in flight."""
+    # Whitelist the query param before it flows into resolve_wav — CodeQL
+    # treats query params as untrusted (mirrors the source checks elsewhere).
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    if session == recorder.session_start:
+        raise HTTPException(409, "cannot delete WAVs from the current session — rotate to a new one first")
+    resolve_session_dir(session)
+    if recorder.jobs.get(session) is not None:
+        raise HTTPException(409, "a transcribe or strip job is in flight on this session")
+    summary = await asyncio.to_thread(delete_session_wav, session, name, source)
+    print(
+        f"[tapscribe] deleted wav {name} ({source}) from session {session}: "
+        f"{summary['bytes_freed']} bytes freed",
+        flush=True,
+    )
+    return {"ok": True, **summary}
 
 
 @app.put("/api/wav/{session}/{name}/primary")

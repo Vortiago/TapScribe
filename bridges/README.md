@@ -107,6 +107,40 @@ from a transient WS failure (network blip, recorder restart) should:
 The bundled `spacialchat-bridge` implements all of this; see
 `bridges/spacialchat-bridge/content.js` for a reference.
 
+## Control endpoint — start a new session
+
+Besides streaming audio over `/tap`, a bridge can ask the Recorder to
+**rotate to a fresh recording session** without the operator touching the
+dashboard — handy when one meeting ends and another begins in the same
+place (daily → refinement), or when the platform moves you to a different
+room.
+
+**Endpoint:** `POST http://<recorder-host>:8001/api/tap/new-session`
+(`https://...` under `--tls`). Fire-and-forget; no request body.
+
+**Auth:** the **same tap token** as `/tap`, but carried as an
+`Authorization: Bearer <token>` header. Unlike the WebSocket handshake, an
+HTTP `fetch()` *can* set arbitrary headers, so there's no need for the
+subprotocol trick here. Under `--no-auth` the header is optional; a
+missing or incorrect token returns `401` and does not rotate.
+
+**Effect:** the Recorder rotates `session_start`/`session_dir` to a fresh
+UTC-stamped folder (already-open `/tap` WebSockets keep writing to their
+original folder; only new opens land in the new one). It **rotates only — it
+deletes nothing.** Removing empty session folders stays a dashboard
+(Basic-auth) action: the dashboard's "+ new session" button rotates *and*
+prunes empties, and there's a separate "prune empty" action. The tap token is
+a lower-privilege credential, so it can start a session but not delete folders.
+
+**Idempotency:** if the current session has received no audio yet, the call is
+a no-op rotation (it won't churn the session timestamp). The JSON response is
+`{"ok": true, "rotated": true|false, "previous": "...", "current":
+"<session-id>", "path": "..."}`.
+
+The `spacialchat-bridge` calls this from its popup's **New session** button
+and — when the operator ticks **"start new session on room change"** —
+automatically whenever SpatialChat swaps rooms.
+
 ## Adding a new bridge
 
 1. Create `bridges/<platform>-bridge/`.

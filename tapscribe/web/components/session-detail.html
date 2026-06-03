@@ -178,6 +178,11 @@
   <button class="btn ghost" data-copy-sess>⎘ copy merged</button>
 </template>
 
+<template id="tpl-sess-delete-audio-button">
+  <button class="btn ghost" type="button" data-delete-audio
+    title="Delete all WAV audio for this session (originals + stripped + per-WAV transcript cache). The merged transcript is kept.">🗑 delete audio</button>
+</template>
+
 <!-- ── Aliases box ──────────────────────────────────────────── -->
 <template id="tpl-sess-aliases">
   <div class="box">
@@ -217,6 +222,7 @@
     <span class="row gap-xs">
       <a class="btn tiny ghost" download title="Download WAV" data-slot="download">⬇</a>
       <button class="btn tiny" data-slot="txButton"></button>
+      <button class="btn tiny ghost" data-slot="deleteBtn" title="Delete this WAV">🗑</button>
     </span>
   </div>
 </template>
@@ -229,6 +235,7 @@
     <span class="row gap-xs">
       <a class="btn tiny ghost" download title="Download stripped region" data-slot="download">⬇</a>
       <button class="btn tiny" data-slot="txButton"></button>
+      <button class="btn tiny ghost" data-slot="deleteBtn" title="Delete this stripped region">🗑</button>
     </span>
   </div>
 </template>

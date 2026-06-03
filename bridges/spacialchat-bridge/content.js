@@ -51,12 +51,17 @@
   let recorderPort = 8001;
   let recorderUseTls = false;
   let tapToken = "";
+  let autoNewSessionOnRoomChange = false;
   let settingsReady = false;
-  chrome.storage.local.get(["recorderHost", "recorderPort", "tapToken", "useTls"]).then((s) => {
+  const SETTINGS_KEYS = ["recorderHost", "recorderPort", "tapToken", "useTls", "autoNewSessionOnRoomChange"];
+  chrome.storage.local.get(SETTINGS_KEYS).then((s) => {
     if (s && s.recorderHost) recorderHost = s.recorderHost;
     if (s && s.recorderPort) recorderPort = Number(s.recorderPort) || 8001;
     if (s && typeof s.tapToken === "string") tapToken = s.tapToken;
     if (s && typeof s.useTls === "boolean") recorderUseTls = s.useTls;
+    if (s && typeof s.autoNewSessionOnRoomChange === "boolean") {
+      autoNewSessionOnRoomChange = s.autoNewSessionOnRoomChange;
+    }
     settingsReady = true;
     console.log(
       "[tapscribe-bridge] recorder: " + (recorderUseTls ? "wss://" : "ws://") +
@@ -93,6 +98,11 @@
       if (changes.useTls) {
         recorderUseTls = !!changes.useTls.newValue;
         touched = true;
+      }
+      if (changes.autoNewSessionOnRoomChange) {
+        // Pure behaviour toggle for future room-changed events — no open WS
+        // is affected, so don't set `touched` / trigger a reconnect.
+        autoNewSessionOnRoomChange = !!changes.autoNewSessionOnRoomChange.newValue;
       }
       if (!touched) return;
       console.log(
@@ -141,6 +151,36 @@
     });
     const scheme = recorderUseTls ? "wss" : "ws";
     return scheme + "://" + recorderHost + ":" + recorderPort + "/tap?" + qp.toString();
+  };
+
+  // HTTP sibling of the /tap WS: ask the recorder to rotate to a fresh
+  // session (and prune now-empty ones). Same tap token, but as a Bearer
+  // header — fetch can set headers whereas the WS handshake can't, which is
+  // why /tap carries the token in the subprotocol slot instead. Fire-and-
+  // forget: the dashboard reflects the new session via its own polling.
+  const newSessionUrl = () => {
+    const scheme = recorderUseTls ? "https" : "http";
+    return scheme + "://" + recorderHost + ":" + recorderPort + "/api/tap/new-session";
+  };
+  const postNewSession = (reason) => {
+    if (typeof fetch !== "function") return; // defensive: very old runtimes
+    if (wouldBeMixedContentBlocked()) {
+      // Same guard the /tap WS uses: an http:// POST from the https
+      // SpatialChat page to a non-trustworthy host is mixed-content-blocked,
+      // and would put the Bearer tap-token on the wire in cleartext on any
+      // client that relaxes that policy. Skip it and surface the cause.
+      console.warn(
+        "[tapscribe-bridge] new-session POST skipped (" + reason +
+        "): recorder is http:// on a non-trustworthy host — enable TLS",
+      );
+      return;
+    }
+    const headers = tapToken ? { Authorization: "Bearer " + tapToken } : {};
+    fetch(newSessionUrl(), { method: "POST", headers })
+      .then((r) => {
+        if (!r.ok) console.warn("[tapscribe-bridge] new-session POST -> " + r.status);
+      })
+      .catch((e) => console.warn("[tapscribe-bridge] new-session POST failed (" + reason + ")", e));
   };
 
   // Construct the WebSocket with the tap-token carried via subprotocol
@@ -607,6 +647,20 @@
           channels.delete(d.identity);
           console.log("[tapscribe-bridge] tap-stop " + d.identity);
           publishStatus();
+        }
+        break;
+      }
+      case "room-changed": {
+        // SpatialChat swapped us into a different room. When the operator
+        // opted in, ask the recorder to start a fresh session so the new
+        // room's audio lands in its own folder. Room-wide event — no
+        // identity, no WS bookkeeping. Defer until settings have loaded
+        // (like the pcm path) so a swap racing storage load can't POST to
+        // the default host/token.
+        if (!settingsReady) break;
+        if (autoNewSessionOnRoomChange) {
+          console.log("[tapscribe-bridge] room changed; requesting new recording session");
+          postNewSession("room-changed");
         }
         break;
       }

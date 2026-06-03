@@ -9,6 +9,7 @@ with a short framing line.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
@@ -89,6 +90,37 @@ class MlxWhisperTranscriber:
         repo = mlx_whisper_repo(model_name)
         print(f"[tapscribe] using mlx-whisper for batch model: {repo}", flush=True)
         return cls(model_name=model_name, hf_repo=repo)
+
+    def unload(self) -> None:
+        """Free the weights mlx-whisper cached for this repo.
+
+        Unlike every other adapter this class holds no model object —
+        mlx_whisper caches loaded models internally (an `@lru_cache` on its
+        model loader), keyed by repo — so dropping the cache entry frees
+        nothing on its own. Clear mlx_whisper's loader cache so those weights
+        can be collected; the Metal buffer pool is reclaimed separately by the
+        factory's `_free_framework_memory`.
+
+        Best-effort and version-tolerant: the loader's module path has moved
+        across mlx_whisper releases, and the package is only imported once a
+        real transcribe has run (so `sys.modules` may not have it at all).
+        A miss just means the weights persist until process exit — never a
+        hard error on the teardown path.
+        """
+        if sys.modules.get("mlx_whisper") is None:
+            return
+        for mod_name in ("mlx_whisper.load_models", "mlx_whisper.transcribe"):
+            module = sys.modules.get(mod_name)
+            loader = getattr(module, "load_model", None) if module is not None else None
+            cache_clear = getattr(loader, "cache_clear", None)
+            if callable(cache_clear):
+                try:
+                    cache_clear()
+                except Exception:
+                    # An upstream rename / signature change must not break
+                    # teardown; the cached weights then linger until the
+                    # process exits. The factory drops the adapter regardless.
+                    pass
 
     def transcribe(
         self,

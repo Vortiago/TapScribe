@@ -151,6 +151,32 @@ def test_api_models_emits_no_inputs_for_parakeet(client):
     assert pk["inputs"] == []
 
 
+def test_api_models_cache_clear_evicts_idle_models(client, monkeypatch):
+    """DELETE /api/models/cache reclaims idle (not-in-use) cached models and
+    reports how many it freed. We seed one resident model via the factory's
+    own acquire/release with eviction disabled, then assert the endpoint
+    drops it."""
+    from test_transcribers_cache_eviction import _GenericSpy, _loader_for, _Registry
+
+    from tapscribe import transcribers
+
+    # ttl<0 keeps the model resident on release so the manual evict has a
+    # target instead of it being dropped immediately on release.
+    monkeypatch.setenv("TAPSCRIBE_MODEL_IDLE_TTL_S", "-1")
+    reg = _Registry("cpu", _loader_for(_GenericSpy, []))
+    try:
+        t = transcribers.load_transcriber("m", backend="cpu", registry=reg)
+        transcribers.release_transcriber(t)
+        assert t._model is not None  # resident before the call
+
+        r = client.delete("/api/models/cache")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "evicted": 1}
+        assert t._model is None  # reclaimed
+    finally:
+        transcribers.clear_cache()
+
+
 def test_api_models_hides_families_whose_adapters_are_not_installed(client):
     """The install picker can pull in only some family extras (e.g.
     Whisper but not Parakeet). The /api/models filter mirrors that so
@@ -352,6 +378,83 @@ def test_new_session_rotates_recorder_session(client, recorder_under_test):
     body = r.json()
     assert body["ok"] is True
     assert body["previous"] == prev
+
+
+def test_new_session_prunes_empty_sessions(client, recorder_under_test):
+    """Rotating via the dashboard button now sweeps stale empty sessions,
+    while WAV-bearing folders survive."""
+    cur = recorder_under_test.session_dir
+    cur.mkdir(parents=True, exist_ok=True)
+    _seed_wav(cur / "cur.wav")
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
+    r = client.post("/api/new-session")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "2020-01-01T00-00-00Z" in body["pruned"]["pruned"]
+    assert not empty.exists()  # empty session swept
+    assert cur.exists()  # WAV-bearing previous session kept
+
+
+def test_tap_new_session_rotates_without_pruning(client, recorder_under_test):
+    """The bridge-facing endpoint rotates (when the current session has audio)
+    but — unlike the dashboard — does NOT prune: deleting folders stays a
+    Basic-auth action. Auth is disabled in this fixture, so no header needed."""
+    cur = recorder_under_test.session_dir
+    cur.mkdir(parents=True, exist_ok=True)
+    _seed_wav(cur / "cur.wav")
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
+    prev = recorder_under_test.session_start
+    r = client.post("/api/tap/new-session")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["rotated"] is True
+    # NB: _utc_session_id() has 1s resolution, so a same-second rotation can
+    # reuse the id — assert on the rotated flag + previous, not current != prev.
+    assert body["previous"] == prev
+    assert recorder_under_test.session_start == body["current"]
+    assert "pruned" not in body  # tap path never prunes
+    assert empty.exists()  # the empty session is NOT deleted by the tap path
+    assert cur.exists()
+
+
+def test_tap_new_session_noop_when_current_empty(client, recorder_under_test):
+    """A fresh/empty current session means a tap-initiated rotation is a
+    no-op — don't churn the session-id timestamp (and never delete)."""
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
+    prev = recorder_under_test.session_start
+    r = client.post("/api/tap/new-session")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["rotated"] is False
+    assert body["current"] == prev
+    assert recorder_under_test.session_start == prev
+    assert "pruned" not in body
+    assert empty.exists()  # the tap path leaves empties alone
+
+
+def test_prune_empty_endpoint_still_works(client, recorder_under_test):
+    """Refactor guard: /api/sessions/prune-empty still returns the
+    documented shape and preserves labelled sessions."""
+    empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
+    empty.mkdir()
+    labelled = recorder_under_test.recordings_dir / "2020-02-02T00-00-00Z"
+    labelled.mkdir()
+    (labelled / "session-meta.json").write_text('{"label": "keep me"}')
+    r = client.post("/api/sessions/prune-empty")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "2020-01-01T00-00-00Z" in body["pruned"]
+    assert body["count"] == 1
+    assert body["failed"] == []
+    assert not empty.exists()
+    assert labelled.exists()  # operator label keeps a WAV-less session
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +955,144 @@ def test_absorb_refuses_self(client, recorder_under_test):
     _seed_session(root, "tgt", [])
     r = client.post("/api/sessions/tgt/absorb", json={"source": "tgt"})
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Audio deletion — DELETE /api/sessions/{session}/audio + /api/wav/{s}/{name}
+# ---------------------------------------------------------------------------
+
+
+def test_delete_session_audio_removes_all_keeps_transcript(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(
+        root,
+        "s",
+        ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"],
+    )
+    # Legacy sidecar on one WAV, new-layout cache dir on the other.
+    (sd / "20260101T000000Z__alice__abc.wav").with_suffix(".json").write_text("{}")
+    txdir = (sd / "20260101T010000Z__bob__def.wav").with_suffix(".transcripts")
+    txdir.mkdir()
+    (txdir / "faster-whisper__small.en.json").write_text("{}")
+    # A stripped region + the merged transcript + session meta.
+    (sd / "stripped").mkdir()
+    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    (sd / "session-transcript.json").write_text('{"merged": true}')
+    (sd / "session-transcript.txt").write_text("merged")
+    (sd / "session-meta.json").write_text('{"label": "kickoff"}')
+
+    r = client.delete("/api/sessions/s/audio")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["wavs_deleted"] == 2  # originals only; stripped folds into bytes
+    assert body["bytes_freed"] > 0
+
+    assert sorted(sd.glob("*.wav")) == []
+    assert not (sd / "stripped").exists()
+    assert not (sd / "20260101T000000Z__alice__abc.json").exists()
+    assert not (sd / "20260101T010000Z__bob__def.transcripts").exists()
+    # The transcript + meta survive — the whole point of audio-only delete.
+    assert (sd / "session-transcript.json").is_file()
+    assert (sd / "session-transcript.txt").is_file()
+    assert (sd / "session-meta.json").is_file()
+
+
+def test_delete_session_audio_refuses_current_session(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    cur = recorder_under_test.session_start
+    sd = _seed_session(root, cur, ["20260101T000000Z__alice__abc.wav"])
+    r = client.delete(f"/api/sessions/{cur}/audio")
+    assert r.status_code == 409
+    assert "current session" in r.json()["detail"]
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # untouched
+
+
+def test_delete_session_audio_refuses_inflight_job(client, recorder_under_test):
+    from tapscribe.recorder import JobState
+
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+
+    # Pre-claim a job slot the way the transcribe-session busy test does —
+    # JobTracker.claim is async, driven via anyio's sync→async portal.
+    import anyio.from_thread
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.jobs.claim,
+            JobState(
+                session="s",
+                kind="strip",
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+                status="running",
+            ),
+        )
+
+    r = client.delete("/api/sessions/s/audio")
+    assert r.status_code == 409
+    assert "in flight" in r.json()["detail"]
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # untouched
+
+
+def test_delete_session_audio_missing_session_404(client, recorder_under_test):  # noqa: ARG001
+    r = client.delete("/api/sessions/does-not-exist/audio")
+    assert r.status_code == 404
+
+
+def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(
+        root,
+        "s",
+        ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"],
+    )
+    (sd / "20260101T000000Z__alice__abc.wav").with_suffix(".json").write_text("{}")
+    # A stripped region sharing the deleted original's speaker — the no-cascade
+    # contract means it must survive a per-file delete of the original.
+    (sd / "stripped").mkdir()
+    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+
+    r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav")
+    assert r.status_code == 200, r.text
+    assert r.json()["bytes_freed"] > 0
+
+    assert not (sd / "20260101T000000Z__alice__abc.wav").exists()
+    assert not (sd / "20260101T000000Z__alice__abc.json").exists()
+    # Second original + the stripped region both survive (no cascade).
+    assert (sd / "20260101T010000Z__bob__def.wav").is_file()
+    assert (sd / "stripped" / "20260101T000000Z__alice__reg.wav").is_file()
+
+
+def test_delete_wav_stripped_region_only(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    (sd / "stripped").mkdir()
+    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+
+    r = client.delete("/api/wav/s/20260101T000000Z__alice__reg.wav?source=stripped")
+    assert r.status_code == 200, r.text
+    assert not (sd / "stripped" / "20260101T000000Z__alice__reg.wav").exists()
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # original kept
+
+
+def test_delete_wav_rejects_bad_input(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    # Non-.wav name → 404 (resolve_wav rejects non-audio). Assign first —
+    # an HTTP call inside `assert` would vanish under `python -O`.
+    r = client.delete("/api/wav/s/session-meta.json")
+    assert r.status_code == 404
+    # Unknown source → 400 (whitelisted before any filesystem touch).
+    r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav?source=bogus")
+    assert r.status_code == 400
+    # Missing WAV → 404.
+    r = client.delete("/api/wav/s/20260101T999999Z__nope__zzz.wav")
+    assert r.status_code == 404
+    # The real WAV is untouched by any of the above.
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()
 
 
 def test_absorb_refuses_missing_source(client, recorder_under_test):
