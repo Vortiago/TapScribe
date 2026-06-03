@@ -46,6 +46,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -165,7 +166,9 @@ async def _streaming_taps(
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         # Drain so the next pass starts from a clean active-taps state.
-        await wait_until(lambda: streams_drained(rr.recorder), timeout=10.0)
+        # partial (not a lambda): a lambda's implicit return inside a finally
+        # trips CodeQL's py/exit-from-finally; partial has no return node.
+        await wait_until(partial(streams_drained, rr.recorder), timeout=10.0)
 
 
 async def _feed_churn(rr: RunningRecorder) -> None:

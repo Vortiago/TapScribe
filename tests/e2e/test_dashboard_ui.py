@@ -34,6 +34,7 @@ import json
 import os
 import re
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -1558,4 +1559,6 @@ async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
     finally:
         stream.cancel()
         await asyncio.gather(stream, return_exceptions=True)
-        await wait_until(lambda: streams_drained(rr.recorder), timeout=10.0)
+        # partial (not a lambda): a lambda's implicit return inside a finally
+        # trips CodeQL's py/exit-from-finally; partial has no return node.
+        await wait_until(partial(streams_drained, rr.recorder), timeout=10.0)
