@@ -557,3 +557,123 @@ test("leaving a room (disconnect) does NOT emit room-changed", async () => {
     "leaving a room is not a room change",
   );
 });
+
+// ---- reconcile(): self-healing membership sweep ---------------------------
+// Event-driven tapping is necessary but not sufficient — LiveKit can drop or
+// coalesce trackSubscribed / participantConnected / participantDisconnected
+// across a reconnect or a proximity resubscribe, and the attach-time
+// enumeration only runs once per room instance. The poll loop now re-derives
+// membership from room.remoteParticipants every tick so a missed event can't
+// strand a speaker (audible in the room, untapped + missing from the popup)
+// or leave a departed one as a ghost row with a leaked /tap WS. `__pollFn` is
+// the captured 250 ms poll callback; calling it drives one reconcile tick.
+
+test("reconcile taps a participant whose trackSubscribed event was missed", async () => {
+  // The reported bug: someone is talking in the room — everyone else shows
+  // up in the extension, but this person doesn't, and their audio never
+  // reaches the recorder. That's a subscribe/connect event the bridge never
+  // saw. Reconcile finds them on the next poll and taps them.
+  const env = loadPageScript(); // room connected, no participants yet
+  await flush();
+
+  const track = makeTrack();
+  const pub = makeAudioPublication({ track });
+  const ghost = makeParticipant({ identity: "ghost", name: "Ghost", pubs: [pub] });
+  // They joined and their mic track subscribed, but NO event reached us.
+  env.room.remoteParticipants.set("ghost", ghost);
+  assert.equal(
+    findMessages(env.posted, "tap-start", "ghost").length, 0,
+    "no tap-start yet — the subscribe event was missed",
+  );
+
+  env.sandbox.__pollFn(); // one 250 ms reconcile tick
+  await flush();
+
+  const tapStart = findMessages(env.posted, "tap-start", "ghost");
+  assert.equal(tapStart.length, 1, "reconcile taps the missed speaker, exactly once");
+  assert.equal(tapStart[0].name, "Ghost", "missed speaker is tapped with their name");
+});
+
+test("reconcile re-taps a present speaker dropped by a stray unsubscribe", async () => {
+  // SpatialChat is spatial audio: walking out of range fires
+  // trackUnsubscribed (we untap + drop the popup row); walking back in can
+  // resubscribe the track without a fresh trackSubscribed reaching us. The
+  // speaker is back, talking, with a live subscribed track — and would stay
+  // missing forever without the reconcile sweep.
+  const track = makeTrack();
+  const pub = makeAudioPublication({ track });
+  const wanderer = makeParticipant({ identity: "wanderer", name: "Wendy", pubs: [pub] });
+  const env = loadPageScript({ remoteParticipants: [wanderer] });
+  await flush();
+  assert.equal(
+    findMessages(env.posted, "tap-start", "wanderer").length, 1, "tapped at attach",
+  );
+
+  // Walked out of range — trackUnsubscribed drops them from taps + popup.
+  env.room.fire("trackUnsubscribed", track, pub, wanderer);
+  await flush();
+  assert.ok(
+    findMessages(env.posted, "tap-stop", "wanderer").length, "untapped on unsubscribe",
+  );
+
+  // Still in the room with a live subscribed track (walked back in, but the
+  // resubscribe event was missed). Reconcile must restore the tap.
+  env.sandbox.__pollFn();
+  await flush();
+  assert.equal(
+    findMessages(env.posted, "tap-start", "wanderer").length, 2,
+    "reconcile re-taps the speaker the stray unsubscribe had dropped",
+  );
+});
+
+test("reconcile untaps a participant who left without a disconnect event", async () => {
+  // The other half of the drift: if participantDisconnected (or the final
+  // trackUnsubscribed) is dropped, the bridge keeps a ghost popup row and a
+  // leaked /tap WS open against the recorder. Reconcile notices the identity
+  // is gone from room.remoteParticipants and untaps it.
+  const track = makeTrack();
+  const pub = makeAudioPublication({ track });
+  const departed = makeParticipant({ identity: "departed", name: "Dave", pubs: [pub] });
+  const env = loadPageScript({ remoteParticipants: [departed] });
+  await flush();
+  assert.equal(
+    findMessages(env.posted, "tap-start", "departed").length, 1, "tapped at attach",
+  );
+
+  // They leave, but no participantDisconnected reaches us.
+  env.room.remoteParticipants.delete("departed");
+  env.sandbox.__pollFn();
+  await flush();
+
+  assert.equal(
+    findMessages(env.posted, "tap-stop", "departed").length, 1,
+    "reconcile untaps the silently-departed participant, exactly once",
+  );
+});
+
+test("reconcile is idempotent — repeated ticks don't re-announce or churn mute", async () => {
+  // Reconcile runs ~4x/second. tap() / announcePresence() must early-return
+  // on a known identity, else every tick would re-post tap-start and flood
+  // the mute channel — and a stray mute=true would prematurely cut an active
+  // speaker's utterance. Pin one tap-start and a single presence-seed mute
+  // across the attach plus five reconcile ticks.
+  const track = makeTrack();
+  const pub = makeAudioPublication({ track });
+  const steady = makeParticipant({ identity: "steady", name: "Steve", pubs: [pub] });
+  const env = loadPageScript({ remoteParticipants: [steady] });
+  await flush();
+
+  for (let i = 0; i < 5; i++) {
+    env.sandbox.__pollFn();
+    await flush();
+  }
+
+  assert.equal(
+    findMessages(env.posted, "tap-start", "steady").length, 1,
+    "exactly one tap-start across attach + five reconcile ticks",
+  );
+  assert.equal(
+    findMessages(env.posted, "mute", "steady").length, 1,
+    "the only mute message is the initial presence seed — no per-tick churn",
+  );
+});

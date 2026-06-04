@@ -34,7 +34,14 @@ spacialchat-bridge/
    spatial.chat swaps the room), subscribes to `trackSubscribed` /
    `trackMuted` / etc., and resamples each audio track to 16 kHz int16
    via an inline AudioWorklet. PCM frames are posted to the content
-   script via `window.postMessage`.
+   script via `window.postMessage`. Because LiveKit can drop or coalesce
+   those events across a reconnect or a proximity-driven resubscribe
+   (spatial.chat is spatial audio), the same poll that watches for room
+   swaps also runs a `reconcile()` sweep every tick: it re-derives the
+   live roster from `room.remoteParticipants`, taps anyone whose
+   subscribe/connect event was missed, and untaps anyone the room no
+   longer lists. That self-healing pass is what stops an actively-talking
+   participant from going missing while everyone else shows up.
 3. `content.js` opens one `/tap` WebSocket per speaker per utterance on
    the first non-muted PCM frame and closes it on `trackMuted`. Muting
    is the end-of-utterance signal; the Recorder finalises a WAV on
