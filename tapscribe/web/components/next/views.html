@@ -140,6 +140,14 @@
       <div class="panel">
         <div class="panel__head"><div class="panel__title"><span class="ic">▶</span>Transcribe</div><div class="panel__hint">one job per session</div></div>
         <div class="panel__body">
+          <!-- audio source: transcribe the ORIGINAL WAVs or the silence-stripped
+               clips. Drives both the session-range transcribe and the per-WAV
+               picker below; "stripped" is disabled until a stripped/ folder
+               exists (strip silence in Recordings first). -->
+          <div class="row-between" style="margin-bottom:9px">
+            <span class="ovr-lab">audio source <span class="dim">— original or stripped</span></span>
+            <span data-slot="srcSwHost"></span>
+          </div>
           <div class="field" style="margin-bottom:9px">
             <label>session range <span class="dim">(blank → whole session)</span></label>
             <div class="rangeform">

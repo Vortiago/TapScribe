@@ -53,6 +53,7 @@ export function build(ctx) {
   const forceBox = /** @type {HTMLInputElement} */ (pick(frag, "forceBox"));
   const txRangeBtn = /** @type {HTMLButtonElement} */ (pick(frag, "txRangeBtn"));
   const txNote = pick(frag, "txNote");
+  const srcSwHost = pick(frag, "srcSwHost");
   const wavList = pick(frag, "wavList");
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
@@ -75,9 +76,13 @@ export function build(ctx) {
   let copyTxFull = null;
   /** @type {import('../../types.js').EffectiveMeta | null} */
   let copyMeta = null;
-  /** Selected original WAV name, per session id (drives re-transcribe + cache). */
+  /** Selected WAV/clip name, per session id (drives re-transcribe + cache). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
+  /** Source toggle (original / stripped) per session id — which audio the
+   * transcribe actions + the per-WAV picker operate on. Mirrors Recordings. */
+  /** @type {Map<string, "original" | "stripped">} */
+  const sourcePick = new Map();
   /** wavKey ("session/name[@stripped]") currently transcribing optimistically. */
   /** @type {Set<string>} */
   const txInflight = new Set();
@@ -121,13 +126,57 @@ export function build(ctx) {
     return null;
   };
 
-  /** Resolve the selected original WAV for the focused session (first if unset). */
+  /** Effective source for the focused session — falls back to original when no
+   * stripped/ folder exists, so a stale "stripped" toggle can't transcribe
+   * nothing after the clips were cleared. */
+  const effectiveSource = () => {
+    const want = sourcePick.get(session?.session || "") || "original";
+    return (want === "stripped" && !session?.stripped) ? "original" : want;
+  };
+
+  /** The WAVs the picker + per-WAV transcribe operate on: the originals, or the
+   * flattened silence-stripped region clips when the source toggle is stripped. */
+  /** @returns {(import('../../types.js').WavFile | import('../../types.js').WavRegion)[]} */
+  const sourceFiles = () => {
+    const files = session?.files || [];
+    return effectiveSource() === "stripped" ? files.flatMap((f) => f.regions || []) : files;
+  };
+
+  /** In-flight key for a (name, source) — matches transcribeWav's key shape so
+   * the row "⟳ tx" busy state lines up with the optimistic set. */
+  /** @param {string} name @param {"original"|"stripped"} src */
+  const wavKey = (name, src) => `${session?.session || ""}/${name}${src === "stripped" ? "@stripped" : ""}`;
+
+  /** Resolve the selected WAV/clip for the focused session (first if unset). */
   const selectedFor = () => {
     if (!session) return null;
-    const files = session.files || [];
+    const files = sourceFiles();
     if (!files.length) return null;
     const want = selectedWav.get(session.session);
     return files.find((f) => f.name === want) ?? files[0] ?? null;
+  };
+
+  /** Build the original/stripped source toggle (reuses tpl-next-srcsw). The
+   * "stripped" option is disabled until the session has a stripped/ folder. */
+  const buildSrcSw = () => {
+    const sw = tpl("tpl-next-srcsw");
+    const active = effectiveSource();
+    const hasStripped = !!session?.stripped;
+    for (const b of /** @type {NodeListOf<HTMLButtonElement>} */ (sw.querySelectorAll("[data-src]"))) {
+      const which = /** @type {"original"|"stripped"} */ (b.dataset.src);
+      if (which === active) b.classList.add("is-on");
+      if (which === "stripped" && !hasStripped) {
+        b.disabled = true;
+        b.title = "no stripped/ folder — strip silence in Recordings first";
+      }
+      b.addEventListener("click", () => {
+        if (b.disabled || !session) return;
+        sourcePick.set(session.session, which);
+        lastCtlSig = " ";
+        afterMutate();
+      });
+    }
+    return sw;
   };
 
   /** Read the Canary source/target lang from the engine panel's selects. */
@@ -145,7 +194,7 @@ export function build(ctx) {
     if (!session) return;
     const sid = session.session;
     const eng = engineState();
-    const key = `${sid}/${name}${src === "stripped" ? "@stripped" : ""}`;
+    const key = wavKey(name, src);
     txInflight.add(key);
     lastCtlSig = " ";
     afterMutate();
@@ -164,7 +213,7 @@ export function build(ctx) {
 
   txOneBtn.addEventListener("click", () => {
     const sel = selectedFor();
-    if (sel) transcribeWav(sel.name, "original");
+    if (sel) transcribeWav(sel.name, effectiveSource());
   });
 
   txRangeBtn.addEventListener("click", async () => {
@@ -175,6 +224,7 @@ export function build(ctx) {
     try {
       await postJson("/api/transcribe-session", {
         session: sid,
+        source: effectiveSource(),
         model: eng.model, backend: eng.backend,
         from_iso: rangeFrom.value.trim(),
         to_iso: rangeTo.value.trim(),
@@ -296,7 +346,7 @@ export function build(ctx) {
 
   // ---- Per-WAV picker (drives re-transcribe + the cache panel) --------------
 
-  /** @param {import('../../types.js').WavFile} f @param {boolean} selected */
+  /** @param {import('../../types.js').WavFile | import('../../types.js').WavRegion} f @param {boolean} selected */
   const wavRow = (f, selected) => {
     const node = tpl("tpl-next-txwavrow");
     const btn = /** @type {HTMLButtonElement} */ (node.firstElementChild);
@@ -306,7 +356,7 @@ export function build(ctx) {
     pick(node, "sub").textContent = `${who}${fmtBytes(f.size)}`;
     pick(node, "dur").textContent = fmtDur(f.duration_s);
     const tag = pick(node, "txTag");
-    const inflight = txInflight.has(`${session?.session || ""}/${f.name}`);
+    const inflight = txInflight.has(wavKey(f.name, effectiveSource()));
     if (inflight) { tag.textContent = "⟳ tx"; tag.className = "wavrow__tx is-busy"; }
     else if (f.transcript) { tag.textContent = "✓ tx"; tag.className = "wavrow__tx is-done"; }
     else { tag.textContent = "no tx"; tag.className = "wavrow__tx is-none"; }
@@ -318,7 +368,7 @@ export function build(ctx) {
 
   // ---- Transcript cache (REAL — moved from recordings.js) -------------------
 
-  /** @param {import('../../types.js').WavFile | null} sel */
+  /** @param {import('../../types.js').WavFile | import('../../types.js').WavRegion | null} sel */
   const renderCache = (sel) => {
     cacheBody.replaceChildren();
     cacheHint.textContent = sel ? truncMid(sel.name, 30) : "no WAV";
@@ -366,7 +416,6 @@ export function build(ctx) {
     session = sess;
     const tx = sess?.session_transcript || null;
     const sid = sess?.session || "";
-    const files = sess?.files || [];
     const sel = selectedFor();
     const job = sess?.progress || null;
 
@@ -451,13 +500,18 @@ export function build(ctx) {
       }
     }
 
-    // ---- Control column (range/note/WAV picker/cache) — own signature. Skip
-    // the DOM-heavy WAV-list / cache rebuild when nothing it depends on
-    // changed, or while a range box is mid-edit (so an in-progress ISO edit
-    // isn't wiped).
-    const wavSig = files.map((f) => `${f.name}:${f.transcript?.transcribed_at || ""}:${(f.transcripts || []).length}`).join("|");
+    // ---- Control column (source toggle/range/note/WAV picker/cache) — own
+    // signature. Skip the DOM-heavy WAV-list / cache rebuild when nothing it
+    // depends on changed, or while a range box is mid-edit (so an in-progress
+    // ISO edit isn't wiped). The source + stripped flag are folded in so an
+    // original↔stripped switch re-renders the picker.
+    const src = effectiveSource();
+    const srcFiles = sourceFiles();
+    const wavSig = srcFiles.map((f) => `${f.name}:${f.transcript?.transcribed_at || ""}:${(f.transcripts || []).length}`).join("|");
     const ctlSig = [
       sid,
+      src,
+      sess?.stripped ? "S" : "",
       sel?.name || "",
       [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(","),
       wavSig,
@@ -469,33 +523,38 @@ export function build(ctx) {
     if (ctlSig === lastCtlSig || editing) return;
     lastCtlSig = ctlSig;
 
+    // Source toggle (original / stripped) — drives the range transcribe AND the
+    // per-WAV picker below.
+    srcSwHost.replaceChildren(buildSrcSw());
+
     // Range placeholders + note
     if (!rangeFrom.value) rangeFrom.placeholder = sess?.earliest_iso || "ISO";
     if (!rangeTo.value) rangeTo.placeholder = sess?.latest_iso || "ISO";
-    txRangeBtn.disabled = !sess || !files.length;
+    const srcWord = src === "stripped" ? "stripped clip" : "WAV";
+    txRangeBtn.disabled = !sess || !srcFiles.length;
     txNote.textContent = sess
-      ? (files.length ? "transcribes every WAV in the range" : "no WAVs to transcribe yet")
+      ? (srcFiles.length ? `transcribes every ${srcWord} in the range` : `no ${srcWord}s to transcribe yet`)
       : "pick a session first";
 
     // Per-WAV re-transcribe picker + selected-WAV button
-    txSelLabel.textContent = sel ? `Selected: ${truncMid(sel.name, 24)}` : "Selected WAV";
-    const oneBusy = !!sel && txInflight.has(`${sid}/${sel.name}`);
+    txSelLabel.textContent = sel ? `Selected: ${truncMid(sel.name, 22)} · ${src}` : "Selected WAV";
+    const oneBusy = !!sel && txInflight.has(wavKey(sel.name, src));
     txOneBtn.disabled = !sel || oneBusy;
     txOneBtn.textContent = oneBusy ? "⟳ transcribing" : (sel?.transcript ? "re-transcribe" : "transcribe");
-    if (!files.length) {
+    if (!srcFiles.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
       empty.textContent = sess
-        ? "No WAVs recorded yet."
+        ? (src === "stripped" ? "No stripped clips — strip silence in Recordings first." : "No WAVs recorded yet.")
         : "Pick a session from the spine.";
       wavList.replaceChildren(empty);
     } else {
       const listFrag = document.createDocumentFragment();
-      for (const f of files) listFrag.appendChild(wavRow(f, f.name === sel?.name));
+      for (const f of srcFiles) listFrag.appendChild(wavRow(f, f.name === sel?.name));
       wavList.replaceChildren(listFrag);
     }
 
-    // Transcript cache for the selected WAV
+    // Transcript cache for the selected WAV/clip
     renderCache(sel);
   };
 

@@ -1634,3 +1634,70 @@ async def test_recordings_strip_controls_stay_visible_with_many_wavs(
             assert knobs == 3, f"all 3 strip knobs must render, got {knobs}"
         finally:
             await browser.close()
+
+
+async def test_transcribe_page_source_toggle_picks_original_or_stripped(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """The Transcribe page must let you transcribe the ORIGINAL WAVs or the
+    silence-stripped clips (operator report: no way to pick). With a stripped/
+    folder present, the source toggle's "stripped" option enables; switching to
+    it lists the stripped region clips in the per-WAV picker and makes the
+    session-range transcribe send source=stripped. The transcribe POST is
+    intercepted (no real job), so this needs no model/transcriber."""
+    import httpx
+
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rr = running_recorder
+    src = _build_speech_silence_wav(tmp_path / "src.wav")
+    await stream_wav_via_tap(
+        ws_base_url=rr.ws_base_url, identity="alice", name="Alice", wav_path=src, utterance_id="utt1"
+    )
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=5.0)
+    async with httpx.AsyncClient(base_url=rr.base_url, timeout=30.0) as c:
+        r = await c.post(
+            f"/api/sessions/{rr.recorder.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert r.status_code == 200 and r.json()["files_written"] == 1, r.text
+    n_clips = len(sorted((rr.recorder.session_dir / "stripped").glob("*.wav")))
+    assert n_clips >= 1
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            captured: dict = {}
+
+            async def _route(route):
+                captured.update(route.request.post_data_json or {})
+                await route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+
+            await page.route("**/api/transcribe-session", _route)
+            await page.goto(rr.base_url + "/#transcript", wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="srcSwHost"] .srcsw', timeout=6000)
+
+            stripped_btn = page.locator('[data-slot="srcSwHost"] [data-src="stripped"]')
+            assert not await stripped_btn.is_disabled(), "stripped must enable once a stripped/ folder exists"
+
+            await stripped_btn.click()
+            await page.wait_for_timeout(700)
+            assert await page.locator('[data-slot="srcSwHost"] [data-src="stripped"].is-on').count() == 1
+            picker_rows = await page.locator('[data-slot="wavList"] .wavrow').count()
+            assert picker_rows >= n_clips, (
+                f"switching to stripped must list the {n_clips} clips in the picker, got {picker_rows}"
+            )
+
+            await page.locator('[data-slot="txRangeBtn"]').click()
+            await page.wait_for_timeout(700)
+            assert captured.get("source") == "stripped", (
+                f"the session-range transcribe must send source=stripped, got {captured!r}"
+            )
+        finally:
+            await browser.close()
