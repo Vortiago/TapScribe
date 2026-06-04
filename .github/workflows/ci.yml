@@ -78,6 +78,25 @@ jobs:
       - name: Run bridge tests (Node built-in runner, no deps)
         run: node --test "bridges/spacialchat-bridge/tests/*.test.js"
 
+  # The dashboard's browser JS (tapscribe/web/js/) is ES modules with no
+  # Python dependency — same rationale as bridge-js: its own job so a
+  # frontend-logic regression surfaces as its own red check. The pure
+  # coalescing helpers in live-feed.js import cleanly in Node without a DOM;
+  # the DOM rendering itself stays covered by the playwright dashboard e2e.
+  dashboard-js:
+    name: dashboard JS tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Run dashboard JS tests (Node built-in runner, no deps)
+        run: node --test "tapscribe/web/js/**/*.test.js"
+
   # Frontend typecheck — runs `tsc --noEmit --checkJs` against
   # tapscribe/web/js/. Files opt in via `// @ts-check`, so this job is
   # incremental: it only checks files that have explicitly enabled it.

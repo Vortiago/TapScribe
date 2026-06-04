@@ -186,32 +186,39 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             for _ in range(4):
                 fake_wlk.push_buffer("")
 
+            # The feed coalesces consecutive same-speaker fragments into one
+            # flowing line, and FakeWlk's broadcast order isn't deterministic
+            # (the two pushes may land Alice/Alice/Bob/Bob and merge, or
+            # interleave and stay separate). So assert on each speaker's
+            # *combined* text rather than exact per-row matches.
             await page.wait_for_function(
                 """
                 () => {
                   const lines = Array.from(
                     document.querySelectorAll('#viewRoot [data-slot="liveFeedShell"] .feed-body .line'),
                   );
-                  const pairs = lines.map((l) => ({
-                    who: l.querySelector(".who")?.textContent.trim(),
-                    txt: l.querySelector(".txt")?.textContent.trim(),
-                  }));
-                  const has = (who, txt) =>
-                    pairs.some((p) => p.who === who && p.txt === txt);
-                  return (
-                    has("Alice", "first ui settled line") &&
-                    has("Bob", "first ui settled line") &&
-                    has("Alice", "second ui settled line") &&
-                    has("Bob", "second ui settled line")
-                  );
+                  const byWho = {};
+                  for (const l of lines) {
+                    const who = l.querySelector(".who")?.textContent.trim();
+                    const txt = l.querySelector(".txt")?.textContent.trim() || "";
+                    if (!who) continue;
+                    byWho[who] = (byWho[who] ? byWho[who] + " " : "") + txt;
+                  }
+                  const ok = (who) =>
+                    !!byWho[who] &&
+                    byWho[who].includes("first ui settled line") &&
+                    byWho[who].includes("second ui settled line");
+                  return ok("Alice") && ok("Bob");
                 }
                 """,
                 timeout=10000,
             )
-            # The feed count tracks the deque length — 2 lines pushed,
-            # broadcast to 2 relays = 4 entries.
+            # The header count tracks rendered (COALESCED) lines, not raw deque
+            # entries (#80): consecutive same-speaker fragments are joined into
+            # sentences, so >=1 line per speaker survives the merge (2 speakers
+            # here). Stages mounts the feed count as a data-slot under #viewRoot.
             count = await page.locator('#viewRoot [data-slot="liveFeedCount"]').inner_text()
-            assert int(count) >= 4
+            assert int(count) >= 2
             await page.screenshot(path=str(SHOTS_DIR / "03-live-transcripts.png"), full_page=True)
 
             await asyncio.gather(alice_task, bob_task)
@@ -1475,9 +1482,15 @@ async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
 ):
     """While a tap streams and captions settle, (a) the Capture header must
     not be rebuilt per tick (its sig is unchanged) and (b) an arriving caption
-    must APPEND a feed line, not rebuild the existing ones — rebuilding ≤200
-    rows per settled line was steady GC + layout pressure for whole meetings,
-    and dropped any text selection the operator had in the feed."""
+    that starts a NEW rendered line must APPEND it, leaving earlier lines
+    untouched — rebuilding ≤200 rows per settled line was steady GC + layout
+    pressure for whole meetings, and dropped any text selection the operator
+    had in the feed.
+
+    Captions end with a period so #80's coalescing splits them into two
+    SENTENCES = two lines (same-speaker fragments without a terminator would
+    coalesce into one growing line); the first sentence is stable, so it must
+    survive as a marked node when the second appends."""
     rr = running_recorder
     # 30 s of audio at real-time pacing keeps the relay OPEN for the whole
     # test (normal duration 2-3 s) — if the WAV ran out mid-test the relay's
@@ -1519,7 +1532,7 @@ async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
                     for _ in range(4):
                         await asyncio.to_thread(rr.fake_wlk.push_buffer, "")
 
-                await push_settled("first settled caption line")
+                await push_settled("First settled caption line.")
                 await page.wait_for_function(
                     f"""() => document.querySelectorAll('{feed_line}').length >= 1""",
                     timeout=10000,
@@ -1534,7 +1547,7 @@ async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
                     document.querySelector('#viewRoot [data-slot="head"]').firstElementChild.__guardMark = 1;
                 }}""")
 
-                await push_settled("second settled caption line")
+                await push_settled("Second settled caption line.")
                 await page.wait_for_function(
                     f"""() => document.querySelectorAll('{feed_line}').length >= 2""",
                     timeout=10000,

@@ -322,30 +322,11 @@
       cleanupAllTaps();
     });
 
-    // Iterate existing publications already in place at attach time.
-    // Remote participants: surface every participant first (so muted-on-
-    // entry users appear in the popup as "muted"), then upgrade to a
-    // real tap if their audio track is already subscribed and live.
-    for (const participant of room.remoteParticipants.values()) {
-      announcePresence(participant, anyAudioPubMuted(participant));
-      for (const pub of participant.audioTrackPublications.values()) {
-        if (pub.isSubscribed && pub.track && pub.track.mediaStreamTrack) {
-          tap(participant, pub.track.mediaStreamTrack);
-          if (pub.isMuted) setMute(participant.identity, true);
-        }
-      }
-    }
-    // Local participant (mic enabled before extension attached):
-    const lp = room.localParticipant;
-    if (lp && lp.audioTrackPublications) {
-      announcePresence(lp, anyAudioPubMuted(lp));
-      for (const pub of lp.audioTrackPublications.values()) {
-        if (pub.source === "microphone" && pub.track && pub.track.mediaStreamTrack) {
-          tap(lp, pub.track.mediaStreamTrack);
-          if (pub.isMuted) setMute(lp.identity, true);
-        }
-      }
-    }
+    // Existing participants and already-subscribed publications are picked
+    // up by reconcile(), which the poll loop runs on every tick — including
+    // the one immediately after this attach. Keeping the enumeration in one
+    // place (reconcile) is what lets a missed trackSubscribed /
+    // participantConnected event self-heal instead of stranding a speaker.
   }
 
   // True if the participant has at least one mic publication that is
@@ -357,6 +338,72 @@
       if (pub.isMuted) return true;
     }
     return false;
+  }
+
+  // Bring one participant's bridge state in line with their CURRENT LiveKit
+  // publications: surface them in the popup (presence row) the first time we
+  // see them, and tap their mic track whenever it's subscribed and live.
+  // Idempotent — announcePresence() / tap() early-return once the identity is
+  // known — so reconcile() calls this every poll tick without re-emitting
+  // tap-start (or flooding the mute / utterance-boundary channel). `isLocal`
+  // applies the microphone-source filter the local-publication path has
+  // always used; remote audio pubs are tapped regardless of source, matching
+  // the original attach-time enumeration this replaced.
+  function ensureParticipantTapped(participant, isLocal) {
+    if (!participant || !participant.identity) return;
+    if (!announced.has(participant.identity)) {
+      announcePresence(participant, anyAudioPubMuted(participant));
+    }
+    if (!participant.audioTrackPublications) return;
+    for (const pub of participant.audioTrackPublications.values()) {
+      // Local pubs are published, not "subscribed", so we gate them on the
+      // mic source instead of pub.isSubscribed (which is undefined for them).
+      if (isLocal) {
+        if (pub.source !== "microphone") continue;
+      } else if (!pub.isSubscribed) {
+        continue;
+      }
+      if (!pub.track || !pub.track.mediaStreamTrack) continue;
+      const wasTapped = taps.has(participant.identity);
+      tap(participant, pub.track.mediaStreamTrack);
+      // Seed the "muted" pill only on the tap we just created; re-posting it
+      // every 250 ms would spam the mute (utterance-boundary) channel.
+      if (!wasTapped && pub.isMuted) setMute(participant.identity, true);
+    }
+  }
+
+  // Self-healing membership sweep, run on every poll tick while attached to a
+  // connected room. Event-driven tapping (trackSubscribed /
+  // participantConnected / …) is necessary but NOT sufficient: LiveKit can
+  // drop or coalesce those events across a reconnect, a proximity-driven
+  // resubscribe in SpatialChat's spatial audio, or a race where a track
+  // subscribes a beat after we attached. When that happens a speaker is
+  // audible in the room yet never tapped — their audio never reaches the
+  // recorder and they're missing from the popup, while everyone whose event
+  // we DID catch shows up fine. Reconcile re-derives the truth from
+  // room.remoteParticipants:
+  //   - tap/announce every participant currently in the room (idempotent),
+  //     recovering anyone whose subscribe/connect event we missed;
+  //   - untap any identity we're still tracking that the room no longer
+  //     lists, clearing ghost popup rows and closing the leaked /tap WS when
+  //     a participantDisconnected / trackUnsubscribed event never arrived.
+  function reconcile(room) {
+    const present = new Set();
+    for (const participant of room.remoteParticipants.values()) {
+      present.add(participant.identity);
+      ensureParticipantTapped(participant, false);
+    }
+    const lp = room.localParticipant;
+    if (lp && lp.identity) {
+      present.add(lp.identity);
+      ensureParticipantTapped(lp, true);
+    }
+    // Drop anyone we're still tracking who has left the room. untap() guards
+    // its tap-stop on announced.delete(), so a departed identity fires
+    // exactly one tap-stop even though reconcile revisits it every tick.
+    for (const id of Array.from(announced)) {
+      if (!present.has(id)) untap(id);
+    }
   }
 
   // ---- Watch window.room ----------------------------------------------------
@@ -392,6 +439,15 @@
         } catch (e) {
           console.error("[tapscribe-bridge/page] attachListeners failed:", e);
         }
+      }
+      // Re-derive membership from the room on every tick (not only on a
+      // fresh attach) so a missed subscribe/connect event can't leave a
+      // speaker untapped, nor a departed one lingering. Cheap and
+      // idempotent — see reconcile().
+      try {
+        reconcile(room);
+      } catch (e) {
+        console.error("[tapscribe-bridge/page] reconcile failed:", e);
       }
     } else if (attachedRoom && attachedRoom.state !== "connected") {
       // Previously-attached room dropped. Belt-and-braces with the
