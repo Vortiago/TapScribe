@@ -357,6 +357,23 @@ one, document why and update this list.
   `DRAIN_MAX_MS`, trailing audio is dropped rather than blocking the
   utterance close forever. Don't remove the timeout.
 
+## Interaction hold
+
+The dashboard-wide rule that a per-tick render defers to operator
+interaction state instead of destroying it: a region is **held** (not
+re-rendered) while a control inside it is focused, a text selection
+starts or ends inside it, or — for tail-following panels — the operator
+has scrolled away from the tail. Deferral always skips **without
+advancing the render gate**, so the held render lands on the first tick
+after the interaction clears; updates are delayed by the operator's own
+interaction, never lost.
+
+Mechanics live in `web/js/templates.js` (`renderRegion`,
+`selectionInside`); the decision and its rejected alternatives
+(DOM-diffing, capture-and-restore, pausing the poll) are ADR-0004. Say
+"this region needs the interaction hold," not ad-hoc descriptions of
+focus/selection guards.
+
 ## Per-WAV transcript cache
 
 Each transcribed WAV gets one or more cached transcripts stored next to
