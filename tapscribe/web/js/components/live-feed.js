@@ -8,8 +8,9 @@
 // the LiveTranscripts deque, so left untouched the panel paints one row per
 // few words — a single spoken sentence ends up stacked across a dozen
 // timestamped rows. We coalesce on the way to the DOM: consecutive fragments
-// from the same speaker are joined into one flowing line so the feed reads
-// like sentences. This is purely presentational — the deque behind
+// from the same speaker are joined and then re-split on sentence boundaries,
+// so each row is one sentence rather than one word. This is purely
+// presentational — the deque behind
 // /api/state keeps every fragment, and the authoritative transcript still
 // comes from batch re-transcription of the per-utterance WAVs.
 //
@@ -52,10 +53,47 @@ export function joinFragments(parts) {
 }
 
 /**
- * Collapse the flat feed into per-speaker runs. A run breaks when the
- * speaker changes or the inter-fragment gap exceeds GROUP_GAP_MS. Each run
- * carries the first fragment's timestamp (when the speaker started) and the
- * joined text of all its fragments.
+ * Split a speaker turn's joined text into sentences so each sentence renders
+ * as its own line. A break falls after a run of sentence terminators
+ * (. ! ?, with any trailing closing quotes/brackets) when the next character
+ * is whitespace or end-of-text — so mid-token dots ("3.5") don't split.
+ * Punctuation-free input (common on small models like tiny.en) yields a
+ * single element, so this gracefully degrades to the speaker/gap grouping.
+ * Pure — no DOM, no shared state.
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function splitSentences(text) {
+  /** @type {string[]} */
+  const out = [];
+  let buf = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i);
+    buf += ch;
+    if (ch === "." || ch === "!" || ch === "?") {
+      // Swallow any adjacent terminators / closing quotes ("?!", '."').
+      while (i + 1 < text.length && /[.!?"'”’)\]]/.test(text.charAt(i + 1))) {
+        buf += text.charAt(++i);
+      }
+      // A real boundary only if the next char is whitespace or the end —
+      // otherwise it's mid-token (a decimal, an abbreviation run-on).
+      if (i + 1 >= text.length || /\s/.test(text.charAt(i + 1))) {
+        const s = buf.trim();
+        if (s) out.push(s);
+        buf = "";
+      }
+    }
+  }
+  const tail = buf.trim();
+  if (tail) out.push(tail);
+  return out;
+}
+
+/**
+ * Collapse the flat feed into per-speaker runs, then split each run into
+ * sentences. A run breaks when the speaker changes or the inter-fragment gap
+ * exceeds GROUP_GAP_MS; each resulting line carries the run's starting
+ * timestamp and one sentence of its joined text.
  * @param {import('../types.js').LiveFeedEntry[]} feed
  * @returns {{ who: string, identity: string, ts: string, text: string }[]}
  */
@@ -81,7 +119,14 @@ export function groupFeed(feed) {
       });
     }
   }
-  return runs.map((r) => ({ who: r.who, identity: r.identity, ts: r.ts, text: joinFragments(r.parts) }));
+  return runs.flatMap((r) =>
+    splitSentences(joinFragments(r.parts)).map((text) => ({
+      who: r.who,
+      identity: r.identity,
+      ts: r.ts,
+      text,
+    })),
+  );
 }
 
 /**
