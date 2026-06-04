@@ -19,7 +19,7 @@
 // clobbered). The engine panel is rebuilt by main on engine state changes
 // (rebuildEngine).
 
-import { tpl, pick } from "../../templates.js";
+import { tpl, pick, selectionInside } from "../../templates.js";
 import { postJson, putJson, fetchSessionTranscript, peekSessionTranscript } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -468,7 +468,11 @@ export function build(ctx) {
     const meta = sess ? metaFor(sess) : null;
     const aliasSig = meta ? Object.entries(meta.aliases).map(([k, v]) => `${k}=${v}`).join(",") : "";
     const txSig = [sid, tx?.transcribed_at || "", txFull ? 1 : 0, meta?.label || "", aliasSig].join("§");
-    if (txSig !== lastTxSig) {
+    // Selection guard: a per-WAV sidecar landing mid-job (or an alias edit)
+    // changes txSig and rebuilds the merged pane — dissolving a selection the
+    // operator is copying from it. Deferring WITHOUT updating lastTxSig means
+    // the gate re-fires on the first tick after the selection clears.
+    if (txSig !== lastTxSig && !selectionInside(mergedHost)) {
       lastTxSig = txSig;
 
       header(headHost, {

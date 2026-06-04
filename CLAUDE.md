@@ -25,9 +25,13 @@
   the swap while a control inside the host is focused OR while a text
   selection starts/ends inside it (clobbering a selection mid-copy is
   the same bug as snapping a dropdown shut; see `spine.js` for the
-  reference adoption). Per-second updaters that write text in place
-  instead of swapping (the live log dialog) use the exported
-  `selectionInside(host)` for the same rule. `live-channel.js` and `config-card.js`
+  reference adoption). Per-tick updaters that mutate text/rows in place
+  instead of swapping a region (the live log dialog, `active-taps.js`,
+  `live-feed.js`) and view-level render gates (`transcript.js` merged
+  pane, `recordings.js` WAV list) apply the exported
+  `selectionInside(host)` for the same rule — defer WITHOUT updating
+  the gate's signature, so the held-back render lands on the first
+  tick after the selection clears. `live-channel.js` and `config-card.js`
   render through it too, keeping only a 2-line `[data-cfg-key]` button
   guard renderRegion deliberately doesn't cover (a focused save button
   mid-putJson isn't an "interactive control" but must still hold the

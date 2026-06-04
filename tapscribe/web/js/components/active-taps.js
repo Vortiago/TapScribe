@@ -2,7 +2,7 @@
 // Active taps panel — one row per live audio source the recorder is
 // currently receiving bytes from.
 
-import { tpl, mount, pick } from "../templates.js";
+import { tpl, mount, pick, selectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
 
@@ -117,6 +117,14 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
   const list = j.active || [];
   const count = String(list.length);
   if (countEl.textContent !== count) countEl.textContent = count;
+
+  // Hold ALL row mutations while the operator is select-copying text inside
+  // the panel (identity / name / filename are natural copy targets): fillRow
+  // rewrites textContent unconditionally each tick, and assigning textContent
+  // replaces the text node — dissolving a selection even when the value is
+  // unchanged. Same interaction-state rule as renderRegion's guards; updates
+  // resume on the first tick after the selection clears.
+  if (selectionInside(bodyEl)) return;
 
   let st = _state.get(bodyEl);
   if (!st) {

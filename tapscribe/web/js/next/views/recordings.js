@@ -16,7 +16,7 @@
 // stats / strip-job progress each tick (signature-gated so an in-progress
 // strip slider isn't clobbered).
 
-import { tpl, pick } from "../../templates.js";
+import { tpl, pick, selectionInside } from "../../templates.js";
 import { postJson, del, fetchWavTranscript, peekWavTranscript } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle } from "../shell.js";
@@ -445,7 +445,13 @@ export function build(ctx) {
       expandedSig,
     ].join("§");
     const focused = /** @type {HTMLElement | null} */ (document.activeElement);
-    const editing = !!focused && focused.dataset?.stripKnob != null;
+    // "editing" = any interaction state a rebuild would destroy: a strip knob
+    // mid-drag, or a text selection in the WAV list (an expanded row's inline
+    // transcript is a natural copy target, and a strip/transcribe job ticking
+    // in the background changes the sig under it). Deferring without updating
+    // lastSig means the rebuild lands on the first tick after release.
+    const editing =
+      (!!focused && focused.dataset?.stripKnob != null) || selectionInside(wavList);
     // Skip the DOM-heavy rebuild when nothing the body depends on changed, or
     // while a knob is mid-edit. Everything Recordings shows is captured in the
     // signature (strip-job progress included), so there's no live-only chrome

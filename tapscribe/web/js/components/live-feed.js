@@ -18,7 +18,7 @@
 //     meeting. A clean shifted-prefix appends only the new tail; anything else
 //     falls back to a full rebuild. Appending also preserves text selection.
 
-import { tpl, mount, pick } from "../templates.js";
+import { tpl, mount, pick, selectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtClock } from "../formatters.js";
 
@@ -204,6 +204,14 @@ export function render(j, { countEl, shell, autoscrollEl }) {
     mount(shell, tpl("tpl-feed-body"));
     body = /** @type {HTMLElement} */ (shell.querySelector(".feed-body"));
   }
+
+  // Hold feed mutations while the operator is select-copying caption text.
+  // Appends alone wouldn't disturb a selection, but a same-speaker
+  // continuation grows the tail sentence (key change → no clean shift →
+  // full replaceChildren) and a saturated deque drops head rows — both
+  // dissolve the selection. Placed BEFORE lastSig/forceNext are consumed so
+  // the deferred update retries on the next tick after release.
+  if (selectionInside(body)) return;
 
   // Coalesce fragments → one row per sentence; the count reflects what's drawn.
   const groups = groupFeed(feed);
