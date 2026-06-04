@@ -11,6 +11,7 @@ import numpy as np
 from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 from tapscribe.wav_cache import (
     CachedTranscription,
+    cache_listing,
     cached_transcribe,
     read_all_cached,
     read_cached,
@@ -77,6 +78,55 @@ def test_cached_transcribe_runs_transcriber_on_miss_and_writes_sidecar(tmp_path:
     assert re_read.result.transcriber == "fake"
     assert re_read.result.model == "fake-model"
     assert re_read.result.backend == "fake-backend"
+
+
+def test_cache_listing_includes_source(tmp_path: Path):
+    """Each cache-listing entry must carry the `source` it was transcribed from
+    ("original" | "stripped"). The dashboard's set-primary uses it to resolve
+    the file's directory — a stripped clip lives in <session>/stripped/, so a
+    listing that omitted source made the UI fall back to "original" and 404 the
+    PUT (it looked for the clip in the originals dir)."""
+    wav = _wav(tmp_path / "x.wav")
+    cached_transcribe(
+        wav,
+        _StubTranscriber(),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+        source="stripped",
+    )
+    listing = cache_listing(wav)
+    assert len(listing) == 1
+    assert listing[0]["source"] == "stripped"
+
+
+def test_cache_listing_legacy_sidecar_reports_source(tmp_path: Path):
+    """The legacy single-`<wav>.json` path must also surface source so a
+    pre-split-layout stripped clip's set-primary resolves correctly."""
+    wav = _wav(tmp_path / "x.wav")
+    legacy = {
+        "transcriber": "fake",
+        "backend": "fake-backend",
+        "device": "test-device",
+        "model": "fake-model",
+        "language": "en",
+        "language_probability": 1.0,
+        "duration": 1.0,
+        "segments": [],
+        "text": "",
+        "initial_prompt_used": "",
+        "hotwords_used": "",
+        "quality_settings": {},
+        "suppressed_hallucinations": [],
+        "transcribed_at": "2026-05-01T00:00:00+00:00",
+        "transcribe_ms": 10,
+        "source": "stripped",
+        "speaker_name": "",
+    }
+    wav.with_suffix(".json").write_text(json.dumps(legacy), encoding="utf-8")
+    listing = cache_listing(wav)
+    assert len(listing) == 1
+    assert listing[0]["source"] == "stripped"
 
 
 def test_sidecar_round_trips_backend_field(tmp_path: Path):

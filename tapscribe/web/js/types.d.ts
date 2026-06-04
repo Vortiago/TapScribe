@@ -192,10 +192,12 @@ export interface WavTranscriptVariant {
   model: string;
   is_primary: boolean;
   transcribe_ms?: number;
-  // cache_listing doesn't emit text/source today; the cache panel reads them
-  // defensively (word-count falls back to 0, source to "original").
+  // The entry's transcribe source — set-primary sends it back so the server
+  // resolves a stripped clip under <session>/stripped/ instead of 404ing.
+  source: "original" | "stripped";
+  // cache_listing doesn't emit text today; the cache panel's word-count reads
+  // it defensively (falls back to 0).
   text?: string;
-  source?: "original" | "stripped";
 }
 
 // Full cached per-WAV transcript (the primary model's result) — the lazy

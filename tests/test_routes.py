@@ -1237,6 +1237,55 @@ def test_api_set_primary_404_for_missing_wav(client, recorder_under_test):
     assert r.status_code == 404
 
 
+def test_stripped_clip_cache_listing_carries_source_so_set_primary_resolves(client, recorder_under_test):
+    """Repro for 'Set primary failed: 404' on stripped-audio transcripts.
+
+    A stripped region clip lives in <session>/stripped/. Its /api/state cache
+    listing must carry source="stripped" so the dashboard PUTs that source —
+    otherwise the UI fell back to "original", resolve_wav looked in the
+    originals dir, and the PUT 404'd. With source present, set-primary on the
+    clip resolves and succeeds."""
+    from tapscribe.wav_cache import cached_transcribe
+
+    root = recorder_under_test.recordings_dir
+    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    stripped = sd / "stripped"
+    stripped.mkdir()
+    region_name = "2026-01-01T01-00-02Z__alice__abc.wav"
+    cached_transcribe(
+        _seed_wav(stripped / region_name),
+        TranscriberStub(backend="parakeet", model="v2"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+        source="stripped",
+    )
+
+    # The clip surfaces under the original's regions[], and its cache listing
+    # reports source="stripped".
+    body = client.get("/api/state").json()
+    s = next(s for s in body["sessions"] if s["session"] == "s")
+    original = next(f for f in s["files"] if f["name"] == "2026-01-01T01-00-00Z__alice__abc.wav")
+    region_row = next(r for r in original["regions"] if r["name"] == region_name)
+    assert region_row["transcripts"][0]["source"] == "stripped"
+
+    # Set-primary with that source resolves the stripped/ path → 200, not 404.
+    ok = client.put(
+        f"/api/wav/s/{region_name}/primary",
+        json={"backend": "parakeet", "model": "v2", "source": "stripped"},
+    )
+    assert ok.status_code == 200, ok.text
+
+    # The pre-fix path the UI took — source omitted, so it defaulted to
+    # "original" — still 404s, because the clip genuinely isn't in the originals
+    # dir. The fix is that the listing now tells the UI to send "stripped".
+    bad = client.put(
+        f"/api/wav/s/{region_name}/primary",
+        json={"backend": "parakeet", "model": "v2"},
+    )
+    assert bad.status_code == 404, bad.text
+
+
 def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recorder_under_test):
     """A WAV with only a legacy `<wav>.json` sidecar should still surface
     a one-element `transcripts` list so the UI can render it consistently."""

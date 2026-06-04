@@ -205,9 +205,12 @@ def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
 
 def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
     """Compact per-(backend, model) listing for dashboards. One walk,
-    one parse per entry: returns `{"backend", "model", "is_primary",
-    "transcribe_ms"?}` dicts ready for the wire. Single-sidecar legacy
-    WAVs return a one-element list with `is_primary=True`."""
+    one parse per entry: returns `{"backend", "model", "source",
+    "is_primary", "transcribe_ms"?}` dicts ready for the wire. `source`
+    ("original"|"stripped") is what the entry was transcribed from — the
+    dashboard's set-primary needs it to resolve the file's directory, since a
+    stripped clip lives in <session>/stripped/. Single-sidecar legacy WAVs
+    return a one-element list with `is_primary=True`."""
     d = _transcripts_dir(wav_path)
     if d.is_dir():
         sidecars = sorted(d.glob("*.json"))
@@ -222,6 +225,7 @@ def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
             item: dict[str, Any] = {
                 "backend": entry.result.backend,
                 "model": entry.result.model,
+                "source": entry.source,
                 "is_primary": sidecar.name == primary,
             }
             if entry.transcribe_ms:
@@ -234,6 +238,7 @@ def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
     item: dict[str, Any] = {
         "backend": legacy.result.backend,
         "model": legacy.result.model,
+        "source": legacy.source,
         "is_primary": True,
     }
     if legacy.transcribe_ms:
