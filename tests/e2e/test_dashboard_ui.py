@@ -1562,3 +1562,59 @@ async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
         # partial (not a lambda): a lambda's implicit return inside a finally
         # trips CodeQL's py/exit-from-finally; partial has no return node.
         await wait_until(partial(streams_drained, rr.recorder), timeout=10.0)
+
+
+async def test_recordings_strip_controls_stay_visible_with_many_wavs(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """The strip-silence knobs + button live at the BOTTOM of the .wavehero
+    panel. The hero is a flex item in the scrollable work column, and `.panel`'s
+    `overflow: hidden` makes its flex auto-min-height resolve to 0 — so a tall
+    WAV list below would shrink the hero and clip the knobbar off the bottom
+    (operator report: "strip settings vanish on sessions with many WAVs").
+    `.wavehero { flex: none }` pins it. Guard: with many WAVs, the strip button
+    must sit WITHIN the hero's painted box (a shrunk/clipped hero pushes the
+    button's bottom below the hero's bottom).
+    """
+    rr = running_recorder
+    n_wavs = 16
+
+    async def _one(i: int):
+        wav = synth_speech_like_wav(tmp_path / f"many{i}.wav", seconds=0.25, freq_hz=180.0 + i * 12.0)
+        await stream_wav_via_tap(
+            ws_base_url=rr.ws_base_url, identity=f"many{i}", name=f"Speaker {i}",
+            wav_path=wav, utterance_id=f"many-utt{i}",
+        )
+
+    await asyncio.gather(*(_one(i) for i in range(n_wavs)))
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=15.0)
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/", wait_until="domcontentloaded")
+            await page.wait_for_selector("#spine .navitem", timeout=6000)
+            await page.evaluate("window.gotoView && window.gotoView('recordings')")
+            await page.wait_for_selector(".wavlist .wavrow", timeout=6000)
+            assert await page.locator(".wavlist .wavrow").count() >= n_wavs
+
+            hero = await page.locator(".wavehero").bounding_box()
+            btn = await page.locator("[data-slot=stripBtn]").bounding_box()
+            knobs = await page.locator("[data-strip-knob]").count()
+            assert hero and btn, "wavehero + strip button must render"
+            hero_bottom = hero["y"] + hero["height"]
+            btn_bottom = btn["y"] + btn["height"]
+            assert btn_bottom <= hero_bottom + 4, (
+                f"strip button (bottom {btn_bottom:.0f}) is clipped below the wavehero "
+                f"(bottom {hero_bottom:.0f}) — the hero shrank + clipped its knobbar. "
+                f"hero={hero} btn={btn}"
+            )
+            assert knobs == 3, f"all 3 strip knobs must render, got {knobs}"
+        finally:
+            await browser.close()

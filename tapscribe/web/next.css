@@ -775,7 +775,13 @@ body::before { display: none; }
 .srcsw__opt.is-on { background: color-mix(in srgb, var(--next-accent) 14%, transparent); color: var(--next-accent); }
 
 /* hero panel holding the waveform stub + stats + strip knobs */
-.wavehero { padding: 0; }
+/* flex: none so the hero never SHRINKS. It's a flex item of the scrollable
+   .work__inner column and `.panel`'s `overflow: hidden` makes its auto
+   min-height resolve to 0 (flexbox spec) — so a tall WAV list below would
+   shrink the hero and CLIP its bottom, which is exactly where the strip-silence
+   knobs live (they vanished on sessions with many WAVs). The WAV-list panel
+   (.panel--fill) absorbs the leftover height + scrolls its own body instead. */
+.wavehero { padding: 0; flex: none; }
 .wave-top {
   display: flex; align-items: center; justify-content: space-between; gap: 14px;
   padding: 9px 13px; border-bottom: 1px solid var(--hairline);
