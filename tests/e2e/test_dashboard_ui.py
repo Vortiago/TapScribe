@@ -172,31 +172,36 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             fake_wlk.push_committed("first ui settled line")
             fake_wlk.push_committed("second ui settled line")
 
+            # The feed coalesces consecutive same-speaker fragments into one
+            # flowing line, and FakeWlk's broadcast order isn't deterministic
+            # (the two pushes may land Alice/Alice/Bob/Bob and merge, or
+            # interleave and stay separate). So assert on each speaker's
+            # *combined* text rather than exact per-row matches.
             await page.wait_for_function(
                 """
                 () => {
                   const lines = Array.from(
                     document.querySelectorAll("#liveFeedShell .feed-body .line"),
                   );
-                  const pairs = lines.map((l) => ({
-                    who: l.querySelector(".who")?.textContent.trim(),
-                    txt: l.querySelector(".txt")?.textContent.trim(),
-                  }));
-                  const has = (who, txt) =>
-                    pairs.some((p) => p.who === who && p.txt === txt);
-                  return (
-                    has("Alice", "first ui settled line") &&
-                    has("Bob", "first ui settled line") &&
-                    has("Alice", "second ui settled line") &&
-                    has("Bob", "second ui settled line")
-                  );
+                  const byWho = {};
+                  for (const l of lines) {
+                    const who = l.querySelector(".who")?.textContent.trim();
+                    const txt = l.querySelector(".txt")?.textContent.trim() || "";
+                    if (!who) continue;
+                    byWho[who] = (byWho[who] ? byWho[who] + " " : "") + txt;
+                  }
+                  const ok = (who) =>
+                    !!byWho[who] &&
+                    byWho[who].includes("first ui settled line") &&
+                    byWho[who].includes("second ui settled line");
+                  return ok("Alice") && ok("Bob");
                 }
                 """,
                 timeout=5000,
             )
-            # The header count tracks the deque length — 4 lines pushed,
-            # broadcast to 2 relays = 8 entries.
-            assert int(await page.locator("#liveFeedCount").inner_text()) >= 4
+            # The header count tracks rendered (coalesced) lines, not raw
+            # deque entries: at least one line per speaker survives the merge.
+            assert int(await page.locator("#liveFeedCount").inner_text()) >= 2
             await page.screenshot(path=str(SHOTS_DIR / "03-live-transcripts.png"), full_page=True)
 
             await asyncio.gather(alice_task, bob_task)
