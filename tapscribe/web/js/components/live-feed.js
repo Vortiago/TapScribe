@@ -20,6 +20,7 @@
 
 import { tpl, mount, pick } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
+import { fmtClock } from "../formatters.js";
 
 // A fragment joins the current speaker's line unless this many ms have
 // elapsed since that line's last fragment. `ts` is the relay's EMISSION
@@ -54,39 +55,20 @@ export function joinFragments(parts) {
 
 /**
  * Split a speaker turn's joined text into sentences so each sentence renders
- * as its own line. A break falls after a run of sentence terminators
- * (. ! ?, with any trailing closing quotes/brackets) when the next character
- * is whitespace or end-of-text — so mid-token dots ("3.5") don't split.
- * Punctuation-free input (common on small models like tiny.en) yields a
- * single element, so this gracefully degrades to the speaker/gap grouping.
- * Pure — no DOM, no shared state.
+ * as its own line. Pure — no DOM, no shared state.
+ *
+ * Splits on whitespace that follows a sentence terminator (. ! ?) plus any
+ * trailing closing quotes/brackets. The lookbehind keeps the terminator on
+ * its sentence and leaves mid-token dots intact (no whitespace after the dot
+ * in "3.5"), and `.filter(Boolean)` drops the empty pieces that leading or
+ * trailing whitespace would produce. Punctuation-free input (common on small
+ * models like tiny.en) yields a single element, so this gracefully degrades
+ * to the speaker/gap grouping.
  * @param {string} text
  * @returns {string[]}
  */
 export function splitSentences(text) {
-  /** @type {string[]} */
-  const out = [];
-  let buf = "";
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charAt(i);
-    buf += ch;
-    if (ch === "." || ch === "!" || ch === "?") {
-      // Swallow any adjacent terminators / closing quotes ("?!", '."').
-      while (i + 1 < text.length && /[.!?"'”’)\]]/.test(text.charAt(i + 1))) {
-        buf += text.charAt(++i);
-      }
-      // A real boundary only if the next char is whitespace or the end —
-      // otherwise it's mid-token (a decimal, an abbreviation run-on).
-      if (i + 1 >= text.length || /\s/.test(text.charAt(i + 1))) {
-        const s = buf.trim();
-        if (s) out.push(s);
-        buf = "";
-      }
-    }
-  }
-  const tail = buf.trim();
-  if (tail) out.push(tail);
-  return out;
+  return text.split(/(?<=[.!?]["'”’)\]]*)\s+/).map((s) => s.trim()).filter(Boolean);
 }
 
 /**
@@ -104,8 +86,9 @@ export function groupFeed(feed) {
     const key = e.identity || e.name || "?";
     const ms = Date.parse(e.ts || "");
     const cur = runs.at(-1);
-    const withinGap = !!cur && (isNaN(ms) || isNaN(cur.lastMs) || ms - cur.lastMs <= GROUP_GAP_MS);
-    if (cur && cur.key === key && withinGap) {
+    // Same speaker, and close enough in time to be the same turn. `cur`
+    // narrows non-undefined here, so `cur.lastMs` is safe in the gap test.
+    if (cur && cur.key === key && (isNaN(ms) || isNaN(cur.lastMs) || ms - cur.lastMs <= GROUP_GAP_MS)) {
       cur.parts.push(e.text || "");
       if (!isNaN(ms)) cur.lastMs = ms;
     } else {
@@ -169,7 +152,7 @@ export function render(j, { countEl, shell, autoscrollEl }) {
   const frag = document.createDocumentFragment();
   for (const g of groups) {
     const node = tpl("tpl-feed-line");
-    pick(node, "ts").textContent = `[${(g.ts || "").slice(11, 19)}]`;
+    pick(node, "ts").textContent = `[${fmtClock(g.ts)}]`;
     const whoEl = pick(node, "who");
     whoEl.textContent = g.who;
     whoEl.dataset.spk = String(speakerIndex(g.who));
