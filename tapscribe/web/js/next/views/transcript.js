@@ -23,7 +23,7 @@ import { tpl, pick } from "../../templates.js";
 import { postJson, putJson, fetchSessionTranscript, peekSessionTranscript } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
-import { header, strong, inline } from "../shell.js";
+import { header, strong, inline, buildSourceToggle } from "../shell.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 
 /**
@@ -147,36 +147,15 @@ export function build(ctx) {
   /** @param {string} name @param {"original"|"stripped"} src */
   const wavKey = (name, src) => `${session?.session || ""}/${name}${src === "stripped" ? "@stripped" : ""}`;
 
-  /** Resolve the selected WAV/clip for the focused session (first if unset). */
-  const selectedFor = () => {
-    if (!session) return null;
-    const files = sourceFiles();
-    if (!files.length) return null;
+  /** Resolve the selected WAV/clip for the focused session (first if unset).
+   * Takes the already-resolved source files so the per-tick path doesn't
+   * rebuild the stripped-region flatMap a second time; defaults to computing
+   * them for event-time callers. */
+  /** @param {(import('../../types.js').WavFile | import('../../types.js').WavRegion)[]} [files] */
+  const selectedFor = (files = sourceFiles()) => {
+    if (!session || !files.length) return null;
     const want = selectedWav.get(session.session);
     return files.find((f) => f.name === want) ?? files[0] ?? null;
-  };
-
-  /** Build the original/stripped source toggle (reuses tpl-next-srcsw). The
-   * "stripped" option is disabled until the session has a stripped/ folder. */
-  const buildSrcSw = () => {
-    const sw = tpl("tpl-next-srcsw");
-    const active = effectiveSource();
-    const hasStripped = !!session?.stripped;
-    for (const b of /** @type {NodeListOf<HTMLButtonElement>} */ (sw.querySelectorAll("[data-src]"))) {
-      const which = /** @type {"original"|"stripped"} */ (b.dataset.src);
-      if (which === active) b.classList.add("is-on");
-      if (which === "stripped" && !hasStripped) {
-        b.disabled = true;
-        b.title = "no stripped/ folder — strip silence in Recordings first";
-      }
-      b.addEventListener("click", () => {
-        if (b.disabled || !session) return;
-        sourcePick.set(session.session, which);
-        lastCtlSig = " ";
-        afterMutate();
-      });
-    }
-    return sw;
   };
 
   /** Read the Canary source/target lang from the engine panel's selects. */
@@ -416,7 +395,6 @@ export function build(ctx) {
     session = sess;
     const tx = sess?.session_transcript || null;
     const sid = sess?.session || "";
-    const sel = selectedFor();
     const job = sess?.progress || null;
 
     // ---- Job progress (one job per session — transcribe OR strip). In-place
@@ -507,6 +485,7 @@ export function build(ctx) {
     // original↔stripped switch re-renders the picker.
     const src = effectiveSource();
     const srcFiles = sourceFiles();
+    const sel = selectedFor(srcFiles);
     const wavSig = srcFiles.map((f) => `${f.name}:${f.transcript?.transcribed_at || ""}:${(f.transcripts || []).length}`).join("|");
     const ctlSig = [
       sid,
@@ -525,7 +504,16 @@ export function build(ctx) {
 
     // Source toggle (original / stripped) — drives the range transcribe AND the
     // per-WAV picker below.
-    srcSwHost.replaceChildren(buildSrcSw());
+    srcSwHost.replaceChildren(buildSourceToggle({
+      active: src,
+      hasStripped: !!sess?.stripped,
+      onPick: (which) => {
+        if (!session) return;
+        sourcePick.set(session.session, which);
+        lastCtlSig = " ";
+        afterMutate();
+      },
+    }));
 
     // Range placeholders + note
     if (!rangeFrom.value) rangeFrom.placeholder = sess?.earliest_iso || "ISO";

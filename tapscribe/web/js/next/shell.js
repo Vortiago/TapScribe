@@ -74,6 +74,35 @@ export function inline(...parts) {
 }
 
 /**
+ * Build the original/stripped source toggle (template `tpl-next-srcsw`), shared
+ * by the Recordings and Transcript views. The "stripped" button is disabled
+ * until the session has a stripped/ folder; `onPick` fires with the chosen
+ * source on a click of an enabled button, where the caller updates its own
+ * sourcePick map and invalidates its render signature.
+ * @param {{
+ *   active: "original" | "stripped",
+ *   hasStripped: boolean,
+ *   onPick: (which: "original" | "stripped") => void,
+ * }} opts
+ */
+export function buildSourceToggle({ active, hasStripped, onPick }) {
+  const sw = tpl("tpl-next-srcsw");
+  for (const b of /** @type {NodeListOf<HTMLButtonElement>} */ (sw.querySelectorAll("[data-src]"))) {
+    const which = /** @type {"original"|"stripped"} */ (b.dataset.src);
+    if (which === active) b.classList.add("is-on");
+    if (which === "stripped" && !hasStripped) {
+      b.disabled = true;
+      b.title = "no stripped/ folder — strip silence in Recordings first";
+    }
+    b.addEventListener("click", () => {
+      if (b.disabled) return;
+      onPick(which);
+    });
+  }
+  return sw;
+}
+
+/**
  * Build the "Coming in a later phase" placeholder for a stubbed view.
  * @param {Element} root
  * @param {{ eyebrow: string, title: string, sub?: string, icon: string, heading: string, detail: string }} opts

@@ -8,7 +8,7 @@
 import { tpl, pick, renderRegion } from "../../templates.js";
 import { putJson } from "../../api.js";
 import { fmtSessionLabel, fmtDur } from "../../formatters.js";
-import { GLOBAL_VIEWS, JOURNEY_VIEWS } from "../shell.js";
+import { GLOBAL_VIEWS } from "../shell.js";
 
 // Optimistic rename overlay (sid → edited label) so a rename typed in the
 // Session Information card shows instantly in the name field AND the session
@@ -320,17 +320,19 @@ export function render(host, j, ctx) {
   // sessInfo duration stat refreshes on that rebuild.
   const sessions = j.sessions || [];
   const active = j.active || [];
-  const people = new Set();
-  for (const s of sessions) for (const k of Object.keys((s.session_meta || {}).aliases || {})) people.add(k);
   const tx = session?.session_transcript || null;
+  // One pass over sessions: the per-session string also carries that session's
+  // alias keys, so a change to who's named (the People chip's "N named" count
+  // in globalDefs) moves the sig without a second Set-building walk. Per-session
+  // alias keys are strictly finer-grained than the deduped total — they can
+  // never miss a change the count would have caught.
   const sig = [
     currentView,
     j.backend || "",
     active.filter((a) => a.live !== false).length,
     active.length,
     sessions.length,
-    people.size,
-    sessions.map((s) => `${s.session}~${(localLabels.get(s.session) ?? metaFor(s).label) || ""}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
+    sessions.map((s) => `${s.session}~${(localLabels.get(s.session) ?? metaFor(s).label) || ""}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}~${Object.keys((s.session_meta || {}).aliases || {}).join("|")}`).join(","),
     session ? `${session.session}~${session.wav_count || 0}~${tx ? 1 : 0}~${tx?.suppressed_count || 0}~${session.stripped ? 1 : 0}~${session.is_current ? 1 : 0}` : "",
   ].join("§");
 
@@ -339,6 +341,3 @@ export function render(host, j, ctx) {
   // unchanged — the latter is what kills the idle churn.
   renderRegion(host, buildFrag, { sig });
 }
-
-// Re-export for callers that need the group membership of the active view.
-export { GLOBAL_VIEWS, JOURNEY_VIEWS };

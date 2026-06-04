@@ -19,7 +19,7 @@
 import { tpl, pick } from "../../templates.js";
 import { postJson, del, fetchWavTranscript, peekWavTranscript } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, truncMid } from "../../formatters.js";
-import { header, strong, inline } from "../shell.js";
+import { header, strong, inline, buildSourceToggle } from "../shell.js";
 
 /** Strip-silence knob defaults — mirror STRIP_OPT_DEFAULTS / the server-side
  * fallbacks in api_session_strip_silence (tapscribe/app.py). */
@@ -400,28 +400,6 @@ export function build(ctx) {
     return out;
   };
 
-  // ---- Source toggle (header actions) ---------------------------------------
-
-  /** @param {"original"|"stripped"} active @param {boolean} hasStripped */
-  const buildSrcSw = (active, hasStripped) => {
-    const sw = tpl("tpl-next-srcsw");
-    for (const b of /** @type {NodeListOf<HTMLButtonElement>} */ (sw.querySelectorAll("[data-src]"))) {
-      const which = /** @type {"original"|"stripped"} */ (b.dataset.src);
-      if (which === active) b.classList.add("is-on");
-      if (which === "stripped" && !hasStripped) {
-        b.disabled = true;
-        b.title = "no stripped/ folder — run strip silence first";
-      }
-      b.addEventListener("click", () => {
-        if (b.disabled || !session) return;
-        sourcePick.set(session.session, which);
-        lastSig = " ";
-        afterMutate();
-      });
-    }
-    return sw;
-  };
-
   // ---- Per-tick update ------------------------------------------------------
 
   /**
@@ -459,7 +437,9 @@ export function build(ctx) {
       stripped ? `${stripped.count}:${stripped.stripped_at}` : "",
       job ? `${job.kind}:${job.current}/${job.total}:${job.current_file || ""}` : "",
       stripInflight.has(sid) ? "S" : "",
-      lastStrip.has(sid) ? JSON.stringify(lastStrip.get(sid)) : "",
+      // lastStrip is NOT in the sig: both its mutations (set on a successful
+      // strip, delete on clear) already reset lastSig=" " to force one render,
+      // so stringifying the whole strip response every poll tick was pure waste.
       (j.current_session || "") === sid ? "CUR" : "",
       txSig,
       expandedSig,
@@ -480,7 +460,16 @@ export function build(ctx) {
       sub: sess
         ? inline(`${files.length} WAV${files.length === 1 ? "" : "s"} in `, strong(metaFor(sess).label || sess.session), " · strip silence, then transcribe")
         : "no session selected — pick one from the spine",
-      actions: sess && files.length ? buildSrcSw(src, !!stripped) : undefined,
+      actions: sess && files.length ? buildSourceToggle({
+        active: src,
+        hasStripped: !!stripped,
+        onPick: (which) => {
+          if (!session) return;
+          sourcePick.set(session.session, which);
+          lastSig = " ";
+          afterMutate();
+        },
+      }) : undefined,
     });
 
     if (!sess || !files.length) {

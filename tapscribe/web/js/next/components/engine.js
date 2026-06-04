@@ -152,9 +152,10 @@ export function render(host, { state, catalog, onChange }) {
       for (const opt of input.options || []) {
         sel.add(new Option(opt.label, opt.value, false, opt.value === input.default));
       }
-      // Selects are display-only in Phase 1 (no transcribe wiring yet on the
-      // Stages engine panel) — the chosen lang is read at submit time when
-      // the Recordings transcribe flow lands. Keep the value local.
+      // The chosen lang lives only on the <select> (tagged with
+      // data-input-name); the Transcript view reads it back from this panel at
+      // submit time — see langValues() in views/transcript.js — so nothing here
+      // wires a change handler.
       wrap.appendChild(sf);
     }
     frag.appendChild(row("Canary translation", wrap));
