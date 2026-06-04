@@ -27,6 +27,47 @@ import { header, strong, inline, buildSourceToggle } from "../shell.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 
 /**
+ * The recording (original WAV) a selected file belongs to. `sel` may be an
+ * original WAV (returned as-is) or one of its silence-stripped region clips —
+ * then we return the original whose `regions[]` contains it. Falls back to
+ * `sel` when no parent is found (e.g. an orphaned clip). Pure.
+ * @param {import('../../types.js').WavFile | import('../../types.js').WavRegion | null} sel
+ * @param {import('../../types.js').WavFile[]} files
+ * @returns {import('../../types.js').WavFile | import('../../types.js').WavRegion | null}
+ */
+export function recordingFor(sel, files) {
+  if (!sel) return null;
+  for (const f of files) {
+    if (f.name === sel.name) return f;
+    if ((f.regions || []).some((r) => r.name === sel.name)) return f;
+  }
+  return sel;
+}
+
+/**
+ * Every cached transcript for a recording as ONE tagged list: the original
+ * WAV's own variants, then each silence-stripped region clip's variants. Each
+ * row carries the `file` it lives on (so set-primary resolves the right path)
+ * and the cache_listing `source` ("original"|"stripped") that drives its tag.
+ * Independent of the Original/Stripped transcribe toggle — the toggle chooses
+ * what to transcribe, not what the cache shows (the operator asked the list not
+ * to change on toggle, since each row is already source-tagged). Pure.
+ * @param {import('../../types.js').WavFile | import('../../types.js').WavRegion | null} rec
+ * @returns {(import('../../types.js').WavTranscriptVariant & { file: string })[]}
+ */
+export function recordingVariants(rec) {
+  if (!rec) return [];
+  /** @type {(import('../../types.js').WavTranscriptVariant & { file: string })[]} */
+  const out = [];
+  for (const v of rec.transcripts || []) out.push({ ...v, file: rec.name });
+  const regions = /** @type {import('../../types.js').WavFile} */ (rec).regions || [];
+  for (const r of regions) {
+    for (const v of r.transcripts || []) out.push({ ...v, file: r.name });
+  }
+  return out;
+}
+
+/**
  * @param {{
  *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
  *   engineState: () => import('../components/engine.js').EngineState,
@@ -349,16 +390,22 @@ export function build(ctx) {
 
   /** @param {import('../../types.js').WavFile | import('../../types.js').WavRegion | null} sel */
   const renderCache = (sel) => {
+    // Show the whole RECORDING's cache (its original variants + every stripped
+    // region clip's variants), not just the toggle-selected file's — so the
+    // list doesn't change when you flip Original/Stripped; each row's source
+    // tag distinguishes them. recordingFor maps a selected region back to its
+    // parent original so either selection lands on the same list.
+    const rec = recordingFor(sel, session?.files || []);
     cacheBody.replaceChildren();
-    cacheHint.textContent = sel ? truncMid(sel.name, 30) : "no WAV";
-    const variants = sel?.transcripts || [];
-    if (!sel) {
+    cacheHint.textContent = rec ? truncMid(rec.name, 30) : "no WAV";
+    if (!rec) {
       const empty = document.createElement("div");
       empty.className = "empty";
       empty.textContent = "Pick a WAV to see its cached transcripts.";
       cacheBody.appendChild(empty);
       return;
     }
+    const variants = recordingVariants(rec);
     if (!variants.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
@@ -366,21 +413,21 @@ export function build(ctx) {
       cacheBody.appendChild(empty);
       return;
     }
-    // The primary is whichever variant matches sel.transcript's backend+model.
-    const primary = sel.transcript;
     for (const v of variants) {
       const row = tpl("tpl-next-cacherow");
       pick(row, "id").textContent = `${v.backend || "?"} · ${v.model || "?"}`;
       const srcTag = pick(row, "src");
-      srcTag.textContent = v.source || "original";
+      srcTag.textContent = v.source;
       srcTag.classList.add(v.source === "stripped" ? "is-stripped" : "is-original");
       const wordCount = (v.text || "").trim() ? (v.text || "").trim().split(/\s+/).length : 0;
       pick(row, "meta").textContent = `${wordCount} w · ${fmtMs(v.transcribe_ms)}`;
-      const isPrimary = !!primary && primary.backend === v.backend && primary.model === v.model && primary.source === v.source;
+      // is_primary is per-file (the original has one, each region has one); the
+      // merge reads the relevant files' primaries by source, so showing each
+      // file's primary is correct. set-primary targets the row's own file.
       const pbtn = /** @type {HTMLButtonElement} */ (pick(row, "primary"));
-      pbtn.textContent = isPrimary ? "● primary" : "set";
-      if (isPrimary) pbtn.classList.add("is-primary");
-      else pbtn.addEventListener("click", () => setPrimary(sel.name, v.backend, v.model, /** @type {"original"|"stripped"} */ (v.source || "original")));
+      pbtn.textContent = v.is_primary ? "● primary" : "set";
+      if (v.is_primary) pbtn.classList.add("is-primary");
+      else pbtn.addEventListener("click", () => setPrimary(v.file, v.backend, v.model, v.source));
       cacheBody.appendChild(row);
     }
   };

@@ -1701,3 +1701,110 @@ async def test_transcribe_page_source_toggle_picks_original_or_stripped(
             )
         finally:
             await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_cache_panel_unions_original_and_stripped_variants(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """The Transcript cache panel shows a recording's WHOLE history — its
+    original-audio variants AND its silence-stripped clip variants — in one
+    source-tagged list that does NOT change when you flip the Original/Stripped
+    toggle (operator ask: the rows are already tagged). And 'Set' on a stripped
+    row sends source=stripped, so the server resolves the clip under stripped/
+    instead of 404ing (the reported 'Set primary failed: 404'). Sidecars are
+    seeded via the wav cache; the set-primary PUT is intercepted to assert its
+    payload."""
+    import httpx
+
+    from tapscribe.wav_cache import cached_transcribe
+
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rr = running_recorder
+    src = _build_speech_silence_wav(tmp_path / "src.wav")
+    await stream_wav_via_tap(
+        ws_base_url=rr.ws_base_url, identity="alice", name="Alice", wav_path=src, utterance_id="utt1"
+    )
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=5.0)
+    async with httpx.AsyncClient(base_url=rr.base_url, timeout=30.0) as c:
+        r = await c.post(
+            f"/api/sessions/{rr.recorder.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert r.status_code == 200 and r.json()["files_written"] >= 1, r.text
+
+    original = sorted(rr.recorder.session_dir.glob("*.wav"))[0]
+    region = sorted((rr.recorder.session_dir / "stripped").glob("*.wav"))[0]
+    spk = {"alice": "scripted alice text"}
+    # Original recording: one cached variant (source=original).
+    cached_transcribe(
+        original,
+        FakeTranscriber(text_by_speaker=spk, model_name="orig-model"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+        source="original",
+    )
+    # Stripped clip: TWO variants (source=stripped) so one row is non-primary
+    # and renders a clickable "set" button to exercise the 404 fix.
+    for model in ("region-a", "region-b"):
+        cached_transcribe(
+            region,
+            FakeTranscriber(text_by_speaker=spk, model_name=model),
+            initial_prompt=None,
+            hotwords=None,
+            hallucination_rules=[],
+            source="stripped",
+        )
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            put_payloads: list[dict] = []
+
+            async def _route(route):
+                if route.request.method == "PUT":
+                    put_payloads.append(route.request.post_data_json or {})
+                await route.fulfill(
+                    status=200, content_type="application/json", body='{"ok": true, "primary": {}}'
+                )
+
+            await page.route("**/api/wav/**/primary", _route)
+            await page.goto(rr.base_url + "/#transcript", wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="cacheBody"] .cacherow', timeout=6000)
+
+            # One unified list: the original variant (is-original) + both stripped
+            # clip variants (is-stripped), regardless of the toggle's default.
+            await page.wait_for_function(
+                "() => document.querySelectorAll('[data-slot=cacheBody] .cacherow').length >= 3",
+                timeout=6000,
+            )
+            orig_tags = await page.locator('[data-slot="cacheBody"] .cacherow__src.is-original').count()
+            strip_tags = await page.locator('[data-slot="cacheBody"] .cacherow__src.is-stripped').count()
+            assert orig_tags >= 1 and strip_tags >= 2, f"orig={orig_tags} stripped={strip_tags}"
+            rows_before = await page.locator('[data-slot="cacheBody"] .cacherow').count()
+
+            # Flipping to Stripped must NOT change the cache list.
+            await page.locator('[data-slot="srcSwHost"] [data-src="stripped"]').click()
+            await page.wait_for_timeout(700)
+            rows_after = await page.locator('[data-slot="cacheBody"] .cacherow').count()
+            assert rows_after == rows_before, f"cache list changed on toggle: {rows_before} -> {rows_after}"
+            assert await page.locator('[data-slot="cacheBody"] .cacherow__src.is-stripped').count() >= 2
+
+            # 'Set' on the non-primary stripped row sends source=stripped (404 fix).
+            set_btn = page.locator('[data-slot="cacheBody"] [data-slot="primary"]', has_text="set")
+            assert await set_btn.count() == 1, "expected one non-primary 'set' row (a stripped variant)"
+            await set_btn.first.click()
+            await page.wait_for_timeout(500)
+            assert put_payloads and put_payloads[-1].get("source") == "stripped", (
+                f"set-primary on a stripped row must send source=stripped, got {put_payloads!r}"
+            )
+        finally:
+            await browser.close()
