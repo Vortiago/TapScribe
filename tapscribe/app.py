@@ -91,7 +91,7 @@ from .text import (
     write_live_prompt,
     write_prompt,
 )
-from .transcribers import evict_idle_now
+from .transcribers import evict_idle_now, run_on_model_thread
 from .transcribers.catalog import REGISTRY, available_backends
 from .wav_cache import set_primary_transcript
 
@@ -649,7 +649,10 @@ async def api_models_cache_clear(recorder: Recorder = Depends(get_recorder)):  #
     model, so clicking this can't yank a model out from under a running job.
     The live channel runs in its own subprocess and is unaffected — stop it
     via /api/live/stop to reclaim that memory."""
-    freed = await asyncio.to_thread(evict_idle_now)
+    # On the dedicated model thread: eviction calls mlx.core.clear_cache(),
+    # which (like every MLX op) must run on the thread that holds the Metal
+    # stream — see run_on_model_thread.
+    freed = await run_on_model_thread(evict_idle_now)
     print(f"[tapscribe] evicted {freed} idle transcription model(s) from cache", flush=True)
     return {"ok": True, "evicted": freed}
 

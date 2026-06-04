@@ -18,7 +18,6 @@ re-implementing the chain.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,7 +30,7 @@ from .recorder import JobState, Recorder
 from .session_merge import merge_session, select_session_wavs
 from .sessions import read_session_meta, resolve_session_dir, resolve_wav
 from .text import read_hotwords, read_prompt
-from .transcribers import load_transcriber, release_transcriber
+from .transcribers import load_transcriber, release_transcriber, run_on_model_thread
 from .wav_cache import cached_transcribe, read_primary_payload
 
 # ---------------------------------------------------------------------------
@@ -198,11 +197,11 @@ async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # n
             "hallucinate. Remove or skip this file."
         )
 
-    transcriber = await asyncio.to_thread(load_transcriber, req.model, backend=req.backend)
+    transcriber = await run_on_model_thread(load_transcriber, req.model, backend=req.backend)
     try:
         inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
 
-        await asyncio.to_thread(
+        await run_on_model_thread(
             cached_transcribe,
             path,
             transcriber,
@@ -227,7 +226,7 @@ async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # n
         # unload it (default: immediately, freeing several GB). Offloaded
         # because eviction may run gc + GPU-cache reclaim; a no-op when
         # load_transcriber was monkeypatched to a fake in tests.
-        await asyncio.to_thread(release_transcriber, transcriber)
+        await run_on_model_thread(release_transcriber, transcriber)
 
 
 async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> dict:
@@ -254,7 +253,7 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
     if not selection.wavs:
         raise NoUsableWavs("no usable WAVs in the given range")
 
-    transcriber = await asyncio.to_thread(load_transcriber, req.model, backend=req.backend)
+    transcriber = await run_on_model_thread(load_transcriber, req.model, backend=req.backend)
     try:
         inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
 
@@ -275,7 +274,7 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
         try:
             for idx, wav in enumerate(selection.wavs):
                 await recorder.jobs.update(req.session, current=idx, current_file=wav.name)
-                await asyncio.to_thread(
+                await run_on_model_thread(
                     cached_transcribe,
                     wav,
                     transcriber,
@@ -307,4 +306,4 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
         # Release our use of the model on every exit path (success, the
         # SessionBusy short-circuit, or a per-WAV failure) so the idle-TTL
         # policy can unload it. Offloaded for the same reason as transcribe_one.
-        await asyncio.to_thread(release_transcriber, transcriber)
+        await run_on_model_thread(release_transcriber, transcriber)

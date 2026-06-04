@@ -477,6 +477,54 @@ async def test_transcribe_session_progress_updates_per_wav(recorder_under_test, 
     assert observed_files == list(SESSION_WAVS)
 
 
+async def test_transcribe_session_runs_model_on_one_dedicated_thread(
+    recorder_under_test, install_stub_transcriber
+):
+    """MLX's Metal GPU stream is thread-local: every model op for a job must
+    run on ONE thread or `mx.eval` raises "There is no Stream(gpu, 0) in
+    current thread". The loop offloaded each `cached_transcribe` via
+    `asyncio.to_thread` (the shared default executor), so under concurrent
+    offloaded work (the ~2 Hz /api/state poll, the per-clip loop) a later
+    `generate` could land on a worker without the model's stream. Stripped
+    sessions surface it reliably — every freshly-cut clip is a cache MISS, so
+    the model actually runs for each. The fix pins all model work to the
+    dedicated `tapscribe-model` worker. The assertion is MLX-free (a stub
+    records its thread) so it guards the contract on every CI host, not just
+    Metal."""
+    import threading
+
+    from tapscribe.transcribers import MODEL_THREAD_PREFIX
+
+    seen_threads: list[str] = []
+
+    class _ThreadSpy(TranscriberStub):
+        def transcribe(self, path, **kw):  # noqa: ARG002
+            seen_threads.append(threading.current_thread().name)
+            return super().transcribe(path, **kw)
+
+    install_stub_transcriber(_ThreadSpy(backend="fake-be", model="fake-m"))
+    _seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+
+    request = BatchSessionRequest(
+        session="s",
+        source="original",
+        model="fake-m",
+        backend="cpu",
+        from_iso=None,
+        to_iso=None,
+        force=False,
+        source_lang=None,
+        target_lang=None,
+    )
+    await transcribe_session(recorder_under_test, request)
+
+    assert len(seen_threads) == len(SESSION_WAVS), seen_threads
+    # Every clip transcribed on the SAME thread, and that thread is the
+    # dedicated model worker — never a default-pool thread.
+    assert len(set(seen_threads)) == 1, f"model scattered across threads: {seen_threads}"
+    assert seen_threads[0].startswith(MODEL_THREAD_PREFIX), seen_threads[0]
+
+
 # ---------------------------------------------------------------------------
 # Exception hierarchy — every domain error inherits the base so callers
 # that don't care to discriminate (e.g. a CLI batch wanting one catch

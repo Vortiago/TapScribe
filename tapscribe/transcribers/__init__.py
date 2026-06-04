@@ -38,10 +38,15 @@ per job.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import gc
 import sys
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, TypeVar
 
 from .. import config
 from .base import (
@@ -58,9 +63,10 @@ from .base import (
 from .catalog import REGISTRY, TranscriberRegistry
 
 __all__ = [
+    "ENV_IDLE_TTL_S",
+    "MODEL_THREAD_PREFIX",
     "BackendKind",
     "BackendPreference",
-    "ENV_IDLE_TTL_S",
     "ModelInput",
     "REGISTRY",
     "SelectInput",
@@ -74,7 +80,38 @@ __all__ = [
     "evict_idle_now",
     "load_transcriber",
     "release_transcriber",
+    "run_on_model_thread",
 ]
+
+
+_T = TypeVar("_T")
+
+# Every model op — load, transcribe, evict — runs on this ONE worker thread.
+# MLX's Metal GPU stream is thread-local: a model whose weight arrays were
+# created on one thread can't be `mx.eval`'d from another, or MLX raises
+# "There is no Stream(gpu, 0) in current thread". `asyncio.to_thread` hands
+# work to the shared default executor, so once the ~2 Hz /api/state poll (also
+# offloaded there) or a multi-clip transcribe loop ran concurrently, a model's
+# `generate` could land on a different worker than the one that built it and
+# blow up. Pinning all model work to a single worker keeps load → generate →
+# release on one Metal stream. It also serialises GPU work, which is what we
+# want — one model runs at a time. (Non-MLX backends don't have the constraint
+# but are equally happy on one thread.)
+MODEL_THREAD_PREFIX = "tapscribe-model"
+_MODEL_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix=MODEL_THREAD_PREFIX)
+
+
+# The inline UP047 suppression keeps the 3.11-valid TypeVar generic: the
+# PEP-695 `[T]` form ruff (target py312) prefers is a SyntaxError on 3.11, which
+# the dev box + pre-push hook still run, and the codebase uses no PEP-695 syntax
+# anywhere for that reason.
+async def run_on_model_thread(func: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:  # noqa: UP047
+    """Run a blocking model op (load / transcribe / evict) on the single
+    dedicated model thread. The `asyncio.to_thread` analogue, but pinned to one
+    worker so MLX's thread-local Metal stream stays consistent across a job's
+    load → transcribe → release sequence (see `MODEL_THREAD_PREFIX` above)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_MODEL_EXECUTOR, functools.partial(func, *args, **kwargs))
 
 
 # Operator knob name, hoisted to a module constant so the (eventual)
