@@ -57,18 +57,19 @@ export function joinFragments(parts) {
  * Split a speaker turn's joined text into sentences so each sentence renders
  * as its own line. Pure — no DOM, no shared state.
  *
- * Splits on whitespace that follows a sentence terminator (. ! ?) plus any
- * trailing closing quotes/brackets. The lookbehind keeps the terminator on
- * its sentence and leaves mid-token dots intact (no whitespace after the dot
- * in "3.5"), and `.filter(Boolean)` drops the empty pieces that leading or
- * trailing whitespace would produce. Punctuation-free input (common on small
- * models like tiny.en) yields a single element, so this gracefully degrades
- * to the speaker/gap grouping.
+ * Each match lazily runs up to a sentence terminator (. ! ?) plus any trailing
+ * closing quotes/brackets that is followed by whitespace or end-of-text; the
+ * final `.+$` alternative sweeps up a trailing fragment that has no terminator.
+ * Mid-token dots stay intact ("3.5" has no whitespace after the dot), and
+ * punctuation-free input (common on small models like tiny.en) yields a single
+ * element, so this degrades to the speaker/gap grouping. Uses lookahead +
+ * dotAll only — no lookbehind — so it parses on every browser the dashboard
+ * runs in (lookbehind would exclude Safari < 16.4).
  * @param {string} text
  * @returns {string[]}
  */
 export function splitSentences(text) {
-  return text.split(/(?<=[.!?]["'”’)\]]*)\s+/).map((s) => s.trim()).filter(Boolean);
+  return (text.match(/.*?[.!?]["'”’)\]]*(?=\s|$)|.+$/gs) || []).map((s) => s.trim()).filter(Boolean);
 }
 
 /**
