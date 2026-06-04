@@ -162,6 +162,17 @@ boundary check) can refuse `gate_kind="backend"` against channels
 that have no native VAD to defer to. `WhisperLiveKitChannel` is
 True; the planned `ParakeetLiveChannel` will be False.
 
+`info["device"]` is an **observation, not an assertion**: WlK exposes
+no `--device` flag (its faster-whisper backend hands `device="auto"`
+to CTranslate2 inside the child), so the parent can't pin or know the
+device. The label is seeded with a prediction from the same
+`available_backends()` probe the batch chips use (`"CUDA (auto)"` /
+`"CPU"`), then overwritten by the log pump when the child's
+`Accelerator: …` startup banner reports what it actually sees — the
+same observe-the-child pattern that promotes `state` to "running".
+Future `LiveChannel` adapters must keep this semantic: report the
+device you observed, not the one you hope for.
+
 ## SpeechGate · gate_kind
 
 Per-`/tap` Silero-backed speech gate sitting between

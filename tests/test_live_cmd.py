@@ -18,7 +18,9 @@ from tapscribe.live import (
     WhisperLiveKitChannel,
     _is_console_worthy,
     _probe_port_free,
+    _seed_device_label,
     build_live_cmd,
+    parse_accelerator_line,
 )
 
 # Back-compat alias so the pre-refactor test names still read naturally.
@@ -323,6 +325,63 @@ def test_console_worthy_lines_pass_through(line: str):
 )
 def test_non_warning_lines_are_filtered(line: str):
     assert _is_console_worthy(line) is False
+
+
+# ---------------------------------------------------------------------------
+# parse_accelerator_line / _seed_device_label — the device label is an
+# observation (child banner) layered over a prediction (parent probe)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        # WlK prints the banner with one or two spaces depending on the
+        # call site (`Accelerator: …` in the server banner, `Accelerator:  …`
+        # in the CLI listing) — both must parse.
+        ("  Accelerator: CUDA (NVIDIA GeForce RTX 4080)", "CUDA (NVIDIA GeForce RTX 4080)"),
+        ("  Accelerator:  CPU only", "CPU only"),
+        ("Accelerator: MPS (Apple Silicon), MLX", "MPS (Apple Silicon), MLX"),
+    ],
+)
+def test_parse_accelerator_line_extracts_child_report(line: str, expected: str):
+    assert parse_accelerator_line(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "INFO:whisperlivekit:loading model",
+        "  Backend: faster-whisper | Model: tiny.en | Language: en",
+        "Accelerator:",  # bare prefix, no value
+        "",
+    ],
+)
+def test_parse_accelerator_line_ignores_other_lines(line: str):
+    assert parse_accelerator_line(line) is None
+
+
+def test_seed_device_label_mlx_is_apple_silicon():
+    assert _seed_device_label(use_mlx=True) == "Apple Silicon GPU"
+
+
+@pytest.mark.parametrize(
+    ("backends", "expected"),
+    [
+        (frozenset({"cuda", "cpu"}), "CUDA (auto)"),
+        (frozenset({"cpu"}), "CPU"),
+    ],
+)
+def test_seed_device_label_predicts_from_backend_probe(backends, expected):
+    """The non-MLX seed is a PREDICTION from the parent's probe — '(auto)'
+    flags that CTranslate2 resolves the real device inside the child."""
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(backends)
+    try:
+        assert _seed_device_label(use_mlx=False) == expected
+    finally:
+        set_available_backends_for_testing(None)
 
 
 # ---------------------------------------------------------------------------
