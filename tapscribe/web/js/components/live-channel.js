@@ -54,6 +54,11 @@ export function render(j, ctx) {
   const focused = /** @type {HTMLElement | null} */ (document.activeElement);
   if (focused && focused.dataset && focused.dataset.cfgKey && bodyEl.contains(focused)) return;
 
+  // NOTE: the log tail is deliberately NOT in this sig. Folding it in
+  // rebuilt the whole body on every WlK log line — snapping shut an
+  // operator-opened init-prompt <details> and churning the form for a
+  // value that only feeds the small "(N+)" log-count hint. Per the
+  // render-signature hygiene rule, that hint updates IN PLACE below.
   const sig = [
     state, li.model || "", li.language || "", li.pid || "", li.host || "",
     li.port || "", li.backend || "", li.device || "", li.last_error || "",
@@ -61,11 +66,19 @@ export function render(j, ctx) {
     li.gate_hangover_ms || "", li.gate_pre_roll_ms || "",
     li.gate_min_speech_ms || "",
     supportsNativeVad ? "1" : "0",
-    log.length, log.length ? log[log.length - 1] : "",
     (liveCatalog?.models || []).length,
     sup.live_prompt ? 1 : 0, lp.length || 0, lp.content || "",
   ].join("§");
   renderRegion(bodyEl, () => buildBody(j, ctx), { sig });
+
+  // Log-count hint — in-place per render (the template ships the row hidden
+  // with the button pre-wired, so unhiding later needs no rebuild).
+  const logRow = /** @type {HTMLElement | null} */ (bodyEl.querySelector('[data-slot="logRow"]'));
+  if (logRow) {
+    logRow.hidden = log.length === 0;
+    const cnt = logRow.querySelector('[data-slot="logCount"]');
+    if (cnt) cnt.textContent = log.length ? `(${log.length}+)` : "";
+  }
 }
 
 /**
@@ -79,7 +92,6 @@ export function render(j, ctx) {
  */
 function buildBody(j, { onAction, liveCatalog }) {
   const li = j.live_info || {};
-  const log = j.live_log || [];
   const state = li.state || "stopped";
   const supportsNativeVad = j.live_supports_native_vad !== false;
   const lp = j.live_prompt || {};
@@ -187,14 +199,10 @@ function buildBody(j, { onAction, liveCatalog }) {
     err.hidden = false;
     err.textContent = li.last_error;
   }
-  // The /api/state payload only carries a tail preview (up to 30 lines);
-  // the dialog fetches the full 200-line deque from /api/live/log on
-  // demand. The button shows the preview count as a hint that there's
-  // something to look at.
-  if (log.length) {
-    pick(frag, "logRow").hidden = false;
-    pick(frag, "logCount").textContent = `(${log.length}+)`;
-  }
+  // The log-count row is filled IN PLACE by render() after the mount (the
+  // /api/state payload only carries a tail preview; the dialog fetches the
+  // full deque from /api/live/log on demand). Keeping the volatile count out
+  // of this build path is what lets the body sig ignore log churn.
 
   // Init-prompt expandable. Hidden when no installed live model supports
   // initial_prompt (registry-driven via inputs_support.live_prompt).
@@ -300,10 +308,14 @@ function renderLogInto(dlg, payload) {
     return;
   }
   const log = payload.log || [];
+  // Sticky-scroll (same rule as live-feed): only follow the tail when the
+  // operator was already AT the tail. An unconditional scroll-to-bottom
+  // yanked them back down every refresh while they were reading older lines.
+  // Geometry is read BEFORE the rewrite — the new content changes it.
+  const wasAtBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 10;
   pre.textContent = log.length ? log.join("\n") : "(no log entries yet)";
   status.textContent = `state: ${payload.state || "stopped"} · ${log.length} line${log.length === 1 ? "" : "s"}`;
-  // Auto-scroll to bottom so new lines are visible on each refresh.
-  pre.scrollTop = pre.scrollHeight;
+  if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
 }
 
 async function openLogDialog() {
