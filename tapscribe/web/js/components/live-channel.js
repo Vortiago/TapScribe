@@ -3,7 +3,7 @@
 // log. Body rebuild is skipped while the user is editing the form or the
 // payload hasn't actually changed, so open <details>/<select> stay open.
 
-import { tpl, mount, pick } from "../templates.js";
+import { tpl, pick, renderRegion } from "../templates.js";
 import { wireConfigSave } from "../api.js";
 
 // Display labels for model families — used as <optgroup> labels in the live
@@ -16,7 +16,6 @@ const LIVE_FAMILY_LABELS = [
   ["voxtral", "Voxtral (Mistral)"],
 ];
 
-let lastSig = "";
 /** @type {ReturnType<typeof setInterval> | null} */
 let logDialogPoll = null;
 
@@ -24,39 +23,27 @@ let logDialogPoll = null;
  * @param {import('../types.js').AppState} j
  * @param {import('../types.js').LiveChannelCtx} ctx
  */
-export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCatalog }) {
+export function render(j, ctx) {
+  const { stateEl, mlxEl, bodyEl, mlxAvail, liveCatalog } = ctx;
   const li = j.live_info || {};
   const log = j.live_log || [];
   const state = li.state || "stopped";
   const supportsNativeVad = j.live_supports_native_vad !== false;
+  const lp = j.live_prompt || {};
+  const sup = j.inputs_support || { live_prompt: true };
 
   stateEl.textContent = state;
   mlxEl.textContent = mlxAvail ? "mlx available" : "cpu only";
 
-  // Don't rebuild while the user is editing — would close their <select>,
-  // wipe a slider value they're typing, wipe their in-progress
-  // init-prompt edit, or (if an init-prompt save is in flight) detach
-  // the status element the awaiting putJson will try to write to.
-  // (This bespoke guard predates renderRegion and is shared with the classic
-  // dashboard. NEW /next per-tick regions should use renderRegion from
-  // templates.js instead of hand-rolling this.)
-  // The dataset.cfgKey check covers the init-prompt textarea AND its
-  // save button + status span so a click-then-poll-tick race can't
-  // tear the DOM out from under the save handler.
+  // The body swap goes through renderRegion (focus-guarded + per-host sig):
+  // it skips while any <select>/<input>/<textarea> inside the body is focused,
+  // so an open dropdown or mid-edit gate knob survives the poll tick. One case
+  // it deliberately can't see: BUTTONS. While an init-prompt save is in
+  // flight, focus sits on its [data-cfg-key] save button — swapping then would
+  // detach the status span the awaiting putJson writes to. Hold the body for
+  // that one case here.
   const focused = /** @type {HTMLElement | null} */ (document.activeElement);
-  const editableIds = new Set([
-    "liveModelSelect", "liveLangInput",
-    "liveGateKindSelect",
-    "liveGateThreshold", "liveGateHangover", "liveGatePreRoll",
-    "liveGateMinSpeech",
-  ]);
-  if (focused) {
-    if (editableIds.has(focused.id)) return;
-    if (focused.dataset && focused.dataset.cfgKey && bodyEl.contains(focused)) return;
-  }
-
-  const lp = j.live_prompt || {};
-  const sup = j.inputs_support || { live_prompt: true };
+  if (focused && focused.dataset && focused.dataset.cfgKey && bodyEl.contains(focused)) return;
 
   const sig = [
     state, li.model || "", li.language || "", li.pid || "", li.host || "",
@@ -69,8 +56,25 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
     (liveCatalog?.models || []).length,
     sup.live_prompt ? 1 : 0, lp.length || 0, lp.content || "",
   ].join("§");
-  if (sig === lastSig) return;
-  lastSig = sig;
+  renderRegion(bodyEl, () => buildBody(j, ctx), { sig });
+}
+
+/**
+ * Build the live-channel body for the current state — model picker, gate
+ * form, actions, info rows, init-prompt editor — fully wired. Listeners are
+ * attached to the fragment's nodes at build time; the nodes survive the
+ * renderRegion swap into bodyEl, so no post-mount wiring pass is needed.
+ * @param {import('../types.js').AppState} j
+ * @param {import('../types.js').LiveChannelCtx} ctx
+ * @returns {DocumentFragment}
+ */
+function buildBody(j, { onAction, liveCatalog }) {
+  const li = j.live_info || {};
+  const log = j.live_log || [];
+  const state = li.state || "stopped";
+  const supportsNativeVad = j.live_supports_native_vad !== false;
+  const lp = j.live_prompt || {};
+  const sup = j.inputs_support || { live_prompt: true };
 
   const frag = tpl("tpl-live-channel");
   const sel = /** @type {HTMLSelectElement} */ (frag.querySelector("#liveModelSelect"));
@@ -195,38 +199,35 @@ export function render(j, { stateEl, mlxEl, bodyEl, mlxAvail, onAction, liveCata
     initRow.open = !!lp.length;
   }
 
-  mount(bodyEl, frag);
-
-  // Wire actions after mount so #ids resolve against the live DOM.
-  bodyEl.querySelector("#liveStartBtn")?.addEventListener("click", onAction.start);
-  bodyEl.querySelector("#liveApplyBtn")?.addEventListener("click", onAction.start);
-  bodyEl.querySelector("#liveStopBtn")?.addEventListener("click", onAction.stop);
-  bodyEl.querySelector("#liveLogBtn")?.addEventListener("click", openLogDialog);
+  // Wire actions against the fragment's nodes (they survive the mount swap).
+  // The handlers capture element references at build time — querying at event
+  // time would miss, because mounting empties the fragment.
+  frag.querySelector("#liveStartBtn")?.addEventListener("click", onAction.start);
+  frag.querySelector("#liveApplyBtn")?.addEventListener("click", onAction.start);
+  frag.querySelector("#liveStopBtn")?.addEventListener("click", onAction.stop);
+  frag.querySelector("#liveLogBtn")?.addEventListener("click", openLogDialog);
   // Nudge language to "no" when an nb-whisper model is picked and lang is
-  // still on the boot default. #liveModelSelect is in the always-present
-  // top section of the live-channel template (not in any of the
-  // state-specific action templates), so it's a hard error if it's
-  // missing — unlike the start/stop/apply buttons above, which use `?.`
-  // because each only appears in one of the three state templates.
-  const modelSelect = bodyEl.querySelector("#liveModelSelect");
-  if (!modelSelect) throw new Error("#liveModelSelect missing from live-channel template");
-  modelSelect.addEventListener("change", (e) => {
-    const value = /** @type {HTMLSelectElement} */ (e.target).value;
-    if (!value.startsWith("nb-")) return;
-    const li = /** @type {HTMLInputElement | null} */ (bodyEl.querySelector("#liveLangInput"));
-    if (li && (li.value === "en" || li.value === "")) li.value = "no";
+  // still on the boot default. `sel`/`langInput` come from the always-present
+  // top section of the live-channel template (not from any of the
+  // state-specific action templates), so they're already hard references —
+  // unlike the start/stop/apply buttons above, which use `?.` because each
+  // only appears in one of the three state templates.
+  sel.addEventListener("change", () => {
+    if (!sel.value.startsWith("nb-")) return;
+    if (langInput.value === "en" || langInput.value === "") langInput.value = "no";
   });
 
-  const initBtn = /** @type {HTMLButtonElement | null} */ (bodyEl.querySelector("#liveInitPromptSave"));
+  const initBtn = /** @type {HTMLButtonElement | null} */ (frag.querySelector("#liveInitPromptSave"));
   if (initBtn) {
     wireConfigSave({
       key: "live-prompt",
       btn: initBtn,
-      textarea: bodyEl.querySelector("#liveInitPromptText"),
-      status: bodyEl.querySelector('[data-slot="initPromptStatus"]'),
+      textarea: frag.querySelector("#liveInitPromptText"),
+      status: frag.querySelector('[data-slot="initPromptStatus"]'),
       onSuccess: undefined,
     });
   }
+  return frag;
 }
 
 export const formValues = () => {

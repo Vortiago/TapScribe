@@ -16,7 +16,8 @@
 //
 // The Live card holds a <select> + <textarea> rebuilt each poll tick, so it
 // renders through renderRegion (focus-guarded swap). The Batch card reuses
-// config-card (own focus guard) + the engine selector (rebuilt on change).
+// config-card (also renderRegion-backed) + the engine selector (rebuilt on
+// change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
 import { putJson, wireConfigSave } from "../../api.js";
@@ -62,7 +63,6 @@ export function build(ctx) {
   const liveCardHost = pick(frag, "liveCardHost");
 
   rebuildEngine(engineHost);
-  configCard.invalidate();
 
   /** Does this live model declare an initial_prompt input? Falls back to the
    * registry-wide flag when the model isn't in the live catalog. */

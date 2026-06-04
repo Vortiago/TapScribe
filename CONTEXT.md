@@ -429,6 +429,24 @@ a CLI batch, a queue worker, or future per-region re-transcribes
 without re-implementing the chain. The request value objects
 (`BatchOneRequest`, `BatchSessionRequest`) are the test surface.
 
+## Batch strip
+
+The strip-silence sibling of Batch transcription — same orchestrator
+shape, same FastAPI-free contract. Lives in `tapscribe/batch_strip.py`;
+the `/api/sessions/{session}/strip-silence` route handler is a thin
+parse-and-map shim over it.
+
+One entry point: `strip_session(recorder, StripSessionRequest) -> dict`
+— claims the session's `JobTracker` slot (the same "one transcribe/strip
+per session" rule Batch transcription claims under), loops
+`strip_one_wav` over every original WAV on a worker thread, aggregates,
+and releases. Raises the shared `SessionBusy` / `NoUsableWavs` (they are
+JobTracker / selection semantics, not transcription-specific) plus its
+own `StrippedDirUnclearable` when a previous `stripped/` can't be
+cleared. `StripSessionRequest` owns the knob defaults (`min_silence_ms`,
+`pad_ms`, `speech_floor_db`); the route forwards only
+explicitly-provided values, and is the test surface.
+
 ## Wire-format note
 
 Result JSON files (per-WAV `<wav>.transcripts/<...>.json` or legacy

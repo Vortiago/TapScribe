@@ -7,6 +7,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
+from wav_builders import seed_wav  # type: ignore[import-not-found]
 
 from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 from tapscribe.wav_cache import (
@@ -19,16 +20,6 @@ from tapscribe.wav_cache import (
 )
 
 SAMPLE_RATE = 16000
-
-
-def _wav(path: Path) -> Path:
-    samples = np.tile(np.array([8000, -8000], dtype=np.int16), SAMPLE_RATE // 2)
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
-        w.writeframes(samples.tobytes())
-    return path
 
 
 class _StubTranscriber:
@@ -57,12 +48,12 @@ class _StubTranscriber:
 
 
 def test_read_cached_returns_none_when_sidecar_missing(tmp_path: Path):
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     assert read_cached(wav) is None
 
 
 def test_cached_transcribe_runs_transcriber_on_miss_and_writes_sidecar(tmp_path: Path):
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     _StubTranscriber.call_count = 0
     cached = cached_transcribe(
         wav,
@@ -86,7 +77,7 @@ def test_cache_listing_includes_source(tmp_path: Path):
     the file's directory — a stripped clip lives in <session>/stripped/, so a
     listing that omitted source made the UI fall back to "original" and 404 the
     PUT (it looked for the clip in the originals dir)."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     cached_transcribe(
         wav,
         _StubTranscriber(),
@@ -103,7 +94,7 @@ def test_cache_listing_includes_source(tmp_path: Path):
 def test_cache_listing_legacy_sidecar_reports_source(tmp_path: Path):
     """The legacy single-`<wav>.json` path must also surface source so a
     pre-split-layout stripped clip's set-primary resolves correctly."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     legacy = {
         "transcriber": "fake",
         "backend": "fake-backend",
@@ -132,7 +123,7 @@ def test_cache_listing_legacy_sidecar_reports_source(tmp_path: Path):
 def test_sidecar_round_trips_backend_field(tmp_path: Path):
     """`backend` must persist through the JSON sidecar so the dashboard can
     render it for transcripts loaded after a restart."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     cached_transcribe(wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
     re_read = read_cached(wav)
     assert re_read is not None
@@ -143,7 +134,7 @@ def test_legacy_sidecar_without_backend_field_loads_with_empty_backend(tmp_path:
     """Older sidecars predate the backend field — they should still load
     (rather than crash) and surface backend as the empty string. The
     dashboard renders that as `?`."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     legacy = {
         "transcriber": "fake",
         # no "backend" key — this is the legacy shape
@@ -172,7 +163,7 @@ def test_legacy_sidecar_without_backend_field_loads_with_empty_backend(tmp_path:
 
 
 def test_cached_transcribe_returns_cached_without_calling_transcriber_on_hit(tmp_path: Path):
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     _StubTranscriber.call_count = 0
     cached_transcribe(wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
     assert _StubTranscriber.call_count == 1
@@ -185,7 +176,7 @@ def test_cached_transcribe_runs_for_different_model_and_promotes_it_to_primary(t
     """Switching models on the same WAV produces a fresh transcribe and
     the freshly-written entry becomes the primary. The original entry
     is preserved alongside (see test_two_backends_cache_independently)."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     _StubTranscriber.call_count = 0
     cached_transcribe(wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
     assert _StubTranscriber.call_count == 1
@@ -201,7 +192,7 @@ def test_cached_transcribe_runs_for_different_model_and_promotes_it_to_primary(t
 
 
 def test_cached_transcribe_force_bypasses_cache(tmp_path: Path):
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     _StubTranscriber.call_count = 0
     cached_transcribe(wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
     cached_transcribe(
@@ -214,7 +205,7 @@ def test_cached_transcribe_records_envelope_metadata(tmp_path: Path):
     """The sidecar carries write-time envelope on top of the
     TranscriptionResult fields. Verify the envelope is surfaced on the
     parsed dataclass."""
-    wav = _wav(tmp_path / "2026-05-12T09-19-55Z_alice_id01_ut000001.wav")
+    wav = seed_wav(tmp_path / "2026-05-12T09-19-55Z_alice_id01_ut000001.wav")
     cached = cached_transcribe(
         wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[]
     )
@@ -227,7 +218,7 @@ def test_cached_transcribe_records_envelope_metadata(tmp_path: Path):
 
 
 def test_read_cached_returns_cached_transcription_dataclass(tmp_path: Path):
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     written = cached_transcribe(
         wav,
         _StubTranscriber(),
@@ -243,7 +234,7 @@ def test_read_cached_returns_cached_transcription_dataclass(tmp_path: Path):
 
 
 def test_corrupt_sidecar_treated_as_cache_miss(tmp_path: Path):
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     wav.with_suffix(".json").write_text("not valid JSON{{", encoding="utf-8")
     _StubTranscriber.call_count = 0
     cached_transcribe(wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
@@ -255,7 +246,7 @@ def test_cached_transcribe_re_runs_when_wav_was_rewritten(tmp_path: Path):
     model name didn't change, but the bytes did — the cache must invalidate
     on size/mtime mismatch or merge_session returns the pre-resume transcript.
     """
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     _StubTranscriber.call_count = 0
     cached_transcribe(wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[])
     assert _StubTranscriber.call_count == 1
@@ -280,7 +271,7 @@ def test_cached_transcribe_treats_legacy_sidecar_without_fingerprint_as_miss(tmp
     in the new code path with zero placeholders. Those won't equal the live
     stat values, so the next call re-transcribes. After that one rebuild
     the cache works normally."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     # Hand-craft a sidecar that looks like the pre-fingerprint format —
     # exactly what's on disk for any WAV transcribed before this change.
     legacy = {
@@ -314,7 +305,7 @@ def test_cached_transcription_fingerprint_persists_to_sidecar(tmp_path: Path):
     """The fingerprint we wrote must round-trip through the JSON sidecar.
     Without this, every restart of the recorder would silently re-transcribe
     everything (legacy-fallback path) instead of hitting the cache."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     cached = cached_transcribe(
         wav, _StubTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[]
     )
@@ -368,7 +359,7 @@ class _StubByKey:
 def test_two_backends_cache_independently(tmp_path: Path):
     """Writing for one (backend, model) doesn't invalidate the other's
     cached entry — A and B can coexist for the same WAV."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     a = _StubByKey(backend="faster-whisper", model="small.en")
     b = _StubByKey(backend="mlx-voxtral", model="voxtral-mini")
 
@@ -387,7 +378,7 @@ def test_read_cached_returns_most_recently_written_transcript_as_primary(tmp_pat
     """Without an explicit primary set, the freshly-written entry wins —
     operators flipping models on the same WAV expect to see the
     just-produced result."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     a = _StubByKey(backend="faster-whisper", model="small.en", text="whisper text")
     b = _StubByKey(backend="mlx-voxtral", model="voxtral-mini", text="voxtral text")
 
@@ -404,7 +395,7 @@ def test_read_cached_returns_most_recently_written_transcript_as_primary(tmp_pat
 def test_read_all_cached_returns_every_entry(tmp_path: Path):
     """`read_all_cached` surfaces every cached transcript for a WAV so
     the comparison UI can list them side by side."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     cached_transcribe(
         wav,
         _StubByKey(backend="faster-whisper", model="small.en", text="whisper"),
@@ -426,7 +417,7 @@ def test_read_all_cached_returns_every_entry(tmp_path: Path):
 
 
 def test_read_all_cached_returns_empty_list_when_nothing_cached(tmp_path: Path):
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     assert read_all_cached(wav) == []
 
 
@@ -434,7 +425,7 @@ def test_set_primary_transcript_flips_the_pointer(tmp_path: Path):
     """After two writes, the explicit primary points the merge layer at
     whichever (backend, model) the operator picked, even if it wasn't
     the most recently written."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     cached_transcribe(
         wav,
         _StubByKey(backend="faster-whisper", model="small.en", text="whisper"),
@@ -459,7 +450,7 @@ def test_set_primary_transcript_flips_the_pointer(tmp_path: Path):
 
 
 def test_set_primary_transcript_raises_for_unknown_entry(tmp_path: Path):
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     cached_transcribe(
         wav,
         _StubByKey(backend="faster-whisper", model="small.en"),
@@ -477,7 +468,7 @@ def test_wav_rewrite_invalidates_each_backend_model_entry_independently(tmp_path
     """A WAV rewrite invalidates *every* cached transcript. Each entry
     carries its own fingerprint, so the next cached_transcribe call for
     that (backend, model) re-runs."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     a = _StubByKey(backend="faster-whisper", model="small.en")
     b = _StubByKey(backend="mlx-voxtral", model="voxtral-mini")
     cached_transcribe(wav, a, initial_prompt=None, hotwords=None, hallucination_rules=[])
@@ -506,7 +497,7 @@ def test_legacy_sidecar_migrates_into_new_layout_on_next_write(tmp_path: Path):
     sidecar must migrate the legacy file into the new directory. This
     keeps the two formats from coexisting and lets read_all_cached see
     the previously-only entry."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     st = wav.stat()
     legacy = {
         "transcriber": "fake",
@@ -555,7 +546,7 @@ def test_legacy_sidecar_still_serves_cache_hits_for_matching_backend_and_model(t
     cached_transcribe is called for the (backend, model) embedded in
     that legacy file with a matching fingerprint, it must hit — not
     re-run — so a system restart doesn't trigger a full re-transcribe."""
-    wav = _wav(tmp_path / "x.wav")
+    wav = seed_wav(tmp_path / "x.wav")
     st = wav.stat()
     legacy = {
         "transcriber": "fake",

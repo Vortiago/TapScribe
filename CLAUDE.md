@@ -23,9 +23,12 @@
   `<textarea>`/contenteditable) MUST render through `renderRegion`
   (`web/js/templates.js`) rather than raw `replaceChildren` — it skips
   the swap while a control inside the host is focused (see `spine.js`
-  for the reference adoption). The bespoke focus guards in
-  `live-channel.js`, `config-card.js`, and the People editor predate it
-  and are left as-is; `renderRegion` is the pattern for NEW regions. The
+  for the reference adoption). `live-channel.js` and `config-card.js`
+  render through it too, keeping only a 2-line `[data-cfg-key]` button
+  guard renderRegion deliberately doesn't cover (a focused save button
+  mid-putJson isn't an "interactive control" but must still hold the
+  swap). The People editor's bespoke guard predates `renderRegion` and
+  is left as-is; `renderRegion` is the pattern for NEW regions. The
   `test_next_poll_render_does_not_clobber_open_controls` sweep in
   `tests/e2e/test_dashboard_ui.py` enforces this — it focuses every
   control in each view, crosses a poll, and fails if a node is rebuilt

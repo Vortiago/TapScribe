@@ -8,16 +8,15 @@ is loaded.
 
 from __future__ import annotations
 
-import wave
 from datetime import UTC, datetime
 from pathlib import Path
 
-import numpy as np
 import pytest
 from conftest import (
     TranscriberStub,  # type: ignore[import-not-found]  # NeMo ships an installed `tests` package — collides with our project's tests/ dir; pytest puts tests/ on sys.path so `from conftest` resolves correctly
 )
 from fastapi.testclient import TestClient
+from wav_builders import seed_session, seed_wav  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
@@ -79,17 +78,6 @@ def client(recorder_under_test):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
-
-
-def _seed_wav(path: Path, *, amplitude: int = 8000, seconds: float = 1.0) -> Path:
-    n = int(16000 * seconds)
-    samples = np.tile(np.array([amplitude, -amplitude], dtype=np.int16), n // 2 + 1)[:n]
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(samples.tobytes())
-    return path
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +394,7 @@ def test_new_session_prunes_empty_sessions(client, recorder_under_test):
     while WAV-bearing folders survive."""
     cur = recorder_under_test.session_dir
     cur.mkdir(parents=True, exist_ok=True)
-    _seed_wav(cur / "cur.wav")
+    seed_wav(cur / "cur.wav")
     empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
     empty.mkdir()
     r = client.post("/api/new-session")
@@ -424,7 +412,7 @@ def test_tap_new_session_rotates_without_pruning(client, recorder_under_test):
     Basic-auth action. Auth is disabled in this fixture, so no header needed."""
     cur = recorder_under_test.session_dir
     cur.mkdir(parents=True, exist_ok=True)
-    _seed_wav(cur / "cur.wav")
+    seed_wav(cur / "cur.wav")
     empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
     empty.mkdir()
     prev = recorder_under_test.session_start
@@ -856,18 +844,10 @@ def test_api_state_reports_default_override_counts(client, recorder_under_test):
 # ---------------------------------------------------------------------------
 
 
-def _seed_session(root: Path, name: str, wavs: list[str]) -> Path:
-    sd = root / name
-    sd.mkdir(parents=True)
-    for w in wavs:
-        _seed_wav(sd / w)
-    return sd
-
-
 def test_absorb_moves_wavs_and_sidecars_and_deletes_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    source = _seed_session(
+    target = seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = seed_session(
         root,
         "src",
         [
@@ -897,10 +877,10 @@ def test_absorb_moves_wavs_and_sidecars_and_deletes_source(client, recorder_unde
 
 def test_absorb_moves_stripped_subfolder(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    source = _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    target = seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
     (source / "stripped").mkdir()
-    _seed_wav(source / "stripped" / "20260101T010000Z__alice__def.wav")
+    seed_wav(source / "stripped" / "20260101T010000Z__alice__def.wav")
 
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 200, r.text
@@ -911,8 +891,8 @@ def test_absorb_moves_stripped_subfolder(client, recorder_under_test):
 
 def test_absorb_merges_aliases_with_target_winning(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
-    _seed_session(root, "src", [])
+    seed_session(root, "tgt", [])
+    seed_session(root, "src", [])
     client.put(
         "/api/session-meta/tgt",
         json={
@@ -939,8 +919,8 @@ def test_absorb_merges_aliases_with_target_winning(client, recorder_under_test):
 
 def test_absorb_invalidates_target_merged_transcript(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    target = seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
     (target / "session-transcript.json").write_text('{"stale": true}')
 
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
@@ -951,9 +931,9 @@ def test_absorb_invalidates_target_merged_transcript(client, recorder_under_test
 
 def test_absorb_refuses_when_source_is_current_session(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
+    seed_session(root, "tgt", [])
     cur = recorder_under_test.session_start
-    _seed_session(root, cur, [])
+    seed_session(root, cur, [])
     r = client.post("/api/sessions/tgt/absorb", json={"source": cur})
     assert r.status_code == 409
     assert "current session" in r.json()["detail"]
@@ -964,8 +944,8 @@ def test_absorb_allows_target_to_be_current_session(client, recorder_under_test)
     into the new one the operator is recording into right now."""
     root = recorder_under_test.recordings_dir
     cur = recorder_under_test.session_start
-    _seed_session(root, cur, [])
-    _seed_session(root, "prev", ["20260101T010000Z__alice__def.wav"])
+    seed_session(root, cur, [])
+    seed_session(root, "prev", ["20260101T010000Z__alice__def.wav"])
     r = client.post(f"/api/sessions/{cur}/absorb", json={"source": "prev"})
     assert r.status_code == 200, r.text
     assert (root / cur / "20260101T010000Z__alice__def.wav").is_file()
@@ -973,7 +953,7 @@ def test_absorb_allows_target_to_be_current_session(client, recorder_under_test)
 
 def test_absorb_refuses_self(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
+    seed_session(root, "tgt", [])
     r = client.post("/api/sessions/tgt/absorb", json={"source": "tgt"})
     assert r.status_code == 400
 
@@ -985,7 +965,7 @@ def test_absorb_refuses_self(client, recorder_under_test):
 
 def test_delete_session_audio_removes_all_keeps_transcript(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(
+    sd = seed_session(
         root,
         "s",
         ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"],
@@ -997,7 +977,7 @@ def test_delete_session_audio_removes_all_keeps_transcript(client, recorder_unde
     (txdir / "faster-whisper__small.en.json").write_text("{}")
     # A stripped region + the merged transcript + session meta.
     (sd / "stripped").mkdir()
-    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
     (sd / "session-transcript.json").write_text('{"merged": true}')
     (sd / "session-transcript.txt").write_text("merged")
     (sd / "session-meta.json").write_text('{"label": "kickoff"}')
@@ -1022,7 +1002,7 @@ def test_delete_session_audio_removes_all_keeps_transcript(client, recorder_unde
 def test_delete_session_audio_refuses_current_session(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     cur = recorder_under_test.session_start
-    sd = _seed_session(root, cur, ["20260101T000000Z__alice__abc.wav"])
+    sd = seed_session(root, cur, ["20260101T000000Z__alice__abc.wav"])
     r = client.delete(f"/api/sessions/{cur}/audio")
     assert r.status_code == 409
     assert "current session" in r.json()["detail"]
@@ -1033,7 +1013,7 @@ def test_delete_session_audio_refuses_inflight_job(client, recorder_under_test):
     from tapscribe.recorder import JobState
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
 
     # Pre-claim a job slot the way the transcribe-session busy test does —
     # JobTracker.claim is async, driven via anyio's sync→async portal.
@@ -1065,7 +1045,7 @@ def test_delete_session_audio_missing_session_404(client, recorder_under_test): 
 
 def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(
+    sd = seed_session(
         root,
         "s",
         ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"],
@@ -1074,7 +1054,7 @@ def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_te
     # A stripped region sharing the deleted original's speaker — the no-cascade
     # contract means it must survive a per-file delete of the original.
     (sd / "stripped").mkdir()
-    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
 
     r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav")
     assert r.status_code == 200, r.text
@@ -1089,9 +1069,9 @@ def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_te
 
 def test_delete_wav_stripped_region_only(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
     (sd / "stripped").mkdir()
-    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
 
     r = client.delete("/api/wav/s/20260101T000000Z__alice__reg.wav?source=stripped")
     assert r.status_code == 200, r.text
@@ -1101,7 +1081,7 @@ def test_delete_wav_stripped_region_only(client, recorder_under_test):
 
 def test_delete_wav_rejects_bad_input(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
     # Non-.wav name → 404 (resolve_wav rejects non-audio). Assign first —
     # an HTTP call inside `assert` would vanish under `python -O`.
     r = client.delete("/api/wav/s/session-meta.json")
@@ -1118,15 +1098,15 @@ def test_delete_wav_rejects_bad_input(client, recorder_under_test):
 
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
+    seed_session(root, "tgt", [])
     r = client.post("/api/sessions/tgt/absorb", json={"source": "nope"})
     assert r.status_code == 404
 
 
 def test_absorb_refuses_filename_collision(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    src = _seed_session(root, "src", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    src = seed_session(root, "src", ["20260101T000000Z__alice__abc.wav"])
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 409
     # Source must be untouched on a refused merge.
@@ -1141,7 +1121,7 @@ def test_api_state_files_row_lists_all_cached_transcripts(client, recorder_under
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
 
     cached_transcribe(
@@ -1178,7 +1158,7 @@ def test_api_set_primary_flips_pointer(client, recorder_under_test):
     from tapscribe.wav_cache import cached_transcribe, read_cached
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
@@ -1211,7 +1191,7 @@ def test_api_set_primary_422_for_uncached_combo(client, recorder_under_test):
     from tapscribe.wav_cache import cached_transcribe
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
@@ -1229,7 +1209,7 @@ def test_api_set_primary_422_for_uncached_combo(client, recorder_under_test):
 
 
 def test_api_set_primary_404_for_missing_wav(client, recorder_under_test):
-    _seed_session(recorder_under_test.recordings_dir, "s", [])
+    seed_session(recorder_under_test.recordings_dir, "s", [])
     r = client.put(
         "/api/wav/s/missing.wav/primary",
         json={"backend": "x", "model": "y"},
@@ -1248,12 +1228,12 @@ def test_stripped_clip_cache_listing_carries_source_so_set_primary_resolves(clie
     from tapscribe.wav_cache import cached_transcribe
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     stripped = sd / "stripped"
     stripped.mkdir()
     region_name = "2026-01-01T01-00-02Z__alice__abc.wav"
     cached_transcribe(
-        _seed_wav(stripped / region_name),
+        seed_wav(stripped / region_name),
         TranscriberStub(backend="parakeet", model="v2"),
         initial_prompt=None,
         hotwords=None,
@@ -1292,7 +1272,7 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
     from tapscribe.wav_cache import cached_transcribe
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
@@ -1336,7 +1316,7 @@ def test_api_transcribe_uses_session_meta_prompt_when_set(client, recorder_under
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL", encoding="utf-8")
     (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
     client.put("/api/session-meta/s", json={"prompt": "SESSION OVERRIDE", "hotwords": "Patricia"})
@@ -1365,7 +1345,7 @@ def test_api_transcribe_falls_back_to_global_when_session_meta_empty(
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL DEFAULT", encoding="utf-8")
     (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
 
@@ -1407,7 +1387,7 @@ def test_api_transcribe_session_re_runs_when_session_meta_prompt_changes(
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     payload = {"session": "s", "model": "fake-small.en"}
 
     # First run under prompt A — caches sidecar with initial_prompt_used="A".
@@ -1442,7 +1422,7 @@ def test_api_transcribe_session_re_runs_when_session_meta_hotwords_change(
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     payload = {"session": "s", "model": "fake-small.en"}
 
     client.put("/api/session-meta/s", json={"hotwords": "Acme"})
@@ -1472,7 +1452,7 @@ def test_api_transcribe_session_re_uses_cache_when_prompt_unchanged(client, reco
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     payload = {"session": "s", "model": "fake-small.en"}
 
     client.put("/api/session-meta/s", json={"prompt": "STABLE"})
@@ -1500,7 +1480,7 @@ def test_api_transcribe_returns_freshly_written_transcript(client, recorder_unde
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
 
     r = client.post(
         "/api/transcribe",
@@ -1551,7 +1531,7 @@ def test_api_transcribe_returns_422_for_silent_wav(client, recorder_under_test):
     sd = root / "s"
     sd.mkdir(parents=True)
     # amplitude=0 → all-zero samples → -inf dBFS, far below SILENT_RMS_DBFS_FLOOR.
-    _seed_wav(sd / "2026-01-01T01-00-00Z__alice__abc.wav", amplitude=0)
+    seed_wav(sd / "2026-01-01T01-00-00Z__alice__abc.wav", amplitude=0)
 
     r = client.post(
         "/api/transcribe",
@@ -1567,7 +1547,7 @@ def test_api_transcribe_session_returns_400_for_unparseable_from_iso(client, rec
     a "client error, fix your input" signal instead of a 404 that
     would suggest the session was empty."""
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
 
     r = client.post(
         "/api/transcribe-session",
@@ -1607,7 +1587,7 @@ def test_api_transcribe_session_returns_409_when_job_already_in_flight(
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
 
     # Pre-claim the slot — TestClient's sync API doesn't expose the loop,
     # but JobTracker.claim is async. anyio.from_thread mirrors the
@@ -1645,7 +1625,7 @@ def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
-    session = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    session = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = session / "2026-01-01T01-00-00Z__alice__abc.wav"
 
     cached_transcribe(
@@ -1698,8 +1678,8 @@ def test_absorb_moves_new_layout_transcripts_directory(client, recorder_under_te
     from tapscribe.wav_cache import cached_transcribe, read_all_cached
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    source = _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
     src_wav = source / "20260101T010000Z__alice__def.wav"
 
     # Seed two cached transcripts via the cache API.
@@ -1737,8 +1717,8 @@ def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
     from tapscribe.recorder import JobState
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
-    _seed_session(root, "src", [])
+    seed_session(root, "tgt", [])
+    seed_session(root, "src", [])
     with anyio.from_thread.start_blocking_portal() as portal:
         portal.call(
             recorder_under_test.jobs.claim,

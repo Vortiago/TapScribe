@@ -7,27 +7,13 @@ filters fire.
 
 from __future__ import annotations
 
-import wave
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import numpy as np
 import pytest
+from wav_builders import seed_silent_wav, seed_wav  # type: ignore[import-not-found]
 
 from tapscribe.session_merge import SessionSelection, select_session_wavs
-
-SAMPLE_RATE = 16000
-
-
-def _write_wav(path: Path, *, seconds: float = 1.0, amplitude: int = 8000) -> Path:
-    n = int(SAMPLE_RATE * seconds)
-    samples = np.tile(np.array([amplitude, -amplitude], dtype=np.int16), n // 2 + 1)[:n]
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
-        w.writeframes(samples.tobytes())
-    return path
 
 
 def _wav_name(when: datetime, speaker: str = "alice", utt: str = "00000001") -> str:
@@ -50,9 +36,9 @@ def test_select_returns_all_audible_wavs_sorted_by_start_time(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
-    _write_wav(session_dir / _wav_name(base + timedelta(seconds=5)))
-    _write_wav(session_dir / _wav_name(base + timedelta(seconds=0)))
-    _write_wav(session_dir / _wav_name(base + timedelta(seconds=10)))
+    seed_wav(session_dir / _wav_name(base + timedelta(seconds=5)))
+    seed_wav(session_dir / _wav_name(base + timedelta(seconds=0)))
+    seed_wav(session_dir / _wav_name(base + timedelta(seconds=10)))
 
     selection = select_session_wavs(session_dir)
     names = [w.name for w in selection.wavs]
@@ -66,13 +52,8 @@ def test_select_drops_silent_wavs_below_floor(tmp_path: Path):
     session_dir.mkdir()
     base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     # One audible (amplitude=8000 ≈ -12 dBFS) + one silent (zeros)
-    audible = _write_wav(session_dir / _wav_name(base + timedelta(seconds=0)))
-    silent_path = session_dir / _wav_name(base + timedelta(seconds=5), speaker="bob")
-    with wave.open(str(silent_path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
-        w.writeframes(np.zeros(SAMPLE_RATE, dtype=np.int16).tobytes())
+    audible = seed_wav(session_dir / _wav_name(base + timedelta(seconds=0)))
+    silent_path = seed_silent_wav(session_dir / _wav_name(base + timedelta(seconds=5), speaker="bob"))
 
     selection = select_session_wavs(session_dir)
     assert [w.name for w in selection.wavs] == [audible.name]
@@ -83,7 +64,7 @@ def test_select_drops_empty_or_corrupt_wavs(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
-    good = _write_wav(session_dir / _wav_name(base))
+    good = seed_wav(session_dir / _wav_name(base))
     # 30-byte garbage "WAV" — too small to read
     bad = session_dir / _wav_name(base + timedelta(seconds=5), speaker="bob")
     bad.write_bytes(b"RIFF" + b"\x00" * 30)
@@ -97,9 +78,9 @@ def test_select_filters_by_iso_time_range(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
-    early = _write_wav(session_dir / _wav_name(base))
-    mid = _write_wav(session_dir / _wav_name(base + timedelta(minutes=5), speaker="b"))
-    late = _write_wav(session_dir / _wav_name(base + timedelta(minutes=10), speaker="c"))
+    early = seed_wav(session_dir / _wav_name(base))
+    mid = seed_wav(session_dir / _wav_name(base + timedelta(minutes=5), speaker="b"))
+    late = seed_wav(session_dir / _wav_name(base + timedelta(minutes=10), speaker="c"))
 
     from_iso = (base + timedelta(minutes=3)).isoformat()
     to_iso = (base + timedelta(minutes=7)).isoformat()
@@ -123,9 +104,9 @@ def test_select_with_source_stripped_uses_stripped_subdir(tmp_path: Path):
     stripped.mkdir(parents=True)
     base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
     # original (in session_dir) is audible — needed for the silence gate
-    _write_wav(session_dir / _wav_name(base))
+    seed_wav(session_dir / _wav_name(base))
     # stripped sibling at the same name
-    _write_wav(stripped / _wav_name(base))
+    seed_wav(stripped / _wav_name(base))
 
     sel_original = select_session_wavs(session_dir, source="original")
     sel_stripped = select_session_wavs(session_dir, source="stripped")

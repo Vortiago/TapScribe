@@ -30,7 +30,6 @@ import math
 import shutil
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -50,7 +49,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import auth, config
 from . import hallucinations as hallucinations_mod
-from . import strip_silence as _ss
+from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
 from .batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
@@ -62,7 +61,7 @@ from .batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
-from .recorder import JobState, Recorder
+from .recorder import Recorder
 from .sessions import (
     absorb_session,
     delete_session_audio,
@@ -75,7 +74,6 @@ from .sessions import (
     resolve_session_dir,
     resolve_wav,
     session_is_empty,
-    strip_one_wav,
     stripped_dir,
     write_session_meta,
 )
@@ -765,91 +763,35 @@ async def api_session_strip_silence(
     req: Request,
     recorder: Recorder = Depends(get_recorder),
 ):
-    """Non-destructively strip silence from every WAV in <session>/. Writes
-    cleaned copies to <session>/stripped/ (originals untouched)."""
-    session_dir = resolve_session_dir(session)
-
+    """Non-destructively strip silence from every WAV in <session>/. Thin
+    HTTP shim over `batch_strip.strip_session` — parse + range-bound the
+    knobs, map the domain errors to status codes."""
     body = await _json_body(req)
     # Range-bound everything that hits the silero detector so a malformed
     # dashboard POST returns 400 instead of a 500 from int()/float().
-    # `is None` (not `or`) so an explicit 0 — e.g. pad_ms=0 to disable
-    # region padding for A/B — doesn't silently fall back to the default.
+    # Only explicitly-provided knobs are forwarded — StripSessionRequest
+    # owns the defaults — and the `is not None` checks keep an explicit 0
+    # (e.g. pad_ms=0 to disable region padding for A/B) from silently
+    # falling back to the default.
+    overrides: dict[str, Any] = {}
     min_silence_ms = _parse_bounded_int(body.get("min_silence_ms"), "min_silence_ms", lo=100, hi=600_000)
-    if min_silence_ms is None:
-        min_silence_ms = 500
+    if min_silence_ms is not None:
+        overrides["min_silence_ms"] = min_silence_ms
     pad_ms = _parse_bounded_int(body.get("pad_ms"), "pad_ms", lo=0, hi=5_000)
-    if pad_ms is None:
-        pad_ms = 200
+    if pad_ms is not None:
+        overrides["pad_ms"] = pad_ms
     speech_floor_db = _parse_bounded_float(body.get("speech_floor_db"), "speech_floor_db", lo=-120.0, hi=0.0)
-    if speech_floor_db is None:
-        speech_floor_db = _ss.SPEECH_RMS_DBFS_FLOOR
-
-    originals = sorted(session_dir.glob("*.wav"))
-    if not originals:
-        raise HTTPException(404, "no WAVs in this session to strip")
-
-    # JobTracker.claim() encapsulates the "one job per session" rule.
-    claimed = await recorder.jobs.claim(
-        JobState(
-            session=session,
-            kind="strip",
-            current=0,
-            total=len(originals),
-            started_at=datetime.now(UTC),
-            status="stripping",
-        )
-    )
-    if not claimed:
-        raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
+    if speech_floor_db is not None:
+        overrides["speech_floor_db"] = speech_floor_db
 
     try:
-        out_dir = stripped_dir(session)
-        if out_dir.exists():
-            try:
-                shutil.rmtree(out_dir)
-            except OSError as e:
-                raise HTTPException(500, f"could not clear stripped/: {e}") from None
-
-        started = datetime.now(UTC)
-
-        def _run() -> list[dict[str, Any]]:
-            results: list[dict[str, Any]] = []
-            for src in originals:
-                try:
-                    results.append(strip_one_wav(src, out_dir, min_silence_ms, pad_ms, speech_floor_db))
-                except Exception as e:
-                    results.append({"name": src.name, "written": False, "error": str(e)})
-            return results
-
-        results = await asyncio.to_thread(_run)
-        finished = datetime.now(UTC)
-    finally:
-        await recorder.jobs.release(session)
-
-    written = sum(1 for r in results if r.get("written"))
-    in_secs = sum(r.get("in_seconds", 0.0) for r in results)
-    speech_secs = sum(r.get("speech_seconds", 0.0) for r in results)
-    detectors = sorted({r.get("detector") for r in results if r.get("detector")})
-
-    print(
-        f"[tapscribe] strip-silence {session}: {written}/{len(originals)} wavs, "
-        f"{speech_secs:.1f}s speech of {in_secs:.1f}s ({100 * speech_secs / max(in_secs, 1e-9):.0f}%), "
-        f"detector={detectors}, took {int((finished - started).total_seconds() * 1000)} ms",
-        flush=True,
-    )
-
-    return {
-        "ok": True,
-        "session": session,
-        "files_processed": len(originals),
-        "files_written": written,
-        "in_seconds": round(in_secs, 2),
-        "speech_seconds": round(speech_secs, 2),
-        "detector": detectors[0] if len(detectors) == 1 else detectors,
-        "stripped_at": finished.isoformat(),
-        "took_ms": int((finished - started).total_seconds() * 1000),
-        "files": results,
-    }
+        return await strip_session(recorder, StripSessionRequest(session=session, **overrides))
+    except NoUsableWavs as e:
+        raise HTTPException(404, str(e)) from None
+    except SessionBusy as e:
+        raise HTTPException(409, str(e)) from None
+    except StrippedDirUnclearable as e:
+        raise HTTPException(500, str(e)) from None
 
 
 @app.delete("/api/sessions/{session}/stripped")

@@ -10,10 +10,8 @@
 // server. While focus is inside any editor textarea the whole card
 // skips its per-second rebuild so polling can't blow away unsaved edits.
 
-import { tpl, pick } from "../templates.js";
+import { tpl, pick, renderRegion } from "../templates.js";
 import { wireConfigSave } from "../api.js";
-
-let lastSig = "";
 
 /**
  * @param {{
@@ -94,9 +92,11 @@ function buildEditor({ key, content, placeholder, overrideCount }) {
  * @param {import('../types.js').ConfigCardCtx} ctx
  */
 export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOverrideCounts = true }) {
-  // Bespoke focus guard (shared with the classic dashboard, predates
-  // renderRegion). NEW /next per-tick regions should render via renderRegion
-  // from templates.js rather than hand-rolling this.
+  // The grid swap goes through renderRegion (focus-guarded + per-host sig),
+  // which covers a focused editor textarea. One case it deliberately can't
+  // see: BUTTONS. While a save is in flight, focus sits on its [data-cfg-key]
+  // save button — swapping then would detach the status span the awaiting
+  // putJson writes to. Hold the grid for that one case here.
   const active = /** @type {HTMLElement | null} */ (document.activeElement);
   if (active && active.dataset && active.dataset.cfgKey && gridEl.contains(active)) return;
 
@@ -127,64 +127,64 @@ export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOv
     support.batch_hotwords ? 1 : 0,
     counts.prompt | 0, counts.hotwords | 0,
   ].join("§");
-  if (sig === lastSig) return;
-  lastSig = sig;
 
   const hotwordList = (h.content || "").split(",").map((s) => s.trim()).filter(Boolean);
   const halRules = hl.rules || [];
 
-  const out = document.createDocumentFragment();
+  const build = () => {
+    const out = document.createDocumentFragment();
 
-  if (support.batch_prompt) {
+    if (support.batch_prompt) {
+      out.appendChild(buildCol({
+        title: "default prompt",
+        file: "prompt.txt",
+        count: p.length ? `${p.length} chars` : null,
+        body: (el) => {
+          el.appendChild(buildEditor({
+            key: "prompt",
+            content: p.content || "",
+            placeholder: "default context biasing for batch transcription — sessions can override below",
+            overrideCount: counts.prompt,
+          }));
+        },
+      }));
+    }
+
+    if (support.batch_hotwords) {
+      out.appendChild(buildCol({
+        title: "default hotwords",
+        file: "hotwords.txt",
+        count: hotwordList.length ? `${hotwordList.length} terms` : null,
+        body: (el) => {
+          el.appendChild(buildEditor({
+            key: "hotwords",
+            content: h.content || "",
+            placeholder: "comma-separated names / jargon, e.g. Acme Inc., Patricia Lin",
+            overrideCount: counts.hotwords,
+          }));
+        },
+      }));
+    }
+
     out.appendChild(buildCol({
-      title: "default prompt",
-      file: "prompt.txt",
-      count: p.length ? `${p.length} chars` : null,
+      title: "hallucination filter",
+      file: "hallucinations.txt",
+      count: halRules.length ? `${halRules.length} rule${halRules.length === 1 ? "" : "s"}` : null,
       body: (el) => {
-        el.appendChild(buildEditor({
-          key: "prompt",
-          content: p.content || "",
-          placeholder: "default context biasing for batch transcription — sessions can override below",
-          overrideCount: counts.prompt,
-        }));
+        if (halRules.length) {
+          el.appendChild(tpl("tpl-cfg-hal-prefix"));
+          el.appendChild(codeList(halRules));
+        } else {
+          el.appendChild(emptyMsg("no patterns — nothing will be suppressed"));
+        }
       },
     }));
-  }
 
-  if (support.batch_hotwords) {
-    out.appendChild(buildCol({
-      title: "default hotwords",
-      file: "hotwords.txt",
-      count: hotwordList.length ? `${hotwordList.length} terms` : null,
-      body: (el) => {
-        el.appendChild(buildEditor({
-          key: "hotwords",
-          content: h.content || "",
-          placeholder: "comma-separated names / jargon, e.g. Acme Inc., Patricia Lin",
-          overrideCount: counts.hotwords,
-        }));
-      },
-    }));
-  }
+    return out;
+  };
 
-  out.appendChild(buildCol({
-    title: "hallucination filter",
-    file: "hallucinations.txt",
-    count: halRules.length ? `${halRules.length} rule${halRules.length === 1 ? "" : "s"}` : null,
-    body: (el) => {
-      if (halRules.length) {
-        el.appendChild(tpl("tpl-cfg-hal-prefix"));
-        el.appendChild(codeList(halRules));
-      } else {
-        el.appendChild(emptyMsg("no patterns — nothing will be suppressed"));
-      }
-    },
-  }));
-
-  gridEl.replaceChildren(out);
+  renderRegion(gridEl, build, { sig });
   if (headerNoteEl) {
     headerNoteEl.textContent = "batch defaults — overridden per-session in the controls below";
   }
 }
-
-export const invalidate = () => { lastSig = ""; };

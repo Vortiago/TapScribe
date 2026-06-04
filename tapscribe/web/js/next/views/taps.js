@@ -11,10 +11,11 @@
 //   - live-channel.js  → the gate LiveConfig form + start/stop (→ /api/live/start)
 //
 // Built once for the page; `update(j, session)` re-runs the live-data
-// components each poll tick — live-channel's own edit/signature guards keep it
-// from clobbering an in-progress gate edit, mirroring main.js's mount-once /
-// render-per-tick model. Only one view is mounted at a time, so reusing
-// live-channel's fixed element ids here doesn't collide with Capture's.
+// components each poll tick — live-channel renders through renderRegion
+// (focus-guarded, per-host signature), so an in-progress gate edit survives
+// the tick and this view's host caches independently of Capture's. Only one
+// view is mounted at a time, so reusing live-channel's fixed element ids here
+// doesn't collide with Capture's.
 
 import { tpl, pick } from "../../templates.js";
 import { putJson, postJson } from "../../api.js";
@@ -104,29 +105,12 @@ export function build(ctx) {
     // Reused components — each touches only its passed hosts.
     activeTaps.render(j, activeTapsCtx);
 
-    const liveChannelCtx = {
+    liveChannel.render(j, {
       ...liveChannelHosts,
       mlxAvail: !!j.mlx_available,
       liveCatalog,
       onAction: { start: onLiveStart, stop: onLiveStop },
-    };
-    // live-channel.js keeps a MODULE-level signature cache (no invalidate()
-    // export, unlike live-feed/config-card), so it mounts into only ONE host
-    // until the live_info signature changes. Capture also mounts it; whichever
-    // rendered last "owns" the cache, leaving the other host empty. When the
-    // Taps body is empty (first mount here, or after Capture clobbered the
-    // cache), prime once with a flipped `live_supports_native_vad` so the
-    // signature differs and the real render below actually mounts. The flip
-    // has no visible body effect (it only greys a gate <option> that the real
-    // render immediately replaces) and the priming frag is overwritten in the
-    // same tick. View-local fix — keeps the shared component untouched.
-    if (liveChannelHosts.bodyEl.childElementCount === 0) {
-      liveChannel.render(
-        { ...j, live_supports_native_vad: !(j.live_supports_native_vad !== false) },
-        liveChannelCtx,
-      );
-    }
-    liveChannel.render(j, liveChannelCtx);
+    });
   };
 
   return { node: frag, update };
