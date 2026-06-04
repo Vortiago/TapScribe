@@ -1577,6 +1577,87 @@ async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
         await wait_until(partial(streams_drained, rr.recorder), timeout=10.0)
 
 
+async def test_live_log_dialog_refresh_preserves_text_selection(
+    running_recorder: RunningRecorder,
+):
+    """The 'view logs' dialog refetches /api/live/log once a second while
+    open and rewrites its <pre>. Rewriting while the operator is
+    select-copying log lines dissolved the selection on every tick
+    (operator report: "it keeps flashing after I mark text") — the same
+    interaction-clobbering class as the dropdown sweep, for selections.
+    `renderLogInto` now holds the rewrite while a selection starts/ends
+    inside the dialog (`selectionInside` in templates.js — the same guard
+    renderRegion applies to every per-tick region).
+
+    Guard: seed live log lines, open the dialog from Capture, select a span
+    inside the <pre>, land a new log line server-side, cross >2 dialog
+    refreshes — the selection must survive verbatim. Then clearing the
+    selection must let the held-back refresh land (the new line appears),
+    proving the guard defers updates rather than killing them.
+    """
+    rr = running_recorder
+    for i in range(5):
+        rr.recorder.live.log.append(f"INFO:whisperlivekit:seed line {i}")
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#capture", wait_until="domcontentloaded")
+
+            # The "view logs" button renders once live_log is non-empty.
+            await page.wait_for_selector("#liveLogBtn", timeout=10000)
+            await page.click("#liveLogBtn")
+            await page.wait_for_function(
+                """() => {
+                    const pre = document.querySelector('#liveLogDialog [data-slot="pre"]');
+                    return !!pre && pre.textContent.includes('seed line 4');
+                }""",
+                timeout=10000,
+            )
+
+            selected = await page.evaluate("""() => {
+                const pre = document.querySelector('#liveLogDialog [data-slot="pre"]');
+                const r = document.createRange();
+                r.setStart(pre.firstChild, 0);
+                r.setEnd(pre.firstChild, 25);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(r);
+                return sel.toString();
+            }""")
+            assert len(selected) == 25
+
+            # A fresh server-side line means the next 1s refresh would REWRITE
+            # the <pre> — exactly what must not happen while text is selected.
+            rr.recorder.live.log.append("INFO:whisperlivekit:line landed while selecting")
+            await page.wait_for_timeout(2500)  # crosses >2 dialog refresh ticks
+
+            still = await page.evaluate("() => window.getSelection().toString()")
+            assert still == selected, (
+                "log dialog refresh dissolved the operator's text selection — "
+                "renderLogInto must skip while a selection is inside the dialog"
+            )
+
+            # Collapse the selection → the deferred refresh must now land.
+            await page.evaluate("() => window.getSelection().removeAllRanges()")
+            await page.wait_for_function(
+                """() => {
+                    const pre = document.querySelector('#liveLogDialog [data-slot="pre"]');
+                    return !!pre && pre.textContent.includes('line landed while selecting');
+                }""",
+                timeout=10000,
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
 async def test_recordings_strip_controls_stay_visible_with_many_wavs(
     running_recorder: RunningRecorder, tmp_path: Path
 ):

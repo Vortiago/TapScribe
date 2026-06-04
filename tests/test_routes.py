@@ -513,7 +513,6 @@ def test_api_state_returns_recorder_view(client, recorder_under_test):
     body = r.json()
     assert body["current_session"] == recorder_under_test.session_start
     assert body["recording_enabled"] is True
-    assert body["mlx_available"] is False
     assert isinstance(body["active"], list)
     assert isinstance(body["sessions"], list)
     assert isinstance(body["live_feed"], list)

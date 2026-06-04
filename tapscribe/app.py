@@ -451,7 +451,6 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "live_info": dict(recorder.live.info),
         "live_log": list(recorder.live.log)[-30:],
         "live_supports_native_vad": bool(getattr(recorder.live, "supports_native_vad", False)),
-        "mlx_available": recorder.use_mlx,  # gates MLX-only options in the Taps live-channel selector
         "backend": recorder.backend,
         "available_backends": sorted(_available_backends_snapshot()),
         "recording_enabled": recorder.recording_enabled,

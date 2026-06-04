@@ -154,7 +154,6 @@ export function build(ctx) {
     liveFeed.render(j, liveFeedCtx);
     liveChannel.render(j, {
       ...liveChannelHosts,
-      mlxAvail: !!j.mlx_available,
       liveCatalog,
       onAction: { start: onLiveStart, stop: onLiveStop },
     });

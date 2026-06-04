@@ -22,8 +22,12 @@
   the tick AND can hold an interactive control (`<select>`/`<input>`/
   `<textarea>`/contenteditable) MUST render through `renderRegion`
   (`web/js/templates.js`) rather than raw `replaceChildren` — it skips
-  the swap while a control inside the host is focused (see `spine.js`
-  for the reference adoption). `live-channel.js` and `config-card.js`
+  the swap while a control inside the host is focused OR while a text
+  selection starts/ends inside it (clobbering a selection mid-copy is
+  the same bug as snapping a dropdown shut; see `spine.js` for the
+  reference adoption). Per-second updaters that write text in place
+  instead of swapping (the live log dialog) use the exported
+  `selectionInside(host)` for the same rule. `live-channel.js` and `config-card.js`
   render through it too, keeping only a 2-line `[data-cfg-key]` button
   guard renderRegion deliberately doesn't cover (a focused save button
   mid-putJson isn't an "interactive control" but must still hold the

@@ -103,11 +103,33 @@ function _isInteractive(el) {
 }
 
 /**
+ * True while the operator has a non-collapsed text selection that starts or
+ * ends inside `host`. Rebuilding (or rewriting textContent of) a node the
+ * selection touches destroys the selection — mid-copy, that reads as the UI
+ * "flashing away" the operator's marked text. The same interaction-state
+ * rule as the focus guard, for selections. Exported for per-second updaters
+ * that write text in place rather than going through renderRegion (the live
+ * log dialog is the canonical case).
+ * @param {Element} host
+ */
+export function selectionInside(host) {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+  return (
+    (!!sel.anchorNode && host.contains(sel.anchorNode)) ||
+    (!!sel.focusNode && host.contains(sel.focusNode))
+  );
+}
+
+/**
  * Render `build()`'s output into `host` WITHOUT clobbering live interaction.
  * The dashboard re-renders every poll; replacing a node that holds an open
- * <select>, a focused input, or a mid-edit textarea would snap it shut. So:
+ * <select>, a focused input, or a mid-edit textarea would snap it shut — and
+ * replacing a node the operator is select-copying text from would dissolve
+ * the selection. So:
  *   - skip the swap while the operator is interacting with a control INSIDE
  *     `host` (the active element is a select/input/textarea/contenteditable);
+ *   - skip the swap while a text selection starts or ends inside `host`;
  *   - optionally skip when a caller-supplied `sig` is unchanged (perf);
  *   - otherwise replaceChildren(build()).
  * `build` is only invoked when we actually swap, so a skipped tick is cheap.
@@ -123,6 +145,7 @@ export function renderRegion(host, build, opts = {}) {
   if (!opts.force) {
     const active = document.activeElement;
     if (active && active !== document.body && host.contains(active) && _isInteractive(active)) return;
+    if (selectionInside(host)) return;
     if (opts.sig != null && _regionSig.get(host) === opts.sig) return;
   }
   if (opts.sig != null) _regionSig.set(host, opts.sig);

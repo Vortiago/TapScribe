@@ -3,7 +3,7 @@
 // log. Body rebuild is skipped while the user is editing the form or the
 // payload hasn't actually changed, so open <details>/<select> stay open.
 
-import { tpl, pick, renderRegion } from "../templates.js";
+import { tpl, pick, renderRegion, selectionInside } from "../templates.js";
 import { wireConfigSave } from "../api.js";
 
 // Display labels for model families — used as <optgroup> labels in the live
@@ -24,7 +24,7 @@ let logDialogPoll = null;
  * @param {import('../types.js').LiveChannelCtx} ctx
  */
 export function render(j, ctx) {
-  const { stateEl, mlxEl, bodyEl, mlxAvail, liveCatalog } = ctx;
+  const { stateEl, mlxEl, bodyEl, liveCatalog } = ctx;
   const li = j.live_info || {};
   const log = j.live_log || [];
   const state = li.state || "stopped";
@@ -33,7 +33,16 @@ export function render(j, ctx) {
   const sup = j.inputs_support || { live_prompt: true };
 
   stateEl.textContent = state;
-  mlxEl.textContent = mlxAvail ? "mlx available" : "cpu only";
+  // Acceleration note (the element keeps its historical mlxEl name): derived
+  // from the server's available_backends probe, NOT just MLX-or-nothing —
+  // a CUDA box used to read "cpu only" here while the live child was happily
+  // on the GPU.
+  const accel = j.available_backends || [];
+  mlxEl.textContent = accel.includes("mlx")
+    ? "mlx available"
+    : accel.includes("cuda")
+      ? "cuda available"
+      : "cpu only";
 
   // The body swap goes through renderRegion (focus-guarded + per-host sig):
   // it skips while any <select>/<input>/<textarea> inside the body is focused,
@@ -277,6 +286,12 @@ async function fetchLog() {
  * @param {{ log?: string[], state?: string } | null} payload
  */
 function renderLogInto(dlg, payload) {
+  // The dialog refreshes once a second while open; rewriting the <pre> (and
+  // autoscrolling) while the operator is select-copying log lines would
+  // dissolve the selection on every tick. Same interaction-state rule as
+  // renderRegion's guards — checked here directly because this updater
+  // writes textContent in place rather than swapping a region.
+  if (selectionInside(dlg)) return;
   const pre = pick(dlg, "pre");
   const status = pick(dlg, "status");
   if (!payload) {

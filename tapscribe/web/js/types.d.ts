@@ -22,7 +22,6 @@ export interface AppState {
   live_info: LiveInfo;
   live_log: string[];
   live_supports_native_vad: boolean;
-  mlx_available: boolean;
   backend: string;
   available_backends: string[];
   recording_enabled: boolean;
@@ -386,9 +385,9 @@ export interface ActiveTapsCtx {
 
 export interface LiveChannelCtx {
   stateEl: HTMLElement;
+  /** Acceleration note (historical name) — filled from available_backends. */
   mlxEl: HTMLElement;
   bodyEl: HTMLElement;
-  mlxAvail: boolean;
   onAction: { start: () => void; stop: () => void };
   liveCatalog: ModelCatalog;
 }
