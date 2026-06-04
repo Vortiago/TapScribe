@@ -47,7 +47,7 @@ function persistLabel(sid, statusEl) {
  * @typedef {{ tone: "live"|"good"|"warn"|"mute", text: string }} Chip
  * @typedef {{
  *   id: import('../shell.js').ViewId, name: string, lead: string,
- *   chip: Chip, live?: number, numbered?: boolean, done?: boolean,
+ *   chip: Chip, numbered?: boolean, done?: boolean,
  * }} NavDef
  */
 
@@ -67,7 +67,6 @@ function globalDefs(j, sess) {
   return [
     {
       id: "taps", name: "Taps", lead: "🛰️",
-      live: liveTaps || undefined,
       chip: liveTaps
         ? { tone: "live", text: `${liveTaps} live` }
         : { tone: "mute", text: `${(j.active || []).length} connected` },
@@ -179,12 +178,6 @@ function navItem(d, currentView, onSelect) {
   chip.textContent = d.chip.text;
   const chipWrap = /** @type {HTMLElement} */ (chip.closest(".navitem__chip"));
   chipWrap.classList.add(`tone-${d.chip.tone}`);
-
-  if (d.live) {
-    const live = pick(node, "live");
-    live.hidden = false;
-    pick(node, "liveCount").textContent = String(d.live);
-  }
 
   btn.addEventListener("click", () => onSelect(d.id));
   return node;

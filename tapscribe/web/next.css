@@ -111,19 +111,14 @@ body::before { display: none; }
   display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
 
   & .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--fg-3); flex: none; }
+  /* "live" reads as a calm static dot — no pulse/glow (operator found the
+     pulsing red noisy and unclear); the "N live" chip text carries the meaning. */
   &.tone-live { color: color-mix(in srgb, var(--rec) 70%, var(--fg-0)); }
-  &.tone-live .dot { background: var(--rec); animation: nextpulse 2s infinite; }
+  &.tone-live .dot { background: var(--rec); }
   &.tone-warn { color: var(--warn); }
   &.tone-warn .dot { background: var(--warn); }
   &.tone-good { color: var(--ok); }
   &.tone-good .dot { background: var(--ok); }
-}
-.navitem__live {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 8.5px; font-family: var(--mono); font-weight: 600; letter-spacing: .03em;
-  color: color-mix(in srgb, var(--rec) 70%, var(--fg-0)); flex: none;
-
-  & .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--rec); animation: nextpulse 2s infinite; }
 }
 
 /* the rail tick that makes the numbered journey read as a pipeline */
@@ -755,8 +750,6 @@ body::before { display: none; }
 .cfg-grid .cfg-editor-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
 .cfg-grid code { font-family: var(--mono); font-size: 10.5px; color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: var(--next-r-sm); }
 .cfg-grid .empty { padding: 6px 0; text-align: left; font-size: 10.5px; }
-
-@keyframes nextpulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
 /* ====================================================================== */
 /* PHASE 2 · RECORDINGS — waveform stub + strip knobs, WAV list, transcribe */
