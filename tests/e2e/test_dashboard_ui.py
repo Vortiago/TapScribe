@@ -1595,8 +1595,11 @@ async def test_recordings_strip_controls_stay_visible_with_many_wavs(
     async def _one(i: int):
         wav = synth_speech_like_wav(tmp_path / f"many{i}.wav", seconds=0.25, freq_hz=180.0 + i * 12.0)
         await stream_wav_via_tap(
-            ws_base_url=rr.ws_base_url, identity=f"many{i}", name=f"Speaker {i}",
-            wav_path=wav, utterance_id=f"many-utt{i}",
+            ws_base_url=rr.ws_base_url,
+            identity=f"many{i}",
+            name=f"Speaker {i}",
+            wav_path=wav,
+            utterance_id=f"many-utt{i}",
         )
 
     await asyncio.gather(*(_one(i) for i in range(n_wavs)))
