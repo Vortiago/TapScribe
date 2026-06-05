@@ -23,7 +23,7 @@ import { tpl, pick, selectionInside } from "../../templates.js";
 import { postJson, putJson, fetchSessionTranscript, peekSessionTranscript } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
-import { header, strong, inline, buildSourceToggle } from "../shell.js";
+import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 
 /**
@@ -444,21 +444,11 @@ export function build(ctx) {
     const sid = sess?.session || "";
     const job = sess?.progress || null;
 
-    // ---- Job progress (one job per session — transcribe OR strip). In-place
-    // text/width writes on prebuilt nodes, EVERY tick — deliberately outside
-    // both signature gates. Progress ticks ~1/s during a job; when they shared
-    // a signature with the merged transcript, each tick rebuilt the whole
-    // O(segments) transcript DOM (the "/next freezes while transcribing" bug).
-    if (job) {
-      jobBar.hidden = false;
-      const pct = job.total > 0 ? Math.round(100 * job.current / job.total) : 0;
-      jobLabel.textContent = job.kind === "strip" ? "Stripping silence" : "Transcribing";
-      jobCount.textContent = `${job.current} / ${job.total}`;
-      jobFill.style.width = `${pct}%`;
-      jobWav.textContent = job.current_file ? `current: ${job.current_file}` : "";
-    } else {
-      jobBar.hidden = true;
-    }
+    // ---- Job progress (one job per session). renderJobBar does in-place writes
+    // on prebuilt nodes, EVERY tick — deliberately outside both signature gates.
+    // Sharing a signature with the O(segments) merged transcript was the "/next
+    // freezes while transcribing" bug (one rebuild per job tick).
+    renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job);
 
     // ---- Merged transcript + header — gated on what THEY display: session,
     // marker stamp, loaded-ness, and the label/aliases the rendered lines

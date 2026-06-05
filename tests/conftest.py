@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import shlex
 import socket
 import sys
 import threading
@@ -441,6 +442,47 @@ class TranscriberStub:
             hotwords_used=hotwords or "",
             quality_settings={},
         )
+
+
+# ---------------------------------------------------------------------------
+# Summarizer Command-source test helpers (shared by the summarizer adapter,
+# batch-summarize orchestrator, and /summarize route tests)
+# ---------------------------------------------------------------------------
+
+
+def py_cmd(script: str) -> str:
+    """A cross-platform Command-source template that runs `script` under the
+    current interpreter. The summarizer tests use this instead of `cat`/`echo`
+    (not PATH executables on Windows) so the suite is identical on the whole
+    Linux/macOS/Windows CI matrix. `shlex.quote` + the adapter's `shlex.split`
+    round-trip keeps a Windows `C:\\...\\python.exe` path intact (it's single-
+    quoted, so the backslashes survive)."""
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+
+def seed_merged_transcript(
+    recordings_dir: Path, session: str, *, plain_text: str = "Alice: hi. We shipped."
+) -> Path:
+    """Write a minimal session-transcript.json into `<recordings_dir>/<session>/`
+    so the session has a merged transcript to summarize — the slim shape the
+    summarize orchestrator + `read_session_transcript` consume. Returns the
+    session dir."""
+    sd = recordings_dir / session
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "session": session,
+                "model": "test",
+                "transcribed_at": "2026-01-01T00:00:00+00:00",
+                "speakers": ["Alice"],
+                "segments": [],
+                "plain_text": plain_text,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return sd
 
 
 # ---------------------------------------------------------------------------

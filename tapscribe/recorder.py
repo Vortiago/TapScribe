@@ -197,16 +197,17 @@ class TapSettings:
 
 
 # ---------------------------------------------------------------------------
-# JobTracker — one in-flight transcribe/strip per session at a time
+# JobTracker — one in-flight transcribe/strip/summarize per session at a time
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class JobState:
-    """State for an in-flight session-scoped job (transcribe or strip)."""
+    """State for an in-flight session-scoped job (transcribe, strip, or
+    summarize)."""
 
     session: str
-    kind: Literal["transcribe", "strip"]
+    kind: Literal["transcribe", "strip", "summarize"]
     current: int
     total: int
     started_at: datetime

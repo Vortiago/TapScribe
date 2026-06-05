@@ -50,6 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, config
 from . import hallucinations as hallucinations_mod
 from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
+from .batch_summarize import NoMergedTranscript, SummarizeSessionRequest, summarize_session
 from .batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
@@ -77,6 +78,7 @@ from .sessions import (
     stripped_dir,
     write_session_meta,
 )
+from .summarizers import SummarizerFailed, SummarizerUnavailable
 from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
@@ -791,6 +793,42 @@ async def api_session_strip_silence(
         raise HTTPException(409, str(e)) from None
     except StrippedDirUnclearable as e:
         raise HTTPException(500, str(e)) from None
+
+
+@app.post("/api/sessions/{session}/summarize")
+async def api_session_summarize(
+    session: str,
+    req: Request,
+    recorder: Recorder = Depends(get_recorder),
+):
+    """Summarize a session's merged transcript. Thin HTTP shim over
+    `batch_summarize.summarize_session` — parse the body, map the domain errors
+    to status codes. For this slice the source / command / prompt arrive in the
+    body (no saved config yet); the Command source is the only one wired."""
+    body = await _json_body(req)
+    # Forward only explicitly-provided fields and let SummarizeSessionRequest own
+    # the defaults (source="command", prompt=DEFAULT_SUMMARY_PROMPT) — the same
+    # "value object owns the defaults" contract as the strip-silence route.
+    overrides: dict[str, str] = {}
+    source = body.get("source")
+    if isinstance(source, str) and source.strip():
+        overrides["source"] = source.strip()
+    command = body.get("command")
+    if isinstance(command, str):
+        overrides["command"] = command.strip()
+    prompt = body.get("prompt")
+    if isinstance(prompt, str):
+        overrides["prompt"] = prompt
+    try:
+        return await summarize_session(recorder, SummarizeSessionRequest(session=session, **overrides))
+    except NoMergedTranscript as e:
+        raise HTTPException(422, str(e)) from None
+    except SessionBusy as e:
+        raise HTTPException(409, str(e)) from None
+    except SummarizerUnavailable as e:
+        raise HTTPException(400, str(e)) from None
+    except SummarizerFailed as e:
+        raise HTTPException(502, str(e)) from None
 
 
 @app.delete("/api/sessions/{session}/stripped")

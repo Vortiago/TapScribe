@@ -139,13 +139,29 @@ export interface StrippedStats {
 // dataclasses.asdict(JobState) — one in-flight job per session at a time.
 export interface JobStateSnapshot {
   session: string;
-  kind: "transcribe" | "strip";
+  kind: "transcribe" | "strip" | "summarize";
   current: number;
   total: number;
   started_at: string; // ISO 8601
   status: string;
   current_file: string | null;
   model: string | null;
+}
+
+// POST /api/sessions/{session}/summarize response — the summary plus the
+// metadata that says which source/engine/prompt produced it. For the Command
+// source `command` is the CLI template and `model` is empty; API/Local (later
+// slices) populate `model`. Not persisted yet (#83) — lost on reload.
+export interface SummaryResult {
+  ok: boolean;
+  session: string;
+  summary: string;
+  source: string;
+  prompt: string;
+  model: string;
+  command: string;
+  took_ms: number;
+  created_at: string;
 }
 
 export interface WavFile {

@@ -19,7 +19,7 @@
 import { tpl, pick, selectionInside } from "../../templates.js";
 import { postJson, del, fetchWavTranscript, peekWavTranscript } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, truncMid } from "../../formatters.js";
-import { header, strong, inline, buildSourceToggle } from "../shell.js";
+import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 
 /** Strip-silence knob defaults — mirror STRIP_OPT_DEFAULTS / the server-side
  * fallbacks in api_session_strip_silence (tapscribe/app.py). */
@@ -526,16 +526,7 @@ export function build(ctx) {
 
     // Job progress bar (one job per session — surfaced here for strip; the
     // transcribe job is driven from the Transcript stage but shows here too).
-    if (job) {
-      jobBar.hidden = false;
-      const pct = job.total > 0 ? Math.round(100 * job.current / job.total) : 0;
-      jobLabel.textContent = job.kind === "strip" ? "Stripping silence" : "Transcribing";
-      jobCount.textContent = `${job.current} / ${job.total}`;
-      jobFill.style.width = `${pct}%`;
-      jobWav.textContent = job.current_file ? `current: ${job.current_file}` : "";
-    } else {
-      jobBar.hidden = true;
-    }
+    renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job);
 
     // WAV list. Delete is refused on the current (recording) session by the
     // backend (409), so the row hides its delete button there — matching how

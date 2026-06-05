@@ -1052,18 +1052,14 @@ body::before { display: none; }
 .srcdetail__lab { font-size: 10.5px; color: var(--fg-1); font-weight: 600; }
 .srcdetail__lab .dim { font-weight: 400; }
 
-/* sample summary output — a title + decisions/action-items/open-questions. */
+/* summary output — a title + the generated summary text. */
 .sumout { display: flex; flex-direction: column; gap: 13px; }
 .sumout__title { font-size: 14px; font-weight: 680; color: var(--fg-0); letter-spacing: -0.2px; }
-.sumblk { display: flex; flex-direction: column; gap: 6px; }
-.sumblk__k {
-  font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em;
-  color: var(--fg-3); font-weight: 600;
-}
-.sumlist { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
-.sumlist li { font-size: 11.5px; color: var(--fg-1); line-height: 1.5; }
-.sumlist li b { color: var(--fg-0); font-weight: 600; }
-.sumlist code { font-family: var(--mono); font-size: 10.5px; color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: var(--next-r-sm); }
+/* The real (Command-source) summary is free-form text from the operator's CLI
+   tool — render it verbatim, preserving the tool's own line breaks. */
+.sumtext { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.6; color: var(--fg-1); }
+/* the Summarizer note line goes red when a Generate fails. */
+.ovr-note.is-err { color: var(--rec); }
 
 /* ====================================================================== */
 /* SESSIONS — the GLOBAL all-sessions list (js/next/views/sessions.js). A    */

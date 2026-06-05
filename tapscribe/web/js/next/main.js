@@ -356,7 +356,10 @@ function buildView(view, session) {
     return { ...b, key: viewKey("transcript", session) };
   }
   if (view === "summary") {
-    const b = summaryView.build();
+    const b = summaryView.build({
+      metaFor,
+      afterMutate: () => { refresh(); },
+    });
     return { ...b, key: "summary" };
   }
   if (view === "recordings") {

@@ -73,6 +73,42 @@ export function inline(...parts) {
   return frag;
 }
 
+/** Job-kind → the label the shared progress bar shows. One source of truth for
+ * the Stages views that render the per-session job (Transcript, Recordings,
+ * Summary) — adding a job kind is a one-line edit here, not a sweep across
+ * every view. Mirrors the backend `JobState.kind` literal. */
+export const JOB_LABELS = {
+  transcribe: "Transcribing",
+  strip: "Stripping silence",
+  summarize: "Summarizing",
+};
+
+/**
+ * Render the shared job-progress bar from a JobState snapshot, mutating the
+ * prebuilt nodes IN PLACE — never rebuilding DOM. The bar ticks ~1/s during a
+ * job and MUST stay outside the per-tick signature gates: sharing a signature
+ * with an O(content) region (the merged transcript) was the "/next freezes
+ * while transcribing" bug (see CLAUDE.md render-signature hygiene). Hidden when
+ * there's no job, or — when `only` is given — when the running job isn't that
+ * kind (so the Summary panel shows a summarize job but not a transcribe/strip
+ * on the same session).
+ * @param {{ jobBar: HTMLElement, jobLabel: HTMLElement, jobCount: HTMLElement, jobFill: HTMLElement, jobWav: HTMLElement }} hosts
+ * @param {import('../types.js').JobStateSnapshot | null} job
+ * @param {{ only?: import('../types.js').JobStateSnapshot["kind"] }} [opts]
+ */
+export function renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job, { only } = {}) {
+  if (!job || (only && job.kind !== only)) {
+    jobBar.hidden = true;
+    return;
+  }
+  jobBar.hidden = false;
+  const pct = job.total > 0 ? Math.round((100 * job.current) / job.total) : 0;
+  jobLabel.textContent = JOB_LABELS[job.kind] || "Working";
+  jobCount.textContent = `${job.current} / ${job.total}`;
+  jobFill.style.width = `${pct}%`;
+  jobWav.textContent = job.current_file ? `current: ${job.current_file}` : "";
+}
+
 /**
  * Build the original/stripped source toggle (template `tpl-next-srcsw`), shared
  * by the Recordings and Transcript views. The "stripped" button is disabled
