@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 RECORDER_SAMPLE_RATE = 16000
@@ -113,3 +114,86 @@ def wav_rms_dbfs(path: Path) -> float:
         return -200.0
     rms = float(np.sqrt((samples.astype(np.float32) ** 2).mean()))
     return dbfs_from_rms(rms)
+
+
+@dataclass(frozen=True)
+class WavePeaks:
+    """A fixed-size downsample of one recording for the dashboard waveform:
+    `bins` normalised peak amplitudes in [0, 1] (one per bucket, the same
+    `|sample| / 32768` normalisation `int16_peak_norm` gives the live meter),
+    plus the duration / sample rate the renderer needs for a time axis.
+
+    The point of computing this server-side is that the wire payload is
+    `bins` floats regardless of how long the recording is — a 3-minute and a
+    3-hour WAV both downsample to the same small array."""
+
+    peaks: list[float]
+    bins: int
+    duration_s: float
+    sample_rate: int
+
+
+def compute_peaks(path: Path, *, bins: int) -> WavePeaks:
+    """Downsample the recorder's WAV (16 kHz mono int16) into `bins` buckets,
+    each carrying that bucket's normalised peak amplitude — `max(|min|, |max|)
+    / 32768`, clamped to 1.0 for the most-negative int16 sample, exactly the
+    contract `int16_peak_norm` gives the per-tap meter.
+
+    `bins` is coerced to at least 1. A WAV with fewer samples than `bins`
+    still returns exactly `bins` entries (the trailing empty buckets read
+    0.0), so the renderer can rely on a fixed-length array.
+
+    Raises `RuntimeError` — naming the file and the actual vs expected format —
+    on a non-recorder WAV (different rate / channels / sample width) or an
+    unreadable file. There is NO ffmpeg fallback and NO resample: this path
+    assumes the recorder format, mirroring `tapscribe.wav_predecode`, and
+    tells the operator to convert anything else rather than silently
+    re-introducing the dependency.
+    """
+    import numpy as np  # transitive dep via faster-whisper / mlx-whisper
+
+    bins = max(1, int(bins))
+    try:
+        with wave.open(str(path), "rb") as wf:
+            rate = wf.getframerate()
+            channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            if (
+                rate != RECORDER_SAMPLE_RATE
+                or channels != RECORDER_CHANNELS
+                or sampwidth != RECORDER_SAMPLE_WIDTH
+            ):
+                # Same format guard (and message shape) as
+                # wav_predecode.load_recorder_wav_as_pcm — no ffmpeg, no resample.
+                raise RuntimeError(
+                    f"unexpected WAV format for {path.name}: "
+                    f"{rate}Hz/{channels}ch/{sampwidth * 8}-bit "
+                    "(expected 16kHz/mono/16-bit — TapScribe writes that natively). "
+                    "Convert with: ffmpeg -i in.wav -ar 16000 -ac 1 -sample_fmt s16 out.wav"
+                )
+            frame_count = wf.getnframes()
+            raw = wf.readframes(frame_count)
+    except (wave.Error, EOFError, OSError) as e:
+        raise RuntimeError(f"could not read WAV {path.name}: {e}") from e
+
+    duration_s = frame_count / rate if rate else 0.0
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if samples.size == 0:
+        return WavePeaks(peaks=[0.0] * bins, bins=bins, duration_s=duration_s, sample_rate=rate)
+
+    # Per bucket: max(|min|, |max|) / 32768. Working from the signed min/max
+    # (not np.abs) sidesteps the int16 overflow where abs(-32768) stays
+    # -32768, and maps a full-scale negative sample to exactly 1.0 — the same
+    # trick int16_peak_norm uses. np.array_split always returns `bins`
+    # sub-arrays (trailing ones empty when samples < bins), so len == bins.
+    peaks: list[float] = []
+    for bucket in np.array_split(samples, bins):
+        if bucket.size == 0:
+            peaks.append(0.0)
+            continue
+        lo = int(bucket.min())
+        hi = int(bucket.max())
+        peak = -lo if -lo > hi else hi
+        peaks.append(peak / 32768.0)
+
+    return WavePeaks(peaks=peaks, bins=len(peaks), duration_s=duration_s, sample_rate=rate)

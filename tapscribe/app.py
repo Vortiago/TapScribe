@@ -49,6 +49,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import auth, config
 from . import hallucinations as hallucinations_mod
+from .audio import compute_peaks
 from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
 from .batch_summarize import NoMergedTranscript, SummarizeSessionRequest, summarize_session
 from .batch_transcribe import (
@@ -993,6 +994,43 @@ async def api_wav_transcript(session: str, name: str, source: str = "original"):
     if source not in ("original", "stripped"):
         raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
     return await asyncio.to_thread(read_wav_transcript, session, name, source)
+
+
+# Waveform downsample resolution. The route CLAMPS the operator-supplied bins
+# into this band rather than 422-ing — a fixed payload size is the whole point,
+# and the dashboard never needs more than a few thousand bars on screen.
+_PEAKS_BINS_DEFAULT = 800
+_PEAKS_BINS_MIN = 16
+_PEAKS_BINS_MAX = 2000
+
+
+@app.get("/api/wav/{session}/{name}/peaks")
+async def api_wav_peaks(
+    session: str,
+    name: str,
+    bins: int = _PEAKS_BINS_DEFAULT,
+    source: str = "original",
+):
+    """Server-computed waveform peaks for one WAV — a fixed-size downsample
+    (the foundation the later cut overlay draws on). Mirrors get_wav's
+    path-safety (resolve_wav validates session/name/source under
+    RECORDINGS_DIR), whitelists `source`, clamps `bins` to a sane band, and
+    offloads the O(samples) read off the event loop. The payload is `bins`
+    floats regardless of recording length."""
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    bins = max(_PEAKS_BINS_MIN, min(_PEAKS_BINS_MAX, bins))
+    path = resolve_wav(session, name, source)
+    try:
+        peaks = await asyncio.to_thread(compute_peaks, path, bins=bins)
+    except RuntimeError as e:
+        # The WAV exists (resolve_wav 404'd a missing one) but isn't decodable
+        # as peaks → 422 unprocessable. compute_peaks is a low-level audio
+        # helper with no domain-error type, so we map its RuntimeError at the
+        # call site rather than via the batch-orchestrator domain-error handler
+        # (a deliberately separate layer, not an unfinished unification).
+        raise HTTPException(422, str(e)) from e
+    return asdict(peaks)
 
 
 @app.delete("/api/wav/{session}/{name}")

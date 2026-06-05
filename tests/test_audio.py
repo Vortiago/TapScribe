@@ -216,3 +216,76 @@ def test_int16_peak_norm_synthesised_half_scale_tone_reads_half(tmp_path):
     assert peaks, "non-empty frame list"
     assert min(peaks) == pytest.approx(0.5, abs=0.01)
     assert max(peaks) == pytest.approx(0.5, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# compute_peaks — server-side waveform downsample (backs the Recordings hero)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_peaks_returns_requested_bins_and_metadata(tmp_path):
+    # 2 s half-scale square wave → every bucket's peak lands at ~0.5, and the
+    # metadata (bins / duration / sample rate) round-trips.
+    seconds = 2.0
+    n = int(SAMPLE_RATE * seconds)
+    samples = np.full(n, 16384, dtype=np.int16)
+    samples[1::2] = -16384
+    _write_pcm_wav(tmp_path / "a.wav", samples)
+    result = audio.compute_peaks(tmp_path / "a.wav", bins=128)
+    assert result.bins == 128
+    assert len(result.peaks) == 128
+    assert result.sample_rate == SAMPLE_RATE
+    assert result.duration_s == pytest.approx(seconds, abs=0.01)
+    assert all(0.0 <= p <= 1.0 for p in result.peaks), "peaks must stay in the renderer's [0,1]"
+    assert all(p == pytest.approx(0.5, abs=0.01) for p in result.peaks)
+
+
+def test_compute_peaks_full_negative_clamps_to_one(tmp_path):
+    # The most-negative int16 (-32768) must map to exactly 1.0, not overflow —
+    # the same saturation contract int16_peak_norm guarantees.
+    _write_pcm_wav(tmp_path / "full.wav", np.full(SAMPLE_RATE, -32768, dtype=np.int16))
+    result = audio.compute_peaks(tmp_path / "full.wav", bins=10)
+    assert all(0.0 <= p <= 1.0 for p in result.peaks)
+    assert max(result.peaks) == pytest.approx(1.0)
+
+
+def test_compute_peaks_preserves_dynamic_range(tmp_path):
+    # A quiet first half + a loud second half must produce small early bins
+    # and large late bins — a regression that averaged (or otherwise washed
+    # out the peak) would flatten this.
+    n = SAMPLE_RATE
+    samples = np.zeros(n, dtype=np.int16)
+    samples[: n // 2] = 200  # near-silent floor
+    samples[n // 2 :: 2] = 20000  # loud, alternating for a real peak
+    samples[n // 2 + 1 :: 2] = -20000
+    _write_pcm_wav(tmp_path / "ramp.wav", samples)
+    result = audio.compute_peaks(tmp_path / "ramp.wav", bins=10)
+    assert result.peaks[0] < 0.05, "the quiet half should read near-silent"
+    assert result.peaks[-1] > 0.5, "the loud half should peg high"
+    assert max(result.peaks) >= 2 * min(p for p in result.peaks if p > 0)
+
+
+def test_compute_peaks_short_wav_still_returns_requested_bins(tmp_path):
+    # Fewer samples than bins → still exactly `bins` entries, with the
+    # trailing empty buckets reading 0.0 (the renderer relies on a fixed
+    # length).
+    _write_pcm_wav(tmp_path / "tiny.wav", np.array([16384, -16384, 16384], dtype=np.int16))
+    result = audio.compute_peaks(tmp_path / "tiny.wav", bins=16)
+    assert result.bins == 16
+    assert len(result.peaks) == 16
+    assert result.peaks[-1] == 0.0
+
+
+def test_compute_peaks_bins_coerced_to_at_least_one(tmp_path):
+    _write_pcm_wav(tmp_path / "a.wav", np.full(1000, 8000, dtype=np.int16))
+    result = audio.compute_peaks(tmp_path / "a.wav", bins=0)
+    assert result.bins == 1
+    assert len(result.peaks) == 1
+
+
+def test_compute_peaks_raises_clear_error_on_non_recorder_format(tmp_path):
+    # 44.1 kHz stereo → not the recorder format. The error names the format
+    # and offers no in-process fallback (no ffmpeg, no resample).
+    _write_pcm_wav(tmp_path / "bad.wav", np.zeros(200, dtype=np.int16), rate=44100, channels=2)
+    with pytest.raises(RuntimeError, match="unexpected WAV format"):
+        audio.compute_peaks(tmp_path / "bad.wav", bins=64)

@@ -236,6 +236,17 @@ export interface SuppressedHallucination {
   matched_rule: string;
 }
 
+// GET /api/wav/{session}/{name}/peaks — a fixed-size server-computed
+// downsample of one WAV for the Recordings waveform. `peaks` are normalised
+// [0, 1] amplitudes (one per bin); the wire cost is `bins` floats regardless
+// of how long the recording is.
+export interface WavePeaks {
+  peaks: number[];
+  bins: number;
+  duration_s: number;
+  sample_rate: number;
+}
+
 // ---------------------------------------------------------------------------
 // Merged (session-level) transcript.
 //

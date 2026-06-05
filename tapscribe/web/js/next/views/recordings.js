@@ -1,25 +1,27 @@
 // @ts-check
 // Stages · Recordings (SESSION stage 2). The per-session AUDIO-FILES stage: a
-// waveform-cut PLACEHOLDER (net-new, no backend) sitting above the REAL
-// strip-silence knobs + the per-WAV list (originals + indented stripped
-// region clips) with an original/stripped source toggle. Transcription (the
-// engine selector, transcribe controls, and per-WAV cache) moved to the
-// Transcript stage — Recordings is files + silence-stripping only.
+// real waveform (an isolated <canvas> drawn from server-computed peaks)
+// sitting above the REAL strip-silence knobs + the per-WAV list (originals +
+// indented stripped region clips) with an original/stripped source toggle.
+// Transcription (the engine selector, transcribe controls, and per-WAV cache)
+// moved to the Transcript stage — Recordings is files + silence-stripping only.
 //
 // Mirrors session-detail.js's data flow (the classic dashboard) for the strip
 // pieces but is FRESH /next code — it builds the WAV list / strip controls
 // from /api/state and the same endpoints (POST
-// /api/sessions/{s}/strip-silence, DELETE /api/sessions/{s}/stripped). No mock
-// data — the only stub is the waveform canvas, tagged inline.
+// /api/sessions/{s}/strip-silence, DELETE /api/sessions/{s}/stripped). The
+// waveform fetches peaks lazily from /api/wav/{s}/{name}/peaks; the cut
+// overlay on top of it lands in a later slice.
 //
 // Built once for the page; `update(j, session)` re-renders the WAV list /
 // stats / strip-job progress each tick (signature-gated so an in-progress
 // strip slider isn't clobbered).
 
 import { tpl, pick, selectionInside } from "../../templates.js";
-import { postJson, del, fetchWavTranscript, peekWavTranscript } from "../../api.js";
-import { fmtBytes, fmtDur, fmtClock, fmtMs, truncMid } from "../../formatters.js";
+import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks } from "../../api.js";
+import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
+import { createWaveform } from "../components/waveform.js";
 
 /** Strip-silence knob defaults — mirror STRIP_OPT_DEFAULTS / the server-side
  * fallbacks in api_session_strip_silence (tapscribe/app.py). */
@@ -40,6 +42,10 @@ export function build(ctx) {
 
   const headHost = pick(frag, "head");
   const waveName = pick(frag, "waveName");
+  // Isolated canvas waveform — mounted once into the hero; update() feeds it
+  // the selected WAV's peaks (lazy + client-cached) as the selection changes.
+  const waveform = createWaveform();
+  pick(frag, "waveHost").appendChild(waveform.node);
   const stats = {
     clips: pick(frag, "sClips"),
     speech: pick(frag, "sSpeech"),
@@ -91,6 +97,19 @@ export function build(ctx) {
   /** @type {Set<string>} */
   const stripInflight = new Set();
   let lastSig = " "; // sentinel so the first update always renders the body
+  // Waveform render state. `lastWaveSig` is the canvas's OWN small signature
+  // (selected WAV · source · size · load-state) so a per-second strip/transcribe
+  // job tick — which churns the body's signature — never rebuilds the O(bins)
+  // canvas (render-signature hygiene). `pendingWave` stops a fresh re-render
+  // callback being chained on every tick while one fetch is in flight (the
+  // api.js cache already dedupes the network request itself); `failedWave`
+  // remembers an unreadable WAV so it shows a message instead of refetching
+  // every tick.
+  let lastWaveSig = " ";
+  /** @type {Set<string>} */
+  const pendingWave = new Set();
+  /** @type {Map<string, string>} */
+  const failedWave = new Map();
 
   // ---- Helpers --------------------------------------------------------------
 
@@ -116,6 +135,63 @@ export function build(ctx) {
     if (!files.length) return null;
     const want = selectedWav.get(session.session);
     return files.find((f) => f.name === want) ?? files[0] ?? null;
+  };
+
+  /** Resolve + draw the selected WAV's waveform. Peaks are fetched lazily
+   * (once per WAV+source, client-cached on the file's byte size so the poll
+   * never refetches) and drawn when they land. Guarded by `lastWaveSig` so the
+   * canvas only redraws when the selection / source / load-state actually
+   * changes — not on every body re-render. */
+  /** @param {import('../../types.js').WavFile | null} sel @param {"original"|"stripped"} src */
+  const drawWaveform = (sel, src) => {
+    const sid = session?.session || "";
+    if (!sel || !sid) {
+      const wsig = `none:${session ? "nofiles" : "nosession"}`;
+      if (wsig === lastWaveSig) return;
+      lastWaveSig = wsig;
+      waveform.showMessage(session ? "no WAVs recorded yet" : "no session selected");
+      return;
+    }
+    const fileSig = String(sel.size);
+    const key = `${sid}/${sel.name}@${src}@${fileSig}`;
+    /** @type {"ok" | "loading" | "error"} */
+    let state;
+    /** @type {import('../../types.js').WavePeaks | undefined} */
+    let data;
+    let message = "";
+    if (failedWave.has(key)) {
+      state = "error";
+      message = failedWave.get(key) || "could not read waveform";
+    } else {
+      data = peekWavePeaks(sid, sel.name, src, fileSig);
+      if (data !== undefined) {
+        state = "ok";
+      } else {
+        state = "loading";
+        if (!pendingWave.has(key)) {
+          pendingWave.add(key);
+          fetchWavePeaks(sid, sel.name, src, fileSig)
+            .then(() => { failedWave.delete(key); })
+            .catch((e) => { failedWave.set(key, String(e).replace(/^Error:\s*/, "")); })
+            .finally(() => {
+              pendingWave.delete(key);
+              // Redraw the canvas ONLY (the body didn't change) now that the
+              // peaks are cached or the fetch failed. Re-resolve the current
+              // selection in case it moved while the fetch was in flight, and
+              // reset just the wave sig so this redraw isn't skipped — no
+              // full body rebuild and no extra /api/state poll.
+              lastWaveSig = " ";
+              drawWaveform(selectedFor(), session ? effectiveSource(session.session) : "original");
+            });
+        }
+      }
+    }
+    const wsig = `${key}@${state}`;
+    if (wsig === lastWaveSig) return;
+    lastWaveSig = wsig;
+    if (state === "ok" && data) waveform.showWaveform(data.peaks, data.duration_s);
+    else if (state === "loading") waveform.showMessage("loading waveform…");
+    else waveform.showMessage(message);
   };
 
   // ---- Knobs ----------------------------------------------------------------
@@ -259,9 +335,7 @@ export function build(ctx) {
     } else {
       for (const ln of lines) {
         const line = tpl("tpl-next-txline");
-        const mins = Math.floor(ln.start / 60);
-        const secs = Math.floor(ln.start % 60);
-        pick(line, "ts").textContent = `[${mins}:${String(secs).padStart(2, "0")}]`;
+        pick(line, "ts").textContent = `[${fmtMmSs(ln.start)}]`;
         pick(line, "speaker").textContent = speakerName ? `${speakerName}:` : "";
         const body = pick(line, "body");
         body.textContent = ln.text;
@@ -491,6 +565,7 @@ export function build(ctx) {
       stripBtn.disabled = !sess;
       clearBtn.disabled = !stripped;
       jobBar.hidden = true;
+      drawWaveform(null, src);
       return;
     }
 
@@ -499,6 +574,7 @@ export function build(ctx) {
     waveName.textContent = sel
       ? `🌊 ${truncMid(sel.name, 40)} · ${fmtDur(sel.duration_s)} · ${src}`
       : "no WAV selected";
+    drawWaveform(sel, src);
     const ls = lastStrip.get(sid);
     if (ls) {
       const kept = ls.in_seconds > 0 ? Math.round(100 * ls.speech_seconds / ls.in_seconds) : 0;
