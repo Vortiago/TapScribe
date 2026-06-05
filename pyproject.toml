@@ -127,6 +127,38 @@ cuda-libs = [
     "nvidia-cudnn-cu12; sys_platform != 'darwin'",
 ]
 
+# --- Summarizer · bundled offline Local model (#86) -------------------------
+# The Local summarizer source runs a bundled model (Gemma 4 E4B-it, Apache-2.0)
+# with no network, hardware-routed at runtime by `tapscribe.summarizers.
+# LocalSummarizer`: an MLX backend on Apple Silicon, a GGUF/llama.cpp backend on
+# CPU/CUDA (and any non-Apple-Silicon box). Unlike the transcription extras,
+# this is installed at STARTUP via the recorder's runtime-deps step (start.sh /
+# start.ps1) — NOT by tools/install_picker.py (which resolves transcription
+# model extras only) and NOT as a per-request preflight. The imported upstream
+# symbols are guarded by importorskip smoke tests
+# (tests/test_summarizers_local.py::test_{mlx_lm,llama_cpp}_upstream_contract);
+# the narrow upper bounds here are the primary defence against an upstream API
+# rename, the same convention as the MLX transcriber adapters.
+summarize = [
+    # MLX text generation (Apple Silicon). `mlx_lm.load` / `mlx_lm.generate`
+    # are the entry points the adapter imports lazily. The package moves fast,
+    # but load/generate are stable; floor ≥0.31 carries Gemma-4 model support.
+    "mlx-lm>=0.31,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # GGUF via llama.cpp (CPU/CUDA, and everywhere that isn't Apple Silicon —
+    # expressed by De Morgan, since PEP 508 markers have no unary `not`).
+    # `Llama.from_pretrained` + `Llama.create_chat_completion` are the imported
+    # entry points. Floor ≥0.3.26 guarantees the bundled llama.cpp carries the
+    # Gemma-4 E-series architecture (in llama.cpp since the Apr-2026 launch);
+    # bump freely within 0.3.x. NOTE: llama-cpp-python builds from source by
+    # default — the startup step passes the prebuilt-CPU-wheel index so a fresh
+    # box without a C++ toolchain still installs (see start.sh).
+    "llama-cpp-python>=0.3.26,<0.4; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    # Both backends fetch the bundled weights from the Hub on first Generate
+    # (mlx `load` / llama.cpp `from_pretrained`); pin a floor so the download
+    # API is present even on an otherwise-minimal install.
+    "huggingface-hub>=0.24",
+]
+
 # --- Convenience aliases (back-compat) --------------------------------------
 # Older docs, the Dockerfile, and test-skip messages still reference the
 # pre-split umbrella names. They self-reference the atomic extras above

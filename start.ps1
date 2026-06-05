@@ -90,6 +90,41 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
+# The Local summarizer source (Summary stage, #86) runs a bundled offline model
+# — an MLX backend on Apple Silicon, a GGUF/llama.cpp backend on CPU/CUDA. The
+# adapter lazy-imports the routed backend on the first Generate; missing → the
+# Local source reports "needs the [summarize] extra" instead of summarizing.
+# Pull the [summarize] extra here so the first Generate just works. No-op on
+# re-runs once installed. (Like [vad] above, NOT via the install picker, which
+# covers transcription model extras only.)
+#
+# Probe the module the extra installs on THIS platform (mirrors
+# LocalSummarizer's _resolve_local_backend): mlx_lm on Apple Silicon, else
+# llama_cpp. find_spec, not import, to skip the heavy backend import on bring-up.
+$SummarizeProbe = "llama_cpp"
+if ($IsMacOS) {
+    if ((uname -m) -eq "arm64") { $SummarizeProbe = "mlx_lm" }
+}
+& python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$SummarizeProbe') else 1)" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[start] $SummarizeProbe missing — installing the [summarize] extra (bundled offline summarizer)…"
+    # NOT --quiet: pulls a text-gen backend (and, on first Generate, a multi-GB
+    # model), so visible output makes a failure recoverable.
+    $SummarizePipArgs = @()
+    if ($SummarizeProbe -eq "llama_cpp") {
+        # llama-cpp-python builds from source by default (needs cmake + MSVC).
+        # Use the maintainer's prebuilt CPU-wheel index so a box without a C++
+        # toolchain still installs. (CUDA-accelerated summary inference is
+        # opt-in: swap in a cuXXX wheel index from
+        # https://abetlen.github.io/llama-cpp-python/whl/ if you want it.)
+        $SummarizePipArgs = @("--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cpu")
+    }
+    & python -m pip install -e ".[summarize]" @SummarizePipArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "[start] 'pip install -e .[summarize]' failed. The recorder will still boot, but the Local summarizer source will report the [summarize] extra is missing."
+    }
+}
+
 # --- CUDA Torch (Windows) ---------------------------------------------------
 # pip's default `torch` wheel is CPU-only on Windows (the Linux wheel bundles
 # CUDA), so on an NVIDIA box the GPU goes unused — TapScribe's probe reports

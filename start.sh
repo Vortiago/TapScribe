@@ -191,6 +191,41 @@ if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spe
     fi
 fi
 
+# The Local summarizer source (Summary stage, #86) runs a bundled offline model
+# — an MLX backend on Apple Silicon, a GGUF/llama.cpp backend on CPU/CUDA. The
+# adapter lazy-imports the routed backend on the first Generate; missing → the
+# Local source reports "needs the [summarize] extra" instead of summarizing.
+# Pull the `[summarize]` extra here so the first Generate just works. No-op on
+# re-runs once installed. (Like the [vad] extra above, NOT via the install
+# picker, which covers transcription model extras only.)
+#
+# Probe the module the extra installs ON THIS PLATFORM (mirrors
+# LocalSummarizer's `_resolve_local_backend`): mlx_lm on Apple Silicon, else
+# llama_cpp. find_spec, not import, to skip the heavy backend import on bring-up.
+if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    SUMMARIZE_PROBE="mlx_lm"
+else
+    SUMMARIZE_PROBE="llama_cpp"
+fi
+if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$SUMMARIZE_PROBE') else 1)" 2>/dev/null; then
+    echo "[start] $SUMMARIZE_PROBE missing — installing the [summarize] extra (bundled offline summarizer)…"
+    # NOT --quiet: the install pulls a text-gen backend (and, on first Generate,
+    # a multi-GB model), so visible output makes a failure recoverable.
+    SUMMARIZE_PIP_ARGS=()
+    if [ "$SUMMARIZE_PROBE" = "llama_cpp" ]; then
+        # llama-cpp-python builds from source by default (needs cmake + a C++
+        # toolchain). Add the maintainer's prebuilt CPU-wheel index so a box
+        # without a compiler still installs. (CUDA-accelerated summary inference
+        # is opt-in: swap in the cuXXX wheel index from
+        # https://abetlen.github.io/llama-cpp-python/whl/ if you want it.)
+        SUMMARIZE_PIP_ARGS+=(--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu)
+    fi
+    if ! python -m pip install -e ".[summarize]" "${SUMMARIZE_PIP_ARGS[@]}"; then
+        echo "[start] 'pip install -e .[summarize]' failed. The recorder will still boot, but the" >&2
+        echo "        Local summarizer source will report the [summarize] extra is missing." >&2
+    fi
+fi
+
 # --- Configuration ----------------------------------------------------------
 MODEL="${SX_MODEL:-tiny.en}"
 LANG="${SX_LANG:-en}"

@@ -828,7 +828,8 @@ async def api_session_summarize(
     `batch_summarize.summarize_session` — parse the body; the registered
     domain-error handlers map failures to status codes. For this slice the
     source / command / prompt arrive in the body (no saved config yet); the
-    Command source is the only one wired."""
+    Local (bundled, offline — #86) and Command (#82) sources are wired, while
+    the API source (#85) still maps to a clear 400."""
     body = await _json_body(req)
     # Forward only explicitly-provided fields and let SummarizeSessionRequest own
     # the defaults (source="command", prompt=DEFAULT_SUMMARY_PROMPT) — the same
