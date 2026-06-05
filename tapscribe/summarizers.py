@@ -246,10 +246,24 @@ ENV_GGUF_CTX = "TAPSCRIBE_SUMMARIZE_GGUF_CTX"
 _DEFAULT_GGUF_CTX = 8192
 _GGUF_CTX_BOUNDS = (512, 131_072)
 
-# Each hardware-routed backend ↔ the python package that powers it. Drives both
-# the default-model pick and the cheap find_spec "is the extra installed" probe.
-_BACKEND_MODULE = {"mlx": "mlx_lm", "gguf": "llama_cpp"}
-_BACKEND_DEFAULT_MODEL = {"mlx": LOCAL_MLX_MODEL, "gguf": LOCAL_GGUF_MODEL}
+
+# One declarative record per hardware-routed backend (mirrors the catalog's
+# table-driven REGISTRY): the python package that powers it (find_spec probe +
+# lazy import), the bundled default model repo, and the env var that overrides
+# that repo. Keeping "everything about a backend" in one keyed record means
+# adding a backend is a single new entry — not edits spread across parallel
+# dicts plus a branch.
+@dataclass(frozen=True)
+class _LocalBackend:
+    module: str  # python package powering this backend (find_spec + lazy import)
+    default_model: str  # bundled default model repo id
+    env_model: str  # env var that overrides default_model
+
+
+_BACKENDS: dict[str, _LocalBackend] = {
+    "mlx": _LocalBackend(module="mlx_lm", default_model=LOCAL_MLX_MODEL, env_model=ENV_LOCAL_MLX_MODEL),
+    "gguf": _LocalBackend(module="llama_cpp", default_model=LOCAL_GGUF_MODEL, env_model=ENV_LOCAL_GGUF_MODEL),
+}
 
 # A backend's per-(transcript, prompt) text generator. The real ones (built
 # lazily below) hold a loaded model; tests inject a pure function instead — the
@@ -284,8 +298,8 @@ def _env_model_default(backend: str) -> str:
     """The default model repo for `backend`, with an env override
     (`TAPSCRIBE_SUMMARIZE_{MLX,GGUF}_MODEL`) so an operator can swap the bundled
     model without a code change."""
-    env_name = ENV_LOCAL_MLX_MODEL if backend == "mlx" else ENV_LOCAL_GGUF_MODEL
-    return os.environ.get(env_name) or _BACKEND_DEFAULT_MODEL[backend]
+    b = _BACKENDS[backend]
+    return os.environ.get(b.env_model) or b.default_model
 
 
 def _backend_module_available(backend: str) -> bool:
@@ -293,8 +307,18 @@ def _backend_module_available(backend: str) -> bool:
     `find_spec` probe (no heavy import, no torch/Metal init). A module-level
     function so a test can force it without touching the real environment, the
     same shape as the catalog's `_is_module_available`."""
-    module = _BACKEND_MODULE.get(backend)
-    return module is not None and importlib.util.find_spec(module) is not None
+    b = _BACKENDS.get(backend)
+    return b is not None and importlib.util.find_spec(b.module) is not None
+
+
+def _missing_extra_message(why: str) -> str:
+    """The operator-facing 'install the [summarize] extra' error, in ONE place so
+    the construction-time probe and the lazy-import handler can't drift on the
+    install recipe. `why` is the site-specific reason clause."""
+    return (
+        f"the local summarizer needs the [summarize] extra — {why}. Install it with: "
+        f"pip install -e '.[summarize]' (the recorder's start.sh / start.ps1 does this at bring-up)."
+    )
 
 
 def _resolve_local_backend() -> str:
@@ -389,7 +413,7 @@ class LocalSummarizer:
         generate_fn: LocalGenerateFn | None = None,
     ) -> None:
         self._backend = (backend or _resolve_local_backend()).strip().lower()
-        if self._backend not in _BACKEND_MODULE:
+        if self._backend not in _BACKENDS:
             raise SummarizerUnavailable(f"unknown local summarizer backend: {self._backend!r}")
         self.model = model or _env_model_default(self._backend)
         self._gguf_file = gguf_file or (os.environ.get(ENV_LOCAL_GGUF_FILE) or LOCAL_GGUF_FILE)
@@ -400,9 +424,7 @@ class LocalSummarizer:
         # imports the backend). `find_spec` only — no heavy import here.
         if generate_fn is None and not _backend_module_available(self._backend):
             raise SummarizerUnavailable(
-                f"the local summarizer needs the [summarize] extra — the "
-                f"{_BACKEND_MODULE[self._backend]!r} package isn't importable. Install it with: "
-                f"pip install -e '.[summarize]' (the recorder's start.sh / start.ps1 does this at bring-up)."
+                _missing_extra_message(f"the {_BACKENDS[self._backend].module!r} package isn't importable")
             )
 
     def summarize(self, transcript: str, *, prompt: str) -> SummaryResult:
@@ -436,9 +458,9 @@ class LocalSummarizer:
             )
         except ImportError as e:
             raise SummarizerUnavailable(
-                f"the local summarizer needs the [summarize] extra — couldn't import the "
-                f"{_BACKEND_MODULE[self._backend]!r} backend ({e}). Install it with: "
-                f"pip install -e '.[summarize]'."
+                _missing_extra_message(
+                    f"couldn't import the {_BACKENDS[self._backend].module!r} backend ({e})"
+                )
             ) from e
 
 
