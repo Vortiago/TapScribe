@@ -10,15 +10,12 @@ straight against a tmpdir-rooted Recorder and a TranscriberStub.
 from __future__ import annotations
 
 import json
-import wave
 from datetime import UTC, datetime
-from pathlib import Path
 
-import numpy as np
 import pytest
 from conftest import TranscriberStub  # type: ignore[import-not-found]
+from wav_builders import seed_session, seed_silent_wav  # type: ignore[import-not-found]
 
-from tapscribe import config as _config
 from tapscribe.batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
@@ -31,65 +28,10 @@ from tapscribe.batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
-from tapscribe.live import LiveConfig
-from tapscribe.recorder import JobState, Recorder
+from tapscribe.recorder import JobState
 
-# ---------------------------------------------------------------------------
-# WAV helpers
-# ---------------------------------------------------------------------------
-
-
-def _seed_wav(path: Path, *, amplitude: int = 8000, seconds: float = 1.0) -> Path:
-    """Write a small audible-tone WAV. Default amplitude is comfortably
-    above SILENT_RMS_DBFS_FLOOR so the silence pre-check passes."""
-    n = int(16000 * seconds)
-    samples = np.tile(np.array([amplitude, -amplitude], dtype=np.int16), n // 2 + 1)[:n]
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(samples.tobytes())
-    return path
-
-
-def _seed_silent_wav(path: Path) -> Path:
-    """All-zeros PCM → RMS is -inf dBFS, deep below SILENT_RMS_DBFS_FLOOR."""
-    return _seed_wav(path, amplitude=0)
-
-
-def _seed_session(root: Path, name: str, wavs: list[str]) -> Path:
-    sd = root / name
-    sd.mkdir(parents=True)
-    for w in wavs:
-        _seed_wav(sd / w)
-    return sd
-
-
-# ---------------------------------------------------------------------------
-# Recorder fixture — tmpdir, no auth, no live spawn
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Recorder:
-    monkeypatch.setattr(_config, "AUTH_ENABLED", False)
-    monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
-    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
-    cfg = tmp_path / "config"
-    cfg.mkdir()
-    monkeypatch.setattr(_config, "CONFIG_DIR", cfg)
-    monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
-    monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
-    monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
-    monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
-    (tmp_path / "recordings").mkdir()
-    return Recorder(
-        recordings_dir=tmp_path / "recordings",
-        config_dir=cfg,
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=8000),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
+# The `recorder_under_test` fixture (tmpdir-rooted Recorder, no auth, no
+# live spawn) lives in conftest.py — shared with test_batch_strip.py.
 
 
 @pytest.fixture
@@ -123,7 +65,7 @@ async def test_transcribe_one_writes_sidecar_and_returns_payload(
     lands on disk, and the returned dict is the freshly-written
     payload (not an in-memory shape that could drift from the file)."""
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m", text="hello world"))
-    _seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
 
     request = BatchOneRequest(
         session="s",
@@ -181,7 +123,7 @@ async def test_transcribe_one_raises_wav_too_quiet_on_silent_audio(
     install_stub_transcriber(stub)
     sd = recorder_under_test.recordings_dir / "s"
     sd.mkdir(parents=True)
-    _seed_silent_wav(sd / WAV_NAME)
+    seed_silent_wav(sd / WAV_NAME)
 
     request = BatchOneRequest(
         session="s",
@@ -213,7 +155,7 @@ async def test_transcribe_one_uses_session_meta_prompt_when_set(
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
 
     install_stub_transcriber(_Spy(backend="fake-be", model="fake-m"))
-    _seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
     (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL", encoding="utf-8")
     (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
     # session-meta sits in recordings/<session>/session-meta.json.
@@ -248,7 +190,7 @@ async def test_transcribe_one_falls_back_to_global_when_meta_empty(
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
 
     install_stub_transcriber(_Spy(backend="fake-be", model="fake-m"))
-    _seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
     (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL DEFAULT", encoding="utf-8")
     (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
 
@@ -283,7 +225,7 @@ async def test_transcribe_session_writes_outputs_and_returns_merged(
     """Drives the loop, the merge, AND the file writes. Returns the
     same dict that landed in session-transcript.json on disk."""
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m", text="merged"))
-    sd = _seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+    sd = seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
 
     request = BatchSessionRequest(
         session="s",
@@ -313,7 +255,7 @@ async def test_transcribe_session_releases_jobtracker_on_success(
     forever (the next call would 409 even after the operator fixed
     the root cause)."""
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m"))
-    _seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+    seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
 
     request = BatchSessionRequest(
         session="s",
@@ -340,7 +282,7 @@ async def test_transcribe_session_releases_jobtracker_on_exception(
             raise RuntimeError("model exploded")
 
     install_stub_transcriber(_Boom(backend="fake-be", model="fake-m"))
-    _seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+    seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
 
     request = BatchSessionRequest(
         session="s",
@@ -362,7 +304,7 @@ async def test_transcribe_session_raises_session_busy_when_slot_taken(
     recorder_under_test, install_stub_transcriber
 ):
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m"))
-    _seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+    seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
     # Pre-claim the slot — as if another transcribe were in flight.
     await recorder_under_test.jobs.claim(
         JobState(
@@ -419,7 +361,7 @@ async def test_transcribe_session_raises_invalid_range_on_unparseable_iso(
     it to 400. Distinct from `NoUsableWavs` (404) because the inputs
     were syntactically wrong, not just empty-result."""
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m"))
-    _seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+    seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
 
     request = BatchSessionRequest(
         session="s",
@@ -458,7 +400,7 @@ async def test_transcribe_session_progress_updates_per_wav(recorder_under_test, 
             return super().transcribe(path, **kw)
 
     install_stub_transcriber(_ProgressSpy(recorder_under_test, backend="fake-be", model="fake-m"))
-    _seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+    seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
 
     request = BatchSessionRequest(
         session="s",
@@ -475,6 +417,54 @@ async def test_transcribe_session_progress_updates_per_wav(recorder_under_test, 
 
     assert observed_currents == [0, 1]
     assert observed_files == list(SESSION_WAVS)
+
+
+async def test_transcribe_session_runs_model_on_one_dedicated_thread(
+    recorder_under_test, install_stub_transcriber
+):
+    """MLX's Metal GPU stream is thread-local: every model op for a job must
+    run on ONE thread or `mx.eval` raises "There is no Stream(gpu, 0) in
+    current thread". The loop offloaded each `cached_transcribe` via
+    `asyncio.to_thread` (the shared default executor), so under concurrent
+    offloaded work (the ~2 Hz /api/state poll, the per-clip loop) a later
+    `generate` could land on a worker without the model's stream. Stripped
+    sessions surface it reliably — every freshly-cut clip is a cache MISS, so
+    the model actually runs for each. The fix pins all model work to the
+    dedicated `tapscribe-model` worker. The assertion is MLX-free (a stub
+    records its thread) so it guards the contract on every CI host, not just
+    Metal."""
+    import threading
+
+    from tapscribe.transcribers import MODEL_THREAD_PREFIX
+
+    seen_threads: list[str] = []
+
+    class _ThreadSpy(TranscriberStub):
+        def transcribe(self, path, **kw):  # noqa: ARG002
+            seen_threads.append(threading.current_thread().name)
+            return super().transcribe(path, **kw)
+
+    install_stub_transcriber(_ThreadSpy(backend="fake-be", model="fake-m"))
+    seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+
+    request = BatchSessionRequest(
+        session="s",
+        source="original",
+        model="fake-m",
+        backend="cpu",
+        from_iso=None,
+        to_iso=None,
+        force=False,
+        source_lang=None,
+        target_lang=None,
+    )
+    await transcribe_session(recorder_under_test, request)
+
+    assert len(seen_threads) == len(SESSION_WAVS), seen_threads
+    # Every clip transcribed on the SAME thread, and that thread is the
+    # dedicated model worker — never a default-pool thread.
+    assert len(set(seen_threads)) == 1, f"model scattered across threads: {seen_threads}"
+    assert seen_threads[0].startswith(MODEL_THREAD_PREFIX), seen_threads[0]
 
 
 # ---------------------------------------------------------------------------

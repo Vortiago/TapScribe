@@ -136,7 +136,7 @@ Two kinds today:
 
 `ModelInput = TextInput | SelectInput` is the union. New input
 kinds are added by extending the union, adding a renderer in
-`web/js/components/session-detail.js`, and giving them a
+`web/js/next/components/engine.js`, and giving them a
 discriminator value in `to_mapping()`.
 
 ## LiveChannel · WhisperLiveKitChannel
@@ -161,6 +161,17 @@ Each `LiveChannel` declares a class attribute
 boundary check) can refuse `gate_kind="backend"` against channels
 that have no native VAD to defer to. `WhisperLiveKitChannel` is
 True; the planned `ParakeetLiveChannel` will be False.
+
+`info["device"]` is an **observation, not an assertion**: WlK exposes
+no `--device` flag (its faster-whisper backend hands `device="auto"`
+to CTranslate2 inside the child), so the parent can't pin or know the
+device. The label is seeded with a prediction from the same
+`available_backends()` probe the batch chips use (`"CUDA (auto)"` /
+`"CPU"`), then overwritten by the log pump when the child's
+`Accelerator: …` startup banner reports what it actually sees — the
+same observe-the-child pattern that promotes `state` to "running".
+Future `LiveChannel` adapters must keep this semantic: report the
+device you observed, not the one you hope for.
 
 ## SpeechGate · gate_kind
 
@@ -346,6 +357,23 @@ one, document why and update this list.
   `DRAIN_MAX_MS`, trailing audio is dropped rather than blocking the
   utterance close forever. Don't remove the timeout.
 
+## Interaction hold
+
+The dashboard-wide rule that a per-tick render defers to operator
+interaction state instead of destroying it: a region is **held** (not
+re-rendered) while a control inside it is focused, a text selection
+starts or ends inside it, or — for tail-following panels — the operator
+has scrolled away from the tail. Deferral always skips **without
+advancing the render gate**, so the held render lands on the first tick
+after the interaction clears; updates are delayed by the operator's own
+interaction, never lost.
+
+Mechanics live in `web/js/templates.js` (`renderRegion`,
+`selectionInside`); the decision and its rejected alternatives
+(DOM-diffing, capture-and-restore, pausing the poll) are ADR-0004. Say
+"this region needs the interaction hold," not ad-hoc descriptions of
+focus/selection guards.
+
 ## Per-WAV transcript cache
 
 Each transcribed WAV gets one or more cached transcripts stored next to
@@ -428,6 +456,24 @@ This keeps the module FastAPI-free so the same orchestrator can drive
 a CLI batch, a queue worker, or future per-region re-transcribes
 without re-implementing the chain. The request value objects
 (`BatchOneRequest`, `BatchSessionRequest`) are the test surface.
+
+## Batch strip
+
+The strip-silence sibling of Batch transcription — same orchestrator
+shape, same FastAPI-free contract. Lives in `tapscribe/batch_strip.py`;
+the `/api/sessions/{session}/strip-silence` route handler is a thin
+parse-and-map shim over it.
+
+One entry point: `strip_session(recorder, StripSessionRequest) -> dict`
+— claims the session's `JobTracker` slot (the same "one transcribe/strip
+per session" rule Batch transcription claims under), loops
+`strip_one_wav` over every original WAV on a worker thread, aggregates,
+and releases. Raises the shared `SessionBusy` / `NoUsableWavs` (they are
+JobTracker / selection semantics, not transcription-specific) plus its
+own `StrippedDirUnclearable` when a previous `stripped/` can't be
+cleared. `StripSessionRequest` owns the knob defaults (`min_silence_ms`,
+`pad_ms`, `speech_floor_db`); the route forwards only
+explicitly-provided values, and is the test surface.
 
 ## Wire-format note
 

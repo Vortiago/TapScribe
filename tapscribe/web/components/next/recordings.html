@@ -1,0 +1,159 @@
+<!-- ======================================================================
+     Stages · Recordings (SESSION stage 2).
+     The per-session AUDIO-FILES stage: a waveform-cut PLACEHOLDER + the real
+     strip-silence knobs, and the per-WAV list (originals + indented stripped
+     region clips, with the original/stripped source toggle). Transcription
+     (engine + transcribe + per-WAV cache) lives in the Transcript stage now;
+     Recordings is files + silence-stripping only. Mounted into #viewRoot by
+     js/next/views/recordings.js, which fills every data-slot with live
+     /api/state data and wires the real endpoints. No mock data here — the
+     only stub is the waveform preview, tagged inline.
+     ====================================================================== -->
+<template id="tpl-next-view-recordings">
+  <div data-slot="head"></div>
+
+  <!-- HERO: waveform-cut PLACEHOLDER (net-new, no backend) + REAL strip
+       knobs/stats/job. The strip RUN is wired; the canvas is a stub. -->
+  <div class="panel panel--primary wavehero">
+    <div class="wave-top">
+      <span class="wave-top__name mono" data-slot="waveName">no WAV selected</span>
+      <div class="wave-stats">
+        <div class="wstat"><span class="wstat__v accent" data-slot="sClips">—</span><span class="wstat__k">clips</span></div>
+        <div class="wstat"><span class="wstat__v good" data-slot="sSpeech">—</span><span class="wstat__k">speech_seconds</span></div>
+        <div class="wstat"><span class="wstat__v" data-slot="sIn">—</span><span class="wstat__k">in_seconds</span></div>
+        <div class="wstat"><span class="wstat__v" data-slot="sKept">—</span><span class="wstat__k">kept</span></div>
+      </div>
+    </div>
+
+    <!-- waveform cut preview — net-new, NOT wired to any backend. Slimmed to a
+         single-row banner (was a tall stub) so the real WAV list below sits
+         higher and fills the reclaimed height. Keeps the `mock · not wired`
+         chip. -->
+    <div class="wavestub wavestub--slim">
+      <span class="wavestub__ic">🌊</span>
+      <span class="wavestub__h">waveform preview — coming soon</span>
+      <span class="wavestub__tag">mock · not wired</span>
+    </div>
+
+    <!-- strip-silence: REAL knobs → POST /api/sessions/{session}/strip-silence -->
+    <div class="knobbar">
+      <div class="kfield">
+        <div class="kfield__top"><span class="kfield__k">Min silence</span><span class="kfield__v" data-slot="kvMinSilence"></span></div>
+        <input type="range" min="100" max="5000" step="50" data-strip-knob="min_silence_ms" data-unit="ms">
+        <div class="kfield__rng"><span>100 ms</span><span>5000 ms</span></div>
+      </div>
+      <div class="kfield">
+        <div class="kfield__top"><span class="kfield__k">Padding</span><span class="kfield__v" data-slot="kvPad"></span></div>
+        <input type="range" min="0" max="2000" step="25" data-strip-knob="pad_ms" data-unit="ms">
+        <div class="kfield__rng"><span>0 ms</span><span>2000 ms</span></div>
+      </div>
+      <div class="kfield">
+        <div class="kfield__top"><span class="kfield__k">Silence floor</span><span class="kfield__v" data-slot="kvFloor"></span></div>
+        <input type="range" min="-120" max="0" step="1" data-strip-knob="speech_floor_db" data-unit="dB">
+        <div class="kfield__rng"><span>-120 dB</span><span>0 dB</span></div>
+      </div>
+      <div class="knobbar__act">
+        <button class="act act--sm act--primary" type="button" data-slot="stripBtn">✂ strip</button>
+        <button class="act act--sm" type="button" data-slot="clearBtn">clear</button>
+      </div>
+    </div>
+
+    <!-- job progress (one job per session, transcribe OR strip) -->
+    <div class="jobbar" data-slot="jobBar" hidden>
+      <div class="jobbar__top"><span data-slot="jobLabel">Job running</span><span class="jobbar__pct mono" data-slot="jobCount"></span></div>
+      <div class="progress"><div class="progress__fill" data-slot="jobFill"></div></div>
+      <div class="jobbar__wav mono" data-slot="jobWav"></div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- per-WAV list (originals + indented stripped region clips). Transcription
+       moved to the Transcript stage; this is the files view only. Fills the
+       reclaimed height (the #1 fix) and scrolls its own rows. -->
+  <div class="panel panel--fill">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">📁</span>WAVs &amp; stripped clips</div>
+      <div class="panel__hint mono" data-slot="wavHint"></div>
+    </div>
+    <div class="panel__body flush"><div class="wavlist" data-slot="wavList"></div></div>
+  </div>
+</template>
+
+<!-- source toggle (original / stripped) — lives in the header actions slot. -->
+<template id="tpl-next-srcsw">
+  <span class="srcsw">
+    <button class="srcsw__opt" type="button" data-src="original">original</button>
+    <button class="srcsw__opt" type="button" data-src="stripped">stripped</button>
+  </span>
+</template>
+
+<!-- one WAV-list row (original). The name/sub block selects the WAV (drives the
+     waveform header); the right cluster carries the tx tag + per-WAV actions
+     (expand transcript / download / delete). The row is a <div> rather than a
+     <button> so the action controls can nest legally; `data-wav-select` is the
+     click target that selects the row. The expandable transcript host is a
+     sibling appended after the row by recordings.js when expanded. -->
+<template id="tpl-next-wavrow">
+  <div class="wavrow" data-slot="row">
+    <span class="wavrow__l" data-wav-select role="button" tabindex="0">
+      <span class="wavrow__n mono" data-slot="name"></span>
+      <span class="wavrow__sub mono" data-slot="sub"></span>
+    </span>
+    <span class="wavrow__r">
+      <span class="wavrow__dur mono" data-slot="dur"></span>
+      <span class="wavrow__tx" data-slot="txTag"></span>
+      <button class="btn tiny ghost" type="button" data-wav-expand title="Expand the cached transcript">tx</button>
+      <a class="btn tiny ghost" download title="Download WAV" data-slot="download">⬇</a>
+      <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this WAV">🗑</button>
+    </span>
+  </div>
+</template>
+
+<!-- one indented stripped region clip under its parent original. Shows the
+     clip's span/size/duration + transcript status, plus the same per-clip
+     actions (expand transcript / download stripped clip / delete). -->
+<template id="tpl-next-wavclip">
+  <div class="wavrow is-clip" data-slot="row">
+    <span class="wavrow__l">
+      <span class="wavrow__n mono" data-slot="name"></span>
+      <span class="wavrow__sub mono" data-slot="sub"></span>
+    </span>
+    <span class="wavrow__r">
+      <span class="wavrow__dur mono" data-slot="dur"></span>
+      <span class="wavrow__tx" data-slot="txTag"></span>
+      <button class="btn tiny ghost" type="button" data-wav-expand title="Expand the cached transcript">tx</button>
+      <a class="btn tiny ghost" download title="Download stripped clip" data-slot="download">⬇</a>
+      <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this stripped clip">🗑</button>
+    </span>
+  </div>
+</template>
+
+<!-- ── Per-WAV expanded transcript (inline, lazy) ─────────────────────────
+     Appended as a sibling AFTER its WAV row when expanded. The meta strip +
+     the .transcript lines container reuse dashboard.css's .expand-tx /
+     .transcript styling (both stylesheets load on /next). The lines container
+     uses `white-space: pre-wrap`, so every template rendered INSIDE it
+     (tpl-next-txline) must stay on a single line — see merged-transcript.html
+     for the same constraint. -->
+<template id="tpl-next-txexpand">
+  <div class="expand-tx" data-slot="expandHost">
+    <div class="meta" data-slot="meta"></div>
+    <div class="transcript" data-slot="lines"></div>
+  </div>
+</template>
+
+<!-- one meta key/value chip in the expand strip -->
+<template id="tpl-next-txmeta-field">
+  <span><span data-slot="label"></span> <span class="fg" data-slot="value"></span></span>
+</template>
+
+<!-- one transcript line. Single-line markup (pre-wrap container). The literal
+     spaces between the spans are load-bearing layout. The body span carries
+     the .seg.suppressed class on suppressed lines for the strike-through. -->
+<template id="tpl-next-txline"><div><span class="ts" data-slot="ts"></span> <span data-slot="speaker"></span> <span data-slot="body"></span></div></template>
+
+<!-- tiny placeholder shown while the full transcript is being fetched lazily -->
+<template id="tpl-next-txloading">
+  <div class="expand-tx-loading dim small" data-slot="loadingHost">loading transcript…</div>
+</template>

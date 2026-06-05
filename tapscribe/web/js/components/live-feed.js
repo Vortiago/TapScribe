@@ -1,24 +1,24 @@
 // @ts-check
 // Live transcripts feed — the streaming terminal-style panel.
 //
-// WhisperLiveKit commits each sentence in small word-level chunks
-// (LocalAgreement-2), and the Recorder's relay forwards every chunk as its
-// own settled line (see live_relay.WlKRelay._consider_emit_line, which emits
-// only the new suffix when WlK grows a line). One settled line = one entry in
-// the LiveTranscripts deque, so left untouched the panel paints one row per
-// few words — a single spoken sentence ends up stacked across a dozen
-// timestamped rows. We coalesce on the way to the DOM: consecutive fragments
-// from the same speaker are joined and then re-split on sentence boundaries,
-// so each row is one sentence rather than one word. This is purely
-// presentational — the deque behind
-// /api/state keeps every fragment, and the authoritative transcript still
-// comes from batch re-transcription of the per-utterance WAVs.
+// Two layers, merged here:
 //
-// The feed is signature-gated so we only re-emit the DOM when the tail
-// utterance actually changed. Skipping rebuilds preserves the user's scroll
-// position and any text selection inside an in-progress utterance.
+//  1. COALESCING (#80): WhisperLiveKit commits each sentence in small
+//     word-level chunks (LocalAgreement-2) and the Recorder's relay forwards
+//     every chunk as its own settled line, so the deque holds one entry per
+//     few words. We join consecutive fragments from the same speaker and
+//     re-split on sentence boundaries (`groupFeed`), so each rendered row is
+//     one sentence, not one word. Purely presentational — the deque keeps
+//     every fragment and the authoritative transcript is the batch re-run.
+//  2. INCREMENTAL RENDER: the coalesced lines are an append-only list (a new
+//     sentence appends one row; once the deque saturates the head shifts off),
+//     so we diff against what's rendered and append/shift instead of rebuilding
+//     all rows each tick — that full rebuild (template clones + replaceChildren
+//     + an autoscroll layout pass) ran on every settled caption during a
+//     meeting. A clean shifted-prefix appends only the new tail; anything else
+//     falls back to a full rebuild. Appending also preserves text selection.
 
-import { tpl, mount, pick } from "../templates.js";
+import { tpl, mount, pick, selectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtClock } from "../formatters.js";
 
@@ -32,7 +32,22 @@ import { fmtClock } from "../formatters.js";
 // turn rather than the next word of the same sentence.
 const GROUP_GAP_MS = 30_000;
 
+// "::empty::" sentinel for the idle ascii state (mounted once, then skipped —
+// re-mounting it every poll churned ~100 detached nodes/sec; see the
+// idle-churn guard in tests/e2e/test_dashboard_ui.py). Otherwise holds the
+// raw-feed signature (tail + length) so an unchanged poll skips all work.
 let lastSig = "";
+// Set by invalidate(): force the next non-empty render down the full-rebuild
+// path even if the rendered keys would match (e.g. after a clear).
+let forceNext = false;
+
+// Rendered-line keys per feed body element. Keyed by the body so a remounted
+// shell (fresh element) naturally starts from a clean slate.
+/** @type {WeakMap<Element, string[]>} */
+const _renderedKeys = new WeakMap();
+
+/** One coalesced row: a speaker turn's sentence + the run's starting stamp. */
+/** @typedef {{ who: string, identity: string, ts: string, text: string }} FeedLine */
 
 /**
  * Join settled-line fragments into one readable string. A fragment that
@@ -78,7 +93,7 @@ export function splitSentences(text) {
  * exceeds GROUP_GAP_MS; each resulting line carries the run's starting
  * timestamp and one sentence of its joined text.
  * @param {import('../types.js').LiveFeedEntry[]} feed
- * @returns {{ who: string, identity: string, ts: string, text: string }[]}
+ * @returns {FeedLine[]}
  */
 export function groupFeed(feed) {
   /** @type {{ key: string, who: string, identity: string, ts: string, parts: string[], lastMs: number }[]} */
@@ -113,6 +128,50 @@ export function groupFeed(feed) {
   );
 }
 
+/** Identity of one coalesced line. The trailing speaker's LAST line mutates as
+ * its run grows (more fragments → re-joined text), which changes its key — the
+ * shift diff handles that by falling back to a rebuild; earlier lines are
+ * stable. */
+/** @param {FeedLine} g */
+const keyOf = (g) => `${g.ts || ""} ${g.identity || ""} ${(g.text || "").length} ${(g.text || "").slice(-16)}`;
+
+/** Build one `.line` ELEMENT (not the template fragment — the fragment
+ * carries whitespace text nodes that would survive the element-wise removal
+ * in the shift path and pile up over a long meeting). */
+/** @param {FeedLine} g */
+function buildLine(g) {
+  const node = tpl("tpl-feed-line");
+  pick(node, "ts").textContent = `[${fmtClock(g.ts)}]`;
+  const whoEl = pick(node, "who");
+  whoEl.textContent = g.who;
+  whoEl.dataset.spk = String(speakerIndex(g.who));
+  whoEl.title = g.identity || "";
+  pick(node, "txt").textContent = g.text || "";
+  return /** @type {HTMLElement} */ (node.firstElementChild);
+}
+
+/**
+ * Find how far the rendered keys have SHIFTED relative to the new lines: the
+ * smallest s such that rendered[s..] is a prefix of keys. s=0 is pure append;
+ * s>0 means the server deque dropped s head entries. Returns -1 when no
+ * clean shift exists (rebuild instead).
+ * @param {string[]} rendered
+ * @param {string[]} keys
+ */
+function shiftOf(rendered, keys) {
+  const maxShift = Math.min(rendered.length, 50);
+  for (let s = 0; s <= maxShift; s++) {
+    const overlap = rendered.length - s;
+    if (overlap <= 0 || overlap > keys.length) continue;
+    let ok = true;
+    for (let i = 0; i < overlap; i++) {
+      if (rendered[s + i] !== keys[i]) { ok = false; break; }
+    }
+    if (ok) return s;
+  }
+  return -1;
+}
+
 /**
  * @param {import('../types.js').AppState} j
  * @param {import('../types.js').LiveFeedCtx} ctx
@@ -121,50 +180,67 @@ export function render(j, { countEl, shell, autoscrollEl }) {
   const feed = j.live_feed || [];
 
   if (!feed.length) {
-    countEl.textContent = "0";
-    mount(shell, tpl("tpl-feed-empty"));
-    lastSig = "";
+    if (countEl.textContent !== "0") countEl.textContent = "0";
+    // Mount the empty-state ascii ONCE, then skip — re-mounting it every poll
+    // tick (the common idle state) churns ~100 detached nodes/sec, which the
+    // operator's tab accumulates between GCs until it OOMs.
+    if (lastSig !== "::empty::") {
+      mount(shell, tpl("tpl-feed-empty"));
+      lastSig = "::empty::";
+    }
     return;
   }
 
+  // Fast skip: the raw feed's tail + length is a cheap proxy for "did anything
+  // change" (a new fragment always moves the tail, even after the deque
+  // saturates at 200). Avoids re-coalescing + re-diffing on an unchanged poll.
+  // forceNext (post-clear) bypasses it.
+  const tail = feed.at(-1);
+  const feedSig = `${feed.length}::${tail?.ts || ""}::${tail?.identity || ""}::${(tail?.text || "").slice(0, 20)}`;
+  if (!forceNext && feedSig === lastSig) return;
+
   let body = /** @type {HTMLElement | null} */ (shell.querySelector(".feed-body"));
-  let wasAtBottom = true;
-  if (body) {
-    wasAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 10;
-  } else {
+  if (!body) {
     mount(shell, tpl("tpl-feed-body"));
     body = /** @type {HTMLElement} */ (shell.querySelector(".feed-body"));
   }
 
-  // Sig uses the tail entry, not just length, so updates keep flowing
-  // after the server-side deque saturates at maxlen=200. A new fragment
-  // always moves the tail (text or identity), so coalescing never hides
-  // an update from the gate.
-  const tail = feed.at(-1);
-  const sig = `${feed.length}::${tail?.ts || ""}::${tail?.identity || ""}::${(tail?.text || "").slice(0, 20)}`;
-  if (sig === lastSig) return;
-  lastSig = sig;
+  // Hold feed mutations while the operator is select-copying caption text.
+  // Appends alone wouldn't disturb a selection, but a same-speaker
+  // continuation grows the tail sentence (key change → no clean shift →
+  // full replaceChildren) and a saturated deque drops head rows — both
+  // dissolve the selection. Placed BEFORE lastSig/forceNext are consumed so
+  // the deferred update retries on the next tick after release.
+  if (selectionInside(body)) return;
 
-  // The count reflects what's actually drawn — coalesced lines, not raw
-  // deque entries — so the header number matches the rows on screen.
+  // Coalesce fragments → one row per sentence; the count reflects what's drawn.
   const groups = groupFeed(feed);
-  countEl.textContent = String(groups.length);
+  const countStr = String(groups.length);
+  if (countEl.textContent !== countStr) countEl.textContent = countStr;
 
-  const frag = document.createDocumentFragment();
-  for (const g of groups) {
-    const node = tpl("tpl-feed-line");
-    pick(node, "ts").textContent = `[${fmtClock(g.ts)}]`;
-    const whoEl = pick(node, "who");
-    whoEl.textContent = g.who;
-    whoEl.dataset.spk = String(speakerIndex(g.who));
-    whoEl.title = g.identity || "";
-    pick(node, "txt").textContent = g.text;
-    frag.appendChild(node);
+  const keys = groups.map(keyOf);
+  const rendered = forceNext ? undefined : _renderedKeys.get(body);
+  forceNext = false;
+  lastSig = feedSig;
+
+  // Sticky-scroll: only read scroll geometry when we're about to mutate.
+  const wasAtBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 10;
+
+  const shift = rendered && body.childElementCount === rendered.length ? shiftOf(rendered, keys) : -1;
+  if (rendered && shift >= 0) {
+    for (let i = 0; i < shift; i++) body.firstElementChild?.remove();
+    const fresh = document.createDocumentFragment();
+    for (const g of groups.slice(rendered.length - shift)) fresh.appendChild(buildLine(g));
+    if (fresh.childNodes.length) body.appendChild(fresh);
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const g of groups) frag.appendChild(buildLine(g));
+    body.replaceChildren(frag);
   }
-  body.replaceChildren(frag);
+  _renderedKeys.set(body, keys);
 
   if (/** @type {HTMLInputElement} */ (autoscrollEl).checked && wasAtBottom) body.scrollTop = body.scrollHeight;
 }
 
-// Reset the sig so the next render forces a rebuild (e.g. after clear).
-export const invalidate = () => { lastSig = ""; };
+// Reset the sigs so the next render forces a repaint (e.g. after clear).
+export const invalidate = () => { lastSig = ""; forceNext = true; };

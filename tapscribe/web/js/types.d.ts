@@ -22,12 +22,15 @@ export interface AppState {
   live_info: LiveInfo;
   live_log: string[];
   live_supports_native_vad: boolean;
-  mlx_available: boolean;
   backend: string;
   available_backends: string[];
   recording_enabled: boolean;
   prompt: ConfigFile;
   live_prompt: ConfigFile;
+  // Operator's saved DEFAULT live-channel model id (live-model.txt); "" when
+  // unset. Distinct from live_info.model (what's actually running) — the Live
+  // engine card flags "restart to apply" while they differ.
+  live_model_default: string;
   hotwords: ConfigFile;
   inputs_support: InputsSupport;
   hallucinations: HallucinationsConfig;
@@ -109,7 +112,11 @@ export interface Session {
   is_current: boolean;
   earliest_iso: string | null;
   latest_iso: string | null;
-  session_transcript: MergedTranscript | null;
+  // SLIM marker only — /api/state no longer embeds the full merged
+  // transcript. The full body (segments[]/plain_text/suppressed[]) is fetched
+  // lazily via fetchSessionTranscript(session, transcribed_at), cached
+  // client-side. A marker change (new transcribed_at) is the re-fetch signal.
+  session_transcript: MergedTranscriptMarker | null;
   progress: JobStateSnapshot | null;
   session_meta: SessionMeta;
   stripped: StrippedStats | null;
@@ -145,8 +152,8 @@ export interface WavFile {
   name: string;
   size: number;
   duration_s: number;
-  transcript: WavTranscript | null;   // primary cached transcript
-  transcripts: WavTranscript[];       // all cached model variants
+  transcript: WavTranscriptMarker | null;   // SLIM marker of the primary cached transcript
+  transcripts: WavTranscriptVariant[];       // compact cache_listing of cached model variants
   wav_start: string | null;           // ISO 8601 from filename
   wav_end: string | null;
   speaker_name: string;
@@ -158,14 +165,42 @@ export interface WavRegion {
   name: string;
   size: number;
   duration_s: number;
-  transcript: WavTranscript | null;
-  transcripts: WavTranscript[];
+  transcript: WavTranscriptMarker | null;
+  transcripts: WavTranscriptVariant[];
   wav_start: string | null;
   wav_end: string | null;
   speaker_name: string;
 }
 
-// Cached per-WAV transcript (the primary model's result).
+// SLIM per-WAV transcript marker embedded in /api/state — just the fields a
+// listing reads without rendering (has-tx, "took Xms", the set-primary
+// compare key). The full body is fetched lazily via fetchWavTranscript.
+export interface WavTranscriptMarker {
+  transcribed_at?: string; // ISO 8601
+  transcribe_ms?: number;
+  model?: string;
+  backend?: string;
+  source?: "original" | "stripped";
+  segment_count?: number;
+}
+
+// One row of wav_cache.cache_listing — the compact per-(backend,model)
+// variant listing for the cache picker. Not the full transcript.
+export interface WavTranscriptVariant {
+  backend: string;
+  model: string;
+  is_primary: boolean;
+  transcribe_ms?: number;
+  // The entry's transcribe source — set-primary sends it back so the server
+  // resolves a stripped clip under <session>/stripped/ instead of 404ing.
+  source: "original" | "stripped";
+  // cache_listing doesn't emit text today; the cache panel's word-count reads
+  // it defensively (falls back to 0).
+  text?: string;
+}
+
+// Full cached per-WAV transcript (the primary model's result) — the lazy
+// fetchWavTranscript result, rendered by buildExpandTx.
 export interface WavTranscript {
   transcribed_at: string; // ISO 8601
   transcribe_ms: number;
@@ -186,9 +221,21 @@ export interface SuppressedHallucination {
 }
 
 // ---------------------------------------------------------------------------
-// Merged (session-level) transcript — /api/transcribe-session response and
-// the session_transcript field embedded in Session above.
+// Merged (session-level) transcript.
+//
+// `MergedTranscriptMarker` is the SLIM shape /api/state embeds per session —
+// just the fields a listing reads without rendering (counts, speakers, the
+// re-fetch stamp). The full `MergedTranscript` (segments[]/plain_text/…) is
+// the /api/transcribe-session response AND the lazy fetchSessionTranscript
+// result that the merged-transcript renderer consumes.
 // ---------------------------------------------------------------------------
+
+export interface MergedTranscriptMarker {
+  transcribed_at: string | null; // ISO 8601 — null only on malformed on-disk JSON
+  segment_count: number;
+  suppressed_count: number;
+  speakers: string[]; // main.js derives its speaker-alias key set from this
+}
 
 export interface MergedTranscript {
   session: string;
@@ -338,9 +385,9 @@ export interface ActiveTapsCtx {
 
 export interface LiveChannelCtx {
   stateEl: HTMLElement;
+  /** Acceleration note (historical name) — filled from available_backends. */
   mlxEl: HTMLElement;
   bodyEl: HTMLElement;
-  mlxAvail: boolean;
   onAction: { start: () => void; stop: () => void };
   liveCatalog: ModelCatalog;
 }
@@ -348,67 +395,14 @@ export interface LiveChannelCtx {
 export interface ConfigCardCtx {
   gridEl: HTMLElement;
   headerNoteEl: HTMLElement;
+  // Stages Settings only: gate the batch prompt/hotwords editors on a SPECIFIC
+  // model's declared inputs (the "Default engine" selection) instead of the
+  // registry-wide inputs_support. Classic dashboard omits it → unchanged.
+  supportOverride?: { batch_prompt: boolean; batch_hotwords: boolean } | null;
+  // Show the "N sessions override this" footnote (default true; Stages passes
+  // false — its global defaults don't surface per-session override counts).
+  showOverrideCounts?: boolean;
 }
 
-export interface SessionSidebarCtx {
-  listEl: HTMLElement;
-  selectedId: string | null;
-  filter: string;
-  metaFor: (s: Session) => EffectiveMeta;
-  onSelect: (id: string) => void;
-  onDelete: (id: string) => void;
-}
-
-export interface SessionDetailCtx {
-  // State snapshots
-  lastJson: AppState | null;
-  batchModel: string;
-  batchBackend: string;
-  modelCatalog: ModelCatalog;
-  sourcePick: Map<string, "original" | "stripped">;
-  sessInflight: Map<string, number>;
-  sessJustDone: Map<string, number>;
-  sessStripInflight: Map<string, number>;
-  wavInflight: Map<string, number>;
-  wavJustDone: Map<string, number>;
-  expandedWav: string | null;
-  rangeState: Record<string, Record<string, string>>;
-  rxOpen: boolean;
-  rxPattern: string;
-  rxFlags: string;
-  defaults: { prompt: string; hotwords: string };
-  // Derived state helpers
-  effectiveMeta: (s: Session | null) => EffectiveMeta;
-  deriveSpeakerKeys: (s: Session | null) => string[];
-  // Sub-component delegate
-  renderMerged: (t: MergedTranscript, meta: EffectiveMeta) => Node;
-  // Mutation callbacks
-  onTranscribeSession: (sessId: string) => void;
-  onCopyMerged: (sessId: string, btn: HTMLButtonElement) => void;
-  onTranscribeWav: (session: string, name: string, sourceOverride?: string | null) => void;
-  onToggleWav: (wavKey: string, sess: Session) => void;
-  onRangeEdit: (sessKey: string, key: string, value: string) => void;
-  onModelChange: (model: string) => void;
-  onBackendChange: (backend: string) => void;
-  onSourcePick: (sessKey: string, source: "original" | "stripped") => void;
-  onStripRun: (sessId: string) => void;
-  onStripRemove: (sessId: string) => void;
-  onDeleteAudio: (sessId: string) => void;
-  onDeleteWav: (session: string, name: string, source: string) => void;
-  // strip-silence operator knobs (added in #58). stripOpts holds the
-  // currently-selected values; the inputs in session-detail.js render
-  // them and call onStripOptEdit per keystroke (empty string → reset to
-  // default for that key, see main.js). onStripOptReset bulk-resets.
-  stripOpts: StripOpts;
-  onStripOptEdit: <K extends keyof StripOpts>(key: K, value: string) => void;
-  onStripOptReset: () => void;
-  onNameEdit: (sessKey: string, value: string) => void;
-  onAliasEdit: (sessKey: string, speakerKey: string, value: string) => void;
-  onMetaOverrideEdit: (sessKey: string, metaKey: string, value: string) => void;
-  onAbsorbSession: (target: string, source: string) => void;
-  onRxToggle: (sessKey: string) => void;
-  onRxPatternInput: (sessKey: string, value: string) => void;
-  onRxFlagsInput: (sessKey: string, value: string) => void;
-  onRxSeed: (sessKey: string, seed: string) => void;
-  onAuditToggle: () => void;
-}
+// (SessionSidebarCtx / SessionDetailCtx were removed with the classic
+// dashboard — the Stages views type their contexts inline via JSDoc.)

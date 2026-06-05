@@ -1,0 +1,1184 @@
+/* =========================================================================
+   TapScribe · Stages (/next) — Phase 1.
+   Sharp, de-bubbled, dense "control surface" layered on the classic
+   dashboard's :root tokens (dashboard.css, loaded first). No hardcoded
+   colours — everything derives from the --bg / --fg / --rec / --ok / --warn / --info
+   --magenta + --mono/--sans. The one warm accent is --warn (amber), doing the
+   "where am I / what's live" work; --rec is the live pulse.
+
+   Aesthetic rules (from prototypes/stages): minimal radius (<=3px), no pills,
+   1px hairline separators, tight padding, dense rows, monospace for all data.
+   ========================================================================= */
+
+:root {
+  --next-r: 3px;          /* the one radius — hard, minimal */
+  --next-r-sm: 2px;
+  --next-accent: var(--warn);   /* warm amber: active view + highlights */
+  --next-spine-w: 232px;
+  --next-rail-w: 260px;   /* global "active taps" rail; 0 when collapsed */
+}
+
+/* The Stages page reuses dashboard.css's body reset (dark bg, sans, tnum).
+   Drop the radial vignette the classic shell paints via body::before so the
+   control surface reads flat. */
+body::before { display: none; }
+
+.next-app {
+  display: grid;
+  grid-template-columns: var(--next-spine-w) 1fr var(--next-rail-w);
+  /* The shell fills the viewport exactly and never scrolls itself — so each
+     view's fill panel (`.panel--fill`) scrolls its OWN body internally and its
+     bottom hairline lands at the footer instead of pushing the page taller.
+     The spine + rail are 100vh sticky inside this; the workspace column scrolls
+     internally only when a stacked/narrow layout overflows (`.work__inner`
+     overflow below). The mobile rail is position:fixed, so overflow:hidden
+     here doesn't clip its overlay. */
+  height: 100vh;
+  overflow: hidden;
+}
+/* Collapsed: the rail track shrinks to 0 so the workspace takes the full
+   remaining width, and the floating "show taps" button is revealed. */
+.next-app.rail-hidden { --next-rail-w: 0px; }
+
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.dim { color: var(--fg-3); }
+.muted { color: var(--fg-2); }
+
+/* ============================ SPINE ============================ */
+.spine {
+  background: var(--bg-0);
+  border-right: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-self: start;
+  overflow: hidden;
+}
+.spine__head { padding: 13px 12px 8px; }
+.brand { display: flex; align-items: center; gap: 7px; }
+.brand__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--next-accent); }
+.brand__name { font-weight: 650; letter-spacing: 0.3px; font-size: 12.5px; color: var(--fg-0); }
+.brand__tag {
+  margin-left: auto; font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-3); font-family: var(--mono);
+}
+
+.grouplab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 7px;
+  font-size: 9px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--fg-3); font-family: var(--mono); font-weight: 600;
+}
+.grouplab::after { content: ""; height: 1px; background: var(--hairline-2); flex: 1; }
+
+.nav { padding: 0 8px; display: flex; flex-direction: column; gap: 1px; }
+.navitem {
+  position: relative;
+  display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 9px;
+  width: 100%; text-align: left;
+  padding: 7px 8px;
+  border-radius: var(--next-r);
+  background: none; border: 1px solid transparent; color: var(--fg-1);
+  cursor: pointer;
+  transition: background 90ms ease, border-color 90ms ease;
+
+  &:hover { background: var(--bg-1); }
+  &.is-active { background: var(--bg-2); border-color: var(--hairline); }
+  &.is-active::before {
+    content: ""; position: absolute; left: 0; top: 6px; bottom: 6px;
+    width: 2px; background: var(--next-accent);
+  }
+}
+.navitem__ic { width: 22px; height: 20px; display: grid; place-items: center; font-size: 13px; opacity: .92; flex: none; }
+.navitem__n {
+  width: 18px; height: 18px; display: grid; place-items: center;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  background: var(--bg-2); color: var(--fg-2);
+  border: 1px solid var(--hairline); border-radius: var(--next-r-sm); flex: none;
+}
+.navitem.is-active .navitem__n { background: var(--next-accent); color: var(--bg-0); border-color: var(--next-accent); }
+.navitem.is-done .navitem__n {
+  color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+.navitem__body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.navitem__name { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg-1); }
+.navitem.is-active .navitem__name { color: var(--fg-0); }
+.navitem__chip {
+  font-size: 9.5px; color: var(--fg-3); font-family: var(--mono);
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+
+  & .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--fg-3); flex: none; }
+  /* "live" reads as a calm static dot — no pulse/glow (operator found the
+     pulsing red noisy and unclear); the "N live" chip text carries the meaning. */
+  &.tone-live { color: color-mix(in srgb, var(--rec) 70%, var(--fg-0)); }
+  &.tone-live .dot { background: var(--rec); }
+  &.tone-warn { color: var(--warn); }
+  &.tone-warn .dot { background: var(--warn); }
+  &.tone-good { color: var(--ok); }
+  &.tone-good .dot { background: var(--ok); }
+}
+
+/* the rail tick that makes the numbered journey read as a pipeline */
+.nav--journey .navitem { grid-template-columns: 18px 1fr auto; }
+.nav--journey .navitem__n { position: relative; }
+.nav--journey .navitem.is-numbered:not(:last-child) .navitem__n::after {
+  content: ""; position: absolute; left: 8px; width: 1px; height: 10px; top: 27px;
+  background: var(--hairline);
+}
+.nav--journey .navitem.is-done:not(:last-child) .navitem__n::after {
+  background: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+
+/* session picker + new-session button */
+.sessionbox { padding: 0 8px 2px; display: flex; flex-direction: column; gap: 5px; }
+.sessionpick {
+  width: 100%;
+  background: var(--bg-1); border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 6px 8px; font-size: 11.5px; color: var(--fg-0); font-family: var(--mono);
+  cursor: pointer;
+  &:hover { border-color: var(--rule); }
+  &:focus { outline: none; border-color: var(--info); }
+}
+.newsession {
+  width: 100%;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: color-mix(in srgb, var(--next-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--next-accent) 32%, transparent);
+  color: var(--next-accent);
+  border-radius: var(--next-r);
+  padding: 6px 10px; font-weight: 600; font-size: 11px; cursor: pointer;
+  transition: background 90ms ease, border-color 90ms ease;
+  &:hover { background: color-mix(in srgb, var(--next-accent) 18%, transparent); border-color: var(--next-accent); }
+}
+.newsession__plus { font-size: 13px; line-height: 1; font-weight: 600; }
+
+.spine__scroll { flex: 1; overflow-y: auto; padding-bottom: 10px; }
+.spine__foot { padding: 9px 12px 11px; border-top: 1px solid var(--hairline-2); }
+.journey { height: 3px; background: var(--bg-2); overflow: hidden; border-radius: var(--next-r-sm); }
+.journey__fill { height: 100%; width: 0; background: var(--next-accent); transition: width .35s ease; }
+.journey__cap { margin-top: 6px; font-size: 9px; color: var(--fg-3); font-family: var(--mono); letter-spacing: .04em; }
+
+/* Session Information card (spine foot) — editable name + at-a-glance stats for
+   the focused session, always visible so renaming isn't buried in Sessions. */
+.sessinfo { margin-bottom: 10px; }
+.sessinfo.is-empty { font-size: 10px; color: var(--fg-3); font-family: var(--mono); padding: 1px 0 6px; }
+.sessinfo__head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+.sessinfo__lab { font-size: 9px; letter-spacing: .07em; text-transform: uppercase; color: var(--fg-3); font-weight: 600; }
+.sessinfo__status { font-size: 9px; }
+.sessinfo__status.is-live { color: color-mix(in srgb, var(--rec) 70%, var(--fg-0)); }
+.sessinfo__status.is-idle { color: var(--fg-3); }
+.sessinfo__name {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg-2); border: 1px solid var(--hairline);
+  border-radius: var(--next-r-sm); color: var(--fg-1);
+  font-size: 12px; font-weight: 600; font-family: var(--sans);
+  padding: 5px 7px; margin-bottom: 5px;
+}
+.sessinfo__name:focus { outline: none; border-color: var(--next-accent); }
+.sessinfo__name::placeholder { color: var(--fg-3); font-weight: 400; }
+.sessinfo__stats { font-size: 9.5px; color: var(--fg-2); margin-bottom: 2px; }
+.sessinfo__id { font-size: 8.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ============================ ACTIVE-TAPS RAIL ============================
+   The spine's right-hand counterpart: a sticky, full-height, de-bubbled
+   column hosting the reused active-taps component on EVERY view. Collapses to
+   zero width (the workspace widens to fill) via `.rail-hidden` on .next-app;
+   the floating .rail-show button brings it back. Same :root tokens as the
+   spine + panels — no new colours. */
+.rail {
+  background: var(--bg-0);
+  border-left: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-self: start;
+  overflow: hidden;
+  /* When the track collapses to 0 the rail must not bleed its content into
+     the workspace; hide it outright. */
+  min-width: 0;
+}
+.rail-hidden .rail { display: none; }
+
+.rail__head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; border-bottom: 1px solid var(--hairline);
+  background: var(--bg-2);
+  flex: none;
+}
+.rail__title {
+  font-size: 10px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--fg-1); display: flex; align-items: center; gap: 6px; min-width: 0;
+  & .ic { font-size: 11px; opacity: .85; }
+}
+.rail__count {
+  margin-left: auto; flex: none;
+  font-size: 10px; color: var(--fg-3); font-family: var(--mono);
+}
+.rail__collapse {
+  flex: none; width: 20px; height: 20px; display: grid; place-items: center;
+  background: var(--bg-1); border: 1px solid var(--hairline); border-radius: var(--next-r-sm);
+  color: var(--fg-2); font-size: 13px; line-height: 1; cursor: pointer;
+  transition: border-color 90ms ease, background 90ms ease, color 90ms ease;
+  &:hover { border-color: var(--rule); color: var(--fg-0); background: var(--bg-elev); }
+}
+.rail__body { flex: 1; min-height: 0; overflow-y: auto; }
+.rail__meta {
+  padding: 7px 12px 0; min-height: 16px;
+  display: flex; align-items: center; gap: 6px;
+}
+
+/* ---------------------------------------------------------------------------
+   RAIL tap-row density. The rail reuses active-taps.js verbatim (shared with
+   the Taps view), so this RESTYLES that component's output — no JS edit — but
+   ONLY inside the narrow `#tapsRail` (the Taps view's wider panel keeps the
+   roomier default layout). The default `.taps .stream-row` is a 4-col grid
+   (dot | who | toggles | stats) that, in a 260px rail, stacks REC over LIVE
+   and the byte/buffer/lag meta as ~3 right-aligned lines, leaving a vertical
+   seam of whitespace. Reflow to ~3 tight rows per tap:
+     row 1  dot · name · REC/LIVE chips (one row)
+     row 2  identity (the id line)
+     row 3  size · ~buffer · lag (one dim mono line beneath the id)
+   The `# quiet` buffer status line + the collapse toggle are unchanged. The
+   level meter is dropped here (the buffer status line already signals activity)
+   to keep the tap to three tight rows. Specificity (.rail .taps …) beats both
+   next.css `.taps …` and dashboard.css `.stream-row …`.
+   --------------------------------------------------------------------------- */
+.rail .taps .stream-row {
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "dot who   toggles"
+    ".   meta  meta";
+  align-items: start;
+  gap: 3px 8px;
+  padding: 8px 12px 9px;
+}
+.rail .taps .stream-row > .dot.rec { grid-area: dot; margin-top: 4px; }
+.rail .taps .stream-row > .who { grid-area: who; gap: 2px; }
+.rail .taps .stream-row > .tap-toggles { grid-area: toggles; flex-direction: row; align-self: start; gap: 4px; }
+/* The volume bar is redundant with the buffer status line in this dense rail;
+   drop it so each tap is three tight rows (it stays in the Taps view panel). */
+.rail .taps .level-meter { display: none; }
+/* size · ~buffer · lag on ONE dim mono line beneath the id (was a 3-line
+   right-aligned column). The empty trailing lag wrapper (its span is `hidden`
+   until the relay reports lag) is dropped so it leaves no gap; populated divs
+   get a middot separator. */
+.rail .taps .stream-row > .stats {
+  grid-area: meta;
+  flex-direction: row; flex-wrap: nowrap; align-items: baseline;
+  gap: 0; text-align: left; color: var(--fg-3); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.rail .taps .stream-row > .stats > div { white-space: nowrap; flex: none; }
+.rail .taps .stream-row > .stats > div:has([hidden]) { display: none; }
+.rail .taps .stream-row > .stats > div + div::before {
+  content: "·"; color: var(--hairline); margin: 0 6px;
+}
+/* Dim the neutral size/buffer text (their shared rules paint them bright
+   `--fg-0`/`--fg-2`); the lag keeps its warn/bad hue from the shared rules. */
+.rail .taps .stream-row > .stats .b,
+.rail .taps .stream-row > .stats .m { color: var(--fg-3); }
+.rail .taps .stream-buffer { padding: 2px 12px 0 29px; }
+
+/* Floating "show taps" button — fixed top-right, only while the rail is
+   hidden. Reuses the .act cell treatment so it reads as the same surface. */
+.rail-show {
+  display: none;
+  position: fixed; top: 12px; right: 12px; z-index: 40;
+  align-items: center; gap: 6px;
+  background: var(--bg-2); color: var(--fg-1);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 5px 10px; font-size: 11px; font-weight: 550; font-family: var(--sans);
+  cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,.35);
+  transition: border-color 90ms ease, background 90ms ease;
+  &:hover { border-color: var(--rule); background: var(--bg-elev); }
+}
+/* The button is a SIBLING of #next-app (so it can stay fixed regardless of the
+   grid), so reveal it via the adjacent-sibling combinator when the app is in
+   the collapsed state. */
+#next-app.rail-hidden ~ .rail-show { display: inline-flex; }
+
+/* Narrow viewports: the rail would crush the workspace as a real grid track,
+   so drop to the spine + workspace 2-column layout and float the rail as a
+   right-edge overlay instead. It still toggles via .rail-hidden, but now
+   expanding it slides a panel over the workspace rather than squeezing it.
+   The breakpoint sits just above the workspace container query (760px) so the
+   rail folds away before the inner grid starts stacking. */
+@media (max-width: 1100px) {
+  .next-app { grid-template-columns: var(--next-spine-w) 1fr; }
+  .rail {
+    position: fixed; top: 0; right: 0; bottom: 0;
+    width: min(300px, 86vw); height: 100vh;
+    z-index: 45; box-shadow: -2px 0 16px rgba(0,0,0,.4);
+  }
+  /* The grid no longer owns a rail track, so the open/closed switch is purely
+     the overlay's own visibility (handled by `.rail-hidden .rail` above). */
+}
+
+/* ============================ WORKSPACE ============================
+   The workspace is a full-height flex COLUMN so each view's primary work panel
+   can grow to fill the viewport (the #1 design-review fix) instead of ending
+   mid-screen. The grid track already stretches to 100vh (align-self: stretch);
+   making .work a column + .work__inner a flex:1 column lets a view opt its main
+   region into `flex: 1` so its bottom hairline lands near the footer.
+
+   The view fragment is mounted inside a `display: contents` host (main.js), so
+   the fragment's own children (the [data-slot=head] header + the grid/panel
+   blocks) are the flex items here — the header keeps its natural height and the
+   designated fill region (`.fillcol`) takes the rest. Generalises the .livecap
+   pattern from Capture to every view. */
+.work { min-width: 0; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.work__inner {
+  padding: 16px 24px 28px;
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  /* Internal scroll fallback: on a narrow/stacked layout where the fill grids
+     fall back to content height (align-items:start), the workspace scrolls here
+     rather than the (overflow:hidden) shell. On the wide layout nothing
+     overflows — the fill panels scroll their own bodies instead. */
+  overflow-y: auto;
+}
+
+/* A view-level block that should consume the leftover column height and lay
+   its own children out vertically. Applied to the PRIMARY grid/panel of each
+   view (the merged transcript, the WAV list, the Sessions table, the People
+   lists, the connected-taps grid, the Settings board). Grids that fill keep
+   their row alignment stretched so a tall aside and a flex panel share height. */
+.fillcol { flex: 1 1 auto; min-height: 0; }
+.grid.fillcol { align-items: stretch; }
+
+/* A panel that fills its flex parent and scrolls its OWN body — the generic
+   form of .livecap. The head stays pinned; .panel__body grows + scrolls.
+   `flex: 1` lets it consume slack in a flex-column parent (a view body or an
+   .aside); it's inert in a grid cell, where the row's stretch does the filling. */
+.panel--fill { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+.panel--fill > .panel__head { flex: none; }
+.panel--fill > .panel__body { flex: 1; min-height: 0; overflow-y: auto; }
+/* When the fill panel's body is flush (a list/feed that brings its own
+   scroller), don't double-scroll: let the inner list own the overflow. */
+.panel--fill > .panel__body.flush { overflow: hidden; display: flex; flex-direction: column; }
+
+/* stage header */
+.whead {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+  margin-bottom: 14px; padding-bottom: 11px; border-bottom: 1px solid var(--hairline);
+}
+.whead__l { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.whead__eyebrow { font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--next-accent); font-weight: 600; font-family: var(--mono); }
+.whead__title { font-size: 18px; font-weight: 680; letter-spacing: -0.2px; margin: 0; color: var(--fg-0); }
+.whead__sub { font-size: 11.5px; color: var(--fg-3); }
+.whead__sub b { color: var(--fg-1); font-weight: 600; }
+.whead__r { display: flex; align-items: center; gap: 7px; flex: none; }
+
+/* generic panel — thin border, flat top bar, hard corners */
+.next-app .panel {
+  background: var(--bg-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--next-r);
+  overflow: hidden;
+}
+.panel__head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 11px; border-bottom: 1px solid var(--hairline);
+  background: var(--bg-2);
+}
+.panel__title { font-size: 10px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-1); display: flex; align-items: center; gap: 6px; }
+.panel__title .ic { font-size: 11px; opacity: .85; }
+.panel__hint { font-size: 9.5px; color: var(--fg-3); font-family: var(--mono); display: inline-flex; align-items: center; gap: 8px; }
+.panel__body { padding: 11px; }
+.panel__body.flush { padding: 0; }
+.panel--primary { border-color: var(--rule); }
+.panel--accent { border-color: color-mix(in srgb, var(--next-accent) 35%, transparent); }
+.panel + .panel { margin-top: 11px; }
+
+.grid { display: grid; gap: 11px; align-items: start; }
+.cols-tx { grid-template-columns: minmax(0, 1.9fr) minmax(300px, 0.9fr); }
+.cols-cap { grid-template-columns: minmax(0, 1fr) 340px; }
+/* Settings board — balanced columns (engine | prompts+rules) that fill the
+   workspace width, not the 1.9/0.9 transcript split. The config column is a
+   touch wider since it carries the prompt + hotwords editors + the rules. */
+.cols-settings { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
+.aside { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+.spacer { height: 11px; }
+.row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+@container (max-width: 760px) {
+  .cols-tx, .cols-cap, .cols-settings { grid-template-columns: 1fr; }
+  /* When a fill-grid stacks to one column its rows must NOT all stretch to the
+     viewport (two full-height panels would each demand 100%); fall back to
+     content height so the page scrolls normally on a narrow workspace. */
+  .grid.fillcol { align-items: start; }
+}
+/* The Settings config board also collapses to a single column on a narrow
+   workspace so the prompt/hotwords/hallucination editors don't crush. */
+@container (max-width: 620px) {
+  .cfg-grid { grid-template-columns: 1fr; }
+}
+/* container query needs a container; the workspace inner is it */
+.work__inner { container-type: inline-size; }
+
+/* action buttons (shared with engine + overrides) */
+.act {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-2); color: var(--fg-1);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 5px 10px; font-size: 11px; font-weight: 550; cursor: pointer;
+  transition: border-color 90ms ease, background 90ms ease;
+  &:hover { border-color: var(--rule); background: var(--bg-elev); }
+  &:disabled { opacity: .55; cursor: default; }
+  &.act--sm { padding: 3px 8px; font-size: 10.5px; }
+  &.act--primary { background: color-mix(in srgb, var(--next-accent) 16%, transparent); border-color: color-mix(in srgb, var(--next-accent) 40%, transparent); color: var(--next-accent); font-weight: 650; }
+  /* destructive: an OUTLINE in the rec hue (not a fill) — matches the
+     de-bubbled .btn.danger treatment further down. Greys out when disabled
+     (e.g. delete-audio on the current session). */
+  &.act--danger { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 32%, transparent); }
+  &.act--danger:hover:not(:disabled) { border-color: color-mix(in srgb, var(--rec) 55%, transparent); background: var(--rec-bg); }
+  &.act--danger:disabled { color: var(--fg-3); border-color: var(--hairline); }
+}
+
+/* recording arm pill */
+.recpill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: var(--next-r); cursor: pointer;
+  font-size: 10.5px; letter-spacing: .08em; font-family: var(--mono);
+  background: var(--rec-bg); color: var(--rec);
+  border: 1px solid color-mix(in srgb, var(--rec) 35%, transparent);
+  &.is-paused { background: var(--bg-elev); color: var(--fg-2); border-color: var(--hairline); }
+  &:disabled { opacity: .55; cursor: default; }
+}
+.ovr-lab { font-size: 11.5px; color: var(--fg-1); }
+.ovr-note { margin-top: 9px; font-size: 9.5px; }
+
+/* fields (textarea + label + save row) */
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field > label { font-size: 9px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .06em; }
+.field__row { display: flex; align-items: center; gap: 8px; }
+.ta {
+  width: 100%; resize: vertical; line-height: 1.5;
+  background: var(--bg-0); color: var(--fg-0);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 5px 8px; font-size: 11.5px; font-family: var(--mono);
+  &:focus { outline: none; border-color: var(--info); }
+}
+
+/* capture-health stat cells */
+.statgrid { display: grid; gap: 9px; }
+.statgrid.c4 { grid-template-columns: repeat(4, 1fr); }
+.statcell { background: var(--bg-2); border: 1px solid var(--hairline-2); border-radius: var(--next-r); padding: 8px 10px; }
+.statcell__k { font-size: 8.5px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .06em; }
+.statcell__v { font-family: var(--mono); font-size: 15px; font-weight: 650; color: var(--fg-0); margin-top: 2px; }
+/* Empty/em-dash metrics recede (the label `--fg-3`) so a missing value doesn't
+   shout as loud as a real number — set by views/capture.js::setHealth. */
+.statcell__v.is-empty { color: var(--fg-3); font-weight: 550; }
+
+/* autoscroll label in the captions panel head */
+.autoscroll { display: inline-flex; align-items: center; gap: 4px; font-size: 9.5px; color: var(--fg-3); cursor: pointer; }
+.autoscroll input { accent-color: var(--next-accent); }
+.live-mlx-note { font-size: 9.5px; margin-bottom: 7px; }
+
+/* empty / placeholder */
+.empty { padding: 34px 18px; text-align: center; color: var(--fg-3); }
+.empty__ic { font-size: 26px; margin-bottom: 7px; opacity: .8; }
+.empty__h { font-weight: 600; color: var(--fg-1); margin-bottom: 4px; }
+.empty__phase {
+  margin-top: 12px; display: inline-block;
+  font-size: 9.5px; font-family: var(--mono); letter-spacing: .06em;
+  color: var(--next-accent);
+  border: 1px dashed color-mix(in srgb, var(--next-accent) 40%, transparent);
+  border-radius: var(--next-r); padding: 4px 9px;
+}
+
+/* ====================================================================== */
+/* ENGINE controls — backend chips, model-by-family, Canary langs.         */
+/* ====================================================================== */
+.eng { display: grid; gap: 13px; }
+.eng-row { display: flex; flex-direction: column; gap: 6px; }
+.eng-cap { font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-3); font-weight: 600; }
+
+/* Live engine card (Settings) — "restart to apply" row: the saved default
+   model differs from the running channel, mirroring the classic apply button. */
+.liveeng__restart {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 9px; padding: 7px 9px;
+  border: 1px solid var(--warn); border-radius: var(--next-r-sm);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+}
+.restartnote { font-size: 10px; color: color-mix(in srgb, var(--warn) 80%, var(--fg-0)); }
+.chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.next-app .chip {
+  font-size: 10.5px; font-family: var(--mono);
+  padding: 4px 9px; border-radius: var(--next-r);
+  border: 1px solid var(--hairline); background: var(--bg-2); color: var(--fg-1);
+  cursor: pointer;
+  &:hover:not(:disabled) { border-color: var(--rule); }
+  &.is-sel { border-color: var(--next-accent); background: color-mix(in srgb, var(--next-accent) 12%, transparent); color: var(--next-accent); }
+  &.is-off, &:disabled { opacity: .4; cursor: not-allowed; text-decoration: line-through; }
+}
+/* compact model dropdown (replaces the old model-by-family grid) — a full
+   width <select>, grouped by family via <optgroup>, matching the .sel cell. */
+.sel--model { width: 100%; }
+
+.selrow { display: flex; gap: 9px; align-items: flex-end; flex-wrap: wrap; }
+.selfield { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 4px; }
+.selfield label { font-size: 9px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .05em; }
+.sel {
+  width: 100%;
+  background: var(--bg-0); color: var(--fg-0); border: 1px solid var(--hairline);
+  border-radius: var(--next-r); padding: 5px 8px; font-size: 11.5px; font-family: var(--mono);
+  &:focus { outline: none; border-color: var(--info); }
+}
+
+/* ====================================================================== */
+/* Hosting the REUSED dashboard components — give their internal class      */
+/* names a home that matches the Stages density without editing them.       */
+/* ====================================================================== */
+
+/* live-feed: the IRC captions stream */
+.feed { max-height: 380px; overflow-y: auto; }
+.feed .feed-body, .feed .feed-empty { padding: 4px 0; }
+.feed .line {
+  display: grid; grid-template-columns: max-content max-content 1fr;
+  gap: 0 7px; padding: 1px 11px; align-items: baseline;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+}
+.feed .line:hover { background: rgba(255,255,255,.03); }
+.feed .ts { color: var(--fg-3); font-size: 10.5px; }
+.feed .who { font-weight: 650; white-space: nowrap; color: var(--fg-0); }
+.feed .who[data-spk="0"] { color: var(--info); }
+.feed .who[data-spk="1"] { color: var(--magenta); }
+.feed .who[data-spk="2"] { color: var(--warn); }
+.feed .who[data-spk="3"] { color: var(--ok); }
+.feed .who[data-spk="4"] { color: var(--spk-4); }
+.feed .txt { color: var(--fg-1); min-width: 0; overflow-wrap: anywhere; }
+.feed .feed-empty { padding: 26px 12px; text-align: center; color: var(--fg-3); }
+.feed .feed-empty .ascii { font-family: var(--mono); white-space: pre; font-size: 11px; color: var(--fg-3); margin-bottom: 8px; line-height: 1.2; }
+.feed .feed-empty .mt-s { margin-top: 6px; }
+
+/* Capture: let the live-captions panel grow to fill its grid row so a tall
+   taps column (the .aside) doesn't leave whitespace beside a fixed-height
+   feed. .grid is align-items:start, so opt this one panel into stretch and
+   make the feed flex instead of a hard 380px cap. */
+.livecap { align-self: stretch; display: flex; flex-direction: column; min-height: 380px; }
+.livecap > .panel__body.flush { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.livecap .feed { max-height: none; flex: 1; min-height: 0; }
+
+/* active-taps: the "taps feeding this session" rows */
+.taps { padding: 2px 0; }
+/* In the Taps view the connected-taps panel is `panel--fill`, so its rows
+   scroll inside the panel and fill the reclaimed height. */
+.panel--fill > .panel__body.flush > .taps { flex: 1; min-height: 0; overflow-y: auto; }
+.taps .empty { padding: 20px 12px; font-size: 10.5px; }
+.taps .stream-row-wrap { border-bottom: 1px solid var(--hairline-2); }
+.taps .stream-row-wrap:last-child { border-bottom: 0; }
+.taps .stream-row {
+  display: grid; grid-template-columns: 10px 1fr auto auto; gap: 9px; align-items: center;
+  padding: 7px 11px;
+}
+.taps .stream-row .dot.rec { width: 7px; height: 7px; border-radius: 50%; background: var(--rec); }
+.taps .who { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.taps .who .name { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 11.5px; color: var(--fg-0); }
+.taps .who .spk-marker { font-size: 9px; }
+.taps .who .spk-marker[data-spk="0"] { color: var(--info); }
+.taps .who .spk-marker[data-spk="1"] { color: var(--magenta); }
+.taps .who .spk-marker[data-spk="2"] { color: var(--warn); }
+.taps .who .spk-marker[data-spk="3"] { color: var(--ok); }
+.taps .who .spk-marker[data-spk="4"] { color: var(--spk-4); }
+.taps .ident { font-size: 9px; color: var(--fg-3); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.taps .level-meter { height: 4px; background: var(--bg-2); border-radius: var(--next-r-sm); overflow: hidden; }
+.taps .level-fill { height: 100%; background: var(--ok); transition: width .12s linear; }
+.taps .level-meter[data-zone="silent"] .level-fill { background: var(--fg-3); }
+.taps .level-meter[data-zone="hot"] .level-fill { background: var(--warn); }
+.taps .level-meter[data-zone="clip"] .level-fill { background: var(--rec); }
+.taps .tap-toggles { display: inline-flex; gap: 4px; }
+.taps .tap-toggle {
+  font-size: 9px; font-family: var(--mono); font-weight: 600; cursor: pointer;
+  border: 1px solid var(--hairline); border-radius: var(--next-r-sm); padding: 3px 7px;
+  background: var(--bg-2); color: var(--fg-3);
+  &.rec.on { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 35%, transparent); background: var(--rec-bg); }
+  &.live.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); background: var(--ok-bg); }
+}
+.taps .stats { font-size: 9px; font-family: var(--mono); color: var(--fg-3); text-align: right; display: flex; flex-direction: column; gap: 2px; }
+.taps .stats .lag { color: var(--fg-3); }
+.taps .stats .lag.lag-warn { color: var(--warn); }
+.taps .stats .lag.lag-bad { color: var(--rec); }
+.taps .stream-buffer { padding: 0 11px 7px 30px; font-size: 10px; color: var(--fg-2); display: flex; align-items: baseline; gap: 5px; font-family: var(--mono); }
+.taps .stream-buffer .buffer-icon { color: var(--fg-3); }
+
+/* ----------------------------------------------------------------------
+   De-bubbled FORM CONTROLS for every reused component that lands inside the
+   Stages shell (live-channel model/lang/gate form, config-card prompt/
+   hotwords textareas, session-detail range inputs). dashboard.css styles
+   .input/.select/.textarea with a softer `--bg-0` fill + a 1px box-shadow
+   focus glow; the Stages aesthetic (prototypes/stages: .field input/.sel)
+   is a flatter cell on the `--bg-2` elevation, hairline border, 3px radius,
+   monospace, and a border-only focus (no glow ring). Scope strictly to
+   `.next-app` so the classic dashboard keeps its own look.
+   ---------------------------------------------------------------------- */
+.next-app :is(.input, .select, .textarea) {
+  background: var(--bg-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--next-r);
+  color: var(--fg-0);
+  font-family: var(--mono);
+  /* Kill dashboard.css's focus glow — Stages controls signal focus with a
+     border-colour change alone. */
+  &:focus { border-color: var(--info); box-shadow: none; }
+}
+.next-app :is(.input, .select) { padding: 4px 8px; font-size: 11.5px; }
+.next-app .textarea { padding: 5px 8px; font-size: 11.5px; line-height: 1.5; }
+
+/* De-bubbled BUTTONS. The reused components emit .btn / .btn.primary /
+   .btn.danger / .btn.tiny (start · apply · stop · save · view logs). The
+   classic .btn.primary/.danger paint a translucent colour-wash bubble;
+   Stages wants the `.act` treatment — a flat hairline cell, with `primary`
+   a solid amber fill (matches .act--primary) and `danger` an outline in the
+   rec hue. Reuses the same tokens the native `.act` buttons use. */
+.next-app .action-row .btn,
+.next-app .live-log-row .btn,
+.next-app .live-init-prompt .btn {
+  background: var(--bg-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--next-r);
+  color: var(--fg-1);
+  font-family: var(--sans);
+  font-weight: 550;
+  transition: border-color 90ms ease, background 90ms ease, filter 90ms ease;
+  &:hover:not(:disabled) { border-color: var(--rule); background: var(--bg-elev); }
+  &:disabled { opacity: .55; }
+
+  &.primary {
+    background: var(--next-accent);
+    border-color: var(--next-accent);
+    color: var(--bg-0);
+    font-weight: 650;
+    &:hover:not(:disabled) { background: var(--next-accent); filter: brightness(1.07); }
+  }
+  &.danger {
+    background: transparent;
+    border-color: color-mix(in srgb, var(--rec) 38%, transparent);
+    color: var(--rec);
+    &:hover:not(:disabled) { background: var(--rec-bg); border-color: color-mix(in srgb, var(--rec) 55%, transparent); }
+  }
+  &.tiny { padding: 3px 8px; font-size: 10.5px; font-family: var(--mono); }
+}
+
+/* live-channel: model/lang/gate form + start/stop. Component emits
+   .live-row / .btn / .input / .select (de-bubbled above); here we tighten to
+   the Stages density and right-align the value column so the form reads like
+   the prototype's label→value rows. */
+.next-app .live-row { margin-bottom: 6px; }
+.next-app .live-row .lbl { font-size: 10px; color: var(--fg-2); letter-spacing: .05em; text-transform: uppercase; }
+.next-app .live-row .select { width: 100%; }
+.next-app .action-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+/* Gate knobs: trim the helper text + indent so the four knobs read as a
+   compact sub-group of the speech-filter selector above them. */
+.next-app .gate-knob-row.live-row { padding-left: 10px; row-gap: 1px; margin-bottom: 5px; }
+.next-app .gate-knob-row .lbl { font-size: 9.5px; text-transform: none; letter-spacing: 0; }
+.next-app .gate-knob-row .dim { font-size: 9px; color: var(--fg-3); }
+.next-app .live-meta { font-size: 9.5px; color: var(--fg-2); border-top: 1px dashed var(--hairline-2); padding-top: 6px; margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.next-app .live-meta code { font-family: var(--mono); color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: var(--next-r-sm); }
+.next-app .live-err { margin-top: 6px; color: var(--rec); font-size: 10.5px; background: var(--rec-bg); padding: 4px 6px; border-radius: var(--next-r); border: 1px solid color-mix(in srgb, var(--rec) 25%, transparent); word-break: break-word; }
+.next-app .live-init-prompt { margin-top: 8px; font-size: 10.5px; }
+.next-app .live-init-prompt summary { cursor: pointer; color: var(--fg-2); }
+.next-app .live-log-row { margin-top: 8px; }
+
+/* merged-transcript: reuse dashboard.css's .box/.transcript/.spk-bar styling
+   verbatim — it already renders cleanly on dark. Just sit it flush in the
+   panel body (the component brings its own .box chrome). */
+.next-app [data-slot="mergedHost"] .box { border: 0; border-radius: 0; background: transparent; }
+.next-app [data-slot="mergedHost"] .box-hd { background: var(--bg-2); }
+
+/* Transcript stage · fill height + cap the line measure. The merged-transcript
+   component mounts this into mergedHost (see merged-transcript.html):
+       .box > .box-hd  (header)
+            + .box-bd  (spk-bar · spk-legend · meta strip)
+            + .rule-top  (the .transcript lines + the audit wrapper)
+   To make the panel grow to the footer (the #1 fix) the chain has to be a flex
+   column: the header + spk-bar block keep their natural height and `.rule-top`
+   flexes, with `.transcript` (the scroll container) dropping its inline + theme
+   380px cap so the lines fill + scroll. The lines themselves are capped to a
+   readable measure (~92ch) so the transcript reads like prose, not a full-width
+   log dump — the freed width becomes margin, and the spk-bar shares the cap. */
+.txbody { padding: 0; }
+.txbody, .txpanel > .panel__body { min-height: 0; }
+.next-app .txbody [data-slot="mergedHost"] { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.next-app .txbody .box { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.next-app .txbody .box-hd,
+.next-app .txbody .box-bd { flex: none; }
+/* .rule-top is the wrapper that actually holds the lines — it takes the slack */
+.next-app .txbody .box > .rule-top { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* override the component's inline + dashboard.css max-height:380px so the lines
+   fill the panel and scroll inside it instead of capping at 380px. */
+.next-app .txbody .transcript { flex: 1; min-height: 0; max-height: none !important; }
+/* cap the prose measure — each transcript LINE wraps at ~92ch (mono) so the
+   block reads like a document, with the freed panel width becoming right
+   margin. The proportional speaker bar + legend stay full-width as an overview
+   strip above the prose; only the line + meta text take the measure. */
+.next-app .txbody [data-slot="metaStrip"],
+.next-app .txbody .transcript > div { max-width: 92ch; }
+
+/* config-card: a grid of the prompt / hotwords / hallucination editor cols.
+   In Settings the host panel is `panel--fill`, so the grid fills the panel
+   body and reads as a dense board: the prompt + hotwords editors sit
+   side-by-side on the top row and the hallucination filter spans the full
+   width beneath them (using the wider Settings column instead of stacking in a
+   skinny strip). The component appends the hallucination col LAST, so the
+   last-child span below is stable regardless of how many cols the server
+   reports. Degrades to a single column on a narrow workspace. */
+.cfg-grid {
+  display: grid; gap: 12px 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 0; flex: 1;
+  align-content: start;
+}
+/* hallucination filter is appended LAST by config-card, so the last col spans
+   both columns + anchors the bottom. Robust to the column count: with all
+   three (prompt | hotwords / hallucination) it's the wide bottom row; if the
+   server reports only the hallucination col it simply spans full width. */
+.cfg-grid > .cfg-col:last-child { grid-column: 1 / -1; min-height: 0; }
+.cfg-grid .cfg-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cfg-grid .cfg-col > .k {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-2); font-weight: 600;
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+}
+.cfg-grid .cfg-col > .k .meta { color: var(--fg-3); font-family: var(--mono); text-transform: none; letter-spacing: 0; font-weight: 400; }
+.cfg-grid .cfg-editor-text { width: 100%; }
+.cfg-grid .cfg-editor-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.cfg-grid code { font-family: var(--mono); font-size: 10.5px; color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: var(--next-r-sm); }
+.cfg-grid .empty { padding: 6px 0; text-align: left; font-size: 10.5px; }
+
+/* ====================================================================== */
+/* PHASE 2 · RECORDINGS — waveform stub + strip knobs, WAV list, transcribe */
+/* + transcript cache. Sharp / dense, same tokens as Phase 1.              */
+/* ====================================================================== */
+
+/* source toggle (original / stripped) in the header actions slot */
+.srcsw { display: inline-flex; border: 1px solid var(--hairline); border-radius: var(--next-r); overflow: hidden; }
+.srcsw__opt {
+  font-size: 9.5px; font-family: var(--mono); background: var(--bg-2); color: var(--fg-3);
+  border: 0; padding: 4px 9px; cursor: pointer;
+  &:hover:not(:disabled):not(.is-on) { color: var(--fg-1); }
+  &:disabled { opacity: .4; cursor: not-allowed; text-decoration: line-through; }
+}
+.srcsw__opt + .srcsw__opt { border-left: 1px solid var(--hairline); }
+.srcsw__opt.is-on { background: color-mix(in srgb, var(--next-accent) 14%, transparent); color: var(--next-accent); }
+
+/* hero panel holding the waveform stub + stats + strip knobs */
+/* flex: none so the hero never SHRINKS. It's a flex item of the scrollable
+   .work__inner column and `.panel`'s `overflow: hidden` makes its auto
+   min-height resolve to 0 (flexbox spec) — so a tall WAV list below would
+   shrink the hero and CLIP its bottom, which is exactly where the strip-silence
+   knobs live (they vanished on sessions with many WAVs). The WAV-list panel
+   (.panel--fill) absorbs the leftover height + scrolls its own body instead. */
+.wavehero { padding: 0; flex: none; }
+.wave-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 9px 13px; border-bottom: 1px solid var(--hairline);
+}
+.wave-top__name { font-size: 11px; color: var(--fg-1); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wave-stats { display: flex; gap: 18px; flex: none; }
+.wstat { display: flex; flex-direction: column; }
+.wstat__v { font-family: var(--mono); font-size: 15px; font-weight: 650; line-height: 1.1; color: var(--fg-0); }
+.wstat__v.accent { color: var(--next-accent); }
+.wstat__v.good { color: var(--ok); }
+/* Empty/em-dash stats recede to the label colour (overrides accent/good so a
+   placeholder clips/speech em-dash doesn't keep its bright hue) — set by
+   views/recordings.js::setStat. Declared after accent/good to win on the tie. */
+.wstat__v.is-empty { color: var(--fg-3); font-weight: 550; }
+.wstat__k { font-size: 8.5px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .07em; margin-top: 2px; }
+
+/* waveform cut preview — net-new, not wired. Slimmed to a single banner row
+   (icon · label · chip) so the WAV list below reclaims the height the tall
+   stub used to waste. */
+.wavestub {
+  margin: 13px; padding: 26px 18px; text-align: center;
+  border: 1px dashed var(--hairline); border-radius: var(--next-r);
+  background: repeating-linear-gradient(90deg, var(--bg-2) 0 2px, transparent 2px 9px);
+}
+.wavestub__ic { font-size: 24px; opacity: .65; }
+.wavestub__h { margin-top: 6px; font-weight: 600; font-size: 12px; color: var(--fg-1); }
+.wavestub__d { margin-top: 4px; font-size: 10px; color: var(--fg-3); max-width: 560px; margin-inline: auto; line-height: 1.5; }
+.wavestub__tag {
+  margin-top: 11px; display: inline-block;
+  font-size: 9px; font-family: var(--mono); letter-spacing: .06em;
+  color: var(--info);
+  border: 1px dashed color-mix(in srgb, var(--info) 40%, transparent);
+  border-radius: var(--next-r); padding: 3px 8px;
+}
+/* slim variant: one horizontal row, no vertical stacking margins */
+.wavestub--slim {
+  display: flex; align-items: center; gap: 10px;
+  margin: 10px 13px; padding: 7px 12px; text-align: left;
+}
+.wavestub--slim .wavestub__ic { font-size: 15px; margin-top: 0; }
+.wavestub--slim .wavestub__h { margin-top: 0; font-size: 11px; color: var(--fg-2); }
+.wavestub--slim .wavestub__tag { margin-top: 0; margin-left: auto; }
+
+/* strip-silence knob bar (REAL run) */
+.knobbar {
+  display: grid; grid-template-columns: repeat(3, 1fr) auto; gap: 13px;
+  padding: 11px 13px; border-top: 1px solid var(--hairline-2); align-items: end;
+}
+.knobbar__act { display: flex; gap: 6px; align-self: end; padding-bottom: 2px; }
+.kfield { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.kfield__top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.kfield__k { font-size: 9.5px; color: var(--fg-3); font-family: var(--mono); }
+.kfield__v { font-family: var(--mono); font-size: 11px; color: var(--next-accent); font-weight: 600; white-space: nowrap; }
+.kfield input[type="range"] { width: 100%; accent-color: var(--next-accent); height: 3px; }
+.kfield__rng { font-size: 8px; color: var(--fg-3); font-family: var(--mono); display: flex; justify-content: space-between; }
+
+/* job progress bar (one job per session, strip OR transcribe) */
+.jobbar { padding: 10px 13px; border-top: 1px solid var(--hairline-2); }
+.jobbar__top { display: flex; align-items: baseline; justify-content: space-between; font-size: 10.5px; color: var(--fg-2); }
+.jobbar__pct { color: var(--next-accent); font-weight: 600; }
+.progress { height: 4px; background: var(--bg-2); border-radius: var(--next-r-sm); overflow: hidden; margin-top: 5px; }
+.progress__fill { height: 100%; width: 0; background: var(--next-accent); transition: width .3s ease; }
+.jobbar__wav { margin-top: 5px; font-size: 9.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* per-WAV list: originals + indented stripped region clips. Inside a fill
+   panel (Recordings) the list scrolls to fill the reclaimed height; the mini
+   variant in the Transcript aside keeps its own cap (further down). */
+.wavlist { padding: 2px 0; }
+.panel--fill > .panel__body.flush > .wavlist { flex: 1; min-height: 0; overflow-y: auto; }
+.wavlist .empty { padding: 22px 12px; font-size: 10.5px; }
+.wavrow {
+  width: 100%; text-align: left; cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 11px; background: none; border: 0; border-bottom: 1px solid var(--hairline-2);
+  &:hover { background: var(--bg-2); }
+  &.is-sel { background: color-mix(in srgb, var(--next-accent) 10%, transparent); }
+  &:last-child { border-bottom: 0; }
+}
+.wavrow.is-clip { cursor: default; background: var(--bg-0); padding-left: 22px; }
+.wavrow.is-clip:hover { background: var(--bg-0); }
+.wavrow__l { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.wavrow__n { font-size: 11px; font-weight: 600; color: var(--fg-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wavrow.is-sel .wavrow__n { color: var(--next-accent); }
+.wavrow.is-clip .wavrow__n { font-weight: 500; color: var(--fg-2); }
+.wavrow__sub { font-size: 9px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wavrow__r { display: flex; align-items: center; gap: 8px; flex: none; }
+.wavrow__dur { font-size: 9.5px; color: var(--fg-3); }
+.wavrow__tx { font-size: 8.5px; font-family: var(--mono); font-weight: 600; padding: 2px 6px; border-radius: var(--next-r-sm); border: 1px solid var(--hairline-2); }
+.wavrow__tx.is-done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); background: var(--ok-bg); }
+.wavrow__tx.is-busy { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+.wavrow__tx.is-none { color: var(--fg-3); }
+
+/* transcribe panel range form */
+.rangeform { display: flex; align-items: flex-end; gap: 9px; flex-wrap: wrap; }
+.rangeform .field { flex: 1; min-width: 84px; }
+.inp-txt {
+  width: 100%; background: var(--bg-0); color: var(--fg-0);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 5px 8px; font-size: 11px;
+  &:focus { outline: none; border-color: var(--info); }
+}
+.checkrow { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--fg-2); white-space: nowrap; }
+.checkrow input { accent-color: var(--next-accent); }
+.act--wide { width: 100%; justify-content: center; }
+
+/* transcript cache rows + set-primary. In the Transcript aside the cache panel
+   is `panel--fill`, so the list scrolls inside it (fills the leftover column
+   height instead of stranding the aside mid-screen). */
+.cache { flex: 1; min-height: 0; overflow-y: auto; }
+.cache .empty { padding: 18px 12px; font-size: 10.5px; }
+.cacherow {
+  display: grid; grid-template-columns: 1fr auto auto auto; gap: 9px; align-items: center;
+  padding: 7px 11px; border-bottom: 1px solid var(--hairline-2);
+  &:last-child { border-bottom: 0; }
+}
+.cacherow__id { font-size: 10.5px; color: var(--fg-0); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cacherow__src { font-size: 8px; font-family: var(--mono); padding: 1px 5px; border-radius: var(--next-r-sm); border: 1px solid var(--hairline-2); text-transform: uppercase; letter-spacing: .04em; }
+.cacherow__src.is-stripped { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
+.cacherow__src.is-original { color: var(--fg-3); }
+.cacherow__meta { font-size: 9px; color: var(--fg-3); white-space: nowrap; }
+.pickprimary {
+  font-size: 9px; font-family: var(--mono); font-weight: 600; cursor: pointer;
+  padding: 3px 8px; border-radius: var(--next-r-sm);
+  border: 1px solid var(--hairline); background: var(--bg-2); color: var(--fg-2);
+  &:hover:not(.is-primary) { border-color: var(--rule); color: var(--fg-0); }
+  &.is-primary { color: var(--next-accent); border-color: color-mix(in srgb, var(--next-accent) 40%, transparent); background: color-mix(in srgb, var(--next-accent) 12%, transparent); cursor: default; }
+}
+
+/* ====================================================================== */
+/* PHASE 2 · TAPS — the connected taps reuse the .taps block (already       */
+/* styled above); below is the MOCK Tap-model strip, clearly tagged.        */
+/* ====================================================================== */
+.mocktag {
+  font-size: 8.5px; font-family: var(--mono); letter-spacing: .06em;
+  color: var(--info);
+  border: 1px dashed color-mix(in srgb, var(--info) 40%, transparent);
+  border-radius: var(--next-r-sm); padding: 2px 7px;
+}
+.mocknote { font-size: 10.5px; color: var(--fg-2); line-height: 1.6; margin-bottom: 13px; }
+.mocknote b { color: var(--fg-0); font-weight: 600; }
+.mockblk {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  padding: 9px 0; border-top: 1px solid var(--hairline-2);
+}
+.mockblk--col { flex-direction: column; align-items: stretch; gap: 7px; }
+.mockblk--persist { color: var(--fg-3); }
+.cfgblk__k { font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-3); font-weight: 600; font-family: var(--mono); flex: none; }
+.mock-hint { font-size: 9.5px; }
+.mock-hint b { color: var(--fg-1); }
+
+/* single / multi segmented control (mock, disabled). Named .segctl — NOT
+   .seg — because merged-transcript.html uses .seg for transcript segments
+   (.seg.lowconf / .seg.suppressed, styled by dashboard.css); when this rule
+   was called .seg it silently boxed every low-confidence segment in the
+   Transcript stage into an inline-flex chip that broke the one-visual-line
+   contract (caught by the merged-transcript layout assertion in
+   tests/e2e/test_dashboard_ui.py). */
+.segctl { display: inline-flex; border: 1px solid var(--hairline); border-radius: var(--next-r); overflow: hidden; }
+.segctl__opt {
+  font-size: 10px; font-family: var(--mono); background: var(--bg-2); color: var(--fg-3);
+  border: 0; padding: 4px 9px; cursor: default;
+  &:disabled { opacity: .7; }
+}
+.segctl__opt + .segctl__opt { border-left: 1px solid var(--hairline); }
+.segctl__opt.is-on { background: color-mix(in srgb, var(--next-accent) 16%, transparent); color: var(--next-accent); opacity: 1; }
+.segctl__opt--multi.is-on { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+
+/* diarized voice → Person rows (mock) */
+.voicemap { display: flex; flex-direction: column; gap: 6px; }
+.voicerow { display: grid; grid-template-columns: 70px 1fr 36px 14px auto; gap: 8px; align-items: center; }
+.voicerow__v { font-size: 10px; color: var(--fg-1); }
+.voicerow__bar { height: 4px; background: var(--bg-2); border-radius: var(--next-r-sm); overflow: hidden; }
+.voicerow__fill { height: 100%; background: var(--info); display: block; }
+.voicerow__pct { font-size: 9px; color: var(--fg-3); text-align: right; }
+.voicerow__arrow { color: var(--fg-3); font-size: 10px; }
+.pick {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10.5px; color: var(--fg-1); font-family: var(--mono);
+  border: 1px solid var(--hairline); border-radius: var(--next-r); padding: 3px 8px; background: var(--bg-2);
+}
+.pick--unid { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 38%, transparent); border-style: dashed; }
+.pick__av {
+  width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 7.5px; font-weight: 650; background: var(--info); color: var(--bg-0); flex: none;
+}
+.pick__av--unid { background: var(--warn); }
+.pick__chev { color: var(--fg-3); font-size: 9px; }
+
+/* ====================================================================== */
+/* PHASE 3 · PEOPLE — the registry of humans. Two REAL panels, both from    */
+/* per-session session_meta.aliases: the per-session alias editor (the      */
+/* participants strip) + the across-sessions named-people registry.         */
+/* Sharp / dense, same :root tokens as Phase 1–2.                           */
+/* ====================================================================== */
+
+/* REAL: per-session participants — identity + editable display name */
+.partlist { display: flex; flex-direction: column; gap: 1px; }
+.partrow {
+  display: grid; grid-template-columns: 17px minmax(0, 1fr) auto minmax(140px, 1.2fr) auto;
+  gap: 9px; align-items: center;
+  padding: 6px 2px; border-top: 1px solid var(--hairline-2);
+}
+.partrow:first-child { border-top: 0; }
+.partrow__id { font-size: 10.5px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.partrow__src { flex: none; }
+.partrow__src.is-live { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 35%, transparent); background: var(--rec-bg); }
+.partrow__src.is-recorded { color: var(--fg-3); }
+.partrow__name {
+  width: 100%; background: var(--bg-0); color: var(--fg-0);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 4px 8px; font-size: 11.5px;
+  &::placeholder { color: var(--fg-3); }
+  &:focus { outline: none; border-color: var(--info); }
+}
+.partrow__status { font-size: 9px; min-width: 44px; text-align: right; white-space: nowrap; }
+
+/* shared avatar (initials chip) — palette-coloured per speaker slot */
+.av {
+  display: grid; place-items: center; flex: none;
+  border-radius: 50%; font-weight: 650; color: var(--bg-0);
+  font-family: var(--mono);
+}
+.av.sm { width: 17px; height: 17px; font-size: 7.5px; }
+.av.lg { width: 28px; height: 28px; font-size: 11px; }
+.av.spk-0 { background: var(--info); }
+.av.spk-1 { background: var(--magenta); }
+.av.spk-2 { background: var(--warn); }
+.av.spk-3 { background: var(--ok); }
+.av.spk-4 { background: var(--spk-4); }
+
+/* REAL: across-sessions named-people registry — one de-bubbled row per
+   distinct assigned name (avatar · name · N sessions · identity codes). */
+.preg { display: flex; flex-direction: column; gap: 1px; }
+.pregrow {
+  display: grid; grid-template-columns: 17px minmax(0, auto) auto minmax(0, 1fr);
+  gap: 10px; align-items: center;
+  padding: 6px 2px; border-top: 1px solid var(--hairline-2);
+}
+.pregrow:first-child { border-top: 0; }
+.pregrow__name { font-size: 12.5px; font-weight: 650; color: var(--fg-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pregrow__count { font-size: 9.5px; color: var(--fg-3); white-space: nowrap; flex: none; }
+.pregrow__ids { font-size: 10.5px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+
+/* small tag chip — used for input badges + the partrow source badge */
+.next-app .tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 9px; font-family: var(--mono);
+  border: 1px solid var(--hairline-2); border-radius: var(--next-r-sm);
+  padding: 2px 6px; color: var(--fg-2); background: var(--bg-2); white-space: nowrap;
+}
+
+/* mini WAV picker (Transcript stage · per-WAV re-transcribe). Reuses the
+   .wavlist / .wavrow block; just caps its height so it scrolls inside the
+   narrow control column instead of pushing the cache panel off-screen. */
+.wavlist--mini { max-height: 220px; overflow-y: auto; }
+
+/* ====================================================================== */
+/* SUMMARY — the SESSION stage 4 PREVIEW (mock, not wired). The disabled    */
+/* Summarizer controls + a sample summary output. Same :root tokens.        */
+/* ====================================================================== */
+
+/* full-width segmented control (summarizer source). Reuses .segctl /
+   .segctl__opt (already styled for the mock Taps strip) but stretches across
+   the column. */
+.segctl--wide { display: flex; width: 100%; }
+.segctl--wide .segctl__opt { flex: 1; text-align: center; }
+
+/* per-source detail block; the non-active sources read dimmed (is-off). */
+.srcdetail {
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 9px 10px; margin-top: 7px; display: flex; flex-direction: column; gap: 7px;
+  background: var(--bg-2);
+}
+.srcdetail.is-off { opacity: .55; }
+.srcdetail__lab { font-size: 10.5px; color: var(--fg-1); font-weight: 600; }
+.srcdetail__lab .dim { font-weight: 400; }
+
+/* sample summary output — a title + decisions/action-items/open-questions. */
+.sumout { display: flex; flex-direction: column; gap: 13px; }
+.sumout__title { font-size: 14px; font-weight: 680; color: var(--fg-0); letter-spacing: -0.2px; }
+.sumblk { display: flex; flex-direction: column; gap: 6px; }
+.sumblk__k {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--fg-3); font-weight: 600;
+}
+.sumlist { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.sumlist li { font-size: 11.5px; color: var(--fg-1); line-height: 1.5; }
+.sumlist li b { color: var(--fg-0); font-weight: 600; }
+.sumlist code { font-family: var(--mono); font-size: 10.5px; color: var(--fg-1); background: var(--bg-2); padding: 1px 4px; border-radius: var(--next-r-sm); }
+
+/* ====================================================================== */
+/* SESSIONS — the GLOBAL all-sessions list (js/next/views/sessions.js). A    */
+/* dense, scannable table: filter box + one hairline row per session, with   */
+/* inline rename + Open / Delete-audio actions. The de-bubbled, mono-data    */
+/* style; the focused session's row carries the amber left-edge the spine    */
+/* uses for its active item.                                                  */
+/* ====================================================================== */
+
+.sesslist {
+  /* One grid template shared by the header row + every data row so the
+     columns can't drift. Label + rename flex; the metrics are fixed. */
+  --sess-cols: minmax(150px, 1.7fr) 64px 48px 64px minmax(120px, 1fr) 80px minmax(150px, 1.4fr) max-content;
+}
+
+/* search row */
+.sesslist__search {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 13px; border-bottom: 1px solid var(--hairline-2);
+}
+.sesslist__searchic { font-size: 12px; opacity: .7; flex: none; }
+.sesslist__filter {
+  flex: 1; min-width: 0;
+  background: var(--bg-0); color: var(--fg-0);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 5px 9px; font-size: 11.5px; font-family: var(--mono);
+  &::placeholder { color: var(--fg-3); }
+  &:focus { outline: none; border-color: var(--info); }
+}
+/* kill the native search clear affordance — we have our own count instead */
+.sesslist__filter::-webkit-search-cancel-button { -webkit-appearance: none; }
+.sesslist__count { font-size: 9.5px; flex: none; white-space: nowrap; }
+
+/* The session list fills the panel height (the #1 fix): the search row pins,
+   the column header pins (sticky), and .sessrows takes the leftover height +
+   scrolls. The host panel is `panel--fill`, so the chain listHost → .sesslist
+   → .sessrows is a flex column down to the scroller. */
+.next-app [data-slot="listHost"] { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.sesslist { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.sesslist__search { flex: none; }
+.sessrow--head { flex: none; }
+.sessrows { flex: 1; min-height: 0; overflow-y: auto; }
+.sessrow {
+  display: grid; grid-template-columns: var(--sess-cols); gap: 10px;
+  align-items: center; padding: 7px 13px;
+  border-bottom: 1px solid var(--hairline-2);
+  border-left: 2px solid transparent;
+}
+.sessrow:last-child { border-bottom: 0; }
+.sessrows .sessrow:hover { background: var(--bg-2); }
+/* the focused session — amber left-edge, like the spine's active nav item */
+.sessrow.is-focused { background: color-mix(in srgb, var(--next-accent) 9%, transparent); border-left-color: var(--next-accent); }
+
+/* column header row — dim, uppercase, non-interactive */
+.sessrow--head {
+  background: var(--bg-2); padding-top: 6px; padding-bottom: 6px;
+  position: sticky; top: 0; z-index: 1;
+}
+.sessrow--head .sesscol {
+  font-size: 8.5px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--fg-3); font-weight: 600; font-family: var(--mono);
+}
+
+.sesscol { min-width: 0; }
+.sesscol--num, .sesscol--strip, .sesscol--size { text-align: right; }
+.sesscol--status, .sesscol--tx { white-space: nowrap; }
+
+/* label cell: display label + the raw id/date as a dim mono sub */
+.sessrow__id { display: flex; flex-direction: column; gap: 1px; }
+.sessrow__label { font-size: 12px; font-weight: 600; color: var(--fg-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sessrow.is-focused .sessrow__label { color: var(--next-accent); }
+.sessrow__raw { font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* status chip — ● live (rec hue) / archived (muted) */
+.sesschip {
+  font-size: 9px; font-family: var(--mono); font-weight: 600;
+  padding: 2px 7px; border-radius: var(--next-r-sm);
+  border: 1px solid var(--hairline-2); white-space: nowrap;
+  &.is-live { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 35%, transparent); background: var(--rec-bg); }
+  &.is-archived { color: var(--fg-3); }
+}
+
+/* WAVs / stripped numeric cells */
+.sesscol--num { font-size: 11px; color: var(--fg-1); }
+.sesscol--strip.is-yes, .sessrow .sesscol--strip.is-yes { color: var(--ok); }
+.sesscol--strip.is-no { color: var(--fg-3); }
+.sesscol--size { font-size: 9.5px; }
+
+/* transcript status — tone-coloured (good/warn/mute), standalone (the spine's
+   tone-* classes are scoped to .navitem__chip, so define our own here) */
+.sesstx { font-size: 9.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.sesstx.tone-good { color: var(--ok); }
+.sesstx.tone-warn { color: var(--warn); }
+.sesstx.tone-mute { color: var(--fg-3); }
+
+/* inline rename: a flat field + a tiny status badge below it */
+.sesscol--rename { display: flex; flex-direction: column; gap: 2px; }
+.sessrow__rename {
+  width: 100%; background: var(--bg-0); color: var(--fg-0);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 3px 7px; font-size: 11px;
+  &::placeholder { color: var(--fg-3); }
+  &:focus { outline: none; border-color: var(--info); }
+}
+.sessrow--head .sesscol--rename { display: block; }
+.sessrow__status { font-size: 8.5px; min-height: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* row actions */
+.sessrow__act { display: inline-flex; gap: 6px; justify-content: flex-end; flex: none; }
+
+/* Narrow workspace: drop the per-row size + raw-id columns gracefully by
+   letting the grid wrap is overkill; instead collapse to a comfortable min by
+   hiding the lowest-value columns under the container width the workspace can
+   actually hit (rail open on a laptop). Container query on .work__inner. */
+@container (max-width: 880px) {
+  .sesslist { --sess-cols: minmax(120px, 1.6fr) 58px 44px minmax(96px, 1fr) minmax(120px, 1.2fr) max-content; }
+  .sesscol--strip, .sesscol--size { display: none; }
+}

@@ -8,11 +8,10 @@ path end-to-end without spinning up any real model.
 
 from __future__ import annotations
 
-import wave
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import numpy as np
+from wav_builders import seed_wav  # type: ignore[import-not-found]
 
 from tapscribe.session_merge import (
     SessionTranscript,
@@ -21,18 +20,6 @@ from tapscribe.session_merge import (
 )
 from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
-
-SAMPLE_RATE = 16000
-
-
-def _wav(path: Path) -> Path:
-    samples = np.tile(np.array([8000, -8000], dtype=np.int16), SAMPLE_RATE // 2)
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
-        w.writeframes(samples.tobytes())
-    return path
 
 
 def _wav_name(when: datetime, speaker: str, utt: str) -> str:
@@ -70,7 +57,7 @@ def _seed(session_dir: Path, n: int = 2, speakers: list[str] | None = None) -> l
     speakers = speakers or ["alice"] * n
     paths = []
     for i in range(n):
-        wav = _wav(session_dir / _wav_name(base + timedelta(seconds=10 * i), speakers[i], f"u{i:08d}"))
+        wav = seed_wav(session_dir / _wav_name(base + timedelta(seconds=10 * i), speakers[i], f"u{i:08d}"))
         paths.append(wav)
     return paths
 
@@ -162,7 +149,7 @@ def test_merge_carries_suppressed_segments_with_absolute_timestamps(tmp_path: Pa
     session_dir = tmp_path / "s"
     session_dir.mkdir()
     base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
-    wav = _wav(session_dir / _wav_name(base, "alice", "u00000001"))
+    wav = seed_wav(session_dir / _wav_name(base, "alice", "u00000001"))
 
     class _SuppressingTranscriber(_FixedTranscriber):
         def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002

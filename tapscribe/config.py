@@ -38,6 +38,12 @@ PROMPT_FILE: Path = CONFIG_DIR / "prompt.txt"
 # terse always-on prompt for live vs a meeting-specific one for batch).
 # Empty/missing = the live channel runs without an --init-prompt.
 LIVE_PROMPT_FILE: Path = CONFIG_DIR / "live-prompt.txt"
+# Operator's DEFAULT live-channel model id (a single model_id, e.g. "tiny.en").
+# Separate from the running channel's model: the dashboard's Live engine card
+# persists the default here, and the live channel only picks it up on (re)start
+# — so the UI can show "restart to apply" when this differs from what's running.
+# Empty/missing = no saved default (the live channel uses its boot/auto model).
+LIVE_MODEL_FILE: Path = CONFIG_DIR / "live-model.txt"
 HOTWORDS_FILE: Path = CONFIG_DIR / "hotwords.txt"
 HALLUCINATIONS_FILE: Path = CONFIG_DIR / "hallucinations.txt"
 

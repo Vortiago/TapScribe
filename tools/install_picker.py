@@ -8,7 +8,11 @@ the operator picks:
   - whether to install it at all (Space toggle), AND
   - which runtime backend to install:
       • CPU/CUDA  — torch / faster-whisper / NeMo (auto-uses CUDA when
-        nvidia-smi reports a device, else CPU)
+        nvidia-smi reports a device, else CPU). For the faster-whisper
+        path specifically, CTranslate2 doesn't bundle cuBLAS/cuDNN, so
+        the `cuda-libs` extra (nvidia-cublas-cu12 / nvidia-cudnn-cu12) is
+        added automatically when CUDA is detected — the Torch-based
+        backends get CUDA from Torch's own bundle and don't need it.
       • MLX       — Apple Silicon GPU (only offered on Darwin/arm64)
       • Both      — install both so the catalog can switch at runtime
 
@@ -58,6 +62,18 @@ STAMP_FILE = Path(sys.prefix) / ".tapscribe-install-stamp.json"
 BACKEND_CPU = "cpu"
 BACKEND_MLX = "mlx"
 BACKEND_BOTH = "both"
+
+# CUDA runtime libs (cuBLAS/cuDNN) for the faster-whisper / CTranslate2 GPU
+# path. CTranslate2 doesn't bundle them (unlike Torch's own backends), so
+# `resolve_extras` appends this extra automatically when CUDA is detected
+# AND the Whisper CPU/CUDA atom (`whisper-cpu`) is in the install. See the
+# `cuda-libs` extra in pyproject.toml.
+CUDA_RUNTIME_EXTRA = "cuda-libs"
+
+# The faster-whisper / CTranslate2 atom. Its presence in the resolved set is
+# what gates CUDA_RUNTIME_EXTRA — it's only there when the Whisper family is
+# enabled with a CPU/CUDA backend on a non-Apple box.
+WHISPER_CPU_EXTRA = "whisper-cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +424,15 @@ def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
         for be in backends:
             for extra in be.extras:
                 add(extra)
+
+    # CTranslate2 (the faster-whisper backend) doesn't bundle cuBLAS/cuDNN,
+    # so the Whisper CPU/CUDA path can't drive the GPU without them. Append
+    # them iff CUDA was detected AND that path is actually in the install
+    # (`whisper-cpu` present). Tied to whisper-cpu specifically: the
+    # Torch-based backends (Voxtral/Parakeet/Canary via NeMo) get CUDA from
+    # Torch's own bundle, and MLX-only selections aren't on CUDA at all.
+    if caps.cuda and WHISPER_CPU_EXTRA in seen:
+        add(CUDA_RUNTIME_EXTRA)
     return out
 
 
@@ -508,6 +533,11 @@ def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None
     extras = resolve_extras(selection, caps)
     if extras:
         lines.append(f"Will install:  pip install -e '.[{','.join(extras)}]'")
+        if CUDA_RUNTIME_EXTRA in extras:
+            lines.append(
+                "               + CUDA runtime libs (nvidia-cublas-cu12, "
+                "nvidia-cudnn-cu12) — faster-whisper GPU"
+            )
     else:
         lines.append("Will install:  (nothing — base package only; the dashboard will be empty)")
     lines.append("")

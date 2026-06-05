@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe · Stages</title>
+    <!-- Reuse the classic dashboard's design tokens + primitives first, then
+         layer the Stages-specific (sharp / de-bubbled / dense) styles on top. -->
+    <link rel="stylesheet" href="/dashboard.css" />
+    <link rel="stylesheet" href="/next.css" />
+  </head>
+  <body>
+    <div id="next-app" class="next-app">
+      <!-- ============ SPINE: two groups (GLOBAL · THIS SESSION) ============ -->
+      <aside class="spine" id="spine"><!-- spine rendered here --></aside>
+
+      <!-- ============ VIEW CONTAINER (one view at a time) ============ -->
+      <main class="work" id="work">
+        <div class="work__inner" id="viewRoot"><!-- active view rendered here --></div>
+      </main>
+
+      <!-- ============ GLOBAL "ACTIVE TAPS" RAIL (every view) ============
+           Mirrors the active-taps host slots Capture used to own. Collapses
+           via the header toggle / floating show button (state persisted to
+           localStorage by main.js). -->
+      <aside class="rail" id="tapsRail">
+        <div class="rail__head">
+          <button class="rail__collapse" type="button" id="tapsRailHide" title="Hide the active-taps rail" aria-label="Hide active taps">›</button>
+          <div class="rail__title"><span class="ic">🛰️</span>Active taps</div>
+          <span class="rail__count mono" id="tapsRailCount" data-slot="activeCount">0</span>
+        </div>
+        <div class="rail__body">
+          <div class="rail__meta"><span data-slot="activeTapsBadge"></span></div>
+          <div class="taps" id="tapsRailBody" data-slot="activeTapsBody"></div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Floating "show taps" button — only visible while the rail is hidden. -->
+    <button class="rail-show" type="button" id="tapsRailShow" title="Show the active-taps rail" aria-label="Show active taps">🛰️ taps</button>
+
+    <script type="module" src="/web/js/next/main.js"></script>
+  </body>
+</html>

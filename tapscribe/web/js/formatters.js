@@ -1,20 +1,8 @@
 // @ts-check
-// Pure formatters and DOM-safe escapers used across the dashboard.
+// Pure formatters used across the dashboard.
 // No DOM dependency, no shared state — safe to unit-test in isolation.
-
-/** @param {unknown} s */
-export function escapeHtml(s) {
-  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
-    /** @type {Record<string, string>} */ (
-      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }
-    )[c] ?? c
-  );
-}
-
-/** @param {string} s */
-export function cssEscape(s) {
-  return String(s).replace(/["\\]/g, "\\$&");
-}
+// (escapeHtml/cssEscape/fmtElapsed* were removed with the classic dashboard —
+// their only callers were classic main.js / ribbon.js / session-detail.js.)
 
 /** @param {number | null | undefined} b */
 export function fmtBytes(b) {
@@ -40,26 +28,6 @@ export function fmtMs(ms) {
 export function fmtClock(iso) {
   if (!iso) return "?";
   return iso.slice(11, 19);
-}
-
-/** @param {number | null | undefined} sec */
-export function fmtElapsed(sec) {
-  if (sec == null) return "—";
-  /** @param {number} n */
-  const p = (n) => String(n).padStart(2, "0");
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  return `${p(h)}:${p(m)}:${p(s)}`;
-}
-
-/** @param {number | null | undefined} sec */
-export function fmtElapsedShort(sec) {
-  if (sec == null || isNaN(sec)) return "0:00";
-  const total = Math.max(0, Math.floor(sec));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return m + ":" + String(s).padStart(2, "0");
 }
 
 /**

@@ -1,23 +1,26 @@
-"""Browser-driven E2E: dashboard renders what the pipeline produces.
+"""Browser-driven E2E: the Stages dashboard (served at /) renders what the
+pipeline produces.
 
-Three tests in this file, all driving real headless Chromium against
-the running uvicorn server:
+All tests drive real headless Chromium against the running uvicorn server.
+The headline flows:
 
-- `test_dashboard_shows_active_taps_live_feed_and_merged_transcript`
-  is the fast plumbing check — synthetic WAVs through two bridges plus
-  a `FakeTranscriber`, so it runs in CI without `faster-whisper`
-  installed. Verifies every panel renders correctly under load.
+- `test_dashboard_shows_active_taps_live_feed_and_merged_transcript` is the
+  fast plumbing check — synthetic WAVs through two bridges plus a
+  `FakeTranscriber`, so it runs in CI without `faster-whisper` installed.
+  Walks Capture (taps rail + live captions) → Sessions → Transcript
+  (transcribe whole session, merged render, alias-applied copy).
 - `test_dashboard_renders_strip_silence_region_sub_rows` exercises the
-  per-WAV region sub-rows the strip-silence pipeline mints — splits a
-  multi-burst WAV, expects N indented `.wav-row.strip-sub` rows under
-  the original, transcribes one of them, and expands its inline
-  transcript.
+  stripped-clip sub-rows in the Recordings view — splits a multi-burst WAV,
+  expects N indented `.wavrow.is-clip` rows under the original, transcribes
+  one region, and expands its inline transcript.
 - `test_dashboard_with_real_audio_and_whisper` is the full-fat check:
   streams the committed `armstrong-en.wav` fixture through the bridge,
-  clicks the dashboard's **▶ transcribe whole session** button, and
-  waits for real `faster-whisper` output to render in the merged
-  transcript panel. Gated by `@pytest.mark.real_audio` and skipped
-  unless `faster-whisper` + the audio fixture are present.
+  clicks Transcript's **▶ transcribe range** button, and waits for real
+  `faster-whisper` output to render in the merged transcript panel. Gated
+  by `@pytest.mark.real_audio` and skipped unless `faster-whisper` + the
+  audio fixture are present.
+- Plus poll-safety sweeps (focus clobbering, idle DOM churn) and the
+  structural perf guards at the bottom of the file.
 
 Skipped entirely when Playwright's Chromium isn't installed. Install
 with `pip install playwright && python -m playwright install chromium`.
@@ -27,13 +30,17 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import re
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 import pytest
 
 from tapscribe import transcribers as _transcribers
+from tapscribe.recorder import JobState
 
 from .conftest import RunningRecorder
 from .fake_transcriber import FakeTranscriber
@@ -78,32 +85,32 @@ def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
     return fake
 
 
-@pytest.fixture
-def synthetic_wavs(tmp_path: Path) -> dict[str, Path]:
-    return {
-        "alice": synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0),
-        "bob": synth_speech_like_wav(tmp_path / "bob.wav", seconds=0.6, freq_hz=440.0),
-    }
-
-
 async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
     running_recorder: RunningRecorder,
     fake_transcriber: FakeTranscriber,  # noqa: ARG001 — keeps the patched factory
-    synthetic_wavs: dict[str, Path],
+    tmp_path: Path,
 ):
     """End-to-end through real Chromium: stream → see in UI → click
-    transcribe → see merged transcript in UI.
+    transcribe → see merged transcript in UI, across the Stages views
+    (Capture → Sessions → Transcript).
 
-    The dashboard polls `/api/state` once per second; every UI wait is
-    on a DOM condition (text appearance, count change), never a fixed
-    sleep, so the test scales with the poll cadence rather than racing
-    it.
+    The dashboard polls `/api/state` every 500ms; every UI wait is on a
+    DOM condition (text appearance, count change), never a fixed sleep,
+    so the test scales with the poll cadence rather than racing it.
     """
     rec = running_recorder.recorder
     fake_wlk = running_recorder.fake_wlk
     ws_base = running_recorder.ws_base_url
 
     SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Long enough that both WSes are still streaming while the rail rows +
+    # caption pushes are asserted (the relays must be open for the pushes
+    # to reach them), short enough not to drag the test out.
+    wavs = {
+        "alice": synth_speech_like_wav(tmp_path / "alice.wav", seconds=6.0, freq_hz=220.0),
+        "bob": synth_speech_like_wav(tmp_path / "bob.wav", seconds=6.0, freq_hz=440.0),
+    }
 
     async with async_playwright() as pw:
         try:
@@ -117,14 +124,15 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                 permissions=["clipboard-read", "clipboard-write"],
             )
             page = await context.new_page()
-            # The dashboard polls /api/state every second so it's never
+            # The dashboard polls /api/state forever so it's never
             # network-idle — wait on DOM ready instead.
             await page.goto(running_recorder.base_url, wait_until="domcontentloaded")
 
-            # The dashboard's idle render — the "live transcripts" panel
-            # starts at 0 and the active-taps panel says "No taps".
-            await page.wait_for_selector("#activeTapsBody .empty", timeout=5000)
-            assert await page.locator("#liveFeedCount").inner_text() == "0"
+            # Idle render: Capture is the default view; the global taps rail
+            # shows the active-taps empty state and the captions feed is empty.
+            await page.wait_for_selector("#tapsRailBody .empty", timeout=5000)
+            assert await page.locator("#tapsRailCount").inner_text() == "0"
+            assert await page.locator('#viewRoot [data-slot="liveFeedCount"]').inner_text() == "0"
             await page.screenshot(path=str(SHOTS_DIR / "01-idle.png"), full_page=True)
 
             alice_task = asyncio.create_task(
@@ -132,9 +140,9 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                     ws_base_url=ws_base,
                     identity="alice",
                     name="Alice",
-                    wav_path=synthetic_wavs["alice"],
+                    wav_path=wavs["alice"],
                     utterance_id="utt-ui-alice",
-                    frame_interval_s=0.025,
+                    frame_interval_s=0.02,
                 )
             )
             bob_task = asyncio.create_task(
@@ -142,19 +150,19 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                     ws_base_url=ws_base,
                     identity="bob",
                     name="Bob",
-                    wav_path=synthetic_wavs["bob"],
+                    wav_path=wavs["bob"],
                     utterance_id="utt-ui-bob",
-                    frame_interval_s=0.025,
+                    frame_interval_s=0.02,
                 )
             )
 
-            # Active taps panel must surface both speakers while their
-            # WSes are open. Poll cadence is 1 s; allow a couple of ticks.
+            # The global taps rail must surface both speakers while their
+            # WSes are open — on every view, but Capture is where we look.
             await page.wait_for_function(
                 """
                 () => {
                   const rows = Array.from(
-                    document.querySelectorAll("#activeTapsBody .stream-row .name .fg"),
+                    document.querySelectorAll('#tapsRailBody .stream-row [data-slot="name"]'),
                   );
                   const names = rows.map((n) => n.textContent.trim());
                   return names.includes("Alice") && names.includes("Bob");
@@ -162,15 +170,21 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                 """,
                 timeout=5000,
             )
-            assert await page.locator("#activeCount").inner_text() == "2"
+            assert await page.locator("#tapsRailCount").inner_text() == "2"
             await page.screenshot(path=str(SHOTS_DIR / "02-active-taps.png"), full_page=True)
 
-            # Settled lines from the fake WhisperLiveKit must surface in
-            # the live transcripts panel, attributed to each speaker.
-            # FakeWlk broadcasts to every connected relay → each push
-            # lands twice (once tagged Alice, once Bob).
+            # Settled lines from the fake WhisperLiveKit must surface in the
+            # Capture view's captions feed, attributed to each speaker.
+            # FakeWlk broadcasts to every connected relay → each push lands
+            # twice (once tagged Alice, once Bob). The relay settles the tail
+            # line only after a few stable empty-buffer snapshots
+            # (live_relay.py _TAIL_STABLE_SNAPSHOTS), so each commit is
+            # followed by confirming snapshots — mirroring WlK's rolling
+            # re-broadcasts.
             fake_wlk.push_committed("first ui settled line")
             fake_wlk.push_committed("second ui settled line")
+            for _ in range(4):
+                fake_wlk.push_buffer("")
 
             # The feed coalesces consecutive same-speaker fragments into one
             # flowing line, and FakeWlk's broadcast order isn't deterministic
@@ -181,7 +195,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                 """
                 () => {
                   const lines = Array.from(
-                    document.querySelectorAll("#liveFeedShell .feed-body .line"),
+                    document.querySelectorAll('#viewRoot [data-slot="liveFeedShell"] .feed-body .line'),
                   );
                   const byWho = {};
                   for (const l of lines) {
@@ -197,46 +211,43 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                   return ok("Alice") && ok("Bob");
                 }
                 """,
-                timeout=5000,
+                timeout=10000,
             )
-            # The header count tracks rendered (coalesced) lines, not raw
-            # deque entries: at least one line per speaker survives the merge.
-            assert int(await page.locator("#liveFeedCount").inner_text()) >= 2
+            # The header count tracks rendered (COALESCED) lines, not raw deque
+            # entries (#80): consecutive same-speaker fragments are joined into
+            # sentences, so >=1 line per speaker survives the merge (2 speakers
+            # here). Stages mounts the feed count as a data-slot under #viewRoot.
+            count = await page.locator('#viewRoot [data-slot="liveFeedCount"]').inner_text()
+            assert int(count) >= 2
             await page.screenshot(path=str(SHOTS_DIR / "03-live-transcripts.png"), full_page=True)
 
             await asyncio.gather(alice_task, bob_task)
-            assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+            assert await wait_until(lambda: streams_drained(rec), timeout=10.0)
 
-            # The sessions panel must list the current session with the
+            # The global Sessions view must list the current session with the
             # two WAVs the bridges wrote.
+            await page.evaluate("() => window.gotoView('sessions')")
             await page.wait_for_function(
                 f"""
                 () => {{
-                  const folder = document.querySelector(
-                    '.sess-folder',
-                  );
-                  return folder && folder.textContent.trim() === '{rec.session_start}';
+                  const row = document.querySelector('.sessrow[data-sid="{rec.session_start}"]');
+                  return row && row.querySelector('[data-slot="wavs"]')?.textContent.trim() === '2';
                 }}
-                """,
-                timeout=5000,
-            )
-            await page.wait_for_function(
-                """
-                () => document.querySelectorAll('.wav-list .wav-row').length >= 2
                 """,
                 timeout=5000,
             )
             await page.screenshot(path=str(SHOTS_DIR / "04-sessions.png"), full_page=True)
 
-            # The dashboard's headline button: ▶ transcribe whole session.
-            tx_button = page.locator(f'[data-tx-sess="{rec.session_start}"]')
+            # The headline flow: Transcript stage → ▶ transcribe range (blank
+            # range = the whole session).
+            await page.evaluate("() => window.gotoView('transcript')")
+            tx_button = page.locator('#viewRoot [data-slot="txRangeBtn"]')
             await tx_button.wait_for(state="visible", timeout=5000)
             await tx_button.click()
 
-            # And the merged transcript must render in .sess-main with
-            # both speakers' scripted text. We assert on `innerText` (the
-            # rendered, layout-aware string) rather than `textContent`
-            # (raw concatenated text). The transcript container is
+            # The merged transcript must render with both speakers' scripted
+            # text. We assert on `innerText` (the rendered, layout-aware
+            # string) rather than `textContent`: the lines container is
             # `white-space: pre-wrap`, so any stray whitespace/newlines
             # between sibling spans would split a single segment across
             # multiple visual lines while still passing a textContent
@@ -244,12 +255,12 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             await page.wait_for_function(
                 f"""
                 () => {{
-                  const region = document.querySelector('.sess-main .transcript');
+                  const region = document.querySelector(
+                    '#viewRoot [data-slot="mergedHost"] [data-slot="lines"]');
                   if (!region) return false;
                   const visible = region.innerText;
                   // Each speaker's label and body must appear adjacent on
-                  // the same visual line — i.e. "Alice: <text>" — not on
-                  // separate lines with a wrapped break in between.
+                  // the same visual line — i.e. "Alice: <text>".
                   return visible.includes('Alice: ' + {ALICE_TEXT!r})
                       && visible.includes('Bob: ' + {BOB_TEXT!r});
                 }}
@@ -264,10 +275,10 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             assert "Alice" in legend_text and "Bob" in legend_text
             await page.screenshot(path=str(SHOTS_DIR / "05-merged-transcript.png"), full_page=True)
 
-            # ⎘ copy merged must copy the speaker display names (aliases
-            # applied) — what the user sees on screen — not the raw
-            # speaker keys from the backend's `plain_text`. Set an alias
-            # and verify the clipboard reflects it.
+            # The copy button must copy the speaker display names (aliases
+            # applied) — what the user sees on screen — not the raw speaker
+            # keys from the backend's `plain_text`. Set an alias and verify
+            # the clipboard reflects it.
             await page.evaluate(
                 """
                 async (sess) => {
@@ -281,28 +292,31 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                 """,
                 rec.session_start,
             )
-            # Wait for the new aliases to render in the merged transcript.
+            # Wait for the new aliases to render in the merged transcript
+            # (the merged pane's render signature includes the alias map).
             await page.wait_for_function(
                 """
                 () => {
-                  const t = document.querySelector('.sess-main .transcript')?.innerText || '';
+                  const t = document.querySelector(
+                    '#viewRoot [data-slot="mergedHost"] [data-slot="lines"]')?.innerText || '';
                   return t.includes('Ms. Smith: ') && t.includes('Mr. Jones: ');
                 }
                 """,
                 timeout=5000,
             )
-            copy_btn = page.locator(f'[data-copy-sess="{rec.session_start}"]')
-            await copy_btn.click()
-            # Verify the behaviour that matters: copy merged applies display-name
-            # aliases (what the user sees), not the backend's raw speaker keys.
-            #
-            # We deliberately do NOT assert the "✓ copied" confirmation flash.
-            # flashButton() shows it for only 1500ms and the dashboard's 1 Hz
-            # poll can re-render the button mid-window, so any check for that
-            # transient state races both the revert and the node swap — it was
-            # the sole source of this test's intermittent failures under load,
-            # while only guarding a cosmetic animation. The clipboard content
-            # below is the real contract and is stable.
+            # The copy button enables once the merged body is loaded.
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('#viewRoot [data-slot="txCopyBtn"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=5000,
+            )
+            await page.locator('#viewRoot [data-slot="txCopyBtn"]').click()
+            # Verify the behaviour that matters: copy applies display-name
+            # aliases (what the user sees), not the backend's raw speaker
+            # keys. (The "✓ copied" flash is cosmetic and transient — the
+            # clipboard content is the contract.)
             clipboard = await page.evaluate("() => navigator.clipboard.readText()")
             assert "Ms. Smith: " in clipboard and "Mr. Jones: " in clipboard, (
                 f"copy merged didn't apply aliases: {clipboard!r}"
@@ -322,17 +336,18 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
     fake_transcriber: FakeTranscriber,
     tmp_path: Path,
 ):
-    """Each original WAV's row shows one indented `.wav-row.strip-sub`
-    per region the strip-silence splitter wrote to `<session>/stripped/`,
-    each with its own download link + transcribe button + expandable
+    """The Recordings view's stripped source shows one indented
+    `.wavrow.is-clip` per region the strip-silence splitter wrote to
+    `<session>/stripped/`, each with its own download link + expandable
     inline transcript.
 
     This is the load-bearing UX guard for the sub-row UI: the splitter
     refactor (PR #49) silently dropped the old 1:1 stripped sibling UI,
     so a regression here would leave region WAVs invisible to the
     operator. The test streams a 3-burst WAV, splits it, asserts 3
-    sub-rows render under the parent, then exercises one sub-row's
-    transcribe + expand controls end-to-end.
+    clip rows render under the parent, transcribes one region
+    (server-side — transcription moved to the Transcript stage), and
+    expands its inline transcript end-to-end.
     """
     # Imported here so the helper stays colocated with the strip-silence
     # pipeline test it was originally written for.
@@ -395,63 +410,74 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
                 viewport={"width": 1400, "height": 900},
             )
             page = await context.new_page()
-            await page.goto(base, wait_until="domcontentloaded")
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+
+            # Switch the WAV list to the stripped source — clip rows render
+            # under their parent original only when that source is active.
+            stripped_toggle = page.locator('#viewRoot .srcsw__opt[data-src="stripped"]')
+            await stripped_toggle.wait_for(state="visible", timeout=10000)
+            await page.wait_for_function(
+                """() => !document.querySelector('#viewRoot .srcsw__opt[data-src="stripped"]')?.disabled""",
+                timeout=10000,
+            )
+            await stripped_toggle.click()
 
             # The original WAV row must render, with exactly 3 indented
-            # `.wav-row.strip-sub` siblings under it (the three regions).
+            # `.wavrow.is-clip` siblings under it (the three regions).
             await page.wait_for_function(
                 """
-                () => document.querySelectorAll('.wav-list .wav-row.strip-sub').length === 3
+                () => document.querySelectorAll('#viewRoot .wavlist .wavrow.is-clip').length === 3
                 """,
                 timeout=10000,
             )
-            # Sub-rows live inside the same `.wav-list` as the original —
+            # Clip rows live inside the same `.wavlist` as the original —
             # i.e. not in some sibling list. Asserts the DOM topology so a
             # future refactor that re-parents them is flagged here.
-            total_rows = await page.locator(".wav-list .wav-row").count()
+            total_rows = await page.locator("#viewRoot .wavlist .wavrow").count()
             assert total_rows == 4, f"expected 1 original + 3 region rows, got {total_rows}"
 
-            # Each region row carries its own transcribe button targeting
-            # source=stripped and the region's own name.
+            # Each clip row is identifiable by its region name + source and
+            # carries a stripped-source download link.
             for r in region_wavs:
-                btn_sel = (
-                    f'.wav-row.strip-sub button[data-tx-source="stripped"]'
-                    f'[data-tx-wav="{rec.session_start}/{r.name}"]'
-                )
-                btn = page.locator(btn_sel)
-                await btn.wait_for(state="visible", timeout=3000)
+                row_sel = f'.wavrow.is-clip[data-wav="{r.name}"][data-src="stripped"]'
+                await page.locator(row_sel).wait_for(state="visible", timeout=3000)
+                href = await page.get_attribute(f'{row_sel} [data-slot="download"]', "href")
+                assert href and "source=stripped" in href, f"clip download must target stripped: {href}"
 
-            # Click the first region's transcribe button and wait for the
-            # row to flip from "transcribing…" to "took Xms".
+            # Transcribe the first region server-side (the per-clip transcribe
+            # button moved to the Transcript stage with the engine panel) and
+            # wait for the clip's tx tag to flip on the next polls.
             first_region = region_wavs[0]
-            first_btn_sel = (
-                f'.wav-row.strip-sub button[data-tx-source="stripped"]'
-                f'[data-tx-wav="{rec.session_start}/{first_region.name}"]'
-            )
-            await page.locator(first_btn_sel).click()
+            async with httpx.AsyncClient(base_url=base, timeout=30.0) as client2:
+                resp2 = await client2.post(
+                    "/api/transcribe",
+                    json={
+                        "session": rec.session_start,
+                        "name": first_region.name,
+                        "source": "stripped",
+                        "model": "tiny.en",
+                    },
+                )
+                assert resp2.status_code == 200, resp2.text
+            first_row_sel = f'.wavrow.is-clip[data-wav="{first_region.name}"][data-src="stripped"]'
             await page.wait_for_function(
                 f"""
                 () => {{
-                  const row = document.querySelector(
-                    '.wav-row.strip-sub button[data-tx-wav="{rec.session_start}/{first_region.name}"]'
-                  )?.closest('.wav-row');
-                  return row && /took\\s+\\d/.test(row.innerText);
+                  const row = document.querySelector('{first_row_sel}');
+                  return row && row.querySelector('[data-slot="txTag"]')?.textContent.includes('✓');
                 }}
                 """,
                 timeout=10000,
             )
 
-            # Clicking the region's name expands the inline transcript
-            # right below the sub-row. Its text must be the scripted text
-            # the FakeTranscriber returned.
-            name_sel = (
-                f'.wav-row.strip-sub [data-toggle-wav="{rec.session_start}/{first_region.name}@stripped"]'
-            )
-            await page.locator(name_sel).click()
+            # Expanding the clip renders its inline transcript right below the
+            # row. Its text must be the scripted text the FakeTranscriber
+            # returned.
+            await page.locator(f"{first_row_sel} [data-wav-expand]").click()
             await page.wait_for_function(
                 f"""
                 () => {{
-                  const tx = document.querySelectorAll('.wav-list .expand-tx');
+                  const tx = document.querySelectorAll('#viewRoot .wavlist .expand-tx');
                   return Array.from(tx).some((el) => el.innerText.includes({scripted!r}));
                 }}
                 """,
@@ -464,9 +490,9 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
             )
 
             # The original WAV's row is still present and identifiable by
-            # its (unique) original filename — sub-rows must not have
+            # its (unique) original filename — clip rows must not have
             # taken its place in the DOM.
-            orig_row = page.locator(f'.wav-list [data-toggle-wav="{rec.session_start}/{original_name}"]')
+            orig_row = page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{original_name}"]')
             await orig_row.wait_for(state="visible", timeout=2000)
         finally:
             await browser.close()
@@ -475,10 +501,10 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
 async def test_dashboard_delete_session_audio_keeps_transcript(
     running_recorder: RunningRecorder,
 ):
-    """The per-session '🗑 delete audio' button removes a session's WAVs
-    while keeping its merged transcript. Drives the real `confirm()`
-    dialog — the first dialog-accept handler in this suite; without it,
-    headless Chromium auto-dismisses the confirm and the delete no-ops.
+    """The Sessions view's per-row 'delete audio' action removes a session's
+    WAVs while keeping its merged transcript. Drives the real `confirm()`
+    dialog — without an accept handler, headless Chromium auto-dismisses
+    the confirm and the delete no-ops.
 
     Operates on a SEEDED, non-current session because the delete endpoints
     refuse the current recording session.
@@ -514,25 +540,25 @@ async def test_dashboard_delete_session_audio_keeps_transcript(
             page = await context.new_page()
             # Accept every confirm() so the destructive action proceeds.
             page.on("dialog", lambda d: asyncio.create_task(d.accept()))
-            await page.goto(base, wait_until="domcontentloaded")
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
 
-            # Select the seeded previous session from the sidebar.
-            sess_sel = f'.sess-item[data-sess-id="{prev_id}"]'
-            await page.locator(sess_sel).wait_for(state="visible", timeout=10000)
-            await page.locator(sess_sel).click()
-
-            # Its single WAV row + the delete-audio button must render.
-            await page.wait_for_function(
-                """() => document.querySelectorAll('.wav-list .wav-row').length === 1""",
-                timeout=10000,
-            )
-            del_btn = page.locator(f'[data-delete-audio="{prev_id}"]')
+            # The seeded previous session renders as a row with 1 WAV and a
+            # merged-transcript marker.
+            row_sel = f'.sessrow[data-sid="{prev_id}"]'
+            await page.locator(row_sel).wait_for(state="visible", timeout=10000)
+            del_btn = page.locator(f'{row_sel} [data-slot="del"]')
             await del_btn.wait_for(state="visible", timeout=3000)
             await del_btn.click()
 
-            # The wav list empties once the delete + next /api/state land.
+            # The row's WAV count drops to 0 once the delete + next poll land.
             await page.wait_for_function(
-                """() => document.querySelectorAll('.wav-list .wav-row').length === 0""",
+                f"""
+                () => {{
+                  const row = document.querySelector('{row_sel}');
+                  // "—" is the zero glyph in the WAVs column.
+                  return row && row.querySelector('[data-slot="wavs"]')?.textContent.trim() === '—';
+                }}
+                """,
                 timeout=10000,
             )
             await page.screenshot(
@@ -547,14 +573,107 @@ async def test_dashboard_delete_session_audio_keeps_transcript(
     assert (prev / "session-transcript.json").is_file(), "merged transcript must be kept"
 
 
+async def test_sessions_view_absorb_delete_and_prune(
+    running_recorder: RunningRecorder,
+):
+    """The Sessions view's management actions, ported from the classic
+    sidebar: absorb-merge one session into another (the source folder is
+    deleted, its WAVs move into the target), whole-session delete, and the
+    prune-empty toolbar action. Also pins the safety wiring: the CURRENT
+    session must not offer delete/absorb (the server would 409 anyway).
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+
+    def seed(sid: str, *, wavs: int) -> Path:
+        d = rec.recordings_dir / sid
+        d.mkdir(parents=True)
+        for i in range(wavs):
+            synth_speech_like_wav(d / f"{sid}_seed{i}_speaker_{i:08d}.wav", seconds=0.3, freq_hz=220.0)
+        return d
+
+    target_id, source_id, empty_id = (
+        "2024-01-01T10-00-00Z",
+        "2024-01-02T10-00-00Z",
+        "2024-01-03T10-00-00Z",
+    )
+    target_dir = seed(target_id, wavs=1)
+    source_dir = seed(source_id, wavs=1)
+    empty_dir = seed(empty_id, wavs=0)
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            page.on("dialog", lambda d: asyncio.create_task(d.accept()))
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+
+            # The current session's row must NOT offer the destructive
+            # actions the server refuses for it.
+            cur_sel = f'.sessrow[data-sid="{rec.session_start}"]'
+            await page.locator(cur_sel).wait_for(state="visible", timeout=10000)
+            assert await page.locator(f'{cur_sel} [data-slot="absorb"]').count() == 0, (
+                "current session must not offer absorb-as-source"
+            )
+            cur_del = page.locator(f'{cur_sel} [data-slot="delSession"]')
+            if await cur_del.count():
+                assert await cur_del.is_disabled(), "current session delete must be disabled"
+
+            # ABSORB: fold source into target via the row's picker. The source
+            # row disappears (its folder is deleted) and the target's WAV
+            # count doubles.
+            await page.locator(f'.sessrow[data-sid="{source_id}"]').wait_for(state="visible", timeout=5000)
+            await page.select_option(f'.sessrow[data-sid="{source_id}"] [data-slot="absorb"]', target_id)
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const src = document.querySelector('.sessrow[data-sid="{source_id}"]');
+                  const tgt = document.querySelector('.sessrow[data-sid="{target_id}"]');
+                  return !src && tgt
+                    && tgt.querySelector('[data-slot="wavs"]')?.textContent.trim() === '2';
+                }}
+                """,
+                timeout=10000,
+            )
+            assert not source_dir.exists(), "absorb must delete the source folder"
+            assert len(sorted(target_dir.glob("*.wav"))) == 2
+
+            # WHOLE-SESSION DELETE: the target row (audio + everything) goes.
+            await page.locator(f'.sessrow[data-sid="{target_id}"] [data-slot="delSession"]').click()
+            await page.wait_for_function(
+                f"""() => !document.querySelector('.sessrow[data-sid="{target_id}"]')""",
+                timeout=10000,
+            )
+            assert not target_dir.exists(), "session delete must remove the folder"
+
+            # PRUNE EMPTY: the empty unlabeled session goes; the status text
+            # surfaces the count; the current session survives.
+            await page.locator('[data-slot="prune"]').click()
+            await page.wait_for_function(
+                f"""() => !document.querySelector('.sessrow[data-sid="{empty_id}"]')""",
+                timeout=10000,
+            )
+            status = await page.locator('[data-slot="pruneStatus"]').inner_text()
+            assert "1" in status, f"prune status should surface the count: {status!r}"
+            assert not empty_dir.exists(), "prune must remove the empty session folder"
+            assert await page.locator(cur_sel).count() == 1, "prune must keep the current session"
+        finally:
+            await browser.close()
+
+
 @pytest.mark.real_audio
 async def test_dashboard_with_real_audio_and_whisper(
     running_recorder: RunningRecorder,
 ):
     """Headline real-deal check: stream the committed Apollo 11 audio
-    fixture through the bridge, click the dashboard's
-    **▶ transcribe whole session** button, wait for real
-    `faster-whisper` to produce a merged transcript, and assert the
+    fixture through the bridge, click the Transcript stage's
+    **▶ transcribe range** button (blank range = whole session), wait for
+    real `faster-whisper` to produce a merged transcript, and assert the
     rendered DOM contains a recognisable word from the reference.
 
     The screenshot at the end (`06-real-audio-transcript.png`) is what
@@ -602,28 +721,24 @@ async def test_dashboard_with_real_audio_and_whisper(
                 permissions=["clipboard-read", "clipboard-write"],
             )
             page = await context.new_page()
-            await page.goto(running_recorder.base_url, wait_until="domcontentloaded")
+            await page.goto(running_recorder.base_url + "/#transcript", wait_until="domcontentloaded")
 
-            # Wait for the dashboard's first /api/state poll to land — then
-            # the sessions list will have the session we just streamed into.
-            await page.wait_for_selector(".wav-list .wav-row", timeout=10000)
-            # The truncMid renderer can elide "armstrong" out of the
-            # visible name on long filenames, but it's preserved in the
-            # `title` attribute.
+            # Wait for the first /api/state poll to land — the range button
+            # enables once the session has WAVs to transcribe.
             await page.wait_for_function(
-                """
-                () => Array.from(document.querySelectorAll('.wav-list .wav-row .wav-name'))
-                  .some((a) => (a.title || a.textContent || "").toLowerCase().includes('armstrong'))
-                """,
-                timeout=5000,
+                """() => {
+                  const b = document.querySelector('#viewRoot [data-slot="txRangeBtn"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=10000,
             )
 
-            # Default model picker is `small.en` (244 MB). tiny.en is in
-            # the picker and only 75 MB — better fit for a test that
-            # might run on a fresh machine.
-            await page.select_option("[data-model-pick]", "tiny.en")
+            # The engine panel's model select defaults to the catalog's first
+            # model. tiny.en is only 75 MB — better fit for a test that might
+            # run on a fresh machine.
+            await page.select_option("#viewRoot .sel--model", "tiny.en")
 
-            tx_button = page.locator(f'[data-tx-sess="{rec.session_start}"]')
+            tx_button = page.locator('#viewRoot [data-slot="txRangeBtn"]')
             await tx_button.wait_for(state="visible", timeout=5000)
             await tx_button.click()
 
@@ -647,7 +762,8 @@ async def test_dashboard_with_real_audio_and_whisper(
                 await page.wait_for_function(
                     f"""
                     () => {{
-                      const region = document.querySelector('.sess-main .transcript');
+                      const region = document.querySelector(
+                        '#viewRoot [data-slot="mergedHost"] [data-slot="lines"]');
                       if (!region) return false;
                       const text = region.textContent.toLowerCase();
                       if (text.length < 8) return false;
@@ -660,10 +776,24 @@ async def test_dashboard_with_real_audio_and_whisper(
                     timeout=int(timeout_s * 1000),
                 )
             except Exception as e:
+                # Gather what actually rendered so a CI flake points at the
+                # real culprit (transcribe never ran? marker never polled?
+                # body fetched but reference word missing?).
+                rendered = await page.evaluate(
+                    """() => ({
+                      txHint: document.querySelector('#viewRoot [data-slot="txHint"]')?.textContent,
+                      lines: document.querySelectorAll(
+                        '#viewRoot [data-slot="mergedHost"] [data-slot="lines"] > div').length,
+                      sample: (document.querySelector(
+                        '#viewRoot [data-slot="mergedHost"] [data-slot="lines"]')?.innerText || '').slice(0, 200),
+                    })"""
+                )
+                tx_file = rec.session_dir / "session-transcript.json"
                 raise AssertionError(
                     f"real-Whisper transcript never rendered: model={whisper_model!r}, "
                     f"waited {timeout_s:.0f}s "
                     f"(override via TAPSCRIBE_E2E_WHISPER_TIMEOUT_S). "
+                    f"rendered={rendered!r} server_tx_exists={tx_file.is_file()} "
                     f"underlying error: {type(e).__name__}: {e}"
                 ) from e
 
@@ -681,14 +811,16 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
     tmp_path: Path,
 ):
     """The dashboard's responsiveness guard: a click that only changes
-    local UI state (here, expanding a WAV's inline transcript) must apply
-    from the client-side cache, NOT wait on a fresh /api/state fetch.
+    local UI state (here, expanding a WAV's inline transcript in the
+    Recordings view) must apply from the client-side cache, NOT wait on a
+    fresh /api/state fetch.
 
     We transcribe a WAV, let the dashboard cache it, then kill every
     further /api/state poll and click to expand. If the expand still
-    happens, the re-render came from cache. Before the fix the handler
-    awaited /api/state (now dead), so the expand never rendered — exactly
-    the "I click and nothing happens until I wait" symptom.
+    happens, the re-render came from cache (refresh() paints from lastJson
+    before polling). Before the fix the handler awaited /api/state (now
+    dead), so the expand never rendered — exactly the "I click and nothing
+    happens until I wait" symptom.
     """
     rec = running_recorder.recorder
     ws_base = running_recorder.ws_base_url
@@ -728,20 +860,35 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
-            await page.goto(base, wait_until="domcontentloaded")
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
 
-            # Wait for the transcribed WAV row to render — proves a poll
-            # has populated the client cache with this WAV's transcript.
+            # Wait for the transcribed WAV row to render with its ✓ tx tag —
+            # proves a poll has populated the client state with this WAV's
+            # transcript marker.
+            row_sel = f'.wavrow[data-wav="{wav_name}"]'
             await page.wait_for_function(
                 f"""
                 () => {{
-                  const row = document.querySelector(
-                    '[data-toggle-wav="{rec.session_start}/{wav_name}"]'
-                  )?.closest('.wav-row');
-                  return row && /took\\s+\\d/.test(row.innerText);
+                  const row = document.querySelector('{row_sel}');
+                  return row && row.querySelector('[data-slot="txTag"]')?.textContent.includes('✓');
                 }}
                 """,
                 timeout=10000,
+            )
+            # Pre-warm the per-WAV transcript body cache: expand once (this
+            # may fetch /api/wav/.../transcript), wait for the text, collapse.
+            await page.locator(f"{row_sel} [data-wav-expand]").click()
+            await page.wait_for_function(
+                f"""
+                () => Array.from(document.querySelectorAll('#viewRoot .wavlist .expand-tx'))
+                  .some((el) => el.innerText.includes({scripted!r}))
+                """,
+                timeout=5000,
+            )
+            await page.locator(f"{row_sel} [data-wav-expand]").click()
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wavlist .expand-tx').length === 0""",
+                timeout=5000,
             )
 
             # Kill every further /api/state poll. From here the dashboard
@@ -752,13 +899,13 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
 
             await page.route("**/api/state", _kill_state)
 
-            await page.locator(f'.wav-list [data-toggle-wav="{rec.session_start}/{wav_name}"]').click()
+            await page.locator(f"{row_sel} [data-wav-expand]").click()
             # The 1500ms bound is below what any rescuing poll could deliver
             # (polls are dead) — so a pass means the expand rendered from
             # cache on click, not from a network round trip.
             await page.wait_for_function(
                 f"""
-                () => Array.from(document.querySelectorAll('.wav-list .expand-tx'))
+                () => Array.from(document.querySelectorAll('#viewRoot .wavlist .expand-tx'))
                   .some((el) => el.innerText.includes({scripted!r}))
                 """,
                 timeout=1500,
@@ -767,24 +914,28 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
             await browser.close()
 
 
-async def test_model_select_change_does_not_block_re_render(
+async def test_lazy_transcript_fetch_is_cached_not_per_poll(
     running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,
     tmp_path: Path,
 ):
-    """The model picker is a <select> inside the detail pane. Changing it
-    leaves the select focused, which trips the focused-input guard in
-    renderSessionsIfChanged and would block a cache re-render entirely —
-    so the model-change handler must blur the select before re-rendering.
+    """The lazy transcript fetch must be CACHED by (session, transcribed_at):
+    hit ONCE when the Transcript stage opens, then NOT re-fetched on every
+    /api/state poll. Otherwise the optimisation just trades DOM churn for
+    network churn.
 
-    With polls killed, the only thing that can re-render the pane is the
-    change handler itself; the fix rebuilds the pane, so focus leaves the
-    (recreated) select. Self-skips where the catalog has <2 models (the
-    synthetic CI e2e job installs no transcriber backends), since a change
-    event needs a second option to select.
+    Records + transcribes a session so /api/state ships a transcript MARKER,
+    opens the Transcript view (which renders the merged transcript via a lazy
+    fetch of GET /api/sessions/{s}/transcript), counts both the poll ticks and
+    the transcript-endpoint hits across ~6 poll cycles, and asserts the
+    transcript endpoint fired exactly once while many polls elapsed.
     """
     rec = running_recorder.recorder
     ws_base = running_recorder.ws_base_url
     base = running_recorder.base_url
+
+    scripted = "cached fetch check from Alice"
+    fake_transcriber.text_by_speaker["Alice"] = scripted
 
     src = synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0)
     await stream_wav_via_tap(
@@ -792,9 +943,20 @@ async def test_model_select_change_does_not_block_re_render(
         identity="alice",
         name="Alice",
         wav_path=src,
-        utterance_id="utt-resp-model",
+        utterance_id="utt-cache-count",
     )
     assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    import httpx
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        # Transcribe the whole session so /api/state carries a session_transcript
+        # marker and the dashboard's merged-transcript path fires a lazy fetch.
+        resp = await client.post(
+            "/api/transcribe-session",
+            json={"session": rec.session_start, "model": "tiny.en"},
+        )
+        assert resp.status_code == 200, resp.text
 
     async with async_playwright() as pw:
         try:
@@ -805,51 +967,925 @@ async def test_model_select_change_does_not_block_re_render(
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+
+            # Count poll ticks and lazy transcript-endpoint hits from the page.
+            await page.add_init_script(
+                """
+                window.__statePolls = 0;
+                window.__txFetches = 0;
+                const _f = window.fetch;
+                window.fetch = function (input, init) {
+                  const u = typeof input === 'string' ? input : (input && input.url) || '';
+                  if (u.includes('/api/state')) window.__statePolls++;
+                  else if (/\\/api\\/sessions\\/[^/]+\\/transcript/.test(u)) window.__txFetches++;
+                  return _f.apply(this, arguments);
+                };
+                """
+            )
+            await page.goto(base + "/#transcript", wait_until="domcontentloaded")
+
+            # Wait until the merged transcript has rendered — proves the lazy
+            # fetch fired and the body painted.
+            await page.wait_for_function(
+                f"""
+                () => {{
+                  const region = document.querySelector(
+                    '#viewRoot [data-slot="mergedHost"] [data-slot="lines"]');
+                  return region && region.innerText.includes({scripted!r});
+                }}
+                """,
+                timeout=15000,
+            )
+
+            # Let several poll cycles elapse (poll cadence ~500ms) so a
+            # per-poll re-fetch would clearly show up in the counter.
+            await page.wait_for_function(
+                "() => window.__statePolls >= 6",
+                timeout=10000,
+            )
+
+            polls = await page.evaluate("() => window.__statePolls")
+            fetches = await page.evaluate("() => window.__txFetches")
+            assert polls >= 6, f"expected several polls, saw {polls}"
+            # The transcript endpoint must have fired ONCE for this (session,
+            # transcribed_at) — not once per poll. (1 is the contract; allow a
+            # tiny slack only for an initial duplicate render, never per-poll.)
+            assert fetches == 1, (
+                f"lazy transcript fetch not cached: {fetches} hits across {polls} polls "
+                f"(must be 1 per (session, transcribed_at), not per poll)"
+            )
+        finally:
+            await browser.close()
+
+
+# (The classic dashboard's model-select blur test was retired with the
+# classic UI: the Stages engine select renders through renderRegion, whose
+# focus guard the poll-safety sweep below already exercises for every view.)
+
+
+# The Stages views, in the order window.gotoView accepts them. Drives the
+# poll-safety sweep below across every stage so a new dropdown in any view
+# can't silently regress the renderRegion guard. The global Sessions list is
+# included because it holds a search box + per-row rename inputs that the
+# 500ms poll must not clobber.
+_NEXT_VIEWS = ("capture", "recordings", "transcript", "taps", "sessions", "people", "settings")
+
+# > one poll period (500ms in next/main.js) so the sweep crosses at least
+# one re-render boundary. The sweep also asserts a poll actually fired during
+# this window, so a vacuous pass (polls somehow stalled) can't hide a regression.
+_NEXT_POLL_CROSS_MS = 750
+
+
+async def test_next_poll_render_does_not_clobber_open_controls(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,
+    tmp_path: Path,
+):
+    """The Stages dashboard re-renders every per-tick region on each 500ms
+    /api/state poll via host.replaceChildren(...). Replacing a node that holds
+    a focused <select> / <input> / <textarea> would snap a dropdown shut or
+    drop the caret mid-edit. The shared `renderRegion` primitive (templates.js)
+    guards every per-tick region against that, and the spine adopts it as the
+    reference.
+
+    This sweep is the regression net: for each of the six views, it focuses
+    every focusable control currently rendered in `#viewRoot` (plus the spine's
+    session <select>), stamps a unique JS property on the live node, lets more
+    than one poll elapse, and asserts the SAME node is still in the DOM with the
+    stamp intact AND still document.activeElement. A clobbering re-render would
+    have built a fresh node — dropping the JS property and the focus — so the
+    assertion fails loudly.
+
+    A control that can't actually take focus (e.g. a disabled engine <select>
+    on the synthetic CI box with no transcriber backends installed) carries no
+    live interaction state to protect, so the sweep skips it after confirming
+    focus didn't land. Views with no focusable controls in this state are
+    skipped too; the test asserts it exercised at least one control overall so
+    it can't pass by finding nothing anywhere.
+    """
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    # Seed a session with two recorded WAVs so Recordings/Transcript render
+    # their WAV-list controls and People derives participants to name. Transcribe
+    # one so the Transcript cache panel and merged view populate too.
+    fake_transcriber.text_by_speaker["Alice"] = "Seeded line for the persistence sweep."
+    src = synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src,
+        utterance_id="utt-persist-1",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+    recorded = sorted(rec.session_dir.glob("*.wav"))
+    assert len(recorded) == 1, f"expected one recorded WAV, got {[w.name for w in recorded]}"
+    wav_name = recorded[0].name
+
+    # Seed TWO archived sessions so the Sessions view renders its per-row
+    # "absorb into…" <select> (an archived row needs a non-self archived
+    # target) — otherwise that control is absent from the DOM and the sweep
+    # can't verify its renderRegion focus-guard.
+    for sweep_sid in ("2024-05-01T10-00-00Z", "2024-05-02T10-00-00Z"):
+        d = rec.recordings_dir / sweep_sid
+        d.mkdir(parents=True)
+        synth_speech_like_wav(d / f"{sweep_sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+
+    import httpx
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            "/api/transcribe",
+            json={"session": rec.session_start, "name": wav_name, "model": "tiny.en"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            # Count /api/state hits so the sweep can prove a poll actually
+            # crossed the focus window (otherwise a stalled poll would let a
+            # would-be clobber pass unnoticed).
+            await page.expose_function("__noteStatePoll", lambda: None)
+            await page.add_init_script(
+                """
+                window.__statePolls = 0;
+                const _fetch = window.fetch;
+                window.fetch = (...args) => {
+                  try {
+                    const u = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+                    if (u.includes('/api/state')) window.__statePolls++;
+                  } catch (_e) { /* never let bookkeeping break the real fetch */ }
+                  return _fetch.apply(window, args);
+                };
+                """
+            )
             await page.goto(base, wait_until="domcontentloaded")
 
-            await page.wait_for_selector("[data-model-pick]", timeout=10000)
-            # The change handler needs a second option to switch to.
-            values = await page.eval_on_selector_all(
-                "[data-model-pick] option", "els => els.map(e => e.value)"
-            )
-            current = await page.eval_on_selector("[data-model-pick]", "el => el.value")
-            target = next((v for v in values if v and v != current), None)
-            if target is None:
-                pytest.skip("model catalog has <2 options in this env")
-
-            # Kill further polls so only the change handler can re-render.
-            async def _kill_state(route):
-                await route.fulfill(status=503, body="down")
-
-            await page.route("**/api/state", _kill_state)
-
-            # Reproduce the real-user precondition: the <select> is the
-            # focused element when its change event fires. `select_option`
-            # alone doesn't DOM-focus it, so focus + value + change are
-            # dispatched together — exactly the state that trips the
-            # focused-input guard in renderSessionsIfChanged.
-            await page.eval_on_selector(
-                "[data-model-pick]",
-                """
-                (el, value) => {
-                  el.focus();
-                  el.value = value;
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                """,
-                target,
-            )
-            # The handler must blur the select and re-render the pane, so
-            # focus leaves it. Before the fix the select kept focus and the
-            # dependent UI never updated until a later poll.
+            # Boot done once the spine has rendered its session <select> with the
+            # seeded session as an option (proves /api/state + the model catalog
+            # load have both landed).
             await page.wait_for_function(
-                """
-                () => {
-                  const el = document.activeElement;
-                  return !el || !el.hasAttribute('data-model-pick');
-                }
+                f"""
+                () => {{
+                  const sel = document.querySelector('[data-slot="sessionPick"]');
+                  return sel && Array.from(sel.options).some(
+                    (o) => o.value === {rec.session_start!r}
+                  );
+                }}
                 """,
-                timeout=1500,
+                timeout=10000,
+            )
+
+            # One sweep over a single view: focus + mark each focusable control,
+            # cross a poll, assert each marked node survived intact & focused.
+            # Returns the number of controls actually exercised in this view.
+            async def sweep_view(view: str) -> int:
+                await page.evaluate("(v) => window.gotoView(v)", view)
+                # Let the view mount + its first per-tick update run.
+                await page.wait_for_function(
+                    "() => document.querySelector('#viewRoot')?.childElementCount > 0",
+                    timeout=5000,
+                )
+
+                # Tag every candidate control with a stable index so each can
+                # be reacquired by selector after a re-render. Tagging is inert
+                # (no focus) — focus happens one control at a time below, so
+                # focusing control N never steals focus from control N-1 and
+                # muddies its result. The spine's session <select> rides along
+                # (it's a per-tick region too, and lives outside #viewRoot).
+                count = await page.evaluate(
+                    """
+                    () => {
+                      const root = document.getElementById('viewRoot');
+                      const spineSel = document.querySelector('[data-slot="sessionPick"]');
+                      const sel =
+                        'select, input[type="text"], input[type="search"], ' +
+                        'input[type="number"], input:not([type]), textarea';
+                      const controls = root ? [...root.querySelectorAll(sel)] : [];
+                      if (spineSel) controls.push(spineSel);
+                      controls.forEach((el, i) => el.setAttribute('data-sweep-idx', String(i)));
+                      return controls.length;
+                    }
+                    """
+                )
+
+                exercised = 0
+                for idx in range(count):
+                    sweep_sel = f'[data-sweep-idx="{idx}"]'
+                    # Focus + stamp this ONE control, then report whether it
+                    # actually took focus. A control that can't (disabled, or a
+                    # type that ignores .focus()) has no interaction state to
+                    # protect — renderRegion is allowed to replace it — so skip.
+                    mark = f"{view}:{idx}"
+                    took_focus = await page.evaluate(
+                        """
+                        ([sel, mark]) => {
+                          const el = document.querySelector(sel);
+                          if (!el || el.disabled) return false;
+                          el.focus();
+                          if (document.activeElement !== el) return false;
+                          el.__persistMark = mark;          // JS property a fresh node won't carry
+                          el.setAttribute('data-persist-mark', mark);
+                          return true;
+                        }
+                        """,
+                        [sweep_sel, mark],
+                    )
+                    if not took_focus:
+                        continue
+
+                    polls_before = await page.evaluate("() => window.__statePolls || 0")
+                    # Cross more than one poll period with this control focused.
+                    # renderRegion must keep its node in place; a clobbering
+                    # re-render would build a fresh node (no __persistMark) and
+                    # drop focus.
+                    await page.wait_for_timeout(_NEXT_POLL_CROSS_MS)
+                    polls_after = await page.evaluate("() => window.__statePolls || 0")
+                    assert polls_after > polls_before, (
+                        f"view {view!r} control {mark}: no /api/state poll fired during the "
+                        f"{_NEXT_POLL_CROSS_MS}ms window ({polls_before} → {polls_after}); "
+                        "the sweep would pass vacuously"
+                    )
+
+                    # Same live node (JS property survives — a node minted by
+                    # replaceChildren never would) AND still focused.
+                    failure = await page.evaluate(
+                        """
+                        (mark) => {
+                          const el = document.querySelector('[data-persist-mark="' + mark + '"]');
+                          if (!el) return 'node gone (region was rebuilt)';
+                          if (el.__persistMark !== mark) return 'JS mark lost (node was replaced)';
+                          if (el !== document.activeElement) {
+                            const a = document.activeElement;
+                            return 'lost focus (active=' + (a ? a.tagName : 'none') + ')';
+                          }
+                          return '';
+                        }
+                        """,
+                        mark,
+                    )
+                    assert not failure, (
+                        f"view {view!r} control {mark}: clobbered by poll re-render — {failure}"
+                    )
+                    exercised += 1
+
+                    # Blur before the next control so its focus result is clean.
+                    await page.evaluate(
+                        "() => { const a = document.activeElement; if (a && a.blur) a.blur(); }"
+                    )
+                return exercised
+
+            total_controls = 0
+            per_view: dict[str, int] = {}
+            for view in _NEXT_VIEWS:
+                n = await sweep_view(view)
+                per_view[view] = n
+                total_controls += n
+
+            # The sweep must have actually exercised controls — otherwise a
+            # render that quietly stopped emitting inputs would pass for free.
+            assert total_controls > 0, (
+                f"persistence sweep exercised no focusable controls across any view: {per_view}"
+            )
+
+            # The two seeded archived sessions must have produced the per-row
+            # absorb <select> in the Sessions view — the newest renderRegion-
+            # guarded dropdown this sweep exists to protect. If this fails,
+            # the seeding above rotted and the sweep silently lost coverage.
+            await page.evaluate("() => window.gotoView('sessions')")
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot [data-slot="absorb"]').length >= 1""",
+                timeout=5000,
+            )
+        finally:
+            await browser.close()
+
+
+# ---------------------------------------------------------------------------
+# Performance guard: idle polling must not churn DOM nodes / event listeners.
+# ---------------------------------------------------------------------------
+# The dashboard is a polling SPA. A component that re-mounts or rebuilds a DOM
+# region on EVERY /api/state tick (no signature gate) — e.g. re-`mount()`ing an
+# empty-state fragment, or `renderRegion` with no `sig` — produces hundreds of
+# collectable *detached* nodes + listeners per second. They are garbage, but an
+# operator's always-open tab accumulates them between GCs and eventually OOMs
+# (real report: Edge tab, climbing "DOM Nodes"/"JS event listeners", 47 s LCP).
+#
+# This guard measures the exact metrics the browser's Performance Monitor shows
+# (Nodes incl. detached, JSEventListeners) via CDP, across ~10 s of TRUE idle
+# (no taps, empty live feed). Listener growth must be ~0 (any growth = a
+# component re-attaching listeners each tick); node growth gets a benign
+# baseline but must not regress to the per-tick-churn range that the
+# live-feed ascii / spine / active-taps produced before they were sig-gated.
+#
+# Tuning: these are deliberately loose enough to absorb CI poll-count variance
+# and the remaining benign header re-render, but tight enough that reverting any
+# of the sig gates (live-feed.js, active-taps.js, spine.js) trips it.
+_IDLE_MAX_LISTENER_GROWTH = 40
+_IDLE_MAX_NODE_GROWTH = 1400
+
+
+async def _perf_metrics(client) -> tuple[float, float]:
+    res = await client.send("Performance.getMetrics")
+    m = {d["name"]: d["value"] for d in res["metrics"]}
+    return m.get("Nodes", 0), m.get("JSEventListeners", 0)
+
+
+async def test_dashboard_idle_polling_does_not_churn_dom(running_recorder: RunningRecorder):
+    """At idle, the dashboard may not grow DOM nodes/listeners every poll.
+
+    Catches the whole bug class of "render region rebuilt every tick without a
+    change signature", which leaks collectable detached nodes/listeners fast
+    enough to OOM a long-lived operator tab.
+    """
+    base = running_recorder.base_url
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            failures: list[str] = []
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            client = await page.context.new_cdp_session(page)
+            await client.send("Performance.enable")
+            await page.goto(base, wait_until="domcontentloaded")
+            # Settle: let first-paint + the first couple of polls land.
+            await page.wait_for_timeout(2500)
+            n0, l0 = await _perf_metrics(client)
+            # Idle through ~20 poll cycles — no input.
+            await page.wait_for_timeout(10000)
+            n1, l1 = await _perf_metrics(client)
+            dn, dl = n1 - n0, l1 - l0
+            print(f"[idle-churn] /: dNodes={dn:+.0f}  dListeners={dl:+.0f}")
+            if dl > _IDLE_MAX_LISTENER_GROWTH:
+                failures.append(f"/: +{dl:.0f} listeners over ~10s idle (per-tick listener churn)")
+            if dn > _IDLE_MAX_NODE_GROWTH:
+                failures.append(f"/: +{dn:.0f} DOM nodes over ~10s idle (per-tick DOM churn)")
+            await context.close()
+            assert not failures, "idle DOM churn regression: " + "; ".join(failures)
+        finally:
+            await browser.close()
+
+
+# ---------------------------------------------------------------------------
+# Performance guard: state churn must not rebuild stable /next regions.
+# ---------------------------------------------------------------------------
+# The perf soak (tests/e2e/test_next_perf_soak.py, opt-in via
+# TAPSCRIBE_PERF_SOAK=1) found the "/next locks up now and again" class: a
+# region whose render signature includes per-tick values (job progress, the
+# live-feed tail) gets rebuilt wholesale on every poll. For the merged
+# transcript that's an O(segments) synchronous DOM build — 100-200 ms of
+# blocked main thread PER TICK on a long session (30 long tasks / 2.4 s
+# blocked over a 30 s soak at baseline). These guards pin the fixes
+# STRUCTURALLY, with no timing thresholds (CI-runner safe): stamp a JS
+# expando on a node inside the region, drive real churn across several
+# polls, and fail if the node was rebuilt — a freshly minted node can't
+# carry the stamp. Same trick as the focus-clobber sweep above.
+
+
+def _seed_merged_session(rec, sid: str, *, segments: int) -> None:
+    """A non-current on-disk session with one WAV + a merged transcript of
+    `segments` segments, in the served wire shape."""
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    synth_speech_like_wav(d / f"{sid}_alice_speaker_0000aaaa.wav", seconds=0.5, freq_hz=220.0)
+    (d / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "transcribed_at": "2025-02-01T10:00:00+00:00",
+                "segments": [
+                    {
+                        "speaker": "Alice",
+                        "text": f"Segment {i}: the quick brown fox jumps over the lazy dog.",
+                        "abs_start": f"2025-02-01T09:{i // 60:02d}:{i % 60:02d}+00:00",
+                    }
+                    for i in range(segments)
+                ],
+                "speakers": ["Alice"],
+                "speaking_seconds": {"Alice": 480.0},
+                "suppressed": [],
+                "suppressed_count": 0,
+                "wav_count": 1,
+                "transcribe_ms": 1000,
+                "model": "tiny.en",
+                "backend": "fake",
+                "device": "cpu",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+_MERGED_FIRST_LINE = '#viewRoot [data-slot="mergedHost"] [data-slot="lines"] > div'
+
+
+async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder: RunningRecorder):
+    """Job progress ticks (~1/s during a transcribe/strip) must update the job
+    bar IN PLACE, not invalidate the merged transcript's render signature —
+    each invalidation re-renders every segment row synchronously, which is the
+    main-thread stall operators reported as the tab "locking up"."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-01T09-00-00Z"
+    _seed_merged_session(rec, sid, segments=120)
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#transcript", wait_until="domcontentloaded")
+
+            # Pin the seeded session — the recorder's own current session also
+            # lists, and the spine focuses it by default.
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await page.evaluate(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    s.value = sid;
+                    s.dispatchEvent(new Event('change', { bubbles: true }));
+                }""",
+                sid,
+            )
+
+            # The merged body arrives via the lazy per-(session, stamp) fetch.
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll('{_MERGED_FIRST_LINE}').length >= 120""",
+                timeout=15000,
+            )
+            await page.evaluate(f"""() => {{
+                document.querySelector('{_MERGED_FIRST_LINE}').__guardMark = 1;
+            }}""")
+
+            # Five job ticks, each crossing at least one 500ms poll. Direct
+            # dict write — the same field /api/state reads via jobs.snapshot();
+            # going through the tracker's asyncio.Lock from this loop would
+            # race the server loop's.
+            for n in range(1, 6):
+                rec.jobs._by_session[sid] = JobState(
+                    session=sid,
+                    kind="transcribe",
+                    current=n,
+                    total=9,
+                    started_at=datetime.now(UTC),
+                    current_file=f"f{n}.wav",
+                    model="tiny.en",
+                )
+                await page.wait_for_timeout(600)
+
+            # Non-vacuous: the job bar must have rendered the final tick…
+            await page.wait_for_function(
+                """() => document.querySelector('#viewRoot [data-slot="jobCount"]')?.textContent === '5 / 9'""",
+                timeout=5000,
+            )
+            # …while the merged transcript's first line is still the SAME node.
+            survived = await page.evaluate(f"""() => {{
+                const el = document.querySelector('{_MERGED_FIRST_LINE}');
+                return !!(el && el.__guardMark === 1);
+            }}""")
+            assert survived, (
+                "merged transcript DOM was rebuilt on a job progress tick — that's an "
+                "O(segments) synchronous stall per tick; keep it gated on its own "
+                "signature (transcript.js lastTxSig), separate from job/WAV churn"
+            )
+            await context.close()
+        finally:
+            rec.jobs._by_session.pop(sid, None)
+            await browser.close()
+
+
+async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """While a tap streams and captions settle, (a) the Capture header must
+    not be rebuilt per tick (its sig is unchanged) and (b) an arriving caption
+    that starts a NEW rendered line must APPEND it, leaving earlier lines
+    untouched — rebuilding ≤200 rows per settled line was steady GC + layout
+    pressure for whole meetings, and dropped any text selection the operator
+    had in the feed.
+
+    Captions end with a period so #80's coalescing splits them into two
+    SENTENCES = two lines (same-speaker fragments without a terminator would
+    coalesce into one growing line); the first sentence is stable, so it must
+    survive as a marked node when the second appends."""
+    rr = running_recorder
+    # 30 s of audio at real-time pacing keeps the relay OPEN for the whole
+    # test (normal duration 2-3 s) — if the WAV ran out mid-test the relay's
+    # close-drain would stop feed updates and the waits below would flake.
+    wav = synth_speech_like_wav(tmp_path / "caption-guard.wav", seconds=30.0, freq_hz=220.0)
+    stream = asyncio.create_task(
+        stream_wav_via_tap(
+            ws_base_url=rr.ws_base_url,
+            identity="guard1",
+            name="Guard",
+            wav_path=wav,
+            frame_interval_s=0.02,
+        )
+    )
+    try:
+        # The relay must be connected before a caption can broadcast.
+        assert await wait_until(lambda: len(rr.fake_wlk.connections) >= 1, timeout=10.0)
+
+        async with async_playwright() as pw:
+            try:
+                browser = await pw.chromium.launch(headless=True)
+            except Exception as e:  # pragma: no cover
+                pytest.skip(f"Chromium not available: {e}")
+                return  # unreachable; for static analysers
+            try:
+                context = await browser.new_context(viewport={"width": 1400, "height": 900})
+                page = await context.new_page()
+                await page.goto(rr.base_url + "/#capture", wait_until="domcontentloaded")
+
+                feed_line = '#viewRoot [data-slot="liveFeedShell"] .feed-body .line'
+
+                # The relay settles the TAIL line only after it holds across
+                # _TAIL_STABLE_SNAPSHOTS consecutive empty-buffer snapshots
+                # (live_relay.py), so each committed push is followed by a few
+                # empty-buffer snapshots to confirm it — mirroring WlK's
+                # rolling re-broadcasts.
+                async def push_settled(text: str) -> None:
+                    await asyncio.to_thread(rr.fake_wlk.push_committed, text)
+                    for _ in range(4):
+                        await asyncio.to_thread(rr.fake_wlk.push_buffer, "")
+
+                await push_settled("First settled caption line.")
+                await page.wait_for_function(
+                    f"""() => document.querySelectorAll('{feed_line}').length >= 1""",
+                    timeout=10000,
+                )
+                # The header-survival half of this guard assumes Capture's
+                # header sub stays TICK-INVARIANT (recorder armed/paused +
+                # session label, both constant here). If the sub ever grows a
+                # per-tick value (live counts, lag, elapsed), header() will
+                # legitimately rebuild and this guard must move its mark.
+                await page.evaluate(f"""() => {{
+                    document.querySelector('{feed_line}').__guardMark = 1;
+                    document.querySelector('#viewRoot [data-slot="head"]').firstElementChild.__guardMark = 1;
+                }}""")
+
+                await push_settled("Second settled caption line.")
+                await page.wait_for_function(
+                    f"""() => document.querySelectorAll('{feed_line}').length >= 2""",
+                    timeout=10000,
+                )
+
+                line_kept, head_kept = await page.evaluate(f"""() => {{
+                    const line = document.querySelector('{feed_line}');
+                    const head = document.querySelector('#viewRoot [data-slot="head"]').firstElementChild;
+                    return [!!(line && line.__guardMark === 1), !!(head && head.__guardMark === 1)];
+                }}""")
+                assert line_kept, (
+                    "live feed rebuilt existing lines when a caption arrived — new lines "
+                    "must APPEND (see live-feed.js incremental render)"
+                )
+                assert head_kept, (
+                    "Capture header was rebuilt on a poll tick with an unchanged sig — "
+                    "header() must skip when eyebrow/title/sub are unchanged (shell.js)"
+                )
+                await context.close()
+            finally:
+                await browser.close()
+    finally:
+        stream.cancel()
+        await asyncio.gather(stream, return_exceptions=True)
+        # partial (not a lambda): a lambda's implicit return inside a finally
+        # trips CodeQL's py/exit-from-finally; partial has no return node.
+        await wait_until(partial(streams_drained, rr.recorder), timeout=10.0)
+
+
+async def test_live_log_dialog_refresh_preserves_text_selection(
+    running_recorder: RunningRecorder,
+):
+    """The 'view logs' dialog refetches /api/live/log once a second while
+    open and rewrites its <pre>. Rewriting while the operator is
+    select-copying log lines dissolved the selection on every tick
+    (operator report: "it keeps flashing after I mark text") — the same
+    interaction-clobbering class as the dropdown sweep, for selections.
+    `renderLogInto` now holds the rewrite while a selection starts/ends
+    inside the dialog (`selectionInside` in templates.js — the same guard
+    renderRegion applies to every per-tick region).
+
+    Guard: seed live log lines, open the dialog from Capture, select a span
+    inside the <pre>, land a new log line server-side, cross >2 dialog
+    refreshes — the selection must survive verbatim. Then clearing the
+    selection must let the held-back refresh land (the new line appears),
+    proving the guard defers updates rather than killing them.
+    """
+    rr = running_recorder
+    for i in range(5):
+        rr.recorder.live.log.append(f"INFO:whisperlivekit:seed line {i}")
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#capture", wait_until="domcontentloaded")
+
+            # The "view logs" button renders once live_log is non-empty.
+            await page.wait_for_selector("#liveLogBtn", timeout=10000)
+            await page.click("#liveLogBtn")
+            await page.wait_for_function(
+                """() => {
+                    const pre = document.querySelector('#liveLogDialog [data-slot="pre"]');
+                    return !!pre && pre.textContent.includes('seed line 4');
+                }""",
+                timeout=10000,
+            )
+
+            selected = await page.evaluate("""() => {
+                const pre = document.querySelector('#liveLogDialog [data-slot="pre"]');
+                const r = document.createRange();
+                r.setStart(pre.firstChild, 0);
+                r.setEnd(pre.firstChild, 25);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(r);
+                return sel.toString();
+            }""")
+            assert len(selected) == 25
+
+            # A fresh server-side line means the next 1s refresh would REWRITE
+            # the <pre> — exactly what must not happen while text is selected.
+            rr.recorder.live.log.append("INFO:whisperlivekit:line landed while selecting")
+            await page.wait_for_timeout(2500)  # crosses >2 dialog refresh ticks
+
+            still = await page.evaluate("() => window.getSelection().toString()")
+            assert still == selected, (
+                "log dialog refresh dissolved the operator's text selection — "
+                "renderLogInto must skip while a selection is inside the dialog"
+            )
+
+            # Collapse the selection → the deferred refresh must now land.
+            await page.evaluate("() => window.getSelection().removeAllRanges()")
+            await page.wait_for_function(
+                """() => {
+                    const pre = document.querySelector('#liveLogDialog [data-slot="pre"]');
+                    return !!pre && pre.textContent.includes('line landed while selecting');
+                }""",
+                timeout=10000,
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_recordings_strip_controls_stay_visible_with_many_wavs(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """The strip-silence knobs + button live at the BOTTOM of the .wavehero
+    panel. The hero is a flex item in the scrollable work column, and `.panel`'s
+    `overflow: hidden` makes its flex auto-min-height resolve to 0 — so a tall
+    WAV list below would shrink the hero and clip the knobbar off the bottom
+    (operator report: "strip settings vanish on sessions with many WAVs").
+    `.wavehero { flex: none }` pins it. Guard: with many WAVs, the strip button
+    must sit WITHIN the hero's painted box (a shrunk/clipped hero pushes the
+    button's bottom below the hero's bottom).
+    """
+    rr = running_recorder
+    n_wavs = 16
+
+    async def _one(i: int):
+        wav = synth_speech_like_wav(tmp_path / f"many{i}.wav", seconds=0.25, freq_hz=180.0 + i * 12.0)
+        await stream_wav_via_tap(
+            ws_base_url=rr.ws_base_url,
+            identity=f"many{i}",
+            name=f"Speaker {i}",
+            wav_path=wav,
+            utterance_id=f"many-utt{i}",
+        )
+
+    await asyncio.gather(*(_one(i) for i in range(n_wavs)))
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=15.0)
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/", wait_until="domcontentloaded")
+            await page.wait_for_selector("#spine .navitem", timeout=6000)
+            await page.evaluate("window.gotoView && window.gotoView('recordings')")
+            await page.wait_for_selector(".wavlist .wavrow", timeout=6000)
+            assert await page.locator(".wavlist .wavrow").count() >= n_wavs
+
+            hero = await page.locator(".wavehero").bounding_box()
+            btn = await page.locator("[data-slot=stripBtn]").bounding_box()
+            knobs = await page.locator("[data-strip-knob]").count()
+            assert hero and btn, "wavehero + strip button must render"
+            hero_bottom = hero["y"] + hero["height"]
+            btn_bottom = btn["y"] + btn["height"]
+            assert btn_bottom <= hero_bottom + 4, (
+                f"strip button (bottom {btn_bottom:.0f}) is clipped below the wavehero "
+                f"(bottom {hero_bottom:.0f}) — the hero shrank + clipped its knobbar. "
+                f"hero={hero} btn={btn}"
+            )
+            assert knobs == 3, f"all 3 strip knobs must render, got {knobs}"
+        finally:
+            await browser.close()
+
+
+async def test_transcribe_page_source_toggle_picks_original_or_stripped(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """The Transcribe page must let you transcribe the ORIGINAL WAVs or the
+    silence-stripped clips (operator report: no way to pick). With a stripped/
+    folder present, the source toggle's "stripped" option enables; switching to
+    it lists the stripped region clips in the per-WAV picker and makes the
+    session-range transcribe send source=stripped. The transcribe POST is
+    intercepted (no real job), so this needs no model/transcriber."""
+    import httpx
+
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rr = running_recorder
+    src = _build_speech_silence_wav(tmp_path / "src.wav")
+    await stream_wav_via_tap(
+        ws_base_url=rr.ws_base_url, identity="alice", name="Alice", wav_path=src, utterance_id="utt1"
+    )
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=5.0)
+    async with httpx.AsyncClient(base_url=rr.base_url, timeout=30.0) as c:
+        r = await c.post(
+            f"/api/sessions/{rr.recorder.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert r.status_code == 200 and r.json()["files_written"] == 1, r.text
+    n_clips = len(sorted((rr.recorder.session_dir / "stripped").glob("*.wav")))
+    assert n_clips >= 1
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            captured: dict = {}
+
+            async def _route(route):
+                captured.update(route.request.post_data_json or {})
+                await route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
+
+            await page.route("**/api/transcribe-session", _route)
+            await page.goto(rr.base_url + "/#transcript", wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="srcSwHost"] .srcsw', timeout=6000)
+
+            stripped_btn = page.locator('[data-slot="srcSwHost"] [data-src="stripped"]')
+            assert not await stripped_btn.is_disabled(), "stripped must enable once a stripped/ folder exists"
+
+            await stripped_btn.click()
+            await page.wait_for_timeout(700)
+            assert await page.locator('[data-slot="srcSwHost"] [data-src="stripped"].is-on').count() == 1
+            picker_rows = await page.locator('[data-slot="wavList"] .wavrow').count()
+            assert picker_rows >= n_clips, (
+                f"switching to stripped must list the {n_clips} clips in the picker, got {picker_rows}"
+            )
+
+            await page.locator('[data-slot="txRangeBtn"]').click()
+            await page.wait_for_timeout(700)
+            assert captured.get("source") == "stripped", (
+                f"the session-range transcribe must send source=stripped, got {captured!r}"
+            )
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_cache_panel_unions_original_and_stripped_variants(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """The Transcript cache panel shows a recording's WHOLE history — its
+    original-audio variants AND its silence-stripped clip variants — in one
+    source-tagged list that does NOT change when you flip the Original/Stripped
+    toggle (operator ask: the rows are already tagged). And 'Set' on a stripped
+    row sends source=stripped, so the server resolves the clip under stripped/
+    instead of 404ing (the reported 'Set primary failed: 404'). Sidecars are
+    seeded via the wav cache; the set-primary PUT is intercepted to assert its
+    payload."""
+    import httpx
+
+    from tapscribe.wav_cache import cached_transcribe
+
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rr = running_recorder
+    src = _build_speech_silence_wav(tmp_path / "src.wav")
+    await stream_wav_via_tap(
+        ws_base_url=rr.ws_base_url, identity="alice", name="Alice", wav_path=src, utterance_id="utt1"
+    )
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=5.0)
+    async with httpx.AsyncClient(base_url=rr.base_url, timeout=30.0) as c:
+        r = await c.post(
+            f"/api/sessions/{rr.recorder.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert r.status_code == 200 and r.json()["files_written"] >= 1, r.text
+
+    original = sorted(rr.recorder.session_dir.glob("*.wav"))[0]
+    region = sorted((rr.recorder.session_dir / "stripped").glob("*.wav"))[0]
+    spk = {"alice": "scripted alice text"}
+    # Original recording: one cached variant (source=original).
+    cached_transcribe(
+        original,
+        FakeTranscriber(text_by_speaker=spk, model_name="orig-model"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+        source="original",
+    )
+    # Stripped clip: TWO variants (source=stripped) so one row is non-primary
+    # and renders a clickable "set" button to exercise the 404 fix.
+    for model in ("region-a", "region-b"):
+        cached_transcribe(
+            region,
+            FakeTranscriber(text_by_speaker=spk, model_name=model),
+            initial_prompt=None,
+            hotwords=None,
+            hallucination_rules=[],
+            source="stripped",
+        )
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            put_payloads: list[dict] = []
+
+            async def _route(route):
+                if route.request.method == "PUT":
+                    put_payloads.append(route.request.post_data_json or {})
+                await route.fulfill(
+                    status=200, content_type="application/json", body='{"ok": true, "primary": {}}'
+                )
+
+            await page.route("**/api/wav/**/primary", _route)
+            await page.goto(rr.base_url + "/#transcript", wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="cacheBody"] .cacherow', timeout=6000)
+
+            # One unified list: the original variant (is-original) + both stripped
+            # clip variants (is-stripped), regardless of the toggle's default.
+            await page.wait_for_function(
+                "() => document.querySelectorAll('[data-slot=cacheBody] .cacherow').length >= 3",
+                timeout=6000,
+            )
+            orig_tags = await page.locator('[data-slot="cacheBody"] .cacherow__src.is-original').count()
+            strip_tags = await page.locator('[data-slot="cacheBody"] .cacherow__src.is-stripped').count()
+            assert orig_tags >= 1 and strip_tags >= 2, f"orig={orig_tags} stripped={strip_tags}"
+            rows_before = await page.locator('[data-slot="cacheBody"] .cacherow').count()
+
+            # Flipping to Stripped must NOT change the cache list.
+            await page.locator('[data-slot="srcSwHost"] [data-src="stripped"]').click()
+            await page.wait_for_timeout(700)
+            rows_after = await page.locator('[data-slot="cacheBody"] .cacherow').count()
+            assert rows_after == rows_before, f"cache list changed on toggle: {rows_before} -> {rows_after}"
+            assert await page.locator('[data-slot="cacheBody"] .cacherow__src.is-stripped').count() >= 2
+
+            # 'Set' on the non-primary stripped row sends source=stripped (404 fix).
+            set_btn = page.locator('[data-slot="cacheBody"] [data-slot="primary"]', has_text="set")
+            assert await set_btn.count() == 1, "expected one non-primary 'set' row (a stripped variant)"
+            await set_btn.first.click()
+            await page.wait_for_timeout(500)
+            assert put_payloads and put_payloads[-1].get("source") == "stripped", (
+                f"set-primary on a stripped row must send source=stripped, got {put_payloads!r}"
             )
         finally:
             await browser.close()

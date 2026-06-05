@@ -7,7 +7,7 @@ and override `app.state.recorder` for isolation.
 
 The big-picture route map:
 
-  GET  /                        — dashboard HTML shell
+  GET  /                        — the Stages dashboard HTML shell (next.html)
   GET  /api/state               — sessions + active streams + live channel
   POST /api/transcribe          — batch transcribe one WAV
   POST /api/transcribe-session  — merge per-WAV transcripts into a session
@@ -23,12 +23,13 @@ The big-picture route map:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import math
 import shutil
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -40,13 +41,15 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config
 from . import hallucinations as hallucinations_mod
-from . import strip_silence as _ss
+from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
 from .batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
@@ -58,7 +61,7 @@ from .batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
-from .recorder import JobState, Recorder
+from .recorder import Recorder
 from .sessions import (
     absorb_session,
     delete_session_audio,
@@ -66,10 +69,11 @@ from .sessions import (
     gather_sessions,
     prune_empty_sessions,
     read_session_meta,
+    read_session_transcript,
+    read_wav_transcript,
     resolve_session_dir,
     resolve_wav,
     session_is_empty,
-    strip_one_wav,
     stripped_dir,
     write_session_meta,
 )
@@ -77,13 +81,15 @@ from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
     read_hotwords,
+    read_live_model,
     read_live_prompt,
     read_prompt,
     write_hotwords,
+    write_live_model,
     write_live_prompt,
     write_prompt,
 )
-from .transcribers import evict_idle_now
+from .transcribers import evict_idle_now, run_on_model_thread
 from .transcribers.catalog import REGISTRY, available_backends
 from .wav_cache import set_primary_transcript
 
@@ -128,6 +134,7 @@ def _compute_inputs_support() -> dict[str, bool]:
 _CONFIG_WRITERS = {
     "prompt": write_prompt,
     "live-prompt": write_live_prompt,
+    "live-model": write_live_model,
     "hotwords": write_hotwords,
 }
 
@@ -210,7 +217,7 @@ class _SuppressPollAccess(logging.Filter):
     /api/transcribe, DELETE /api/sessions/..., websocket records) still
     surfaces."""
 
-    _SILENCED = ("/api/state", "/dashboard.css", "/dashboard.js", "/web/", "/health", "/healthz")
+    _SILENCED = ("/api/state", "/dashboard.css", "/next.css", "/web/", "/health", "/healthz")
 
     def filter(self, record):
         msg = record.getMessage()
@@ -253,6 +260,10 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="TapScribe recorder", lifespan=_lifespan)
+# Compress responses (the dashboard polls /api/state ~1-2×/s; even the slimmed
+# listing is highly compressible JSON). minimum_size skips tiny bodies where the
+# gzip header would cost more than it saves.
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -394,6 +405,7 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
         "sessions": gather_sessions(current_session=current_session, jobs=jobs_snapshot),
         "prompt": read_prompt(),
         "live_prompt": read_live_prompt(),
+        "live_model_default": read_live_model(),
         "hotwords": read_hotwords(),
         "halluc_rules": hallucinations_mod.parse_rules(),
         "inputs_support": _compute_inputs_support(),
@@ -401,7 +413,7 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
 
 
 @app.get("/api/state")
-async def api_state(recorder: Recorder = Depends(get_recorder)):
+async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
     blob = await asyncio.to_thread(_build_state_blob, recorder.session_start, jobs_snapshot)
@@ -430,7 +442,7 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
             override_counts["prompt"] += 1
         if m.get("hotwords"):
             override_counts["hotwords"] += 1
-    return {
+    payload = {
         "current_session": recorder.session_start,
         "active": active,
         "sessions": sessions_list,
@@ -439,7 +451,6 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
         "live_info": dict(recorder.live.info),
         "live_log": list(recorder.live.log)[-30:],
         "live_supports_native_vad": bool(getattr(recorder.live, "supports_native_vad", False)),
-        "mlx_available": recorder.use_mlx,  # back-compat for the dashboard ribbon
         "backend": recorder.backend,
         "available_backends": sorted(_available_backends_snapshot()),
         "recording_enabled": recorder.recording_enabled,
@@ -459,12 +470,26 @@ async def api_state(recorder: Recorder = Depends(get_recorder)):
             "length": len(hotwords),
         },
         "inputs_support": inputs_support,
+        "live_model_default": blob["live_model_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "rules": [r["raw"] for r in halluc_rules],
             "count": len(halluc_rules),
         },
     }
+    # Conditional GET: hash the (compact) body into a weak ETag and answer 304
+    # when the dashboard's If-None-Match still matches. The poll fires every
+    # ~0.5-1s; at idle the payload is byte-identical, so the client reuses its
+    # cached state and skips the parse + state-object allocation. Weak ETag
+    # (W/) because GZipMiddleware re-encodes the body — the validator is over
+    # the semantic content, not the on-wire bytes. During capture the payload
+    # changes each tick, so this only short-circuits genuine no-ops.
+    body = json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode("utf-8")
+    etag = 'W/"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if req.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +646,10 @@ async def api_models_cache_clear(recorder: Recorder = Depends(get_recorder)):  #
     model, so clicking this can't yank a model out from under a running job.
     The live channel runs in its own subprocess and is unaffected — stop it
     via /api/live/stop to reclaim that memory."""
-    freed = await asyncio.to_thread(evict_idle_now)
+    # On the dedicated model thread: eviction calls mlx.core.clear_cache(),
+    # which (like every MLX op) must run on the thread that holds the Metal
+    # stream — see run_on_model_thread.
+    freed = await run_on_model_thread(evict_idle_now)
     print(f"[tapscribe] evicted {freed} idle transcription model(s) from cache", flush=True)
     return {"ok": True, "evicted": freed}
 
@@ -734,91 +762,35 @@ async def api_session_strip_silence(
     req: Request,
     recorder: Recorder = Depends(get_recorder),
 ):
-    """Non-destructively strip silence from every WAV in <session>/. Writes
-    cleaned copies to <session>/stripped/ (originals untouched)."""
-    session_dir = resolve_session_dir(session)
-
+    """Non-destructively strip silence from every WAV in <session>/. Thin
+    HTTP shim over `batch_strip.strip_session` — parse + range-bound the
+    knobs, map the domain errors to status codes."""
     body = await _json_body(req)
     # Range-bound everything that hits the silero detector so a malformed
     # dashboard POST returns 400 instead of a 500 from int()/float().
-    # `is None` (not `or`) so an explicit 0 — e.g. pad_ms=0 to disable
-    # region padding for A/B — doesn't silently fall back to the default.
+    # Only explicitly-provided knobs are forwarded — StripSessionRequest
+    # owns the defaults — and the `is not None` checks keep an explicit 0
+    # (e.g. pad_ms=0 to disable region padding for A/B) from silently
+    # falling back to the default.
+    overrides: dict[str, Any] = {}
     min_silence_ms = _parse_bounded_int(body.get("min_silence_ms"), "min_silence_ms", lo=100, hi=600_000)
-    if min_silence_ms is None:
-        min_silence_ms = 500
+    if min_silence_ms is not None:
+        overrides["min_silence_ms"] = min_silence_ms
     pad_ms = _parse_bounded_int(body.get("pad_ms"), "pad_ms", lo=0, hi=5_000)
-    if pad_ms is None:
-        pad_ms = 200
+    if pad_ms is not None:
+        overrides["pad_ms"] = pad_ms
     speech_floor_db = _parse_bounded_float(body.get("speech_floor_db"), "speech_floor_db", lo=-120.0, hi=0.0)
-    if speech_floor_db is None:
-        speech_floor_db = _ss.SPEECH_RMS_DBFS_FLOOR
-
-    originals = sorted(session_dir.glob("*.wav"))
-    if not originals:
-        raise HTTPException(404, "no WAVs in this session to strip")
-
-    # JobTracker.claim() encapsulates the "one job per session" rule.
-    claimed = await recorder.jobs.claim(
-        JobState(
-            session=session,
-            kind="strip",
-            current=0,
-            total=len(originals),
-            started_at=datetime.now(UTC),
-            status="stripping",
-        )
-    )
-    if not claimed:
-        raise HTTPException(409, "session is already busy (transcribe or strip in flight)")
+    if speech_floor_db is not None:
+        overrides["speech_floor_db"] = speech_floor_db
 
     try:
-        out_dir = stripped_dir(session)
-        if out_dir.exists():
-            try:
-                shutil.rmtree(out_dir)
-            except OSError as e:
-                raise HTTPException(500, f"could not clear stripped/: {e}") from None
-
-        started = datetime.now(UTC)
-
-        def _run() -> list[dict[str, Any]]:
-            results: list[dict[str, Any]] = []
-            for src in originals:
-                try:
-                    results.append(strip_one_wav(src, out_dir, min_silence_ms, pad_ms, speech_floor_db))
-                except Exception as e:
-                    results.append({"name": src.name, "written": False, "error": str(e)})
-            return results
-
-        results = await asyncio.to_thread(_run)
-        finished = datetime.now(UTC)
-    finally:
-        await recorder.jobs.release(session)
-
-    written = sum(1 for r in results if r.get("written"))
-    in_secs = sum(r.get("in_seconds", 0.0) for r in results)
-    speech_secs = sum(r.get("speech_seconds", 0.0) for r in results)
-    detectors = sorted({r.get("detector") for r in results if r.get("detector")})
-
-    print(
-        f"[tapscribe] strip-silence {session}: {written}/{len(originals)} wavs, "
-        f"{speech_secs:.1f}s speech of {in_secs:.1f}s ({100 * speech_secs / max(in_secs, 1e-9):.0f}%), "
-        f"detector={detectors}, took {int((finished - started).total_seconds() * 1000)} ms",
-        flush=True,
-    )
-
-    return {
-        "ok": True,
-        "session": session,
-        "files_processed": len(originals),
-        "files_written": written,
-        "in_seconds": round(in_secs, 2),
-        "speech_seconds": round(speech_secs, 2),
-        "detector": detectors[0] if len(detectors) == 1 else detectors,
-        "stripped_at": finished.isoformat(),
-        "took_ms": int((finished - started).total_seconds() * 1000),
-        "files": results,
-    }
+        return await strip_session(recorder, StripSessionRequest(session=session, **overrides))
+    except NoUsableWavs as e:
+        raise HTTPException(404, str(e)) from None
+    except SessionBusy as e:
+        raise HTTPException(409, str(e)) from None
+    except StrippedDirUnclearable as e:
+        raise HTTPException(500, str(e)) from None
 
 
 @app.delete("/api/sessions/{session}/stripped")
@@ -931,6 +903,18 @@ async def api_session_meta_put(session: str, req: Request, recorder: Recorder = 
     return {"ok": True, "meta": read_session_meta(session)}
 
 
+@app.get("/api/sessions/{session}/transcript")
+async def api_session_transcript(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """The FULL merged session-transcript.json (or null when none).
+
+    Lazy companion to `/api/state`, whose `session_transcript` is now a slim
+    marker. The dashboard fetches this once per (session, transcribed_at) when
+    a session is opened and caches it client-side, so the heavy segments[] /
+    plain_text / suppressed[] body crosses the wire on open, not every poll.
+    The disk read is offloaded with to_thread like the rest of the poll path."""
+    return await asyncio.to_thread(read_session_transcript, session)
+
+
 # ---------------------------------------------------------------------------
 # WAV download + transcription
 # ---------------------------------------------------------------------------
@@ -942,6 +926,20 @@ async def get_wav(session: str, name: str, source: str = "original"):
     path = resolve_wav(session, name, source)
     dl_name = ("stripped-" + name) if source == "stripped" else name
     return FileResponse(path, media_type="audio/wav", filename=dl_name)
+
+
+@app.get("/api/wav/{session}/{name}/transcript")
+async def api_wav_transcript(session: str, name: str, source: str = "original"):
+    """The FULL primary cached transcript for one WAV (or null when none).
+
+    Lazy companion to `/api/state`, whose per-WAV `transcript` is now a slim
+    marker. The dashboard fetches this when a WAV row is expanded and caches
+    it per (session, name, source, transcribed_at). Mirrors `get_wav`'s
+    path-safety (resolve_wav validates session/name/source) and offloads the
+    disk read with to_thread."""
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    return await asyncio.to_thread(read_wav_transcript, session, name, source)
 
 
 @app.delete("/api/wav/{session}/{name}")
@@ -1152,6 +1150,10 @@ async def tap(ws: WebSocket):
                 if buf:
                     await fan_out.write_frame(buf)
         except WebSocketDisconnect:
+            # The Bridge closing the /tap WS (end of utterance, or a network
+            # drop) raises this — it's the normal termination path, not an
+            # error. Swallow it and let the TapFanOut context manager finalize
+            # the WAV on exit; nothing is lost.
             pass
         except Exception as e:  # pragma: no cover
             print(f"[tapscribe] /tap error for {utterance_id}: {e}", flush=True)
@@ -1161,27 +1163,28 @@ async def tap(ws: WebSocket):
 # Dashboard assets
 # ---------------------------------------------------------------------------
 
-DASHBOARD_HTML_PATH = config.WEB_DIR / "dashboard.html"
+# The Stages dashboard ("/next" during its incubation; promoted to "/" once
+# the classic dashboard was retired). The shell is next.html; it layers
+# next.css on top of dashboard.css (the shared design tokens + primitives),
+# and loads everything else through the /web/... mounts below.
 DASHBOARD_CSS_PATH = config.WEB_DIR / "dashboard.css"
 DASHBOARD_JS_DIR = config.WEB_DIR / "js"
 DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
-
-
-def _read_dashboard_html() -> str:
-    try:
-        return DASHBOARD_HTML_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return (
-            "<!doctype html><html><body>"
-            "<h1>Dashboard HTML missing</h1>"
-            "<p>Expected at <code>" + str(DASHBOARD_HTML_PATH) + "</code>.</p>"
-            "</body></html>"
-        )
+NEXT_HTML_PATH = config.WEB_DIR / "next.html"
+NEXT_CSS_PATH = config.WEB_DIR / "next.css"
 
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    return HTMLResponse(_read_dashboard_html())
+    try:
+        return HTMLResponse(NEXT_HTML_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return HTMLResponse(
+            "<!doctype html><html><body>"
+            "<h1>Dashboard HTML missing</h1>"
+            "<p>Expected at <code>" + str(NEXT_HTML_PATH) + "</code>.</p>"
+            "</body></html>"
+        )
 
 
 @app.get("/dashboard.css")
@@ -1189,6 +1192,13 @@ async def dashboard_css():
     if not DASHBOARD_CSS_PATH.is_file():
         raise HTTPException(404, "dashboard.css not found")
     return FileResponse(DASHBOARD_CSS_PATH, media_type="text/css")
+
+
+@app.get("/next.css")
+async def next_css():
+    if not NEXT_CSS_PATH.is_file():
+        raise HTTPException(404, "next.css not found")
+    return FileResponse(NEXT_CSS_PATH, media_type="text/css")
 
 
 # Dashboard JS modules and HTML component templates. StaticFiles handles

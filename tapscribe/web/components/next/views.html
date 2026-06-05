@@ -1,0 +1,283 @@
+<!-- ======================================================================
+     Stages view templates (Phase 1). Each `tpl-next-view-*` is mounted into
+     #viewRoot by js/next/main.js when its spine entry is active. Component
+     host elements (data-slot=…) are filled by the REUSED existing dashboard
+     components (live-feed, active-taps, live-channel, merged-transcript,
+     config-card) — see js/next/components/*.js.
+     ====================================================================== -->
+
+<!-- Shared stage header (eyebrow + title + sub + an actions slot). -->
+<template id="tpl-next-head">
+  <div class="whead">
+    <div class="whead__l">
+      <div class="whead__eyebrow" data-slot="eyebrow"></div>
+      <h1 class="whead__title" data-slot="title"></h1>
+      <div class="whead__sub" data-slot="sub"></div>
+    </div>
+    <div class="whead__r" data-slot="actions"></div>
+  </div>
+</template>
+
+<!-- Generic placeholder for the not-yet-built views (Taps / Recordings /
+     People). Keeps the shell navigable while those land in a later phase. -->
+<template id="tpl-next-placeholder">
+  <div class="panel">
+    <div class="panel__body">
+      <div class="empty">
+        <div class="empty__ic" data-slot="icon"></div>
+        <div class="empty__h" data-slot="heading"></div>
+        <div data-slot="detail"></div>
+        <div class="empty__phase">Coming in a later phase</div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- ===================== SESSION · 1 CAPTURE ===================== -->
+<template id="tpl-next-view-capture">
+  <div data-slot="head"></div>
+  <div class="grid cols-cap fillcol">
+    <!-- PRIMARY: live IRC captions (reuses live-feed.js) -->
+    <div class="panel panel--primary livecap">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">💬</span>Live captions</div>
+        <div class="panel__hint">
+          <label class="autoscroll"><input type="checkbox" data-slot="liveAutoScroll" checked> autoscroll</label>
+          <span class="mono dim"><span data-slot="liveFeedCount">0</span> lines</span>
+          <button class="act act--sm" type="button" data-slot="liveClear">clear</button>
+        </div>
+      </div>
+      <div class="panel__body flush"><div class="feed" data-slot="liveFeedShell"></div></div>
+    </div>
+
+    <!-- ASIDE: live channel control. (The active-taps panel that used to live
+         here is now the global #tapsRail, visible on every view.) -->
+    <div class="aside">
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title"><span class="ic">📡</span>Live channel</div>
+          <span class="chip" data-slot="liveStateBadge">stopped</span>
+        </div>
+        <div class="panel__body">
+          <div class="live-mlx-note dim mono" data-slot="liveMlxNote"></div>
+          <div data-slot="liveChannelBody"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="grid cols-cap">
+    <!-- Capture health — derived from active[] / live_info -->
+    <div class="panel">
+      <div class="panel__head"><div class="panel__title"><span class="ic">📊</span>Capture health</div><div class="panel__hint">right now</div></div>
+      <div class="panel__body">
+        <div class="statgrid c4">
+          <div class="statcell"><div class="statcell__k">Live taps</div><div class="statcell__v" data-slot="hLive">0</div></div>
+          <div class="statcell"><div class="statcell__k">Recording</div><div class="statcell__v" data-slot="hRec">0</div></div>
+          <div class="statcell"><div class="statcell__k">Max lag</div><div class="statcell__v" data-slot="hLag">—</div></div>
+          <div class="statcell"><div class="statcell__k">Live channel</div><div class="statcell__v" data-slot="hChan">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session overrides: per-session recording toggle + prompt/hotwords. -->
+    <div class="panel">
+      <div class="panel__head"><div class="panel__title"><span class="ic">⚙️</span>Session overrides</div><div class="panel__hint">else inherits Settings</div></div>
+      <div class="panel__body">
+        <div class="row-between" style="margin-bottom:11px">
+          <span class="ovr-lab">Recording (global arm)</span>
+          <button class="recpill" type="button" data-slot="recPill">● recording</button>
+        </div>
+        <div class="field" style="margin-bottom:9px">
+          <label>prompt override <span class="dim">(blank → global)</span></label>
+          <textarea class="ta" rows="2" data-slot="capPrompt" data-cfg-key="prompt-ovr"></textarea>
+          <div class="field__row"><button class="act act--sm" type="button" data-slot="capPromptSave">save</button><span class="dim mono" data-slot="capPromptStatus"></span></div>
+        </div>
+        <div class="field">
+          <label>hotwords override</label>
+          <textarea class="ta" rows="2" data-slot="capHotwords" data-cfg-key="hotwords-ovr"></textarea>
+          <div class="field__row"><button class="act act--sm" type="button" data-slot="capHotwordsSave">save</button><span class="dim mono" data-slot="capHotwordsStatus"></span></div>
+        </div>
+        <div class="dim mono ovr-note" data-slot="ovrNote"></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- ===================== SESSION · 3 TRANSCRIPT ===================== -->
+<!-- The merged transcript (main/left) + the transcription control column
+     (right): the engine selector (backend chips + compact model dropdown +
+     Canary src/tgt), the transcribe controls (session range + force + per-WAV
+     re-transcribe), and the per-WAV transcript cache (set-primary). Built by
+     js/next/views/transcript.js, which owns the REAL transcribe wiring. -->
+<template id="tpl-next-view-transcript">
+  <div data-slot="head"></div>
+  <div class="grid cols-tx fillcol">
+    <!-- PRIMARY: the merged transcript (reuses merged-transcript.js). Fills the
+         column height; the transcript lines scroll inside it and are capped to
+         a comfortable measure (next.css `.txbody`) so they don't run the full
+         panel width like a log dump. -->
+    <div class="panel panel--primary panel--fill txpanel">
+      <!-- Copy applies speaker-name aliases (raw identity keys → display names),
+           one "[hh:mm:ss] Name: text" line per non-suppressed segment, then
+           navigator.clipboard.writeText. txCopyStatus flashes copied/failed.
+           Disabled until the merged body is loaded — toggled inside the
+           lastTxSig gate, never per-tick. NB: NOT inside a .transcript pre-wrap
+           container, so the single-line constraint does not apply here. -->
+      <div class="panel__head"><div class="panel__title"><span class="ic">📝</span>Merged transcript</div><span class="dim mono" data-slot="txCopyStatus"></span><button class="act act--sm" type="button" data-slot="txCopyBtn" disabled>copy</button><div class="panel__hint mono" data-slot="txHint"></div></div>
+      <div class="panel__body flush txbody"><div data-slot="mergedHost"></div></div>
+    </div>
+
+    <!-- CONTROL COLUMN: engine selector + transcribe + per-WAV cache. -->
+    <div class="aside">
+      <div class="panel panel--accent">
+        <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Engine</div><div class="panel__hint">batch backend &amp; model</div></div>
+        <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__head"><div class="panel__title"><span class="ic">▶</span>Transcribe</div><div class="panel__hint">one job per session</div></div>
+        <div class="panel__body">
+          <!-- audio source: transcribe the ORIGINAL WAVs or the silence-stripped
+               clips. Drives both the session-range transcribe and the per-WAV
+               picker below; "stripped" is disabled until a stripped/ folder
+               exists (strip silence in Recordings first). -->
+          <div class="row-between" style="margin-bottom:9px">
+            <span class="ovr-lab">audio source <span class="dim">— original or stripped</span></span>
+            <span data-slot="srcSwHost"></span>
+          </div>
+          <div class="field" style="margin-bottom:9px">
+            <label>session range <span class="dim">(blank → whole session)</span></label>
+            <div class="rangeform">
+              <div class="field"><label>from</label><input class="inp-txt mono" type="text" data-slot="rangeFrom" placeholder="ISO"></div>
+              <div class="field"><label>to</label><input class="inp-txt mono" type="text" data-slot="rangeTo" placeholder="ISO"></div>
+              <label class="checkrow"><input type="checkbox" data-slot="forceBox"> force</label>
+            </div>
+          </div>
+          <button class="act act--sm act--primary act--wide" type="button" data-slot="txRangeBtn">▶ transcribe range</button>
+          <div class="dim mono ovr-note" data-slot="txNote"></div>
+
+          <!-- job progress (one job per session, transcribe OR strip) -->
+          <div class="jobbar" data-slot="jobBar" hidden>
+            <div class="jobbar__top"><span data-slot="jobLabel">Job running</span><span class="jobbar__pct mono" data-slot="jobCount"></span></div>
+            <div class="progress"><div class="progress__fill" data-slot="jobFill"></div></div>
+            <div class="jobbar__wav mono" data-slot="jobWav"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title"><span class="ic">🎯</span>Per-WAV re-transcribe</div>
+          <button class="act act--sm" type="button" data-slot="txOneBtn" disabled>transcribe</button>
+        </div>
+        <div class="panel__body">
+          <div class="dim mono ovr-note" data-slot="txSelLabel" style="margin-top:0;margin-bottom:8px">Selected WAV</div>
+          <div class="wavlist wavlist--mini" data-slot="wavList"></div>
+        </div>
+      </div>
+
+      <div class="panel panel--fill">
+        <div class="panel__head"><div class="panel__title"><span class="ic">🗂️</span>Transcript cache</div><div class="panel__hint mono" data-slot="cacheHint"></div></div>
+        <div class="panel__body flush"><div class="cache" data-slot="cacheBody"></div></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- one WAV row in the Transcript transcribe panel (pick a WAV → re-transcribe
+     it / see its cache). Originals selectable; stripped clips are indented. -->
+<template id="tpl-next-txwavrow">
+  <button class="wavrow" type="button">
+    <span class="wavrow__l">
+      <span class="wavrow__n mono" data-slot="name"></span>
+      <span class="wavrow__sub mono" data-slot="sub"></span>
+    </span>
+    <span class="wavrow__r">
+      <span class="wavrow__dur mono" data-slot="dur"></span>
+      <span class="wavrow__tx" data-slot="txTag"></span>
+    </span>
+  </button>
+</template>
+
+<!-- one transcript-cache row (a cached backend·model variant + set-primary) -->
+<template id="tpl-next-cacherow">
+  <div class="cacherow">
+    <span class="cacherow__id mono" data-slot="id"></span>
+    <span class="cacherow__src" data-slot="src"></span>
+    <span class="cacherow__meta mono" data-slot="meta"></span>
+    <button class="pickprimary" type="button" data-slot="primary"></button>
+  </div>
+</template>
+
+<!-- ===================== GLOBAL · SETTINGS ===================== -->
+<!-- Two clearly-separated engine cards so live vs batch is never ambiguous:
+     LIVE (streaming model + live initial prompt) on top, BATCH (recordings
+     model + batch prompt + hotwords + hallucination filter) filling below.
+     Each card's prompt/hotwords gate on THAT card's selected model. The live
+     model is a saved DEFAULT — the card flags "restart to apply" when it
+     differs from the running channel (live_info.model). Built by
+     js/next/views/settings.js. -->
+<template id="tpl-next-view-settings">
+  <div data-slot="head"></div>
+
+  <!-- LIVE engine — streaming model + initial prompt. renderRegion-guarded: it
+       holds a <select> + <textarea> rebuilt each poll tick. -->
+  <div class="panel panel--accent">
+    <div class="panel__head"><div class="panel__title"><span class="ic">📡</span>Live engine</div><div class="panel__hint">streaming · model + initial prompt</div></div>
+    <div class="panel__body"><div class="liveeng" data-slot="liveCardHost"></div></div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- BATCH engine — recordings model + batch prompt + hotwords + hallucination
+       filter (reuses engine.js + config-card.js). Fills the rest of the height. -->
+  <div class="panel panel--primary panel--fill">
+    <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Batch engine</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
+    <div class="panel__body"><div class="eng" data-slot="engineHost"></div><div class="cfg-grid" data-slot="configGrid" style="margin-top:11px"></div></div>
+  </div>
+</template>
+
+<!-- Live engine card content (renderRegion target): the model row, the
+     "restart to apply" affordance, and the live-prompt editor. Rebuilt per
+     tick; the swap is skipped while a control inside is focused. -->
+<template id="tpl-next-liveeng">
+  <div data-slot="modelRow"></div>
+  <div class="liveeng__restart" data-slot="restart" hidden></div>
+  <div class="field" data-slot="promptField" style="margin-top:11px">
+    <label>live initial prompt <span class="dim">(applied to whisperlivekit on restart)</span></label>
+    <textarea class="ta" rows="3" data-slot="promptTa" data-cfg-key="live-prompt" placeholder="terse always-on context for the live channel"></textarea>
+    <div class="field__row"><button class="act act--sm" type="button" data-slot="promptSave">save</button><span class="dim mono" data-slot="promptStatus"></span></div>
+  </div>
+</template>
+
+<!-- ===================== ENGINE selector pieces ===================== -->
+<!-- Backend chip-row + model-by-family + (Canary) source/target. Built by
+     js/next/components/engine.js and mounted into [data-slot=engineHost]. -->
+<template id="tpl-next-eng-row">
+  <div class="eng-row">
+    <span class="eng-cap" data-slot="cap"></span>
+    <div class="eng-row__body" data-slot="body"></div>
+  </div>
+</template>
+
+<template id="tpl-next-chip">
+  <button class="chip" type="button"></button>
+</template>
+
+<!-- Compact model dropdown — a single <select> grouped by family with
+     <optgroup>, mirroring the classic dashboard's session-detail model pick.
+     Replaces the older model-by-family LIST (too tall for the few models we
+     ship). Options are added by js/next/components/engine.js. -->
+<template id="tpl-next-modelsel">
+  <select class="sel sel--model" data-slot="select" aria-label="Model"></select>
+</template>
+
+<template id="tpl-next-sel">
+  <div class="selfield">
+    <label data-slot="label"></label>
+    <select class="sel" data-slot="select"></select>
+  </div>
+</template>

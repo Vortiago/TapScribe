@@ -217,8 +217,17 @@ def build_live_cmd(
         # `--model-path` exists specifically to sidestep.
     else:
         cmd.extend(["--model", config.model])
+        # Pin the backend explicitly so it's a pure function of (model, MLX)
+        # and OS-independent. Without an explicit --backend on the non-MLX
+        # path, WhisperLiveKit falls back to its OWN default (now
+        # SimulStreaming), which both mismatches the `info["backend"]`
+        # status label below and diverges from the batch path's
+        # faster-whisper. MLX boxes get mlx-whisper; everywhere else
+        # (Windows AND Linux/CUDA) gets faster-whisper.
         if use_mlx:
             cmd.extend(["--backend", "mlx-whisper"])
+        else:
+            cmd.extend(["--backend", "faster-whisper"])
 
     if init_prompt:
         cmd.extend(["--init-prompt", init_prompt])
@@ -318,6 +327,39 @@ def _is_console_worthy(ln: str) -> bool:
     return ":WARNING:" in ln or ":ERROR:" in ln or ":CRITICAL:" in ln
 
 
+def parse_accelerator_line(ln: str) -> str | None:
+    """Extract the child's accelerator self-report from a WhisperLiveKit
+    startup-banner line — `  Accelerator: CUDA (NVIDIA ...)` or
+    `  Accelerator:  CPU only` (the banner goes to stderr, which the
+    spawn merges into stdout, so the log pump sees it). Returns None for
+    every other line.
+
+    This is the ground truth the pump uses to overwrite the parent's
+    seeded device PREDICTION (`_seed_device_label`): WlK exposes no
+    --device flag — its faster-whisper backend hands device="auto" to
+    CTranslate2 inside the child — so only the child knows what it
+    actually resolved."""
+    s = ln.strip()
+    if not s.startswith("Accelerator:"):
+        return None
+    return s[len("Accelerator:") :].strip() or None
+
+
+def _seed_device_label(use_mlx: bool) -> str:
+    """The parent's prediction of the device the child will pick, shown
+    until the child's `Accelerator:` banner is observed by the log pump.
+    The non-MLX label comes from the same `available_backends()` probe
+    the batch chips use; the child shares the venv, so its torch-CUDA
+    visibility matches. "(auto)" flags that TapScribe isn't pinning the
+    device — CTranslate2 resolves it inside the child."""
+    if use_mlx:
+        return "Apple Silicon GPU"
+    # Late import: the probe imports torch on first call (cached after).
+    from .transcribers.catalog import available_backends
+
+    return "CUDA (auto)" if "cuda" in available_backends() else "CPU"
+
+
 # ---------------------------------------------------------------------------
 # LiveChannel — owns the whisperlivekit-server child + its supervision
 # ---------------------------------------------------------------------------
@@ -380,7 +422,7 @@ class WhisperLiveKitChannel:
         self.info["host"] = config.host
         self.info["port"] = str(config.port)
         self.info["backend"] = "mlx-whisper" if use_mlx else "faster-whisper"
-        self.info["device"] = "Apple Silicon GPU" if use_mlx else "CPU"
+        self.info["device"] = _seed_device_label(use_mlx)
         # Seed gate info too so the dashboard's selector / sliders show
         # the right values before the first start().
         self._mirror_gate_info()
@@ -569,7 +611,7 @@ class WhisperLiveKitChannel:
             self.info["host"] = self.config.host
             self.info["port"] = str(self.config.port)
             self.info["backend"] = "mlx-whisper" if self.use_mlx else "faster-whisper"
-            self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
+            self.info["device"] = _seed_device_label(self.use_mlx)
             self._mirror_gate_info()
             self.info["state"] = "starting"
             self.info["last_error"] = ""
@@ -670,6 +712,12 @@ class WhisperLiveKitChannel:
                     self.log.append(ln)
                     if _is_console_worthy(ln):
                         print(f"[wlk] {ln}", flush=True)
+                    # The child's own accelerator report beats the seeded
+                    # prediction — same observe-the-child pattern as the
+                    # 'running' promotion below.
+                    device = parse_accelerator_line(ln)
+                    if device is not None:
+                        self.info["device"] = device
                     if not promoted:
                         low = ln.lower()
                         if "uvicorn running" in low or "application startup complete" in low:

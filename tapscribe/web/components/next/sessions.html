@@ -1,0 +1,111 @@
+<!-- ======================================================================
+     Stages · Sessions (GLOBAL · all sessions).
+     A dense, scannable, manageable list of EVERY session on disk — the
+     spine's session <select> doesn't scale past a handful. Pure /api/state
+     data (the same Session[] the spine reads), no mock:
+       - a filter/search box narrows by label / id / date;
+       - a dense table, newest first, one row per session: label (+ raw id),
+         a status chip (● live / archived), WAV count, stripped? (✓/—),
+         transcript status (merged · N seg / not run), total WAV size;
+       - row actions: Open (focus + route in), Rename (inline label →
+         debounced PUT /api/session-meta/{session}), Delete audio (DELETE
+         /api/sessions/{session}/audio, behind a confirm — disabled on the
+         current session + when there's no audio).
+     The whole list region renders through renderRegion (it holds the search
+     box + rename inputs) so the 500ms poll doesn't clobber an open edit.
+     Mounted into #viewRoot by js/next/views/sessions.js.
+     ====================================================================== -->
+<template id="tpl-next-view-sessions">
+  <div data-slot="head"></div>
+
+  <!-- Fills the workspace height (the #1 fix): the table scrolls inside the
+       panel so a short list doesn't strand the panel at ~25%. -->
+  <div class="panel panel--fill">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">🗂️</span>All sessions</div>
+      <!-- Toolbar: a view-level "prune empty" action + the newest-first hint.
+           Lives in the STATIC panel head (built once in build(), never touched
+           by the per-tick poll), so its listener is wired once and never
+           clobbered. POST /api/sessions/prune-empty deletes every session with
+           0 WAVs / no merged transcript / no label (skips the current one). -->
+      <div class="panel__hint mono">
+        <button class="act act--sm act--danger" type="button" data-slot="prune"
+                title="Delete every session with 0 WAVs, no merged transcript, and no label. The current session is always kept.">prune empty</button>
+        <span data-slot="pruneStatus" class="dim"></span>
+        <span>newest first</span>
+      </div>
+    </div>
+    <!-- The renderRegion-guarded region: search box + table. flush so the
+         table's own row hairlines reach the panel edges. -->
+    <div class="panel__body flush" data-slot="listHost"></div>
+  </div>
+</template>
+
+<!-- The guarded list region: a search row + the dense session table. Rebuilt
+     by renderRegion only when the data changes (and never while the search box
+     or a rename input inside it is focused). -->
+<template id="tpl-next-sesslist">
+  <div class="sesslist">
+    <div class="sesslist__search">
+      <span class="sesslist__searchic">🔎</span>
+      <input class="sesslist__filter" type="search" data-slot="search"
+             placeholder="Filter by label, date, or id…" autocomplete="off" spellcheck="false">
+      <span class="sesslist__count mono dim" data-slot="shownCount"></span>
+    </div>
+
+    <!-- column header -->
+    <div class="sessrow sessrow--head">
+      <span class="sesscol sesscol--label">Session</span>
+      <span class="sesscol sesscol--status">Status</span>
+      <span class="sesscol sesscol--num">WAVs</span>
+      <span class="sesscol sesscol--strip">Stripped</span>
+      <span class="sesscol sesscol--tx">Transcript</span>
+      <span class="sesscol sesscol--size">Size</span>
+      <span class="sesscol sesscol--rename">Rename</span>
+      <span class="sesscol sesscol--act">Actions</span>
+    </div>
+
+    <div class="sessrows" data-slot="rows"></div>
+  </div>
+</template>
+
+<!-- one session row — label (+ raw id sub) · status chip · WAVs · stripped? ·
+     transcript status · size · inline rename · Open / Absorb-into / Delete-audio
+     / Delete-session actions. The absorb <select> and every button live inside
+     the single Actions grid cell (.sessrow__act) so the row's 8-column grid
+     template is untouched, and every control stays inside the renderRegion host
+     (focus-safe across the poll). -->
+<template id="tpl-next-sessrow">
+  <div class="sessrow">
+    <span class="sesscol sesscol--label sessrow__id">
+      <span class="sessrow__label" data-slot="label"></span>
+      <span class="sessrow__raw mono dim" data-slot="id"></span>
+    </span>
+    <span class="sesscol sesscol--status">
+      <span class="sesschip" data-slot="status"></span>
+    </span>
+    <span class="sesscol sesscol--num mono" data-slot="wavs"></span>
+    <span class="sesscol sesscol--strip mono" data-slot="stripped"></span>
+    <span class="sesscol sesscol--tx">
+      <span class="sesstx mono" data-slot="tx"></span>
+    </span>
+    <span class="sesscol sesscol--size mono dim" data-slot="size"></span>
+    <span class="sesscol sesscol--rename">
+      <input class="sessrow__rename" type="text" data-slot="rename" autocomplete="off" spellcheck="false">
+      <span class="sessrow__status mono dim" data-slot="renameStatus"></span>
+    </span>
+    <span class="sesscol sesscol--act sessrow__act">
+      <button class="act act--sm" type="button" data-slot="open">open</button>
+      <!-- Absorb THIS session (source) into another (target): the row's WAVs +
+           sidecars move into the picked target, source aliases fill gaps, and
+           THIS folder is deleted. POST /api/sessions/{target}/absorb {source}.
+           Hidden on the current session (the server refuses it as a source) and
+           when there's no other session to fold into. -->
+      <select class="select" data-slot="absorb" title="Fold this session into another — moves its WAVs into the picked target, then deletes this folder.">
+        <option value="">absorb into…</option>
+      </select>
+      <button class="act act--sm act--danger" type="button" data-slot="del">delete audio</button>
+      <button class="act act--sm act--danger" type="button" data-slot="delSession">delete</button>
+    </span>
+  </div>
+</template>

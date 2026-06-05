@@ -18,7 +18,9 @@ from tapscribe.live import (
     WhisperLiveKitChannel,
     _is_console_worthy,
     _probe_port_free,
+    _seed_device_label,
     build_live_cmd,
+    parse_accelerator_line,
 )
 
 # Back-compat alias so the pre-refactor test names still read naturally.
@@ -44,12 +46,21 @@ def test_argv_for_standard_whisper_model_includes_model_flag():
     assert cmd[cmd.index("--model") + 1] == "tiny.en"
 
 
-def test_mlx_backend_only_appended_when_use_mlx_true():
+def test_regular_model_pins_backend_explicitly_by_mlx_flag():
+    """The backend is a pure function of (model, MLX), OS-independent:
+    use_mlx=True → mlx-whisper, use_mlx=False → faster-whisper. We pin
+    --backend explicitly on BOTH paths so WhisperLiveKit never falls back
+    to its own default (SimulStreaming), which would mismatch the
+    `info["backend"]` label and diverge from the batch path."""
     cpu_cmd = build_live_cmd(EXE, DEFAULT_CFG, use_mlx=False)
     mlx_cmd = build_live_cmd(EXE, DEFAULT_CFG, use_mlx=True)
-    assert "--backend" not in cpu_cmd
+    assert "--backend" in cpu_cmd
+    assert cpu_cmd[cpu_cmd.index("--backend") + 1] == "faster-whisper"
+    assert "mlx-whisper" not in cpu_cmd
     assert "--backend" in mlx_cmd
     assert mlx_cmd[mlx_cmd.index("--backend") + 1] == "mlx-whisper"
+    # MLX path must NOT also carry faster-whisper.
+    assert "faster-whisper" not in mlx_cmd
 
 
 def test_no_vac_flag_appended_when_gate_kind_is_tapscribe():
@@ -314,6 +325,63 @@ def test_console_worthy_lines_pass_through(line: str):
 )
 def test_non_warning_lines_are_filtered(line: str):
     assert _is_console_worthy(line) is False
+
+
+# ---------------------------------------------------------------------------
+# parse_accelerator_line / _seed_device_label — the device label is an
+# observation (child banner) layered over a prediction (parent probe)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        # WlK prints the banner with one or two spaces depending on the
+        # call site (`Accelerator: …` in the server banner, `Accelerator:  …`
+        # in the CLI listing) — both must parse.
+        ("  Accelerator: CUDA (NVIDIA GeForce RTX 4080)", "CUDA (NVIDIA GeForce RTX 4080)"),
+        ("  Accelerator:  CPU only", "CPU only"),
+        ("Accelerator: MPS (Apple Silicon), MLX", "MPS (Apple Silicon), MLX"),
+    ],
+)
+def test_parse_accelerator_line_extracts_child_report(line: str, expected: str):
+    assert parse_accelerator_line(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "INFO:whisperlivekit:loading model",
+        "  Backend: faster-whisper | Model: tiny.en | Language: en",
+        "Accelerator:",  # bare prefix, no value
+        "",
+    ],
+)
+def test_parse_accelerator_line_ignores_other_lines(line: str):
+    assert parse_accelerator_line(line) is None
+
+
+def test_seed_device_label_mlx_is_apple_silicon():
+    assert _seed_device_label(use_mlx=True) == "Apple Silicon GPU"
+
+
+@pytest.mark.parametrize(
+    ("backends", "expected"),
+    [
+        (frozenset({"cuda", "cpu"}), "CUDA (auto)"),
+        (frozenset({"cpu"}), "CPU"),
+    ],
+)
+def test_seed_device_label_predicts_from_backend_probe(backends, expected):
+    """The non-MLX seed is a PREDICTION from the parent's probe — '(auto)'
+    flags that CTranslate2 resolves the real device inside the child."""
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(backends)
+    try:
+        assert _seed_device_label(use_mlx=False) == expected
+    finally:
+        set_available_backends_for_testing(None)
 
 
 # ---------------------------------------------------------------------------

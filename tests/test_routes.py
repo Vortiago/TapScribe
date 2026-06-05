@@ -8,16 +8,15 @@ is loaded.
 
 from __future__ import annotations
 
-import wave
 from datetime import UTC, datetime
 from pathlib import Path
 
-import numpy as np
 import pytest
 from conftest import (
     TranscriberStub,  # type: ignore[import-not-found]  # NeMo ships an installed `tests` package — collides with our project's tests/ dir; pytest puts tests/ on sys.path so `from conftest` resolves correctly
 )
 from fastapi.testclient import TestClient
+from wav_builders import seed_session, seed_wav  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
@@ -79,17 +78,6 @@ def client(recorder_under_test):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
-
-
-def _seed_wav(path: Path, *, amplitude: int = 8000, seconds: float = 1.0) -> Path:
-    n = int(16000 * seconds)
-    samples = np.tile(np.array([amplitude, -amplitude], dtype=np.int16), n // 2 + 1)[:n]
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(samples.tobytes())
-    return path
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +194,27 @@ def test_api_state_carries_backend_preference_and_available_backends(client):
     assert "backend" in body
     assert "available_backends" in body
     assert isinstance(body["available_backends"], list)
+
+
+def test_api_state_conditional_get_returns_304_when_unchanged(client):
+    """The poll path emits a weak ETag and answers a matching If-None-Match with
+    a bodyless 304, so an idle dashboard reuses its cached state instead of
+    re-parsing the payload every tick. A stale validator gets the full 200."""
+    r1 = client.get("/api/state")
+    assert r1.status_code == 200
+    etag = r1.headers.get("etag")
+    assert etag and etag.startswith('W/"'), f"expected a weak ETag, got {etag!r}"
+
+    # Same validator + unchanged (idle) state → 304 with no body.
+    r2 = client.get("/api/state", headers={"If-None-Match": etag})
+    assert r2.status_code == 304
+    assert r2.content == b""
+    assert r2.headers.get("etag") == etag
+
+    # A stale validator → full 200 body again.
+    r3 = client.get("/api/state", headers={"If-None-Match": 'W/"0000000000000000"'})
+    assert r3.status_code == 200
+    assert r3.json()["current_session"] == r1.json()["current_session"]
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +394,7 @@ def test_new_session_prunes_empty_sessions(client, recorder_under_test):
     while WAV-bearing folders survive."""
     cur = recorder_under_test.session_dir
     cur.mkdir(parents=True, exist_ok=True)
-    _seed_wav(cur / "cur.wav")
+    seed_wav(cur / "cur.wav")
     empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
     empty.mkdir()
     r = client.post("/api/new-session")
@@ -403,7 +412,7 @@ def test_tap_new_session_rotates_without_pruning(client, recorder_under_test):
     Basic-auth action. Auth is disabled in this fixture, so no header needed."""
     cur = recorder_under_test.session_dir
     cur.mkdir(parents=True, exist_ok=True)
-    _seed_wav(cur / "cur.wav")
+    seed_wav(cur / "cur.wav")
     empty = recorder_under_test.recordings_dir / "2020-01-01T00-00-00Z"
     empty.mkdir()
     prev = recorder_under_test.session_start
@@ -504,7 +513,6 @@ def test_api_state_returns_recorder_view(client, recorder_under_test):
     body = r.json()
     assert body["current_session"] == recorder_under_test.session_start
     assert body["recording_enabled"] is True
-    assert body["mlx_available"] is False
     assert isinstance(body["active"], list)
     assert isinstance(body["sessions"], list)
     assert isinstance(body["live_feed"], list)
@@ -802,9 +810,9 @@ def test_session_meta_rejects_oversize_hotwords(client, recorder_under_test):
 
 
 def test_api_state_sessions_include_meta_prompt_and_hotwords(client, recorder_under_test):
-    """The dashboard renders the override badge in the session-detail
-    pane off the meta block. /api/state's per-session entry must surface
-    these so the JS doesn't need a second round-trip per session."""
+    """The dashboard renders per-session override badges off the meta
+    block. /api/state's per-session entry must surface these so the JS
+    doesn't need a second round-trip per session."""
     session_dir = recorder_under_test.recordings_dir / "fakesession"
     session_dir.mkdir()
     client.put("/api/session-meta/fakesession", json={"prompt": "P", "hotwords": "H"})
@@ -835,18 +843,10 @@ def test_api_state_reports_default_override_counts(client, recorder_under_test):
 # ---------------------------------------------------------------------------
 
 
-def _seed_session(root: Path, name: str, wavs: list[str]) -> Path:
-    sd = root / name
-    sd.mkdir(parents=True)
-    for w in wavs:
-        _seed_wav(sd / w)
-    return sd
-
-
 def test_absorb_moves_wavs_and_sidecars_and_deletes_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    source = _seed_session(
+    target = seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = seed_session(
         root,
         "src",
         [
@@ -876,10 +876,10 @@ def test_absorb_moves_wavs_and_sidecars_and_deletes_source(client, recorder_unde
 
 def test_absorb_moves_stripped_subfolder(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    source = _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    target = seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
     (source / "stripped").mkdir()
-    _seed_wav(source / "stripped" / "20260101T010000Z__alice__def.wav")
+    seed_wav(source / "stripped" / "20260101T010000Z__alice__def.wav")
 
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 200, r.text
@@ -890,8 +890,8 @@ def test_absorb_moves_stripped_subfolder(client, recorder_under_test):
 
 def test_absorb_merges_aliases_with_target_winning(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
-    _seed_session(root, "src", [])
+    seed_session(root, "tgt", [])
+    seed_session(root, "src", [])
     client.put(
         "/api/session-meta/tgt",
         json={
@@ -918,8 +918,8 @@ def test_absorb_merges_aliases_with_target_winning(client, recorder_under_test):
 
 def test_absorb_invalidates_target_merged_transcript(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    target = _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    target = seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
     (target / "session-transcript.json").write_text('{"stale": true}')
 
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
@@ -930,9 +930,9 @@ def test_absorb_invalidates_target_merged_transcript(client, recorder_under_test
 
 def test_absorb_refuses_when_source_is_current_session(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
+    seed_session(root, "tgt", [])
     cur = recorder_under_test.session_start
-    _seed_session(root, cur, [])
+    seed_session(root, cur, [])
     r = client.post("/api/sessions/tgt/absorb", json={"source": cur})
     assert r.status_code == 409
     assert "current session" in r.json()["detail"]
@@ -943,8 +943,8 @@ def test_absorb_allows_target_to_be_current_session(client, recorder_under_test)
     into the new one the operator is recording into right now."""
     root = recorder_under_test.recordings_dir
     cur = recorder_under_test.session_start
-    _seed_session(root, cur, [])
-    _seed_session(root, "prev", ["20260101T010000Z__alice__def.wav"])
+    seed_session(root, cur, [])
+    seed_session(root, "prev", ["20260101T010000Z__alice__def.wav"])
     r = client.post(f"/api/sessions/{cur}/absorb", json={"source": "prev"})
     assert r.status_code == 200, r.text
     assert (root / cur / "20260101T010000Z__alice__def.wav").is_file()
@@ -952,7 +952,7 @@ def test_absorb_allows_target_to_be_current_session(client, recorder_under_test)
 
 def test_absorb_refuses_self(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
+    seed_session(root, "tgt", [])
     r = client.post("/api/sessions/tgt/absorb", json={"source": "tgt"})
     assert r.status_code == 400
 
@@ -964,7 +964,7 @@ def test_absorb_refuses_self(client, recorder_under_test):
 
 def test_delete_session_audio_removes_all_keeps_transcript(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(
+    sd = seed_session(
         root,
         "s",
         ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"],
@@ -976,7 +976,7 @@ def test_delete_session_audio_removes_all_keeps_transcript(client, recorder_unde
     (txdir / "faster-whisper__small.en.json").write_text("{}")
     # A stripped region + the merged transcript + session meta.
     (sd / "stripped").mkdir()
-    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
     (sd / "session-transcript.json").write_text('{"merged": true}')
     (sd / "session-transcript.txt").write_text("merged")
     (sd / "session-meta.json").write_text('{"label": "kickoff"}')
@@ -1001,7 +1001,7 @@ def test_delete_session_audio_removes_all_keeps_transcript(client, recorder_unde
 def test_delete_session_audio_refuses_current_session(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     cur = recorder_under_test.session_start
-    sd = _seed_session(root, cur, ["20260101T000000Z__alice__abc.wav"])
+    sd = seed_session(root, cur, ["20260101T000000Z__alice__abc.wav"])
     r = client.delete(f"/api/sessions/{cur}/audio")
     assert r.status_code == 409
     assert "current session" in r.json()["detail"]
@@ -1012,7 +1012,7 @@ def test_delete_session_audio_refuses_inflight_job(client, recorder_under_test):
     from tapscribe.recorder import JobState
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
 
     # Pre-claim a job slot the way the transcribe-session busy test does —
     # JobTracker.claim is async, driven via anyio's sync→async portal.
@@ -1044,7 +1044,7 @@ def test_delete_session_audio_missing_session_404(client, recorder_under_test): 
 
 def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(
+    sd = seed_session(
         root,
         "s",
         ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"],
@@ -1053,7 +1053,7 @@ def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_te
     # A stripped region sharing the deleted original's speaker — the no-cascade
     # contract means it must survive a per-file delete of the original.
     (sd / "stripped").mkdir()
-    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
 
     r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav")
     assert r.status_code == 200, r.text
@@ -1068,9 +1068,9 @@ def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_te
 
 def test_delete_wav_stripped_region_only(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
     (sd / "stripped").mkdir()
-    _seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
 
     r = client.delete("/api/wav/s/20260101T000000Z__alice__reg.wav?source=stripped")
     assert r.status_code == 200, r.text
@@ -1080,7 +1080,7 @@ def test_delete_wav_stripped_region_only(client, recorder_under_test):
 
 def test_delete_wav_rejects_bad_input(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
     # Non-.wav name → 404 (resolve_wav rejects non-audio). Assign first —
     # an HTTP call inside `assert` would vanish under `python -O`.
     r = client.delete("/api/wav/s/session-meta.json")
@@ -1097,15 +1097,15 @@ def test_delete_wav_rejects_bad_input(client, recorder_under_test):
 
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
+    seed_session(root, "tgt", [])
     r = client.post("/api/sessions/tgt/absorb", json={"source": "nope"})
     assert r.status_code == 404
 
 
 def test_absorb_refuses_filename_collision(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    src = _seed_session(root, "src", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    src = seed_session(root, "src", ["20260101T000000Z__alice__abc.wav"])
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 409
     # Source must be untouched on a refused merge.
@@ -1120,7 +1120,7 @@ def test_api_state_files_row_lists_all_cached_transcripts(client, recorder_under
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
 
     cached_transcribe(
@@ -1157,7 +1157,7 @@ def test_api_set_primary_flips_pointer(client, recorder_under_test):
     from tapscribe.wav_cache import cached_transcribe, read_cached
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
@@ -1190,7 +1190,7 @@ def test_api_set_primary_422_for_uncached_combo(client, recorder_under_test):
     from tapscribe.wav_cache import cached_transcribe
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
@@ -1208,12 +1208,61 @@ def test_api_set_primary_422_for_uncached_combo(client, recorder_under_test):
 
 
 def test_api_set_primary_404_for_missing_wav(client, recorder_under_test):
-    _seed_session(recorder_under_test.recordings_dir, "s", [])
+    seed_session(recorder_under_test.recordings_dir, "s", [])
     r = client.put(
         "/api/wav/s/missing.wav/primary",
         json={"backend": "x", "model": "y"},
     )
     assert r.status_code == 404
+
+
+def test_stripped_clip_cache_listing_carries_source_so_set_primary_resolves(client, recorder_under_test):
+    """Repro for 'Set primary failed: 404' on stripped-audio transcripts.
+
+    A stripped region clip lives in <session>/stripped/. Its /api/state cache
+    listing must carry source="stripped" so the dashboard PUTs that source —
+    otherwise the UI fell back to "original", resolve_wav looked in the
+    originals dir, and the PUT 404'd. With source present, set-primary on the
+    clip resolves and succeeds."""
+    from tapscribe.wav_cache import cached_transcribe
+
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    stripped = sd / "stripped"
+    stripped.mkdir()
+    region_name = "2026-01-01T01-00-02Z__alice__abc.wav"
+    cached_transcribe(
+        seed_wav(stripped / region_name),
+        TranscriberStub(backend="parakeet", model="v2"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+        source="stripped",
+    )
+
+    # The clip surfaces under the original's regions[], and its cache listing
+    # reports source="stripped".
+    body = client.get("/api/state").json()
+    s = next(s for s in body["sessions"] if s["session"] == "s")
+    original = next(f for f in s["files"] if f["name"] == "2026-01-01T01-00-00Z__alice__abc.wav")
+    region_row = next(r for r in original["regions"] if r["name"] == region_name)
+    assert region_row["transcripts"][0]["source"] == "stripped"
+
+    # Set-primary with that source resolves the stripped/ path → 200, not 404.
+    ok = client.put(
+        f"/api/wav/s/{region_name}/primary",
+        json={"backend": "parakeet", "model": "v2", "source": "stripped"},
+    )
+    assert ok.status_code == 200, ok.text
+
+    # The pre-fix path the UI took — source omitted, so it defaulted to
+    # "original" — still 404s, because the clip genuinely isn't in the originals
+    # dir. The fix is that the listing now tells the UI to send "stripped".
+    bad = client.put(
+        f"/api/wav/s/{region_name}/primary",
+        json={"backend": "parakeet", "model": "v2"},
+    )
+    assert bad.status_code == 404, bad.text
 
 
 def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recorder_under_test):
@@ -1222,7 +1271,7 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
     from tapscribe.wav_cache import cached_transcribe
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
     cached_transcribe(
         wav,
@@ -1266,7 +1315,7 @@ def test_api_transcribe_uses_session_meta_prompt_when_set(client, recorder_under
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL", encoding="utf-8")
     (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
     client.put("/api/session-meta/s", json={"prompt": "SESSION OVERRIDE", "hotwords": "Patricia"})
@@ -1295,7 +1344,7 @@ def test_api_transcribe_falls_back_to_global_when_session_meta_empty(
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     (recorder_under_test.config_dir / "prompt.txt").write_text("GLOBAL DEFAULT", encoding="utf-8")
     (recorder_under_test.config_dir / "hotwords.txt").write_text("Acme", encoding="utf-8")
 
@@ -1337,7 +1386,7 @@ def test_api_transcribe_session_re_runs_when_session_meta_prompt_changes(
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     payload = {"session": "s", "model": "fake-small.en"}
 
     # First run under prompt A — caches sidecar with initial_prompt_used="A".
@@ -1372,7 +1421,7 @@ def test_api_transcribe_session_re_runs_when_session_meta_hotwords_change(
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     payload = {"session": "s", "model": "fake-small.en"}
 
     client.put("/api/session-meta/s", json={"hotwords": "Acme"})
@@ -1402,7 +1451,7 @@ def test_api_transcribe_session_re_uses_cache_when_prompt_unchanged(client, reco
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     payload = {"session": "s", "model": "fake-small.en"}
 
     client.put("/api/session-meta/s", json={"prompt": "STABLE"})
@@ -1430,7 +1479,7 @@ def test_api_transcribe_returns_freshly_written_transcript(client, recorder_unde
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    sd = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
 
     r = client.post(
         "/api/transcribe",
@@ -1481,7 +1530,7 @@ def test_api_transcribe_returns_422_for_silent_wav(client, recorder_under_test):
     sd = root / "s"
     sd.mkdir(parents=True)
     # amplitude=0 → all-zero samples → -inf dBFS, far below SILENT_RMS_DBFS_FLOOR.
-    _seed_wav(sd / "2026-01-01T01-00-00Z__alice__abc.wav", amplitude=0)
+    seed_wav(sd / "2026-01-01T01-00-00Z__alice__abc.wav", amplitude=0)
 
     r = client.post(
         "/api/transcribe",
@@ -1497,7 +1546,7 @@ def test_api_transcribe_session_returns_400_for_unparseable_from_iso(client, rec
     a "client error, fix your input" signal instead of a 404 that
     would suggest the session was empty."""
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
 
     r = client.post(
         "/api/transcribe-session",
@@ -1537,7 +1586,7 @@ def test_api_transcribe_session_returns_409_when_job_already_in_flight(
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
 
     # Pre-claim the slot — TestClient's sync API doesn't expose the loop,
     # but JobTracker.claim is async. anyio.from_thread mirrors the
@@ -1565,14 +1614,17 @@ def test_api_transcribe_session_returns_409_when_job_already_in_flight(
 
 
 def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_test):
-    """The dashboard reads each WAV's transcript out of /api/state's
-    `sessions[*].files[*].transcript`. With the new multi-cache layout,
-    that field must surface the *primary* transcript so flipping the
-    primary on disk shows up on the next poll."""
+    """The dashboard reads each WAV's transcript MARKER out of /api/state's
+    `sessions[*].files[*].transcript`. With the lazy-transcript change the
+    field is a slim marker (backend/model/transcribed_at/transcribe_ms/source/
+    segment_count) — NOT the full body — but it must still surface the
+    *primary* (backend, model) so flipping the primary on disk shows up on the
+    next poll. The full text is fetched lazily via the per-WAV transcript
+    endpoint instead, asserted below."""
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
-    session = _seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    session = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
     wav = session / "2026-01-01T01-00-00Z__alice__abc.wav"
 
     cached_transcribe(
@@ -1590,21 +1642,32 @@ def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_
         hallucination_rules=[],
     )
 
-    # Default primary is the most-recent write (voxtral).
+    # Default primary is the most-recent write (voxtral). The marker carries
+    # backend/model but NOT the segment-level text/words.
     body = client.get("/api/state").json()
     s = next(s for s in body["sessions"] if s["session"] == "s")
     file_row = next(f for f in s["files"] if f["name"] == wav.name)
     assert file_row["transcript"] is not None
-    assert file_row["transcript"]["text"] == "voxtral text"
     assert file_row["transcript"]["backend"] == "mlx-voxtral"
+    assert file_row["transcript"]["model"] == "voxtral-mini"
+    assert "text" not in file_row["transcript"], "marker must not embed the transcript body"
+    assert "segments" not in file_row["transcript"]
 
-    # Flip primary back to whisper; the dashboard sees the change.
+    # The full text is reachable via the lazy per-WAV transcript endpoint.
+    full = client.get(f"/api/wav/s/{wav.name}/transcript").json()
+    assert full["text"] == "voxtral text"
+    assert full["backend"] == "mlx-voxtral"
+
+    # Flip primary back to whisper; the dashboard sees the change in the marker.
     set_primary_transcript(wav, backend="faster-whisper", model="small.en")
     body = client.get("/api/state").json()
     s = next(s for s in body["sessions"] if s["session"] == "s")
     file_row = next(f for f in s["files"] if f["name"] == wav.name)
-    assert file_row["transcript"]["text"] == "whisper text"
     assert file_row["transcript"]["backend"] == "faster-whisper"
+    assert file_row["transcript"]["model"] == "small.en"
+    full = client.get(f"/api/wav/s/{wav.name}/transcript").json()
+    assert full["text"] == "whisper text"
+    assert full["backend"] == "faster-whisper"
 
 
 def test_absorb_moves_new_layout_transcripts_directory(client, recorder_under_test):
@@ -1614,8 +1677,8 @@ def test_absorb_moves_new_layout_transcripts_directory(client, recorder_under_te
     from tapscribe.wav_cache import cached_transcribe, read_all_cached
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    source = _seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    source = seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
     src_wav = source / "20260101T010000Z__alice__def.wav"
 
     # Seed two cached transcripts via the cache API.
@@ -1653,8 +1716,8 @@ def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
     from tapscribe.recorder import JobState
 
     root = recorder_under_test.recordings_dir
-    _seed_session(root, "tgt", [])
-    _seed_session(root, "src", [])
+    seed_session(root, "tgt", [])
+    seed_session(root, "src", [])
     with anyio.from_thread.start_blocking_portal() as portal:
         portal.call(
             recorder_under_test.jobs.claim,
@@ -1668,3 +1731,46 @@ def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
         )
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Dashboard shell serving — unit-level guards so a broken / route or missing
+# asset is caught by the default suite, not only the Playwright job (which
+# self-skips without a browser).
+# ---------------------------------------------------------------------------
+
+
+def test_root_serves_stages_shell(client):
+    """GET / is the Stages dashboard (next.html): the shell markers and the
+    single module script must be present. The classic dashboard was retired —
+    this is the only UI."""
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert 'id="next-app"' in r.text
+    assert "/web/js/next/main.js" in r.text
+    # The shell layers next.css on top of the shared design tokens.
+    assert "/dashboard.css" in r.text
+    assert "/next.css" in r.text
+
+
+def test_next_route_is_gone(client):
+    """/next was the Stages UI's incubation address; it no longer exists."""
+    assert client.get("/next").status_code == 404
+
+
+def test_dashboard_stylesheets_serve(client):
+    for path in ("/dashboard.css", "/next.css"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert "text/css" in r.headers["content-type"], path
+
+
+def test_stages_assets_serve_from_mounts(client):
+    """The shell's entry module and one template bundle must come back via
+    the /web mounts — this is exactly what a broken package-data glob or a
+    botched StaticFiles mount breaks first."""
+    r = client.get("/web/js/next/main.js")
+    assert r.status_code == 200
+    r = client.get("/web/components/next/views.html")
+    assert r.status_code == 200

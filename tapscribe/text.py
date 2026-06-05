@@ -106,6 +106,17 @@ def read_live_prompt() -> str:
     return _read_config_text_cached(config.LIVE_PROMPT_FILE)
 
 
+def read_live_model() -> str:
+    """Return the operator's DEFAULT live-channel model id from live-model.txt
+    (a single model_id, e.g. "tiny.en"), stripped. Empty when unset.
+
+    Separate from the running channel's model (`live_info.model`): the
+    dashboard's Live engine card persists the default here, and the live
+    channel only adopts it on (re)start — so the UI can flag "restart to
+    apply" while the two differ."""
+    return _read_config_text_cached(config.LIVE_MODEL_FILE).strip()
+
+
 def read_hotwords() -> str:
     """Return the faster-whisper `hotwords` string from hotwords.txt — a
     comma- or space-separated list of proper nouns / tricky vocabulary."""
@@ -176,6 +187,14 @@ def write_live_prompt(content: str) -> None:
     """Persist the live-channel init prompt to live-prompt.txt. Atomic;
     oversize input rejected."""
     _write_text_file_atomic(config.LIVE_PROMPT_FILE, validate_config_text(content))
+
+
+def write_live_model(content: str) -> None:
+    """Persist the default live-channel model id to live-model.txt. Stored
+    stripped (it's a single model_id token, not free text). Atomic; oversize
+    input rejected. The value isn't validated against the registry here — an
+    unknown id surfaces as a clear error at /api/live/start time, not silently."""
+    _write_text_file_atomic(config.LIVE_MODEL_FILE, validate_config_text(content.strip()))
 
 
 def write_hotwords(content: str) -> None:

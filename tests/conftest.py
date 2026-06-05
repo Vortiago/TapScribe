@@ -441,3 +441,38 @@ class TranscriberStub:
             hotwords_used=hotwords or "",
             quality_settings={},
         )
+
+
+# ---------------------------------------------------------------------------
+# Recorder fixture — tmpdir, no auth, no live spawn
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A tmpdir-rooted Recorder for direct batch-orchestrator tests
+    (test_batch_transcribe, test_batch_strip) — no HTTP, no auth, no live
+    spawn. tapscribe imports happen inside the fixture so config-dir
+    redirection lands before module import (see module docstring)."""
+    from tapscribe import config as _config
+    from tapscribe.live import LiveConfig
+    from tapscribe.recorder import Recorder
+
+    monkeypatch.setattr(_config, "AUTH_ENABLED", False)
+    monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
+    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr(_config, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
+    monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
+    monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
+    monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
+    (tmp_path / "recordings").mkdir()
+    return Recorder(
+        recordings_dir=tmp_path / "recordings",
+        config_dir=cfg,
+        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=8000),
+        use_mlx=False,
+        auth_password_file=tmp_path / ".auth-password",
+    )

@@ -1,0 +1,65 @@
+<!-- ======================================================================
+     Stages · People (GLOBAL · Registry).
+     Two REAL panels, both derived from /api/state's session_meta.aliases —
+     no mock data:
+       1. "In this session · names" — the per-session alias editor: every
+          speaker present in the focused session gets an editable DISPLAY
+          NAME saved to that session's session_meta.aliases
+          (PUT /api/session-meta/{session}).
+       2. "People · across all sessions" — the names the operator has
+          assigned anywhere, aggregated into one row per person (avatar,
+          name, "N session(s)", the identity code(s) mapped to them).
+     Mounted into #viewRoot by js/next/views/people.js.
+     ====================================================================== -->
+<template id="tpl-next-view-people">
+  <div data-slot="head"></div>
+
+  <!-- ============ this session's participants (alias editor) ============
+       Both People panels fill the column (the #1 fix) — they split the
+       leftover height and scroll their own rows, so a short roster doesn't
+       strand the panels at ~45%. -->
+  <div class="panel panel--accent panel--fill">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">📍</span>In this session · names</div>
+      <div class="panel__hint mono" data-slot="partHint"></div>
+    </div>
+    <div class="panel__body">
+      <div class="partlist" data-slot="partList"></div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- ============ the named-people registry (across all sessions) ============ -->
+  <div class="panel panel--fill">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">🗂️</span>People · across all sessions</div>
+      <div class="panel__hint mono" data-slot="regHint"></div>
+    </div>
+    <div class="panel__body">
+      <div class="preg" data-slot="people"></div>
+    </div>
+  </div>
+</template>
+
+<!-- one REAL per-session participant row: identity code + editable name. -->
+<template id="tpl-next-partrow">
+  <div class="partrow">
+    <span class="av sm" data-slot="av"></span>
+    <span class="partrow__id mono" data-slot="code"></span>
+    <span class="tag partrow__src" data-slot="src"></span>
+    <input class="partrow__name" type="text" data-slot="name" autocomplete="off" spellcheck="false">
+    <span class="partrow__status mono dim" data-slot="status"></span>
+  </div>
+</template>
+
+<!-- one REAL registry row: a named person aggregated across all sessions —
+     avatar (initials) · name · "N session(s)" · the identity code(s). -->
+<template id="tpl-next-pregrow">
+  <div class="pregrow">
+    <span class="av sm" data-slot="av"></span>
+    <span class="pregrow__name" data-slot="name"></span>
+    <span class="pregrow__count mono" data-slot="count"></span>
+    <span class="pregrow__ids mono" data-slot="ids"></span>
+  </div>
+</template>

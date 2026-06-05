@@ -2,9 +2,112 @@
 // Active taps panel — one row per live audio source the recorder is
 // currently receiving bytes from.
 
-import { tpl, mount, pick } from "../templates.js";
+import { tpl, mount, pick, selectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
+
+// Per-host render state, keyed by bodyEl (NOT module scope — active-taps renders
+// into several hosts at once on /next: the global rail + the Taps view, so a
+// shared sentinel would cross-talk). Tracks the mounted mode (idle vs active)
+// and, while active, a map of tap identity → its row element so we update rows
+// IN PLACE instead of rebuilding every row via replaceChildren each tick.
+//
+// During a live meeting the old code re-created ~10-15 DOM nodes per tap, 1-2×/s
+// indefinitely — collectable, but steady GC pressure + layout cost for the whole
+// meeting. Now an existing row's mutable cells (level meter, lag, buffer text,
+// byte/dur counters, toggle state) are rewritten in place; nodes are only
+// created when a NEW tap appears and removed when one disappears.
+/** @typedef {{ mode: "idle" | "active" | null, rows: Map<string, HTMLElement> }} TapHostState */
+/** @type {WeakMap<Element, TapHostState>} */
+const _state = new WeakMap();
+
+/**
+ * Write a tap's current values into an existing (or fresh) row scope. Only
+ * touches text/attributes/classes — never creates child nodes — so calling it
+ * each tick on a live row is allocation-free.
+ * @param {ParentNode} scope the `.stream-row-wrap` (or its fragment)
+ * @param {import('../types.js').ActiveStream} a
+ */
+function fillRow(scope, a) {
+  const recOn = a.record !== false;
+  const liveOn = a.live !== false;
+  const ident = a.identity || "";
+  const filename = a.filename || "";
+  const dur = (a.bytes_received || 0) / 32000;
+
+  const row = /** @type {HTMLElement} */ (scope.querySelector(".stream-row"));
+
+  const marker = pick(scope, "spkMarker");
+  marker.dataset.spk = String(speakerIndex(a.name || ident));
+
+  pick(scope, "name").textContent = a.name || "<anon>";
+  const identEl = pick(scope, "ident");
+  identEl.title = filename;
+  identEl.textContent = `${ident} · ${truncMid(filename, 30)}`;
+
+  pick(scope, "size").textContent = fmtBytes(a.bytes_received || 0);
+  pick(scope, "dur").textContent = `~${fmtDur(dur)}`;
+
+  // Volume meter — peak amplitude of recent PCM, 0.0–1.0. Quiet (<5%) shows
+  // muted gray; below ~1% snaps to zero width so a near-silent room doesn't show
+  // a confusing sliver. green→amber→red comes from CSS via data-zone.
+  const level = Math.max(0, Math.min(1, Number(a.level) || 0));
+  const meter = pick(scope, "meter");
+  const fill = pick(scope, "meterFill");
+  const pct = level < 0.01 ? 0 : Math.round(level * 100);
+  fill.style.width = pct + "%";
+  let zone = "silent";
+  if (level >= 0.85) zone = "clip";
+  else if (level >= 0.6) zone = "hot";
+  else if (level >= 0.05) zone = "ok";
+  meter.dataset.zone = zone;
+  meter.setAttribute("aria-label", `volume ${pct}% (${zone})`);
+
+  // Per-tap lag from the relay. Hidden when live is off or not yet reported.
+  const lagEl = pick(scope, "lag");
+  const lag = typeof a.lag_s === "number" ? a.lag_s : null;
+  if (lag === null || !liveOn) {
+    lagEl.hidden = true;
+  } else {
+    lagEl.hidden = false;
+    lagEl.textContent = `lag ${lag.toFixed(1)}s`;
+    lagEl.classList.toggle("lag-warn", lag >= 0.5 && lag < 2);
+    lagEl.classList.toggle("lag-bad", lag >= 2);
+  }
+
+  for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (row.querySelectorAll(".tap-toggle"))) {
+    const which = btn.dataset.toggle;
+    const on = which === "record" ? recOn : liveOn;
+    btn.dataset.identity = ident;
+    btn.dataset.state = on ? "1" : "0";
+    btn.classList.toggle("on", on);
+  }
+
+  // Three-state status line under each row: ⟳ <text> / ⟳ listening… / ⏸ quiet.
+  // Hidden when LIVE is off or there's nothing meaningful to show.
+  const bufRow = pick(scope, "bufferRow");
+  const bufText = pick(scope, "bufferText");
+  const bufIcon = pick(scope, "bufferIcon");
+  const buf = (a.buffer_transcription || "").trim();
+  const gateOpen = !!a.gate_open;
+  let icon = "";
+  let text = "";
+  let cls = "";
+  if (liveOn) {
+    if (buf) { icon = "⟳"; text = buf; cls = "buf-active"; }
+    else if (gateOpen) { icon = "⟳"; text = "listening…"; cls = "buf-listening"; }
+    else { icon = "⏸"; text = "quiet"; cls = "buf-quiet"; }
+  }
+  if (text) {
+    bufRow.hidden = false;
+    bufIcon.textContent = icon;
+    bufText.textContent = text;
+    bufRow.className = "stream-buffer " + cls;
+  } else {
+    bufRow.hidden = true;
+    bufText.textContent = "";
+  }
+}
 
 /**
  * @param {import('../types.js').AppState} j
@@ -12,120 +115,70 @@ import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
  */
 export function render(j, { countEl, badgeEl, bodyEl }) {
   const list = j.active || [];
-  countEl.textContent = String(list.length);
+  const count = String(list.length);
+  if (countEl.textContent !== count) countEl.textContent = count;
+
+  // Hold ALL row mutations while the operator is select-copying text inside
+  // the panel (identity / name / filename are natural copy targets): fillRow
+  // rewrites textContent unconditionally each tick, and assigning textContent
+  // replaces the text node — dissolving a selection even when the value is
+  // unchanged. Same interaction-state rule as renderRegion's guards; updates
+  // resume on the first tick after the selection clears.
+  if (selectionInside(bodyEl)) return;
+
+  let st = _state.get(bodyEl);
+  if (!st) {
+    st = { mode: null, rows: new Map() };
+    _state.set(bodyEl, st);
+  }
 
   if (!list.length) {
-    mount(badgeEl, tpl("tpl-active-badge-idle"));
-    mount(bodyEl, tpl("tpl-active-empty"));
+    // Idle: mount the empty state ONCE (re-mounting every tick churned ~15
+    // detached nodes/sec that the operator's tab accumulated until OOM).
+    if (st.mode !== "idle") {
+      mount(badgeEl, tpl("tpl-active-badge-idle"));
+      mount(bodyEl, tpl("tpl-active-empty"));
+      st.mode = "idle";
+      st.rows.clear();
+    }
     return;
   }
-  mount(badgeEl, tpl("tpl-active-badge-capturing"));
 
-  const frag = document.createDocumentFragment();
-  for (const a of list) {
-    const dur = (a.bytes_received || 0) / 32000;
-    // Settings default to true when the server didn't include them (older
-    // payload, or first-ever sighting of this identity).
-    const recOn = a.record !== false;
-    const liveOn = a.live !== false;
-    const ident = a.identity || "";
-    const filename = a.filename || "";
-
-    const node = tpl("tpl-stream-row");
-    const row = /** @type {HTMLElement} */ (node.querySelector(".stream-row"));
-
-    const marker = pick(row, "spkMarker");
-    marker.dataset.spk = String(speakerIndex(a.name || ident));
-
-    pick(row, "name").textContent = a.name || "<anon>";
-    const identEl = pick(row, "ident");
-    identEl.title = filename;
-    identEl.textContent = `${ident} · ${truncMid(filename, 30)}`;
-
-    pick(row, "size").textContent = fmtBytes(a.bytes_received || 0);
-    pick(row, "dur").textContent = `~${fmtDur(dur)}`;
-
-    // Volume meter — peak amplitude of recent PCM, 0.0–1.0 from
-    // `int16_peak_norm` on the server side, peak-held over ~200 ms.
-    // Quiet (<5%) shows muted gray so a silent-but-open WS doesn't look
-    // like it's actively streaming; the green→amber→red colour shifts
-    // come from CSS via the data-zone attribute. Below ~1% we treat as
-    // silent and snap the bar to zero width so it doesn't show a
-    // confusing sliver under near-silent rooms.
-    const level = Math.max(0, Math.min(1, Number(a.level) || 0));
-    const meter = pick(row, "meter");
-    const fill = pick(row, "meterFill");
-    const pct = level < 0.01 ? 0 : Math.round(level * 100);
-    fill.style.width = pct + "%";
-    let zone = "silent";
-    if (level >= 0.85) zone = "clip";
-    else if (level >= 0.6) zone = "hot";
-    else if (level >= 0.05) zone = "ok";
-    meter.dataset.zone = zone;
-    meter.setAttribute(
-      "aria-label",
-      `volume ${pct}% (${zone})`,
-    );
-
-    // Per-tap lag from the relay (remaining_time_transcription). Hidden
-    // when live is off or the relay hasn't reported yet — there's no
-    // useful value to show in those states.
-    const lagEl = pick(row, "lag");
-    const lag = typeof a.lag_s === "number" ? a.lag_s : null;
-    if (lag === null || !liveOn) {
-      lagEl.hidden = true;
-    } else {
-      lagEl.hidden = false;
-      lagEl.textContent = `lag ${lag.toFixed(1)}s`;
-      lagEl.classList.toggle("lag-warn", lag >= 0.5 && lag < 2);
-      lagEl.classList.toggle("lag-bad", lag >= 2);
-    }
-
-    for (const btn of /** @type {NodeListOf<HTMLButtonElement>} */ (row.querySelectorAll(".tap-toggle"))) {
-      const which = btn.dataset.toggle;
-      const on = which === "record" ? recOn : liveOn;
-      btn.dataset.identity = ident;
-      btn.dataset.state = on ? "1" : "0";
-      btn.classList.toggle("on", on);
-    }
-
-    // Three-state status line under each tap row:
-    //   ⟳ <text>      — model is transcribing the latest hypothesis
-    //   ⟳ listening…  — audio is being forwarded but nothing decoded yet
-    //   ⏸ quiet       — gate is closed (no speech detected)
-    // Hidden when LIVE is off, or when we have nothing meaningful to show
-    // (e.g. backend-gate mode with no buffer text — we can't tell what
-    // the backend's own VAD is doing, so we stay silent).
-    const bufRow = pick(node, "bufferRow");
-    const bufText = pick(node, "bufferText");
-    const bufIcon = pick(node, "bufferIcon");
-    const buf = (a.buffer_transcription || "").trim();
-    const gateOpen = !!a.gate_open;
-    if (bufRow && bufText && bufIcon) {
-      let icon = "";
-      let text = "";
-      let cls = "";
-      if (liveOn) {
-        if (buf) {
-          icon = "⟳"; text = buf; cls = "buf-active";
-        } else if (gateOpen) {
-          icon = "⟳"; text = "listening…"; cls = "buf-listening";
-        } else {
-          icon = "⏸"; text = "quiet"; cls = "buf-quiet";
-        }
-      }
-      if (text) {
-        bufRow.hidden = false;
-        bufIcon.textContent = icon;
-        bufText.textContent = text;
-        bufRow.className = "stream-buffer " + cls;
-      } else {
-        bufRow.hidden = true;
-        bufText.textContent = "";
-      }
-    }
-
-    frag.appendChild(node);
+  // Entering the active state from idle/first-render: swap the badge + clear the
+  // empty-state node once. The rows themselves are then managed in place below.
+  if (st.mode !== "active") {
+    mount(badgeEl, tpl("tpl-active-badge-capturing"));
+    bodyEl.replaceChildren();
+    st.mode = "active";
+    st.rows.clear();
   }
-  bodyEl.replaceChildren(frag);
+
+  const seen = new Set();
+  /** @type {HTMLElement | null} */
+  let prevRow = null;
+  for (const a of list) {
+    const id = a.identity || "";
+    seen.add(id);
+    let wrap = st.rows.get(id);
+    if (!wrap) {
+      wrap = /** @type {HTMLElement} */ (tpl("tpl-stream-row").firstElementChild);
+      st.rows.set(id, wrap);
+    }
+    fillRow(wrap, a);
+    // Keep list order WITHOUT re-appending every row each tick: moving an
+    // attached node is a remove+insert even when it lands in the same slot,
+    // which dirties layout (and restarts CSS transitions) K times per tick.
+    // Only rows that are new or genuinely out of order get inserted.
+    if (wrap.parentNode !== bodyEl || wrap.previousElementSibling !== prevRow) {
+      bodyEl.insertBefore(wrap, prevRow ? prevRow.nextSibling : bodyEl.firstChild);
+    }
+    prevRow = wrap;
+  }
+  // Drop rows for taps that are gone.
+  for (const [id, wrap] of st.rows) {
+    if (!seen.has(id)) {
+      wrap.remove();
+      st.rows.delete(id);
+    }
+  }
 }
