@@ -30,21 +30,30 @@
           <span class="panel__hint">one job per session</span>
         </div>
         <div class="panel__body">
-          <!-- 1. source (segmented). Command is wired; Local + API land in
-               later slices and are disabled. -->
+          <!-- 1. source (segmented). Local (bundled, offline) is the wired
+               default; Command is wired too; API lands in #85 and stays
+               disabled. js/next/views/summary.js wires the clicks. -->
           <div class="field" style="margin-bottom:11px">
             <label>source</label>
             <span class="segctl segctl--wide">
-              <button class="segctl__opt" type="button" disabled title="bundled local model — coming in a later slice">🖥️ Local</button>
-              <button class="segctl__opt" type="button" disabled title="OpenAI-compatible / Ollama endpoint — coming in a later slice">🌐 API</button>
-              <button class="segctl__opt is-on" type="button" aria-pressed="true">⌨️ Command</button>
+              <button class="segctl__opt is-on" type="button" data-src="local" aria-pressed="true" title="bundled offline model — runs with no network">🖥️ Local</button>
+              <button class="segctl__opt" type="button" data-src="api" disabled title="OpenAI-compatible / Ollama endpoint — coming in a later slice">🌐 API</button>
+              <button class="segctl__opt" type="button" data-src="command" aria-pressed="false" title="pipe the transcript to a CLI tool">⌨️ Command</button>
             </span>
           </div>
 
-          <!-- 2. Command source detail: the CLI template. The merged transcript
+          <!-- 2a. Local source detail: a single bundled model, no fields. Shown
+               by default (Local is the default source). -->
+          <div class="srcdetail" data-slot="srcLocal">
+            <div class="srcdetail__lab">🖥️ Local <span class="dim">— bundled offline model · runs with no network</span></div>
+            <div class="dim mono" style="margin-top:4px">first Generate downloads the model, then it runs fully offline</div>
+          </div>
+
+          <!-- 2b. Command source detail: the CLI template. The merged transcript
                is piped to it on stdin; the prompt is appended as a trailing
-               argument (so `claude -p` becomes `claude -p "<prompt>"`). -->
-          <div class="srcdetail">
+               argument (so `claude -p` becomes `claude -p "<prompt>"`). Hidden
+               until the operator picks the Command source. -->
+          <div class="srcdetail" data-slot="srcCommand" hidden>
             <div class="srcdetail__lab">⌨️ Command <span class="dim">— a CLI tool · transcript on stdin</span></div>
             <div class="field"><label>command template</label><input class="inp-txt mono" type="text" data-slot="sumCmd" value="claude -p"></div>
           </div>

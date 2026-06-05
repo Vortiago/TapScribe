@@ -109,7 +109,10 @@ def test_load_summarizer_command_source_is_case_insensitive():
     assert isinstance(load_summarizer(source="Command", command=_CAT), CommandSummarizer)
 
 
-@pytest.mark.parametrize("source", ["api", "local"])
+# `local` is no longer here — it's wired in #86 (see tests/test_summarizers_local.py,
+# where its missing-extra → Unavailable path is forced deterministically). `api`
+# stays unwired until #85.
+@pytest.mark.parametrize("source", ["api"])
 def test_load_summarizer_unwired_sources_raise_unavailable(source):
     with pytest.raises(SummarizerUnavailable):
         load_summarizer(source=source, command="")

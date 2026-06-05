@@ -1,24 +1,28 @@
 // @ts-check
 // Stages · Summary (SESSION stage 4) — the post-transcription summarizer.
 //
-// WIRED for the Command source (#82): the operator picks a CLI template (e.g.
-// `claude -p`), edits the prompt, and clicks Generate; we POST to
-// /api/sessions/{session}/summarize, which pipes the session's merged
-// transcript to the command on stdin and returns the summary from stdout. We
-// render the summary + the source/command that produced it, surface errors,
-// and drive the shared job-progress bar while the job runs. The Local + API
-// sources are present but disabled until their slices land (#86 / #85).
+// WIRED for the Local + Command sources. Local (#86) is the bundled, offline,
+// hardware-routed model and the DEFAULT source here (view-local default until
+// #84 makes it operator-configurable) — it needs no per-call fields. Command
+// (#82) takes a CLI template (e.g. `claude -p`). The operator picks a source,
+// edits the prompt, and clicks Generate; we POST to
+// /api/sessions/{session}/summarize, which summarizes the session's merged
+// transcript and returns the result. We render the summary + the source/model
+// (or command) that produced it, surface errors, and drive the shared
+// job-progress bar while the job runs. The API source (#85) is present but
+// disabled until its slice lands.
 //
 // No persistence yet (#83): the summary lives in view-local state and is lost
 // on reload / cleared when the operator switches sessions. No saved config yet
 // (#84): the source/command/prompt are entered here and sent per Generate.
 //
-// Interaction hold: the command <input> and prompt <textarea> are built ONCE
-// from the template and NEVER rebuilt per-tick (update() only mutates the
-// button/note/job-bar/header + the output pane), so a background poll can't
-// clobber a mid-edit prompt — the dashboard interaction-hold sweep covers them.
-// The output pane re-render is selection-guarded (the summary is a copy target,
-// like the merged-transcript pane).
+// Interaction hold: the source buttons, command <input>, and prompt <textarea>
+// are built ONCE from the template and NEVER rebuilt per-tick (update() only
+// mutates the button/note/job-bar/header + the output pane; the source selector
+// is click-driven), so a background poll can't clobber a mid-edit prompt — the
+// dashboard interaction-hold sweep covers them. The output pane re-render is
+// selection-guarded (the summary is a copy target, like the merged-transcript
+// pane).
 
 import { tpl, pick, selectionInside } from "../../templates.js";
 import { postJson } from "../../api.js";
@@ -48,6 +52,16 @@ export function build(ctx) {
   const jobFill = /** @type {HTMLElement} */ (pick(frag, "jobFill"));
   const jobWav = pick(frag, "jobWav");
 
+  // Source selector (segmented) + the per-source detail panes. The buttons and
+  // both panes are built ONCE from the template; a click switches `source` and
+  // toggles which pane shows — never a per-tick rebuild, so the interaction
+  // hold holds (the command <input> / prompt <textarea> live inside, untouched).
+  const srcButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
+    frag.querySelectorAll(".segctl--wide [data-src]")
+  );
+  const srcLocal = /** @type {HTMLElement} */ (pick(frag, "srcLocal"));
+  const srcCommand = /** @type {HTMLElement} */ (pick(frag, "srcCommand"));
+
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
   let session = null;
@@ -63,6 +77,10 @@ export function build(ctx) {
   /** Sticky error message from the last failed Generate — shown in the note
    * until the next Generate clears it. */
   let errorMsg = "";
+  /** The selected summarizer source. Local (bundled, offline) is the default
+   * for this view — view-local until #84 makes the default operator-configurable.
+   * Command is also wired (#82); API (#85) is present but disabled. */
+  let source = "local";
 
   // Three deliberately-split signatures: the header, the output pane, and the
   // controls update independently so an idle tick rebuilds nothing.
@@ -106,7 +124,13 @@ export function build(ctx) {
     body.textContent = res.summary || "";
     out.append(title, body);
     sumOut.replaceChildren(out);
-    sumOutHint.textContent = res.command ? `${res.source} · ${res.command}` : res.source;
+    // Show what produced it: the model (local/api) if present, else the command
+    // template (command source), else just the source name.
+    sumOutHint.textContent = res.model
+      ? `${res.source} · ${res.model}`
+      : res.command
+        ? `${res.source} · ${res.command}`
+        : res.source;
   };
 
   /** @param {import('../../types.js').Session | null} sess */
@@ -137,12 +161,13 @@ export function build(ctx) {
     lastCtlSig = " "; // re-sync the button immediately, don't wait for a poll
     reflectControls();
     try {
+      // The bundled Local source needs no per-call fields (a single offline
+      // model); only the Command source carries a CLI template.
+      /** @type {{ source: string, prompt: string, command?: string }} */
+      const body = { source, prompt: promptTa.value };
+      if (source === "command") body.command = cmdInput.value.trim();
       const res = /** @type {import('../../types.js').SummaryResult} */ (
-        await postJson(`/api/sessions/${encodeURIComponent(sid)}/summarize`, {
-          source: "command",
-          command: cmdInput.value.trim(),
-          prompt: promptTa.value,
-        })
+        await postJson(`/api/sessions/${encodeURIComponent(sid)}/summarize`, body)
       );
       lastSummary = res;
       summarySession = sid;
@@ -160,6 +185,32 @@ export function build(ctx) {
       afterMutate();
     }
   });
+
+  // ---- Source selector (REAL) -----------------------------------------------
+  // Bound ONCE at build time. Switching source toggles which detail pane shows;
+  // the command/prompt inputs inside are never rebuilt (interaction hold).
+
+  /** Reflect the selected `source` onto the segmented buttons + detail panes.
+   * Pure view sync, no fetch — called on a click and once at build. */
+  const applySource = () => {
+    for (const b of srcButtons) {
+      const on = b.dataset.src === source;
+      b.classList.toggle("is-on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    srcLocal.hidden = source !== "local";
+    srcCommand.hidden = source !== "command";
+  };
+
+  for (const b of srcButtons) {
+    b.addEventListener("click", () => {
+      const next = b.dataset.src;
+      if (b.disabled || generating || !next || next === source) return;
+      source = next;
+      applySource();
+    });
+  }
+  applySource(); // seed the default (Local) selection + pane visibility
 
   // ---- Per-tick update ------------------------------------------------------
 

@@ -1925,6 +1925,20 @@ def test_summarize_unwired_source_returns_400(client, recorder_under_test):
     assert r.status_code == 400, r.text
 
 
+def test_summarize_local_without_extra_returns_400(client, recorder_under_test, monkeypatch):
+    """The Local source degrades CLEARLY when the [summarize] extra isn't
+    installed: a clean 400 at the boundary, not a crash mid-request. We force
+    the dependency probe so the result is deterministic regardless of whether
+    this box happens to have mlx_lm / llama_cpp installed."""
+    import tapscribe.summarizers as summarizers
+
+    monkeypatch.setattr(summarizers, "_backend_module_available", lambda backend: False)
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    r = client.post("/api/sessions/s/summarize", json={"source": "local"})
+    assert r.status_code == 400, r.text
+    assert "summarize" in r.json()["detail"].lower()
+
+
 def test_summarize_empty_command_returns_400(client, recorder_under_test):
     seed_merged_transcript(recorder_under_test.recordings_dir, "s")
     r = client.post("/api/sessions/s/summarize", json={"source": "command", "command": ""})

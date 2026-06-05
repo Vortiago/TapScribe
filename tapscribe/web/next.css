@@ -1044,6 +1044,10 @@ body::before { display: none; }
   padding: 9px 10px; margin-top: 7px; display: flex; flex-direction: column; gap: 7px;
   background: var(--bg-2);
 }
+/* `display: flex` above (an author rule) beats the UA `[hidden]{display:none}`,
+   so the Summary view's per-source panes need this higher-specificity author
+   rule for `.hidden = true` to actually hide them (summary.js toggles them). */
+.srcdetail[hidden] { display: none; }
 .srcdetail.is-off { opacity: .55; }
 .srcdetail__lab { font-size: 10.5px; color: var(--fg-1); font-weight: 600; }
 .srcdetail__lab .dim { font-weight: 400; }

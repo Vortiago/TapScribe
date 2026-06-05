@@ -2009,9 +2009,12 @@ async def test_summary_stage_command_source_generates_and_renders(
             page = await context.new_page()
             await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
 
-            # The Command controls render, and Generate enables once the seeded
-            # transcript lands on a poll (proves the view sees the marker).
-            await page.wait_for_selector('[data-slot="sumCmd"]', timeout=6000)
+            # Local is the default source now (#86); switch to Command to reveal
+            # its CLI template field, then wait for Generate to enable once the
+            # seeded transcript lands on a poll (proves the view sees the marker).
+            await page.wait_for_selector('[data-src="command"]', timeout=6000)
+            await page.click('[data-src="command"]')
+            await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
             await page.wait_for_function(
                 """() => {
                   const b = document.querySelector('[data-slot="sumGenerate"]');
@@ -2054,7 +2057,7 @@ async def test_summary_stage_command_source_generates_and_renders(
 
 async def test_summary_stage_has_no_mock_not_wired_tags(running_recorder: RunningRecorder):
     """The 'mock · not wired' tags are gone from the Summary stage now that it's
-    real, and the API/Local source options are present but disabled."""
+    real; Local + Command are wired and only the API source stays disabled."""
     rr = running_recorder
     async with async_playwright() as pw:
         try:
@@ -2066,15 +2069,55 @@ async def test_summary_stage_has_no_mock_not_wired_tags(running_recorder: Runnin
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
             await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
-            await page.wait_for_selector('[data-slot="sumCmd"]', timeout=6000)
+            # Anchor on the source selector (always visible) — the command field
+            # is hidden under the Local default now.
+            await page.wait_for_selector('[data-src="local"]', timeout=6000)
 
             assert await page.locator("#viewRoot .mocktag").count() == 0, (
                 "the mock·not-wired tag must be gone"
             )
-            # Command source enabled; Local + API present but disabled.
+            # Local + Command enabled; only API disabled now (#85 not yet wired).
             seg = page.locator("#viewRoot .segctl--wide .segctl__opt")
             assert await seg.count() == 3
             disabled = await page.locator("#viewRoot .segctl--wide .segctl__opt[disabled]").count()
-            assert disabled == 2, f"Local + API must be disabled, got {disabled} disabled options"
+            assert disabled == 1, f"only API must be disabled, got {disabled} disabled options"
+            # Local is the bundled-offline default selected source (#86).
+            assert await page.locator('#viewRoot .segctl--wide [data-src="local"].is-on').count() == 1
+        finally:
+            await browser.close()
+
+
+async def test_summary_stage_local_is_default_and_toggles_command_field(running_recorder: RunningRecorder):
+    """Local (bundled, offline) is the default source in the Summary view (#86):
+    its pane shows no CLI field, and switching to Command reveals the command
+    template (and back to Local hides it). This is the source-selector wiring
+    the Local slice adds on top of the Command tracer bullet — no model download
+    needed, so it runs offline on CI."""
+    rr = running_recorder
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            # Local selected by default; its command field is not shown.
+            await page.wait_for_selector('[data-src="local"].is-on', timeout=6000)
+            assert not await page.locator('[data-slot="sumCmd"]').is_visible(), (
+                "the command field must be hidden under the Local source"
+            )
+
+            # Switch to Command → the CLI template field appears.
+            await page.click('[data-src="command"]')
+            await page.locator('[data-slot="sumCmd"]').wait_for(state="visible", timeout=4000)
+
+            # Switch back to Local → it hides again, and Local is is-on.
+            await page.click('[data-src="local"]')
+            await page.locator('[data-slot="sumCmd"]').wait_for(state="hidden", timeout=4000)
+            assert await page.locator('[data-src="local"].is-on').count() == 1
         finally:
             await browser.close()
