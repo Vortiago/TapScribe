@@ -15,8 +15,8 @@ import pytest
 from wav_builders import seed_session  # type: ignore[import-not-found]
 
 from tapscribe.batch_strip import StripSessionRequest, strip_session
-from tapscribe.batch_transcribe import NoUsableWavs, SessionBusy
-from tapscribe.recorder import JobState
+from tapscribe.recorder import JobState, SessionBusy
+from tapscribe.session_merge import NoUsableWavs
 
 WAV_NAME = "2026-01-01T01-00-00Z__alice__abc.wav"
 

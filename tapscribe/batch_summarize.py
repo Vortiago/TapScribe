@@ -1,12 +1,12 @@
 """Batch summarize — turn a session's merged transcript into a summary.
 
 The post-transcription sibling of `batch_transcribe` / `batch_strip`: same
-orchestrator shape (resolve inputs, claim the session's `JobTracker` slot, run
-the work off the event loop, release on every exit path) and the same
-FastAPI-free contract — domain errors out, the route maps them to HTTP codes.
-`SessionBusy` is shared with `batch_transcribe` because it's a JobTracker
-concern, not a transcription-specific one; the "one heavy job per session" rule
-now has three claimants (transcribe / strip / summarize).
+orchestrator shape (resolve inputs, bracket the session's job slot via
+`recorder.jobs.run`, run the work off the event loop) and the same FastAPI-free
+contract — domain errors out, the route maps them to HTTP codes. `SessionBusy`
+lives in `tapscribe.recorder` next to JobTracker (the cm raises it); the "one
+heavy job per session" rule now has three claimants (transcribe / strip /
+summarize), all going through `run`.
 
 This is the tracer-bullet slice (#82): the **Command** source only, no
 persistence (the summary is returned to the caller and lost on reload) and no
@@ -19,11 +19,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
-from .batch_transcribe import SessionBusy
-from .recorder import JobState, Recorder
+from .recorder import Recorder
 from .sessions import read_session_transcript
 from .summarizers import DEFAULT_SUMMARY_PROMPT, SummarizerError, load_summarizer
 
@@ -54,12 +52,11 @@ async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) ->
     Reads `session-transcript.json` (raising `NoMergedTranscript` when it's
     absent or its `plain_text` is empty), builds the `Summarizer` via the
     factory (raising `SummarizerUnavailable` for a misconfigured source — BEFORE
-    claiming, so a bad command doesn't claim+release a slot for nothing), claims
-    the session's `JobTracker` slot under the new `summarize` kind (raising
-    `SessionBusy` when a transcribe / strip / summarize is already in flight —
-    WITHOUT releasing the foreign claim), runs the summarizer off the event
-    loop, and returns the summary dict. The slot is released on every exit path
-    via the `finally`."""
+    the disk read + slot claim, so a bad command fails fast for free), then
+    brackets the run in `recorder.jobs.run(..., kind="summarize")` — which
+    raises `SessionBusy` when a transcribe / strip / summarize is already in
+    flight (releasing nothing) and releases the slot on every other exit path.
+    Returns the summary dict."""
     # Build the summarizer FIRST: it's pure (shlex parse + non-empty check, no
     # I/O), so a misconfigured command (empty template, unknown source) fails
     # fast — before the merged-transcript disk read, and without ever touching
@@ -73,23 +70,8 @@ async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) ->
             "this session has no merged transcript yet — transcribe it first, then summarize"
         )
 
-    claimed = await recorder.jobs.claim(
-        JobState(
-            session=req.session,
-            kind="summarize",
-            current=0,
-            total=1,
-            started_at=datetime.now(UTC),
-            status="summarizing",
-        )
-    )
-    if not claimed:
-        raise SessionBusy("session is already busy (transcribe, strip, or summarize in flight)")
-
-    try:
+    async with recorder.jobs.run(req.session, kind="summarize", total=1, status="summarizing"):
         result = await asyncio.to_thread(summarizer.summarize, text, prompt=req.prompt)
-    finally:
-        await recorder.jobs.release(req.session)
 
     print(
         f"[tapscribe] summarize {req.session}: source={result.source} "

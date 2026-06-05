@@ -20,15 +20,13 @@ from tapscribe.batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
     BatchTranscribeError,
-    InvalidRange,
-    NoUsableWavs,
-    SessionBusy,
     WavTooQuiet,
     WavUnreadable,
     transcribe_one,
     transcribe_session,
 )
-from tapscribe.recorder import JobState
+from tapscribe.recorder import JobState, SessionBusy
+from tapscribe.session_merge import InvalidRange, NoUsableWavs
 
 # The `recorder_under_test` fixture (tmpdir-rooted Recorder, no auth, no
 # live spawn) lives in conftest.py — shared with test_batch_strip.py.
@@ -468,13 +466,19 @@ async def test_transcribe_session_runs_model_on_one_dedicated_thread(
 
 
 # ---------------------------------------------------------------------------
-# Exception hierarchy — every domain error inherits the base so callers
-# that don't care to discriminate (e.g. a CLI batch wanting one catch
-# for "anything from this module went wrong") can write `except
-# BatchTranscribeError`.
+# Exception taxonomy — transcribe-specific errors share BatchTranscribeError;
+# the cross-cutting ones live with their concept and are deliberately NOT
+# BatchTranscribeError (SessionBusy is a JobTracker concept; NoUsableWavs /
+# InvalidRange are selection verdicts), so strip/summarize don't import a
+# transcribe base just to raise them.
 # ---------------------------------------------------------------------------
 
 
-def test_every_domain_error_inherits_base():
-    for cls in (WavUnreadable, WavTooQuiet, SessionBusy, NoUsableWavs, InvalidRange):
+def test_transcribe_specific_errors_inherit_base():
+    for cls in (WavUnreadable, WavTooQuiet):
         assert issubclass(cls, BatchTranscribeError)
+
+
+def test_relocated_errors_are_decoupled_from_transcribe_base():
+    for cls in (SessionBusy, NoUsableWavs, InvalidRange):
+        assert not issubclass(cls, BatchTranscribeError)

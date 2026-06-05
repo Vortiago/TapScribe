@@ -19,6 +19,7 @@ import asyncio
 import os
 import secrets
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -201,6 +202,14 @@ class TapSettings:
 # ---------------------------------------------------------------------------
 
 
+class SessionBusy(Exception):
+    """A heavy job (transcribe / strip / summarize) is already in flight on
+    this session — `JobTracker.run` couldn't claim the slot. Lives here, next
+    to JobTracker, because it's a *job* concept, not a transcription one: the
+    batch orchestrators that claim a slot all raise it (via `run`), none of
+    them owns it. The route layer maps it to 409."""
+
+
 @dataclass
 class JobState:
     """State for an in-flight session-scoped job (transcribe, strip, or
@@ -216,10 +225,25 @@ class JobState:
     model: str | None = None
 
 
+class _JobHandle:
+    """The handle `JobTracker.run` yields: a thin per-session progress updater
+    so the body reports progress with `await job.update(current=i,
+    current_file=name)` instead of re-passing the session id each time."""
+
+    def __init__(self, tracker: JobTracker, session: str) -> None:
+        self._tracker = tracker
+        self._session = session
+
+    async def update(self, **fields) -> None:
+        await self._tracker.update(self._session, **fields)
+
+
 class JobTracker:
     """The 'one job per session at a time' rule lives here, not in each
     route handler. `claim()` returns False when the session is already
-    busy; release/update modify in place."""
+    busy; release/update modify in place. `run()` is the high-level verb the
+    batch orchestrators use — it brackets a job with claim+release so callers
+    never hand-roll the ritual (or its foreign-claim guard)."""
 
     def __init__(self) -> None:
         self._by_session: dict[str, JobState] = {}
@@ -244,6 +268,46 @@ class JobTracker:
     async def release(self, session: str) -> None:
         async with self._lock:
             self._by_session.pop(session, None)
+
+    @asynccontextmanager
+    async def run(
+        self,
+        session: str,
+        *,
+        kind: Literal["transcribe", "strip", "summarize"],
+        total: int,
+        model: str | None = None,
+        status: str = "running",
+    ):
+        """Hold the session's single job slot for the duration of the block.
+
+        Claims on entry — raising `SessionBusy` when the session is already
+        busy, in which case the block never runs and NO release happens, so a
+        foreign claim is never touched (the guard is *structural*, not a
+        try/finally discipline each caller re-derives). Releases on EVERY exit
+        path. Yields a `_JobHandle` for in-loop progress updates.
+
+        This is the one verb the batch orchestrators (transcribe / strip /
+        summarize) use to bracket their work; it replaces the hand-rolled
+        claim → `if not claimed: raise` → try/finally → release block each used
+        to copy."""
+        claimed = await self.claim(
+            JobState(
+                session=session,
+                kind=kind,
+                current=0,
+                total=total,
+                started_at=datetime.now(UTC),
+                status=status,
+                model=model,
+            )
+        )
+        if not claimed:
+            raise SessionBusy(f"session {session!r} already has a job in flight")
+        try:
+            yield _JobHandle(self, session)
+        finally:
+            await self.release(session)
 
     def get(self, session: str) -> JobState | None:
         """Read-only access — lock not strictly needed for a single dict

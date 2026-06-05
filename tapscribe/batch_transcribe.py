@@ -20,14 +20,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Literal
 
 from . import config
 from . import hallucinations as hallucinations_mod
 from .audio import wav_duration_s, wav_rms_dbfs
-from .recorder import JobState, Recorder
-from .session_merge import merge_session, select_session_wavs
+from .recorder import Recorder
+from .session_merge import InvalidRange, NoUsableWavs, merge_session, select_session_wavs
 from .sessions import read_session_meta, resolve_session_dir, resolve_wav
 from .text import read_hotwords, read_prompt
 from .transcribers import load_transcriber, release_transcriber, run_on_model_thread
@@ -39,7 +38,12 @@ from .wav_cache import cached_transcribe, read_primary_payload
 
 
 class BatchTranscribeError(Exception):
-    """Base class for every domain error this module raises."""
+    """Base class for the transcription-specific domain errors this module
+    raises. Cross-cutting errors live with their concept, not here:
+    `SessionBusy` in `tapscribe.recorder` (a JobTracker concept) and
+    `NoUsableWavs` / `InvalidRange` in `tapscribe.session_merge` (selection
+    verdicts) — both re-exported into this module's namespace would just
+    reintroduce the coupling the relocation removed."""
 
 
 class WavUnreadable(BatchTranscribeError):
@@ -51,27 +55,6 @@ class WavTooQuiet(BatchTranscribeError):
     hallucinate, so the single-WAV path refuses rather than producing
     junk. The session loop doesn't apply this check; `select_session_wavs`
     surfaces silent WAVs separately."""
-
-
-class SessionBusy(BatchTranscribeError):
-    """A transcribe or strip job is already in flight on this session.
-    The `JobTracker.claim` returned False; only one such job per session
-    runs at a time."""
-
-
-class NoUsableWavs(BatchTranscribeError):
-    """The session range filter rejected every WAV — either the directory
-    is empty or the from_iso/to_iso range matched nothing. Distinct from
-    `InvalidRange`: this is "your inputs were valid but nothing matched",
-    not "your inputs were unparseable.\""""
-
-
-class InvalidRange(BatchTranscribeError):
-    """`select_session_wavs` raised `ValueError` — typically an
-    unparseable `from_iso` / `to_iso`. The caller's inputs were
-    syntactically wrong; the matching `NoUsableWavs` is for "valid
-    inputs, empty result." Routes map this to 400, `NoUsableWavs` to
-    404."""
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +216,12 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
     """Transcribe every WAV in the supplied range, then merge and write
     `session-transcript.json` + `.txt`. Returns the merged dict.
 
-    Claims a `JobTracker` slot for the session — only one transcribe /
-    strip job per session at a time. Raises `SessionBusy` when the slot
-    is already taken; raises `NoUsableWavs` when the range filter
-    rejected every WAV. Per-WAV failures inside the cache loop
-    propagate, mark the job `status="error: …"`, then release the slot
-    via the `finally` block."""
+    Brackets the work in `recorder.jobs.run(...)` — one transcribe / strip /
+    summarize job per session at a time. The cm raises `SessionBusy` when the
+    slot is already taken (releasing nothing in that case) and releases the
+    slot on every other exit path. Raises `NoUsableWavs` when the range filter
+    rejected every WAV; per-WAV failures inside the loop propagate through the
+    cm, which still releases."""
     session_dir = resolve_session_dir(req.session)
 
     try:
@@ -257,23 +240,11 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
     try:
         inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
 
-        claimed = await recorder.jobs.claim(
-            JobState(
-                session=req.session,
-                kind="transcribe",
-                current=0,
-                total=len(selection.wavs),
-                started_at=datetime.now(UTC),
-                model=req.model,
-                status="running",
-            )
-        )
-        if not claimed:
-            raise SessionBusy("session is already busy (transcribe or strip in flight)")
-
-        try:
+        async with recorder.jobs.run(
+            req.session, kind="transcribe", total=len(selection.wavs), model=req.model
+        ) as job:
             for idx, wav in enumerate(selection.wavs):
-                await recorder.jobs.update(req.session, current=idx, current_file=wav.name)
+                await job.update(current=idx, current_file=wav.name)
                 await run_on_model_thread(
                     cached_transcribe,
                     wav,
@@ -297,11 +268,6 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
             (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
 
             return merged
-        except Exception as e:
-            await recorder.jobs.update(req.session, status="error: " + str(e))
-            raise
-        finally:
-            await recorder.jobs.release(req.session)
     finally:
         # Release our use of the model on every exit path (success, the
         # SessionBusy short-circuit, or a per-WAV failure) so the idle-TTL

@@ -19,8 +19,7 @@ from tapscribe.batch_summarize import (
     SummarizeSessionRequest,
     summarize_session,
 )
-from tapscribe.batch_transcribe import SessionBusy
-from tapscribe.recorder import JobState
+from tapscribe.recorder import JobState, SessionBusy
 from tapscribe.summarizers import SummarizerFailed
 
 # stdin → stdout: the summary is the merged transcript text echoed back, so we

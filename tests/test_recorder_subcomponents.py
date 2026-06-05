@@ -20,6 +20,7 @@ from tapscribe.recorder import (
     JobTracker,
     LiveTranscripts,
     SecretFile,
+    SessionBusy,
 )
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,76 @@ async def test_job_tracker_update_modifies_fields():
 async def test_job_tracker_get_missing_returns_none():
     tracker = JobTracker()
     assert tracker.get("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# JobTracker.run — the context-manager seam the batch orchestrators bracket
+# their work with. The invariants below used to be re-derived (and one,
+# error-status, diverged) across three hand-rolled try/finally blocks.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_job_tracker_run_claims_for_the_block_and_releases_after():
+    tracker = JobTracker()
+    async with tracker.run("s1", kind="summarize", total=1):
+        held = tracker.get("s1")
+        assert held is not None and held.kind == "summarize"
+    assert tracker.get("s1") is None  # released on normal exit
+
+
+@pytest.mark.asyncio
+async def test_job_tracker_run_handle_updates_progress():
+    tracker = JobTracker()
+    async with tracker.run("s1", kind="transcribe", total=3) as job:
+        await job.update(current=2, current_file="b.wav")
+        held = tracker.get("s1")
+        assert held is not None and held.current == 2 and held.current_file == "b.wav"
+
+
+@pytest.mark.asyncio
+async def test_job_tracker_run_raises_busy_without_touching_a_foreign_claim():
+    """The whole point of the seam: when the slot is taken, `run` raises
+    SessionBusy on entry — the body never runs and the foreign claim is NOT
+    released (the guard is structural, not a try/finally discipline)."""
+    tracker = JobTracker()
+    foreign = JobState(session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC))
+    await tracker.claim(foreign)
+
+    body_ran = False
+
+    async def _enter_busy() -> None:
+        # The `async with` lives in a helper, not directly in the pytest.raises
+        # block, so the post-block assertions stay reachable: CodeQL models an
+        # asynccontextmanager as always yielding, so a bare `async with run()`
+        # here reads as "never raises" → pytest.raises "DID NOT RAISE" → dead
+        # code after. An awaited call it treats as might-raise.
+        nonlocal body_ran
+        async with tracker.run("s1", kind="summarize", total=1):
+            body_ran = True
+
+    with pytest.raises(SessionBusy):
+        await _enter_busy()
+
+    assert not body_ran, "the body must not run when the session is busy"
+    still = tracker.get("s1")
+    assert still is not None and still.kind == "transcribe"  # foreign claim intact
+
+
+@pytest.mark.asyncio
+async def test_job_tracker_run_releases_on_exception():
+    tracker = JobTracker()
+
+    async def _work_that_raises() -> None:
+        # The raise lives in a helper, not directly inside the `pytest.raises`
+        # block, so the post-block assertion stays reachable (CodeQL doesn't
+        # model that pytest.raises swallows the exception).
+        async with tracker.run("s1", kind="strip", total=2):
+            raise ValueError("work blew up")
+
+    with pytest.raises(ValueError):
+        await _work_that_raises()
+    assert tracker.get("s1") is None  # released even though the body raised
 
 
 # ---------------------------------------------------------------------------
