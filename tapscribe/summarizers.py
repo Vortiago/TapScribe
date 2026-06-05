@@ -337,9 +337,7 @@ def _build_mlx_generate(model_repo: str, max_tokens: int) -> LocalGenerateFn:
     return _generate
 
 
-def _build_gguf_generate(
-    model_repo: str, gguf_file: str, *, max_tokens: int, n_ctx: int
-) -> LocalGenerateFn:
+def _build_gguf_generate(model_repo: str, gguf_file: str, *, max_tokens: int, n_ctx: int) -> LocalGenerateFn:
     """Download (first call, then HF-cached) + load the GGUF model once and
     return a `(transcript, prompt) -> summary` closure. `llama_cpp` is imported
     lazily for the same reason as the MLX builder."""
