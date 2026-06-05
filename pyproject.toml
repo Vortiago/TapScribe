@@ -86,7 +86,7 @@ parakeet-cpu = [
     # auditing upstream changelogs.
     "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
     "torch>=2.1",
-    "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
+    "kaldialign>=0.9.2,<0.11; sys_platform == 'darwin'",
 ]
 parakeet-mlx = [
     # Upper bound: `tapscribe.transcribers.mlx_parakeet` relies on
@@ -112,7 +112,7 @@ canary-cpu = [
     "nemo_toolkit[asr]>=2.5,<2.8; sys_platform != 'darwin'",
     "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
     "torch>=2.1",
-    "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
+    "kaldialign>=0.9.2,<0.11; sys_platform == 'darwin'",
 ]
 
 # --- CUDA runtime libs (faster-whisper / CTranslate2 GPU path) --------------
