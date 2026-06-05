@@ -1097,6 +1097,83 @@ def test_delete_wav_rejects_bad_input(client, recorder_under_test):
     assert (sd / "20260101T000000Z__alice__abc.wav").is_file()
 
 
+# ---------------------------------------------------------------------------
+# Waveform peaks — GET /api/wav/{session}/{name}/peaks
+# ---------------------------------------------------------------------------
+
+
+def test_wav_peaks_shape_and_range(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    # seed_wav writes a 1.0 s audible square wave in the recorder format.
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    r = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/peaks?bins=200")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["bins"] == 200
+    assert len(body["peaks"]) == 200
+    assert body["sample_rate"] == 16000
+    assert body["duration_s"] == pytest.approx(1.0, abs=0.01)
+    assert all(0.0 <= p <= 1.0 for p in body["peaks"])
+    assert max(body["peaks"]) > 0.1, "an audible WAV should produce non-trivial peaks"
+
+
+def test_wav_peaks_clamps_bins(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    # Absurdly large → clamped to the route's upper bound.
+    hi = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/peaks?bins=100000").json()
+    assert hi["bins"] == 2000
+    assert len(hi["peaks"]) == 2000
+    # Below the floor → clamped up.
+    lo = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/peaks?bins=1").json()
+    assert lo["bins"] == 16
+    assert len(lo["peaks"]) == 16
+
+
+def test_wav_peaks_default_bins_and_stripped_source(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    (sd / "stripped").mkdir()
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    # source=stripped resolves through the same sanitiser as the download route.
+    r = client.get("/api/wav/s/20260101T000000Z__alice__reg.wav/peaks?source=stripped")
+    assert r.status_code == 200, r.text
+    assert len(r.json()["peaks"]) == 800  # the route's default bins
+
+
+def test_wav_peaks_rejects_bad_input(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    # Unknown source → 400, whitelisted before any filesystem touch.
+    r = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/peaks?source=bogus")
+    assert r.status_code == 400
+    # Missing WAV → 404 via resolve_wav.
+    r = client.get("/api/wav/s/20260101T999999Z__nope__zzz.wav/peaks")
+    assert r.status_code == 404
+    # Non-.wav name → 404 (resolve_wav rejects non-audio).
+    r = client.get("/api/wav/s/session-meta.json/peaks")
+    assert r.status_code == 404
+
+
+def test_wav_peaks_non_recorder_format_is_422(client, recorder_under_test):
+    # A WAV that passes the path sanitiser but isn't the recorder format
+    # (44.1 kHz stereo) → compute_peaks raises and the route maps it to 422
+    # with a clear message, mirroring the WavUnreadable mapping.
+    import wave as _wave
+
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", [])
+    bad = sd / "20260101T000000Z__alice__bad.wav"
+    with _wave.open(str(bad), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"\x00\x00\x00\x00" * 100)
+    r = client.get("/api/wav/s/20260101T000000Z__alice__bad.wav/peaks")
+    assert r.status_code == 422, r.text
+    assert "format" in r.json()["detail"].lower()
+
+
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", [])

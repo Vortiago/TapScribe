@@ -64,6 +64,8 @@ export async function fetchState() {
 const _sessionTxCache = new Map();
 /** @type {Map<string, TxEntry<import('./types.js').WavTranscript | null>>} */
 const _wavTxCache = new Map();
+/** @type {Map<string, TxEntry<import('./types.js').WavePeaks>>} */
+const _wavPeaksCache = new Map();
 
 // Bound the caches so a long-lived tab that opens hundreds of (id,
 // transcribed_at) pairs over its lifetime doesn't grow unbounded. Map
@@ -158,6 +160,63 @@ export function fetchWavTranscript(session, name, source, transcribedAt) {
  */
 export function peekWavTranscript(session, name, source, transcribedAt) {
   const e = _wavTxCache.get(`${session}/${name}@${source}@${transcribedAt}`);
+  return e && e.settled ? e.value : undefined;
+}
+
+// ---- Waveform peaks fetch + client cache ---------------------------------
+//
+// Same lazy-cache shape as the per-WAV transcript above, keyed by a file
+// SIGNATURE (the WAV's byte size) instead of a transcribed_at stamp: a
+// re-recording changes the size and busts the key, while the ~0.5s /api/state
+// poll reuses the cached promise and fires no request. The payload is a fixed
+// `bins` floats regardless of recording length, so one fetch per (WAV, source)
+// is all the waveform ever needs.
+
+/** Default downsample resolution the waveform component requests. */
+export const WAVE_PEAK_BINS = 800;
+
+/**
+ * @param {string} session
+ * @param {string} name
+ * @param {"original" | "stripped"} source
+ * @param {string} sig
+ * @param {number} [bins]
+ */
+const _peaksKey = (session, name, source, sig, bins = WAVE_PEAK_BINS) =>
+  `${session}/${name}@${source}@${sig}@${bins}`;
+
+/**
+ * Server-computed waveform peaks for one WAV, cached per (session, name,
+ * source, sig). Returns the fixed-size downsample; rejects (and evicts the
+ * key, so a later call retries) when the WAV can't be read as peaks.
+ * @param {string} session
+ * @param {string} name
+ * @param {"original" | "stripped"} source
+ * @param {string} sig
+ * @param {number} [bins]
+ * @returns {Promise<import('./types.js').WavePeaks>}
+ */
+export function fetchWavePeaks(session, name, source, sig, bins = WAVE_PEAK_BINS) {
+  const qs = new URLSearchParams({ bins: String(bins) });
+  if (source === "stripped") qs.set("source", "stripped");
+  const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/peaks?${qs}`;
+  return _getOrFetch(_wavPeaksCache, _peaksKey(session, name, source, sig, bins), () =>
+    fetch(url, { cache: "no-store" }).then(_unwrap),
+  );
+}
+
+/**
+ * Synchronous peek — the resolved peaks for (session, name, source, sig) if
+ * the fetch already settled, else undefined. See `peekWavTranscript`.
+ * @param {string} session
+ * @param {string} name
+ * @param {"original" | "stripped"} source
+ * @param {string} sig
+ * @param {number} [bins]
+ * @returns {import('./types.js').WavePeaks | undefined}
+ */
+export function peekWavePeaks(session, name, source, sig, bins = WAVE_PEAK_BINS) {
+  const e = _wavPeaksCache.get(_peaksKey(session, name, source, sig, bins));
   return e && e.settled ? e.value : undefined;
 }
 /**

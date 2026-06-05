@@ -791,32 +791,28 @@ body::before { display: none; }
 .wstat__v.is-empty { color: var(--fg-3); font-weight: 550; }
 .wstat__k { font-size: 8.5px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .07em; margin-top: 2px; }
 
-/* waveform cut preview — net-new, not wired. Slimmed to a single banner row
-   (icon · label · chip) so the WAV list below reclaims the height the tall
-   stub used to waste. */
-.wavestub {
-  margin: 13px; padding: 26px 18px; text-align: center;
-  border: 1px dashed var(--hairline); border-radius: var(--next-r);
-  background: repeating-linear-gradient(90deg, var(--bg-2) 0 2px, transparent 2px 9px);
+/* waveform — a REAL, server-computed downsample drawn to a <canvas> + a mm:ss
+   time axis (replaces the old "mock · not wired" stub). The isolated
+   js/next/components/waveform.js owns the drawing; the cut overlay lands on
+   top of the same canvas in a later slice. */
+.wavewrap { margin: 10px 13px; }
+.wave { display: flex; flex-direction: column; gap: 5px; }
+.wave-canvas-wrap {
+  position: relative; height: 64px;
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  background: var(--bg-0); overflow: hidden;
 }
-.wavestub__ic { font-size: 24px; opacity: .65; }
-.wavestub__h { margin-top: 6px; font-weight: 600; font-size: 12px; color: var(--fg-1); }
-.wavestub__d { margin-top: 4px; font-size: 10px; color: var(--fg-3); max-width: 560px; margin-inline: auto; line-height: 1.5; }
-.wavestub__tag {
-  margin-top: 11px; display: inline-block;
-  font-size: 9px; font-family: var(--mono); letter-spacing: .06em;
-  color: var(--info);
-  border: 1px dashed color-mix(in srgb, var(--info) 40%, transparent);
-  border-radius: var(--next-r); padding: 3px 8px;
+.wave-canvas { display: block; width: 100%; height: 100%; }
+.wave-msg {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10.5px; color: var(--fg-3); pointer-events: none;
 }
-/* slim variant: one horizontal row, no vertical stacking margins */
-.wavestub--slim {
-  display: flex; align-items: center; gap: 10px;
-  margin: 10px 13px; padding: 7px 12px; text-align: left;
+.wave-msg[hidden] { display: none; }
+.wave-axis {
+  display: flex; justify-content: space-between;
+  font-size: 8.5px; color: var(--fg-3);
 }
-.wavestub--slim .wavestub__ic { font-size: 15px; margin-top: 0; }
-.wavestub--slim .wavestub__h { margin-top: 0; font-size: 11px; color: var(--fg-2); }
-.wavestub--slim .wavestub__tag { margin-top: 0; margin-left: auto; }
 
 /* strip-silence knob bar (REAL run) */
 .knobbar {

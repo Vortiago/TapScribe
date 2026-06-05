@@ -1717,6 +1717,65 @@ async def test_recordings_strip_controls_stay_visible_with_many_wavs(
             await browser.close()
 
 
+async def test_recordings_waveform_renders_real_canvas_not_mock(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """The Recordings hero shows a REAL waveform <canvas> drawn from
+    server-computed peaks (GET /api/wav/.../peaks), with a mm:ss time axis —
+    and the old "mock · not wired" stub is gone.
+
+    Streams one synthetic WAV, opens Recordings (the first WAV auto-selects),
+    and asserts: the canvas renders + paints a non-zero bitmap, the time-axis
+    labels populate (which only happens after peaks land + draw), and no
+    stub / mock-tag markup survives. The structural sibling of
+    test_summary_stage_has_no_mock_not_wired_tags, for the waveform slice.
+    """
+    rr = running_recorder
+    wav = synth_speech_like_wav(tmp_path / "wave.wav", seconds=1.0, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=rr.ws_base_url,
+        identity="alice",
+        name="Alice",
+        wav_path=wav,
+        utterance_id="utt-wave",
+    )
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=10.0)
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#recordings", wait_until="domcontentloaded")
+            await page.wait_for_selector("#viewRoot .wavlist .wavrow", timeout=8000)
+
+            # A real <canvas> renders where the stub used to be.
+            canvas = page.locator("#viewRoot .wave-canvas")
+            await canvas.wait_for(state="attached", timeout=8000)
+
+            # The mock stub + its "mock · not wired" tag are gone.
+            assert await page.locator("#viewRoot .wavestub").count() == 0
+            body_text = (await page.locator("#viewRoot").inner_text()).lower()
+            assert "not wired" not in body_text, "the mock·not-wired stub must be gone"
+
+            # Peaks loaded → the component drew the bars AND populated the mm:ss
+            # time axis (axis labels render only on a successful peaks draw).
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wave-axis span').length >= 2""",
+                timeout=8000,
+            )
+            # The canvas backing bitmap was sized by the paint pass — proof it
+            # actually drew rather than sitting as inert 0×0 markup.
+            width = await canvas.evaluate("c => c.width")
+            assert width > 0, "the waveform canvas should have a non-zero backing bitmap"
+        finally:
+            await browser.close()
+
+
 async def test_transcribe_page_source_toggle_picks_original_or_stripped(
     running_recorder: RunningRecorder, tmp_path: Path
 ):

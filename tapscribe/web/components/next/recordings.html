@@ -1,19 +1,20 @@
 <!-- ======================================================================
      Stages · Recordings (SESSION stage 2).
-     The per-session AUDIO-FILES stage: a waveform-cut PLACEHOLDER + the real
+     The per-session AUDIO-FILES stage: a real waveform + the real
      strip-silence knobs, and the per-WAV list (originals + indented stripped
      region clips, with the original/stripped source toggle). Transcription
      (engine + transcribe + per-WAV cache) lives in the Transcript stage now;
      Recordings is files + silence-stripping only. Mounted into #viewRoot by
      js/next/views/recordings.js, which fills every data-slot with live
      /api/state data and wires the real endpoints. No mock data here — the
-     only stub is the waveform preview, tagged inline.
+     waveform is a real, server-computed downsample (the cut overlay lands in
+     a later slice).
      ====================================================================== -->
 <template id="tpl-next-view-recordings">
   <div data-slot="head"></div>
 
-  <!-- HERO: waveform-cut PLACEHOLDER (net-new, no backend) + REAL strip
-       knobs/stats/job. The strip RUN is wired; the canvas is a stub. -->
+  <!-- HERO: the real waveform (canvas drawn from server-computed peaks) +
+       REAL strip knobs/stats/job. -->
   <div class="panel panel--primary wavehero">
     <div class="wave-top">
       <span class="wave-top__name mono" data-slot="waveName">no WAV selected</span>
@@ -25,15 +26,11 @@
       </div>
     </div>
 
-    <!-- waveform cut preview — net-new, NOT wired to any backend. Slimmed to a
-         single-row banner (was a tall stub) so the real WAV list below sits
-         higher and fills the reclaimed height. Keeps the `mock · not wired`
-         chip. -->
-    <div class="wavestub wavestub--slim">
-      <span class="wavestub__ic">🌊</span>
-      <span class="wavestub__h">waveform preview — coming soon</span>
-      <span class="wavestub__tag">mock · not wired</span>
-    </div>
+    <!-- waveform — a REAL, server-computed downsample of the selected WAV.
+         js/next/components/waveform.js mounts a <canvas> + mm:ss time axis
+         here and draws peaks fetched from /api/wav/{s}/{name}/peaks; the cut
+         overlay draws on top of the same canvas in a later slice. -->
+    <div class="wavewrap" data-slot="waveHost"></div>
 
     <!-- strip-silence: REAL knobs → POST /api/sessions/{session}/strip-silence -->
     <div class="knobbar">
@@ -77,6 +74,19 @@
       <div class="panel__hint mono" data-slot="wavHint"></div>
     </div>
     <div class="panel__body flush"><div class="wavlist" data-slot="wavList"></div></div>
+  </div>
+</template>
+
+<!-- isolated waveform component (canvas + mm:ss axis + a centred message
+     overlay for empty / loading / error states). Cloned by createWaveform()
+     in js/next/components/waveform.js, which owns all drawing. -->
+<template id="tpl-next-waveform">
+  <div class="wave">
+    <div class="wave-canvas-wrap">
+      <canvas class="wave-canvas" data-slot="canvas"></canvas>
+      <div class="wave-msg" data-slot="msg" hidden></div>
+    </div>
+    <div class="wave-axis mono" data-slot="axis"></div>
   </div>
 </template>
 
