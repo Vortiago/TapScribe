@@ -28,6 +28,26 @@ from .audio import wav_duration_s, wav_rms_dbfs
 from .text import parse_iso, parse_wav_start
 from .wav_cache import read_cached
 
+# ---------------------------------------------------------------------------
+# Selection verdicts — raised when a session/range yields nothing usable.
+# They live here, next to `select_session_wavs`, because they are *selection*
+# outcomes, not transcription ones: both Batch transcription and Batch strip
+# raise `NoUsableWavs`, so neither orchestrator should own it. The route layer
+# maps NoUsableWavs → 404 and InvalidRange → 400.
+# ---------------------------------------------------------------------------
+
+
+class NoUsableWavs(Exception):
+    """The session/range filter rejected every WAV — the directory is empty or
+    the from_iso/to_iso range matched nothing. "Valid inputs, empty result"
+    (vs. `InvalidRange`, which is "inputs unparseable")."""
+
+
+class InvalidRange(Exception):
+    """`select_session_wavs` got an unparseable `from_iso` / `to_iso`. The
+    caller's inputs were syntactically wrong (vs. `NoUsableWavs`'s valid-but-
+    empty)."""
+
 
 @dataclass(frozen=True)
 class SessionSelection:

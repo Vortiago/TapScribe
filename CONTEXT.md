@@ -421,6 +421,32 @@ naturally invalidates every per-WAV transcript on its next
 - `cached_transcribe(wav, transcriber, ...)` is unchanged in signature;
   it just no longer evicts other entries.
 
+## Session job · `JobTracker.run`
+
+The "one heavy job per session at a time" rule — a session may have at most
+one transcribe **or** strip **or** summarize running. `JobTracker` (a Recorder
+sub-component in `tapscribe/recorder.py`) holds the per-session `JobState`; the
+batch orchestrators bracket their work with the async context manager
+`recorder.jobs.run(session, *, kind, total, …)`:
+
+```python
+async with recorder.jobs.run(session, kind="summarize", total=1) as job:
+    await job.update(current=i, current_file=name)   # progress, optional
+    ...
+```
+
+`run` claims the slot on entry and **releases it on every exit path**. When the
+session is already busy it raises `SessionBusy` *before* the block runs, so a
+foreign claim is never released — the guard is structural, not a try/finally
+discipline each orchestrator re-derives (which is what the three of them used
+to do by hand, and one diverged). `SessionBusy` lives next to `JobTracker` in
+`recorder.py` because it's a *job* concept, not a transcription one; new batch
+orchestrators raise it only via `run`, never by importing it sideways.
+
+The read side (`jobs.snapshot()` / `jobs.get()`) is unchanged and widely used:
+`/api/state` surfaces each session's `progress`, and the delete/absorb routes
+refuse a session with a job in flight.
+
 ## Batch transcription
 
 The orchestrator that drives a `Transcriber` across either one WAV or
@@ -437,9 +463,9 @@ Two entry points:
   through the cache, then returns the freshly-written sidecar's raw
   JSON dict.
 - `transcribe_session(recorder, BatchSessionRequest) -> dict` — every
-  WAV in the supplied `from_iso`/`to_iso` range. Claims a `JobTracker`
-  slot (one transcribe/strip in flight per session), loops with progress
-  updates, then merges via `merge_session` and writes both
+  WAV in the supplied `from_iso`/`to_iso` range. Brackets the loop in
+  `recorder.jobs.run` (the Session job seam), reporting progress through the
+  yielded handle, then merges via `merge_session` and writes both
   `session-transcript.json` and `.txt`. No per-WAV silence pre-check —
   the session loop transcribes everything in range.
 
@@ -449,12 +475,15 @@ per request. The prompt/hotwords resolution layers session-meta over
 the global config files (`config/prompt.txt`, `config/hotwords.txt`);
 an empty session-meta override falls back to the global default.
 
-The module never raises `HTTPException`. It raises domain errors
-(`WavTooQuiet`, `WavUnreadable`, `SessionBusy`, `NoUsableWavs`, base
-`BatchTranscribeError`) and the route handlers map those to HTTP codes.
-This keeps the module FastAPI-free so the same orchestrator can drive
-a CLI batch, a queue worker, or future per-region re-transcribes
-without re-implementing the chain. The request value objects
+The module never raises `HTTPException`. It raises domain errors — its own
+`WavTooQuiet` / `WavUnreadable` (under `BatchTranscribeError`), plus
+`SessionBusy` (from `recorder`, via `jobs.run`) and `NoUsableWavs` /
+`InvalidRange` (selection verdicts, from `session_merge`). A single
+domain-error handler registered in `app.py` maps each error type to its HTTP
+code once (busy → 409, …), so routes are just `return await orchestrator(req)`
+rather than per-route try/except ladders. Keeping the orchestrator FastAPI-free
+means the same code can drive a CLI batch, a queue worker, or future per-region
+re-transcribes without re-implementing the chain. The request value objects
 (`BatchOneRequest`, `BatchSessionRequest`) are the test surface.
 
 ## Batch strip
@@ -465,15 +494,51 @@ the `/api/sessions/{session}/strip-silence` route handler is a thin
 parse-and-map shim over it.
 
 One entry point: `strip_session(recorder, StripSessionRequest) -> dict`
-— claims the session's `JobTracker` slot (the same "one transcribe/strip
-per session" rule Batch transcription claims under), loops
-`strip_one_wav` over every original WAV on a worker thread, aggregates,
-and releases. Raises the shared `SessionBusy` / `NoUsableWavs` (they are
-JobTracker / selection semantics, not transcription-specific) plus its
-own `StrippedDirUnclearable` when a previous `stripped/` can't be
-cleared. `StripSessionRequest` owns the knob defaults (`min_silence_ms`,
-`pad_ms`, `speech_floor_db`); the route forwards only
-explicitly-provided values, and is the test surface.
+— brackets its work in `recorder.jobs.run` (the Session job seam, shared with
+Batch transcription), loops `strip_one_wav` over every original WAV on a worker
+thread, and aggregates. Raises `SessionBusy` (from `recorder`, via `run`) /
+`NoUsableWavs` (from `session_merge`) plus its own `StrippedDirUnclearable`
+(under a `BatchStripError` base — a strip failure isn't a transcription one)
+when a previous `stripped/` can't be cleared. `StripSessionRequest` owns the
+knob defaults (`min_silence_ms`, `pad_ms`, `speech_floor_db`); the route
+forwards only explicitly-provided values, and is the test surface.
+
+## Batch summarize
+
+The post-transcription sibling of Batch transcription / strip — same
+orchestrator shape (bracket the Session job slot via `recorder.jobs.run`, run
+off the event loop), same FastAPI-free contract. Lives in
+`tapscribe/batch_summarize.py`; the `/api/sessions/{session}/summarize` route is
+a thin shim. One entry point: `summarize_session(recorder,
+SummarizeSessionRequest) -> dict` — reads the session's merged transcript
+(`NoMergedTranscript` when absent/empty), builds a `Summarizer` via the factory
+(`SummarizerUnavailable` for a misconfigured source — *before* the slot claim,
+so a bad command fails fast), runs it under the `summarize` job kind, and
+returns the summary dict. As of the tracer-bullet slice (#82) there's no
+persistence (the summary is lost on reload) and no saved config (source /
+command / prompt arrive per request).
+
+## Summarizer
+
+The protocol-level abstraction for "something that can summarize one
+transcript": `summarize(transcript, *, prompt) -> SummaryResult`. The
+post-transcription mirror of `Transcriber`, one altitude up. Lives in
+`tapscribe/summarizers.py` with the factory `load_summarizer(source=…)` that
+dispatches on source — exactly as `load_transcriber` resolves a backend.
+
+Concrete adapters:
+- `CommandSummarizer` — pipes the merged transcript to an operator-supplied CLI
+  tool (e.g. `claude -p`) on **stdin**, reads the summary from **stdout**. Argv
+  is list-form (`shlex.split` of the template + the prompt appended as a
+  trailing positional), `shell=False`, timeout-bounded — same subprocess
+  discipline as `build_live_cmd`. The first and (so far) only adapter.
+
+`ApiSummarizer` (OpenAI-compatible / Ollama) and `LocalSummarizer` (a bundled
+offline model) are planned as new adapters behind the same one-method seam, at
+which point `summarizers.py` graduates to a package with lazy-import loaders
+like `transcribers/`. Adapter-level errors are `SummarizerUnavailable`
+(misconfigured / not-wired source → 400) and `SummarizerFailed` (ran but failed
+→ 502).
 
 ## Wire-format note
 

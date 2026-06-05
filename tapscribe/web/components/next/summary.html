@@ -1,90 +1,70 @@
 <!-- ======================================================================
-     Stages · Summary (SESSION stage 4) — PREVIEW, mock, NOT wired.
-     A preview of a future "summarize this session" feature so the operator
-     can see the intended shape. No backend calls: the source selector,
-     prompt field, and Generate button are all disabled, and the output area
-     shows placeholder content. Tagged "mock · not wired" throughout.
+     Stages · Summary (SESSION stage 4) — the post-transcription summarizer.
+     WIRED for the Command source (#82): the operator picks a CLI template
+     (e.g. `claude -p`), edits the prompt, and clicks Generate; TapScribe pipes
+     the session's merged transcript to the command on stdin and renders the
+     summary it prints to stdout. The Local + API sources are present but
+     disabled until their slices land (#86 / #85). No persistence yet — the
+     summary is lost on reload (that's #83).
      Mounted into #viewRoot by js/next/views/summary.js.
      ====================================================================== -->
 <template id="tpl-next-view-summary">
   <div data-slot="head"></div>
 
   <div class="grid cols-tx fillcol">
-    <!-- LEFT: a sample summary OUTPUT (placeholder content). Fills the column
-         height (consistent with the other stages) and scrolls its own body. -->
+    <!-- LEFT: the generated summary OUTPUT. Fills the column height and scrolls
+         its own body (consistent with the other stages). -->
     <div class="panel panel--primary panel--fill">
       <div class="panel__head">
         <div class="panel__title"><span class="ic">📄</span>Summary</div>
-        <span class="panel__hint"><span class="mocktag">sample output</span></span>
+        <span class="panel__hint mono" data-slot="sumOutHint"></span>
       </div>
-      <div class="panel__body">
-        <div class="sumout">
-          <div class="sumout__title">Weekly sync — decisions &amp; next steps</div>
-          <div class="sumblk">
-            <div class="sumblk__k">✅ Decisions</div>
-            <ul class="sumlist">
-              <li>Ship the Stages dashboard behind <code>/next</code> for internal review.</li>
-              <li>Keep ffmpeg out of the batch path — pre-decode stays.</li>
-            </ul>
-          </div>
-          <div class="sumblk">
-            <div class="sumblk__k">📌 Action items</div>
-            <ul class="sumlist">
-              <li><b>Atle</b> — wire the strip-silence knobs into the dashboard.</li>
-              <li><b>Mette</b> — draft the People registry backend.</li>
-            </ul>
-          </div>
-          <div class="sumblk">
-            <div class="sumblk__k">❓ Open questions</div>
-            <ul class="sumlist">
-              <li>Which summarizer ships as the bundled default?</li>
-            </ul>
-          </div>
-        </div>
-      </div>
+      <div class="panel__body"><div data-slot="sumOut"></div></div>
     </div>
 
-    <!-- RIGHT: the (disabled) Summarizer controls. -->
+    <!-- RIGHT: the Summarizer controls (Command source wired). -->
     <div class="aside">
       <div class="panel panel--accent">
         <div class="panel__head">
           <div class="panel__title"><span class="ic">🪄</span>Summarizer</div>
-          <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
+          <span class="panel__hint">one job per session</span>
         </div>
         <div class="panel__body">
-          <!-- 1. summarizer SOURCE (segmented, all disabled) -->
+          <!-- 1. source (segmented). Command is wired; Local + API land in
+               later slices and are disabled. -->
           <div class="field" style="margin-bottom:11px">
             <label>source</label>
             <span class="segctl segctl--wide">
-              <button class="segctl__opt is-on" type="button" disabled>🖥️ Local</button>
-              <button class="segctl__opt" type="button" disabled>🌐 API</button>
-              <button class="segctl__opt" type="button" disabled>⌨️ Command</button>
+              <button class="segctl__opt" type="button" disabled title="bundled local model — coming in a later slice">🖥️ Local</button>
+              <button class="segctl__opt" type="button" disabled title="OpenAI-compatible / Ollama endpoint — coming in a later slice">🌐 API</button>
+              <button class="segctl__opt is-on" type="button" aria-pressed="true">⌨️ Command</button>
             </span>
           </div>
 
-          <!-- per-source detail (all disabled). Local: bundled default. -->
+          <!-- 2. Command source detail: the CLI template. The merged transcript
+               is piped to it on stdin; the prompt is appended as a trailing
+               argument (so `claude -p` becomes `claude -p "<prompt>"`). -->
           <div class="srcdetail">
-            <div class="srcdetail__lab">🖥️ Local <span class="dim">— bundled default model · runs offline</span></div>
-          </div>
-          <div class="srcdetail is-off">
-            <div class="srcdetail__lab">🌐 API <span class="dim">— Ollama / OpenAI-compatible</span></div>
-            <div class="field"><label>base url</label><input class="inp-txt mono" type="text" value="http://localhost:11434/v1" disabled></div>
-            <div class="field"><label>model</label><input class="inp-txt mono" type="text" value="llama3.1:8b" disabled></div>
-            <div class="field"><label>api key <span class="dim">(optional)</span></label><input class="inp-txt mono" type="password" value="" placeholder="sk-…" disabled></div>
-          </div>
-          <div class="srcdetail is-off">
-            <div class="srcdetail__lab">⌨️ Command <span class="dim">— a CLI command</span></div>
-            <div class="field"><label>command template</label><input class="inp-txt mono" type="text" value="claude -p" disabled></div>
+            <div class="srcdetail__lab">⌨️ Command <span class="dim">— a CLI tool · transcript on stdin</span></div>
+            <div class="field"><label>command template</label><input class="inp-txt mono" type="text" data-slot="sumCmd" value="claude -p"></div>
           </div>
 
-          <!-- 2. prompt / template (disabled, with a sensible default) -->
+          <!-- 3. prompt (appended to the command argv) -->
           <div class="field" style="margin-top:11px">
             <label>prompt</label>
-            <textarea class="ta" rows="3" disabled>Summarize this meeting into decisions, action items, and open questions.</textarea>
+            <textarea class="ta" rows="3" data-slot="sumPrompt">Summarize this meeting into decisions, action items, and open questions.</textarea>
           </div>
 
-          <!-- 3. Generate (disabled) -->
-          <button class="act act--sm act--primary act--wide" type="button" disabled style="margin-top:10px">🪄 Generate summary</button>
+          <!-- 4. Generate -->
+          <button class="act act--sm act--primary act--wide" type="button" data-slot="sumGenerate" style="margin-top:10px">🪄 Generate summary</button>
+          <div class="dim mono ovr-note" data-slot="sumNote"></div>
+
+          <!-- job progress (one job per session — transcribe / strip / summarize) -->
+          <div class="jobbar" data-slot="jobBar" hidden>
+            <div class="jobbar__top"><span data-slot="jobLabel">Summarizing</span><span class="jobbar__pct mono" data-slot="jobCount"></span></div>
+            <div class="progress"><div class="progress__fill" data-slot="jobFill"></div></div>
+            <div class="jobbar__wav mono" data-slot="jobWav"></div>
+          </div>
         </div>
       </div>
     </div>

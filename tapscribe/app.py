@@ -50,18 +50,17 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, config
 from . import hallucinations as hallucinations_mod
 from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
+from .batch_summarize import NoMergedTranscript, SummarizeSessionRequest, summarize_session
 from .batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
-    InvalidRange,
-    NoUsableWavs,
-    SessionBusy,
     WavTooQuiet,
     WavUnreadable,
     transcribe_one,
     transcribe_session,
 )
-from .recorder import Recorder
+from .recorder import Recorder, SessionBusy
+from .session_merge import InvalidRange, NoUsableWavs
 from .sessions import (
     absorb_session,
     delete_session_audio,
@@ -77,6 +76,7 @@ from .sessions import (
     stripped_dir,
     write_session_meta,
 )
+from .summarizers import SummarizerFailed, SummarizerUnavailable
 from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
@@ -271,6 +271,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.middleware("http")(auth.basic_auth_middleware)
+
+
+# ---------------------------------------------------------------------------
+# Domain error → HTTP status. ONE source of truth: the orchestrators raise
+# FastAPI-free domain errors (SessionBusy, NoUsableWavs, SummarizerFailed, …)
+# and these handlers translate them, so every batch route is just
+# `return await orchestrator(...)` instead of a per-route try/except ladder. A
+# domain error's HTTP meaning is intrinsic (busy is always 409), so it's
+# registered once here rather than re-mapped in each route that can raise it.
+# ---------------------------------------------------------------------------
+
+_DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
+    SessionBusy: 409,
+    NoUsableWavs: 404,
+    InvalidRange: 400,
+    WavUnreadable: 422,
+    WavTooQuiet: 422,
+    StrippedDirUnclearable: 500,
+    NoMergedTranscript: 422,
+    SummarizerUnavailable: 400,
+    SummarizerFailed: 502,
+}
+
+
+async def _domain_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Translate a known domain error to its status; anything unmapped falls to
+    500, so a new orchestrator error can't silently slip through as a 200."""
+    return JSONResponse(status_code=_DOMAIN_ERROR_STATUS.get(type(exc), 500), content={"detail": str(exc)})
+
+
+for _exc_type in _DOMAIN_ERROR_STATUS:
+    app.add_exception_handler(_exc_type, _domain_error_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -763,8 +795,8 @@ async def api_session_strip_silence(
     recorder: Recorder = Depends(get_recorder),
 ):
     """Non-destructively strip silence from every WAV in <session>/. Thin
-    HTTP shim over `batch_strip.strip_session` — parse + range-bound the
-    knobs, map the domain errors to status codes."""
+    HTTP shim over `batch_strip.strip_session` — parse + range-bound the knobs;
+    the registered domain-error handlers map failures to status codes."""
     body = await _json_body(req)
     # Range-bound everything that hits the silero detector so a malformed
     # dashboard POST returns 400 instead of a 500 from int()/float().
@@ -783,14 +815,35 @@ async def api_session_strip_silence(
     if speech_floor_db is not None:
         overrides["speech_floor_db"] = speech_floor_db
 
-    try:
-        return await strip_session(recorder, StripSessionRequest(session=session, **overrides))
-    except NoUsableWavs as e:
-        raise HTTPException(404, str(e)) from None
-    except SessionBusy as e:
-        raise HTTPException(409, str(e)) from None
-    except StrippedDirUnclearable as e:
-        raise HTTPException(500, str(e)) from None
+    return await strip_session(recorder, StripSessionRequest(session=session, **overrides))
+
+
+@app.post("/api/sessions/{session}/summarize")
+async def api_session_summarize(
+    session: str,
+    req: Request,
+    recorder: Recorder = Depends(get_recorder),
+):
+    """Summarize a session's merged transcript. Thin HTTP shim over
+    `batch_summarize.summarize_session` — parse the body; the registered
+    domain-error handlers map failures to status codes. For this slice the
+    source / command / prompt arrive in the body (no saved config yet); the
+    Command source is the only one wired."""
+    body = await _json_body(req)
+    # Forward only explicitly-provided fields and let SummarizeSessionRequest own
+    # the defaults (source="command", prompt=DEFAULT_SUMMARY_PROMPT) — the same
+    # "value object owns the defaults" contract as the strip-silence route.
+    overrides: dict[str, str] = {}
+    source = body.get("source")
+    if isinstance(source, str) and source.strip():
+        overrides["source"] = source.strip()
+    command = body.get("command")
+    if isinstance(command, str):
+        overrides["command"] = command.strip()
+    prompt = body.get("prompt")
+    if isinstance(prompt, str):
+        overrides["prompt"] = prompt
+    return await summarize_session(recorder, SummarizeSessionRequest(session=session, **overrides))
 
 
 @app.delete("/api/sessions/{session}/stripped")
@@ -1023,12 +1076,7 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         source_lang=(body.get("source_lang") or "").strip() or None,
         target_lang=(body.get("target_lang") or "").strip() or None,
     )
-    try:
-        payload = await transcribe_one(recorder, request)
-    except WavUnreadable as e:
-        raise HTTPException(422, str(e)) from None
-    except WavTooQuiet as e:
-        raise HTTPException(422, str(e)) from None
+    payload = await transcribe_one(recorder, request)
     print(
         f"[tapscribe] transcribed {request.name} ({request.source}) with {request.model}",
         flush=True,
@@ -1056,15 +1104,7 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
         source_lang=(body.get("source_lang") or "").strip() or None,
         target_lang=(body.get("target_lang") or "").strip() or None,
     )
-    try:
-        merged = await transcribe_session(recorder, request)
-    except InvalidRange as e:
-        raise HTTPException(400, str(e)) from None
-    except NoUsableWavs as e:
-        raise HTTPException(404, str(e)) from None
-    except SessionBusy as e:
-        raise HTTPException(409, str(e)) from None
-    return JSONResponse(merged)
+    return JSONResponse(await transcribe_session(recorder, request))
 
 
 # ---------------------------------------------------------------------------

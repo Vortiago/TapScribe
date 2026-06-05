@@ -1028,7 +1028,7 @@ async def test_lazy_transcript_fetch_is_cached_not_per_poll(
 # can't silently regress the renderRegion guard. The global Sessions list is
 # included because it holds a search box + per-row rename inputs that the
 # 500ms poll must not clobber.
-_NEXT_VIEWS = ("capture", "recordings", "transcript", "taps", "sessions", "people", "settings")
+_NEXT_VIEWS = ("capture", "recordings", "transcript", "summary", "taps", "sessions", "people", "settings")
 
 # > one poll period (500ms in next/main.js) so the sweep crosses at least
 # one re-render boundary. The sweep also asserts a poll actually fired during
@@ -1887,5 +1887,135 @@ async def test_transcribe_cache_panel_unions_original_and_stripped_variants(
             assert put_payloads and put_payloads[-1].get("source") == "stripped", (
                 f"set-primary on a stripped row must send source=stripped, got {put_payloads!r}"
             )
+        finally:
+            await browser.close()
+
+
+# ---------------------------------------------------------------------------
+# Summary stage (Command source) — Generate → render, + error surfacing.
+# ---------------------------------------------------------------------------
+
+
+def _py_summarize_cmd(script: str) -> str:
+    """A cross-platform Command-source template that runs `script` under the
+    server's own interpreter (the uvicorn server shares this venv), so the
+    summarize subprocess works on the Linux playwright CI without `cat`/`echo`
+    on PATH."""
+    import shlex
+    import sys
+
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+
+async def test_summary_stage_command_source_generates_and_renders(
+    running_recorder: RunningRecorder,
+):
+    """The wired Summary stage: with a merged transcript present, the operator
+    enters a Command template, clicks Generate, and the summary the command
+    prints to stdout renders in the output panel along with the source/command
+    that produced it. Then a failing command surfaces a visible error. Drives
+    the REAL POST /summarize → batch_summarize → subprocess seam (no mock)."""
+    rr = running_recorder
+
+    # Seed the CURRENT session with a merged transcript so it's selectable in
+    # the spine AND the Summary stage's Generate is enabled (needs a transcript).
+    sd = rr.recorder.session_dir
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "session": rr.recorder.session_start,
+                "model": "test",
+                "transcribed_at": "2026-01-01T00:00:00+00:00",
+                "speakers": ["Alice"],
+                "segments": [],
+                "plain_text": "Alice: we decided to ship the dashboard.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    marker = "MEETING_SUMMARY_RENDERED_OK"
+    echo_cmd = _py_summarize_cmd(f"import sys; sys.stdout.write({marker!r})")
+    fail_cmd = _py_summarize_cmd("import sys; sys.stderr.write('kaboom'); sys.exit(1)")
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            # The Command controls render, and Generate enables once the seeded
+            # transcript lands on a poll (proves the view sees the marker).
+            await page.wait_for_selector('[data-slot="sumCmd"]', timeout=6000)
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('[data-slot="sumGenerate"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=8000,
+            )
+
+            # Generate with the echo command — the summary is the marker.
+            await page.fill('[data-slot="sumCmd"]', echo_cmd)
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """(m) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(m)""",
+                arg=marker,
+                timeout=10000,
+            )
+
+            # The source/command that produced it is shown.
+            hint = await page.locator('[data-slot="sumOutHint"]').text_content()
+            assert "command" in (hint or ""), f"output hint must name the source/command, got {hint!r}"
+
+            # A failing command surfaces a visible error in the note line.
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('[data-slot="sumGenerate"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=8000,
+            )
+            await page.fill('[data-slot="sumCmd"]', fail_cmd)
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """() => (document.querySelector('[data-slot="sumNote"]')?.textContent || '')
+                          .toLowerCase().includes('failed')""",
+                timeout=10000,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_summary_stage_has_no_mock_not_wired_tags(running_recorder: RunningRecorder):
+    """The 'mock · not wired' tags are gone from the Summary stage now that it's
+    real, and the API/Local source options are present but disabled."""
+    rr = running_recorder
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sumCmd"]', timeout=6000)
+
+            assert await page.locator("#viewRoot .mocktag").count() == 0, (
+                "the mock·not-wired tag must be gone"
+            )
+            # Command source enabled; Local + API present but disabled.
+            seg = page.locator("#viewRoot .segctl--wide .segctl__opt")
+            assert await seg.count() == 3
+            disabled = await page.locator("#viewRoot .segctl--wide .segctl__opt[disabled]").count()
+            assert disabled == 2, f"Local + API must be disabled, got {disabled} disabled options"
         finally:
             await browser.close()

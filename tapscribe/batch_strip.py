@@ -1,12 +1,12 @@
 """Batch strip-silence — drive the splitter across every WAV in a session.
 
 The strip-silence sibling of `batch_transcribe`: same orchestrator shape
-(claim the session's JobTracker slot, loop the WAVs on a worker thread,
-aggregate, release), same FastAPI-free contract — domain errors out, the
-route maps them to HTTP codes. `SessionBusy` / `NoUsableWavs` are shared
-with `batch_transcribe` because they're JobTracker / selection semantics,
-not transcription-specific; the "one transcribe/strip job per session"
-rule has exactly these two claimants.
+(bracket the session's job slot via `recorder.jobs.run`, loop the WAVs on a
+worker thread, aggregate), same FastAPI-free contract — domain errors out, the
+route maps them to HTTP codes. `SessionBusy` comes from `tapscribe.recorder`
+(a JobTracker concept, raised by `run`) and `NoUsableWavs` from
+`tapscribe.session_merge` (a selection verdict) — neither is transcription-
+specific, so neither lives in `batch_transcribe` any more.
 """
 
 from __future__ import annotations
@@ -17,13 +17,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .batch_transcribe import BatchTranscribeError, NoUsableWavs, SessionBusy
-from .recorder import JobState, Recorder
+from .recorder import Recorder
+from .session_merge import NoUsableWavs
 from .sessions import resolve_session_dir, strip_one_wav, stripped_dir
 from .strip_silence import SPEECH_RMS_DBFS_FLOOR
 
 
-class StrippedDirUnclearable(BatchTranscribeError):
+class BatchStripError(Exception):
+    """Base class for strip-silence orchestration errors. Distinct from
+    `BatchTranscribeError`: a strip failure isn't a transcription failure —
+    they only ever shared a base by accident of where the code first grew."""
+
+
+class StrippedDirUnclearable(BatchStripError):
     """`<session>/stripped/` exists but couldn't be removed before the
     re-strip — typically a file lock (Windows) or permissions. Raised
     before any WAV is touched, so nothing was modified. Routes map this
@@ -59,21 +65,9 @@ async def strip_session(recorder: Recorder, req: StripSessionRequest) -> dict[st
     if not originals:
         raise NoUsableWavs("no WAVs in this session to strip")
 
-    # JobTracker.claim() encapsulates the "one job per session" rule.
-    claimed = await recorder.jobs.claim(
-        JobState(
-            session=req.session,
-            kind="strip",
-            current=0,
-            total=len(originals),
-            started_at=datetime.now(UTC),
-            status="stripping",
-        )
-    )
-    if not claimed:
-        raise SessionBusy("session is already busy (transcribe or strip in flight)")
-
-    try:
+    # recorder.jobs.run brackets the "one job per session" rule: claim on
+    # entry (SessionBusy if busy, releasing nothing), release on every exit.
+    async with recorder.jobs.run(req.session, kind="strip", total=len(originals), status="stripping"):
         out_dir = stripped_dir(req.session)
         if out_dir.exists():
             try:
@@ -96,8 +90,6 @@ async def strip_session(recorder: Recorder, req: StripSessionRequest) -> dict[st
 
         results = await asyncio.to_thread(_run)
         finished = datetime.now(UTC)
-    finally:
-        await recorder.jobs.release(req.session)
 
     written = sum(1 for r in results if r.get("written"))
     in_secs = sum(r.get("in_seconds", 0.0) for r in results)

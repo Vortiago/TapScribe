@@ -12,8 +12,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from conftest import (
-    TranscriberStub,  # type: ignore[import-not-found]  # NeMo ships an installed `tests` package — collides with our project's tests/ dir; pytest puts tests/ on sys.path so `from conftest` resolves correctly
+from conftest import (  # type: ignore[import-not-found]  # NeMo ships an installed `tests` package — collides with our project's tests/ dir; pytest puts tests/ on sys.path so `from conftest` resolves correctly
+    TranscriberStub,
+    py_cmd,
+    seed_merged_transcript,
 )
 from fastapi.testclient import TestClient
 from wav_builders import seed_session, seed_wav  # type: ignore[import-not-found]
@@ -1774,3 +1776,97 @@ def test_stages_assets_serve_from_mounts(client):
     assert r.status_code == 200
     r = client.get("/web/components/next/views.html")
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /api/sessions/{session}/summarize — domain-error → status mapping
+# ---------------------------------------------------------------------------
+#
+# The route is a thin shim over batch_summarize.summarize_session; these assert
+# the status-code mapping for each domain error plus the happy path. The
+# Command source runs a real `python -c` subprocess (cross-platform — `cat`
+# isn't a PATH executable on Windows) so no model/endpoint is touched.
+
+
+_SUMMARIZE_CAT = py_cmd("import sys; sys.stdout.write(sys.stdin.read())")
+
+
+def test_summarize_returns_summary_for_command_source(client, recorder_under_test):
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="we decided to ship")
+    r = client.post(
+        "/api/sessions/s/summarize",
+        json={"source": "command", "command": _SUMMARIZE_CAT, "prompt": ""},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["source"] == "command"
+    assert body["summary"] == "we decided to ship"
+    assert body["command"] == _SUMMARIZE_CAT
+
+
+def test_summarize_no_merged_transcript_returns_422(client, recorder_under_test):
+    (recorder_under_test.recordings_dir / "empty").mkdir()
+    r = client.post(
+        "/api/sessions/empty/summarize",
+        json={"source": "command", "command": _SUMMARIZE_CAT},
+    )
+    assert r.status_code == 422, r.text
+    assert "transcribe" in r.json()["detail"].lower()
+
+
+def test_summarize_busy_returns_409(client, recorder_under_test):
+    from tapscribe.recorder import JobState
+
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+
+    import anyio.from_thread
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.jobs.claim,
+            JobState(
+                session="s",
+                kind="transcribe",
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+                status="running",
+            ),
+        )
+
+    r = client.post(
+        "/api/sessions/s/summarize",
+        json={"source": "command", "command": _SUMMARIZE_CAT},
+    )
+    assert r.status_code == 409, r.text
+
+
+def test_summarize_unwired_source_returns_400(client, recorder_under_test):
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    r = client.post("/api/sessions/s/summarize", json={"source": "api"})
+    assert r.status_code == 400, r.text
+
+
+def test_summarize_empty_command_returns_400(client, recorder_under_test):
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    r = client.post("/api/sessions/s/summarize", json={"source": "command", "command": ""})
+    assert r.status_code == 400, r.text
+
+
+def test_summarize_failed_command_returns_502(client, recorder_under_test):
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    failing = py_cmd("import sys; sys.exit(1)")
+    r = client.post(
+        "/api/sessions/s/summarize",
+        json={"source": "command", "command": failing, "prompt": ""},
+    )
+    assert r.status_code == 502, r.text
+
+
+def test_summarize_unknown_session_returns_404(client, recorder_under_test):  # noqa: ARG001
+    r = client.post(
+        "/api/sessions/does-not-exist/summarize",
+        json={"source": "command", "command": _SUMMARIZE_CAT},
+    )
+    assert r.status_code == 404, r.text
