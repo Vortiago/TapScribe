@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import pytest
 
-import tapscribe.summarizers as S
 from tapscribe.summarizers import (
     DEFAULT_SUMMARY_PROMPT,
     LOCAL_GGUF_MODEL,
@@ -29,6 +28,7 @@ from tapscribe.summarizers import (
     SummarizerFailed,
     SummarizerUnavailable,
     SummaryResult,
+    _build_local_messages,
     load_summarizer,
 )
 from tapscribe.transcribers.catalog import set_available_backends_for_testing
@@ -47,14 +47,14 @@ def extra_present(monkeypatch):
     """Pretend the `[summarize]` backend module IS importable, so a no-generate_fn
     construction doesn't fail the fast dependency probe. Deterministic regardless
     of whether this dev box happens to have mlx_lm / llama_cpp installed."""
-    monkeypatch.setattr(S, "_backend_module_available", lambda backend: True)
+    monkeypatch.setattr("tapscribe.summarizers._backend_module_available", lambda backend: True)
 
 
 @pytest.fixture
 def extra_missing(monkeypatch):
     """Pretend the `[summarize]` backend module is NOT importable — the fresh-box
     case the runtime-deps step is meant to fix, and the 'degrade clearly' path."""
-    monkeypatch.setattr(S, "_backend_module_available", lambda backend: False)
+    monkeypatch.setattr("tapscribe.summarizers._backend_module_available", lambda backend: False)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ def test_load_summarizer_local_without_extra_raises_unavailable(reset_available_
 
 
 def test_build_local_messages_single_user_turn_with_prompt_and_transcript():
-    msgs = S._build_local_messages("the transcript text", "Summarize this")
+    msgs = _build_local_messages("the transcript text", "Summarize this")
     assert len(msgs) == 1
     assert msgs[0]["role"] == "user"
     assert "Summarize this" in msgs[0]["content"]
@@ -197,7 +197,7 @@ def test_build_local_messages_single_user_turn_with_prompt_and_transcript():
 
 
 def test_build_local_messages_blank_prompt_falls_back_to_default():
-    msgs = S._build_local_messages("t", "   ")
+    msgs = _build_local_messages("t", "   ")
     assert DEFAULT_SUMMARY_PROMPT in msgs[0]["content"]
 
 
