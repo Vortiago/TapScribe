@@ -10,6 +10,7 @@
 // renderer with no state coupling is the seam that makes that easy.
 
 import { tpl, pick } from "../../templates.js";
+import { fmtMmSs } from "../../formatters.js";
 
 /** How many time-axis ticks to label under the waveform. */
 const AXIS_TICKS = 5;
@@ -17,23 +18,18 @@ const AXIS_TICKS = 5;
 /**
  * Evenly-spaced mm:ss tick labels from 0 to `durationS` inclusive of both
  * ends. Pure (no DOM) so it's unit-testable in isolation. `count` is clamped
- * to >= 2 so there's always a start and an end label; a non-positive or
- * non-finite duration degrades to all-"0:00".
+ * to >= 2 so there's always a start and an end label; `fmtMmSs` collapses a
+ * non-positive / non-finite tick to "0:00", so a bogus duration degrades
+ * cleanly.
  * @param {number} durationS
  * @param {number} count
  * @returns {string[]}
  */
 export function axisTicks(durationS, count) {
   const n = Math.max(2, Math.floor(count));
-  const dur = durationS > 0 && Number.isFinite(durationS) ? durationS : 0;
   /** @type {string[]} */
   const out = [];
-  for (let i = 0; i < n; i++) {
-    const t = (dur * i) / (n - 1);
-    const mins = Math.floor(t / 60);
-    const secs = Math.floor(t % 60);
-    out.push(`${mins}:${String(secs).padStart(2, "0")}`);
-  }
+  for (let i = 0; i < n; i++) out.push(fmtMmSs((durationS * i) / (n - 1)));
   return out;
 }
 

@@ -172,7 +172,8 @@ export function peekWavTranscript(session, name, source, transcribedAt) {
 // `bins` floats regardless of recording length, so one fetch per (WAV, source)
 // is all the waveform ever needs.
 
-/** Default downsample resolution the waveform component requests. */
+/** Downsample resolution the waveform component requests. Shared client/server
+ * default; one value because the dashboard never needs a second resolution. */
 export const WAVE_PEAK_BINS = 800;
 
 /**
@@ -180,10 +181,8 @@ export const WAVE_PEAK_BINS = 800;
  * @param {string} name
  * @param {"original" | "stripped"} source
  * @param {string} sig
- * @param {number} [bins]
  */
-const _peaksKey = (session, name, source, sig, bins = WAVE_PEAK_BINS) =>
-  `${session}/${name}@${source}@${sig}@${bins}`;
+const _peaksKey = (session, name, source, sig) => `${session}/${name}@${source}@${sig}`;
 
 /**
  * Server-computed waveform peaks for one WAV, cached per (session, name,
@@ -193,14 +192,13 @@ const _peaksKey = (session, name, source, sig, bins = WAVE_PEAK_BINS) =>
  * @param {string} name
  * @param {"original" | "stripped"} source
  * @param {string} sig
- * @param {number} [bins]
  * @returns {Promise<import('./types.js').WavePeaks>}
  */
-export function fetchWavePeaks(session, name, source, sig, bins = WAVE_PEAK_BINS) {
-  const qs = new URLSearchParams({ bins: String(bins) });
+export function fetchWavePeaks(session, name, source, sig) {
+  const qs = new URLSearchParams({ bins: String(WAVE_PEAK_BINS) });
   if (source === "stripped") qs.set("source", "stripped");
   const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/peaks?${qs}`;
-  return _getOrFetch(_wavPeaksCache, _peaksKey(session, name, source, sig, bins), () =>
+  return _getOrFetch(_wavPeaksCache, _peaksKey(session, name, source, sig), () =>
     fetch(url, { cache: "no-store" }).then(_unwrap),
   );
 }
@@ -212,11 +210,10 @@ export function fetchWavePeaks(session, name, source, sig, bins = WAVE_PEAK_BINS
  * @param {string} name
  * @param {"original" | "stripped"} source
  * @param {string} sig
- * @param {number} [bins]
  * @returns {import('./types.js').WavePeaks | undefined}
  */
-export function peekWavePeaks(session, name, source, sig, bins = WAVE_PEAK_BINS) {
-  const e = _wavPeaksCache.get(_peaksKey(session, name, source, sig, bins));
+export function peekWavePeaks(session, name, source, sig) {
+  const e = _wavPeaksCache.get(_peaksKey(session, name, source, sig));
   return e && e.settled ? e.value : undefined;
 }
 /**

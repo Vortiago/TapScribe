@@ -31,6 +31,18 @@ export function fmtClock(iso) {
 }
 
 /**
+ * Elapsed seconds → compact "m:ss" (90 → "1:30"). Distinct from `fmtDur`
+ * (human "1m 30.0s") and `fmtClock` (ISO wall-clock slice): this is the
+ * transcript-timestamp / waveform-axis form. Floors to whole seconds and
+ * treats a non-positive or non-finite input as 0 so callers needn't guard.
+ * @param {number} seconds
+ */
+export function fmtMmSs(seconds) {
+  const s = seconds > 0 && isFinite(seconds) ? seconds : 0;
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+}
+
+/**
  * @param {string | null | undefined} s
  * @param {number} max
  */

@@ -19,7 +19,7 @@
 
 import { tpl, pick, selectionInside } from "../../templates.js";
 import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks } from "../../api.js";
-import { fmtBytes, fmtDur, fmtClock, fmtMs, truncMid } from "../../formatters.js";
+import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 import { createWaveform } from "../components/waveform.js";
 
@@ -100,9 +100,11 @@ export function build(ctx) {
   // Waveform render state. `lastWaveSig` is the canvas's OWN small signature
   // (selected WAV · source · size · load-state) so a per-second strip/transcribe
   // job tick — which churns the body's signature — never rebuilds the O(bins)
-  // canvas (render-signature hygiene). `pendingWave` dedupes the lazy peaks
-  // fetch; `failedWave` remembers an unreadable WAV so it shows a message
-  // instead of refetching every tick.
+  // canvas (render-signature hygiene). `pendingWave` stops a fresh re-render
+  // callback being chained on every tick while one fetch is in flight (the
+  // api.js cache already dedupes the network request itself); `failedWave`
+  // remembers an unreadable WAV so it shows a message instead of refetching
+  // every tick.
   let lastWaveSig = " ";
   /** @type {Set<string>} */
   const pendingWave = new Set();
@@ -173,11 +175,13 @@ export function build(ctx) {
             .catch((e) => { failedWave.set(key, String(e).replace(/^Error:\s*/, "")); })
             .finally(() => {
               pendingWave.delete(key);
-              // Force one more render so the now-cached peaks (or the error)
-              // get drawn; reset the wave sig too so the redraw isn't skipped.
-              lastSig = " ";
+              // Redraw the canvas ONLY (the body didn't change) now that the
+              // peaks are cached or the fetch failed. Re-resolve the current
+              // selection in case it moved while the fetch was in flight, and
+              // reset just the wave sig so this redraw isn't skipped — no
+              // full body rebuild and no extra /api/state poll.
               lastWaveSig = " ";
-              afterMutate();
+              drawWaveform(selectedFor(), session ? effectiveSource(session.session) : "original");
             });
         }
       }
@@ -331,9 +335,7 @@ export function build(ctx) {
     } else {
       for (const ln of lines) {
         const line = tpl("tpl-next-txline");
-        const mins = Math.floor(ln.start / 60);
-        const secs = Math.floor(ln.start % 60);
-        pick(line, "ts").textContent = `[${mins}:${String(secs).padStart(2, "0")}]`;
+        pick(line, "ts").textContent = `[${fmtMmSs(ln.start)}]`;
         pick(line, "speaker").textContent = speakerName ? `${speakerName}:` : "";
         const body = pick(line, "body");
         body.textContent = ln.text;

@@ -1024,8 +1024,11 @@ async def api_wav_peaks(
     try:
         peaks = await asyncio.to_thread(compute_peaks, path, bins=bins)
     except RuntimeError as e:
-        # Non-recorder format or an unreadable WAV — 422 mirrors the
-        # WavUnreadable mapping (resolve_wav already 404'd a missing file).
+        # The WAV exists (resolve_wav 404'd a missing one) but isn't decodable
+        # as peaks → 422 unprocessable. compute_peaks is a low-level audio
+        # helper with no domain-error type, so we map its RuntimeError at the
+        # call site rather than via the batch-orchestrator domain-error handler
+        # (a deliberately separate layer, not an unfinished unification).
         raise HTTPException(422, str(e)) from e
     return asdict(peaks)
 
