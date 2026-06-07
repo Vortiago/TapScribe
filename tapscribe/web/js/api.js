@@ -62,6 +62,8 @@ export async function fetchState() {
 
 /** @type {Map<string, TxEntry<import('./types.js').MergedTranscript | null>>} */
 const _sessionTxCache = new Map();
+/** @type {Map<string, TxEntry<import('./types.js').PersistedSummary | null>>} */
+const _sessionSummaryCache = new Map();
 /** @type {Map<string, TxEntry<import('./types.js').WavTranscript | null>>} */
 const _wavTxCache = new Map();
 /** @type {Map<string, TxEntry<import('./types.js').WavePeaks>>} */
@@ -130,6 +132,34 @@ export function fetchSessionTranscript(session, transcribedAt) {
  */
 export function peekSessionTranscript(session, transcribedAt) {
   const e = _sessionTxCache.get(`${session}@${transcribedAt}`);
+  return e && e.settled ? e.value : undefined;
+}
+
+/**
+ * Full persisted session summary, cached per (session, summarizedAt).
+ * `summarizedAt` comes from the slim marker on /api/state; passing it means a
+ * re-generate (new stamp) invalidates the cache while an idle poll reuses the
+ * cached promise and fires no request. Returns null when the session has no
+ * persisted summary.
+ * @param {string} session
+ * @param {string} summarizedAt
+ * @returns {Promise<import('./types.js').PersistedSummary | null>}
+ */
+export function fetchSessionSummary(session, summarizedAt) {
+  return _getOrFetch(_sessionSummaryCache, `${session}@${summarizedAt}`, () =>
+    fetch(`/api/sessions/${encodeURIComponent(session)}/summary`, { cache: "no-store" }).then(_unwrap),
+  );
+}
+
+/**
+ * Synchronous peek: the resolved summary for (session, summarizedAt) if its
+ * fetch already settled, else undefined.
+ * @param {string} session
+ * @param {string} summarizedAt
+ * @returns {import('./types.js').PersistedSummary | null | undefined}
+ */
+export function peekSessionSummary(session, summarizedAt) {
+  const e = _sessionSummaryCache.get(`${session}@${summarizedAt}`);
   return e && e.settled ? e.value : undefined;
 }
 

@@ -12,9 +12,12 @@
 // job-progress bar while the job runs. The API source (#85) is present but
 // disabled until its slice lands.
 //
-// No persistence yet (#83): the summary lives in view-local state and is lost
-// on reload / cleared when the operator switches sessions. No saved config yet
-// (#84): the source/command/prompt are entered here and sent per Generate.
+// Persistence (#83): a generated summary is stored server-side next to the
+// merged transcript; the session row carries a slim `session_summary` marker
+// and this view lazily fetches the body (cached per (session, summarized_at))
+// so a stored summary re-renders on revisit/reload without re-generating. No
+// saved config yet (#84): the source/command/prompt are entered here and sent
+// per Generate.
 //
 // Interaction hold: the source buttons, command <input>, and prompt <textarea>
 // are built ONCE from the template and NEVER rebuilt per-tick (update() only
@@ -25,7 +28,7 @@
 // pane).
 
 import { tpl, pick, selectionInside } from "../../templates.js";
-import { postJson } from "../../api.js";
+import { postJson, fetchSessionSummary, peekSessionSummary } from "../../api.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
 
 /**
@@ -65,9 +68,9 @@ export function build(ctx) {
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
   let session = null;
-  /** The summary currently shown (null until a Generate lands). Lives only in
-   * memory — no persistence in this slice. */
-  /** @type {import('../../types.js').SummaryResult | null} */
+  /** The summary currently shown (null until a Generate lands). Either the
+   * just-generated POST result or the lazily-fetched stored body. */
+  /** @type {import('../../types.js').PersistedSummary | null} */
   let lastSummary = null;
   /** The session id `lastSummary` belongs to — so switching sessions clears a
    * summary that isn't this session's. */
@@ -92,6 +95,37 @@ export function build(ctx) {
 
   const hasTranscript = () => !!session?.session_transcript;
 
+  /** In-flight lazy summary fetches, keyed `${sid}@${stamp}` (dedup). */
+  const sumPending = new Set();
+
+  /**
+   * Resolve the persisted summary behind the session's slim marker: the cached
+   * body when already in hand, else fire ONE lazy fetch and re-cross the
+   * output gate when it lands (the resolveMerged pattern from transcript.js).
+   * Returns null until loaded — the placeholder shows meanwhile.
+   * @param {import('../../types.js').SummaryMarker | null | undefined} marker
+   * @param {string} sid
+   * @returns {import('../../types.js').PersistedSummary | null}
+   */
+  const resolveStored = (marker, sid) => {
+    if (!marker || !marker.summarized_at || !sid) return null;
+    const stamp = marker.summarized_at;
+    const cached = peekSessionSummary(sid, stamp);
+    if (cached !== undefined) return cached;
+    const key = `${sid}@${stamp}`;
+    if (!sumPending.has(key)) {
+      sumPending.add(key);
+      fetchSessionSummary(sid, stamp)
+        .catch(() => {})
+        .finally(() => {
+          sumPending.delete(key);
+          lastOutSig = " ";
+          afterMutate();
+        });
+    }
+    return null;
+  };
+
   /** Sync the Generate button + the note line from current state. Never touches
    * the command/prompt inputs (the operator owns those). */
   const reflectControls = () => {
@@ -112,7 +146,7 @@ export function build(ctx) {
           : "";
   };
 
-  /** @param {import('../../types.js').SummaryResult} res */
+  /** @param {import('../../types.js').PersistedSummary} res */
   const renderSummary = (res) => {
     const out = document.createElement("div");
     out.className = "sumout";
@@ -255,10 +289,19 @@ export function build(ctx) {
     // ---- Output pane — gated, and deferred (without advancing the gate) while
     // a text selection is active inside it, so a tick can't dissolve a
     // mid-copy selection (the merged-transcript pane's rule, for the summary).
-    const outSig = [sid, lastSummary?.created_at || "", hasTranscript() ? 1 : 0].join("§");
+    // A persisted summary (slim marker on the session) is resolved lazily.
+    const marker = sess?.session_summary || null;
+    const shown = lastSummary || resolveStored(marker, sid);
+    const outSig = [
+      sid,
+      lastSummary?.created_at || "",
+      marker?.summarized_at || "",
+      shown ? 1 : 0,
+      hasTranscript() ? 1 : 0,
+    ].join("§");
     if (outSig !== lastOutSig && !selectionInside(sumOut)) {
       lastOutSig = outSig;
-      if (lastSummary) renderSummary(lastSummary);
+      if (shown) renderSummary(shown);
       else renderPlaceholder(sess);
     }
 

@@ -221,6 +221,29 @@ def read_session_transcript(session: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def read_session_summary(session: str) -> dict[str, Any] | None:
+    """The FULL persisted session-summary.json for `session`, or None when the
+    session has never been summarized. Backs `GET /api/sessions/{session}/
+    summary`. Same path-safety shape as `read_session_transcript`:
+    `resolve_session_dir` validates traversal, `_read_json_or_none` re-checks
+    containment at the point of file access."""
+    session_dir = resolve_session_dir(session)
+    data = _read_json_or_none(session_dir / "session-summary.json")
+    return data if isinstance(data, dict) else None
+
+
+def write_session_summary(session: str, summary: dict[str, Any]) -> None:
+    """Persist the generated summary next to the merged transcript. Atomic via
+    `atomic_write_text` so a crashed write never leaves a torn JSON file that
+    `_read_json_or_none` would silently swallow. One current summary per
+    session — a re-generate overwrites."""
+    session_dir = resolve_session_dir(session)
+    atomic_write_text(
+        session_dir / "session-summary.json",
+        json.dumps(summary, indent=2, ensure_ascii=False),
+    )
+
+
 def read_wav_transcript(session: str, name: str, source: str = "original") -> dict[str, Any] | None:
     """The FULL primary cached transcript (raw sidecar dict) for one WAV, or
     None. Backs the per-WAV lazy expand. `resolve_wav` validates session +
@@ -349,6 +372,22 @@ def _session_transcript_marker(data: Any) -> dict[str, Any] | None:
     return marker
 
 
+def _session_summary_marker(data: Any) -> dict[str, Any] | None:
+    """Project the persisted session-summary.json down to the SLIM marker the
+    dashboard listing reads: `summarized_at` + `source` + `model`. DROPS the
+    `summary` body and `prompt` — the dashboard fetches the full summary lazily
+    via `GET /api/sessions/{session}/summary` when the Summary stage is open.
+    A marker change (different `summarized_at`) is the client's re-fetch
+    signal. None when the session has never been summarized."""
+    if not isinstance(data, dict):
+        return None
+    return {
+        "summarized_at": data.get("summarized_at"),
+        "source": data.get("source") or "",
+        "model": data.get("model") or "",
+    }
+
+
 def _describe_wav_uncached(w: Path, *, size: int) -> dict[str, Any]:
     wav_start = parse_wav_start(w.name)
     dur = round(wav_duration_s(w), 2)
@@ -474,6 +513,9 @@ def _describe_session(
         "session_transcript": _session_transcript_marker(
             _read_session_json_cached(sd / "session-transcript.json")
         ),
+        "session_summary": _session_summary_marker(
+            _read_session_json_cached(sd / "session-summary.json")
+        ),
         "progress": jobs.get(sd.name),
         "session_meta": read_session_meta(sd.name),
         "stripped": _stripped_summary(stripped_root, region_buckets),
@@ -501,6 +543,7 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
             continue
         seen_names.add(sd.name)
         visited_session_jsons.add(str(sd / "session-transcript.json"))
+        visited_session_jsons.add(str(sd / "session-summary.json"))
         out.append(_describe_session(sd, jobs=jobs, current_session=current_session, visited=visited_wavs))
 
     # Prune the poll caches down to what this walk actually saw so deleted
@@ -522,6 +565,7 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
                 "earliest_iso": None,
                 "latest_iso": None,
                 "session_transcript": None,
+                "session_summary": None,
                 "progress": None,
                 "session_meta": read_session_meta(current_session),
                 "stripped": None,

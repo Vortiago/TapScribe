@@ -20,6 +20,7 @@ from tapscribe.batch_summarize import (
     summarize_session,
 )
 from tapscribe.recorder import JobState, SessionBusy
+from tapscribe.sessions import read_session_summary
 from tapscribe.summarizers import SummarizerFailed
 
 # stdin → stdout: the summary is the merged transcript text echoed back, so we
@@ -131,3 +132,67 @@ async def test_summarize_session_releases_slot_on_summarizer_failure(recorder_un
             SummarizeSessionRequest(session="s", source="command", command=failing, prompt=""),
         )
     assert recorder_under_test.jobs.get("s") is None
+
+
+# ---------------------------------------------------------------------------
+# Persistence (#83): the summary survives alongside the session
+# ---------------------------------------------------------------------------
+
+
+async def test_summarize_session_persists_summary_file(recorder_under_test):
+    """#83: a completed summary is written next to the merged transcript
+    (session-summary.json) so it survives a dashboard reload. The persisted
+    body is the result mapping plus a `summarized_at` stamp — the same stamp
+    the returned dict carries, so the view and the listing marker agree."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="decided to ship the thing")
+
+    out = await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_CAT, prompt=""),
+    )
+
+    assert (recorder_under_test.recordings_dir / "s" / "session-summary.json").is_file()
+    stored = read_session_summary("s")
+    assert stored is not None
+    assert stored["summary"] == "decided to ship the thing"
+    assert stored["source"] == "command"
+    assert stored["command"] == _CAT
+    assert stored["summarized_at"]
+    assert out["summarized_at"] == stored["summarized_at"]
+
+
+async def test_summarize_session_regenerate_replaces_summary(recorder_under_test):
+    """#83: one current summary per session — re-generating replaces the
+    stored summary, it doesn't accumulate history."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="first take")
+    await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_CAT, prompt=""),
+    )
+    regenerated = py_cmd("import sys; sys.stdin.read(); sys.stdout.write('REGENERATED')")
+    await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=regenerated, prompt=""),
+    )
+    stored = read_session_summary("s")
+    assert stored is not None
+    assert stored["summary"] == "REGENERATED"
+
+
+async def test_summarize_session_failure_keeps_previous_summary(recorder_under_test):
+    """#83: a failed re-generate must NOT clobber the stored summary — the
+    write happens only after the summarizer succeeds."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="the good take")
+    await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_CAT, prompt=""),
+    )
+    failing = py_cmd("import sys; sys.exit(1)")
+    with pytest.raises(SummarizerFailed):
+        await summarize_session(
+            recorder_under_test,
+            SummarizeSessionRequest(session="s", source="command", command=failing, prompt=""),
+        )
+    stored = read_session_summary("s")
+    assert stored is not None
+    assert stored["summary"] == "the good take"

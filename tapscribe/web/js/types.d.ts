@@ -117,6 +117,10 @@ export interface Session {
   // lazily via fetchSessionTranscript(session, transcribed_at), cached
   // client-side. A marker change (new transcribed_at) is the re-fetch signal.
   session_transcript: MergedTranscriptMarker | null;
+  // SLIM marker only — the full persisted summary is fetched lazily via
+  // fetchSessionSummary(session, summarized_at). A marker change (new
+  // summarized_at) is the re-fetch signal. Null when never summarized.
+  session_summary: SummaryMarker | null;
   progress: JobStateSnapshot | null;
   session_meta: SessionMeta;
   stripped: StrippedStats | null;
@@ -148,20 +152,14 @@ export interface JobStateSnapshot {
   model: string | null;
 }
 
-// POST /api/sessions/{session}/summarize response — the summary plus the
-// metadata that says which source/engine/prompt produced it. For the Command
-// source `command` is the CLI template and `model` is empty; API/Local (later
-// slices) populate `model`. Not persisted yet (#83) — lost on reload.
-export interface SummaryResult {
+// POST /api/sessions/{session}/summarize response — the persisted summary
+// plus the ok/session envelope. For the Command source `command` is the CLI
+// template and `model` is empty; the Local source populates `model`.
+// Persisted (#83): the same body is stored in session-summary.json and read
+// back lazily via GET /api/sessions/{session}/summary.
+export interface SummaryResult extends PersistedSummary {
   ok: boolean;
   session: string;
-  summary: string;
-  source: string;
-  prompt: string;
-  model: string;
-  command: string;
-  took_ms: number;
-  created_at: string;
 }
 
 export interface WavFile {
@@ -262,6 +260,27 @@ export interface MergedTranscriptMarker {
   segment_count: number;
   suppressed_count: number;
   speakers: string[]; // main.js derives its speaker-alias key set from this
+}
+
+// `SummaryMarker` is the SLIM shape /api/state embeds per session — the
+// re-fetch stamp plus which source/engine produced the summary. The full
+// `PersistedSummary` body is fetched lazily via fetchSessionSummary.
+export interface SummaryMarker {
+  summarized_at: string | null; // ISO 8601 — null only on malformed on-disk JSON
+  source: string;
+  model: string; // empty for the command source
+}
+
+// GET /api/sessions/{session}/summary response — the persisted summary body.
+export interface PersistedSummary {
+  summary: string;
+  source: string;
+  prompt: string;
+  model: string;
+  command: string;
+  took_ms: number;
+  created_at: string;
+  summarized_at: string;
 }
 
 export interface MergedTranscript {
