@@ -22,6 +22,8 @@ import pytest
 
 from tapscribe.summarizers import (
     DEFAULT_SUMMARY_PROMPT,
+    ENV_LOCAL_GGUF_MODEL,
+    ENV_LOCAL_MLX_MODEL,
     LOCAL_GGUF_MODEL,
     LOCAL_MLX_MODEL,
     LocalSummarizer,
@@ -160,6 +162,75 @@ def test_local_summarizer_injected_fn_skips_dependency_probe(reset_available_bac
     a box without the extra."""
     s = LocalSummarizer(backend="gguf", generate_fn=lambda transcript, prompt: "ok")
     assert s.summarize("t", prompt="p").summary == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Degrade clearly when the backend imports but the model won't LOAD — the
+# mlx_lm "Received N parameters not in model" weight/arch skew (the one that
+# sank gemma-4-e4b on Apple Silicon), plus corrupt downloads / OOM. These must
+# map to a clear SummarizerUnavailable (→ 400) naming the model + the override
+# env var, never a raw 500 mid-request — and must NOT swallow the distinct
+# "install the [summarize] extra" ImportError path.
+# ---------------------------------------------------------------------------
+
+
+def test_local_summarizer_mlx_load_failure_raises_unavailable(
+    reset_available_backends, extra_present, monkeypatch
+):
+    """mlx_lm.load raising (the 'Received 126 parameters not in model' skew) maps
+    to SummarizerUnavailable with the model repo + TAPSCRIBE_SUMMARIZE_MLX_MODEL
+    override in the message. The failure is lazy (first summarize), so
+    construction must still pass."""
+
+    def boom(model_repo, max_tokens):
+        raise ValueError(
+            "Received 126 parameters not in model: "
+            "language_model.model.layers.24.self_attn.k_norm.weight, ..."
+        )
+
+    monkeypatch.setattr("tapscribe.summarizers._build_mlx_generate", boom)
+    s = LocalSummarizer(backend="mlx")  # no generate_fn → builds the (patched) backend
+    with pytest.raises(SummarizerUnavailable) as ei:
+        s.summarize("the transcript", prompt="Summarize it")
+    msg = str(ei.value)
+    assert LOCAL_MLX_MODEL in msg  # names the model that failed to load
+    assert ENV_LOCAL_MLX_MODEL in msg  # points at the override knob
+
+
+def test_local_summarizer_gguf_load_failure_raises_unavailable(
+    reset_available_backends, extra_present, monkeypatch
+):
+    """Same graceful mapping for the GGUF backend — any load-time failure
+    (corrupt download, OOM, unsupported arch) becomes a clear 400 naming the
+    GGUF model + its override env var."""
+
+    def boom(model_repo, gguf_file, *, max_tokens, n_ctx):
+        raise RuntimeError("failed to load model from file")
+
+    monkeypatch.setattr("tapscribe.summarizers._build_gguf_generate", boom)
+    s = LocalSummarizer(backend="gguf")
+    with pytest.raises(SummarizerUnavailable) as ei:
+        s.summarize("t", prompt="p")
+    msg = str(ei.value)
+    assert LOCAL_GGUF_MODEL in msg
+    assert ENV_LOCAL_GGUF_MODEL in msg
+
+
+def test_local_summarizer_lazy_import_error_still_names_extra(
+    reset_available_backends, extra_present, monkeypatch
+):
+    """A lazy ImportError (extra vanished after the construction probe) must keep
+    steering the operator to the [summarize] extra — the broadened load-failure
+    catch must not swallow the install path."""
+
+    def boom(model_repo, max_tokens):
+        raise ImportError("No module named 'mlx_lm'")
+
+    monkeypatch.setattr("tapscribe.summarizers._build_mlx_generate", boom)
+    s = LocalSummarizer(backend="mlx")
+    with pytest.raises(SummarizerUnavailable) as ei:
+        s.summarize("t", prompt="p")
+    assert "summarize" in str(ei.value).lower()  # the [summarize] extra message
 
 
 # ---------------------------------------------------------------------------

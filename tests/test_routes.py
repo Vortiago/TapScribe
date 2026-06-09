@@ -1939,6 +1939,30 @@ def test_summarize_local_without_extra_returns_400(client, recorder_under_test, 
     assert "summarize" in r.json()["detail"].lower()
 
 
+def test_summarize_local_model_load_failure_returns_400(client, recorder_under_test, monkeypatch):
+    """A model that imports but won't LOAD (mlx_lm 'Received N parameters not in
+    model', a corrupt GGUF, OOM) surfaces as a clean 400 with remediation — not a
+    raw 500. Force the gguf route + a deterministic load failure so the result
+    doesn't depend on which backends this box happens to have."""
+    import tapscribe.summarizers as summarizers
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    monkeypatch.setattr(summarizers, "_backend_module_available", lambda backend: True)
+
+    def boom(model_repo, gguf_file, *, max_tokens, n_ctx):
+        raise ValueError("Received 126 parameters not in model: language_model...")
+
+    monkeypatch.setattr(summarizers, "_build_gguf_generate", boom)
+    try:
+        seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+        r = client.post("/api/sessions/s/summarize", json={"source": "local"})
+        assert r.status_code == 400, r.text
+        assert summarizers.ENV_LOCAL_GGUF_MODEL in r.json()["detail"]
+    finally:
+        set_available_backends_for_testing(None)
+
+
 def test_summarize_empty_command_returns_400(client, recorder_under_test):
     seed_merged_transcript(recorder_under_test.recordings_dir, "s")
     r = client.post("/api/sessions/s/summarize", json={"source": "command", "command": ""})
