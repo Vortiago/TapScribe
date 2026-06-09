@@ -61,28 +61,24 @@ from .batch_transcribe import (
     transcribe_session,
 )
 from .recorder import Recorder, SessionBusy
-from .session_merge import InvalidRange, NoUsableWavs
-from .sessions import (
+from .session_maintenance import (
     absorb_session,
     delete_session_audio,
     delete_session_wav,
-    gather_sessions,
     prune_empty_sessions,
+    session_is_empty,
+)
+from .session_merge import InvalidRange, NoUsableWavs
+from .session_paths import resolve_session_dir, resolve_wav, stripped_dir
+from .sessions import (
+    gather_sessions,
     read_session_meta,
     read_session_transcript,
     read_wav_transcript,
-    resolve_session_dir,
-    resolve_wav,
-    session_is_empty,
-    stripped_dir,
     write_session_meta,
 )
-from .summarizers import (
-    _MAX_TOKENS_BOUNDS,
-    SummarizerFailed,
-    SummarizerUnavailable,
-    summary_model_catalog,
-)
+from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
+from .summarizers.catalog import _MAX_TOKENS_BOUNDS
 from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,

@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from tapscribe import strip_silence as ss
-from tapscribe.sessions import strip_one_wav
+from tapscribe.batch_strip import strip_one_wav
 from tapscribe.text import parse_wav_speaker_slug, parse_wav_start
 
 

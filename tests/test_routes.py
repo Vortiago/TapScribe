@@ -1930,9 +1930,9 @@ def test_summarize_local_without_extra_returns_400(client, recorder_under_test, 
     installed: a clean 400 at the boundary, not a crash mid-request. We force
     the dependency probe so the result is deterministic regardless of whether
     this box happens to have mlx_lm / llama_cpp installed."""
-    import tapscribe.summarizers as summarizers
+    import tapscribe.summarizers.catalog as summarizers_catalog
 
-    monkeypatch.setattr(summarizers, "_backend_module_available", lambda backend: False)
+    monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: False)
     seed_merged_transcript(recorder_under_test.recordings_dir, "s")
     r = client.post("/api/sessions/s/summarize", json={"source": "local"})
     assert r.status_code == 400, r.text
@@ -1944,21 +1944,22 @@ def test_summarize_local_model_load_failure_returns_400(client, recorder_under_t
     model', a corrupt GGUF, OOM) surfaces as a clean 400 with remediation — not a
     raw 500. Force the gguf route + a deterministic load failure so the result
     doesn't depend on which backends this box happens to have."""
-    import tapscribe.summarizers as summarizers
+    import tapscribe.summarizers.catalog as summarizers_catalog
+    import tapscribe.summarizers.local as summarizers_local
     from tapscribe.transcribers.catalog import set_available_backends_for_testing
 
     set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
-    monkeypatch.setattr(summarizers, "_backend_module_available", lambda backend: True)
+    monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: True)
 
     def boom(model_repo, gguf_file, *, max_tokens, n_ctx):
         raise ValueError("Received 126 parameters not in model: language_model...")
 
-    monkeypatch.setattr(summarizers, "_build_gguf_generate", boom)
+    monkeypatch.setattr(summarizers_local, "_build_gguf_generate", boom)
     try:
         seed_merged_transcript(recorder_under_test.recordings_dir, "s")
         r = client.post("/api/sessions/s/summarize", json={"source": "local"})
         assert r.status_code == 400, r.text
-        assert summarizers.ENV_LOCAL_GGUF_MODEL in r.json()["detail"]
+        assert summarizers_catalog.ENV_LOCAL_GGUF_MODEL in r.json()["detail"]
     finally:
         set_available_backends_for_testing(None)
 

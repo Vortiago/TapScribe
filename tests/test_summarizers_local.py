@@ -21,7 +21,6 @@ from __future__ import annotations
 import pytest
 
 from tapscribe.summarizers import (
-    _MAX_TOKENS_BOUNDS,
     DEFAULT_SUMMARY_PROMPT,
     ENV_LOCAL_GGUF_MODEL,
     ENV_LOCAL_MLX_MODEL,
@@ -31,11 +30,14 @@ from tapscribe.summarizers import (
     SummarizerFailed,
     SummarizerUnavailable,
     SummaryResult,
-    _build_local_messages,
-    _clamp_max_tokens,
     load_summarizer,
     summary_model_catalog,
 )
+
+# Internal helpers live in their submodules; import them from where they're
+# defined (the package __init__ re-exports only the public interface).
+from tapscribe.summarizers.catalog import _MAX_TOKENS_BOUNDS, _clamp_max_tokens
+from tapscribe.summarizers.local import _build_local_messages
 from tapscribe.transcribers.catalog import set_available_backends_for_testing
 
 
@@ -52,14 +54,14 @@ def extra_present(monkeypatch):
     """Pretend the `[summarize]` backend module IS importable, so a no-generate_fn
     construction doesn't fail the fast dependency probe. Deterministic regardless
     of whether this dev box happens to have mlx_lm / llama_cpp installed."""
-    monkeypatch.setattr("tapscribe.summarizers._backend_module_available", lambda backend: True)
+    monkeypatch.setattr("tapscribe.summarizers.catalog._backend_module_available", lambda backend: True)
 
 
 @pytest.fixture
 def extra_missing(monkeypatch):
     """Pretend the `[summarize]` backend module is NOT importable — the fresh-box
     case the runtime-deps step is meant to fix, and the 'degrade clearly' path."""
-    monkeypatch.setattr("tapscribe.summarizers._backend_module_available", lambda backend: False)
+    monkeypatch.setattr("tapscribe.summarizers.catalog._backend_module_available", lambda backend: False)
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +281,7 @@ def test_local_summarizer_mlx_load_failure_raises_unavailable(
             "language_model.model.layers.24.self_attn.k_norm.weight, ..."
         )
 
-    monkeypatch.setattr("tapscribe.summarizers._build_mlx_generate", boom)
+    monkeypatch.setattr("tapscribe.summarizers.local._build_mlx_generate", boom)
     s = LocalSummarizer(backend="mlx")  # no generate_fn → builds the (patched) backend
     with pytest.raises(SummarizerUnavailable) as ei:
         s.summarize("the transcript", prompt="Summarize it")
@@ -298,7 +300,7 @@ def test_local_summarizer_gguf_load_failure_raises_unavailable(
     def boom(model_repo, gguf_file, *, max_tokens, n_ctx):
         raise RuntimeError("failed to load model from file")
 
-    monkeypatch.setattr("tapscribe.summarizers._build_gguf_generate", boom)
+    monkeypatch.setattr("tapscribe.summarizers.local._build_gguf_generate", boom)
     s = LocalSummarizer(backend="gguf")
     with pytest.raises(SummarizerUnavailable) as ei:
         s.summarize("t", prompt="p")
@@ -317,7 +319,7 @@ def test_local_summarizer_lazy_import_error_still_names_extra(
     def boom(model_repo, max_tokens):
         raise ImportError("No module named 'mlx_lm'")
 
-    monkeypatch.setattr("tapscribe.summarizers._build_mlx_generate", boom)
+    monkeypatch.setattr("tapscribe.summarizers.local._build_mlx_generate", boom)
     s = LocalSummarizer(backend="mlx")
     with pytest.raises(SummarizerUnavailable) as ei:
         s.summarize("t", prompt="p")

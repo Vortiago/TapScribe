@@ -27,7 +27,8 @@ from . import hallucinations as hallucinations_mod
 from .audio import wav_duration_s, wav_rms_dbfs
 from .recorder import Recorder
 from .session_merge import InvalidRange, NoUsableWavs, merge_session, select_session_wavs
-from .sessions import read_session_meta, resolve_session_dir, resolve_wav
+from .session_paths import resolve_session_dir, resolve_wav
+from .sessions import read_session_meta
 from .text import read_hotwords, read_prompt
 from .transcribers import load_transcriber, release_transcriber, run_on_model_thread
 from .wav_cache import cached_transcribe, read_primary_payload
