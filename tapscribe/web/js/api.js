@@ -216,6 +216,8 @@ export function peekWavePeaks(session, name, source, sig) {
   const e = _wavPeaksCache.get(_peaksKey(session, name, source, sig));
   return e && e.settled ? e.value : undefined;
 }
+/** @param {string} url */
+export const getJson = (url) => fetch(url, { cache: "no-store" }).then(_unwrap);
 /**
  * @param {string} url
  * @param {unknown} [body]

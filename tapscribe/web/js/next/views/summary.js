@@ -3,8 +3,10 @@
 //
 // WIRED for the Local + Command sources. Local (#86) is the bundled, offline,
 // hardware-routed model and the DEFAULT source here (view-local default until
-// #84 makes it operator-configurable) — it needs no per-call fields. Command
-// (#82) takes a CLI template (e.g. `claude -p`). The operator picks a source,
+// #84 makes it operator-configurable) — it carries a model picker, populated
+// once from the hardware-routed catalog (GET /api/summarize/models), so the
+// operator can A/B local models. Command (#82) takes a CLI template (e.g.
+// `claude -p`). The operator picks a source,
 // edits the prompt, and clicks Generate; we POST to
 // /api/sessions/{session}/summarize, which summarizes the session's merged
 // transcript and returns the result. We render the summary + the source/model
@@ -25,7 +27,7 @@
 // pane).
 
 import { tpl, pick, selectionInside } from "../../templates.js";
-import { postJson } from "../../api.js";
+import { getJson, postJson } from "../../api.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
 
 /**
@@ -62,6 +64,13 @@ export function build(ctx) {
   const srcLocal = /** @type {HTMLElement} */ (pick(frag, "srcLocal"));
   const srcCommand = /** @type {HTMLElement} */ (pick(frag, "srcCommand"));
 
+  // Local model picker. The <select> is populated ONCE from the hardware-routed
+  // catalog (GET /api/summarize/models) and never rebuilt per-tick, so the
+  // interaction hold holds (same discipline as the source buttons / inputs).
+  const modelSel = /** @type {HTMLSelectElement} */ (pick(frag, "sumModel"));
+  const modelNote = pick(frag, "sumModelNote");
+  const maxTokInput = /** @type {HTMLInputElement} */ (pick(frag, "sumMaxTokens"));
+
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
   let session = null;
@@ -81,6 +90,14 @@ export function build(ctx) {
    * for this view — view-local until #84 makes the default operator-configurable.
    * Command is also wired (#82); API (#85) is present but disabled. */
   let source = "local";
+  /** The selected Local model repo id. Empty until the catalog loads (the
+   * server then falls back to its default); once loaded, mirrors the <select>.
+   * Sent in the Generate body ONLY for the local source. */
+  let model = "";
+  /** The loaded catalog rows, kept so the note can show the picked model's
+   * footprint/context. */
+  /** @type {import('../../types.js').SummaryModel[]} */
+  let models = [];
 
   // Three deliberately-split signatures: the header, the output pane, and the
   // controls update independently so an idle tick rebuilds nothing.
@@ -161,11 +178,16 @@ export function build(ctx) {
     lastCtlSig = " "; // re-sync the button immediately, don't wait for a poll
     reflectControls();
     try {
-      // The bundled Local source needs no per-call fields (a single offline
-      // model); only the Command source carries a CLI template.
-      /** @type {{ source: string, prompt: string, command?: string }} */
+      // The Local source carries the picked model + output cap (empty/NaN →
+      // server defaults); the Command source carries a CLI template instead.
+      /** @type {{ source: string, prompt: string, command?: string, model?: string, max_tokens?: number }} */
       const body = { source, prompt: promptTa.value };
       if (source === "command") body.command = cmdInput.value.trim();
+      if (source === "local") {
+        if (model) body.model = model;
+        const mt = parseInt(maxTokInput.value, 10);
+        if (Number.isFinite(mt)) body.max_tokens = mt;
+      }
       const res = /** @type {import('../../types.js').SummaryResult} */ (
         await postJson(`/api/sessions/${encodeURIComponent(sid)}/summarize`, body)
       );
@@ -211,6 +233,57 @@ export function build(ctx) {
     });
   }
   applySource(); // seed the default (Local) selection + pane visibility
+
+  // ---- Local model picker (REAL) --------------------------------------------
+  // Populate the <select> ONCE from the hardware-routed catalog, then leave it
+  // alone — a click on an option mutates `model`, never a per-tick rebuild, so
+  // the interaction hold holds (the dashboard sweep covers it).
+
+  /** @param {number} t */
+  const ctxLabel = (t) => (t >= 1000 ? `${Math.round(t / 1000)}K` : `${t}`);
+
+  /** Show the picked model's footprint + context + note under the dropdown. */
+  const reflectModelNote = () => {
+    const m = models.find((x) => x.repo_id === model);
+    modelNote.textContent = m
+      ? `≈${m.approx_gb} GB · ${ctxLabel(m.context_tokens)} ctx${m.note ? ` · ${m.note}` : ""}`
+      : "first Generate downloads the model, then it runs fully offline";
+  };
+
+  modelSel.addEventListener("change", () => {
+    model = modelSel.value;
+    reflectModelNote();
+  });
+
+  (async () => {
+    try {
+      const cat = /** @type {import('../../types.js').SummaryModelCatalog} */ (
+        await getJson("/api/summarize/models")
+      );
+      models = cat.models || [];
+      modelSel.replaceChildren();
+      for (const m of models) modelSel.add(new Option(m.label || m.repo_id, m.repo_id, m.is_default, m.is_default));
+      if (!models.length) {
+        modelSel.add(new Option("no local models", "", true, true));
+        modelSel.disabled = true;
+      }
+      model = modelSel.value;
+      reflectModelNote();
+      // Seed the output-cap input's bounds + default from the server (one source
+      // of truth). Don't stomp a value the operator has already typed.
+      if (typeof cat.max_tokens_min === "number") maxTokInput.min = String(cat.max_tokens_min);
+      if (typeof cat.max_tokens_max === "number") maxTokInput.max = String(cat.max_tokens_max);
+      if (typeof cat.max_tokens_default === "number" && maxTokInput.value === "2048") {
+        maxTokInput.value = String(cat.max_tokens_default);
+      }
+    } catch {
+      // Best-effort: if the catalog fetch fails, leave the dropdown disabled and
+      // let the server fall back to its default model (an empty `model` in the
+      // Generate body), rather than blocking the operator.
+      modelSel.add(new Option("model list unavailable — using default", "", true, true));
+      modelSel.disabled = true;
+    }
+  })();
 
   // ---- Per-tick update ------------------------------------------------------
 

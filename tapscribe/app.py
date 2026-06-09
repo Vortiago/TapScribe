@@ -77,7 +77,7 @@ from .sessions import (
     stripped_dir,
     write_session_meta,
 )
-from .summarizers import SummarizerFailed, SummarizerUnavailable
+from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
 from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
@@ -835,17 +835,45 @@ async def api_session_summarize(
     # Forward only explicitly-provided fields and let SummarizeSessionRequest own
     # the defaults (source="command", prompt=DEFAULT_SUMMARY_PROMPT) — the same
     # "value object owns the defaults" contract as the strip-silence route.
-    overrides: dict[str, str] = {}
+    overrides: dict[str, Any] = {}
     source = body.get("source")
     if isinstance(source, str) and source.strip():
         overrides["source"] = source.strip()
     command = body.get("command")
     if isinstance(command, str):
         overrides["command"] = command.strip()
+    model = body.get("model")
+    if isinstance(model, str) and model.strip():
+        overrides["model"] = model.strip()
+    # max_tokens: accept an int or a numeric string; reject bool (a JSON `true`
+    # is an int subclass). Out-of-range values are clamped server-side by the
+    # summarizer, so the route only has to coerce the type.
+    max_tokens = body.get("max_tokens")
+    if isinstance(max_tokens, bool):
+        pass  # a JSON boolean is not a token count — ignore, fall back to default
+    elif isinstance(max_tokens, int):
+        overrides["max_tokens"] = max_tokens
+    elif isinstance(max_tokens, str) and max_tokens.strip().lstrip("-").isdigit():
+        overrides["max_tokens"] = int(max_tokens)
     prompt = body.get("prompt")
     if isinstance(prompt, str):
         overrides["prompt"] = prompt
     return await summarize_session(recorder, SummarizeSessionRequest(session=session, **overrides))
+
+
+@app.get("/api/summarize/models")
+async def api_summarize_models():
+    """List the local summarizer's selectable models for THIS machine's backend.
+
+    Drives the Summary view's model dropdown. The backend is hardware-routed
+    (MLX on Apple Silicon, GGUF/CPU elsewhere — the same probe the summarizer
+    uses), so a Mac sees the MLX catalog and a Linux/CUDA box sees the GGUF one.
+    The catalog is also the allowlist the local source validates a picked model
+    against, so the dropdown can only ever offer loadable choices.
+
+    Response: `{ "backend", "default", "models": [{repo_id, label, approx_gb,
+    context_tokens, note, is_default}, ...] }`."""
+    return summary_model_catalog()
 
 
 @app.delete("/api/sessions/{session}/stripped")

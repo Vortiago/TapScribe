@@ -1985,3 +1985,59 @@ def test_summarize_unknown_session_returns_404(client, recorder_under_test):  # 
         json={"source": "command", "command": _SUMMARIZE_CAT},
     )
     assert r.status_code == 404, r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /api/summarize/models — the local model dropdown's catalog
+# ---------------------------------------------------------------------------
+
+
+def test_api_summarize_models_lists_catalog(client):
+    """The dropdown's source of truth: the hardware-routed catalog with one
+    flagged default. The same table is the allowlist the local source validates
+    against, so the dropdown can only ever offer loadable choices."""
+    r = client.get("/api/summarize/models")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["backend"] in ("mlx", "gguf")
+    assert body["default"]
+    assert body["models"], "the catalog must offer at least one model"
+    row = body["models"][0]
+    assert {"repo_id", "label", "approx_gb", "context_tokens", "note", "is_default"} <= set(row)
+    # Exactly the rows flagged is_default match the top-level default repo.
+    assert [m["repo_id"] for m in body["models"] if m["is_default"]] == [body["default"]]
+    # The output-cap knob the dropdown's number input seeds + bounds.
+    assert body["max_tokens_min"] <= body["max_tokens_default"] <= body["max_tokens_max"]
+
+
+def test_summarize_command_source_accepts_max_tokens_field(client, recorder_under_test):
+    """The route parses an output-cap field without choking; the command source
+    ignores it (an external CLI owns its own length), proving the body coercion
+    is harmless across sources."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    r = client.post(
+        "/api/sessions/s/summarize",
+        json={"source": "command", "command": _SUMMARIZE_CAT, "max_tokens": 4096, "prompt": ""},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_summarize_local_rejects_unknown_model_returns_400(client, recorder_under_test):
+    """Proves the route forwards `model` AND that an untrusted, off-catalog repo
+    is rejected at the boundary (→ 400) before any Hub access — a stray repo id
+    from the dashboard can't reach mlx_lm.load / a download. The allowlist check
+    fires inside the factory, before the transcript read, so it 400s regardless
+    of which backends this box has."""
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    try:
+        seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+        r = client.post(
+            "/api/sessions/s/summarize",
+            json={"source": "local", "model": "evil/not-in-catalog"},
+        )
+        assert r.status_code == 400, r.text
+        assert "evil/not-in-catalog" in r.json()["detail"]
+    finally:
+        set_available_backends_for_testing(None)

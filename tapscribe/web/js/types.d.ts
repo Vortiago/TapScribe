@@ -164,6 +164,27 @@ export interface SummaryResult {
   created_at: string;
 }
 
+// One selectable local-summarizer model — a row of GET /api/summarize/models,
+// shown in the Summary view's model dropdown.
+export interface SummaryModel {
+  repo_id: string;
+  label: string;
+  approx_gb: number;
+  context_tokens: number;
+  note: string;
+  is_default: boolean;
+}
+
+// GET /api/summarize/models — the hardware-routed local model catalog.
+export interface SummaryModelCatalog {
+  backend: string;            // "mlx" on Apple Silicon, "gguf" elsewhere
+  default: string;            // repo_id of the active default
+  models: SummaryModel[];
+  max_tokens_default: number; // OUTPUT-length cap default the number input seeds
+  max_tokens_min: number;     // lower bound for the number input
+  max_tokens_max: number;     // upper bound for the number input
+}
+
 export interface WavFile {
   name: string;
   size: number;
