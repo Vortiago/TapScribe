@@ -213,16 +213,28 @@ class CommandSummarizer:
 # Local adapter — a bundled, offline, hardware-routed model (#86)
 # ---------------------------------------------------------------------------
 
-# The bundled default: Gemma 4 E4B-it (Google, Apr 2026) — the local-first
-# default an operator can run with no network. Same model FAMILY on both
-# backends so a summary reads the same regardless of hardware:
-#   * Apple Silicon       → MLX 4-bit via `mlx_lm`
-#   * CPU / CUDA / other   → GGUF Q4_K_M via `llama_cpp`
-# HITL decision (size/license reviewed in #86): Apache-2.0, ~4.5B effective
-# params, ~5 GB RAM at 4-bit. Every value here is operator-overridable via the
-# env knobs below (and, once the config slice #84 lands, from the dashboard) so
-# swapping the bundled model never needs a code change.
-LOCAL_MLX_MODEL = "mlx-community/gemma-4-e4b-it-4bit"
+# The bundled defaults: the local-first models an operator can run with no
+# network. The MLX (Apple-Silicon) and GGUF (CPU/CUDA/other) backends currently
+# run DIFFERENT models — see the divergence note — chosen so each hardware path
+# has a model that actually loads.
+#
+# MLX → Gemma 3 4B-it, QAT 4-bit (~3 GB). The intended default was Gemma 4 E4B
+# (to match the GGUF side), but that model's E-series KV-sharing layout is
+# unloadable by mlx-lm ≤0.31.3 — the latest release — which raises "Received N
+# parameters not in model" on the shared-KV layers, and there's no mlx-lm 0.32+
+# to fix it. Gemma 3 4B is dense (no shared-KV layers) so it loads and generates
+# cleanly, and QAT 4-bit keeps near-bf16 quality at a smaller footprint.
+# Reconciling both backends onto one model again is a follow-up — revisit once a
+# loadable Gemma-4 E-series MLX build (or mlx-lm 0.32+) ships.
+#
+# GGUF → Gemma 4 E4B-it Q4_K_M (~5 GB; HITL size/license review in #86,
+# Apache-2.0, ~4.5B effective params). llama.cpp loads the E-series fine, so the
+# CPU/CUDA path keeps it.
+#
+# Every value here is operator-overridable via the env knobs below (and, once
+# the config slice #84 lands, from the dashboard) so swapping a bundled model
+# never needs a code change.
+LOCAL_MLX_MODEL = "mlx-community/gemma-3-4b-it-qat-4bit"
 LOCAL_GGUF_MODEL = "ggml-org/gemma-4-E4B-it-GGUF"
 # `Llama.from_pretrained(filename=…)` matches this against the repo's files with
 # fnmatch. The ggml-org gemma-4 GGUFs are lowercased; a case-tolerant glob keeps
@@ -318,6 +330,21 @@ def _missing_extra_message(why: str) -> str:
     return (
         f"the local summarizer needs the [summarize] extra — {why}. Install it with: "
         f"pip install -e '.[summarize]' (the recorder's start.sh / start.ps1 does this at bring-up)."
+    )
+
+
+def _model_load_failed_message(backend: str, model_repo: str, why: object) -> str:
+    """The operator-facing error when the backend imports fine but the model
+    itself won't load — the mlx_lm 'Received N parameters not in model'
+    weight/arch skew, a corrupt/incompatible Hub download, or an OOM. Names the
+    failed repo and the override env var so the operator can swap to a model that
+    loads (or update the extra) instead of staring at a raw 500."""
+    b = _BACKENDS[backend]
+    return (
+        f"the local summarizer couldn't load the {backend} model {model_repo!r} ({why}). "
+        f"This is usually a mismatch between the model and the installed {b.module} — set "
+        f"{b.env_model}=<a compatible repo> to override the bundled model, or update the "
+        f"[summarize] extra (pip install -U -e '.[summarize]')."
     )
 
 
@@ -446,10 +473,14 @@ class LocalSummarizer:
         )
 
     def _build_generate_fn(self) -> LocalGenerateFn:
-        """Lazy-import + load the routed backend. An ImportError here (extra
-        uninstalled, or a broken install `find_spec` couldn't see through) is
-        re-raised as `SummarizerUnavailable` so the operator gets the 'install
-        the extra' message instead of a raw traceback mid-request."""
+        """Lazy-import + load the routed backend. An ImportError (extra
+        uninstalled, or a broken install `find_spec` couldn't see through) maps
+        to `SummarizerUnavailable` with the 'install the extra' message; any
+        OTHER construction failure — the model imports but won't load (mlx_lm's
+        'Received N parameters not in model' weight/arch skew, a corrupt Hub
+        download, OOM) — maps to `SummarizerUnavailable` naming the model + the
+        override env var. Either way the operator gets a clear 400, never a raw
+        traceback mid-request."""
         try:
             if self._backend == "mlx":
                 return _build_mlx_generate(self.model, self._max_tokens)
@@ -462,6 +493,19 @@ class LocalSummarizer:
                     f"couldn't import the {_BACKENDS[self._backend].module!r} backend ({e})"
                 )
             ) from e
+        except SummarizerError:
+            # Already a domain error with its own HTTP status — let it through
+            # rather than re-wrapping it as a generic load failure.
+            raise
+        except Exception as e:
+            # The extra IS importable (ImportError handled above) but the backend
+            # couldn't construct the model: the mlx_lm "Received N parameters not
+            # in model" weight/arch skew, a corrupt/incompatible Hub download, or
+            # an OOM. The try wraps only the cheap load() call (the returned
+            # closure isn't invoked here), so this can't mask a generation bug.
+            # Map to a clear SummarizerUnavailable (→ 400) naming the model + the
+            # override env var so the operator gets remediation, not a raw 500.
+            raise SummarizerUnavailable(_model_load_failed_message(self._backend, self.model, e)) from e
 
 
 # ---------------------------------------------------------------------------
