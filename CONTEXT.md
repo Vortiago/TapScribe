@@ -368,11 +368,20 @@ advancing the render gate**, so the held render lands on the first tick
 after the interaction clears; updates are delayed by the operator's own
 interaction, never lost.
 
-Mechanics live in `web/js/templates.js` (`renderRegion`,
-`selectionInside`); the decision and its rejected alternatives
-(DOM-diffing, capture-and-restore, pausing the poll) are ADR-0004. Say
-"this region needs the interaction hold," not ad-hoc descriptions of
-focus/selection guards.
+Mechanics live in `web/js/templates.js`: `renderRegion(host, build, {sig})`
+is the swap-based primitive (gates on a focus/selection guard + an optional
+perf signature, replaceChildren on render), `selectionInside(host)` is the
+shared selection predicate, and `markRegionStale(host)` invalidates a host's
+remembered signature so the NEXT `renderRegion` re-renders after a mutate /
+lazy-body load — the "defer, don't force" reset (`force:true` would bypass the
+guards and clobber a selection). Swap-based copy-target panes render through
+`renderRegion` (the Summary output pane, the Transcript merged pane, plus the
+spine/settings/live-channel/config-card regions); a few **view-level** gates
+that guard a whole `update()` body rather than one host swap (the Recordings
+WAV list) apply `selectionInside` directly. The decision and its rejected
+alternatives (DOM-diffing, capture-and-restore, pausing the poll) are
+ADR-0004. Say "this region needs the interaction hold," not ad-hoc
+descriptions of focus/selection guards.
 
 ## Per-WAV transcript cache
 

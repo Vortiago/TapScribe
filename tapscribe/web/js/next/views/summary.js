@@ -26,7 +26,7 @@
 // selection-guarded (the summary is a copy target, like the merged-transcript
 // pane).
 
-import { tpl, pick, selectionInside } from "../../templates.js";
+import { tpl, pick, renderRegion, markRegionStale } from "../../templates.js";
 import { getJson, postJson } from "../../api.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
 
@@ -99,10 +99,10 @@ export function build(ctx) {
   /** @type {import('../../types.js').SummaryModel[]} */
   let models = [];
 
-  // Three deliberately-split signatures: the header, the output pane, and the
-  // controls update independently so an idle tick rebuilds nothing.
+  // Split render gates: the header and the controls each update independently so
+  // an idle tick rebuilds nothing. The output pane has no closure sig — it
+  // renders through `renderRegion(sumOut, …, {sig})`, which owns its own gate.
   let lastHeadSig = " ";
-  let lastOutSig = " ";
   let lastCtlSig = " ";
 
   // ---- Helpers --------------------------------------------------------------
@@ -140,14 +140,15 @@ export function build(ctx) {
     body.className = "sumtext";
     body.textContent = res.summary || "";
     out.append(title, body);
-    sumOut.replaceChildren(out);
     // Show what produced it: the model (local/api) if present, else the command
-    // template (command source), else just the source name.
+    // template (command source), else just the source name. Side-effect inside
+    // the build closure so it only fires on a real render (renderRegion gate).
     sumOutHint.textContent = res.model
       ? `${res.source} · ${res.model}`
       : res.command
         ? `${res.source} · ${res.command}`
         : res.source;
+    return out;
   };
 
   /** @param {import('../../types.js').Session | null} sess */
@@ -164,8 +165,8 @@ export function build(ctx) {
         : "Transcribe this session first, then Generate a summary from its merged transcript."
       : "Pick a session from the spine to summarize it.";
     empty.append(h, d);
-    sumOut.replaceChildren(empty);
     sumOutHint.textContent = "";
+    return empty;
   };
 
   // ---- Generate (REAL) ------------------------------------------------------
@@ -193,7 +194,7 @@ export function build(ctx) {
       );
       lastSummary = res;
       summarySession = sid;
-      lastOutSig = " "; // force the output pane to re-render with the new summary
+      markRegionStale(sumOut); // force the output pane to re-render with the new summary
     } catch (e) {
       errorMsg = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
     } finally {
@@ -202,7 +203,7 @@ export function build(ctx) {
       reflectControls();
       // Re-poll for the authoritative state (the job slot is freed server-side).
       // afterMutate() re-renders synchronously, so a fresh summary lands via the
-      // output-pane gate (lastOutSig was reset on success) — which also honours
+      // output-pane renderRegion (marked stale on success) — which also honours
       // the copy-selection guard a direct render here would bypass.
       afterMutate();
     }
@@ -320,19 +321,18 @@ export function build(ctx) {
       lastSummary = null;
       summarySession = sid;
       errorMsg = "";
-      lastOutSig = " ";
+      markRegionStale(sumOut);
       lastCtlSig = " ";
     }
 
-    // ---- Output pane — gated, and deferred (without advancing the gate) while
-    // a text selection is active inside it, so a tick can't dissolve a
-    // mid-copy selection (the merged-transcript pane's rule, for the summary).
+    // ---- Output pane — rendered through renderRegion: it gates on outSig AND
+    // defers (without advancing) while a text selection is active inside it, so
+    // a tick can't dissolve a mid-copy selection. The hint side-effect lives in
+    // the build closures, so it only fires on a real render.
     const outSig = [sid, lastSummary?.created_at || "", hasTranscript() ? 1 : 0].join("§");
-    if (outSig !== lastOutSig && !selectionInside(sumOut)) {
-      lastOutSig = outSig;
-      if (lastSummary) renderSummary(lastSummary);
-      else renderPlaceholder(sess);
-    }
+    renderRegion(sumOut, () => (lastSummary ? renderSummary(lastSummary) : renderPlaceholder(sess)), {
+      sig: outSig,
+    });
 
     // ---- Controls (button + note) — gated. The command/prompt inputs are NOT
     // rebuilt here (interaction hold).

@@ -151,3 +151,22 @@ export function renderRegion(host, build, opts = {}) {
   if (opts.sig != null) _regionSig.set(host, opts.sig);
   host.replaceChildren(build());
 }
+
+/**
+ * Invalidate `host`'s remembered render signature so the NEXT `renderRegion`
+ * call re-renders even if its `sig` is unchanged. This is the "mark stale"
+ * companion to `renderRegion`'s perf gate: a mutation (a fresh summary landing,
+ * a session switch, a lazy body resolving) makes the on-screen content stale
+ * without changing the sig the caller computes, so the caller calls this to
+ * force one more render.
+ *
+ * Deliberately NOT `force:true`: forcing would bypass the focus/selection
+ * guards and could clobber an open control or a mid-copy selection. Marking
+ * stale instead lets the held-back render land on the first tick AFTER the
+ * interaction clears — preserving the interaction hold (ADR-0004).
+ *
+ * @param {Element} host
+ */
+export function markRegionStale(host) {
+  _regionSig.delete(host);
+}

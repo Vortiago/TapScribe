@@ -19,7 +19,7 @@
 // clobbered). The engine panel is rebuilt by main on engine state changes
 // (rebuildEngine).
 
-import { tpl, pick, selectionInside } from "../../templates.js";
+import { tpl, pick, renderRegion, markRegionStale } from "../../templates.js";
 import { postJson, putJson, fetchSessionTranscript, peekSessionTranscript } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -110,9 +110,9 @@ export function build(ctx) {
   /** @type {import('../../types.js').Session | null} */
   let session = null;
   // The merged body + meta currently rendered in the pane, captured inside the
-  // lastTxSig gate. The copy handler reads THESE (no re-fetch) so the copied
-  // text is exactly what's on screen — same alias set, same loaded body. null
-  // until a body has loaded; the copy button's disabled state mirrors it.
+  // merged-pane renderRegion build. The copy handler reads THESE (no re-fetch)
+  // so the copied text is exactly what's on screen — same alias set, same loaded
+  // body. null until a body has loaded; the copy button's disabled state mirrors it.
   /** @type {import('../../types.js').MergedTranscript | null} */
   let copyTxFull = null;
   /** @type {import('../../types.js').EffectiveMeta | null} */
@@ -133,8 +133,9 @@ export function build(ctx) {
   // second (job progress) or per utterance (the WAV list). Sharing one sig
   // was exactly the "/next freezes while transcribing" bug: each job tick
   // invalidated the combined sig and re-rendered thousands of segment rows
-  // (see test_next_perf_soak.py::test_soak_transcript_heavy).
-  let lastTxSig = " "; // merged transcript + header (sentinel: first update renders)
+  // (see test_next_perf_soak.py::test_soak_transcript_heavy). The merged pane's
+  // own sig (txSig) is held by `renderRegion(mergedHost, …)`; only the control
+  // column keeps a closure sig here.
   let lastCtlSig = " "; // control column: range/note/WAV picker/cache
   // Keys (session@stamp) we've already scheduled a re-render for after the
   // lazy merged-transcript fetch lands — dedupes repeated misses.
@@ -162,7 +163,7 @@ export function build(ctx) {
       txRerenderPending.add(key);
       fetchSessionTranscript(sid, stamp)
         .catch(() => { /* transient failure — next poll retries */ })
-        .finally(() => { txRerenderPending.delete(key); lastTxSig = " "; afterMutate(); });
+        .finally(() => { txRerenderPending.delete(key); markRegionStale(mergedHost); afterMutate(); });
     }
     return null;
   };
@@ -358,7 +359,7 @@ export function build(ctx) {
     } catch (e) {
       alert(`Set primary failed: ${String(e).replace(/^Error:\s*/, "")}`);
     } finally {
-      lastTxSig = " ";
+      markRegionStale(mergedHost);
       lastCtlSig = " ";
       afterMutate();
     }
@@ -450,60 +451,56 @@ export function build(ctx) {
     // freezes while transcribing" bug (one rebuild per job tick).
     renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job);
 
-    // ---- Merged transcript + header — gated on what THEY display: session,
-    // marker stamp, loaded-ness, and the label/aliases the rendered lines
-    // show. resolveMerged resets lastTxSig when the lazy body fetch lands, so
-    // "loading… → loaded" re-crosses this gate without a marker change.
+    // ---- Merged transcript + header — rendered through renderRegion on the
+    // mergedHost: it gates on txSig (session, marker stamp, loaded-ness, and the
+    // label/aliases the rendered lines show) AND defers, without advancing, while
+    // a selection is active inside the pane — so a per-WAV sidecar landing mid-job
+    // (or an alias edit) can't dissolve a selection the operator is copying. The
+    // header + copy-button capture + hint all live INSIDE the build closure so
+    // they stay in sync with the body actually rendered (a deferred render must
+    // not desync copy ↔ pane); resolveMerged marks the pane stale when the lazy
+    // body lands, so "loading… → loaded" re-crosses the gate without a marker change.
     const txFull = sess ? resolveMerged(tx, sid) : null;
     const meta = sess ? metaFor(sess) : null;
     const aliasSig = meta ? Object.entries(meta.aliases).map(([k, v]) => `${k}=${v}`).join(",") : "";
     const txSig = [sid, tx?.transcribed_at || "", txFull ? 1 : 0, meta?.label || "", aliasSig].join("§");
-    // Selection guard: a per-WAV sidecar landing mid-job (or an alias edit)
-    // changes txSig and rebuilds the merged pane — dissolving a selection the
-    // operator is copying from it. Deferring WITHOUT updating lastTxSig means
-    // the gate re-fires on the first tick after the selection clears.
-    if (txSig !== lastTxSig && !selectionInside(mergedHost)) {
-      lastTxSig = txSig;
+    renderRegion(
+      mergedHost,
+      () => {
+        header(headHost, {
+          eyebrow: "Session · 3 Transcript",
+          title: "Transcript",
+          sub: tx && sess
+            ? inline("merged result for ", strong(metaFor(sess).label || sess.session))
+            : (sess ? "not transcribed yet — pick a model and transcribe below" : "no session selected — pick one from the spine"),
+        });
 
-      header(headHost, {
-        eyebrow: "Session · 3 Transcript",
-        title: "Transcript",
-        sub: tx && sess
-          ? inline("merged result for ", strong(metaFor(sess).label || sess.session))
-          : (sess ? "not transcribed yet — pick a model and transcribe below" : "no session selected — pick one from the spine"),
-      });
-
-      // Copy button: enabled only once the FULL merged body has loaded (the
-      // slim marker alone can't produce alias-applied lines). Capture the body
-      // + meta the pane is rendering (same `meta` the render call below uses)
-      // so the click handler copies exactly what's shown. Toggled HERE, inside
-      // the gate — never per tick.
-      if (sess && txFull && meta) {
-        copyTxFull = txFull;
-        copyMeta = meta;
-        txCopyBtn.disabled = false;
-      } else {
-        copyTxFull = null;
-        copyMeta = null;
-        txCopyBtn.disabled = true;
-      }
-
-      // Merged transcript (main/left). `tx` is the slim marker; the body comes
-      // from the lazy cache. While it loads, the marker still drives the "has a
-      // transcript" branch so the hint shows the marker's segment count.
-      if (sess && tx) {
-        const segCount = txFull ? (txFull.segments || []).length : (tx.segment_count || 0);
-        const model = txFull?.model || "?";
-        txHint.textContent = `${segCount} seg · model ${model} · took ${fmtMs(txFull?.transcribe_ms)}`;
-        if (txFull) {
-          mergedHost.replaceChildren(mergedTranscript.render(txFull, metaFor(sess), { showAudit: true }));
+        // Copy button: enabled only once the FULL merged body has loaded (the
+        // slim marker alone can't produce alias-applied lines). Captured here,
+        // inside the build, so the click handler copies exactly what's shown.
+        if (sess && txFull && meta) {
+          copyTxFull = txFull;
+          copyMeta = meta;
+          txCopyBtn.disabled = false;
         } else {
+          copyTxFull = null;
+          copyMeta = null;
+          txCopyBtn.disabled = true;
+        }
+
+        // Merged transcript (main/left). `tx` is the slim marker; the body comes
+        // from the lazy cache. While it loads, the marker still drives the "has a
+        // transcript" branch so the hint shows the marker's segment count.
+        if (sess && tx) {
+          const segCount = txFull ? (txFull.segments || []).length : (tx.segment_count || 0);
+          const model = txFull?.model || "?";
+          txHint.textContent = `${segCount} seg · model ${model} · took ${fmtMs(txFull?.transcribe_ms)}`;
+          if (txFull) return mergedTranscript.render(txFull, metaFor(sess), { showAudit: true });
           const loading = document.createElement("div");
           loading.className = "empty";
           loading.textContent = "loading transcript…";
-          mergedHost.replaceChildren(loading);
+          return loading;
         }
-      } else {
         txHint.textContent = "not run";
         const empty = document.createElement("div");
         empty.className = "empty";
@@ -515,9 +512,10 @@ export function build(ctx) {
           ? "Pick a model in the engine panel, then transcribe the session range (or a single WAV) to produce the merged transcript here."
           : "Pick a session from the spine to view its merged transcript.";
         empty.append(h, d);
-        mergedHost.replaceChildren(empty);
-      }
-    }
+        return empty;
+      },
+      { sig: txSig },
+    );
 
     // ---- Control column (source toggle/range/note/WAV picker/cache) — own
     // signature. Skip the DOM-heavy WAV-list / cache rebuild when nothing it

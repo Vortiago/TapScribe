@@ -28,10 +28,14 @@
   the swap while a control inside the host is focused OR while a text
   selection starts/ends inside it (clobbering a selection mid-copy is
   the same bug as snapping a dropdown shut; see `spine.js` for the
-  reference adoption). Per-tick updaters that mutate text/rows in place
-  instead of swapping a region (the live log dialog, `active-taps.js`,
-  `live-feed.js`) and view-level render gates (`transcript.js` merged
-  pane, `recordings.js` WAV list) apply the exported
+  reference adoption; `summary.js` output pane and `transcript.js` merged
+  pane render through it too, calling `markRegionStale(host)` to force the
+  next render after a mutate / lazy-body load WITHOUT bypassing the guards —
+  never `force:true`, which would clobber a mid-copy selection). Per-tick
+  updaters that mutate text/rows in place instead of swapping a region (the
+  live log dialog, `active-taps.js`, `live-feed.js`) and the `recordings.js`
+  WAV-list view-level gate (it gates the whole view body, not a single host
+  swap, so it can't use `renderRegion`) apply the exported
   `selectionInside(host)` for the same rule — defer WITHOUT updating
   the gate's signature, so the held-back render lands on the first
   tick after the selection clears. `live-channel.js` and `config-card.js`
