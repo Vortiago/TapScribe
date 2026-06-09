@@ -2255,3 +2255,113 @@ async def test_summary_stage_local_sends_picked_model_and_max_tokens(running_rec
             assert captured.get("max_tokens") == 4096, captured
         finally:
             await browser.close()
+
+
+async def test_summary_stage_local_seeds_max_tokens_and_surfaces_error(running_recorder: RunningRecorder):
+    """The max-output-tokens input SEEDS from the server (value + bounds), and a
+    rejected Generate (e.g. an off-catalog / unloadable model the backend 400s)
+    surfaces a visible error in the note.
+
+    We mock the catalog with a distinctive default (1536, not the HTML
+    placeholder 2048) + custom bounds to prove the input is seeded from
+    `GET /api/summarize/models`, and fail the summarize POST with the real
+    off-catalog 400 shape to prove the Local source renders the error."""
+    rr = running_recorder
+
+    sd = rr.recorder.session_dir
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "session": rr.recorder.session_start,
+                "model": "test",
+                "transcribed_at": "2026-01-01T00:00:00+00:00",
+                "speakers": ["Alice"],
+                "segments": [],
+                "plain_text": "Alice: we decided to ship the dashboard.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_catalog = {
+        "backend": "gguf",
+        "default": "vendor/only-model",
+        "models": [
+            {
+                "repo_id": "vendor/only-model",
+                "label": "Only Model",
+                "approx_gb": 5.0,
+                "context_tokens": 128000,
+                "note": "",
+                "is_default": True,
+            }
+        ],
+        # Distinctive default + bounds — none equal the HTML placeholder "2048",
+        # so seeing them in the input proves it was seeded from the server.
+        "max_tokens_default": 1536,
+        "max_tokens_min": 128,
+        "max_tokens_max": 4096,
+    }
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+
+            async def _catalog_route(route):
+                await route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(fake_catalog)
+                )
+
+            async def _summarize_route(route):
+                # The backend's real off-catalog / unavailable rejection shape.
+                await route.fulfill(
+                    status=400,
+                    content_type="application/json",
+                    body=json.dumps({"detail": "the local summarizer model 'x' isn't a known gguf model"}),
+                )
+
+            await page.route("**/api/summarize/models", _catalog_route)
+            await page.route("**/api/sessions/*/summarize", _summarize_route)
+
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            # The input is seeded from the catalog (value 1536, not the HTML 2048).
+            await page.wait_for_function(
+                """() => {
+                  const sel = document.querySelector('[data-slot="sumModel"]');
+                  const mt = document.querySelector('[data-slot="sumMaxTokens"]');
+                  return sel && sel.options.length === 1 && mt && mt.value === '1536';
+                }""",
+                timeout=8000,
+            )
+            mt = page.locator('[data-slot="sumMaxTokens"]')
+            assert await mt.get_attribute("min") == "128", "min bound must seed from the catalog"
+            assert await mt.get_attribute("max") == "4096", "max bound must seed from the catalog"
+
+            # Generate enables once the seeded transcript lands; the rejected POST
+            # surfaces a visible error in the note.
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('[data-slot="sumGenerate"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=8000,
+            )
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """() => {
+                  const n = document.querySelector('[data-slot="sumNote"]');
+                  return n && n.classList.contains('is-err') &&
+                         (n.textContent || '').toLowerCase().includes('failed');
+                }""",
+                timeout=10000,
+            )
+        finally:
+            await browser.close()

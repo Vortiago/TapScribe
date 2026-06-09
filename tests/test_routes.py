@@ -2011,6 +2011,39 @@ def test_api_summarize_models_lists_catalog(client):
     assert body["max_tokens_min"] <= body["max_tokens_default"] <= body["max_tokens_max"]
 
 
+def test_api_summarize_models_reflects_env_override(client, recorder_under_test, monkeypatch):
+    """An operator's TAPSCRIBE_SUMMARIZE_{MLX,GGUF}_MODEL override is surfaced as
+    the catalog's `default` AND bypasses the allowlist (it's operator-controlled,
+    not untrusted request input). Forces the gguf route so the result is
+    deterministic regardless of this box's hardware."""
+    import tapscribe.summarizers.catalog as summarizers_catalog
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    monkeypatch.setenv(summarizers_catalog.ENV_LOCAL_GGUF_MODEL, "vendor/operator-custom-gguf")
+    try:
+        # 1. The endpoint surfaces the override as the active default.
+        body = client.get("/api/summarize/models").json()
+        assert body["backend"] == "gguf"
+        assert body["default"] == "vendor/operator-custom-gguf"
+
+        # 2. POSTing that override model is NOT rejected as an unknown model — it
+        # passes the allowlist and reaches the missing-extra probe instead
+        # (llama_cpp isn't importable on CI), proving the override was let through.
+        monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: False)
+        seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+        r = client.post(
+            "/api/sessions/s/summarize",
+            json={"source": "local", "model": "vendor/operator-custom-gguf"},
+        )
+        assert r.status_code == 400, r.text
+        detail = r.json()["detail"]
+        assert "isn't a known" not in detail, f"override must bypass the allowlist, got {detail!r}"
+        assert "summarize" in detail.lower()  # the missing-extra message it reached instead
+    finally:
+        set_available_backends_for_testing(None)
+
+
 def test_summarize_command_source_accepts_max_tokens_field(client, recorder_under_test):
     """The route parses an output-cap field without choking; the command source
     ignores it (an external CLI owns its own length), proving the body coercion
