@@ -270,12 +270,11 @@ export function build(ctx) {
       model = modelSel.value;
       reflectModelNote();
       // Seed the output-cap input's bounds + default from the server (one source
-      // of truth). Don't stomp a value the operator has already typed.
+      // of truth — the HTML value is only a placeholder until this lands, which
+      // is once at mount, before the operator can edit).
       if (typeof cat.max_tokens_min === "number") maxTokInput.min = String(cat.max_tokens_min);
       if (typeof cat.max_tokens_max === "number") maxTokInput.max = String(cat.max_tokens_max);
-      if (typeof cat.max_tokens_default === "number" && maxTokInput.value === "2048") {
-        maxTokInput.value = String(cat.max_tokens_default);
-      }
+      if (typeof cat.max_tokens_default === "number") maxTokInput.value = String(cat.max_tokens_default);
     } catch {
       // Best-effort: if the catalog fetch fails, leave the dropdown disabled and
       // let the server fall back to its default model (an empty `model` in the

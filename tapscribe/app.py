@@ -77,7 +77,12 @@ from .sessions import (
     stripped_dir,
     write_session_meta,
 )
-from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
+from .summarizers import (
+    _MAX_TOKENS_BOUNDS,
+    SummarizerFailed,
+    SummarizerUnavailable,
+    summary_model_catalog,
+)
 from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
@@ -845,16 +850,14 @@ async def api_session_summarize(
     model = body.get("model")
     if isinstance(model, str) and model.strip():
         overrides["model"] = model.strip()
-    # max_tokens: accept an int or a numeric string; reject bool (a JSON `true`
-    # is an int subclass). Out-of-range values are clamped server-side by the
-    # summarizer, so the route only has to coerce the type.
-    max_tokens = body.get("max_tokens")
-    if isinstance(max_tokens, bool):
-        pass  # a JSON boolean is not a token count — ignore, fall back to default
-    elif isinstance(max_tokens, int):
+    # max_tokens: parse + bounds-check exactly like the other numeric body knobs
+    # (gate / strip-silence) — a clear 400 for out-of-range, None when omitted.
+    # The adapter also clamps as a final safety net for non-route callers.
+    max_tokens = _parse_bounded_int(
+        body.get("max_tokens"), "max_tokens", lo=_MAX_TOKENS_BOUNDS[0], hi=_MAX_TOKENS_BOUNDS[1]
+    )
+    if max_tokens is not None:
         overrides["max_tokens"] = max_tokens
-    elif isinstance(max_tokens, str) and max_tokens.strip().lstrip("-").isdigit():
-        overrides["max_tokens"] = int(max_tokens)
     prompt = body.get("prompt")
     if isinstance(prompt, str):
         overrides["prompt"] = prompt
