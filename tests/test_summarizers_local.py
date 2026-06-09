@@ -174,7 +174,9 @@ def test_local_summarizer_injected_fn_skips_dependency_probe(reset_available_bac
 # ---------------------------------------------------------------------------
 
 
-def test_local_summarizer_mlx_load_failure_raises_unavailable(reset_available_backends, extra_present, monkeypatch):
+def test_local_summarizer_mlx_load_failure_raises_unavailable(
+    reset_available_backends, extra_present, monkeypatch
+):
     """mlx_lm.load raising (the 'Received 126 parameters not in model' skew) maps
     to SummarizerUnavailable with the model repo + TAPSCRIBE_SUMMARIZE_MLX_MODEL
     override in the message. The failure is lazy (first summarize), so
@@ -195,7 +197,9 @@ def test_local_summarizer_mlx_load_failure_raises_unavailable(reset_available_ba
     assert ENV_LOCAL_MLX_MODEL in msg  # points at the override knob
 
 
-def test_local_summarizer_gguf_load_failure_raises_unavailable(reset_available_backends, extra_present, monkeypatch):
+def test_local_summarizer_gguf_load_failure_raises_unavailable(
+    reset_available_backends, extra_present, monkeypatch
+):
     """Same graceful mapping for the GGUF backend — any load-time failure
     (corrupt download, OOM, unsupported arch) becomes a clear 400 naming the
     GGUF model + its override env var."""
@@ -212,7 +216,9 @@ def test_local_summarizer_gguf_load_failure_raises_unavailable(reset_available_b
     assert ENV_LOCAL_GGUF_MODEL in msg
 
 
-def test_local_summarizer_lazy_import_error_still_names_extra(reset_available_backends, extra_present, monkeypatch):
+def test_local_summarizer_lazy_import_error_still_names_extra(
+    reset_available_backends, extra_present, monkeypatch
+):
     """A lazy ImportError (extra vanished after the construction probe) must keep
     steering the operator to the [summarize] extra — the broadened load-failure
     catch must not swallow the install path."""
