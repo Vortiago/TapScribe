@@ -161,6 +161,21 @@ async def test_summarize_session_persists_summary_file(recorder_under_test):
     assert out["summarized_at"] == stored["summarized_at"]
 
 
+async def test_summarize_session_persists_transcript_stamp(recorder_under_test):
+    """#94: the persisted summary carries the source transcript's `transcribed_at`
+    so the Summary view can detect a summary that predates a later re-transcribe."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="shipped")
+
+    out = await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_CAT, prompt=""),
+    )
+
+    assert out["transcribed_at"] == "2026-01-01T00:00:00+00:00"
+    stored = read_session_summary("s")
+    assert stored["transcribed_at"] == "2026-01-01T00:00:00+00:00"
+
+
 async def test_summarize_session_regenerate_replaces_summary(recorder_under_test):
     """#83: one current summary per session — re-generating replaces the
     stored summary, it doesn't accumulate history."""

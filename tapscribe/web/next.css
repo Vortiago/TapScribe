@@ -1055,6 +1055,13 @@ body::before { display: none; }
 /* summary output — a title + the generated summary text. */
 .sumout { display: flex; flex-direction: column; gap: 13px; }
 .sumout__title { font-size: 14px; font-weight: 680; color: var(--fg-0); letter-spacing: -0.2px; }
+/* #94: the summary was built from an older transcript than the session now holds —
+   nudge the operator to regenerate. Amber, mirrors the warn-banner pattern. */
+.sumout__stale {
+  font-size: 12px; font-weight: 600; color: var(--warn);
+  border: 1px solid var(--warn); border-radius: var(--next-r-sm);
+  background: color-mix(in srgb, var(--warn) 9%, transparent); padding: 7px 10px;
+}
 /* The real (Command-source) summary is free-form text from the operator's CLI
    tool — render it verbatim, preserving the tool's own line breaks. */
 .sumtext { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.6; color: var(--fg-1); }

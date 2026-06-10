@@ -290,6 +290,11 @@ export interface SummaryMarker {
   summarized_at: string | null; // ISO 8601 — null only on malformed on-disk JSON
   source: string;
   model: string; // empty for the command source
+  // ISO 8601 stamp of the merged transcript this summary was built from (#94).
+  // Compared against the live `session_transcript` marker so the view can flag a
+  // summary that predates a later re-transcribe. Null for summaries written
+  // before this field existed.
+  transcribed_at: string | null;
 }
 
 // GET /api/sessions/{session}/summary response — the persisted summary body.
@@ -302,6 +307,9 @@ export interface PersistedSummary {
   took_ms: number;
   created_at: string;
   summarized_at: string;
+  // Stamp of the merged transcript this summary was built from (#94); null for
+  // summaries persisted before this field was added.
+  transcribed_at: string | null;
 }
 
 export interface MergedTranscript {
