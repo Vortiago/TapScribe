@@ -68,10 +68,15 @@ def build_tap_url(
     name: str,
     tls: bool = False,
     utterance_id: str | None = None,
+    session: str | None = None,
 ) -> str:
     params: dict[str, str] = {"identity": identity, "name": name}
     if utterance_id:
         params["utterance_id"] = utterance_id
+    if session:
+        # Detached-session routing: the Recorder refuses the upgrade for
+        # unknown ids, so only send the param when the operator asked.
+        params["session"] = session
     qs = urllib.parse.urlencode(params)
     scheme = "wss" if tls else "ws"
     return f"{scheme}://{host}:{port}/tap?{qs}"
@@ -168,12 +173,13 @@ async def run_tap_session(
     tap_token: str = "",
     tls: bool = False,
     utterance_id: str | None = None,
+    session: str | None = None,
 ) -> int:
     """Open one /tap WS and stream queue bytes until stop_event is set or
     the WS dies. Returns the total bytes sent."""
     url = build_tap_url(
         host=host, port=port, identity=identity, name=name, tls=tls,
-        utterance_id=utterance_id,
+        utterance_id=utterance_id, session=session,
     )
     subprotocols = build_subprotocols(tap_token)
     print(f"[bridge] connecting → {url}" + (" (with tap-token)" if tap_token else " (no auth)"), flush=True)
@@ -293,6 +299,7 @@ async def _main(args: argparse.Namespace) -> int:
                         tap_token=args.tap_token,
                         tls=args.tls,
                         utterance_id=this_utt,
+                        session=args.session,
                     )
                     capture.stop()
                     state["recording"] = False
@@ -339,6 +346,13 @@ def main() -> int:
                         "(use when the recorder runs with --no-auth).")
     p.add_argument("--tls", action="store_true",
                    help="Connect over wss:// (the recorder was started with --tls).")
+    p.add_argument("--session", default=None,
+                   help="Detached-session id to direct this bridge's taps into "
+                        "(?session= on each /tap WS). Create one with: "
+                        "curl -X POST -H 'Authorization: Bearer <tap-token>' "
+                        "-H 'Content-Type: application/json' -d '{\"detached\": true}' "
+                        "http://<host>:<port>/api/tap/new-session. "
+                        "Default: the Recorder's global current session.")
     args = p.parse_args()
 
     try:

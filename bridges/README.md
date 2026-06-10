@@ -92,6 +92,19 @@ errors — there's nothing for it to do about WlK state anyway.
   on mute / end-of-utterance and mint a fresh one on the next unmute.
   Omitting this still works (each WS gets its own WAV), but bridges that
   want blip resilience should supply it.
+- `session` (optional): a session id to direct this tap into — normally a
+  **detached session** the bridge minted via the control endpoint below.
+  Present, the WAV (and the tap's live-feed lines) land in that session;
+  absent, the Recorder's global current session is used. The id is
+  validated against the existing sessions on disk: an unknown or invalid
+  id **refuses the WS upgrade** with an HTTP 404 denial — the same
+  fail-loudly shape as a bad tap token (which refuses with its 4401
+  close), so a misconfigured bridge errors instead of recording into the
+  wrong session. Only pass ids of eagerly-created detached sessions: the
+  global current session materialises lazily on its first WAV, so passing
+  *its* id can 404 — omit the param to target it. Affiliation is
+  snapshotted at WS open — a session rotation never re-homes an
+  already-open tap.
 
 **Reconnect / blip resilience:** the Recorder will not auto-reconnect to
 the bridge — `/tap` is bridge-initiated. A bridge that wants to recover
@@ -116,7 +129,9 @@ place (daily → refinement), or when the platform moves you to a different
 room.
 
 **Endpoint:** `POST http://<recorder-host>:8001/api/tap/new-session`
-(`https://...` under `--tls`). Fire-and-forget; no request body.
+(`https://...` under `--tls`). Fire-and-forget; no request body for the
+legacy rotate. With a JSON body of `{"detached": true}` it creates a
+**detached session** instead — see below.
 
 **Auth:** the **same tap token** as `/tap`, but carried as an
 `Authorization: Bearer <token>` header. Unlike the WebSocket handshake, an
@@ -140,6 +155,44 @@ a no-op rotation (it won't churn the session timestamp). The JSON response is
 The `spacialchat-bridge` calls this from its popup's **New session** button
 and — when the operator ticks **"start new session on room change"** —
 automatically whenever SpatialChat swaps rooms.
+
+### Detached sessions — per-bridge isolation
+
+A rotation moves the **global** current session, which every plain tap
+shares. When two people tap two different meetings against one Recorder,
+each bridge should instead work in its own **detached session**:
+
+1. `POST /api/tap/new-session` with a JSON body of `{"detached": true}`
+   (same bearer auth). The Recorder mints a fresh session directory and
+   returns it **without** touching the global current session:
+   `{"ok": true, "detached": true, "session": "<id>", "path": "...",
+   "current": "<the untouched global id>"}`.
+2. Open every `/tap` WS with `?session=<id>` so the bridge's audio lands
+   there, isolated from concurrent taps that use the global session.
+
+Detached sessions are ordinary sessions — same on-disk layout, dashboard
+listing, transcription and maintenance operations. Two practical notes:
+a freshly created detached session is empty until its first WAV, so the
+dashboard's prune-empties actions can delete it (create it just-in-time);
+and the id only lives in the bridge — the Recorder won't redirect plain
+taps to it.
+
+Demo with two terminals against one Recorder (the WAVs land in two
+different session folders). `TAPSCRIBE_TAP_TOKEN` is the tap token the
+recorder printed at boot (also stored in `.tap-token`); the
+local-test-bridge reads the same env var for its `--tap-token` default,
+and under `--no-auth` you can drop the Authorization header entirely:
+
+```
+# terminal 1 — a detached meeting
+id=$(curl -s -X POST -H "Authorization: Bearer $TAPSCRIBE_TAP_TOKEN" \
+     -H 'Content-Type: application/json' -d '{"detached": true}' \
+     http://localhost:8001/api/tap/new-session | jq -r .session)
+python bridges/local-test-bridge/local_test_bridge.py --session "$id"
+
+# terminal 2 — the global current session, unaffected
+python bridges/local-test-bridge/local_test_bridge.py
+```
 
 ## Adding a new bridge
 

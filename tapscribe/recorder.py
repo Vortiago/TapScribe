@@ -384,12 +384,14 @@ class UtteranceIndex:
         """Return the existing record marked open=True if resumable, else
         None. Caller is expected to reopen the WAV for append.
 
-        `session_dir` is the Recorder's current session folder. A record
-        whose WAV lives in a different folder (Recorder rotated session
-        between the original open and the resume attempt) is dropped from
-        the index and reported as not-resumable — appending across a
-        session rotation would put the resumed audio in a session the
-        operator is no longer looking at.
+        `session_dir` is the resuming tap's snapshotted session folder
+        (the global current session, or the detached session a
+        /tap?session= reconnect names again). A record whose WAV lives in
+        a different folder (Recorder rotated session between the original
+        open and the resume attempt, or the reconnect targets another
+        session) is dropped from the index and reported as not-resumable —
+        appending across a session boundary would put the resumed audio in
+        a session nobody is looking at.
         """
         self._prune_expired()
         rec = self._by_id.get(utterance_id)
@@ -596,15 +598,46 @@ class Recorder:
                 return False
         return False
 
+    def _mint_unclaimed_session_id(self, *, avoid: str | None = None) -> str:
+        """Mint a fresh session id, de-collided with a numeric suffix.
+        Ids are second-resolution timestamps, so a same-second mint would
+        otherwise alias an id that is already taken — either `avoid` (the
+        not-necessarily-materialised current session) or any directory
+        already on disk (detached sessions are created eagerly; a rotation
+        that re-minted one would silently point the global current session
+        at the detached dir and merge two meetings)."""
+        base = _utc_session_id()
+        candidate = base
+        n = 2
+        while candidate == avoid or (self.recordings_dir / candidate).exists():
+            candidate = f"{base}-{n}"
+            n += 1
+        return candidate
+
     def rotate_session(self) -> tuple[str, str]:
         """Rotate to a fresh session ID. Returns (previous, current).
         Existing /record WebSockets keep writing to their original
         session_dir (captured at WS open); only new opens land in the
-        new folder."""
+        new folder. A same-second rotation may re-mint the previous id
+        when its folder never materialised (harmless: both point at the
+        same lazy dir) but never an id that exists on disk."""
         prev = self.session_start
-        self.session_start = _utc_session_id()
+        self.session_start = self._mint_unclaimed_session_id()
         self.session_dir = self.recordings_dir / self.session_start
         return prev, self.session_start
+
+    def create_detached_session(self) -> tuple[str, Path]:
+        """Mint a fresh session directory WITHOUT touching the global
+        current session — a detached session a Bridge can direct its
+        taps into via /tap?session=<id>. Returns (session_id, session_dir).
+
+        The directory is created eagerly (unlike rotate_session's lazy
+        materialisation) because /tap validates ?session= through
+        resolve_session_dir, which requires the dir to exist."""
+        session_id = self._mint_unclaimed_session_id(avoid=self.session_start)
+        session_dir = self.recordings_dir / session_id
+        session_dir.mkdir(parents=True)
+        return session_id, session_dir
 
     def toggle_recording(self, enabled: bool | None = None) -> bool:
         if enabled is None:

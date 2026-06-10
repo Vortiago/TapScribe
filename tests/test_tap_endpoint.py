@@ -639,6 +639,268 @@ class TestTapNewSession:
         assert recorder_with_fake_wlk.session_start == prev
 
 
+class TestDetachedNewSession:
+    """POST /api/tap/new-session with {"detached": true} mints a fresh,
+    isolated session for the calling Bridge: the directory exists on disk
+    immediately and the global current session is left untouched. The
+    legacy no-body call keeps its rotate semantics (TestTapNewSession)."""
+
+    def test_detached_creates_fresh_session_without_rotating_global(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        global_before = recorder_with_fake_wlk.session_start
+        r = client.post("/api/tap/new-session", json={"detached": True})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["detached"] is True
+        detached_id = body["session"]
+        # A fresh id, never the global current one — even when minted in
+        # the same second as the global session's 1s-resolution id.
+        assert detached_id and detached_id != global_before
+        # The global current session is untouched (no rotation).
+        assert recorder_with_fake_wlk.session_start == global_before
+        # The directory materialises immediately so ?session= taps can
+        # resolve it.
+        assert (recorder_with_fake_wlk.recordings_dir / detached_id).is_dir()
+
+    def test_detached_requires_the_tap_bearer_token_when_auth_enabled(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """The detached mode sits behind the same tap-token gate as the
+        legacy rotate: no token → 401 and nothing created; valid token →
+        the detached session is minted."""
+        before = set(recorder_with_fake_wlk.recordings_dir.iterdir())
+        r = auth_client.post("/api/tap/new-session", json={"detached": True})
+        assert r.status_code == 401
+        assert set(recorder_with_fake_wlk.recordings_dir.iterdir()) == before
+
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.post(
+            "/api/tap/new-session",
+            json={"detached": True},
+            headers={"Authorization": "Bearer " + token},
+        )
+        assert r.status_code == 200 and r.json()["detached"] is True
+
+    def test_malformed_body_is_rejected_not_silently_rotated(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """A body that fails to parse must not fall through to the legacy
+        rotate — the caller plausibly meant {"detached": true}, and a
+        silent rotation would move the GLOBAL session out from under
+        every plain tap."""
+        TestTapNewSession._touch_wav(recorder_with_fake_wlk)
+        before = recorder_with_fake_wlk.session_start
+        dirs_before = set(recorder_with_fake_wlk.recordings_dir.iterdir())
+        r = client.post(
+            "/api/tap/new-session",
+            content=b'{"detached": tru',
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 400
+        assert recorder_with_fake_wlk.session_start == before
+        assert set(recorder_with_fake_wlk.recordings_dir.iterdir()) == dirs_before
+
+    def test_detached_false_keeps_legacy_rotate_semantics(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """An explicit {"detached": false} (and any body without the flag)
+        is the legacy rotate, byte-for-byte response shape included."""
+        TestTapNewSession._touch_wav(recorder_with_fake_wlk)
+        before = recorder_with_fake_wlk.session_start
+        r = client.post("/api/tap/new-session", json={"detached": False})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["rotated"] is True
+        assert body["previous"] == before
+        assert "detached" not in body
+
+    def test_rotation_never_aliases_an_existing_detached_session(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The inverse of detached de-collision: a rotation minted in the
+        same second as a detached session must NOT re-use the detached id —
+        that would point the global current session at the detached dir and
+        silently merge the two meetings."""
+        monkeypatch.setattr("tapscribe.recorder._utc_session_id", lambda: "2099-01-01T00-00-00Z")
+        detached_id = client.post("/api/tap/new-session", json={"detached": True}).json()["session"]
+        assert detached_id == "2099-01-01T00-00-00Z"
+        # Seed a WAV so the rotate's empty-session idempotency guard fires.
+        recorder_with_fake_wlk.session_dir.mkdir(parents=True, exist_ok=True)
+        (recorder_with_fake_wlk.session_dir / "seed.wav").write_bytes(b"")
+        r = client.post("/api/tap/new-session")
+        assert r.json()["rotated"] is True
+        assert r.json()["current"] != detached_id
+        assert recorder_with_fake_wlk.session_dir != recorder_with_fake_wlk.recordings_dir / detached_id
+
+    def test_two_detached_creates_in_one_second_mint_distinct_sessions(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Deterministic de-collision: with the clock pinned, back-to-back
+        detached creates still mint distinct, existing directories."""
+        monkeypatch.setattr("tapscribe.recorder._utc_session_id", lambda: "2099-01-01T00-00-00Z")
+        first = client.post("/api/tap/new-session", json={"detached": True}).json()["session"]
+        second = client.post("/api/tap/new-session", json={"detached": True}).json()["session"]
+        assert first != second
+        assert (recorder_with_fake_wlk.recordings_dir / first).is_dir()
+        assert (recorder_with_fake_wlk.recordings_dir / second).is_dir()
+
+    def test_detached_session_is_an_ordinary_session_in_the_listing(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """Bridge-created detached sessions are ordinary sessions: they
+        appear in the dashboard listing (not flagged current) with their
+        recorded WAVs, like any other session on disk."""
+        recorder_with_fake_wlk.live._proc = None
+        detached_id = client.post("/api/tap/new-session", json={"detached": True}).json()["session"]
+        with client.websocket_connect(f"/tap?identity=alice&name=Alice&session={detached_id}") as ws:
+            ws.send_bytes(b"\x10\x00" * 320)
+        listing = {s["session"]: s for s in client.get("/sessions").json()}
+        assert detached_id in listing
+        assert listing[detached_id]["is_current"] is False
+        assert listing[detached_id]["wav_count"] == 1
+
+
+class TestTapSessionParam:
+    """/tap?session=<id> directs a tap's WAV into that session instead of
+    the global current one — the per-Bridge isolation of issue #100."""
+
+    def test_session_param_isolates_tap_from_concurrent_global_tap(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """Two concurrent taps against one Recorder: the one carrying
+        ?session=<detached id> writes its WAV there; the plain one keeps
+        writing to the global current session."""
+        recorder_with_fake_wlk.live._proc = None  # WAV-routing focus, no relay
+        detached_id = client.post("/api/tap/new-session", json={"detached": True}).json()["session"]
+        pcm = b"\x10\x00" * 320
+        with (
+            client.websocket_connect(f"/tap?identity=alice&name=Alice&session={detached_id}") as ws_a,
+            client.websocket_connect("/tap?identity=bob&name=Bob") as ws_b,
+        ):
+            ws_a.send_bytes(pcm)
+            ws_b.send_bytes(pcm)
+
+        detached_wavs = list((recorder_with_fake_wlk.recordings_dir / detached_id).glob("*.wav"))
+        global_wavs = list(recorder_with_fake_wlk.session_dir.glob("*.wav"))
+        assert len(detached_wavs) == 1 and "Alice" in detached_wavs[0].name
+        assert len(global_wavs) == 1 and "Bob" in global_wavs[0].name
+
+    @pytest.mark.parametrize(
+        "bad_session",
+        [
+            "2099-01-01T00-00-00Z",  # well-formed but no such session on disk
+            "..",  # traversal — rejected by the path-safety seam
+            "",  # empty ?session= is invalid, not a fallback to the global
+        ],
+    )
+    def test_unknown_or_invalid_session_refuses_the_upgrade(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder, bad_session: str
+    ):
+        """An unknown or invalid ?session= refuses the WS upgrade outright
+        (mirroring token rejection) — a misconfigured bridge fails loudly
+        instead of silently recording into the wrong session. The id
+        crosses resolve_session_dir (the canonical path-safety seam), whose
+        HTTPException(404) denies the upgrade with an HTTP 404 response
+        before accept."""
+        from starlette.testclient import WebSocketDenialResponse
+
+        with pytest.raises(WebSocketDenialResponse) as exc_info:
+            with client.websocket_connect(f"/tap?identity=alice&name=Alice&session={bad_session}"):
+                pass
+        assert exc_info.value.status_code == 404
+        # Nothing was recorded anywhere.
+        assert list(recorder_with_fake_wlk.recordings_dir.rglob("*.wav")) == []
+
+    def test_open_tap_keeps_its_session_across_rotation(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Session affiliation snapshots at WS open: a rotation
+        mid-utterance never re-homes the open tap — frames sent after the
+        rotation keep landing in the WAV in the original session folder."""
+        recorder_with_fake_wlk.live._proc = None
+        original_dir = recorder_with_fake_wlk.session_dir
+        # Session ids have 1s resolution, so a same-second rotation would
+        # re-mint the SAME id and the two dirs couldn't be told apart. Pin
+        # the clock boundary so the rotation lands on a distinct id.
+        monkeypatch.setattr("tapscribe.recorder._utc_session_id", lambda: "2099-01-01T00-00-00Z")
+        pcm = b"\x10\x00" * 320
+        with client.websocket_connect("/tap?identity=alice&name=Alice") as ws:
+            ws.send_bytes(pcm)
+            # The WAV materialises during the open; wait for it so the
+            # rotate endpoint's empty-session idempotency guard sees a
+            # non-empty current session and actually rotates.
+            deadline = time.time() + 5
+            while not list(original_dir.glob("*.wav")) and time.time() < deadline:
+                time.sleep(0.01)
+            assert list(original_dir.glob("*.wav")), "tap WAV never materialised before rotation"
+            assert client.post("/api/tap/new-session").json()["rotated"] is True
+            ws.send_bytes(pcm)
+
+        assert recorder_with_fake_wlk.session_dir != original_dir
+        wavs = list(original_dir.glob("*.wav"))
+        assert len(wavs) == 1
+        with wave.open(str(wavs[0]), "rb") as w:
+            assert w.getnframes() == 640  # both frames: pre- AND post-rotation
+        # The new current session received nothing from the open tap.
+        assert list(recorder_with_fake_wlk.session_dir.glob("*.wav")) == []
+
+    def test_resume_with_same_utterance_id_appends_within_detached_session(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """Blip recovery composes with ?session=: a reconnect carrying the
+        same utterance_id AND the same detached session id resumes the
+        existing WAV there — the resume seam matches on the tap's
+        snapshotted session dir, not the global one."""
+        recorder_with_fake_wlk.live._proc = None  # WAV-side focus, as in the global resume test
+        detached_id = client.post("/api/tap/new-session", json={"detached": True}).json()["session"]
+        pcm = b"\x10\x00" * 320
+        utt = "feedbeef1234"
+
+        with client.websocket_connect(
+            f"/tap?identity=alice&name=Alice&utterance_id={utt}&session={detached_id}"
+        ) as ws:
+            ws.send_bytes(pcm)
+            ws.send_bytes(pcm)
+        assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
+
+        with client.websocket_connect(
+            f"/tap?identity=alice&name=Alice&utterance_id={utt}&session={detached_id}"
+        ) as ws:
+            ws.send_bytes(pcm)
+        assert _wait_for_utterance_closed(recorder_with_fake_wlk, utt)
+
+        wavs = list((recorder_with_fake_wlk.recordings_dir / detached_id).glob("*.wav"))
+        assert len(wavs) == 1, f"expected one resumed WAV, got {[w.name for w in wavs]}"
+        with wave.open(str(wavs[0]), "rb") as w:
+            assert w.getnframes() == 960  # 3 frames appended across the blip
+        # Nothing leaked into the global current session.
+        assert list(recorder_with_fake_wlk.session_dir.glob("*.wav")) == []
+
+    def test_detached_tap_live_captions_attributed_to_its_session(
+        self, client: TestClient, recorder_with_fake_wlk: Recorder, fake_wlk: FakeWlkThread
+    ):
+        """Session affiliation covers the live feed too: settled lines from
+        a detached tap carry the detached session id, not the global
+        current one."""
+        detached_id = client.post("/api/tap/new-session", json={"detached": True}).json()["session"]
+        pcm = b"\x10\x00" * 320
+        with client.websocket_connect(f"/tap?identity=alice&name=Alice&session={detached_id}") as ws:
+            ws.send_bytes(pcm)
+            assert _wait_for_relay_bytes(fake_wlk, len(pcm))
+            fake_wlk.push_committed("from the detached meeting")
+            fake_wlk.push_committed("tail line")
+            assert _wait_for_transcript_text(recorder_with_fake_wlk, "from the detached meeting")
+
+        entries = [
+            e
+            for e in recorder_with_fake_wlk.transcripts.snapshot()
+            if e["text"] == "from the detached meeting"
+        ]
+        assert entries and entries[0]["session"] == detached_id
+
+
 def test_pick_tap_subprotocol_returns_match():
     """Pure helper test — the heart of the auth gate, exercised in isolation."""
     from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX, pick_tap_subprotocol
