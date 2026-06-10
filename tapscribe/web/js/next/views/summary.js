@@ -324,7 +324,7 @@ export function build(ctx) {
     }
     const p = promptTa.value.trim();
     const shown = p.length > 80 ? `${p.slice(0, 77)}…` : p;
-    const promptArg = shown ? ` "${shown.replace(/"/g, '\\"')}"` : "";
+    const promptArg = shown ? ` "${shown.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : "";
     const l1 = document.createElement("div");
     l1.textContent = `will run: ${cmd}${promptArg}`;
     const l2 = document.createElement("div");
