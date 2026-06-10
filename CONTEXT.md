@@ -277,10 +277,36 @@ Besides the audio `tap`, a Bridge may issue one **control** verb:
 `Authorization: Bearer` header) asks the Recorder to rotate to a fresh
 session — e.g. the SpatialChat Bridge's "New session" button or its opt-in
 "new session on room change." It rotates only; pruning empty sessions stays a
-dashboard/Basic-auth action. It's the only thing a Bridge sends over HTTP;
-everything else is PCM over `/tap`.
+dashboard/Basic-auth action. With body `{"detached": true}` the same verb
+instead mints a **detached session** (below) without rotating anything.
+It's the only thing a Bridge sends over HTTP; everything else is PCM over
+`/tap`.
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
+
+## Detached session
+
+A session a Bridge creates for itself and directs its own taps into,
+fully isolated from the Recorder's global current session — so two
+people can tap two meetings against one Recorder without muddling.
+Minted via `POST /api/tap/new-session` with body `{"detached": true}`
+(the global current session is untouched; the directory is created
+eagerly, de-collided from the 1 s-resolution current-session id) and
+joined by opening `/tap` with `?session=<id>`. The id crosses
+`resolve_session_dir` — the canonical path-safety seam — and an unknown
+or invalid id refuses the WS upgrade, mirroring token rejection.
+
+Session affiliation is snapshotted at WS open (like the per-identity
+`do_record`/`do_live` prefs): rotations never re-home an open tap, and
+both the tap's WAVs and its live-feed lines carry the snapshotted
+session. On disk and on the dashboard a detached session is an ordinary
+session — same layout, listing, and maintenance operations. That
+includes empty-session pruning: a detached dir with no WAV yet is
+prunable by the dashboard's prune actions, so Bridges should create it
+just-in-time, not long in advance — and a tap whose per-identity record
+preference is off never materialises a WAV at all, leaving its detached
+session prunable for its whole lifetime (a pruned id refuses the next
+`?session=` upgrade until the Bridge mints a fresh one).
 
 ## Utterance
 

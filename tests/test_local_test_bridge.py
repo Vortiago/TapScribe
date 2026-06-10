@@ -65,6 +65,22 @@ def test_build_tap_url_uses_wss_when_tls_set():
     assert url.startswith("wss://recorder.lan:8001/tap?")
 
 
+def test_build_tap_url_carries_session_only_when_given():
+    """--session pins the bridge's taps to a detached session via the
+    ?session= query param; omitted, the param stays off the wire so the
+    Recorder falls back to the global current session."""
+    url = ltb.build_tap_url(
+        host="localhost",
+        port=8001,
+        identity="alice",
+        name="Alice",
+        session="2026-06-10T12-00-00Z-2",
+    )
+    assert "session=2026-06-10T12-00-00Z-2" in url
+    url = ltb.build_tap_url(host="localhost", port=8001, identity="alice", name="Alice")
+    assert "session=" not in url
+
+
 def test_build_subprotocols_empty_for_blank_token():
     """No subprotocols when the operator left the token blank — the
     server should be in --no-auth mode."""

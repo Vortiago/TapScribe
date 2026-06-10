@@ -16,6 +16,8 @@ The big-picture route map:
   DELETE /api/live-transcript   — clear the live transcripts feed (dashboard "clear")
   WS   /tap?identity&name       — Bridge audio in (one WS per utterance);
                                   Recorder fans out to WAV + WlK relay (ADR-0002).
+                                  Optional &session=<id> pins the tap to a
+                                  detached session (unknown id → upgrade refused).
                                   Auth: Sec-WebSocket-Protocol "tapscribe.v1.tap.<token>"
                                   when AUTH_ENABLED; gate is in the route handler.
 """
@@ -399,13 +401,48 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     prune empty sessions. The tap token is a deliberately lower-privilege
     credential handed to browser extensions, so deleting session folders stays
     a Basic-auth action (the dashboard's "+ new session" / "prune empty"). No
-    filesystem path is derived from the request (the new session id is a
-    server-minted UTC timestamp), so there is no path-injection surface here.
+    filesystem path is derived from the request (session ids are server-minted
+    UTC timestamps and the optional body carries only a boolean), so there is
+    no path-injection surface here.
+
+    With a JSON body of `{"detached": true}` the verb creates a DETACHED
+    session instead: a fresh session directory is minted and returned WITHOUT
+    rotating the global current session, for the bridge to direct its taps
+    into via /tap?session=<id> (per-bridge isolation; see "Detached session"
+    in CONTEXT.md). The legacy no-body call keeps the rotate semantics below.
     """
     if config.AUTH_ENABLED and not auth.check_tap_bearer(
         req.headers.get("authorization"), recorder.tap.value
     ):
         return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+
+    # The body is optional (the legacy no-body call = rotate) but, when
+    # present, must parse as a JSON object: a malformed {"detached": true}
+    # falling through to the legacy branch would silently rotate the GLOBAL
+    # session out from under every plain tap — reject so the bridge retries.
+    raw_body = await req.body()
+    if raw_body:
+        try:
+            body = json.loads(raw_body)
+        except ValueError:
+            return JSONResponse({"detail": "malformed JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"detail": "JSON body must be an object"}, status_code=400)
+    else:
+        body = {}
+    if body.get("detached"):
+        session_id, session_dir = recorder.create_detached_session()
+        print(
+            f"[tapscribe] tap detached session {session_id} (current: {recorder.session_start})",
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "detached": True,
+            "session": session_id,
+            "path": str(session_dir),
+            "current": recorder.session_start,
+        }
 
     # Idempotency guard (tap path only): if the current session is empty, a
     # rotation would only churn the session-id timestamp — no-op it. The
@@ -1195,7 +1232,10 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
 async def tap(ws: WebSocket):
     """The Bridge's only endpoint. One WS per utterance.
 
-    The route's job is small: gate auth, accept the upgrade, honour the
+    The route's job is small: gate auth, resolve the tap's session
+    (?session=<id> → that detached session, validated against the
+    path-safety seam with the upgrade refused on an unknown id; absent →
+    the global current session), accept the upgrade, honour the
     recording-paused toggle, build a TapFanOut, and pump PCM frames into
     it. The fan-out owns WAV writing, UtteranceIndex bookkeeping,
     ActiveStream registration, and the WlKRelay (per ADR-0002).
@@ -1230,6 +1270,20 @@ async def tap(ws: WebSocket):
             await ws.close(code=4401, reason="missing or invalid tap token")
             return
 
+    # Detached-session routing: ?session=<id> pins this tap to an existing
+    # session, resolved through the canonical path-safety seam
+    # (session_paths.resolve_session_dir). Absent → the recorder's current
+    # session. Affiliation is snapshotted here at WS open — like the
+    # per-identity record/live prefs below — so a rotation never re-homes
+    # an open tap.
+    session_param = ws.query_params.get("session")
+    if session_param is not None:
+        tap_session_dir = resolve_session_dir(session_param)
+        tap_session = tap_session_dir.name
+    else:
+        tap_session = recorder.session_start
+        tap_session_dir = recorder.session_dir
+
     await ws.accept(subprotocol=accept_subprotocol)
 
     # Honor the operator's pause toggle: accept the WS so the bridge knows
@@ -1256,6 +1310,8 @@ async def tap(ws: WebSocket):
         utterance_id=utterance_id,
         do_record=tap_pref.record,
         do_live=tap_pref.live,
+        session=tap_session,
+        session_dir=tap_session_dir,
     ) as fan_out:
         try:
             while True:

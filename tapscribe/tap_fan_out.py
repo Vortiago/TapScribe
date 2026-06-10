@@ -18,6 +18,7 @@ import time
 import wave
 from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 
 from .audio import int16_peak_norm, open_recorder_wav
 from .live_relay import WlKRelay
@@ -60,6 +61,8 @@ class TapFanOut:
         utterance_id: str,
         do_record: bool,
         do_live: bool,
+        session: str | None = None,
+        session_dir: Path | None = None,
     ) -> None:
         self._recorder = recorder
         self._identity = identity
@@ -67,6 +70,13 @@ class TapFanOut:
         self._utterance_id = utterance_id
         self._do_record = do_record
         self._do_live = do_live
+        # Session affiliation — snapshotted at construction (WS open), like
+        # the do_record/do_live prefs: a rotation never re-homes an open
+        # tap, and a detached tap (?session=) stays in its own session for
+        # both the WAV and the live-feed attribution. None → the recorder's
+        # current session at open time.
+        self._session: str = session if session is not None else recorder.session_start
+        self._session_dir: Path = session_dir if session_dir is not None else recorder.session_dir
         self._wf: wave.Wave_write | None = None
         self._record: UtteranceRecord | None = None
         self._conn_id: str = ""
@@ -111,6 +121,8 @@ class TapFanOut:
         utterance_id: str,
         do_record: bool,
         do_live: bool,
+        session: str | None = None,
+        session_dir: Path | None = None,
     ) -> TapFanOut:
         self = cls(
             recorder,
@@ -119,6 +131,8 @@ class TapFanOut:
             utterance_id=utterance_id,
             do_record=do_record,
             do_live=do_live,
+            session=session,
+            session_dir=session_dir,
         )
         await self._open()
         return self
@@ -202,7 +216,7 @@ class TapFanOut:
             resumed = self._recorder.utterances.try_resume(
                 self._utterance_id,
                 identity=self._identity,
-                session_dir=self._recorder.session_dir,
+                session_dir=self._session_dir,
             )
             if resumed is not None:
                 # Bridge reconnected within the resume window with the
@@ -235,7 +249,7 @@ class TapFanOut:
                 # we don't repeat them here.
                 short_id = safe_name(self._identity)[:10]
                 fname = build_recorder_wav_name(started_at, self._name or "", short_id)
-                session_dir = self._recorder.session_dir
+                session_dir = self._session_dir
                 session_dir.mkdir(parents=True, exist_ok=True)
                 fpath = session_dir / fname
                 record = UtteranceRecord(
@@ -367,7 +381,7 @@ class TapFanOut:
         """Settled-line consumer for the WlKRelay. Cleans Whisper
         meta-tokens (e.g. `<|nospeech|>`), drops letterless residues,
         then appends to LiveTranscripts attributed to this fan-out's
-        identity/name and current session."""
+        identity/name and snapshotted session."""
         cleaned = clean_meta_tokens(text)
         if not cleaned or not any(c.isalpha() for c in cleaned):
             return
@@ -377,7 +391,7 @@ class TapFanOut:
                 "identity": self._identity,
                 "name": self._name,
                 "text": cleaned,
-                "session": self._recorder.session_start,
+                "session": self._session,
             }
         )
 
