@@ -159,18 +159,26 @@ def read_wav_transcript(session: str, name: str, source: str = "original") -> di
 
 def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
     """The committed strip-silence cut for one ORIGINAL wav — the explicit
-    {start_s, end_s} spans the last strip run wrote (plus its knobs and run
-    stamp), or None when the session has no strip-meta or this wav produced
-    no regions. `resolve_wav` validates session + name; `_read_json_or_none`
-    re-checks containment before opening the sidecar."""
-    resolve_wav(session, name, "original")
+    {name, start_s, end_s} spans the last strip run wrote (plus its knobs
+    and run stamp), or None when the session has no strip-meta or this wav
+    produced no regions. Entries are fingerprinted against the original's
+    current size/mtime, so spans for a since-rewritten WAV read as absent
+    instead of drawing a stale cut. `resolve_wav` validates session + name;
+    `_read_json_or_none` re-checks containment before opening the sidecar."""
+    wav_path = resolve_wav(session, name, "original")
     meta = _read_json_or_none(stripped_dir(session) / "strip-meta.json")
     if not isinstance(meta, dict):
         return None
-    spans = (meta.get("files") or {}).get(name)
-    if not spans:
+    entry = (meta.get("files") or {}).get(name)
+    if not isinstance(entry, dict) or not entry.get("spans"):
         return None
-    return {"spans": spans, "stripped_at": meta.get("stripped_at"), "knobs": meta.get("knobs")}
+    try:
+        st = os.stat(wav_path)
+    except OSError:
+        return None
+    if st.st_size != entry.get("wav_size") or st.st_mtime_ns != entry.get("wav_mtime_ns"):
+        return None
+    return {"spans": entry["spans"], "stripped_at": meta.get("stripped_at"), "knobs": meta.get("knobs")}
 
 
 # ---------------------------------------------------------------------------

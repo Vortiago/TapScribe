@@ -23,9 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import config
 from . import strip_silence as _ss
-from .audio import wav_rms_dbfs
 from .recorder import Recorder
 from .session_merge import NoUsableWavs
 from .session_paths import resolve_session_dir, stripped_dir
@@ -78,63 +76,26 @@ def strip_one_wav(
     """
 
     samples = _ss.read_wav_int16(src)
-    total = len(samples)
-    in_secs = total / _ss.SAMPLE_RATE
-    if total == 0:
-        return {
+    plan = _ss.plan_strip_regions(
+        samples,
+        min_silence_ms=min_silence_ms,
+        pad_ms=pad_ms,
+        speech_floor_db=speech_floor_db,
+    )
+
+    if not plan.regions:
+        row: dict[str, Any] = {
             "name": src.name,
-            "in_seconds": 0.0,
+            "in_seconds": plan.in_seconds,
             "speech_seconds": 0.0,
             "segments": 0,
             "written": False,
             "regions_written": [],
-            "reason": "empty",
+            "reason": plan.reason,
         }
-
-    # Whole-file silence gate. Same threshold the transcribe path uses
-    # (SILENT_RMS_DBFS_FLOOR). If the original WAV has no sustained signal,
-    # silero will at best false-positive on a transient, and the per-region
-    # outputs are just concentrated noise that hallucinates under Whisper.
-    # Don't write them.
-    overall_rms_dbfs = wav_rms_dbfs(src)
-    if overall_rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
-        return {
-            "name": src.name,
-            "in_seconds": round(in_secs, 2),
-            "speech_seconds": 0.0,
-            "segments": 0,
-            "written": False,
-            "regions_written": [],
-            "reason": f"whole-file silent ({overall_rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)",
-        }
-
-    regions = _ss.detect_speech_silero(samples, min_silence_ms=min_silence_ms, pad_ms=pad_ms)
-
-    if not regions:
-        return {
-            "name": src.name,
-            "in_seconds": round(in_secs, 2),
-            "speech_seconds": 0.0,
-            "segments": 0,
-            "written": False,
-            "regions_written": [],
-            "reason": "no speech detected",
-            "detector": "silero-vad",
-        }
-
-    pre_filter_count = len(regions)
-    regions = _ss.filter_low_energy_regions(samples, regions, floor_dbfs=speech_floor_db)
-    if not regions:
-        return {
-            "name": src.name,
-            "in_seconds": round(in_secs, 2),
-            "speech_seconds": 0.0,
-            "segments": 0,
-            "written": False,
-            "regions_written": [],
-            "reason": f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
-            "detector": "silero-vad",
-        }
+        if plan.detector:
+            row["detector"] = plan.detector
+        return row
 
     out_dir.mkdir(parents=True, exist_ok=True)
     origin = parse_wav_start(src.name) or datetime.fromtimestamp(src.stat().st_mtime, tz=UTC)
@@ -142,32 +103,27 @@ def strip_one_wav(
 
     speech_samples = 0
     regions_written: list[str] = []
-    region_spans: list[dict[str, float]] = []
-    for start_sample, end_sample in regions:
+    region_spans: list[dict[str, Any]] = []
+    for (start_sample, end_sample), span in zip(plan.regions, plan.spans, strict=True):
         region_samples = samples[start_sample:end_sample]
         offset_s = start_sample / _ss.SAMPLE_RATE
         region_start = origin + timedelta(seconds=offset_s)
         fname = build_recorder_wav_name(region_start, speaker_slug, ident_slug)
         _ss.write_wav_int16(out_dir / fname, region_samples)
         regions_written.append(fname)
-        region_spans.append(
-            {
-                "start_s": round(start_sample / _ss.SAMPLE_RATE, 3),
-                "end_s": round(end_sample / _ss.SAMPLE_RATE, 3),
-            }
-        )
+        region_spans.append({"name": fname, **span})
         speech_samples += len(region_samples)
 
     return {
         "name": src.name,
-        "in_seconds": round(in_secs, 2),
+        "in_seconds": plan.in_seconds,
         "speech_seconds": round(speech_samples / _ss.SAMPLE_RATE, 2),
-        "segments": len(regions),
-        "segments_filtered_below_floor": pre_filter_count - len(regions),
+        "segments": len(plan.regions),
+        "segments_filtered_below_floor": plan.segments_filtered_below_floor,
         "written": True,
         "regions_written": regions_written,
         "region_spans": region_spans,
-        "detector": "silero-vad",
+        "detector": plan.detector,
     }
 
 
@@ -213,13 +169,26 @@ async def strip_session(recorder: Recorder, req: StripSessionRequest) -> dict[st
         results = await asyncio.to_thread(_run)
         finished = datetime.now(UTC)
 
-        # Persist the committed cut (#90): the explicit spans each written WAV
-        # was cut to, keyed by ORIGINAL name, plus the knobs that produced
-        # them. Lives inside stripped/ so a re-strip's rmtree or a "clear
-        # stripped" wipes it with the clips it describes.
-        spans_by_original = {
-            r["name"]: r["region_spans"] for r in results if r.get("written") and r.get("region_spans")
-        }
+        # Persist the committed cut (#90, schema v2): per ORIGINAL, the
+        # explicit spans each region clip was cut to (each span carries its
+        # clip's filename so a single-clip delete can prune it) plus a
+        # size/mtime fingerprint of the original (a since-rewritten WAV must
+        # read as "no committed cut", not draw stale geometry). Lives inside
+        # stripped/ so a re-strip's rmtree or a "clear stripped" wipes it
+        # with the clips it describes.
+        spans_by_original: dict[str, dict[str, Any]] = {}
+        for r in results:
+            if not (r.get("written") and r.get("region_spans")):
+                continue
+            try:
+                st = (session_dir / r["name"]).stat()
+            except OSError:
+                continue
+            spans_by_original[r["name"]] = {
+                "wav_size": st.st_size,
+                "wav_mtime_ns": st.st_mtime_ns,
+                "spans": r["region_spans"],
+            }
         if spans_by_original:
             atomic_write_text(
                 out_dir / "strip-meta.json",

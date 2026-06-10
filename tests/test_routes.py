@@ -1220,6 +1220,23 @@ def test_strip_meta_null_when_never_stripped_and_404_on_bad_input(client, record
     assert client.get("/api/wav/s/strip-meta.json/strip-meta").status_code == 404
 
 
+def test_strip_meta_null_after_original_rewritten(client, recorder_under_test):
+    """The fingerprint guard: a re-recorded/rewritten original must read as
+    'no committed cut' rather than draw the old spans against new audio."""
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    r = client.post("/api/sessions/s/strip-silence", json={})
+    assert r.status_code == 200, r.text
+    m = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m.status_code == 200 and m.json() is not None
+
+    # Rewrite the original (longer file -> new size + mtime).
+    seed_wav(sd / "20260101T000000Z__alice__abc.wav", seconds=2.0)
+    m2 = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m2.status_code == 200
+    assert m2.json() is None
+
+
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", [])

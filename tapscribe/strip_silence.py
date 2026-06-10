@@ -15,10 +15,12 @@ strip-silence endpoint, and is also runnable as a CLI via
 from __future__ import annotations
 
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from . import config
 from .audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
 from .audio import dbfs_from_rms, open_recorder_wav
 
@@ -96,3 +98,92 @@ def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms:
         speech_pad_ms=pad_ms,
     )
     return [(t["start"], t["end"]) for t in ts]
+
+
+@dataclass(frozen=True)
+class StripPlan:
+    """What a strip-silence run WOULD do to one WAV's samples — the padded,
+    floor-filtered speech regions plus the aggregate stats and the
+    whole-file-silence verdict. Pure data, no disk writes: `strip_one_wav`
+    writes one region file per entry in `regions`, and the strip-preview
+    route serialises `spans` + the stats for the dashboard's live overlay.
+
+    `regions` are (start_sample, end_sample) tuples — the exact slice
+    bounds the splitter writes from; `spans` are the same boundaries as
+    rounded {start_s, end_s} second-dicts (the wire/UI shape). Empty
+    `regions` with a non-None `reason` explains why nothing would be
+    written; `detector` is None when detection never ran (empty or
+    whole-file-silent input)."""
+
+    regions: list[tuple[int, int]]
+    spans: list[dict[str, float]]
+    in_seconds: float
+    speech_seconds: float
+    segments_filtered_below_floor: int
+    silent: bool
+    rms_dbfs: float
+    reason: str | None
+    detector: str | None
+
+
+def plan_strip_regions(
+    samples: np.ndarray,
+    *,
+    min_silence_ms: int,
+    pad_ms: int,
+    speech_floor_db: float = SPEECH_RMS_DBFS_FLOOR,
+) -> StripPlan:
+    """Plan the strip-silence cut for one WAV's samples — extracted from
+    `batch_strip.strip_one_wav` (#89) so the live strip-preview endpoint and
+    the splitter share one detection path. Behaviour-preserving: the same
+    whole-file silence gate (RMS vs `config.SILENT_RMS_DBFS_FLOOR`, computed
+    from the samples instead of a second file read), the same silero
+    detection, the same per-region energy floor — in the same order."""
+    total = len(samples)
+    in_secs = total / SAMPLE_RATE
+    if total == 0:
+        return StripPlan(
+            regions=[], spans=[], in_seconds=0.0, speech_seconds=0.0,
+            segments_filtered_below_floor=0, silent=True, rms_dbfs=-200.0,
+            reason="empty", detector=None,
+        )
+
+    rms = float(np.sqrt((samples.astype(np.float32) ** 2).mean()))
+    rms_dbfs = dbfs_from_rms(rms)
+    if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
+        return StripPlan(
+            regions=[], spans=[], in_seconds=round(in_secs, 2), speech_seconds=0.0,
+            segments_filtered_below_floor=0, silent=True, rms_dbfs=rms_dbfs,
+            reason=f"whole-file silent ({rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)",
+            detector=None,
+        )
+
+    regions = detect_speech_silero(samples, min_silence_ms=min_silence_ms, pad_ms=pad_ms)
+    if not regions:
+        return StripPlan(
+            regions=[], spans=[], in_seconds=round(in_secs, 2), speech_seconds=0.0,
+            segments_filtered_below_floor=0, silent=False, rms_dbfs=rms_dbfs,
+            reason="no speech detected", detector="silero-vad",
+        )
+
+    pre_filter_count = len(regions)
+    regions = filter_low_energy_regions(samples, regions, floor_dbfs=speech_floor_db)
+    if not regions:
+        return StripPlan(
+            regions=[], spans=[], in_seconds=round(in_secs, 2), speech_seconds=0.0,
+            segments_filtered_below_floor=pre_filter_count, silent=False, rms_dbfs=rms_dbfs,
+            reason=f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
+            detector="silero-vad",
+        )
+
+    spans = [
+        {"start_s": round(s / SAMPLE_RATE, 3), "end_s": round(e / SAMPLE_RATE, 3)}
+        for s, e in regions
+    ]
+    speech_samples = sum(e - s for s, e in regions)
+    return StripPlan(
+        regions=regions, spans=spans, in_seconds=round(in_secs, 2),
+        speech_seconds=round(speech_samples / SAMPLE_RATE, 2),
+        segments_filtered_below_floor=pre_filter_count - len(regions),
+        silent=False, rms_dbfs=rms_dbfs, reason=None, detector="silero-vad",
+    )

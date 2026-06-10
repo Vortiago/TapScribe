@@ -84,6 +84,13 @@ async def test_strip_session_rows_carry_region_spans_and_persist_meta(recorder_u
     meta_path = recorder_under_test.recordings_dir / "s" / "stripped" / "strip-meta.json"
     assert meta_path.is_file()
     meta = json.loads(meta_path.read_text())
-    assert meta["files"] == {r["name"]: r["region_spans"] for r in rows}
     assert meta["knobs"] == {"min_silence_ms": 500, "pad_ms": 200, "speech_floor_db": -45.0}
     assert meta["stripped_at"] == out["stripped_at"]
+    for row in rows:
+        entry = meta["files"][row["name"]]
+        st = (recorder_under_test.recordings_dir / "s" / row["name"]).stat()
+        assert entry["wav_size"] == st.st_size
+        assert entry["wav_mtime_ns"] == st.st_mtime_ns
+        assert entry["spans"] == row["region_spans"]
+        # v2: every span names the region clip it was written to.
+        assert [sp["name"] for sp in entry["spans"]] == row["regions_written"]
