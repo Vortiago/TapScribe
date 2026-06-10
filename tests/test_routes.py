@@ -1287,6 +1287,56 @@ def test_absorb_carries_strip_meta_into_target(client, recorder_under_test):
     assert m_src.json()["spans"] == src_spans
 
 
+def test_strip_preview_matches_committed_strip_and_writes_nothing(client, recorder_under_test):
+    """The preview IS the cut: for the same knobs, /strip-preview's spans
+    must equal what a real ✂ strip then commits (modulo the clip filenames
+    only the real run mints) — and the preview itself writes nothing."""
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+
+    p = client.get(
+        "/api/wav/s/20260101T000000Z__alice__abc.wav/strip-preview"
+        "?min_silence_ms=400&pad_ms=50&speech_floor_db=-40"
+    )
+    assert p.status_code == 200, p.text
+    preview = p.json()
+    assert preview["segments"] >= 1
+    assert preview["silent"] is False
+    assert preview["detector"] == "silero-vad"
+    assert preview["knobs"] == {"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0}
+    assert preview["speech_seconds"] <= preview["in_seconds"]
+    for sp in preview["spans"]:
+        assert 0.0 <= sp["start_s"] < sp["end_s"] <= preview["in_seconds"] + 0.01
+    # A preview must not create stripped/ (or anything else).
+    assert not (sd / "stripped").exists()
+
+    r = client.post(
+        "/api/sessions/s/strip-silence",
+        json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+    )
+    assert r.status_code == 200, r.text
+    committed = [f for f in r.json()["files"] if f.get("written")][0]["region_spans"]
+    assert [{"start_s": sp["start_s"], "end_s": sp["end_s"]} for sp in committed] == preview["spans"]
+
+
+def test_strip_preview_shares_strip_knob_bounds_and_sanitiser(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    base = "/api/wav/s/20260101T000000Z__alice__abc.wav/strip-preview"
+    # Out-of-range knobs → 400, same bounds as the strip route.
+    assert client.get(f"{base}?min_silence_ms=50").status_code == 400
+    assert client.get(f"{base}?pad_ms=9999").status_code == 400
+    assert client.get(f"{base}?speech_floor_db=5").status_code == 400
+    # Unknown source → 400, whitelisted before any filesystem touch.
+    assert client.get(f"{base}?source=bogus").status_code == 400
+    # Missing WAV → 404 via resolve_wav.
+    assert client.get("/api/wav/s/20260101T999999Z__nope__zzz.wav/strip-preview").status_code == 404
+    # Omitted knobs fall back to the StripSessionRequest defaults.
+    ok = client.get(base)
+    assert ok.status_code == 200
+    assert ok.json()["knobs"] == {"min_silence_ms": 500, "pad_ms": 200, "speech_floor_db": -45.0}
+
+
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", [])
