@@ -75,6 +75,7 @@ from .sessions import (
     read_session_meta,
     read_session_summary,
     read_session_transcript,
+    read_wav_strip_meta,
     read_wav_transcript,
     write_session_meta,
 )
@@ -1035,6 +1036,15 @@ async def api_wav_transcript(session: str, name: str, source: str = "original"):
     if source not in ("original", "stripped"):
         raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
     return await asyncio.to_thread(read_wav_transcript, session, name, source)
+
+
+@app.get("/api/wav/{session}/{name}/strip-meta")
+async def api_wav_strip_meta(session: str, name: str):
+    """The committed strip-silence cut for one ORIGINAL wav (or null when the
+    session was never stripped or this wav produced no regions). Lazy
+    companion to /api/state, same contract as the transcript sidecar route:
+    resolve_wav path-safety inside the reader, disk read off the event loop."""
+    return await asyncio.to_thread(read_wav_strip_meta, session, name)
 
 
 # Waveform downsample resolution. The route CLAMPS the operator-supplied bins

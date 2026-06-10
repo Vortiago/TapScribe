@@ -16,6 +16,7 @@ out of `sessions.py` when that module was narrowed to the dashboard read path.
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -29,7 +30,7 @@ from .recorder import Recorder
 from .session_merge import NoUsableWavs
 from .session_paths import resolve_session_dir, stripped_dir
 from .strip_silence import SPEECH_RMS_DBFS_FLOOR
-from .text import build_recorder_wav_name, parse_wav_speaker_ident, parse_wav_start
+from .text import atomic_write_text, build_recorder_wav_name, parse_wav_speaker_ident, parse_wav_start
 
 
 class BatchStripError(Exception):
@@ -141,6 +142,7 @@ def strip_one_wav(
 
     speech_samples = 0
     regions_written: list[str] = []
+    region_spans: list[dict[str, float]] = []
     for start_sample, end_sample in regions:
         region_samples = samples[start_sample:end_sample]
         offset_s = start_sample / _ss.SAMPLE_RATE
@@ -148,6 +150,12 @@ def strip_one_wav(
         fname = build_recorder_wav_name(region_start, speaker_slug, ident_slug)
         _ss.write_wav_int16(out_dir / fname, region_samples)
         regions_written.append(fname)
+        region_spans.append(
+            {
+                "start_s": round(start_sample / _ss.SAMPLE_RATE, 3),
+                "end_s": round(end_sample / _ss.SAMPLE_RATE, 3),
+            }
+        )
         speech_samples += len(region_samples)
 
     return {
@@ -158,6 +166,7 @@ def strip_one_wav(
         "segments_filtered_below_floor": pre_filter_count - len(regions),
         "written": True,
         "regions_written": regions_written,
+        "region_spans": region_spans,
         "detector": "silero-vad",
     }
 
@@ -203,6 +212,30 @@ async def strip_session(recorder: Recorder, req: StripSessionRequest) -> dict[st
 
         results = await asyncio.to_thread(_run)
         finished = datetime.now(UTC)
+
+        # Persist the committed cut (#90): the explicit spans each written WAV
+        # was cut to, keyed by ORIGINAL name, plus the knobs that produced
+        # them. Lives inside stripped/ so a re-strip's rmtree or a "clear
+        # stripped" wipes it with the clips it describes.
+        spans_by_original = {
+            r["name"]: r["region_spans"] for r in results if r.get("written") and r.get("region_spans")
+        }
+        if spans_by_original:
+            atomic_write_text(
+                out_dir / "strip-meta.json",
+                json.dumps(
+                    {
+                        "stripped_at": finished.isoformat(),
+                        "knobs": {
+                            "min_silence_ms": req.min_silence_ms,
+                            "pad_ms": req.pad_ms,
+                            "speech_floor_db": req.speech_floor_db,
+                        },
+                        "files": spans_by_original,
+                    },
+                    indent=2,
+                ),
+            )
 
     written = sum(1 for r in results if r.get("written"))
     in_secs = sum(r.get("in_seconds", 0.0) for r in results)

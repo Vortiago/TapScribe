@@ -29,7 +29,7 @@ from fastapi import HTTPException
 
 from . import config
 from .audio import wav_duration_s
-from .session_paths import _safe_part, resolve_session_dir, resolve_wav, session_meta_path
+from .session_paths import _safe_part, resolve_session_dir, resolve_wav, session_meta_path, stripped_dir
 from .text import (
     atomic_write_text,
     file_stat_sig,
@@ -155,6 +155,22 @@ def read_wav_transcript(session: str, name: str, source: str = "original") -> di
     `read_primary_payload` only ever opens a contained sidecar."""
     wav_path = resolve_wav(session, name, source)
     return read_primary_payload(wav_path)
+
+
+def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
+    """The committed strip-silence cut for one ORIGINAL wav — the explicit
+    {start_s, end_s} spans the last strip run wrote (plus its knobs and run
+    stamp), or None when the session has no strip-meta or this wav produced
+    no regions. `resolve_wav` validates session + name; `_read_json_or_none`
+    re-checks containment before opening the sidecar."""
+    resolve_wav(session, name, "original")
+    meta = _read_json_or_none(stripped_dir(session) / "strip-meta.json")
+    if not isinstance(meta, dict):
+        return None
+    spans = (meta.get("files") or {}).get(name)
+    if not spans:
+        return None
+    return {"spans": spans, "stripped_at": meta.get("stripped_at"), "knobs": meta.get("knobs")}
 
 
 # ---------------------------------------------------------------------------

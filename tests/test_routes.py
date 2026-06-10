@@ -1186,6 +1186,40 @@ def test_wav_peaks_non_recorder_format_is_422(client, recorder_under_test):
     assert "format" in r.json()["detail"].lower()
 
 
+def test_strip_meta_roundtrips_response_spans(client, recorder_under_test):
+    """POST strip-silence returns explicit region_spans per written WAV, and
+    GET /strip-meta serves the SAME spans back from the persisted sidecar —
+    the no-filename-reconstruction contract of #90."""
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    r = client.post("/api/sessions/s/strip-silence", json={})
+    assert r.status_code == 200, r.text
+    rows = [f for f in r.json()["files"] if f.get("written")]
+    assert rows and all(f["region_spans"] for f in rows)
+    for sp in rows[0]["region_spans"]:
+        assert sp["start_s"] < sp["end_s"]
+
+    m = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m.status_code == 200
+    body = m.json()
+    assert body["spans"] == rows[0]["region_spans"]
+    assert body["knobs"] == {"min_silence_ms": 500, "pad_ms": 200, "speech_floor_db": -45.0}
+    assert body["stripped_at"] == r.json()["stripped_at"]
+
+
+def test_strip_meta_null_when_never_stripped_and_404_on_bad_input(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    # Never stripped → JSON null, not an error.
+    m = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m.status_code == 200
+    assert m.json() is None
+    # Missing WAV → 404 via resolve_wav.
+    assert client.get("/api/wav/s/20260101T999999Z__nope__zzz.wav/strip-meta").status_code == 404
+    # Non-.wav name → 404 (resolve_wav rejects non-audio).
+    assert client.get("/api/wav/s/strip-meta.json/strip-meta").status_code == 404
+
+
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", [])
