@@ -467,9 +467,7 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
 
 
 @app.post("/api/tap/sessions/{session}/pipeline", status_code=202)
-async def api_tap_pipeline_trigger(
-    session: str, req: Request, recorder: Recorder = Depends(get_recorder)
-):
+async def api_tap_pipeline_trigger(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):
     """Bridge-initiated end-of-meeting pipeline: strip → transcribe →
     summarize the session as ONE session job. Tap-bearer authenticated like
     /api/tap/new-session (exempt from Basic auth via the /api/tap/ prefix;
@@ -494,9 +492,7 @@ async def api_tap_pipeline_trigger(
 
 
 @app.get("/api/tap/sessions/{session}/pipeline")
-async def api_tap_pipeline_poll(
-    session: str, req: Request, recorder: Recorder = Depends(get_recorder)
-):
+async def api_tap_pipeline_poll(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):
     """Poll the end-of-meeting pipeline: stage progress while running (from
     the live job snapshot), the persisted summary when done, the failing
     stage's domain error when failed. `state: "idle"` when this session has

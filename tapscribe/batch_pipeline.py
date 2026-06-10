@@ -127,9 +127,7 @@ async def _run_claimed(recorder: Recorder, req: PipelineRequest, *, model: str, 
         await job.update(stage="summarize", status="summarizing", total=1, current=0, current_file=None)
         await run_summarize_stage(req, job=job)
     except Exception as e:
-        recorder.pipelines.finish_failed(
-            req.session, stage=stage, error=str(e), error_kind=type(e).__name__
-        )
+        recorder.pipelines.finish_failed(req.session, stage=stage, error=str(e), error_kind=type(e).__name__)
         print(f"[tapscribe] pipeline {req.session}: FAILED at {stage}: {e}", flush=True)
     else:
         recorder.pipelines.finish_done(req.session)
@@ -194,7 +192,5 @@ async def run_summarize_stage(req: PipelineRequest, *, job) -> dict[str, Any]:  
     )
     merged = await asyncio.to_thread(read_session_transcript, req.session)
     if not ((merged or {}).get("plain_text") or "").strip():
-        raise NoMergedTranscript(
-            "the transcribe stage produced no merged transcript text to summarize"
-        )
+        raise NoMergedTranscript("the transcribe stage produced no merged transcript text to summarize")
     return await summarize_session_locked(sreq, summarizer=summarizer, merged=merged)

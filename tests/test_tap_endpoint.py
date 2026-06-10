@@ -806,9 +806,7 @@ class TestTapPipeline:
     ):
         self._seed_session(recorder_with_fake_wlk)
         token = recorder_with_fake_wlk.tap.value
-        r = auth_client.post(
-            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
-        )
+        r = auth_client.post("/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token})
         assert r.status_code == 202, r.text
         body = r.json()
         assert body["ok"] is True
@@ -832,25 +830,19 @@ class TestTapPipeline:
         # Nothing started / leaked despite the seeded session.
         assert recorder_with_fake_wlk.jobs.get("meet1") is None
 
-    def test_trigger_409_when_session_busy(
-        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
-    ):
+    def test_trigger_409_when_session_busy(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
         """The acceptance criterion: a concurrent trigger (or a manual
         transcribe holding the slot) gets a deterministic 409."""
         self._seed_session(recorder_with_fake_wlk)
         self._claim(recorder_with_fake_wlk, kind="transcribe")
         token = recorder_with_fake_wlk.tap.value
-        r = auth_client.post(
-            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
-        )
+        r = auth_client.post("/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token})
         assert r.status_code == 409, r.text
         # The foreign claim is untouched.
         held = recorder_with_fake_wlk.jobs.get("meet1")
         assert held is not None and held.kind == "transcribe"
 
-    def test_trigger_404_on_unknown_session(
-        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
-    ):
+    def test_trigger_404_on_unknown_session(self, auth_client: TestClient, recorder_with_fake_wlk: Recorder):
         """The session id crosses the path-safety seam (resolve_session_dir)
         before anything else — unknown ids 404; traversal strings are covered
         by the seam's own suite (test_sessions_path_safety.py)."""
@@ -899,9 +891,7 @@ class TestTapPipeline:
         self._claim(recorder_with_fake_wlk, kind="pipeline", stage="transcribe", current_file="a.wav")
 
         token = recorder_with_fake_wlk.tap.value
-        r = auth_client.get(
-            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
-        )
+        r = auth_client.get("/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token})
         assert r.status_code == 200
         body = r.json()
         assert body["state"] == "running"
@@ -922,9 +912,7 @@ class TestTapPipeline:
         )
 
         token = recorder_with_fake_wlk.tap.value
-        r = auth_client.get(
-            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
-        )
+        r = auth_client.get("/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token})
         assert r.status_code == 200
         body = r.json()
         assert body["state"] == "failed"
@@ -941,15 +929,14 @@ class TestTapPipeline:
 
         self._seed_session(recorder_with_fake_wlk)
         write_session_summary(
-            "meet1", {"summary": "decided to ship", "source": "local", "summarized_at": "2026-06-10T12:00:00+00:00"}
+            "meet1",
+            {"summary": "decided to ship", "source": "local", "summarized_at": "2026-06-10T12:00:00+00:00"},
         )
         recorder_with_fake_wlk.pipelines.begin("meet1")
         recorder_with_fake_wlk.pipelines.finish_done("meet1")
 
         token = recorder_with_fake_wlk.tap.value
-        r = auth_client.get(
-            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
-        )
+        r = auth_client.get("/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token})
         assert r.status_code == 200
         body = r.json()
         assert body["state"] == "done"
@@ -968,9 +955,7 @@ class TestTapPipeline:
         assert recorder_with_fake_wlk.pipelines.get("meet1") is None  # no record, as after boot
 
         token = recorder_with_fake_wlk.tap.value
-        r = auth_client.get(
-            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
-        )
+        r = auth_client.get("/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token})
         assert r.status_code == 200
         body = r.json()
         assert body["state"] == "done"
@@ -981,9 +966,7 @@ class TestTapPipeline:
     ):
         self._seed_session(recorder_with_fake_wlk)
         token = recorder_with_fake_wlk.tap.value
-        r = auth_client.get(
-            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
-        )
+        r = auth_client.get("/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token})
         assert r.status_code == 200
         assert r.json()["state"] == "idle"
 

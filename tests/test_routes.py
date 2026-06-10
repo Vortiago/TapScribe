@@ -321,16 +321,12 @@ def test_put_config_batch_model_writes_file_and_validates(client, recorder_under
     so an unknown id must 400 instead of landing on disk."""
     r = client.put("/api/config/batch-model", json={"content": "small.en"})
     assert r.status_code == 200, r.text
-    assert (recorder_under_test.config_dir / "batch-model.txt").read_text(
-        encoding="utf-8"
-    ) == "small.en"
+    assert (recorder_under_test.config_dir / "batch-model.txt").read_text(encoding="utf-8") == "small.en"
 
     r = client.put("/api/config/batch-model", json={"content": "not-a-model"})
     assert r.status_code == 400
     # The bad id never replaced the good one.
-    assert (recorder_under_test.config_dir / "batch-model.txt").read_text(
-        encoding="utf-8"
-    ) == "small.en"
+    assert (recorder_under_test.config_dir / "batch-model.txt").read_text(encoding="utf-8") == "small.en"
 
 
 def test_api_state_includes_batch_model_default(client, recorder_under_test):  # noqa: ARG001 — recorder fixture pins the tmp config dir
@@ -1731,9 +1727,7 @@ def test_api_transcribe_session_returns_409_when_job_already_in_flight(
     assert r.status_code == 409, r.text
 
 
-def test_manual_transcribe_session_409_while_pipeline_running(
-    client, recorder_under_test, monkeypatch
-):
+def test_manual_transcribe_session_409_while_pipeline_running(client, recorder_under_test, monkeypatch):
     """The end-of-meeting pipeline holds ONE `kind="pipeline"` slot for its
     whole chain — a manual transcribe started mid-pipeline gets the same 409
     as against any other in-flight job (the other half of issue #102's

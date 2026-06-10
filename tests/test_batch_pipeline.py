@@ -42,9 +42,7 @@ def fake_stages(monkeypatch: pytest.MonkeyPatch):
     return calls
 
 
-async def test_pipeline_runs_stages_in_order_under_one_claim(
-    recorder_under_test, fake_stages, monkeypatch
-):
+async def test_pipeline_runs_stages_in_order_under_one_claim(recorder_under_test, fake_stages, monkeypatch):
     """The tracer bullet: one trigger claims ONE `kind="pipeline"` slot, runs
     the three stages in order, records done, and releases the slot."""
     claims: list[JobState] = []
@@ -99,9 +97,7 @@ async def test_pipeline_updates_stage_between_stages(recorder_under_test, monkey
     ]
 
 
-async def test_pipeline_busy_raises_session_busy_and_starts_no_task(
-    recorder_under_test, fake_stages
-):
+async def test_pipeline_busy_raises_session_busy_and_starts_no_task(recorder_under_test, fake_stages):
     """A concurrent trigger (or manual transcribe) must get a deterministic
     busy verdict in the REQUEST path — no stage runs, the foreign claim and
     any previous pipeline record are left alone."""
@@ -211,9 +207,7 @@ async def test_pipeline_resolves_model_from_batch_model_config_else_default(
     assert seen["backend"] == recorder_under_test.backend  # operator launch preference
 
 
-async def test_pipeline_end_to_end_produces_stripped_transcript_and_summary(
-    recorder_under_test, monkeypatch
-):
+async def test_pipeline_end_to_end_produces_stripped_transcript_and_summary(recorder_under_test, monkeypatch):
     """Issue #102's first acceptance criterion, with REAL stages and fakes
     only at the model seams (transcriber stub, summarizer fake): one trigger
     yields a stripped/ directory, a merged session transcript, and a
@@ -241,7 +235,8 @@ async def test_pipeline_end_to_end_produces_stripped_transcript_and_summary(
             return _FakeResult()
 
     monkeypatch.setattr(
-        "tapscribe.batch_pipeline.load_summarizer", lambda **kw: _FakeSummarizer()  # noqa: ARG005
+        "tapscribe.batch_pipeline.load_summarizer",
+        lambda **kw: _FakeSummarizer(),  # noqa: ARG005
     )
 
     sd = seed_session(recorder_under_test.recordings_dir, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
