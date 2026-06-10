@@ -13,6 +13,7 @@ functions are purely the filesystem op.
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,9 @@ from typing import Any
 from fastapi import HTTPException
 
 from . import config
-from .session_paths import resolve_session_dir, resolve_wav
+from .session_paths import resolve_session_dir, resolve_wav, stripped_dir
 from .sessions import read_session_meta, write_session_meta
+from .text import atomic_write_text
 
 
 def session_is_empty(session_dir: Path) -> bool:
@@ -147,6 +149,47 @@ def _delete_wav_with_sidecars(wav: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _read_strip_meta(stripped: Path) -> dict[str, Any] | None:
+    """Parse `<stripped>/strip-meta.json` if present and shaped like the v2
+    sidecar ({"files": {...}}). None on missing/unparseable/legacy content —
+    maintenance ops treat a bad sidecar as absent rather than failing the
+    whole operation."""
+    try:
+        meta = json.loads((stripped / "strip-meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict) or not isinstance(meta.get("files"), dict):
+        return None
+    return meta
+
+
+def _prune_strip_meta_clip(session: str, clip_name: str) -> None:
+    """Drop a deleted region clip's span from stripped/strip-meta.json so the
+    committed-cut overlay stops drawing audio that no longer exists. An
+    original whose spans all vanish loses its whole entry. Best-effort: a
+    missing/legacy meta is left alone."""
+    stripped = stripped_dir(session)
+    meta = _read_strip_meta(stripped)
+    if meta is None:
+        return
+    files = meta["files"]
+    changed = False
+    for orig, entry in list(files.items()):
+        spans = entry.get("spans") if isinstance(entry, dict) else None
+        if not isinstance(spans, list):
+            continue
+        kept = [sp for sp in spans if not (isinstance(sp, dict) and sp.get("name") == clip_name)]
+        if len(kept) == len(spans):
+            continue
+        changed = True
+        if kept:
+            entry["spans"] = kept
+        else:
+            del files[orig]
+    if changed:
+        atomic_write_text(stripped / "strip-meta.json", json.dumps(meta, indent=2))
+
+
 def absorb_session(target: str, source: str) -> dict[str, Any]:
     """Move every WAV (and its `<name>.json` sidecar) from `source` into
     `target`, fold the source's `session-meta.json` aliases into the
@@ -205,6 +248,26 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
             shutil.move(str(w), str(tgt_stripped_dir / w.name))
             _move_sidecars_with_wav(w, tgt_stripped_dir / w.name)
             moved_stripped.append(w.name)
+        # Carry the committed-cut sidecar with the clips it describes: merge
+        # the source's per-original span entries into the target's (the
+        # collision check above already guarantees original names can't
+        # clash; target wins anyway). Knobs/stripped_at keep the TARGET's
+        # values when both sides have a meta — they describe the target's
+        # own last run; a target without a meta adopts the source's wholesale.
+        src_strip_meta = _read_strip_meta(src_stripped_dir)
+        if src_strip_meta is not None:
+            tgt_strip_meta = _read_strip_meta(tgt_stripped_dir)
+            if tgt_strip_meta is not None:
+                merged_files = dict(src_strip_meta["files"])
+                merged_files.update(tgt_strip_meta["files"])
+                tgt_strip_meta["files"] = merged_files
+                atomic_write_text(
+                    tgt_stripped_dir / "strip-meta.json", json.dumps(tgt_strip_meta, indent=2)
+                )
+            else:
+                atomic_write_text(
+                    tgt_stripped_dir / "strip-meta.json", json.dumps(src_strip_meta, indent=2)
+                )
 
     # Merge speaker aliases. Target wins on conflict; source fills in keys
     # the target doesn't already have. Target's label is preserved as-is.
@@ -315,4 +378,6 @@ def delete_session_wav(session: str, name: str, source: str = "original") -> dic
     Returns `{session, name, source, bytes_freed}`."""
     wav = resolve_wav(session, name, source)
     bytes_freed = _delete_wav_with_sidecars(wav)
+    if source == "stripped":
+        _prune_strip_meta_clip(session, name)
     return {"session": session, "name": name, "source": source, "bytes_freed": bytes_freed}

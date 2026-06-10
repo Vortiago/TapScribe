@@ -1237,6 +1237,56 @@ def test_strip_meta_null_after_original_rewritten(client, recorder_under_test):
     assert m2.json() is None
 
 
+def test_delete_stripped_clip_prunes_strip_meta(client, recorder_under_test):
+    """Deleting one region clip must remove ITS span from strip-meta (an
+    original whose spans all vanish loses its entry) while other originals'
+    committed cuts stay intact."""
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"])
+    r = client.post("/api/sessions/s/strip-silence", json={})
+    assert r.status_code == 200, r.text
+    rows = {f["name"]: f for f in r.json()["files"] if f.get("written")}
+    assert set(rows) == {"20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"}
+    alice_clip = rows["20260101T000000Z__alice__abc.wav"]["regions_written"][0]
+
+    d = client.delete(f"/api/wav/s/{alice_clip}?source=stripped")
+    assert d.status_code == 200, d.text
+
+    # Alice's only clip is gone -> her committed cut reads as absent…
+    m = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m.status_code == 200 and m.json() is None
+    # …while Bob's is untouched.
+    m2 = client.get("/api/wav/s/20260101T010000Z__bob__def.wav/strip-meta")
+    assert m2.status_code == 200
+    assert m2.json()["spans"] == rows["20260101T010000Z__bob__def.wav"]["region_spans"]
+
+
+def test_absorb_carries_strip_meta_into_target(client, recorder_under_test):
+    """Absorb moves region clips AND their committed-cut sidecar: both the
+    target's own spans and the absorbed source's spans must resolve in the
+    target afterwards, with the target's knobs preserved."""
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "src", ["20260101T010000Z__bob__def.wav"])
+    rt = client.post("/api/sessions/tgt/strip-silence", json={"pad_ms": 100})
+    assert rt.status_code == 200, rt.text
+    rs = client.post("/api/sessions/src/strip-silence", json={"pad_ms": 50})
+    assert rs.status_code == 200, rs.text
+    tgt_spans = [f for f in rt.json()["files"] if f.get("written")][0]["region_spans"]
+    src_spans = [f for f in rs.json()["files"] if f.get("written")][0]["region_spans"]
+
+    a = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert a.status_code == 200, a.text
+
+    m_tgt = client.get("/api/wav/tgt/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m_tgt.status_code == 200 and m_tgt.json() is not None
+    assert m_tgt.json()["spans"] == tgt_spans
+    assert m_tgt.json()["knobs"]["pad_ms"] == 100  # target's knobs win
+    m_src = client.get("/api/wav/tgt/20260101T010000Z__bob__def.wav/strip-meta")
+    assert m_src.status_code == 200 and m_src.json() is not None
+    assert m_src.json()["spans"] == src_spans
+
+
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", [])
