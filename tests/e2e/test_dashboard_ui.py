@@ -57,6 +57,23 @@ BOB_TEXT = "Hello operator, this is a transcription pipeline check."
 # Screenshots committed to the repo so the README can embed them and a
 # reviewer can eyeball what the test actually saw.
 SHOTS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "dashboard-shots"
+
+
+async def _shot(page, name: str) -> None:
+    """Refresh one committed README screenshot — ONLY when explicitly asked.
+
+    The PNGs under docs/dashboard-shots are repo artifacts, and
+    `page.screenshot` produces different bytes on every run (render timing,
+    dynamic timestamps), so writing them unconditionally dirties the working
+    tree on every e2e run — including the pre-push hook's, right after a
+    commit. Opt in with TAPSCRIBE_REFRESH_SHOTS=1 when deliberately
+    refreshing the docs (same opt-in shape as TAPSCRIBE_PERF_SOAK)."""
+    if os.environ.get("TAPSCRIBE_REFRESH_SHOTS") != "1":
+        return
+    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    await page.screenshot(path=str(SHOTS_DIR / name), full_page=True)
+
+
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "audio"
 
 _WORD_RE = re.compile(r"[^\W\d_]+", flags=re.UNICODE)
@@ -102,8 +119,6 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
     fake_wlk = running_recorder.fake_wlk
     ws_base = running_recorder.ws_base_url
 
-    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
-
     # Long enough that both WSes are still streaming while the rail rows +
     # caption pushes are asserted (the relays must be open for the pushes
     # to reach them), short enough not to drag the test out.
@@ -133,7 +148,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             await page.wait_for_selector("#tapsRailBody .empty", timeout=5000)
             assert await page.locator("#tapsRailCount").inner_text() == "0"
             assert await page.locator('#viewRoot [data-slot="liveFeedCount"]').inner_text() == "0"
-            await page.screenshot(path=str(SHOTS_DIR / "01-idle.png"), full_page=True)
+            await _shot(page, "01-idle.png")
 
             alice_task = asyncio.create_task(
                 stream_wav_via_tap(
@@ -171,7 +186,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                 timeout=5000,
             )
             assert await page.locator("#tapsRailCount").inner_text() == "2"
-            await page.screenshot(path=str(SHOTS_DIR / "02-active-taps.png"), full_page=True)
+            await _shot(page, "02-active-taps.png")
 
             # Settled lines from the fake WhisperLiveKit must surface in the
             # Capture view's captions feed, attributed to each speaker.
@@ -219,7 +234,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             # here). Stages mounts the feed count as a data-slot under #viewRoot.
             count = await page.locator('#viewRoot [data-slot="liveFeedCount"]').inner_text()
             assert int(count) >= 2
-            await page.screenshot(path=str(SHOTS_DIR / "03-live-transcripts.png"), full_page=True)
+            await _shot(page, "03-live-transcripts.png")
 
             await asyncio.gather(alice_task, bob_task)
             assert await wait_until(lambda: streams_drained(rec), timeout=10.0)
@@ -236,7 +251,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
                 """,
                 timeout=5000,
             )
-            await page.screenshot(path=str(SHOTS_DIR / "04-sessions.png"), full_page=True)
+            await _shot(page, "04-sessions.png")
 
             # The headline flow: Transcript stage → ▶ transcribe range (blank
             # range = the whole session).
@@ -273,7 +288,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
             await legend.wait_for(state="visible", timeout=5000)
             legend_text = await legend.inner_text()
             assert "Alice" in legend_text and "Bob" in legend_text
-            await page.screenshot(path=str(SHOTS_DIR / "05-merged-transcript.png"), full_page=True)
+            await _shot(page, "05-merged-transcript.png")
 
             # The copy button must copy the speaker display names (aliases
             # applied) — what the user sees on screen — not the raw speaker
@@ -356,8 +371,6 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
     rec = running_recorder.recorder
     ws_base = running_recorder.ws_base_url
     base = running_recorder.base_url
-
-    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Scripted text the FakeTranscriber returns for any region WAV — the
     # speaker slug on every region is "Alice" (inherited from the
@@ -484,10 +497,7 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
                 timeout=5000,
             )
 
-            await page.screenshot(
-                path=str(SHOTS_DIR / "07-stripped-region-sub-rows.png"),
-                full_page=True,
-            )
+            await _shot(page, "07-stripped-region-sub-rows.png")
 
             # The original WAV's row is still present and identifiable by
             # its (unique) original filename — clip rows must not have
@@ -511,7 +521,6 @@ async def test_dashboard_delete_session_audio_keeps_transcript(
     """
     rec = running_recorder.recorder
     base = running_recorder.base_url
-    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Seed a previous (non-current) session on disk: one WAV + a merged
     # transcript. A 2020 timestamp sorts below rec.session_start and
@@ -561,10 +570,7 @@ async def test_dashboard_delete_session_audio_keeps_transcript(
                 """,
                 timeout=10000,
             )
-            await page.screenshot(
-                path=str(SHOTS_DIR / "08-deleted-session-audio.png"),
-                full_page=True,
-            )
+            await _shot(page, "08-deleted-session-audio.png")
         finally:
             await browser.close()
 
@@ -697,7 +703,6 @@ async def test_dashboard_with_real_audio_and_whisper(
     reference_words = _word_tokens(fixture_ref.read_text(encoding="utf-8"))
     rec = running_recorder.recorder
     ws_base = running_recorder.ws_base_url
-    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
     await stream_wav_via_tap(
         ws_base_url=ws_base,
@@ -797,10 +802,7 @@ async def test_dashboard_with_real_audio_and_whisper(
                     f"underlying error: {type(e).__name__}: {e}"
                 ) from e
 
-            await page.screenshot(
-                path=str(SHOTS_DIR / "06-real-audio-transcript.png"),
-                full_page=True,
-            )
+            await _shot(page, "06-real-audio-transcript.png")
         finally:
             await browser.close()
 
