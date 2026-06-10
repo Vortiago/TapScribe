@@ -508,6 +508,93 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
             await browser.close()
 
 
+async def test_recordings_committed_cut_overlay_persists_across_reload(
+    running_recorder: RunningRecorder,
+    tmp_path: Path,
+):
+    """After ✂ strip, the selected original's waveform draws the committed
+    cut — the EXACT {start_s, end_s} spans the strip response returned,
+    surfaced on the canvas's data-cut-spans hook — and a full dashboard
+    reload re-resolves the SAME spans from the persisted strip-meta (no
+    reconstruction from region filenames). The #90 acceptance guard."""
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    src_wav = _build_speech_silence_wav(tmp_path / "alice-multi.wav")
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src_wav,
+        utterance_id="utt-cut-overlay",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    import httpx
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            f"/api/sessions/{rec.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert resp.status_code == 200, resp.text
+        rows = [f for f in resp.json()["files"] if f.get("written")]
+    assert len(rows) == 1
+    expected_spans = rows[0]["region_spans"]
+    assert len(expected_spans) == 3, (
+        f"the 3-burst source should commit 3 spans, got {expected_spans}"
+    )
+
+    # The canvas's committed-cut hook: the JSON spans it is currently drawing,
+    # or null while the overlay isn't up yet.
+    overlay_js = """
+    () => {
+      const c = document.querySelector('#viewRoot .wave-canvas');
+      return (c && c.dataset.cutSpans) ? c.dataset.cutSpans : null;
+    }
+    """
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+
+            # The default source is "original", and the first WAV is the
+            # auto-selected one — the overlay lands once the peaks and
+            # strip-meta fetches settle.
+            await page.wait_for_function(overlay_js, timeout=10000)
+            spans = json.loads(await page.evaluate(overlay_js))
+            assert spans == expected_spans, (
+                f"overlay spans {spans} != committed {expected_spans}"
+            )
+
+            # The badge is the operator-visible "this is the committed cut"
+            # cue, distinct from the future live knob preview (#89).
+            await page.locator("#viewRoot .wave-cutbadge").wait_for(state="visible", timeout=3000)
+
+            await _shot(page, "08-committed-cut-overlay.png")
+
+            # Reload: the spans must come back EXACTLY from the persisted
+            # strip-meta — the cut survives with no strip response in memory.
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_function(overlay_js, timeout=10000)
+            spans2 = json.loads(await page.evaluate(overlay_js))
+            assert spans2 == expected_spans, (
+                f"reload lost the committed cut: {spans2} != {expected_spans}"
+            )
+        finally:
+            await browser.close()
+
+
 async def test_dashboard_delete_session_audio_keeps_transcript(
     running_recorder: RunningRecorder,
 ):
