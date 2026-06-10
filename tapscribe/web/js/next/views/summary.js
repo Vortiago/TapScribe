@@ -29,7 +29,7 @@
 // selection-guarded (the summary is a copy target, like the merged-transcript
 // pane).
 
-import { tpl, pick, renderRegion, markRegionStale } from "../../templates.js";
+import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
 import { getJson, postJson, fetchSessionSummary, peekSessionSummary } from "../../api.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
 
@@ -48,6 +48,9 @@ export function build(ctx) {
   const sumOut = pick(frag, "sumOut");
   const sumOutHint = pick(frag, "sumOutHint");
   const cmdInput = /** @type {HTMLInputElement} */ (pick(frag, "sumCmd"));
+  const cmdPresetSel = /** @type {HTMLSelectElement} */ (pick(frag, "sumCmdPreset"));
+  const cmdPresetNote = pick(frag, "sumCmdPresetNote");
+  const cmdPreview = pick(frag, "sumCmdPreview");
   const promptTa = /** @type {HTMLTextAreaElement} */ (pick(frag, "sumPrompt"));
   const genBtn = /** @type {HTMLButtonElement} */ (pick(frag, "sumGenerate"));
   const sumNote = pick(frag, "sumNote");
@@ -101,6 +104,10 @@ export function build(ctx) {
    * footprint/context. */
   /** @type {import('../../types.js').SummaryModel[]} */
   let models = [];
+  /** The loaded command presets — known CLI tools whose template a pick seeds
+   * into the (still editable) command field. NOT an allowlist. */
+  /** @type {import('../../types.js').CommandPreset[]} */
+  let presets = [];
 
   // Split render gates: the header and the controls each update independently so
   // an idle tick rebuilds nothing. The output pane has no closure sig — it
@@ -182,7 +189,10 @@ export function build(ctx) {
     title.textContent = "Summary";
     const body = document.createElement("div");
     body.className = "sumtext";
-    body.textContent = res.summary || "";
+    // The summary is markdown from an UNTRUSTED model — render through
+    // renderMarkdown (createElement/textContent only, injection-proof by
+    // construction), never innerHTML.
+    body.append(renderMarkdown(res.summary || ""));
     out.append(title, body);
     // Show what produced it: the model (local/api) if present, else the command
     // template (command source), else just the source name. Side-effect inside
@@ -300,6 +310,57 @@ export function build(ctx) {
     reflectModelNote();
   });
 
+  // ---- Command presets + the "will run" preview (REAL) ----------------------
+  // The preset <select> SEEDS the editable command field; the preview spells
+  // out the exact invocation so the operator can see where the prompt and the
+  // transcript go: template + prompt as ONE trailing argv element, transcript
+  // on stdin (mirrors build_command_argv server-side). Both are input-event-
+  // driven — never tick-driven — so the interaction hold is untouched (the
+  // pane is built once and never rebuilt).
+
+  /** Reflect the picked preset's caveat note under the dropdown. */
+  const reflectPresetNote = () => {
+    const p = presets.find((x) => x.key === cmdPresetSel.value);
+    cmdPresetNote.textContent = p ? p.note : "";
+  };
+
+  /** Spell out what Generate will run: the template verbatim + the prompt as
+   * a quoted trailing argument (elided past 80 chars), then the stdin note. */
+  const reflectCmdPreview = () => {
+    const cmd = cmdInput.value.trim();
+    if (!cmd) {
+      cmdPreview.replaceChildren();
+      return;
+    }
+    const p = promptTa.value.trim();
+    const shown = p.length > 80 ? `${p.slice(0, 77)}…` : p;
+    const promptArg = shown ? ` "${shown.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : "";
+    const l1 = document.createElement("div");
+    l1.textContent = `will run: ${cmd}${promptArg}`;
+    const l2 = document.createElement("div");
+    l2.textContent = "merged transcript → stdin";
+    cmdPreview.replaceChildren(l1, l2);
+  };
+
+  cmdPresetSel.addEventListener("change", () => {
+    const p = presets.find((x) => x.key === cmdPresetSel.value);
+    if (p) cmdInput.value = p.template;
+    reflectPresetNote();
+    reflectCmdPreview();
+  });
+  cmdInput.addEventListener("input", () => {
+    // A hand-edited template is no longer the preset verbatim — flip the
+    // dropdown back to "custom…" so it doesn't claim otherwise.
+    const p = presets.find((x) => x.key === cmdPresetSel.value);
+    if (p && p.template !== cmdInput.value) {
+      cmdPresetSel.value = "";
+      reflectPresetNote();
+    }
+    reflectCmdPreview();
+  });
+  promptTa.addEventListener("input", reflectCmdPreview);
+  reflectCmdPreview(); // seed from the template defaults at build
+
   (async () => {
     try {
       const cat = /** @type {import('../../types.js').SummaryModelCatalog} */ (
@@ -320,12 +381,23 @@ export function build(ctx) {
       if (typeof cat.max_tokens_min === "number") maxTokInput.min = String(cat.max_tokens_min);
       if (typeof cat.max_tokens_max === "number") maxTokInput.max = String(cat.max_tokens_max);
       if (typeof cat.max_tokens_default === "number") maxTokInput.value = String(cat.max_tokens_default);
+      // Command presets (same fetch): "custom…" + one option per known tool.
+      // Pre-select the preset whose template matches the field's default.
+      presets = cat.command_presets || [];
+      cmdPresetSel.replaceChildren();
+      cmdPresetSel.add(new Option("custom…", ""));
+      for (const p of presets) cmdPresetSel.add(new Option(p.label, p.key));
+      const match = presets.find((x) => x.template === cmdInput.value);
+      cmdPresetSel.value = match ? match.key : "";
+      reflectPresetNote();
     } catch {
       // Best-effort: if the catalog fetch fails, leave the dropdown disabled and
       // let the server fall back to its default model (an empty `model` in the
       // Generate body), rather than blocking the operator.
       modelSel.add(new Option("model list unavailable — using default", "", true, true));
       modelSel.disabled = true;
+      cmdPresetSel.add(new Option("presets unavailable", "", true, true));
+      cmdPresetSel.disabled = true;
     }
   })();
 

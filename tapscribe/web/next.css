@@ -1062,9 +1062,22 @@ body::before { display: none; }
   border: 1px solid var(--warn); border-radius: var(--next-r-sm);
   background: color-mix(in srgb, var(--warn) 9%, transparent); padding: 7px 10px;
 }
-/* The real (Command-source) summary is free-form text from the operator's CLI
-   tool — render it verbatim, preserving the tool's own line breaks. */
-.sumtext { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.6; color: var(--fg-1); }
+/* The summary is markdown from the operator's CLI tool / local model, rendered
+   through renderMarkdown (templates.js) into safe block elements — so normal
+   flow here (the old pre-wrap was for the verbatim-text era); <pre> below
+   keeps code-block whitespace itself. */
+.sumtext { word-break: break-word; font-size: 12px; line-height: 1.6; color: var(--fg-1); }
+.sumtext > * { margin: 0 0 8px; }
+.sumtext > *:last-child { margin-bottom: 0; }
+.sumtext h1, .sumtext h2, .sumtext h3, .sumtext h4, .sumtext h5, .sumtext h6 {
+  color: var(--fg-0); font-weight: 650; letter-spacing: -0.2px;
+}
+.sumtext h1 { font-size: 13.5px; }
+.sumtext h2 { font-size: 13px; }
+.sumtext h3, .sumtext h4, .sumtext h5, .sumtext h6 { font-size: 12.5px; }
+.sumtext ul, .sumtext ol { padding-left: 18px; }
+.sumtext code { font-family: var(--mono); font-size: 11px; }
+.sumtext pre { white-space: pre-wrap; font-family: var(--mono); font-size: 11px; }
 /* the Summarizer note line goes red when a Generate fails. */
 .ovr-note.is-err { color: var(--rec); }
 

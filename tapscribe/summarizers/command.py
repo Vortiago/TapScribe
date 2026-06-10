@@ -7,6 +7,17 @@ the operator's template, with the prompt appended as a trailing positional) and
 run with `shell=False` — never an f-string, never `shell=True` — so a transcript
 or prompt can't break out into a shell. Same subprocess-argv discipline as
 `tapscribe.live.build_live_cmd`.
+
+Why the transcript travels on **stdin** (not argv, not a file path): argv would
+hit ARG_MAX and leak meeting content into `ps`; a file reference wouldn't
+reduce prompt injection either (the model reads the same bytes regardless of
+transport) while REQUIRING the tool to have file-read capability enabled —
+stdin is the least-capability delivery. The injection exposure that actually
+matters is the tool's own tool use (an injected transcript asking an agentic
+CLI to read files / fetch URLs and exfiltrate into the summary); that
+mitigation lives in `catalog.COMMAND_PRESETS`, whose templates ship hardened
+flags (e.g. Claude Code with tools disabled). Don't "fix" injection by moving
+the transcript to a file.
 """
 
 from __future__ import annotations
@@ -40,6 +51,21 @@ def _default_timeout_s() -> float:
     )
 
 
+def build_command_argv(command: str, prompt: str) -> list[str]:
+    """List-form argv for one summarize call: the operator's shell-style
+    template split by `shlex`, with the prompt appended as ONE trailing
+    positional (only when non-empty, so a stdin-only tool sees exactly the
+    transcript). Pure — no subprocess spawn — the same testable-builder shape
+    as `tapscribe.live.build_live_cmd`. Raises `SummarizerUnavailable` on an
+    empty template."""
+    argv = shlex.split(command or "")
+    if not argv:
+        raise SummarizerUnavailable("the command source needs a non-empty command template")
+    if prompt:
+        argv.append(prompt)
+    return argv
+
+
 class CommandSummarizer:
     """Summarize by piping the transcript to an operator-supplied CLI tool.
 
@@ -58,10 +84,9 @@ class CommandSummarizer:
     source = "command"
 
     def __init__(self, command: str, *, timeout_s: float | None = None) -> None:
-        argv = shlex.split(command or "")
-        if not argv:
-            raise SummarizerUnavailable("the command source needs a non-empty command template")
-        self._argv = argv
+        # Validate the template eagerly (empty → Unavailable) by building a
+        # promptless argv; summarize() rebuilds with the real prompt.
+        self._argv = build_command_argv(command, "")
         self.command = (command or "").strip()
         self._timeout_s = _default_timeout_s() if timeout_s is None else timeout_s
 
@@ -69,9 +94,7 @@ class CommandSummarizer:
         # List-form argv only (the operator template parsed by shlex + the
         # prompt as a trailing positional). Never interpolated into a shell
         # string — see the class docstring.
-        argv = list(self._argv)
-        if prompt:
-            argv.append(prompt)
+        argv = build_command_argv(self.command, prompt)
         started = datetime.now(UTC)
         try:
             proc = subprocess.run(

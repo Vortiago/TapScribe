@@ -583,6 +583,15 @@ Package layout:
   `mlx_lm.load` / a Hub download if it's listed). `ApiSummarizer`'s model list
   will land here too.
 
+**Command preset** — a curated `COMMAND_PRESETS` row in `catalog`
+(key / label / template / note) that a dashboard dropdown pick seeds into the
+Command source's **editable** template field. Unlike the local-model catalog,
+the preset list is NOT an allowlist — the command template stays
+operator-trusted free text; what a preset adds is hardening-by-default
+(the Claude Code row ships with tool use disabled so a prompt-injected
+transcript can't make the tool read files or fetch URLs). Don't confuse the
+two catalogs' roles when adding rows to either.
+
 `ApiSummarizer` (OpenAI-compatible / Ollama, #85) is the remaining planned
 adapter behind the same one-method seam — one new `api` module. Adapter-level
 errors are `SummarizerUnavailable` (misconfigured / not-wired source → 400) and

@@ -206,6 +206,46 @@ SUMMARY_MODELS: dict[str, tuple[SummaryModel, ...]] = {
     "gguf": _GGUF_MODELS,
 }
 
+
+# ---------------------------------------------------------------------------
+# Command-source presets — known CLI tools the dashboard offers as one-click
+# templates. UNLIKE the local-model catalog above, this is NOT an allowlist:
+# the command source is operator-trusted free text by design (the operator
+# already controls which binaries exist on the host), so a preset only SEEDS
+# the editable template field. What the rows add is hardening-by-default —
+# flags an operator wouldn't know to write: the Claude row disables tool use
+# so a prompt-injected transcript can't make the tool read files or fetch
+# URLs. Add a tool = add a row; never narrow CommandSummarizer to one tool's
+# quirks.
+@dataclass(frozen=True)
+class CommandPreset:
+    """One dashboard-offered command template: a known CLI summarizer tool."""
+
+    key: str  # stable identity, the dropdown <option> value
+    label: str  # human-friendly dropdown label
+    template: str  # the command template a pick seeds into the field
+    note: str = ""  # one-line caveat/why shown under the dropdown
+
+    def to_mapping(self) -> dict[str, Any]:
+        """JSON-ready dict for `GET /api/summarize/models`."""
+        return {"key": self.key, "label": self.label, "template": self.template, "note": self.note}
+
+
+COMMAND_PRESETS: tuple[CommandPreset, ...] = (
+    CommandPreset(
+        key="claude",
+        label="Claude Code",
+        template='claude -p --tools "" --bare',
+        note="tools disabled — a prompt-injected transcript can't read files or fetch URLs",
+    ),
+    CommandPreset(
+        key="opencode",
+        label="OpenCode",
+        template="opencode run",
+        note="runs your configured agent WITH its tools — prefer Claude Code for untrusted transcripts",
+    ),
+)
+
 # Operator knobs, hoisted to module constants so the dashboard wiring + docs
 # share ONE source of truth — same convention as the MLX transcriber chunk-size
 # knobs and the command-source timeout.
@@ -324,6 +364,9 @@ def summary_model_catalog(backend: str | None = None) -> dict[str, Any]:
         "max_tokens_default": _default_max_tokens(),
         "max_tokens_min": _MAX_TOKENS_BOUNDS[0],
         "max_tokens_max": _MAX_TOKENS_BOUNDS[1],
+        # Command-source presets ride along so the view needs ONE catalog
+        # fetch. NOT an allowlist — see the CommandPreset block above.
+        "command_presets": [p.to_mapping() for p in COMMAND_PRESETS],
     }
 
 

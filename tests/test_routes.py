@@ -2097,6 +2097,24 @@ def test_api_summarize_models_lists_catalog(client):
     assert body["max_tokens_min"] <= body["max_tokens_default"] <= body["max_tokens_max"]
 
 
+def test_api_summarize_models_lists_command_presets(client):
+    """The Command source's preset dropdown rides the same catalog fetch: known
+    CLI tools as {key,label,template,note} rows. NOT an allowlist — the command
+    field stays operator-editable free text; a preset only seeds it (the Claude
+    row ships tool use disabled, hardening an operator wouldn't know to write)."""
+    body = client.get("/api/summarize/models").json()
+    presets = body["command_presets"]
+    by_key = {p["key"]: p for p in presets}
+    assert {"claude", "opencode"} <= set(by_key)
+    for p in presets:
+        assert {"key", "label", "template", "note"} <= set(p)
+        assert p["label"] and p["template"]
+    # The Claude preset ships hardened: tool use disabled in print mode.
+    assert by_key["claude"]["template"].startswith("claude ")
+    assert "--tools" in by_key["claude"]["template"]
+    assert by_key["opencode"]["template"].startswith("opencode ")
+
+
 def test_api_summarize_models_reflects_env_override(client, recorder_under_test, monkeypatch):
     """An operator's TAPSCRIBE_SUMMARIZE_{MLX,GGUF}_MODEL override is surfaced as
     the catalog's `default` AND bypasses the allowlist (it's operator-controlled,

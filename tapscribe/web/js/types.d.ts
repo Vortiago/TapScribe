@@ -162,6 +162,15 @@ export interface SummaryResult extends PersistedSummary {
   session: string;
 }
 
+// One Command-source preset — a known CLI tool whose template a dropdown pick
+// seeds into the (still editable) command field. NOT an allowlist.
+export interface CommandPreset {
+  key: string;
+  label: string;
+  template: string;
+  note: string;
+}
+
 // One selectable local-summarizer model — a row of GET /api/summarize/models,
 // shown in the Summary view's model dropdown.
 export interface SummaryModel {
@@ -181,6 +190,7 @@ export interface SummaryModelCatalog {
   max_tokens_default: number; // OUTPUT-length cap default the number input seeds
   max_tokens_min: number;     // lower bound for the number input
   max_tokens_max: number;     // upper bound for the number input
+  command_presets: CommandPreset[]; // Command-source presets (ride the same fetch)
 }
 
 export interface WavFile {
