@@ -93,6 +93,29 @@ export function mount(host, frag) {
 /** @type {WeakMap<Element, string>} */
 const _regionSig = new WeakMap();
 
+// Dev/test only. Re-runs `build` into a detached probe and compares to what the
+// region currently shows; a mismatch means `sig` is missing a dependency the
+// render reads, so the region would silently go stale. Records to
+// globalThis.__TAPSCRIBE_SIG_DRIFT (a throw would be swallowed by the dashboard's
+// event-handler try/catch, so we don't rely on it) and console.errors loudly.
+/**
+ * @param {Element} host
+ * @param {() => Node} build
+ * @param {string} sig
+ */
+function _auditSigCoversOutput(host, build, sig) {
+  const probe = /** @type {Element} */ (document.createElement(host.tagName || "div"));
+  probe.replaceChildren(build());
+  if (probe.innerHTML === host.innerHTML) return;
+  (globalThis.__TAPSCRIBE_SIG_DRIFT ||= []).push({ sig, expected: probe.innerHTML, actual: host.innerHTML });
+  console.error(
+    `renderRegion sig drift: output changed but sig ${JSON.stringify(sig)} did not — the build ` +
+      `closure reads a value missing from its sig, so this region will silently go stale. Add that ` +
+      `value to the sig, OR render the derived bit in place (a sibling toggled per-tick) instead of ` +
+      `through a sig-gated region.`,
+  );
+}
+
 /** @param {Element} el — true for controls that hold live interaction state. */
 function _isInteractive(el) {
   const tag = el.tagName;
@@ -146,7 +169,10 @@ export function renderRegion(host, build, opts = {}) {
     const active = document.activeElement;
     if (active && active !== document.body && host.contains(active) && _isInteractive(active)) return;
     if (selectionInside(host)) return;
-    if (opts.sig != null && _regionSig.get(host) === opts.sig) return;
+    if (opts.sig != null && _regionSig.get(host) === opts.sig) {
+      if (globalThis.__TAPSCRIBE_SIG_AUDIT) _auditSigCoversOutput(host, build, opts.sig);
+      return;
+    }
   }
   if (opts.sig != null) _regionSig.set(host, opts.sig);
   host.replaceChildren(build());

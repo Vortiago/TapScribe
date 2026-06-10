@@ -2589,3 +2589,60 @@ async def test_summary_persists_across_reload(running_recorder: RunningRecorder)
             assert "command" in (hint or ""), f"hint must name the persisted source, got {hint!r}"
         finally:
             await browser.close()
+
+
+async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRecorder):
+    """Every renderRegion call carries a `sig` that gates whether the build
+    closure re-runs. If the sig is missing a value the build actually reads,
+    the region silently goes stale (#94). The guard in templates.js lets the
+    audit run opt-in via globalThis.__TAPSCRIBE_SIG_AUDIT — when set, every
+    skipped rebuild re-invokes build() into a detached probe and pushes any
+    mismatch to globalThis.__TAPSCRIBE_SIG_DRIFT.
+
+    This test turns the audit on, exercises real views across several poll
+    cycles, and asserts zero drift was recorded: any future sig-drift will
+    trip it as soon as a region's build output changes without its sig changing."""
+    base = running_recorder.base_url
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+
+            # Wait for first paint + spine rendering.
+            await page.wait_for_function(
+                "() => document.querySelector('[data-slot=\"sessionPick\"]')",
+                timeout=10000,
+            )
+            # Turn audit on AFTER the initial render so the first paint (no
+            # prior sig remembered) doesn't produce false positives.
+            await page.evaluate(
+                "() => { window.__TAPSCRIBE_SIG_AUDIT = true; window.__TAPSCRIBE_SIG_DRIFT = []; }"
+            )
+
+            # Drive through each view and let >1 poll cross per view so any
+            # sig-gated region would get skipped (and re-checked by the audit).
+            for view in _NEXT_VIEWS:
+                await page.evaluate("(v) => window.gotoView(v)", view)
+                await page.wait_for_function(
+                    "() => document.querySelector('#viewRoot')?.childElementCount > 0",
+                    timeout=5000,
+                )
+                # Cross at least one poll period (500ms in main.js).
+                await page.wait_for_timeout(_NEXT_POLL_CROSS_MS)
+
+            # Assert no drift was recorded across any view.
+            drift = await page.evaluate("() => (window.__TAPSCRIBE_SIG_DRIFT || []).length")
+            assert drift == 0, (
+                f"renderRegion sig audit found {drift} region(s) where build output changed "
+                f"but the sig did not — those regions will go stale. Inspect "
+                "window.__TAPSCRIBE_SIG_DRIFT in the browser for details."
+            )
+        finally:
+            await browser.close()
