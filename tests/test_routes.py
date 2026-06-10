@@ -930,6 +930,18 @@ def test_absorb_invalidates_target_merged_transcript(client, recorder_under_test
     assert not (target / "session-transcript.json").exists()
 
 
+def test_absorb_invalidates_target_summary(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    target = seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    (target / "session-summary.json").write_text('{"stale": true}')
+
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary_invalidated"] is True
+    assert not (target / "session-summary.json").exists()
+
+
 def test_absorb_refuses_when_source_is_current_session(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", [])
