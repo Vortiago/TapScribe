@@ -18,7 +18,7 @@
 // strip slider isn't clobbered).
 
 import { tpl, pick, selectionInside } from "../../templates.js";
-import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks } from "../../api.js";
+import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks, fetchWavStripMeta, peekWavStripMeta } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 import { createWaveform } from "../components/waveform.js";
@@ -110,6 +110,14 @@ export function build(ctx) {
   const pendingWave = new Set();
   /** @type {Map<string, string>} */
   const failedWave = new Map();
+  /** Committed-cut (strip-meta) fetches in flight / failed, keyed
+   * `sid/name@strippedAt` — same dedupe + no-retry-loop discipline as the
+   * peaks cache above. A failed key never refetches; a re-strip changes the
+   * stamp and therefore the key. */
+  /** @type {Set<string>} */
+  const pendingCutMeta = new Set();
+  /** @type {Set<string>} */
+  const failedCutMeta = new Set();
 
   // ---- Helpers --------------------------------------------------------------
 
@@ -186,10 +194,39 @@ export function build(ctx) {
         }
       }
     }
-    const wsig = `${key}@${state}`;
+
+    // Committed strip cut (#90): only the ORIGINAL's waveform carries the
+    // overlay (the stripped source IS the cut result). Resolved lazily from
+    // /strip-meta, cached on the stripped_at stamp so a re-strip refetches;
+    // spans come from the persisted sidecar — never reconstructed from
+    // region filenames.
+    const stripped = session?.stripped || null;
+    const cutStamp = src === "original" && stripped ? stripped.stripped_at || "" : "";
+    /** @type {import('../../types.js').CutSpan[] | null} */
+    let cut = null;
+    if (src === "original" && stripped) {
+      const mkey = `${sid}/${sel.name}@${cutStamp}`;
+      const meta = peekWavStripMeta(sid, sel.name, cutStamp);
+      if (meta !== undefined) {
+        cut = meta && meta.spans && meta.spans.length ? meta.spans : null;
+      } else if (!pendingCutMeta.has(mkey) && !failedCutMeta.has(mkey)) {
+        pendingCutMeta.add(mkey);
+        fetchWavStripMeta(sid, sel.name, cutStamp)
+          .catch(() => { failedCutMeta.add(mkey); })
+          .finally(() => {
+            pendingCutMeta.delete(mkey);
+            // Same redraw-only contract as the peaks fetch above: reset just
+            // the wave sig and re-resolve the current selection.
+            lastWaveSig = " ";
+            drawWaveform(selectedFor(), session ? effectiveSource(session.session) : "original");
+          });
+      }
+    }
+
+    const wsig = `${key}@${state}@cut:${cutStamp}:${cut ? cut.length : 0}`;
     if (wsig === lastWaveSig) return;
     lastWaveSig = wsig;
-    if (state === "ok" && data) waveform.showWaveform(data.peaks, data.duration_s);
+    if (state === "ok" && data) waveform.showWaveform(data.peaks, data.duration_s, cut);
     else if (state === "loading") waveform.showMessage("loading waveform…");
     else waveform.showMessage(message);
   };

@@ -809,6 +809,14 @@ body::before { display: none; }
   font-size: 10.5px; color: var(--fg-3); pointer-events: none;
 }
 .wave-msg[hidden] { display: none; }
+.wave-cutbadge {
+  position: absolute; top: 5px; right: 7px;
+  font-size: 9px; color: color-mix(in srgb, var(--rec) 85%, var(--fg-0));
+  background: color-mix(in srgb, var(--bg-0) 75%, transparent);
+  border: 1px solid var(--hairline); border-radius: var(--next-r);
+  padding: 1px 6px; pointer-events: none;
+}
+.wave-cutbadge[hidden] { display: none; }
 .wave-axis {
   display: flex; justify-content: space-between;
   font-size: 8.5px; color: var(--fg-3);

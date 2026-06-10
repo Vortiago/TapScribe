@@ -40,7 +40,7 @@ export function axisTicks(durationS, count) {
  * where clientWidth is still 0) redraws without the caller re-supplying data.
  * @returns {{
  *   node: DocumentFragment,
- *   showWaveform: (peaks: number[], durationS: number) => void,
+ *   showWaveform: (peaks: number[], durationS: number, cut?: import('../../types.js').CutSpan[] | null) => void,
  *   showMessage: (text: string) => void,
  * }}
  */
@@ -49,10 +49,13 @@ export function createWaveform() {
   const canvas = /** @type {HTMLCanvasElement} */ (pick(frag, "canvas"));
   const axisHost = pick(frag, "axis");
   const msgHost = pick(frag, "msg");
+  const cutBadge = pick(frag, "cutBadge");
 
   /** @type {number[] | null} */
   let peaks = null;
   let durationS = 0;
+  /** @type {import('../../types.js').CutSpan[] | null} */
+  let cutSpans = null;
 
   const paint = () => {
     const ctx = canvas.getContext("2d");
@@ -89,6 +92,30 @@ export function createWaveform() {
       const w = bw > 1.5 ? bw - 0.5 : bw;
       ctx.fillRect(x, mid - h, w, h * 2);
     }
+
+    if (cutSpans && cutSpans.length && durationS > 0) {
+      // Committed strip-silence cut (#90): dim the DROPPED intervals (the
+      // complement of the kept spans) and mark each kept edge with a SOLID
+      // 1px tick — solid = committed-on-disk; the live knob preview (#89)
+      // gets dashed markers so the two read differently at a glance.
+      const cutColor = styles.getPropertyValue("--rec").trim() || "#d75d6a";
+      ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+      let cursor = 0;
+      for (const sp of cutSpans) {
+        const x0 = Math.max(0, Math.min(cssW, (sp.start_s / durationS) * cssW));
+        const x1 = Math.max(0, Math.min(cssW, (sp.end_s / durationS) * cssW));
+        if (x0 > cursor) ctx.fillRect(cursor, 0, x0 - cursor, cssH);
+        cursor = Math.max(cursor, x1);
+      }
+      if (cursor < cssW) ctx.fillRect(cursor, 0, cssW - cursor, cssH);
+      ctx.fillStyle = cutColor;
+      for (const sp of cutSpans) {
+        for (const edge of [sp.start_s, sp.end_s]) {
+          const x = Math.max(0, Math.min(cssW - 1, (edge / durationS) * cssW));
+          ctx.fillRect(x, 0, 1, cssH);
+        }
+      }
+    }
   };
 
   const renderAxis = () => {
@@ -101,11 +128,17 @@ export function createWaveform() {
     axisHost.replaceChildren(out);
   };
 
-  /** Draw the waveform for one WAV's peaks + duration. */
-  /** @param {number[]} p @param {number} d */
-  const showWaveform = (p, d) => {
+  /** Draw the waveform for one WAV's peaks + duration. `cut` (optional) is
+   * the committed strip-silence cut to overlay — the kept {start_s, end_s}
+   * spans; the canvas exposes it on data-cut-spans as a stable e2e hook. */
+  /** @param {number[]} p @param {number} d @param {import('../../types.js').CutSpan[] | null} [cut] */
+  const showWaveform = (p, d, cut) => {
     peaks = p;
     durationS = d;
+    cutSpans = cut && cut.length ? cut : null;
+    if (cutSpans) canvas.dataset.cutSpans = JSON.stringify(cutSpans);
+    else delete canvas.dataset.cutSpans;
+    cutBadge.hidden = !cutSpans;
     msgHost.textContent = "";
     msgHost.hidden = true;
     paint();
@@ -118,6 +151,9 @@ export function createWaveform() {
   const showMessage = (text) => {
     peaks = null;
     durationS = 0;
+    cutSpans = null;
+    delete canvas.dataset.cutSpans;
+    cutBadge.hidden = true;
     msgHost.textContent = text;
     msgHost.hidden = false;
     axisHost.replaceChildren();

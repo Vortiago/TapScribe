@@ -68,6 +68,8 @@ const _sessionSummaryCache = new Map();
 const _wavTxCache = new Map();
 /** @type {Map<string, TxEntry<import('./types.js').WavePeaks>>} */
 const _wavPeaksCache = new Map();
+/** @type {Map<string, TxEntry<import('./types.js').WavStripMeta | null>>} */
+const _wavStripMetaCache = new Map();
 
 // Bound the caches so a long-lived tab that opens hundreds of (id,
 // transcribed_at) pairs over its lifetime doesn't grow unbounded. Map
@@ -246,6 +248,43 @@ export function peekWavePeaks(session, name, source, sig) {
   const e = _wavPeaksCache.get(_peaksKey(session, name, source, sig));
   return e && e.settled ? e.value : undefined;
 }
+
+/**
+ * @param {string} session
+ * @param {string} name
+ * @param {string} sig
+ */
+const _stripMetaKey = (session, name, sig) => `${session}/${name}@${sig}`;
+
+/**
+ * The committed strip-silence cut for one ORIGINAL wav, cached per (session,
+ * name, sig) — callers pass the session's stripped_at stamp as sig so a
+ * re-strip busts the key. Resolves null when the wav has no committed cut.
+ * @param {string} session
+ * @param {string} name
+ * @param {string} sig
+ * @returns {Promise<import('./types.js').WavStripMeta | null>}
+ */
+export function fetchWavStripMeta(session, name, sig) {
+  const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-meta`;
+  return _getOrFetch(_wavStripMetaCache, _stripMetaKey(session, name, sig), () =>
+    fetch(url, { cache: "no-store" }).then(_unwrap),
+  );
+}
+
+/**
+ * Synchronous peek — the resolved strip-meta for (session, name, sig) if the
+ * fetch already settled, else undefined. See `peekWavTranscript`.
+ * @param {string} session
+ * @param {string} name
+ * @param {string} sig
+ * @returns {import('./types.js').WavStripMeta | null | undefined}
+ */
+export function peekWavStripMeta(session, name, sig) {
+  const e = _wavStripMetaCache.get(_stripMetaKey(session, name, sig));
+  return e && e.settled ? e.value : undefined;
+}
+
 /** @param {string} url */
 export const getJson = (url) => fetch(url, { cache: "no-store" }).then(_unwrap);
 /**
