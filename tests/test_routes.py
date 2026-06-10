@@ -1335,6 +1335,11 @@ def test_strip_preview_shares_strip_knob_bounds_and_sanitiser(client, recorder_u
     ok = client.get(base)
     assert ok.status_code == 200
     assert ok.json()["knobs"] == {"min_silence_ms": 500, "pad_ms": 200, "speech_floor_db": -45.0}
+    # Corrupt bytes behind a .wav name → 422 (wave.Error path), not a 500 —
+    # the same unreadable-WAV outcome the peaks route maps.
+    bad = root / "s" / "20260101T020000Z__alice__bad.wav"
+    bad.write_bytes(b"RIFFgarbage-not-a-wav")
+    assert client.get("/api/wav/s/20260101T020000Z__alice__bad.wav/strip-preview").status_code == 422
 
 
 def test_absorb_refuses_missing_source(client, recorder_under_test):

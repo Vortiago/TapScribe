@@ -75,6 +75,13 @@ def strip_one_wav(
     Used by `strip_session` below, which runs this in a worker thread.
     """
 
+    # Fingerprint the source BEFORE reading its bytes: stat-after-read could
+    # certify samples that an in-flight append (utterance resume on the live
+    # session) has already outdated — stale-but-certified is the one failure
+    # the strip-meta fingerprint exists to prevent. Stat-then-read errs the
+    # safe way: any mutation after this stat makes read_wav_strip_meta treat
+    # the committed cut as absent.
+    st = src.stat()
     samples = _ss.read_wav_int16(src)
     plan = _ss.plan_strip_regions(
         samples,
@@ -98,7 +105,7 @@ def strip_one_wav(
         return row
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    origin = parse_wav_start(src.name) or datetime.fromtimestamp(src.stat().st_mtime, tz=UTC)
+    origin = parse_wav_start(src.name) or datetime.fromtimestamp(st.st_mtime, tz=UTC)
     speaker_slug, ident_slug = parse_wav_speaker_ident(src.name)
 
     speech_samples = 0
@@ -123,6 +130,8 @@ def strip_one_wav(
         "written": True,
         "regions_written": regions_written,
         "region_spans": region_spans,
+        "wav_size": st.st_size,
+        "wav_mtime_ns": st.st_mtime_ns,
         "detector": plan.detector,
     }
 
@@ -180,13 +189,9 @@ async def strip_session(recorder: Recorder, req: StripSessionRequest) -> dict[st
         for r in results:
             if not (r.get("written") and r.get("region_spans")):
                 continue
-            try:
-                st = (session_dir / r["name"]).stat()
-            except OSError:
-                continue
             spans_by_original[r["name"]] = {
-                "wav_size": st.st_size,
-                "wav_mtime_ns": st.st_mtime_ns,
+                "wav_size": r["wav_size"],
+                "wav_mtime_ns": r["wav_mtime_ns"],
                 "spans": r["region_spans"],
             }
         if spans_by_original:

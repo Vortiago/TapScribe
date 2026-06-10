@@ -288,6 +288,13 @@ export function build(ctx) {
     fetchStripPreview(sid, sel.name, { ...knobs })
       .then((p) => {
         if (token !== previewToken) return; // superseded by a newer drag
+        // Identity at land time, not just ordering: the selection/source/
+        // session may have moved while the fetch was in flight — never
+        // paint another WAV's preview (the next drawWaveform tick would
+        // only reconcile it up to a poll later).
+        const cur = selectedFor();
+        if (!session || !cur || effectiveSource(session.session) !== "original") return;
+        if (`${session.session}/${cur.name}@original@${String(cur.size)}` !== key) return;
         lastPreview.set(sid, p);
         previewKey = key;
         waveform.setPreview({ spans: p.spans, speech_floor_db: p.knobs.speech_floor_db });
@@ -299,6 +306,17 @@ export function build(ctx) {
   const schedulePreview = () => {
     if (previewTimer) clearTimeout(previewTimer);
     previewTimer = setTimeout(() => { previewTimer = null; firePreview(); }, PREVIEW_DEBOUNCE_MS);
+  };
+
+  /** Drop the live preview entirely — overlay, stats, AND any debounce still
+   * pending, so a drag scheduled just before a ✂ strip / clear doesn't
+   * re-create the preview ~300ms after it was deliberately dropped. */
+  /** @param {string} sid */
+  const dropPreview = (sid) => {
+    if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+    lastPreview.delete(sid);
+    previewKey = "";
+    waveform.setPreview(null);
   };
 
   for (const inp of /** @type {NodeListOf<HTMLInputElement>} */ (frag.querySelectorAll("[data-strip-knob]"))) {
@@ -323,9 +341,7 @@ export function build(ctx) {
         await postJson(`/api/sessions/${encodeURIComponent(sid)}/strip-silence`, { ...knobs }));
       lastStrip.set(sid, res);
       // The committed cut now reflects these knobs — drop the live preview.
-      lastPreview.delete(sid);
-      previewKey = "";
-      waveform.setPreview(null);
+      dropPreview(sid);
       // Flip to the cleaned audio on success so the operator can act on it.
       if ((res.files_written || 0) > 0) sourcePick.set(sid, "stripped");
     } catch (e) {
@@ -345,9 +361,7 @@ export function build(ctx) {
     try { await del(`/api/sessions/${encodeURIComponent(sid)}/stripped`); }
     catch (e) { alert(`Clear stripped failed: ${String(e).replace(/^Error:\s*/, "")}`); return; }
     lastStrip.delete(sid);
-    lastPreview.delete(sid);
-    previewKey = "";
-    waveform.setPreview(null);
+    dropPreview(sid);
     if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
     lastSig = " ";
     afterMutate();
