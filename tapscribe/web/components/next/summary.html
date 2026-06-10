@@ -66,11 +66,20 @@
 
           <!-- 2b. Command source detail: the CLI template. The merged transcript
                is piped to it on stdin; the prompt is appended as a trailing
-               argument (so `claude -p` becomes `claude -p "<prompt>"`). Hidden
-               until the operator picks the Command source. -->
+               argument (so `claude -p` becomes `claude -p "<prompt>"`). The
+               preset <select> only SEEDS the editable template (rows from
+               GET /api/summarize/models — convenience + hardened flags, NOT an
+               allowlist); the preview spells out the resulting invocation.
+               Hidden until the operator picks the Command source. -->
           <div class="srcdetail" data-slot="srcCommand" hidden>
             <div class="srcdetail__lab">⌨️ Command <span class="dim">— a CLI tool · transcript on stdin</span></div>
-            <div class="field"><label>command template</label><input class="inp-txt mono" type="text" data-slot="sumCmd" value="claude -p"></div>
+            <div class="field" style="margin-top:6px">
+              <label>preset</label>
+              <select class="sel sel--model" data-slot="sumCmdPreset" aria-label="Command preset"></select>
+            </div>
+            <div class="dim mono" data-slot="sumCmdPresetNote" style="margin-top:4px"></div>
+            <div class="field" style="margin-top:8px"><label>command template</label><input class="inp-txt mono" type="text" data-slot="sumCmd" value='claude -p --tools "" --bare'></div>
+            <div class="dim mono" data-slot="sumCmdPreview" style="margin-top:4px"></div>
           </div>
 
           <!-- 3. prompt (appended to the command argv) -->

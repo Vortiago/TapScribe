@@ -153,6 +153,116 @@ export function renderRegion(host, build, opts = {}) {
 }
 
 /**
+ * Inline markdown spans → nodes: `` `code` ``, `**bold**`, `*italic*`.
+ * Everything is appended as text nodes or textContent — never parsed as HTML —
+ * so markup in the source text stays literal. No nesting (bold inside italic
+ * etc.); LLM summaries don't need it and flat spans keep this auditable.
+ * @param {string} text
+ * @returns {DocumentFragment}
+ */
+function _inlineMd(text) {
+  const frag = document.createDocumentFragment();
+  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m.index > last) frag.append(text.slice(last, m.index));
+    const el = document.createElement(m[1] ? "code" : m[2] ? "strong" : "em");
+    const span = m[1] || m[2] || m[3] || "";
+    el.textContent = m[2] ? span.slice(2, -2) : span.slice(1, -1);
+    frag.append(el);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) frag.append(text.slice(last));
+  return frag;
+}
+
+/**
+ * Render LLM-emitted markdown into a DocumentFragment, safely. Summaries come
+ * back from an external model (the Command source pipes an untrusted
+ * transcript through a CLI tool), so the text is untrusted: every node here is
+ * built via createElement/textContent — NEVER innerHTML — which makes script
+ * injection impossible by construction (`<img onerror=…>` in the summary
+ * renders as those literal characters). Deliberately a small subset, not a
+ * markdown engine: `#`–`######` headings, `-`/`*` bullets, `1.` ordered items,
+ * fenced code blocks, paragraphs, plus the `_inlineMd` spans. Anything else
+ * stays literal text.
+ * @param {string} text
+ * @returns {DocumentFragment}
+ */
+export function renderMarkdown(text) {
+  const root = document.createDocumentFragment();
+  /** @type {HTMLElement | null} — the open <ul>/<ol>, so adjacent items share one list. */
+  let list = null;
+  /** @type {string[]} — accumulated paragraph lines (single newlines join, like markdown). */
+  let para = [];
+  /** @type {string[] | null} — lines inside an open ``` fence (verbatim, no inline spans). */
+  let fence = null;
+
+  const flushPara = () => {
+    if (!para.length) return;
+    const p = document.createElement("p");
+    p.append(_inlineMd(para.join(" ")));
+    root.append(p);
+    para = [];
+  };
+  const flushFence = () => {
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    code.textContent = (fence || []).join("\n");
+    pre.append(code);
+    root.append(pre);
+    fence = null;
+  };
+
+  for (const raw of String(text ?? "").split(/\r?\n/)) {
+    if (fence) {
+      if (raw.trim().startsWith("```")) flushFence();
+      else fence.push(raw);
+      continue;
+    }
+    const t = raw.trim();
+    if (t.startsWith("```")) {
+      flushPara();
+      list = null;
+      fence = [];
+      continue;
+    }
+    if (!t) {
+      flushPara();
+      list = null;
+      continue;
+    }
+    const h = t.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      flushPara();
+      list = null;
+      const el = document.createElement(`h${(h[1] || "#").length}`);
+      el.append(_inlineMd(h[2] || ""));
+      root.append(el);
+      continue;
+    }
+    const item = t.match(/^[-*]\s+(.*)$/) || t.match(/^\d+[.)]\s+(.*)$/);
+    if (item) {
+      flushPara();
+      const want = /^[-*]/.test(t) ? "UL" : "OL";
+      if (!list || list.tagName !== want) {
+        list = document.createElement(want === "UL" ? "ul" : "ol");
+        root.append(list);
+      }
+      const li = document.createElement("li");
+      li.append(_inlineMd(item[1] || ""));
+      list.append(li);
+      continue;
+    }
+    list = null;
+    para.push(t);
+  }
+  flushPara();
+  if (fence) flushFence(); // unterminated fence — still show what we got
+  return root;
+}
+
+/**
  * Invalidate `host`'s remembered render signature so the NEXT `renderRegion`
  * call re-renders even if its `sig` is unchanged. This is the "mark stale"
  * companion to `renderRegion`'s perf gate: a mutation (a fresh summary landing,
