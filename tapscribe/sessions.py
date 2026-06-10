@@ -278,17 +278,19 @@ def _session_transcript_marker(data: Any) -> dict[str, Any] | None:
 
 def _session_summary_marker(data: Any) -> dict[str, Any] | None:
     """Project the persisted session-summary.json down to the SLIM marker the
-    dashboard listing reads: `summarized_at` + `source` + `model`. DROPS the
-    `summary` body and `prompt` — the dashboard fetches the full summary lazily
-    via `GET /api/sessions/{session}/summary` when the Summary stage is open.
-    A marker change (different `summarized_at`) is the client's re-fetch
-    signal. None when the session has never been summarized."""
+    dashboard listing reads: `summarized_at`, `source`, `model`, and
+    `transcribed_at` (the stamp of the transcript the summary was built from).
+    DROPS the `summary` body and `prompt` — the dashboard fetches the full
+    summary lazily via `GET /api/sessions/{session}/summary` when the Summary
+    stage is open. A marker change (different `summarized_at`) is the client's
+    re-fetch signal. None when the session has never been summarized."""
     if not isinstance(data, dict):
         return None
     return {
         "summarized_at": data.get("summarized_at"),
         "source": data.get("source") or "",
         "model": data.get("model") or "",
+        "transcribed_at": data.get("transcribed_at"),
     }
 
 

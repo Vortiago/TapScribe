@@ -170,10 +170,20 @@ export function build(ctx) {
           : "";
   };
 
-  /** @param {import('../../types.js').PersistedSummary} res */
-  const renderSummary = (res) => {
+  /**
+   * @param {import('../../types.js').PersistedSummary} res
+   * @param {boolean} [stale] true when the summary predates the current transcript (#94)
+   */
+  const renderSummary = (res, stale = false) => {
     const out = document.createElement("div");
     out.className = "sumout";
+    if (stale) {
+      const warn = document.createElement("div");
+      warn.className = "sumout__stale";
+      warn.textContent =
+        "This summary predates the current transcript — regenerate to refresh it.";
+      out.append(warn);
+    }
     const title = document.createElement("div");
     title.className = "sumout__title";
     title.textContent = "Summary";
@@ -440,14 +450,23 @@ export function build(ctx) {
     // stale when it lands (resolveStored).
     const marker = sess?.session_summary || null;
     const shown = lastSummary || resolveStored(marker, sid);
+    // Staleness (#94): the summary carries the `transcribed_at` of the transcript
+    // it was built from; if the session was re-transcribed since, the live
+    // transcript marker's stamp is newer. Prefer the resolved body's stamp, fall
+    // back to the slim marker's. ISO 8601 from one source → lexical compare is
+    // chronological. `stale` joins outSig so a re-transcribe re-renders the pane.
+    const curStamp = sess?.session_transcript?.transcribed_at || "";
+    const sumStamp = shown?.transcribed_at || marker?.transcribed_at || "";
+    const stale = !!(curStamp && sumStamp && sumStamp < curStamp);
     const outSig = [
       sid,
       lastSummary?.created_at || "",
       marker?.summarized_at || "",
       shown ? 1 : 0,
       hasTranscript() ? 1 : 0,
+      stale ? 1 : 0,
     ].join("§");
-    renderRegion(sumOut, () => (shown ? renderSummary(shown) : renderPlaceholder(sess)), {
+    renderRegion(sumOut, () => (shown ? renderSummary(shown, stale) : renderPlaceholder(sess)), {
       sig: outSig,
     });
 

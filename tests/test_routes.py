@@ -930,6 +930,18 @@ def test_absorb_invalidates_target_merged_transcript(client, recorder_under_test
     assert not (target / "session-transcript.json").exists()
 
 
+def test_absorb_invalidates_target_summary(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    target = seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "src", ["20260101T010000Z__alice__def.wav"])
+    (target / "session-summary.json").write_text('{"stale": true}')
+
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary_invalidated"] is True
+    assert not (target / "session-summary.json").exists()
+
+
 def test_absorb_refuses_when_source_is_current_session(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", [])
@@ -2006,10 +2018,11 @@ def test_session_summary_get_unknown_session_returns_404(client, recorder_under_
 
 
 def test_api_state_carries_slim_summary_marker_and_lazy_get_returns_body(client, recorder_under_test):
-    """#83: after a summarize, the session's /api/state row carries ONLY the
-    slim `session_summary` marker (summarized_at + source + model) — never the
-    body — and GET /api/sessions/{session}/summary returns the full persisted
-    summary. Mirrors the merged-transcript marker-plus-lazy-body split."""
+    """#83/#94: after a summarize, the session's /api/state row carries ONLY the
+    slim `session_summary` marker (summarized_at + source + model +
+    transcribed_at) — never the body — and GET /api/sessions/{session}/summary
+    returns the full persisted summary. Mirrors the merged-transcript
+    marker-plus-lazy-body split."""
     seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="we decided to ship")
     r = client.post(
         "/api/sessions/s/summarize",
@@ -2021,8 +2034,15 @@ def test_api_state_carries_slim_summary_marker_and_lazy_get_returns_body(client,
 
     state = client.get("/api/state").json()
     row = next(s for s in state["sessions"] if s["session"] == "s")
-    # Strict equality pins the marker SLIM: exactly these three fields, no body.
-    assert row["session_summary"] == {"summarized_at": stamp, "source": "command", "model": ""}
+    # Strict equality pins the marker SLIM: exactly these four fields, no body.
+    # transcribed_at (#94) is the stamp of the transcript this summary was built
+    # from — the seed's merged transcript carries a fixed stamp.
+    assert row["session_summary"] == {
+        "summarized_at": stamp,
+        "source": "command",
+        "model": "",
+        "transcribed_at": "2026-01-01T00:00:00+00:00",
+    }
 
     # The synthetic current-session entry must carry the key too (None when
     # the current session has never been summarized).

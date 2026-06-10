@@ -241,6 +241,19 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
             # will be overwritten on the next ▶ transcribe whole session.
             pass
 
+    # The target's persisted summary was built from that same now-dropped
+    # transcript, so it is stale too. Drop it alongside, with the same
+    # best-effort handling — the operator regenerates after the next transcribe.
+    tgt_summary = target_dir / "session-summary.json"
+    summary_invalidated = tgt_summary.exists()
+    if summary_invalidated:
+        try:
+            tgt_summary.unlink()
+        except OSError:
+            # Best-effort, mirrors the transcript case above: the WAVs are
+            # already moved, so raising would leave the merge half-applied.
+            pass
+
     # Source folder is now expected to hold only metadata files (session-meta,
     # session-transcript) and an empty stripped/ at most. Wipe the whole tree.
     shutil.rmtree(source_dir)
@@ -252,6 +265,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         "stripped_moved": len(moved_stripped),
         "aliases_added": aliases_added,
         "transcript_invalidated": transcript_invalidated,
+        "summary_invalidated": summary_invalidated,
     }
 
 
