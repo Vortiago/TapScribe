@@ -1930,9 +1930,9 @@ def test_summarize_local_without_extra_returns_400(client, recorder_under_test, 
     installed: a clean 400 at the boundary, not a crash mid-request. We force
     the dependency probe so the result is deterministic regardless of whether
     this box happens to have mlx_lm / llama_cpp installed."""
-    import tapscribe.summarizers as summarizers
+    import tapscribe.summarizers.catalog as summarizers_catalog
 
-    monkeypatch.setattr(summarizers, "_backend_module_available", lambda backend: False)
+    monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: False)
     seed_merged_transcript(recorder_under_test.recordings_dir, "s")
     r = client.post("/api/sessions/s/summarize", json={"source": "local"})
     assert r.status_code == 400, r.text
@@ -1944,21 +1944,22 @@ def test_summarize_local_model_load_failure_returns_400(client, recorder_under_t
     model', a corrupt GGUF, OOM) surfaces as a clean 400 with remediation — not a
     raw 500. Force the gguf route + a deterministic load failure so the result
     doesn't depend on which backends this box happens to have."""
-    import tapscribe.summarizers as summarizers
+    import tapscribe.summarizers.catalog as summarizers_catalog
+    import tapscribe.summarizers.local as summarizers_local
     from tapscribe.transcribers.catalog import set_available_backends_for_testing
 
     set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
-    monkeypatch.setattr(summarizers, "_backend_module_available", lambda backend: True)
+    monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: True)
 
     def boom(model_repo, gguf_file, *, max_tokens, n_ctx):
         raise ValueError("Received 126 parameters not in model: language_model...")
 
-    monkeypatch.setattr(summarizers, "_build_gguf_generate", boom)
+    monkeypatch.setattr(summarizers_local, "_build_gguf_generate", boom)
     try:
         seed_merged_transcript(recorder_under_test.recordings_dir, "s")
         r = client.post("/api/sessions/s/summarize", json={"source": "local"})
         assert r.status_code == 400, r.text
-        assert summarizers.ENV_LOCAL_GGUF_MODEL in r.json()["detail"]
+        assert summarizers_catalog.ENV_LOCAL_GGUF_MODEL in r.json()["detail"]
     finally:
         set_available_backends_for_testing(None)
 
@@ -1985,3 +1986,92 @@ def test_summarize_unknown_session_returns_404(client, recorder_under_test):  # 
         json={"source": "command", "command": _SUMMARIZE_CAT},
     )
     assert r.status_code == 404, r.text
+
+
+# ---------------------------------------------------------------------------
+# GET /api/summarize/models — the local model dropdown's catalog
+# ---------------------------------------------------------------------------
+
+
+def test_api_summarize_models_lists_catalog(client):
+    """The dropdown's source of truth: the hardware-routed catalog with one
+    flagged default. The same table is the allowlist the local source validates
+    against, so the dropdown can only ever offer loadable choices."""
+    r = client.get("/api/summarize/models")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["backend"] in ("mlx", "gguf")
+    assert body["default"]
+    assert body["models"], "the catalog must offer at least one model"
+    row = body["models"][0]
+    assert {"repo_id", "label", "approx_gb", "context_tokens", "note", "is_default"} <= set(row)
+    # Exactly the rows flagged is_default match the top-level default repo.
+    assert [m["repo_id"] for m in body["models"] if m["is_default"]] == [body["default"]]
+    # The output-cap knob the dropdown's number input seeds + bounds.
+    assert body["max_tokens_min"] <= body["max_tokens_default"] <= body["max_tokens_max"]
+
+
+def test_api_summarize_models_reflects_env_override(client, recorder_under_test, monkeypatch):
+    """An operator's TAPSCRIBE_SUMMARIZE_{MLX,GGUF}_MODEL override is surfaced as
+    the catalog's `default` AND bypasses the allowlist (it's operator-controlled,
+    not untrusted request input). Forces the gguf route so the result is
+    deterministic regardless of this box's hardware."""
+    import tapscribe.summarizers.catalog as summarizers_catalog
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    monkeypatch.setenv(summarizers_catalog.ENV_LOCAL_GGUF_MODEL, "vendor/operator-custom-gguf")
+    try:
+        # 1. The endpoint surfaces the override as the active default.
+        body = client.get("/api/summarize/models").json()
+        assert body["backend"] == "gguf"
+        assert body["default"] == "vendor/operator-custom-gguf"
+
+        # 2. POSTing that override model is NOT rejected as an unknown model — it
+        # passes the allowlist and reaches the missing-extra probe instead
+        # (llama_cpp isn't importable on CI), proving the override was let through.
+        monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: False)
+        seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+        r = client.post(
+            "/api/sessions/s/summarize",
+            json={"source": "local", "model": "vendor/operator-custom-gguf"},
+        )
+        assert r.status_code == 400, r.text
+        detail = r.json()["detail"]
+        assert "isn't a known" not in detail, f"override must bypass the allowlist, got {detail!r}"
+        assert "summarize" in detail.lower()  # the missing-extra message it reached instead
+    finally:
+        set_available_backends_for_testing(None)
+
+
+def test_summarize_command_source_accepts_max_tokens_field(client, recorder_under_test):
+    """The route parses an output-cap field without choking; the command source
+    ignores it (an external CLI owns its own length), proving the body coercion
+    is harmless across sources."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    r = client.post(
+        "/api/sessions/s/summarize",
+        json={"source": "command", "command": _SUMMARIZE_CAT, "max_tokens": 4096, "prompt": ""},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_summarize_local_rejects_unknown_model_returns_400(client, recorder_under_test):
+    """Proves the route forwards `model` AND that an untrusted, off-catalog repo
+    is rejected at the boundary (→ 400) before any Hub access — a stray repo id
+    from the dashboard can't reach mlx_lm.load / a download. The allowlist check
+    fires inside the factory, before the transcript read, so it 400s regardless
+    of which backends this box has."""
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    try:
+        seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+        r = client.post(
+            "/api/sessions/s/summarize",
+            json={"source": "local", "model": "evil/not-in-catalog"},
+        )
+        assert r.status_code == 400, r.text
+        assert "evil/not-in-catalog" in r.json()["detail"]
+    finally:
+        set_available_backends_for_testing(None)

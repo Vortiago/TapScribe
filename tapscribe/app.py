@@ -61,23 +61,24 @@ from .batch_transcribe import (
     transcribe_session,
 )
 from .recorder import Recorder, SessionBusy
-from .session_merge import InvalidRange, NoUsableWavs
-from .sessions import (
+from .session_maintenance import (
     absorb_session,
     delete_session_audio,
     delete_session_wav,
-    gather_sessions,
     prune_empty_sessions,
+    session_is_empty,
+)
+from .session_merge import InvalidRange, NoUsableWavs
+from .session_paths import resolve_session_dir, resolve_wav, stripped_dir
+from .sessions import (
+    gather_sessions,
     read_session_meta,
     read_session_transcript,
     read_wav_transcript,
-    resolve_session_dir,
-    resolve_wav,
-    session_is_empty,
-    stripped_dir,
     write_session_meta,
 )
-from .summarizers import SummarizerFailed, SummarizerUnavailable
+from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
+from .summarizers.catalog import _MAX_TOKENS_BOUNDS
 from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
@@ -835,17 +836,43 @@ async def api_session_summarize(
     # Forward only explicitly-provided fields and let SummarizeSessionRequest own
     # the defaults (source="command", prompt=DEFAULT_SUMMARY_PROMPT) — the same
     # "value object owns the defaults" contract as the strip-silence route.
-    overrides: dict[str, str] = {}
+    overrides: dict[str, Any] = {}
     source = body.get("source")
     if isinstance(source, str) and source.strip():
         overrides["source"] = source.strip()
     command = body.get("command")
     if isinstance(command, str):
         overrides["command"] = command.strip()
+    model = body.get("model")
+    if isinstance(model, str) and model.strip():
+        overrides["model"] = model.strip()
+    # max_tokens: parse + bounds-check exactly like the other numeric body knobs
+    # (gate / strip-silence) — a clear 400 for out-of-range, None when omitted.
+    # The adapter also clamps as a final safety net for non-route callers.
+    max_tokens = _parse_bounded_int(
+        body.get("max_tokens"), "max_tokens", lo=_MAX_TOKENS_BOUNDS[0], hi=_MAX_TOKENS_BOUNDS[1]
+    )
+    if max_tokens is not None:
+        overrides["max_tokens"] = max_tokens
     prompt = body.get("prompt")
     if isinstance(prompt, str):
         overrides["prompt"] = prompt
     return await summarize_session(recorder, SummarizeSessionRequest(session=session, **overrides))
+
+
+@app.get("/api/summarize/models")
+async def api_summarize_models():
+    """List the local summarizer's selectable models for THIS machine's backend.
+
+    Drives the Summary view's model dropdown. The backend is hardware-routed
+    (MLX on Apple Silicon, GGUF/CPU elsewhere — the same probe the summarizer
+    uses), so a Mac sees the MLX catalog and a Linux/CUDA box sees the GGUF one.
+    The catalog is also the allowlist the local source validates a picked model
+    against, so the dropdown can only ever offer loadable choices.
+
+    Response: `{ "backend", "default", "models": [{repo_id, label, approx_gb,
+    context_tokens, note, is_default}, ...] }`."""
+    return summary_model_catalog()
 
 
 @app.delete("/api/sessions/{session}/stripped")

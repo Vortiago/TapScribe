@@ -7,6 +7,10 @@ route maps them to HTTP codes. `SessionBusy` comes from `tapscribe.recorder`
 (a JobTracker concept, raised by `run`) and `NoUsableWavs` from
 `tapscribe.session_merge` (a selection verdict) — neither is transcription-
 specific, so neither lives in `batch_transcribe` any more.
+
+`strip_one_wav` — the per-WAV splitter the loop drives — lives here too: it's
+the unit of work this orchestrator owns, not session bookkeeping, so it moved
+out of `sessions.py` when that module was narrowed to the dashboard read path.
 """
 
 from __future__ import annotations
@@ -14,13 +18,18 @@ from __future__ import annotations
 import asyncio
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+from . import config
+from . import strip_silence as _ss
+from .audio import wav_rms_dbfs
 from .recorder import Recorder
 from .session_merge import NoUsableWavs
-from .sessions import resolve_session_dir, strip_one_wav, stripped_dir
+from .session_paths import resolve_session_dir, stripped_dir
 from .strip_silence import SPEECH_RMS_DBFS_FLOOR
+from .text import build_recorder_wav_name, parse_wav_speaker_ident, parse_wav_start
 
 
 class BatchStripError(Exception):
@@ -47,6 +56,110 @@ class StripSessionRequest:
     min_silence_ms: int = 500
     pad_ms: int = 200
     speech_floor_db: float = SPEECH_RMS_DBFS_FLOOR
+
+
+def strip_one_wav(
+    src: Path,
+    out_dir: Path,
+    min_silence_ms: int,
+    pad_ms: int,
+    speech_floor_db: float,
+) -> dict[str, Any]:
+    """Split one WAV into one output per detected speech region.
+
+    Each region's output filename uses the recorder's naming convention
+    `<iso>_<speaker>_<ident>_<uuid>.wav` with `<iso>` recomputed as
+    `original_start + region_start_seconds`. That makes `parse_wav_start`
+    place each region at its true wall-clock time during the session
+    merge with no extra metadata.
+
+    Used by `strip_session` below, which runs this in a worker thread.
+    """
+
+    samples = _ss.read_wav_int16(src)
+    total = len(samples)
+    in_secs = total / _ss.SAMPLE_RATE
+    if total == 0:
+        return {
+            "name": src.name,
+            "in_seconds": 0.0,
+            "speech_seconds": 0.0,
+            "segments": 0,
+            "written": False,
+            "regions_written": [],
+            "reason": "empty",
+        }
+
+    # Whole-file silence gate. Same threshold the transcribe path uses
+    # (SILENT_RMS_DBFS_FLOOR). If the original WAV has no sustained signal,
+    # silero will at best false-positive on a transient, and the per-region
+    # outputs are just concentrated noise that hallucinates under Whisper.
+    # Don't write them.
+    overall_rms_dbfs = wav_rms_dbfs(src)
+    if overall_rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
+        return {
+            "name": src.name,
+            "in_seconds": round(in_secs, 2),
+            "speech_seconds": 0.0,
+            "segments": 0,
+            "written": False,
+            "regions_written": [],
+            "reason": f"whole-file silent ({overall_rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)",
+        }
+
+    regions = _ss.detect_speech_silero(samples, min_silence_ms=min_silence_ms, pad_ms=pad_ms)
+
+    if not regions:
+        return {
+            "name": src.name,
+            "in_seconds": round(in_secs, 2),
+            "speech_seconds": 0.0,
+            "segments": 0,
+            "written": False,
+            "regions_written": [],
+            "reason": "no speech detected",
+            "detector": "silero-vad",
+        }
+
+    pre_filter_count = len(regions)
+    regions = _ss.filter_low_energy_regions(samples, regions, floor_dbfs=speech_floor_db)
+    if not regions:
+        return {
+            "name": src.name,
+            "in_seconds": round(in_secs, 2),
+            "speech_seconds": 0.0,
+            "segments": 0,
+            "written": False,
+            "regions_written": [],
+            "reason": f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
+            "detector": "silero-vad",
+        }
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    origin = parse_wav_start(src.name) or datetime.fromtimestamp(src.stat().st_mtime, tz=UTC)
+    speaker_slug, ident_slug = parse_wav_speaker_ident(src.name)
+
+    speech_samples = 0
+    regions_written: list[str] = []
+    for start_sample, end_sample in regions:
+        region_samples = samples[start_sample:end_sample]
+        offset_s = start_sample / _ss.SAMPLE_RATE
+        region_start = origin + timedelta(seconds=offset_s)
+        fname = build_recorder_wav_name(region_start, speaker_slug, ident_slug)
+        _ss.write_wav_int16(out_dir / fname, region_samples)
+        regions_written.append(fname)
+        speech_samples += len(region_samples)
+
+    return {
+        "name": src.name,
+        "in_seconds": round(in_secs, 2),
+        "speech_seconds": round(speech_samples / _ss.SAMPLE_RATE, 2),
+        "segments": len(regions),
+        "segments_filtered_below_floor": pre_filter_count - len(regions),
+        "written": True,
+        "regions_written": regions_written,
+        "detector": "silero-vad",
+    }
 
 
 async def strip_session(recorder: Recorder, req: StripSessionRequest) -> dict[str, Any]:
