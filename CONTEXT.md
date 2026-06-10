@@ -368,11 +368,20 @@ advancing the render gate**, so the held render lands on the first tick
 after the interaction clears; updates are delayed by the operator's own
 interaction, never lost.
 
-Mechanics live in `web/js/templates.js` (`renderRegion`,
-`selectionInside`); the decision and its rejected alternatives
-(DOM-diffing, capture-and-restore, pausing the poll) are ADR-0004. Say
-"this region needs the interaction hold," not ad-hoc descriptions of
-focus/selection guards.
+Mechanics live in `web/js/templates.js`: `renderRegion(host, build, {sig})`
+is the swap-based primitive (gates on a focus/selection guard + an optional
+perf signature, replaceChildren on render), `selectionInside(host)` is the
+shared selection predicate, and `markRegionStale(host)` invalidates a host's
+remembered signature so the NEXT `renderRegion` re-renders after a mutate /
+lazy-body load — the "defer, don't force" reset (`force:true` would bypass the
+guards and clobber a selection). Swap-based copy-target panes render through
+`renderRegion` (the Summary output pane, the Transcript merged pane, plus the
+spine/settings/live-channel/config-card regions); a few **view-level** gates
+that guard a whole `update()` body rather than one host swap (the Recordings
+WAV list) apply `selectionInside` directly. The decision and its rejected
+alternatives (DOM-diffing, capture-and-restore, pausing the poll) are
+ADR-0004. Say "this region needs the interaction hold," not ad-hoc
+descriptions of focus/selection guards.
 
 ## Per-WAV transcript cache
 
@@ -420,6 +429,33 @@ naturally invalidates every per-WAV transcript on its next
 - `set_primary_transcript(wav, *, backend, model)` flips the pointer.
 - `cached_transcribe(wav, transcriber, ...)` is unchanged in signature;
   it just no longer evicts other entries.
+
+## Session modules — paths · listing · maintenance
+
+Recording-session bookkeeping is split across three modules by concern, so the
+once-per-second read path isn't tangled with path-safety or destructive
+operations:
+
+- **`session_paths`** — the path-resolution seam. The ONE place a request-
+  supplied `session` / `name` becomes a filesystem path under `RECORDINGS_DIR`:
+  `_safe_part` (the lowest-level sanitiser) + `resolve_session_dir` /
+  `resolve_source_dir` / `resolve_wav` / `session_meta_path` / `stripped_dir`.
+  Owns the two-layer `py/path-injection` guard (`_safe_part` + the canonical
+  `realpath(x).startswith(root + os.sep)` check) so callers cross it instead of
+  re-deriving it. New code that turns request input into a recordings path goes
+  through here — never `config.RECORDINGS_DIR / <raw>` by hand.
+- **`sessions`** — the dashboard read model: `gather_sessions` (the poll-path
+  listing, memoised on cheap stat signatures), `read_session_meta` /
+  `write_session_meta`, and the lazy full-transcript reads the slim poll
+  markers point at. Read-path only.
+- **`session_maintenance`** — destructive, infrequent operator operations:
+  `absorb_session`, `delete_session_audio` / `delete_session_wav`,
+  `prune_empty_sessions`, `session_is_empty`. Resolves via `session_paths`,
+  reads/writes meta via `sessions`.
+
+(The recorder-filename parsers `parse_wav_start` / `parse_wav_speaker_slug` /
+`parse_wav_speaker_ident` and `build_recorder_wav_name` all live in `text` — the
+single source of truth for the `<iso>_<speaker>_<ident>_<utt>.wav` format.)
 
 ## Session job · `JobTracker.run`
 
@@ -495,8 +531,9 @@ parse-and-map shim over it.
 
 One entry point: `strip_session(recorder, StripSessionRequest) -> dict`
 — brackets its work in `recorder.jobs.run` (the Session job seam, shared with
-Batch transcription), loops `strip_one_wav` over every original WAV on a worker
-thread, and aggregates. Raises `SessionBusy` (from `recorder`, via `run`) /
+Batch transcription), loops `strip_one_wav` (the per-WAV splitter, which lives
+in `batch_strip` as the unit of work this orchestrator owns) over every original
+WAV on a worker thread, and aggregates. Raises `SessionBusy` (from `recorder`, via `run`) /
 `NoUsableWavs` (from `session_merge`) plus its own `StrippedDirUnclearable`
 (under a `BatchStripError` base — a strip failure isn't a transcription one)
 when a previous `stripped/` can't be cleared. `StripSessionRequest` owns the
@@ -522,23 +559,34 @@ command / prompt arrive per request).
 
 The protocol-level abstraction for "something that can summarize one
 transcript": `summarize(transcript, *, prompt) -> SummaryResult`. The
-post-transcription mirror of `Transcriber`, one altitude up. Lives in
-`tapscribe/summarizers.py` with the factory `load_summarizer(source=…)` that
-dispatches on source — exactly as `load_transcriber` resolves a backend.
+post-transcription mirror of `Transcriber`, one altitude up. Lives in the
+`tapscribe/summarizers/` **package** (it graduated from a single module once the
+Local source landed, mirroring `transcribers/`); the factory
+`load_summarizer(source=…)` in `__init__` dispatches on source — exactly as
+`load_transcriber` resolves a backend.
 
-Concrete adapters:
-- `CommandSummarizer` — pipes the merged transcript to an operator-supplied CLI
-  tool (e.g. `claude -p`) on **stdin**, reads the summary from **stdout**. Argv
-  is list-form (`shlex.split` of the template + the prompt appended as a
-  trailing positional), `shell=False`, timeout-bounded — same subprocess
-  discipline as `build_live_cmd`. The first and (so far) only adapter.
+Package layout:
+- `base` — the `Summarizer` protocol, `SummaryResult`, the domain errors, and
+  `DEFAULT_SUMMARY_PROMPT`. The leaf everything builds on.
+- `command` — `CommandSummarizer`: pipes the merged transcript to an
+  operator-supplied CLI tool (e.g. `claude -p`) on **stdin**, reads the summary
+  from **stdout**. Argv is list-form (`shlex.split` + the prompt as a trailing
+  positional), `shell=False`, timeout-bounded — same subprocess discipline as
+  `build_live_cmd`.
+- `local` — `LocalSummarizer`: a bundled, offline, hardware-routed model
+  (MLX on Apple Silicon, GGUF/CPU elsewhere), lazy-imported on first
+  `summarize()`.
+- `catalog` — the source-neutral model catalog (`SUMMARY_MODELS`), the
+  allowlist (`_is_allowed_local_model`), per-machine hardware routing, and the
+  operator knobs. Serialised by `GET /api/summarize/models`; the catalog is
+  ALSO the security allowlist (an untrusted request-body model id only reaches
+  `mlx_lm.load` / a Hub download if it's listed). `ApiSummarizer`'s model list
+  will land here too.
 
-`ApiSummarizer` (OpenAI-compatible / Ollama) and `LocalSummarizer` (a bundled
-offline model) are planned as new adapters behind the same one-method seam, at
-which point `summarizers.py` graduates to a package with lazy-import loaders
-like `transcribers/`. Adapter-level errors are `SummarizerUnavailable`
-(misconfigured / not-wired source → 400) and `SummarizerFailed` (ran but failed
-→ 502).
+`ApiSummarizer` (OpenAI-compatible / Ollama, #85) is the remaining planned
+adapter behind the same one-method seam — one new `api` module. Adapter-level
+errors are `SummarizerUnavailable` (misconfigured / not-wired source → 400) and
+`SummarizerFailed` (ran but failed → 502).
 
 ## Wire-format note
 

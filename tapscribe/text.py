@@ -273,6 +273,23 @@ def parse_wav_speaker_slug(name: str) -> str:
     return "_".join(parts[1:-2])
 
 
+def parse_wav_speaker_ident(name: str) -> tuple[str, str]:
+    """Pull `(speaker_slug, ident)` out of a recorder filename so callers can
+    stitch them back into per-region output names (strip-silence) or bucket
+    regions under their source original (the session listing).
+
+    Falls back to safe defaults (`"anon"`, `"unknown"`) when the input doesn't
+    follow the `<iso>_<speaker_slug>_<ident>_<utt>.wav` convention, so a
+    hand-dropped WAV still produces workable output. Sits with the other
+    recorder-filename parsers (`parse_wav_start`, `parse_wav_speaker_slug`) as
+    the single source of truth for the format `build_recorder_wav_name` mints."""
+    speaker = parse_wav_speaker_slug(name) or "anon"
+    stem = name.rsplit(".", 1)[0]
+    parts = stem.split("_")
+    ident = parts[-2] if len(parts) >= 4 else "unknown"
+    return speaker, ident
+
+
 def build_recorder_wav_name(start: datetime, speaker_slug: str, ident: str) -> str:
     """Mint the canonical recorder filename:
     `<YYYY-MM-DDTHH-MM-SSZ>_<speaker_slug>_<ident>_<uuid8>.wav`.

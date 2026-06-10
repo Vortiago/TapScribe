@@ -28,10 +28,14 @@
   the swap while a control inside the host is focused OR while a text
   selection starts/ends inside it (clobbering a selection mid-copy is
   the same bug as snapping a dropdown shut; see `spine.js` for the
-  reference adoption). Per-tick updaters that mutate text/rows in place
-  instead of swapping a region (the live log dialog, `active-taps.js`,
-  `live-feed.js`) and view-level render gates (`transcript.js` merged
-  pane, `recordings.js` WAV list) apply the exported
+  reference adoption; `summary.js` output pane and `transcript.js` merged
+  pane render through it too, calling `markRegionStale(host)` to force the
+  next render after a mutate / lazy-body load WITHOUT bypassing the guards —
+  never `force:true`, which would clobber a mid-copy selection). Per-tick
+  updaters that mutate text/rows in place instead of swapping a region (the
+  live log dialog, `active-taps.js`, `live-feed.js`) and the `recordings.js`
+  WAV-list view-level gate (it gates the whole view body, not a single host
+  swap, so it can't use `renderRegion`) apply the exported
   `selectionInside(host)` for the same rule — defer WITHOUT updating
   the gate's signature, so the held-back render lands on the first
   tick after the selection clears. `live-channel.js` and `config-card.js`
@@ -177,6 +181,19 @@ introduced and how to avoid them:
   external input. Constrain with `choices=` / `type=int` / `type=float`
   where possible; defensive validation at the boundary keeps the rest
   of the codebase clean.
+- **A model / repo id from a request body must be validated against an
+  allowlist before it reaches a model loader or a Hub download.** The
+  summarizer model dropdown (`POST /api/sessions/{s}/summarize` body
+  `model`) is untrusted input that flows into `mlx_lm.load` /
+  `Llama.from_pretrained` — i.e. a network fetch keyed on attacker-
+  controllable text. `tapscribe.summarizers.SUMMARY_MODELS` is the ONE
+  curated catalog AND the allowlist: `_is_allowed_local_model` rejects
+  anything not listed (the operator's `TAPSCRIBE_SUMMARIZE_*_MODEL` env
+  override and the bundled default are the only exceptions — operator-
+  controlled, not external input). Add a model = add a `SummaryModel`
+  row there; never let a raw body string reach a loader. The same
+  catalog is what `GET /api/summarize/models` serialises for the
+  dropdown, so the UI can only ever offer loadable, allowed choices.
 - **Every `except: pass` (and `except Foo: pass`) needs an explanatory
   comment inside the body** explaining *why* swallowing is the correct
   behaviour. CodeQL's `py/empty-except` flags bare passes, and the

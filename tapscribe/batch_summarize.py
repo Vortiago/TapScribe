@@ -44,6 +44,8 @@ class SummarizeSessionRequest:
     session: str
     source: str = "command"
     command: str = ""
+    model: str = ""  # local source: which catalog model to load (empty = default)
+    max_tokens: int | None = None  # local source: OUTPUT cap (None = env default)
     prompt: str = DEFAULT_SUMMARY_PROMPT
 
 
@@ -62,7 +64,9 @@ async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) ->
     # I/O), so a misconfigured command (empty template, unknown source) fails
     # fast — before the merged-transcript disk read, and without ever touching
     # the JobTracker slot.
-    summarizer = load_summarizer(source=req.source, command=req.command)
+    summarizer = load_summarizer(
+        source=req.source, command=req.command, model=req.model, max_tokens=req.max_tokens
+    )
 
     merged = await asyncio.to_thread(read_session_transcript, req.session)
     text = (merged or {}).get("plain_text") or ""

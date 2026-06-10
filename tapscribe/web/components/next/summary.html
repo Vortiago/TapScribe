@@ -42,11 +42,26 @@
             </span>
           </div>
 
-          <!-- 2a. Local source detail: a single bundled model, no fields. Shown
-               by default (Local is the default source). -->
+          <!-- 2a. Local source detail: pick which bundled model to run. The
+               <select> is populated ONCE from GET /api/summarize/models (the
+               hardware-routed catalog — MLX on a Mac, GGUF elsewhere) and never
+               rebuilt per-tick, so the interaction hold holds. Shown by default
+               (Local is the default source). -->
           <div class="srcdetail" data-slot="srcLocal">
             <div class="srcdetail__lab">🖥️ Local <span class="dim">— bundled offline model · runs with no network</span></div>
-            <div class="dim mono" style="margin-top:4px">first Generate downloads the model, then it runs fully offline</div>
+            <div class="field" style="margin-top:6px">
+              <label>model</label>
+              <select class="sel sel--model" data-slot="sumModel" aria-label="Local summarizer model"></select>
+            </div>
+            <div class="dim mono" data-slot="sumModelNote" style="margin-top:4px">first Generate downloads the model, then it runs fully offline</div>
+            <!-- OUTPUT length cap. The input window is the model's native one (not
+                 a knob on MLX); this caps how long the summary itself can be —
+                 raise it for long meetings or reasoning models. Seeded with the
+                 server default + bounds from GET /api/summarize/models. -->
+            <div class="field" style="margin-top:8px">
+              <label>max output tokens <span class="dim">— summary length cap</span></label>
+              <input class="inp-txt mono" type="number" data-slot="sumMaxTokens" min="16" max="8192" step="64" value="2048" aria-label="Max output tokens">
+            </div>
           </div>
 
           <!-- 2b. Command source detail: the CLI template. The merged transcript

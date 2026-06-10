@@ -22,15 +22,22 @@ import pytest
 
 from tapscribe.summarizers import (
     DEFAULT_SUMMARY_PROMPT,
+    ENV_LOCAL_GGUF_MODEL,
+    ENV_LOCAL_MLX_MODEL,
     LOCAL_GGUF_MODEL,
     LOCAL_MLX_MODEL,
     LocalSummarizer,
     SummarizerFailed,
     SummarizerUnavailable,
     SummaryResult,
-    _build_local_messages,
     load_summarizer,
+    summary_model_catalog,
 )
+
+# Internal helpers live in their submodules; import them from where they're
+# defined (the package __init__ re-exports only the public interface).
+from tapscribe.summarizers.catalog import _MAX_TOKENS_BOUNDS, _clamp_max_tokens
+from tapscribe.summarizers.local import _build_local_messages
 from tapscribe.transcribers.catalog import set_available_backends_for_testing
 
 
@@ -47,14 +54,14 @@ def extra_present(monkeypatch):
     """Pretend the `[summarize]` backend module IS importable, so a no-generate_fn
     construction doesn't fail the fast dependency probe. Deterministic regardless
     of whether this dev box happens to have mlx_lm / llama_cpp installed."""
-    monkeypatch.setattr("tapscribe.summarizers._backend_module_available", lambda backend: True)
+    monkeypatch.setattr("tapscribe.summarizers.catalog._backend_module_available", lambda backend: True)
 
 
 @pytest.fixture
 def extra_missing(monkeypatch):
     """Pretend the `[summarize]` backend module is NOT importable — the fresh-box
     case the runtime-deps step is meant to fix, and the 'degrade clearly' path."""
-    monkeypatch.setattr("tapscribe.summarizers._backend_module_available", lambda backend: False)
+    monkeypatch.setattr("tapscribe.summarizers.catalog._backend_module_available", lambda backend: False)
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +120,94 @@ def test_local_summarizer_model_override_wins(reset_available_backends):
 
 
 # ---------------------------------------------------------------------------
+# Model catalog + allowlist — the dropdown's source of truth (the curated, per-
+# backend table `GET /api/summarize/models` serialises) DOUBLES as the security
+# allowlist: a model id arriving in a POST body is untrusted (CodeQL treats it
+# as external input), so only catalog members — plus the operator's env override
+# / the bundled default — may reach `mlx_lm.load` / a Hub download.
+# ---------------------------------------------------------------------------
+
+
+def test_summary_model_catalog_shape_and_default(reset_available_backends):
+    cat = summary_model_catalog("gguf")
+    assert cat["backend"] == "gguf"
+    assert cat["default"] == LOCAL_GGUF_MODEL
+    assert cat["models"], "the gguf catalog must list at least the bundled default"
+    # Exactly the default row is flagged is_default, and it matches the top-level.
+    assert [m["repo_id"] for m in cat["models"] if m["is_default"]] == [LOCAL_GGUF_MODEL]
+    assert {"repo_id", "label", "approx_gb", "context_tokens", "note", "is_default"} <= set(cat["models"][0])
+    # The output-cap knob the dashboard's number input seeds + bounds.
+    assert cat["max_tokens_min"] == _MAX_TOKENS_BOUNDS[0]
+    assert cat["max_tokens_max"] == _MAX_TOKENS_BOUNDS[1]
+    assert _MAX_TOKENS_BOUNDS[0] <= cat["max_tokens_default"] <= _MAX_TOKENS_BOUNDS[1]
+
+
+def test_clamp_max_tokens_bounds():
+    lo, hi = _MAX_TOKENS_BOUNDS
+    assert _clamp_max_tokens(hi + 100_000) == hi  # runaway decode capped
+    assert _clamp_max_tokens(0) == lo  # zero/negative floored
+    assert _clamp_max_tokens(lo + 1) == lo + 1  # in-range passes through
+
+
+def test_local_summarizer_clamps_caller_max_tokens(reset_available_backends):
+    """A UI-supplied output cap is clamped to the env knob's bounds, so a typo in
+    the number input can't ask for a runaway (or zero-length) decode."""
+    hi = _MAX_TOKENS_BOUNDS[1]
+    s = LocalSummarizer(backend="gguf", max_tokens=hi + 50_000, generate_fn=lambda t, p: "ok")
+    assert s._max_tokens == hi
+
+
+def test_load_summarizer_local_threads_and_clamps_max_tokens(reset_available_backends, extra_present):
+    hi = _MAX_TOKENS_BOUNDS[1]
+    s = load_summarizer(source="local", max_tokens=hi + 1)
+    assert isinstance(s, LocalSummarizer)
+    assert s._max_tokens == hi
+
+
+def test_summary_model_catalog_unknown_backend_raises():
+    with pytest.raises(SummarizerUnavailable):
+        summary_model_catalog("tpu")
+
+
+def test_local_summarizer_rejects_unknown_model(reset_available_backends, extra_present):
+    """A model that's neither in the catalog nor the env override is rejected at
+    construction (→ 400) BEFORE any Hub access — names the model + the override
+    env var, so the operator either picks a listed model or sets the knob."""
+    with pytest.raises(SummarizerUnavailable) as ei:
+        LocalSummarizer(backend="gguf", model="evil/not-in-catalog")
+    msg = str(ei.value)
+    assert "evil/not-in-catalog" in msg  # names the rejected repo
+    assert ENV_LOCAL_GGUF_MODEL in msg  # points at the override knob
+
+
+def test_local_summarizer_accepts_catalog_model(reset_available_backends, extra_present):
+    s = LocalSummarizer(backend="gguf", model=LOCAL_GGUF_MODEL)
+    assert s.model == LOCAL_GGUF_MODEL
+
+
+def test_local_summarizer_env_override_model_always_allowed(
+    reset_available_backends, extra_present, monkeypatch
+):
+    """The operator's env override is operator-controlled (not external input),
+    so an unlisted repo set via it bypasses the catalog allowlist."""
+    monkeypatch.setenv(ENV_LOCAL_GGUF_MODEL, "me/custom-gguf")
+    s = LocalSummarizer(backend="gguf")  # model resolves from the env override
+    assert s.model == "me/custom-gguf"
+
+
+def test_local_summarizer_injected_fn_bypasses_allowlist(reset_available_backends):
+    """The injected-generate_fn unit-test seam skips the allowlist exactly as it
+    skips the missing-extra probe — tests can drive any repo id."""
+    s = LocalSummarizer(backend="gguf", model="anything/at-all", generate_fn=lambda t, p: "ok")
+    assert s.model == "anything/at-all"
+
+
+def test_load_summarizer_local_rejects_unknown_model(reset_available_backends, extra_present):
+    with pytest.raises(SummarizerUnavailable):
+        load_summarizer(source="local", model="evil/not-in-catalog")
+
+
+# ---------------------------------------------------------------------------
 # Hardware routing — reuses the catalog's available_backends() probe so there's
 # ONE source of truth for "is this an Apple-Silicon-MLX box" (no shadow probe).
 # ---------------------------------------------------------------------------
@@ -160,6 +255,75 @@ def test_local_summarizer_injected_fn_skips_dependency_probe(reset_available_bac
     a box without the extra."""
     s = LocalSummarizer(backend="gguf", generate_fn=lambda transcript, prompt: "ok")
     assert s.summarize("t", prompt="p").summary == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Degrade clearly when the backend imports but the model won't LOAD — the
+# mlx_lm "Received N parameters not in model" weight/arch skew (the one that
+# sank gemma-4-e4b on Apple Silicon), plus corrupt downloads / OOM. These must
+# map to a clear SummarizerUnavailable (→ 400) naming the model + the override
+# env var, never a raw 500 mid-request — and must NOT swallow the distinct
+# "install the [summarize] extra" ImportError path.
+# ---------------------------------------------------------------------------
+
+
+def test_local_summarizer_mlx_load_failure_raises_unavailable(
+    reset_available_backends, extra_present, monkeypatch
+):
+    """mlx_lm.load raising (the 'Received 126 parameters not in model' skew) maps
+    to SummarizerUnavailable with the model repo + TAPSCRIBE_SUMMARIZE_MLX_MODEL
+    override in the message. The failure is lazy (first summarize), so
+    construction must still pass."""
+
+    def boom(model_repo, max_tokens):
+        raise ValueError(
+            "Received 126 parameters not in model: "
+            "language_model.model.layers.24.self_attn.k_norm.weight, ..."
+        )
+
+    monkeypatch.setattr("tapscribe.summarizers.local._build_mlx_generate", boom)
+    s = LocalSummarizer(backend="mlx")  # no generate_fn → builds the (patched) backend
+    with pytest.raises(SummarizerUnavailable) as ei:
+        s.summarize("the transcript", prompt="Summarize it")
+    msg = str(ei.value)
+    assert LOCAL_MLX_MODEL in msg  # names the model that failed to load
+    assert ENV_LOCAL_MLX_MODEL in msg  # points at the override knob
+
+
+def test_local_summarizer_gguf_load_failure_raises_unavailable(
+    reset_available_backends, extra_present, monkeypatch
+):
+    """Same graceful mapping for the GGUF backend — any load-time failure
+    (corrupt download, OOM, unsupported arch) becomes a clear 400 naming the
+    GGUF model + its override env var."""
+
+    def boom(model_repo, gguf_file, *, max_tokens, n_ctx):
+        raise RuntimeError("failed to load model from file")
+
+    monkeypatch.setattr("tapscribe.summarizers.local._build_gguf_generate", boom)
+    s = LocalSummarizer(backend="gguf")
+    with pytest.raises(SummarizerUnavailable) as ei:
+        s.summarize("t", prompt="p")
+    msg = str(ei.value)
+    assert LOCAL_GGUF_MODEL in msg
+    assert ENV_LOCAL_GGUF_MODEL in msg
+
+
+def test_local_summarizer_lazy_import_error_still_names_extra(
+    reset_available_backends, extra_present, monkeypatch
+):
+    """A lazy ImportError (extra vanished after the construction probe) must keep
+    steering the operator to the [summarize] extra — the broadened load-failure
+    catch must not swallow the install path."""
+
+    def boom(model_repo, max_tokens):
+        raise ImportError("No module named 'mlx_lm'")
+
+    monkeypatch.setattr("tapscribe.summarizers.local._build_mlx_generate", boom)
+    s = LocalSummarizer(backend="mlx")
+    with pytest.raises(SummarizerUnavailable) as ei:
+        s.summarize("t", prompt="p")
+    assert "summarize" in str(ei.value).lower()  # the [summarize] extra message
 
 
 # ---------------------------------------------------------------------------
