@@ -2123,6 +2123,154 @@ async def test_summary_stage_local_is_default_and_toggles_command_field(running_
             await browser.close()
 
 
+async def test_summary_command_preset_seeds_template_and_preview(running_recorder: RunningRecorder):
+    """The Command source's preset dropdown + 'will run' preview: presets load
+    from GET /api/summarize/models and SEED the editable template (not an
+    allowlist); the preview spells out template + prompt-as-trailing-arg +
+    transcript-on-stdin; hand-editing the template flips the preset back to
+    custom. All input-event-driven — the poll never rebuilds the pane."""
+    rr = running_recorder
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            await page.wait_for_selector('[data-src="command"]', timeout=6000)
+            await page.click('[data-src="command"]')
+            await page.locator('[data-slot="sumCmdPreset"]').wait_for(state="visible", timeout=4000)
+
+            # Presets populate from the catalog fetch: custom… + claude + opencode.
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sumCmdPreset"]')?.options.length >= 3""",
+                timeout=6000,
+            )
+            labels = await page.eval_on_selector(
+                '[data-slot="sumCmdPreset"]',
+                "el => Array.from(el.options).map(o => o.label)",
+            )
+            assert any("Claude" in label for label in labels), labels
+            assert any("OpenCode" in label for label in labels), labels
+
+            # Picking the Claude preset seeds the editable template field with
+            # the hardened tools-disabled invocation.
+            await page.select_option('[data-slot="sumCmdPreset"]', "claude")
+            cmd = await page.input_value('[data-slot="sumCmd"]')
+            assert cmd.startswith("claude ") and "--tools" in cmd, cmd
+
+            # The preview spells out the invocation: the template, the prompt as
+            # a quoted trailing argument, and the transcript-on-stdin note.
+            preview = await page.locator('[data-slot="sumCmdPreview"]').text_content()
+            assert cmd in (preview or ""), preview
+            assert "stdin" in (preview or ""), preview
+            assert '"' in (preview or ""), "the prompt must show as a quoted trailing arg"
+
+            # Editing the prompt updates the preview (input-event-driven).
+            await page.fill('[data-slot="sumPrompt"]', "Five bullet points")
+            await page.wait_for_function(
+                """() => (document.querySelector('[data-slot="sumCmdPreview"]')?.textContent || '')
+                          .includes('Five bullet points')""",
+                timeout=4000,
+            )
+
+            # Hand-editing the template flips the preset back to custom.
+            await page.fill('[data-slot="sumCmd"]', "my-own-tool --flag")
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sumCmdPreset"]')?.value === ''""",
+                timeout=4000,
+            )
+            preview2 = await page.locator('[data-slot="sumCmdPreview"]').text_content()
+            assert "my-own-tool --flag" in (preview2 or ""), preview2
+        finally:
+            await browser.close()
+
+
+async def test_summary_output_renders_markdown_safely(running_recorder: RunningRecorder):
+    """The summary output pane renders the model's markdown (heading, bullets,
+    bold) as real elements — Claude and friends answer in markdown — via
+    templates.js renderMarkdown, which builds DOM through createElement/
+    textContent only. The flip side is the security property this test pins:
+    the summary is UNTRUSTED model output (the Command source pipes an
+    untrusted transcript through an LLM), so injected HTML must stay literal
+    text — an `<img onerror=…>` in the summary must never become an element."""
+    rr = running_recorder
+
+    sd = rr.recorder.session_dir
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "session": rr.recorder.session_start,
+                "model": "test",
+                "transcribed_at": "2026-01-01T00:00:00+00:00",
+                "speakers": ["Alice"],
+                "segments": [],
+                "plain_text": "Alice: we decided to ship the dashboard.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    md = "# Decisions\n- ship the MD_MARKER dashboard\n**bold** <img src=x onerror=alert(1)>"
+    md_cmd = _py_summarize_cmd(f"import sys; sys.stdin.read(); sys.stdout.write({md!r})")
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            await page.wait_for_selector('[data-src="command"]', timeout=6000)
+            await page.click('[data-src="command"]')
+            await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('[data-slot="sumGenerate"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=8000,
+            )
+            await page.fill('[data-slot="sumCmd"]', md_cmd)
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """() => (document.querySelector('[data-slot="sumOut"]')?.textContent || '')
+                          .includes('MD_MARKER')""",
+                timeout=10000,
+            )
+
+            shape = await page.evaluate(
+                """() => {
+                  const out = document.querySelector('[data-slot="sumOut"]');
+                  return {
+                    h1: out.querySelectorAll('.sumtext h1').length,
+                    li: out.querySelectorAll('.sumtext li').length,
+                    strong: out.querySelectorAll('.sumtext strong').length,
+                    img: out.querySelectorAll('img').length,
+                    text: out.textContent || '',
+                  };
+                }"""
+            )
+            # The markdown became real elements inside the output pane…
+            assert shape["h1"] == 1, shape
+            assert shape["li"] == 1, shape
+            assert shape["strong"] == 1, shape
+            # …but the injected tag did NOT — it stays the literal characters.
+            assert shape["img"] == 0, "injected <img onerror> must not become an element"
+            assert "<img" in shape["text"], shape["text"]
+        finally:
+            await browser.close()
+
+
 async def test_summary_stage_local_sends_picked_model_and_max_tokens(running_recorder: RunningRecorder):
     """The Local source's model dropdown + max-output-tokens knob (PR #96) reach
     the backend. The <select> populates from GET /api/summarize/models; picking a

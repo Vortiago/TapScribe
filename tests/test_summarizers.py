@@ -26,6 +26,7 @@ from tapscribe.summarizers import (
     SummaryResult,
     load_summarizer,
 )
+from tapscribe.summarizers.command import build_command_argv
 
 # Echoes "<argv[1]>|<stdin>" so one command proves BOTH the prompt-as-argv and
 # the transcript-on-stdin contracts at once. `python -c` puts the trailing args
@@ -126,3 +127,22 @@ def test_load_summarizer_unknown_source_raises_unavailable():
 def test_load_summarizer_command_source_empty_command_raises_unavailable():
     with pytest.raises(SummarizerUnavailable):
         load_summarizer(source="command", command="")
+
+
+# ---------------------------------------------------------------------------
+# build_command_argv — the pure argv builder (same shape as build_live_cmd)
+# ---------------------------------------------------------------------------
+
+
+def test_build_command_argv_splits_template_and_appends_prompt():
+    argv = build_command_argv('claude -p --tools "" --bare', "Sum it")
+    assert argv == ["claude", "-p", "--tools", "", "--bare", "Sum it"]
+
+
+def test_build_command_argv_empty_prompt_appends_nothing():
+    assert build_command_argv("opencode run", "") == ["opencode", "run"]
+
+
+def test_build_command_argv_empty_template_raises_unavailable():
+    with pytest.raises(SummarizerUnavailable):
+        build_command_argv("   ", "prompt")
