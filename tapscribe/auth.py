@@ -85,6 +85,12 @@ async def basic_auth_middleware(request: Request, call_next):
         return await call_next(request)
     if (request.method.upper(), request.url.path) in config.AUTH_EXEMPT_ROUTES:
         return await call_next(request)
+    # Prefix exemptions cover tap-token routes with a path parameter
+    # (/api/tap/sessions/{session}/pipeline), which exact (method, path)
+    # matching can never hit. Every handler under an exempt prefix MUST
+    # carry its own tap-bearer gate — see config.AUTH_EXEMPT_PREFIXES.
+    if request.url.path.startswith(config.AUTH_EXEMPT_PREFIXES):
+        return await call_next(request)
 
     realm_header = {"WWW-Authenticate": 'Basic realm="TapScribe recorder"'}
     auth_header = request.headers.get("authorization") or ""

@@ -509,7 +509,9 @@ export function build(ctx) {
     const sig = [
       sid, src, sel?.name || "",
       stripped ? `${stripped.count}:${stripped.stripped_at}` : "",
-      job ? `${job.kind}:${job.current}/${job.total}:${job.current_file || ""}` : "",
+      // job.stage: a pipeline stage flip must repaint even when the counters
+      // happen to match (e.g. strip 0/1 → summarize 0/1).
+      job ? `${job.kind}:${job.stage || ""}:${job.current}/${job.total}:${job.current_file || ""}` : "",
       stripInflight.has(sid) ? "S" : "",
       // lastStrip is NOT in the sig: both its mutations (set on a successful
       // strip, delete on clear) already reset lastSig=" " to force one render,

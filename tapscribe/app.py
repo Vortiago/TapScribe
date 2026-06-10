@@ -52,6 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, config
 from . import hallucinations as hallucinations_mod
 from .audio import compute_peaks
+from .batch_pipeline import PipelineRequest, start_pipeline
 from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
 from .batch_summarize import NoMergedTranscript, SummarizeSessionRequest, summarize_session
 from .batch_transcribe import (
@@ -85,17 +86,19 @@ from .summarizers.catalog import _MAX_TOKENS_BOUNDS
 from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
+    read_batch_model,
     read_hotwords,
     read_live_model,
     read_live_prompt,
     read_prompt,
+    write_batch_model,
     write_hotwords,
     write_live_model,
     write_live_prompt,
     write_prompt,
 )
 from .transcribers import evict_idle_now, run_on_model_thread
-from .transcribers.catalog import REGISTRY, available_backends
+from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY, available_backends
 from .wav_cache import set_primary_transcript
 
 
@@ -140,6 +143,7 @@ _CONFIG_WRITERS = {
     "prompt": write_prompt,
     "live-prompt": write_live_prompt,
     "live-model": write_live_model,
+    "batch-model": write_batch_model,
     "hotwords": write_hotwords,
 }
 
@@ -462,6 +466,95 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     }
 
 
+@app.post("/api/tap/sessions/{session}/pipeline", status_code=202)
+async def api_tap_pipeline_trigger(
+    session: str, req: Request, recorder: Recorder = Depends(get_recorder)
+):
+    """Bridge-initiated end-of-meeting pipeline: strip → transcribe →
+    summarize the session as ONE session job. Tap-bearer authenticated like
+    /api/tap/new-session (exempt from Basic auth via the /api/tap/ prefix;
+    the bearer check below is the gate).
+
+    Fire-and-forget: the job slot is claimed before this returns (so a
+    concurrent trigger or manual transcribe gets a deterministic 409 via
+    `SessionBusy`) and the chain runs in the background — poll the GET twin
+    for progress and the result.
+
+    The request body is IGNORED entirely, never parsed: the pipeline resolves
+    the batch model, backend, and summarizer from operator-side configuration
+    (`PipelineRequest` carries only the session), so a tap-token holder can
+    never choose which model gets loaded or downloaded."""
+    if config.AUTH_ENABLED and not auth.check_tap_bearer(
+        req.headers.get("authorization"), recorder.tap.value
+    ):
+        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+    resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
+    await start_pipeline(recorder, PipelineRequest(session=session))
+    return {"ok": True, "session": session, "state": "running"}
+
+
+@app.get("/api/tap/sessions/{session}/pipeline")
+async def api_tap_pipeline_poll(
+    session: str, req: Request, recorder: Recorder = Depends(get_recorder)
+):
+    """Poll the end-of-meeting pipeline: stage progress while running (from
+    the live job snapshot), the persisted summary when done, the failing
+    stage's domain error when failed. `state: "idle"` when this session has
+    no pipeline record and no persisted summary.
+
+    The done branch reads session-summary.json rather than process memory,
+    so a Bridge that polls across a Recorder restart still gets its summary
+    (`recorder.pipelines` is in-memory only and rebuilt empty at boot)."""
+    if config.AUTH_ENABLED and not auth.check_tap_bearer(
+        req.headers.get("authorization"), recorder.tap.value
+    ):
+        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+    resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
+
+    record = recorder.pipelines.get(session)
+    if record is not None and record.state == "running":
+        out: dict = {
+            "ok": True,
+            "session": session,
+            "state": "running",
+            "started_at": record.started_at.isoformat() if record.started_at else None,
+        }
+        job = recorder.jobs.get(session)
+        if job is not None and job.kind == "pipeline":
+            out.update(
+                stage=job.stage,
+                status=job.status,
+                current=job.current,
+                total=job.total,
+                current_file=job.current_file,
+            )
+        return out
+    if record is not None and record.state == "failed":
+        return {
+            "ok": True,
+            "session": session,
+            "state": "failed",
+            "stage": record.stage,
+            "error": record.error,
+            "error_kind": record.error_kind,
+            "finished_at": record.finished_at.isoformat() if record.finished_at else None,
+        }
+    summary = await asyncio.to_thread(read_session_summary, session)
+    if record is not None and record.state == "done":
+        return {
+            "ok": True,
+            "session": session,
+            "state": "done",
+            "summary": summary,
+            "finished_at": record.finished_at.isoformat() if record.finished_at else None,
+        }
+    if summary is not None:
+        # No record (Recorder restarted since the run) but a persisted summary
+        # exists — that IS the done answer the polling Bridge is waiting for.
+        return {"ok": True, "session": session, "state": "done", "summary": summary}
+    return {"ok": True, "session": session, "state": "idle"}
+
+
 # ---------------------------------------------------------------------------
 # /api/state — the dashboard's once-per-second polling endpoint
 # ---------------------------------------------------------------------------
@@ -478,6 +571,7 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
         "prompt": read_prompt(),
         "live_prompt": read_live_prompt(),
         "live_model_default": read_live_model(),
+        "batch_model_default": read_batch_model(),
         "hotwords": read_hotwords(),
         "halluc_rules": hallucinations_mod.parse_rules(),
         "inputs_support": _compute_inputs_support(),
@@ -543,6 +637,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         },
         "inputs_support": inputs_support,
         "live_model_default": blob["live_model_default"],
+        "batch_model_default": blob["batch_model_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "rules": [r["raw"] for r in halluc_rules],
@@ -1183,7 +1278,7 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         session=session,
         name=name,
         source=source,
-        model=body.get("model") or "small.en",
+        model=body.get("model") or DEFAULT_BATCH_MODEL,
         # Per-call backend override — falls back to the Recorder's
         # preference when the body didn't carry one.
         backend=(body.get("backend") or "").strip() or recorder.backend,
@@ -1212,7 +1307,7 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     request = BatchSessionRequest(
         session=session,
         source=source,
-        model=body.get("model") or "small.en",
+        model=body.get("model") or DEFAULT_BATCH_MODEL,
         backend=(body.get("backend") or "").strip() or recorder.backend,
         from_iso=body.get("from_iso") or None,
         to_iso=body.get("to_iso") or None,

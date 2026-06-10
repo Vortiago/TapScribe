@@ -205,3 +205,29 @@ def test_write_prompt_rejects_oversize(tmp_config_dir):
     too_big = "x" * 5000
     with pytest.raises(ValueError):
         text.write_prompt(too_big)
+
+
+def test_write_batch_model_accepts_catalog_id_and_reads_back(tmp_config_dir):
+    text.write_batch_model("  small.en \n")
+    assert (tmp_config_dir / "batch-model.txt").read_text(encoding="utf-8") == "small.en"
+    assert text.read_batch_model() == "small.en"
+
+
+def test_write_batch_model_rejects_unknown_model_id(tmp_config_dir):
+    """Unlike write_live_model (where an unknown id surfaces loudly at
+    /api/live/start), the batch default feeds the end-of-meeting pipeline's
+    model loader with no operator in the loop — validate at WRITE time so a
+    bad id never lands on disk in the first place."""
+    with pytest.raises(ValueError):
+        text.write_batch_model("evil/repo")
+    assert text.read_batch_model() == ""
+
+
+def test_write_batch_model_empty_clears_back_to_default(tmp_config_dir):
+    text.write_batch_model("small.en")
+    text.write_batch_model("")
+    assert text.read_batch_model() == ""
+
+
+def test_read_batch_model_empty_when_unset(tmp_config_dir):
+    assert text.read_batch_model() == ""

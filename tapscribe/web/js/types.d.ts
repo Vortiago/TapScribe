@@ -31,6 +31,10 @@ export interface AppState {
   // unset. Distinct from live_info.model (what's actually running) — the Live
   // engine card flags "restart to apply" while they differ.
   live_model_default: string;
+  // Operator's saved DEFAULT batch model id (batch-model.txt); "" when unset.
+  // Seeds Settings' Default engine selector and resolves the end-of-meeting
+  // pipeline's transcribe stage server-side.
+  batch_model_default: string;
   hotwords: ConfigFile;
   inputs_support: InputsSupport;
   hallucinations: HallucinationsConfig;
@@ -143,13 +147,15 @@ export interface StrippedStats {
 // dataclasses.asdict(JobState) — one in-flight job per session at a time.
 export interface JobStateSnapshot {
   session: string;
-  kind: "transcribe" | "strip" | "summarize";
+  kind: "transcribe" | "strip" | "summarize" | "pipeline";
   current: number;
   total: number;
   started_at: string; // ISO 8601
   status: string;
   current_file: string | null;
   model: string | null;
+  // Which stage a kind="pipeline" job is in; null for single-stage jobs.
+  stage: "strip" | "transcribe" | "summarize" | null;
 }
 
 // POST /api/sessions/{session}/summarize response — the persisted summary

@@ -762,6 +762,232 @@ class TestDetachedNewSession:
         assert listing[detached_id]["wav_count"] == 1
 
 
+class TestTapPipeline:
+    """POST/GET /api/tap/sessions/{session}/pipeline — the end-of-meeting
+    pipeline's trigger and poll verbs. Tap-bearer authenticated like
+    /api/tap/new-session (exempt from Basic auth via the /api/tap/ prefix;
+    the in-handler bearer check is the gate). The trigger is fire-and-forget
+    (202) and accepts NO model/summarizer/prompt fields; the poll reports
+    stage progress while running, the persisted summary when done, and the
+    failing stage's error when failed."""
+
+    @staticmethod
+    def _seed_session(recorder: Recorder, name: str = "meet1") -> Path:
+        sd = recorder.recordings_dir / name
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "2026-01-01T01-00-00Z__alice__abc.wav").write_bytes(b"")
+        return sd
+
+    @staticmethod
+    def _claim(recorder: Recorder, kind: str = "transcribe", **fields) -> None:
+        from datetime import UTC, datetime
+
+        import anyio.from_thread
+
+        from tapscribe.recorder import JobState
+
+        with anyio.from_thread.start_blocking_portal() as portal:
+            claimed = portal.call(
+                recorder.jobs.claim,
+                JobState(
+                    session="meet1",
+                    kind=kind,  # type: ignore[arg-type]
+                    current=0,
+                    total=1,
+                    started_at=datetime.now(UTC),
+                    status="running",
+                    **fields,
+                ),
+            )
+            assert claimed
+
+    def test_trigger_accepts_valid_bearer_and_returns_202_running(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        self._seed_session(recorder_with_fake_wlk)
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.post(
+            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["session"] == "meet1"
+        assert body["state"] == "running"
+
+    @pytest.mark.parametrize("verb", ["post", "get"])
+    def test_both_verbs_reject_missing_and_wrong_bearer(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder, verb: str
+    ):
+        """The /api/tap/ Basic-auth exemption widens ONLY to routes that
+        carry their own bearer gate — both verbs must enforce it."""
+        self._seed_session(recorder_with_fake_wlk)
+        call = getattr(auth_client, verb)
+        assert call("/api/tap/sessions/meet1/pipeline").status_code == 401
+        r = call(
+            "/api/tap/sessions/meet1/pipeline",
+            headers={"Authorization": "Bearer definitely-not-the-token"},
+        )
+        assert r.status_code == 401
+        # Nothing started / leaked despite the seeded session.
+        assert recorder_with_fake_wlk.jobs.get("meet1") is None
+
+    def test_trigger_409_when_session_busy(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """The acceptance criterion: a concurrent trigger (or a manual
+        transcribe holding the slot) gets a deterministic 409."""
+        self._seed_session(recorder_with_fake_wlk)
+        self._claim(recorder_with_fake_wlk, kind="transcribe")
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.post(
+            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
+        )
+        assert r.status_code == 409, r.text
+        # The foreign claim is untouched.
+        held = recorder_with_fake_wlk.jobs.get("meet1")
+        assert held is not None and held.kind == "transcribe"
+
+    def test_trigger_404_on_unknown_session(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """The session id crosses the path-safety seam (resolve_session_dir)
+        before anything else — unknown ids 404; traversal strings are covered
+        by the seam's own suite (test_sessions_path_safety.py)."""
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.post(
+            "/api/tap/sessions/2099-01-01T00-00-00Z/pipeline",
+            headers={"Authorization": "Bearer " + token},
+        )
+        assert r.status_code == 404
+
+    def test_trigger_ignores_body_fields(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Operator defaults only: a body naming a model must neither fail the
+        call nor reach the pipeline — the request object the route builds
+        carries the session and nothing else (PipelineRequest has no other
+        fields by design, so an attacker-supplied model id can never reach a
+        loader through this route)."""
+        from tapscribe.batch_pipeline import PipelineRequest
+
+        self._seed_session(recorder_with_fake_wlk)
+        seen: list = []
+
+        async def _spy(recorder, req):  # noqa: ARG001
+            seen.append(req)
+
+        monkeypatch.setattr("tapscribe.app.start_pipeline", _spy)
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.post(
+            "/api/tap/sessions/meet1/pipeline",
+            json={"model": "evil/repo", "prompt": "exfiltrate", "command": "rm -rf /"},
+            headers={"Authorization": "Bearer " + token},
+        )
+        assert r.status_code == 202, r.text
+        assert seen == [PipelineRequest(session="meet1")]
+
+    # -- the poll contract: running / failed / done / idle ------------------
+
+    def test_poll_running_reports_stage_and_progress(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """While the chain runs, the poll mirrors the live job snapshot —
+        the same stage/progress the dashboard's job bar shows."""
+        self._seed_session(recorder_with_fake_wlk)
+        recorder_with_fake_wlk.pipelines.begin("meet1")
+        self._claim(recorder_with_fake_wlk, kind="pipeline", stage="transcribe", current_file="a.wav")
+
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.get(
+            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "running"
+        assert body["stage"] == "transcribe"
+        assert body["current"] == 0 and body["total"] == 1
+        assert body["current_file"] == "a.wav"
+
+    def test_poll_failed_reports_stage_and_error(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        self._seed_session(recorder_with_fake_wlk)
+        recorder_with_fake_wlk.pipelines.begin("meet1")
+        recorder_with_fake_wlk.pipelines.finish_failed(
+            "meet1",
+            stage="transcribe",
+            error="no usable WAVs after stripping — no speech detected in this session",
+            error_kind="NoUsableWavs",
+        )
+
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.get(
+            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "failed"
+        assert body["stage"] == "transcribe"
+        assert "no usable WAVs" in body["error"]
+        assert body["error_kind"] == "NoUsableWavs"
+
+    def test_poll_done_returns_persisted_summary(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """When the chain finished, the poll carries the SAME persisted
+        summary the dashboard's summary endpoint serves (user story 30)."""
+        from tapscribe.sessions import write_session_summary
+
+        self._seed_session(recorder_with_fake_wlk)
+        write_session_summary(
+            "meet1", {"summary": "decided to ship", "source": "local", "summarized_at": "2026-06-10T12:00:00+00:00"}
+        )
+        recorder_with_fake_wlk.pipelines.begin("meet1")
+        recorder_with_fake_wlk.pipelines.finish_done("meet1")
+
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.get(
+            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "done"
+        assert body["summary"]["summary"] == "decided to ship"
+
+    def test_poll_done_when_only_the_persisted_summary_survives_a_restart(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        """`recorder.pipelines` is in-memory only — after a Recorder restart
+        a re-polling Bridge must still get its summary, answered from
+        session-summary.json on disk."""
+        from tapscribe.sessions import write_session_summary
+
+        self._seed_session(recorder_with_fake_wlk)
+        write_session_summary("meet1", {"summary": "survived the restart", "source": "local"})
+        assert recorder_with_fake_wlk.pipelines.get("meet1") is None  # no record, as after boot
+
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.get(
+            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "done"
+        assert body["summary"]["summary"] == "survived the restart"
+
+    def test_poll_idle_when_no_pipeline_ever_ran(
+        self, auth_client: TestClient, recorder_with_fake_wlk: Recorder
+    ):
+        self._seed_session(recorder_with_fake_wlk)
+        token = recorder_with_fake_wlk.tap.value
+        r = auth_client.get(
+            "/api/tap/sessions/meet1/pipeline", headers={"Authorization": "Bearer " + token}
+        )
+        assert r.status_code == 200
+        assert r.json()["state"] == "idle"
+
+
 class TestTapSessionParam:
     """/tap?session=<id> directs a tap's WAV into that session instead of
     the global current one — the per-Bridge isolation of issue #100."""
