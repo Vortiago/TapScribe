@@ -514,9 +514,12 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
 ):
     """After ✂ strip, the selected original's waveform draws the committed
     cut — the EXACT {start_s, end_s} spans the strip response returned,
-    surfaced on the canvas's data-cut-spans hook — and a full dashboard
-    reload re-resolves the SAME spans from the persisted strip-meta (no
-    reconstruction from region filenames). The #90 acceptance guard."""
+    surfaced on the canvas's data-cut-spans hook. Pins four paths: the
+    cold-load resolve from persisted strip-meta, the negative control (no
+    overlay on the stripped source), the LIVE swap when a re-strip lands
+    while the page is open (the /api/state stripped_at stamp busts the
+    client cache — no reload), and a final reload proving the LATEST cut
+    survives with nothing in memory. The #90 acceptance guard."""
     from .test_pipeline_strip_silence import _build_speech_silence_wav
 
     rec = running_recorder.recorder
@@ -572,24 +575,61 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
             # auto-selected one — the overlay lands once the peaks and
             # strip-meta fetches settle.
             await page.wait_for_function(overlay_js, timeout=10000)
-            spans = json.loads(await page.evaluate(overlay_js))
+            first_attr = await page.evaluate(overlay_js)
+            spans = json.loads(first_attr)
             assert spans == expected_spans, (
                 f"overlay spans {spans} != committed {expected_spans}"
             )
 
             # The badge is the operator-visible "this is the committed cut"
             # cue, distinct from the future live knob preview (#89).
-            await page.locator("#viewRoot .wave-cutbadge").wait_for(state="visible", timeout=3000)
+            await page.locator('#viewRoot [data-slot="cutBadge"]').wait_for(state="visible", timeout=3000)
 
             await _shot(page, "09-committed-cut-overlay.png")
 
-            # Reload: the spans must come back EXACTLY from the persisted
-            # strip-meta — the cut survives with no strip response in memory.
+            # Negative control: the overlay belongs to the ORIGINAL source
+            # only (the stripped waveform IS the cut result) — toggling away
+            # must drop it, toggling back must restore it.
+            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.wait_for_function(
+                """() => !document.querySelector('#viewRoot .wave-canvas')?.dataset.cutSpans""",
+                timeout=5000,
+            )
+            await page.locator('#viewRoot .srcsw__opt[data-src="original"]').click()
+            await page.wait_for_function(overlay_js, timeout=5000)
+
+            # Live path: a re-strip with a wider pad lands while the page is
+            # open. The poll's new stripped_at stamp must bust the client
+            # cache and swap the overlay to the NEW spans without a reload.
+            async with httpx.AsyncClient(base_url=base, timeout=30.0) as client2:
+                resp2 = await client2.post(
+                    f"/api/sessions/{rec.session_start}/strip-silence",
+                    json={"min_silence_ms": 400, "pad_ms": 150, "speech_floor_db": -40.0},
+                )
+                assert resp2.status_code == 200, resp2.text
+                rows2 = [f for f in resp2.json()["files"] if f.get("written")]
+            assert len(rows2) == 1
+            new_spans = rows2[0]["region_spans"]
+            assert new_spans != expected_spans, "a wider pad must move the committed spans"
+            await page.wait_for_function(
+                f"""() => {{
+                  const c = document.querySelector('#viewRoot .wave-canvas');
+                  return !!(c && c.dataset.cutSpans) && c.dataset.cutSpans !== {json.dumps(first_attr)};
+                }}""",
+                timeout=10000,
+            )
+            live_spans = json.loads(await page.evaluate(overlay_js))
+            assert live_spans == new_spans, (
+                f"live overlay spans {live_spans} != re-strip committed {new_spans}"
+            )
+
+            # Reload: the LATEST spans must come back EXACTLY from the
+            # persisted strip-meta — no strip response left in memory.
             await page.reload(wait_until="domcontentloaded")
             await page.wait_for_function(overlay_js, timeout=10000)
             spans2 = json.loads(await page.evaluate(overlay_js))
-            assert spans2 == expected_spans, (
-                f"reload lost the committed cut: {spans2} != {expected_spans}"
+            assert spans2 == new_spans, (
+                f"reload lost the committed cut: {spans2} != {new_spans}"
             )
         finally:
             await browser.close()
