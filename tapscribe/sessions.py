@@ -417,9 +417,7 @@ def _describe_session(
         "session_transcript": _session_transcript_marker(
             _read_session_json_cached(sd / "session-transcript.json")
         ),
-        "session_summary": _session_summary_marker(
-            _read_session_json_cached(sd / "session-summary.json")
-        ),
+        "session_summary": _session_summary_marker(_read_session_json_cached(sd / "session-summary.json")),
         "progress": jobs.get(sd.name),
         "session_meta": read_session_meta(sd.name),
         "stripped": _stripped_summary(stripped_root, region_buckets),
