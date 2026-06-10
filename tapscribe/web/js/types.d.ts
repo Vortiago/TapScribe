@@ -483,3 +483,13 @@ export interface ConfigCardCtx {
 
 // (SessionSidebarCtx / SessionDetailCtx were removed with the classic
 // dashboard — the Stages views type their contexts inline via JSDoc.)
+
+// Dev/test-only renderRegion sig-drift audit (templates.js `_auditSigCoversOutput`).
+// Unset in production. When `__TAPSCRIBE_SIG_AUDIT` is true, a skipped renderRegion
+// re-builds into a probe and records any region whose output drifts from its sig.
+declare global {
+  // eslint-disable-next-line no-var
+  var __TAPSCRIBE_SIG_AUDIT: boolean | undefined;
+  // eslint-disable-next-line no-var
+  var __TAPSCRIBE_SIG_DRIFT: Array<{ sig: string; expected: string; actual: string }> | undefined;
+}

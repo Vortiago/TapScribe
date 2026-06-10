@@ -62,6 +62,21 @@
   `TAPSCRIBE_PERF_SOAK=1 pytest tests/e2e/test_next_perf_soak.py -s`
   (multi-pass scenarios; reports long tasks, poll health, post-GC
   node/listener/heap growth — see its module docstring for knobs).
+  The dual of that footgun: `renderRegion(host, fn, {sig})` makes you
+  hand-maintain `sig` to list every value `fn` reads — forget one and
+  the region silently goes **stale** (never rebuilds). So for a DERIVED,
+  non-interactive display bit (a staleness badge, a count) prefer
+  rendering it as a SIBLING toggled in place each tick (like the
+  `active-taps.js`/`live-feed.js` in-place updaters) rather than inside a
+  sig-gated `renderRegion` pane — that sidesteps the drift entirely (the
+  `summary.js` #94 stale-summary cue uses this pattern). When you DO use a
+  sig-gated pane, a `renderRegion` sig-drift **audit** catches a missing
+  dep: set `globalThis.__TAPSCRIBE_SIG_AUDIT = true` (dev console, or a
+  test) and skipped regions are re-built into a probe and compared; any
+  region whose output drifts from its sig is recorded to
+  `globalThis.__TAPSCRIBE_SIG_DRIFT`. The
+  `test_renderregion_sig_audit_finds_no_drift` e2e test enables it across
+  the views and asserts no drift.
 
 ## Runtime deps the install picker does NOT cover
 
