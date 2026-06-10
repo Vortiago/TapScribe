@@ -42,6 +42,7 @@ export function axisTicks(durationS, count) {
  *   node: DocumentFragment,
  *   showWaveform: (peaks: number[], durationS: number, cut?: import('../../types.js').CutSpan[] | null) => void,
  *   showMessage: (text: string) => void,
+ *   setPreview: (preview: { spans: import('../../types.js').CutSpan[], speech_floor_db: number } | null) => void,
  * }}
  */
 export function createWaveform() {
@@ -50,12 +51,17 @@ export function createWaveform() {
   const axisHost = pick(frag, "axis");
   const msgHost = pick(frag, "msg");
   const cutBadge = pick(frag, "cutBadge");
+  const legend = pick(frag, "legend");
 
   /** @type {number[] | null} */
   let peaks = null;
   let durationS = 0;
   /** @type {import('../../types.js').CutSpan[] | null} */
   let cutSpans = null;
+  /** @type {import('../../types.js').CutSpan[] | null} */
+  let previewSpans = null;
+  /** @type {number | null} */
+  let previewFloorDb = null;
 
   const paint = () => {
     const ctx = canvas.getContext("2d");
@@ -93,28 +99,79 @@ export function createWaveform() {
       ctx.fillRect(x, mid - h, w, h * 2);
     }
 
-    if (cutSpans && cutSpans.length && durationS > 0) {
-      // Committed strip-silence cut (#90): dim the DROPPED intervals (the
-      // complement of the kept spans) and mark each kept edge with a SOLID
-      // 1px tick — solid = committed-on-disk; the live knob preview (#89)
-      // gets dashed markers so the two read differently at a glance.
-      const cutColor = styles.getPropertyValue("--rec").trim() || "#d75d6a";
-      ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
-      let cursor = 0;
-      for (const sp of cutSpans) {
-        const x0 = Math.max(0, Math.min(cssW, (sp.start_s / durationS) * cssW));
-        const x1 = Math.max(0, Math.min(cssW, (sp.end_s / durationS) * cssW));
-        if (x0 > cursor) ctx.fillRect(cursor, 0, x0 - cursor, cssH);
-        cursor = Math.max(cursor, x1);
-      }
-      if (cursor < cssW) ctx.fillRect(cursor, 0, cssW - cursor, cssH);
-      ctx.fillStyle = cutColor;
-      for (const sp of cutSpans) {
-        for (const edge of [sp.start_s, sp.end_s]) {
-          const x = Math.max(0, Math.min(cssW - 1, (edge / durationS) * cssW));
-          ctx.fillRect(x, 0, 1, cssH);
+    // Cut overlays — #90 committed (solid) + #89 live preview (dashed).
+    // The PREVIEW is the live thing being tuned: it owns the region shading
+    // (kept tint + dropped dim), the dashed edge markers, and the
+    // speech-floor guide. The COMMITTED cut always keeps its solid edge
+    // ticks, but only dims dropped intervals when no preview is active —
+    // two stacked shadings would be unreadable. An EMPTY preview spans
+    // array is meaningful ("this cut drops everything") and dims it all.
+    if (durationS > 0 && (cutSpans || previewSpans)) {
+      /** @param {number} s */
+      const xAt = (s) => Math.max(0, Math.min(cssW, (s / durationS) * cssW));
+      /** @param {import('../../types.js').CutSpan[]} spans @param {number} alpha */
+      const dimDropped = (spans, alpha) => {
+        ctx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+        let cursor = 0;
+        for (const sp of spans) {
+          const x0 = xAt(sp.start_s);
+          const x1 = xAt(sp.end_s);
+          if (x0 > cursor) ctx.fillRect(cursor, 0, x0 - cursor, cssH);
+          cursor = Math.max(cursor, x1);
         }
+        if (cursor < cssW) ctx.fillRect(cursor, 0, cssW - cursor, cssH);
+      };
+      /** @param {import('../../types.js').CutSpan[]} spans @param {string} color @param {boolean} dashed */
+      const edgeLines = (spans, color, dashed) => {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash(dashed ? [3, 3] : []);
+        ctx.beginPath();
+        for (const sp of spans) {
+          for (const edge of [sp.start_s, sp.end_s]) {
+            const x = Math.max(0.5, Math.min(cssW - 0.5, (edge / durationS) * cssW));
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, cssH);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+      };
+      const cutColor = styles.getPropertyValue("--rec").trim() || "#d75d6a";
+      const okColor = styles.getPropertyValue("--ok").trim() || "#69b76b";
+      const infoColor = styles.getPropertyValue("--info").trim() || "#6ab0f3";
+      if (previewSpans) {
+        dimDropped(previewSpans, 0.45);
+        ctx.save();
+        ctx.globalAlpha = 0.16;
+        ctx.fillStyle = okColor;
+        for (const sp of previewSpans) {
+          const x0 = xAt(sp.start_s);
+          ctx.fillRect(x0, 0, xAt(sp.end_s) - x0, cssH);
+        }
+        ctx.restore();
+        if (previewFloorDb != null) {
+          // The floor knob as a horizontal guide: dBFS → normalised
+          // amplitude, mirrored around the baseline like the bars.
+          const dy = Math.max(1, Math.pow(10, previewFloorDb / 20) * (mid - 1));
+          ctx.save();
+          ctx.strokeStyle = infoColor;
+          ctx.globalAlpha = 0.7;
+          ctx.setLineDash([2, 4]);
+          ctx.beginPath();
+          ctx.moveTo(0, mid - dy);
+          ctx.lineTo(cssW, mid - dy);
+          ctx.moveTo(0, mid + dy);
+          ctx.lineTo(cssW, mid + dy);
+          ctx.stroke();
+          ctx.restore();
+        }
+        edgeLines(previewSpans, cutColor, true);
+      } else if (cutSpans && cutSpans.length) {
+        dimDropped(cutSpans, 0.55);
       }
+      if (cutSpans && cutSpans.length) edgeLines(cutSpans, cutColor, false);
     }
   };
 
@@ -139,6 +196,7 @@ export function createWaveform() {
     if (cutSpans) canvas.dataset.cutSpans = JSON.stringify(cutSpans);
     else delete canvas.dataset.cutSpans;
     cutBadge.hidden = !cutSpans;
+    legend.hidden = !(cutSpans || previewSpans);
     msgHost.textContent = "";
     msgHost.hidden = true;
     paint();
@@ -154,9 +212,27 @@ export function createWaveform() {
     cutSpans = null;
     delete canvas.dataset.cutSpans;
     cutBadge.hidden = true;
+    previewSpans = null;
+    previewFloorDb = null;
+    delete canvas.dataset.previewSpans;
+    legend.hidden = true;
     msgHost.textContent = text;
     msgHost.hidden = false;
     axisHost.replaceChildren();
+    paint();
+  };
+
+  /** Update (or clear) the live strip-preview overlay (#89) without
+   * re-supplying peaks — the debounced knob path repaints in place. An
+   * EMPTY spans array is meaningful ("this cut drops everything"); null
+   * clears the preview entirely. */
+  /** @param {{ spans: import('../../types.js').CutSpan[], speech_floor_db: number } | null} preview */
+  const setPreview = (preview) => {
+    previewSpans = preview ? preview.spans : null;
+    previewFloorDb = preview ? preview.speech_floor_db : null;
+    if (previewSpans) canvas.dataset.previewSpans = JSON.stringify(previewSpans);
+    else delete canvas.dataset.previewSpans;
+    legend.hidden = !(cutSpans || previewSpans);
     paint();
   };
 
@@ -166,5 +242,5 @@ export function createWaveform() {
   const ro = new ResizeObserver(() => paint());
   ro.observe(canvas);
 
-  return { node: frag, showWaveform, showMessage };
+  return { node: frag, showWaveform, showMessage, setPreview };
 }

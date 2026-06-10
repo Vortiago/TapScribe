@@ -285,6 +285,24 @@ export function peekWavStripMeta(session, name, sig) {
   return e && e.settled ? e.value : undefined;
 }
 
+/**
+ * What ✂ strip WOULD cut for one WAV at the given knobs — the live
+ * strip-preview (#89). Deliberately NOT cached: the knob space is unbounded
+ * and the caller debounces; latest-wins is the view's request token's job.
+ * @param {string} session
+ * @param {string} name
+ * @param {import('./types.js').StripOpts} knobs
+ * @returns {Promise<import('./types.js').StripPreview>}
+ */
+export function fetchStripPreview(session, name, knobs) {
+  const qs = new URLSearchParams({
+    min_silence_ms: String(knobs.min_silence_ms),
+    pad_ms: String(knobs.pad_ms),
+    speech_floor_db: String(knobs.speech_floor_db),
+  });
+  return getJson(`/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-preview?${qs}`);
+}
+
 /** @param {string} url */
 export const getJson = (url) => fetch(url, { cache: "no-store" }).then(_unwrap);
 /**

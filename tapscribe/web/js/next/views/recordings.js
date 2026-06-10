@@ -18,7 +18,7 @@
 // strip slider isn't clobbered).
 
 import { tpl, pick, selectionInside } from "../../templates.js";
-import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks, fetchWavStripMeta, peekWavStripMeta } from "../../api.js";
+import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks, fetchWavStripMeta, peekWavStripMeta, fetchStripPreview } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 import { createWaveform } from "../components/waveform.js";
@@ -119,6 +119,18 @@ export function build(ctx) {
   /** @type {Set<string>} */
   const failedCutMeta = new Set();
 
+  /** Live strip-preview bookkeeping (#89). `lastPreview` is the latest
+   * response per session (the wave-stats row tracks it across body
+   * rebuilds); `previewToken` makes the debounced fetches latest-wins;
+   * `previewKey` pins the (wav, source, size) the preview belongs to so a
+   * selection/source change drops it instead of overlaying the wrong WAV. */
+  /** @type {Map<string, import('../../types.js').StripPreview>} */
+  const lastPreview = new Map();
+  let previewToken = 0;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let previewTimer = null;
+  let previewKey = "";
+
   // ---- Helpers --------------------------------------------------------------
 
   /** @param {string} sid @returns {"original" | "stripped"} */
@@ -154,6 +166,10 @@ export function build(ctx) {
   const drawWaveform = (sel, src) => {
     const sid = session?.session || "";
     if (!sel || !sid) {
+      if (previewKey) {
+        previewKey = "";
+        waveform.setPreview(null);
+      }
       const wsig = `none:${session ? "nofiles" : "nosession"}`;
       if (wsig === lastWaveSig) return;
       lastWaveSig = wsig;
@@ -162,6 +178,14 @@ export function build(ctx) {
     }
     const fileSig = String(sel.size);
     const key = `${sid}/${sel.name}@${src}@${fileSig}`;
+    // A live strip-preview belongs to ONE (wav, source, size) — drop it the
+    // moment the waveform moves elsewhere so stale spans never overlay a
+    // different recording.
+    if (previewKey && previewKey !== key) {
+      previewKey = "";
+      lastPreview.delete(sid);
+      waveform.setPreview(null);
+    }
     /** @type {"ok" | "loading" | "error"} */
     let state;
     /** @type {import('../../types.js').WavePeaks | undefined} */
@@ -238,13 +262,52 @@ export function build(ctx) {
   /** @param {keyof StripKnobs} key */
   const paintKnob = (key) => { knobVals[key].textContent = `${knobs[key]} ${knobUnit(key)}`; };
 
+  /** Debounce so a knob drag fires one strip-preview per pause, not one per
+   * pixel — silero on the worker thread is O(samples) per call. */
+  const PREVIEW_DEBOUNCE_MS = 300;
+
+  /** @param {import('../../types.js').StripPreview} p */
+  const paintPreviewStats = (p) => {
+    const kept = p.in_seconds > 0 ? Math.round(100 * p.speech_seconds / p.in_seconds) : 0;
+    setStat(stats.clips, String(p.segments));
+    setStat(stats.speech, `${Math.round(p.speech_seconds)}s`);
+    setStat(stats.in, `${Math.round(p.in_seconds)}s`);
+    setStat(stats.kept, `${kept}%`);
+  };
+
+  /** Fire the strip-preview for the CURRENT knobs + selection. Only the
+   * latest response lands (token check), and only while the original
+   * source is shown — the stripped waveform IS a cut result already. */
+  const firePreview = () => {
+    if (!session) return;
+    const sid = session.session;
+    const sel = selectedFor();
+    if (!sel || effectiveSource(sid) !== "original") return;
+    const token = ++previewToken;
+    const key = `${sid}/${sel.name}@original@${String(sel.size)}`;
+    fetchStripPreview(sid, sel.name, { ...knobs })
+      .then((p) => {
+        if (token !== previewToken) return; // superseded by a newer drag
+        lastPreview.set(sid, p);
+        previewKey = key;
+        waveform.setPreview({ spans: p.spans, speech_floor_db: p.knobs.speech_floor_db });
+        paintPreviewStats(p);
+      })
+      .catch(() => { /* transient — the next knob input refires */ });
+  };
+
+  const schedulePreview = () => {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => { previewTimer = null; firePreview(); }, PREVIEW_DEBOUNCE_MS);
+  };
+
   for (const inp of /** @type {NodeListOf<HTMLInputElement>} */ (frag.querySelectorAll("[data-strip-knob]"))) {
     const key = /** @type {keyof StripKnobs} */ (inp.dataset.stripKnob);
     inp.value = String(knobs[key]);
     paintKnob(key);
     inp.addEventListener("input", () => {
       const n = Number(inp.value);
-      if (Number.isFinite(n)) { knobs[key] = n; paintKnob(key); }
+      if (Number.isFinite(n)) { knobs[key] = n; paintKnob(key); schedulePreview(); }
     });
   }
 
@@ -259,6 +322,10 @@ export function build(ctx) {
       const res = /** @type {import('../../types.js').StripSilenceResult} */ (
         await postJson(`/api/sessions/${encodeURIComponent(sid)}/strip-silence`, { ...knobs }));
       lastStrip.set(sid, res);
+      // The committed cut now reflects these knobs — drop the live preview.
+      lastPreview.delete(sid);
+      previewKey = "";
+      waveform.setPreview(null);
       // Flip to the cleaned audio on success so the operator can act on it.
       if ((res.files_written || 0) > 0) sourcePick.set(sid, "stripped");
     } catch (e) {
@@ -278,6 +345,9 @@ export function build(ctx) {
     try { await del(`/api/sessions/${encodeURIComponent(sid)}/stripped`); }
     catch (e) { alert(`Clear stripped failed: ${String(e).replace(/^Error:\s*/, "")}`); return; }
     lastStrip.delete(sid);
+    lastPreview.delete(sid);
+    previewKey = "";
+    waveform.setPreview(null);
     if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
     lastSig = " ";
     afterMutate();
@@ -612,8 +682,11 @@ export function build(ctx) {
       ? `🌊 ${truncMid(sel.name, 40)} · ${fmtDur(sel.duration_s)} · ${src}`
       : "no WAV selected";
     drawWaveform(sel, src);
+    const pv = lastPreview.get(sid);
     const ls = lastStrip.get(sid);
-    if (ls) {
+    if (pv) {
+      paintPreviewStats(pv);
+    } else if (ls) {
       const kept = ls.in_seconds > 0 ? Math.round(100 * ls.speech_seconds / ls.in_seconds) : 0;
       setStat(stats.clips, String(ls.files_written ?? 0));
       setStat(stats.speech, `${Math.round(ls.speech_seconds)}s`);

@@ -281,6 +281,7 @@ export interface WavePeaks {
 export interface CutSpan {
   start_s: number;
   end_s: number;
+  name?: string;  // committed spans (schema v2) carry their region clip's filename
 }
 
 // GET /api/wav/{session}/{name}/strip-meta — the committed (on-disk) cut for
@@ -291,6 +292,22 @@ export interface WavStripMeta {
   spans: CutSpan[];
   stripped_at: string | null;
   knobs?: StripOpts;
+}
+
+// GET /api/wav/{session}/{name}/strip-preview — what ✂ strip WOULD cut at
+// the given knobs: the kept spans plus the aggregate stats the live overlay
+// and the wave-stats row track while a knob drags (#89).
+export interface StripPreview {
+  spans: CutSpan[];
+  in_seconds: number;
+  speech_seconds: number;
+  segments: number;
+  segments_filtered_below_floor: number;
+  silent: boolean;
+  rms_dbfs: number;
+  reason: string | null;
+  detector: string | null;
+  knobs: StripOpts;
 }
 
 // ---------------------------------------------------------------------------

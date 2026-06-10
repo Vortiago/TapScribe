@@ -817,6 +817,18 @@ body::before { display: none; }
   padding: 1px 6px; pointer-events: none;
 }
 .wave-cutbadge[hidden] { display: none; }
+.wave-legend {
+  display: flex; gap: 12px; align-items: center;
+  font-size: 8.5px; color: var(--fg-3);
+}
+.wave-legend[hidden] { display: none; }
+.wave-legend__item { display: inline-flex; gap: 4px; align-items: center; }
+.wave-legend .sw { display: inline-block; width: 10px; height: 8px; }
+.wave-legend .sw--kept { background: color-mix(in srgb, var(--ok) 25%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 60%, transparent); }
+.wave-legend .sw--dropped { background: rgba(0, 0, 0, 0.5); border: 1px solid var(--hairline); }
+.wave-legend .sw--committed { width: 0; height: 10px; border-left: 2px solid var(--rec); }
+.wave-legend .sw--preview { width: 0; height: 10px; border-left: 2px dashed var(--rec); }
+.wave-legend .sw--floor { width: 12px; height: 0; border-top: 1px dashed var(--info); }
 .wave-axis {
   display: flex; justify-content: space-between;
   font-size: 8.5px; color: var(--fg-3);
