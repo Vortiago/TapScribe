@@ -73,6 +73,7 @@ from .session_paths import resolve_session_dir, resolve_wav, stripped_dir
 from .sessions import (
     gather_sessions,
     read_session_meta,
+    read_session_summary,
     read_session_transcript,
     read_wav_transcript,
     write_session_meta,
@@ -995,6 +996,18 @@ async def api_session_transcript(session: str, recorder: Recorder = Depends(get_
     plain_text / suppressed[] body crosses the wire on open, not every poll.
     The disk read is offloaded with to_thread like the rest of the poll path."""
     return await asyncio.to_thread(read_session_transcript, session)
+
+
+@app.get("/api/sessions/{session}/summary")
+async def api_session_summary(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """The FULL persisted session summary (or null when none).
+
+    Lazy companion to `/api/state`, whose `session_summary` is a slim marker
+    (summarized_at + source + model). The dashboard fetches this once per
+    (session, summarized_at) when the Summary stage is opened and caches it
+    client-side. The disk read is offloaded with to_thread like the rest of
+    the poll path."""
+    return await asyncio.to_thread(read_session_summary, session)
 
 
 # ---------------------------------------------------------------------------

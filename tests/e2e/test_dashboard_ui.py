@@ -2365,3 +2365,77 @@ async def test_summary_stage_local_seeds_max_tokens_and_surfaces_error(running_r
             )
         finally:
             await browser.close()
+
+
+async def test_summary_persists_across_reload(running_recorder: RunningRecorder):
+    """#83: a generated summary survives a dashboard reload. Generate via the
+    Command source, reload the page, and the stored summary renders again
+    WITHOUT clicking Generate — served from session-summary.json through the
+    slim marker + lazy GET /api/sessions/{session}/summary, not from view
+    memory (the reload wiped that)."""
+    rr = running_recorder
+
+    sd = rr.recorder.session_dir
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "session": rr.recorder.session_start,
+                "model": "test",
+                "transcribed_at": "2026-01-01T00:00:00+00:00",
+                "speakers": ["Alice"],
+                "segments": [],
+                "plain_text": "Alice: we decided to ship the dashboard.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    marker = "PERSISTED_SUMMARY_SURVIVES_RELOAD"
+    echo_cmd = _py_summarize_cmd(f"import sys; sys.stdout.write({marker!r})")
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            # Generate once via the Command source (the #82 flow).
+            await page.wait_for_selector('[data-src="command"]', timeout=6000)
+            await page.click('[data-src="command"]')
+            await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('[data-slot="sumGenerate"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=8000,
+            )
+            await page.fill('[data-slot="sumCmd"]', echo_cmd)
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """(m) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(m)""",
+                arg=marker,
+                timeout=10000,
+            )
+
+            # Reload — view-local state is gone; the stored summary must come
+            # back on its own (marker → lazy GET), with NO Generate click.
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(m) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(m)""",
+                arg=marker,
+                timeout=10000,
+            )
+
+            # The hint still names what produced it (persisted metadata, not
+            # view memory).
+            hint = await page.locator('[data-slot="sumOutHint"]').text_content()
+            assert "command" in (hint or ""), f"hint must name the persisted source, got {hint!r}"
+        finally:
+            await browser.close()

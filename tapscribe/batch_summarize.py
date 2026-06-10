@@ -8,21 +8,22 @@ lives in `tapscribe.recorder` next to JobTracker (the cm raises it); the "one
 heavy job per session" rule now has three claimants (transcribe / strip /
 summarize), all going through `run`.
 
-This is the tracer-bullet slice (#82): the **Command** source only, no
-persistence (the summary is returned to the caller and lost on reload) and no
-saved config (source / command / prompt arrive per request). Persistence (#83)
-and the global-default + per-session-override config (#84) layer on later
-without changing this seam.
+This is the tracer-bullet slice (#82): the **Command** source only.
+Persistence (#83): the summary is written to session-summary.json next to the
+merged transcript and read back lazily. Saved config (source / command /
+prompt per request today) is #84 and layers on later without changing this
+seam.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from .recorder import Recorder
-from .sessions import read_session_transcript
+from .sessions import read_session_transcript, write_session_summary
 from .summarizers import DEFAULT_SUMMARY_PROMPT, SummarizerError, load_summarizer
 
 
@@ -57,8 +58,8 @@ async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) ->
     the disk read + slot claim, so a bad command fails fast for free), then
     brackets the run in `recorder.jobs.run(..., kind="summarize")` — which
     raises `SessionBusy` when a transcribe / strip / summarize is already in
-    flight (releasing nothing) and releases the slot on every other exit path.
-    Returns the summary dict."""
+    flight (releasing nothing) and releases the slot on every other exit path. Persists the summary to session-summary.json (atomic, one current summary
+    per session) before returning it."""
     # Build the summarizer FIRST: it's pure (shlex parse + non-empty check, no
     # I/O), so a misconfigured command (empty template, unknown source) fails
     # fast — before the merged-transcript disk read, and without ever touching
@@ -76,10 +77,15 @@ async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) ->
 
     async with recorder.jobs.run(req.session, kind="summarize", total=1, status="summarizing"):
         result = await asyncio.to_thread(summarizer.summarize, text, prompt=req.prompt)
+        # Persist next to the merged transcript (#83) — only after a successful
+        # run, so a failed re-generate can't clobber the stored summary. The
+        # `summarized_at` stamp is the slim listing marker's re-fetch signal.
+        persisted = {**result.to_mapping(), "summarized_at": datetime.now(UTC).isoformat()}
+        await asyncio.to_thread(write_session_summary, req.session, persisted)
 
     print(
-        f"[tapscribe] summarize {req.session}: source={result.source} "
-        f"chars={len(result.summary)} took {result.took_ms} ms",
+        f"[tapscribe] summarize {req.session}: source={persisted['source']} "
+        f"chars={len(persisted['summary'])} took {persisted['took_ms']} ms",
         flush=True,
     )
-    return {"ok": True, "session": req.session, **result.to_mapping()}
+    return {"ok": True, "session": req.session, **persisted}

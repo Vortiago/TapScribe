@@ -1989,6 +1989,72 @@ def test_summarize_unknown_session_returns_404(client, recorder_under_test):  # 
 
 
 # ---------------------------------------------------------------------------
+# Persisted summary (#83): slim marker in /api/state + lazy GET for the body
+# ---------------------------------------------------------------------------
+
+
+def test_session_summary_get_returns_null_when_absent(client, recorder_under_test):
+    (recorder_under_test.recordings_dir / "s").mkdir()
+    r = client.get("/api/sessions/s/summary")
+    assert r.status_code == 200, r.text
+    assert r.json() is None
+
+
+def test_session_summary_get_unknown_session_returns_404(client, recorder_under_test):  # noqa: ARG001
+    r = client.get("/api/sessions/does-not-exist/summary")
+    assert r.status_code == 404, r.text
+
+
+def test_api_state_carries_slim_summary_marker_and_lazy_get_returns_body(client, recorder_under_test):
+    """#83: after a summarize, the session's /api/state row carries ONLY the
+    slim `session_summary` marker (summarized_at + source + model) — never the
+    body — and GET /api/sessions/{session}/summary returns the full persisted
+    summary. Mirrors the merged-transcript marker-plus-lazy-body split."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="we decided to ship")
+    r = client.post(
+        "/api/sessions/s/summarize",
+        json={"source": "command", "command": _SUMMARIZE_CAT, "prompt": ""},
+    )
+    assert r.status_code == 200, r.text
+    stamp = r.json()["summarized_at"]
+    assert stamp
+
+    state = client.get("/api/state").json()
+    row = next(s for s in state["sessions"] if s["session"] == "s")
+    # Strict equality pins the marker SLIM: exactly these three fields, no body.
+    assert row["session_summary"] == {"summarized_at": stamp, "source": "command", "model": ""}
+
+    # The synthetic current-session entry must carry the key too (None when
+    # the current session has never been summarized).
+    current = next(s for s in state["sessions"] if s["is_current"])
+    assert "session_summary" in current
+
+    full = client.get("/api/sessions/s/summary").json()
+    assert full["summary"] == "we decided to ship"
+    assert full["source"] == "command"
+    assert full["summarized_at"] == stamp
+
+
+def test_regenerate_replaces_stored_summary(client, recorder_under_test):
+    """#83: one current summary per session — POST summarize twice, the lazy
+    GET returns the second result."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="first take")
+    r1 = client.post(
+        "/api/sessions/s/summarize",
+        json={"source": "command", "command": _SUMMARIZE_CAT, "prompt": ""},
+    )
+    assert r1.status_code == 200, r1.text
+    regenerated = py_cmd("import sys; sys.stdin.read(); sys.stdout.write('REGENERATED')")
+    r2 = client.post(
+        "/api/sessions/s/summarize",
+        json={"source": "command", "command": regenerated, "prompt": ""},
+    )
+    assert r2.status_code == 200, r2.text
+    full = client.get("/api/sessions/s/summary").json()
+    assert full["summary"] == "REGENERATED"
+
+
+# ---------------------------------------------------------------------------
 # GET /api/summarize/models — the local model dropdown's catalog
 # ---------------------------------------------------------------------------
 
