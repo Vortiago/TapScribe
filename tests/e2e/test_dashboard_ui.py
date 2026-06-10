@@ -581,7 +581,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
             # cue, distinct from the future live knob preview (#89).
             await page.locator("#viewRoot .wave-cutbadge").wait_for(state="visible", timeout=3000)
 
-            await _shot(page, "08-committed-cut-overlay.png")
+            await _shot(page, "09-committed-cut-overlay.png")
 
             # Reload: the spans must come back EXACTLY from the persisted
             # strip-meta — the cut survives with no strip response in memory.
