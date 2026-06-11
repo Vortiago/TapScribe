@@ -231,3 +231,127 @@ def test_write_batch_model_empty_clears_back_to_default(tmp_config_dir):
 
 def test_read_batch_model_empty_when_unset(tmp_config_dir):
     assert text.read_batch_model() == ""
+
+
+# ---------------------------------------------------------------------------
+# Summarizer default (config/summarizer.json) — the structured operator
+# default (#84): source + prompt + per-source fields. Unlike the text
+# configs this is one JSON object; the writer validates at WRITE time
+# (write_batch_model's rationale: the value feeds the end-of-meeting
+# pipeline's summarizer with no operator in the loop).
+# ---------------------------------------------------------------------------
+
+
+def test_read_summarizer_config_returns_defaults_when_missing(tmp_config_dir):
+    assert text.read_summarizer_config() == {
+        "source": "",
+        "prompt": "",
+        "command": "",
+        "model": "",
+        "max_tokens": None,
+    }
+
+
+def test_write_summarizer_config_round_trips(tmp_config_dir):
+    stored = text.write_summarizer_config(
+        {
+            "source": "command",
+            "prompt": "Summarize into action items.",
+            "command": "claude -p",
+            "model": "",
+            "max_tokens": 2048,
+        }
+    )
+    assert stored == text.read_summarizer_config()
+    assert text.read_summarizer_config()["source"] == "command"
+    assert text.read_summarizer_config()["max_tokens"] == 2048
+
+
+def test_write_summarizer_config_missing_keys_clear_fields(tmp_config_dir):
+    """Full-object semantics: the PUT sends the whole object, so a key left
+    out clears that field back to its built-in-empty default."""
+    text.write_summarizer_config({"source": "command", "command": "claude -p", "prompt": "P"})
+    text.write_summarizer_config({})
+    assert text.read_summarizer_config() == {
+        "source": "",
+        "prompt": "",
+        "command": "",
+        "model": "",
+        "max_tokens": None,
+    }
+
+
+def test_write_summarizer_config_rejects_unknown_and_unwired_sources(tmp_config_dir):
+    with pytest.raises(ValueError):
+        text.write_summarizer_config({"source": "bogus"})
+    # "api" exists in the UI as a disabled button but is unwired (#85): an
+    # unwired DEFAULT would break the end-of-meeting pipeline with no
+    # operator in the loop, so reject it at write time until it lands.
+    with pytest.raises(ValueError):
+        text.write_summarizer_config({"source": "api"})
+    assert text.read_summarizer_config()["source"] == ""
+
+
+def test_write_summarizer_config_rejects_non_catalog_model(tmp_config_dir, monkeypatch):
+    from tapscribe.summarizers import catalog
+
+    monkeypatch.setattr(catalog, "_resolve_local_backend", lambda: "gguf")
+    with pytest.raises(ValueError):
+        text.write_summarizer_config({"model": "evil/not-in-catalog"})
+    assert text.read_summarizer_config()["model"] == ""
+
+
+def test_write_summarizer_config_accepts_catalog_and_env_override_model(tmp_config_dir, monkeypatch):
+    from tapscribe.summarizers import catalog
+    from tapscribe.summarizers.catalog import ENV_LOCAL_GGUF_MODEL, LOCAL_GGUF_MODEL
+
+    monkeypatch.setattr(catalog, "_resolve_local_backend", lambda: "gguf")
+    assert text.write_summarizer_config({"model": LOCAL_GGUF_MODEL})["model"] == LOCAL_GGUF_MODEL
+    # The operator's env override is operator-controlled, not external input.
+    monkeypatch.setenv(ENV_LOCAL_GGUF_MODEL, "me/custom-gguf")
+    assert text.write_summarizer_config({"model": "me/custom-gguf"})["model"] == "me/custom-gguf"
+    assert text.write_summarizer_config({"model": ""})["model"] == ""
+
+
+def test_write_summarizer_config_rejects_oversize_prompt_and_command(tmp_config_dir):
+    too_big = "x" * 5000
+    with pytest.raises(ValueError):
+        text.write_summarizer_config({"prompt": too_big})
+    with pytest.raises(ValueError):
+        text.write_summarizer_config({"command": too_big})
+
+
+def test_write_summarizer_config_bounds_max_tokens(tmp_config_dir):
+    with pytest.raises(ValueError):
+        text.write_summarizer_config({"max_tokens": 9})
+    with pytest.raises(ValueError):
+        text.write_summarizer_config({"max_tokens": 9000})
+    with pytest.raises(ValueError):
+        text.write_summarizer_config({"max_tokens": "lots"})
+    assert text.write_summarizer_config({"max_tokens": None})["max_tokens"] is None
+    assert text.write_summarizer_config({"max_tokens": 2048})["max_tokens"] == 2048
+
+
+def test_read_summarizer_config_garbage_json_reads_as_defaults(tmp_config_dir):
+    (tmp_config_dir / "summarizer.json").write_text("{not json", encoding="utf-8")
+    assert text.read_summarizer_config()["source"] == ""
+    (tmp_config_dir / "summarizer.json").write_text('["a", "list"]', encoding="utf-8")
+    assert text.read_summarizer_config() == {
+        "source": "",
+        "prompt": "",
+        "command": "",
+        "model": "",
+        "max_tokens": None,
+    }
+
+
+def test_summarizer_default_public_exposes_exactly_the_public_fields(tmp_config_dir):
+    """The state-poll filter is the redaction seam: when #85 adds API-key
+    fields to summarizer.json they must NOT appear here. Pin the exact key
+    set so adding a field to the blob is a deliberate act."""
+    text.write_summarizer_config({"source": "local", "prompt": "P"})
+    blob = text.summarizer_default_public(text.read_summarizer_config())
+    assert set(blob.keys()) == {"source", "prompt", "command", "model", "max_tokens"}
+    assert blob["source"] == "local"
+    # A future secret-ish key on the stored dict is dropped, not forwarded.
+    assert "api_key" not in text.summarizer_default_public({**blob, "api_key": "s3cret"})
