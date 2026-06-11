@@ -17,7 +17,7 @@ export interface AppState {
   current_session: string;
   active: ActiveStream[];
   sessions: Session[];
-  default_override_counts: { prompt: number; hotwords: number };
+  default_override_counts: { prompt: number; hotwords: number; summarizer: number };
   live_feed: LiveFeedEntry[];
   live_info: LiveInfo;
   live_log: string[];
@@ -37,7 +37,22 @@ export interface AppState {
   batch_model_default: string;
   hotwords: ConfigFile;
   inputs_support: InputsSupport;
+  // The structured global summarizer default (#84) — the NON-SECRET projection
+  // of config/summarizer.json (summarizer_default_public server-side; #85's
+  // API-key fields must never appear here). "" / null = unset (built-ins
+  // apply). Seeds the Settings card and the Summary view's effective config.
+  summarizer_default: SummarizerDefault;
   hallucinations: HallucinationsConfig;
+}
+
+// The operator's global summarizer default — GET/PUT /api/summarize/config
+// and AppState.summarizer_default share this shape.
+export interface SummarizerDefault {
+  source: string;            // "" (unset → built-in "local") | "local" | "command"
+  prompt: string;
+  command: string;           // command source: the CLI template
+  model: string;             // local source: catalog repo id ("" = catalog default)
+  max_tokens: number | null; // local source: output cap (null = env default)
 }
 
 // Active /tap WebSocket (one per recording utterance). `record` and `live`
@@ -135,6 +150,10 @@ export interface SessionMeta {
   label?: string;
   prompt?: string;
   hotwords?: string;
+  // Per-session summarizer override (#84): source + prompt only (per-source
+  // fields stay global). "" = no override → the global default applies.
+  summary_source?: string;
+  summary_prompt?: string;
   aliases?: Record<string, string>;
 }
 

@@ -2926,6 +2926,179 @@ async def test_summary_persists_across_reload(running_recorder: RunningRecorder)
             await browser.close()
 
 
+async def test_settings_summarizer_default_card_saves_and_prefills(running_recorder: RunningRecorder):
+    """#84: the Settings stage's Summarizer card edits the structured global
+    default. Pick the Command source, type a template + prompt, Save — then
+    reload: the card pre-fills from the persisted config (state poll), not
+    from view memory."""
+    rr = running_recorder
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
+
+            # The card builds once; the source segctl scopes its own buttons.
+            await page.wait_for_selector('[data-slot="sdSource"] [data-sd-src="command"]', timeout=6000)
+            await page.click('[data-slot="sdSource"] [data-sd-src="command"]')
+            await page.wait_for_selector('[data-slot="sdCmd"]', state="visible", timeout=6000)
+            await page.fill('[data-slot="sdCmd"]', "claude -p --bare")
+            await page.fill('[data-slot="sdPrompt"]', "GLOBAL DEFAULT PROMPT")
+            await page.click('[data-slot="sdSave"]')
+            await page.wait_for_function(
+                """() => (document.querySelector('[data-slot="sdStatus"]')?.textContent || '') === 'saved'""",
+                timeout=8000,
+            )
+
+            # Reload: the card must pre-fill from the persisted global default.
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sdPrompt"]', timeout=6000)
+            await page.wait_for_function(
+                """() => {
+                  const ta = document.querySelector('[data-slot="sdPrompt"]');
+                  return ta && ta.value === 'GLOBAL DEFAULT PROMPT';
+                }""",
+                timeout=8000,
+            )
+            on = await page.get_attribute('[data-slot="sdSource"] [data-sd-src="command"]', "class")
+            assert "is-on" in (on or ""), f"saved source must pre-select, got class {on!r}"
+            cmd_visible = await page.is_visible('[data-slot="sdCmd"]')
+            assert cmd_visible, "command detail pane must show for the saved Command source"
+            # The command value applies once the catalog fetch settles (the
+            # shared controls sequence saved values on it) — wait, don't race it.
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sdCmd"]')?.value === 'claude -p --bare'""",
+                timeout=8000,
+            )
+
+            # The backend agrees (the card saved through PUT /api/summarize/config).
+            cfg = json.loads(await (await context.request.get(rr.base_url + "/api/summarize/config")).text())
+            assert cfg["source"] == "command"
+            assert cfg["prompt"] == "GLOBAL DEFAULT PROMPT"
+        finally:
+            await browser.close()
+
+
+async def test_summary_prefills_effective_config_and_saves_session_override(
+    running_recorder: RunningRecorder,
+):
+    """#84: the Summary view's source/prompt read the EFFECTIVE config and
+    write the per-session override. (a) With a global default saved, the view
+    pre-fills from it. (b) 'save for this session' persists an override that
+    survives reload — while Settings still shows the global. (c) 'use global
+    default' clears the override and the controls re-seed from the global."""
+    rr = running_recorder
+    sid = rr.recorder.session_start
+
+    # Global default: Command source + its template + a global prompt.
+    import httpx
+
+    async with httpx.AsyncClient(base_url=rr.base_url, timeout=30.0) as client:
+        r = await client.put(
+            "/api/summarize/config",
+            json={"source": "command", "command": "claude -p", "prompt": "GLOBAL PROMPT"},
+        )
+        assert r.status_code == 200, r.text
+
+    # A transcript so the current session is a normal, selectable session.
+    sd = rr.recorder.session_dir
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "session": sid,
+                "model": "test",
+                "transcribed_at": "2026-01-01T00:00:00+00:00",
+                "speakers": ["Alice"],
+                "segments": [],
+                "plain_text": "Alice: we decided to ship.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            # (a) Pre-fill from the global default (no override saved yet).
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sumPrompt"]')?.value === 'GLOBAL PROMPT'""",
+                timeout=8000,
+            )
+            on = await page.get_attribute('.segctl--wide [data-src="command"]', "class")
+            assert "is-on" in (on or ""), f"global default source must pre-select, got {on!r}"
+            # The command value applies once the catalog fetch settles (the
+            # shared controls sequence saved values on it) — wait, don't race it.
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sumCmd"]')?.value === 'claude -p'""",
+                timeout=8000,
+            )
+
+            # (b) Save a per-session override: Local source + a session prompt.
+            await page.click('.segctl--wide [data-src="local"]')
+            await page.fill('[data-slot="sumPrompt"]', "SESSION PROMPT")
+            await page.click('[data-slot="sumSaveSession"]')
+            await page.wait_for_function(
+                """() => (document.querySelector('[data-slot="sumSaveStatus"]')?.textContent || '') === 'saved'""",
+                timeout=8000,
+            )
+
+            # Survives reload (pre-fills from the override, not the global).
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sumPrompt"]')?.value === 'SESSION PROMPT'""",
+                timeout=8000,
+            )
+            on = await page.get_attribute('.segctl--wide [data-src="local"]', "class")
+            assert "is-on" in (on or ""), f"override source must pre-select after reload, got {on!r}"
+            note = await page.locator('[data-slot="sumOverrideNote"]').text_content()
+            assert "override" in (note or ""), f"override indicator must show, got {note!r}"
+
+            # …while Settings still shows the GLOBAL default (the card edits
+            # the global, not the session). The hash is only read at boot, so
+            # cross-view navigation needs a reload.
+            await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sdPrompt"]')?.value === 'GLOBAL PROMPT'""",
+                timeout=8000,
+            )
+
+            # (c) Clear the override — the controls re-seed from the global.
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sumPrompt"]')?.value === 'SESSION PROMPT'""",
+                timeout=8000,
+            )
+            await page.click('[data-slot="sumUseDefault"]')
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sumPrompt"]')?.value === 'GLOBAL PROMPT'""",
+                timeout=8000,
+            )
+            meta = json.loads(
+                await (await context.request.get(rr.base_url + f"/api/session-meta/{sid}")).text()
+            )
+            assert meta.get("summary_source", "") == ""
+            assert meta.get("summary_prompt", "") == ""
+        finally:
+            await browser.close()
+
+
 async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRecorder):
     """Every renderRegion call carries a `sig` that gates whether the build
     closure re-runs. If the sig is missing a value the build actually reads,

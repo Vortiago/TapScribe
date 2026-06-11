@@ -55,7 +55,12 @@ from . import hallucinations as hallucinations_mod
 from .audio import compute_peaks
 from .batch_pipeline import PipelineRequest, start_pipeline
 from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
-from .batch_summarize import NoMergedTranscript, SummarizeSessionRequest, summarize_session
+from .batch_summarize import (
+    NoMergedTranscript,
+    SummarizeSessionRequest,
+    effective_summarizer_config,
+    summarize_session,
+)
 from .batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
@@ -94,11 +99,14 @@ from .text import (
     read_live_model,
     read_live_prompt,
     read_prompt,
+    read_summarizer_config,
+    summarizer_default_public,
     write_batch_model,
     write_hotwords,
     write_live_model,
     write_live_prompt,
     write_prompt,
+    write_summarizer_config,
 )
 from .transcribers import evict_idle_now, run_on_model_thread
 from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY, available_backends
@@ -572,6 +580,9 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
         "live_model_default": read_live_model(),
         "batch_model_default": read_batch_model(),
         "hotwords": read_hotwords(),
+        # Non-secret projection ONLY (`summarizer_default_public` is the #85
+        # redaction seam) — the Settings card and Summary view pre-fill from it.
+        "summarizer_default": summarizer_default_public(read_summarizer_config()),
         "halluc_rules": hallucinations_mod.parse_rules(),
         "inputs_support": _compute_inputs_support(),
     }
@@ -600,13 +611,15 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         active.append(row)
     sessions_list = blob["sessions"]
     # Powers the "· N sessions override this" footer in the default config panel.
-    override_counts = {"prompt": 0, "hotwords": 0}
+    override_counts = {"prompt": 0, "hotwords": 0, "summarizer": 0}
     for s in sessions_list:
         m = s.get("session_meta") or {}
         if m.get("prompt"):
             override_counts["prompt"] += 1
         if m.get("hotwords"):
             override_counts["hotwords"] += 1
+        if m.get("summary_source") or m.get("summary_prompt"):
+            override_counts["summarizer"] += 1
     payload = {
         "current_session": recorder.session_start,
         "active": active,
@@ -637,6 +650,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "inputs_support": inputs_support,
         "live_model_default": blob["live_model_default"],
         "batch_model_default": blob["batch_model_default"],
+        "summarizer_default": blob["summarizer_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "rules": [r["raw"] for r in halluc_rules],
@@ -971,15 +985,18 @@ async def api_session_summarize(
 ):
     """Summarize a session's merged transcript. Thin HTTP shim over
     `batch_summarize.summarize_session` — parse the body; the registered
-    domain-error handlers map failures to status codes. For this slice the
-    source / command / prompt arrive in the body (no saved config yet); the
-    Local (bundled, offline — #86) and Command (#82) sources are wired, while
-    the API source (#85) still maps to a clear 400."""
+    domain-error handlers map failures to status codes. The Local (bundled,
+    offline — #86) and Command (#82) sources are wired, while the API source
+    (#85) still maps to a clear 400.
+
+    Body fields the caller omits resolve through the saved config (#84):
+    session-meta override → global default → built-ins, via
+    `effective_summarizer_config`. An explicit body field wins over both
+    saved layers, so a Generate with hand-edited values behaves exactly as
+    before. The effective model/source were allowlist-validated at write
+    time AND are re-validated inside `load_summarizer` (double guard)."""
     body = await _json_body(req)
-    # Forward only explicitly-provided fields and let SummarizeSessionRequest own
-    # the defaults (source="command", prompt=DEFAULT_SUMMARY_PROMPT) — the same
-    # "value object owns the defaults" contract as the strip-silence route.
-    overrides: dict[str, Any] = {}
+    overrides: dict[str, Any] = await asyncio.to_thread(effective_summarizer_config, session)
     source = body.get("source")
     if isinstance(source, str) and source.strip():
         overrides["source"] = source.strip()
@@ -1016,6 +1033,34 @@ async def api_summarize_models():
     Response: `{ "backend", "default", "models": [{repo_id, label, approx_gb,
     context_tokens, note, is_default}, ...] }`."""
     return summary_model_catalog()
+
+
+@app.get("/api/summarize/config")
+async def api_summarize_config_get():
+    """The structured global summarizer default (#84) — the full stored
+    object. The Settings card seeds from the state poll's projection
+    (`summarizer_default_public`) rather than this; the GET is the PUT's
+    read-back twin for scripts and tests. If #85 adds secret fields to
+    summarizer.json, THIS endpoint needs its own redaction decision too."""
+    return read_summarizer_config()
+
+
+@app.put("/api/summarize/config")
+async def api_summarize_config_put(req: Request):
+    """Persist the global summarizer default. Full-object semantics (a
+    missing key clears that field). Dedicated endpoint rather than a
+    `_CONFIG_WRITERS` entry — that map is `{content: str}`-shaped, this is
+    one structured object. ALL validation (source/model allowlists, text
+    caps, max_tokens int + bounds) lives in `write_summarizer_config`; its
+    ValueError is the 400."""
+    body = await _json_body(req)
+    try:
+        stored = write_summarizer_config(body)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    except OSError as e:
+        raise HTTPException(500, f"failed to write config: {e}") from None
+    return {"ok": True, "config": stored}
 
 
 @app.delete("/api/sessions/{session}/stripped")

@@ -6,6 +6,7 @@ on nothing in TapScribe besides config paths. Easy to unit-test.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -126,6 +127,102 @@ def read_batch_model() -> str:
     transcribe stage from it — the tap trigger carries no model field by
     design (operator defaults only)."""
     return _read_config_text_cached(config.BATCH_MODEL_FILE).strip()
+
+
+def read_summarizer_config() -> dict:
+    """Return the operator's DEFAULT summarizer config from summarizer.json
+    (#84), normalised to the full shape — {source, prompt, command, model,
+    max_tokens} — with all-empty defaults when the file is missing or
+    unparseable. Stat-signature cached like the other config reads (the JSON
+    parse of ~200 bytes per poll tick is negligible on top of that)."""
+    raw = _read_config_text_cached(config.SUMMARIZER_CONFIG_FILE)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    out = {
+        k: data[k] if isinstance(data.get(k), str) else "" for k in ("source", "prompt", "command", "model")
+    }
+    mt = data.get("max_tokens")
+    out["max_tokens"] = mt if isinstance(mt, int) and not isinstance(mt, bool) else None
+    return out
+
+
+def summarizer_default_public(cfg: dict) -> dict:
+    """The /api/state projection of the stored summarizer default — an
+    explicit field ALLOWLIST, not a passthrough. This is the redaction seam
+    for #85: when the API source adds key/base-url fields to summarizer.json,
+    they must NOT be added here (the state poll is long-lived, cached and
+    rendered into the DOM). Pinned by a test asserting the exact key set."""
+    return {k: cfg.get(k) for k in ("source", "prompt", "command", "model", "max_tokens")}
+
+
+# The wired summarizer sources — ONE allowlist shared by the global-default
+# writer below and the per-session override validator
+# (`tapscribe.sessions.write_session_meta`), so wiring the API source (#85)
+# is a single-tuple change that covers both write paths. "" means unset (no
+# global default) / cleared (no per-session override).
+SUMMARY_SOURCES: tuple[str, ...] = ("", "local", "command")
+
+
+def write_summarizer_config(cfg: dict) -> dict:
+    """Validate + persist the operator's DEFAULT summarizer config to
+    summarizer.json (#84). Full-object semantics: the PUT always sends the
+    whole structured object, so a missing key clears that field. Returns the
+    normalised stored dict.
+
+    Like `write_batch_model`, validation happens at WRITE time — the value
+    feeds the end-of-meeting pipeline's summarizer with no operator in the
+    loop, and a model id arriving from the dashboard is external input that
+    must never reach a Hub download (`ValueError` → the PUT's 400):
+
+    - `source`: "" (no default) | "local" | "command". "api" is REJECTED
+      until #85 wires it — an unwired default would break the pipeline.
+    - `model`: "" (catalog default) or a member of the local backend's
+      catalog allowlist / env-override model (`_is_allowed_local_model`).
+    - `prompt` / `command`: free text under the MAX_CONFIG_TEXT_LEN cap.
+    - `max_tokens`: None (env default) or an int within the catalog bounds.
+
+    The catalog import is lazy (write_batch_model's pattern) so this module
+    stays free of the summarizers dependency for every other caller."""
+    source = str(cfg.get("source") or "").strip()
+    if source not in SUMMARY_SOURCES:
+        raise ValueError(
+            f"unknown summarizer source: {source!r} (expected one of: {', '.join(s for s in SUMMARY_SOURCES if s)})"
+        )
+    prompt = validate_config_text(str(cfg.get("prompt") or ""))
+    command = validate_config_text(str(cfg.get("command") or ""))
+    model = str(cfg.get("model") or "").strip()
+    if model:
+        from .summarizers.catalog import (
+            _is_allowed_local_model,
+            _resolve_local_backend,
+            _unknown_model_message,
+        )
+
+        backend = _resolve_local_backend()
+        if not _is_allowed_local_model(backend, model):
+            raise ValueError(_unknown_model_message(backend, model))
+    max_tokens = cfg.get("max_tokens")
+    if max_tokens is not None:
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
+            raise ValueError(f"max_tokens must be an integer, got {max_tokens!r}")
+        from .summarizers.catalog import _MAX_TOKENS_BOUNDS
+
+        lo, hi = _MAX_TOKENS_BOUNDS
+        if not (lo <= max_tokens <= hi):
+            raise ValueError(f"max_tokens must be within {lo}–{hi}, got {max_tokens}")
+    stored = {
+        "source": source,
+        "prompt": prompt,
+        "command": command,
+        "model": model,
+        "max_tokens": max_tokens,
+    }
+    atomic_write_text(config.SUMMARIZER_CONFIG_FILE, json.dumps(stored, indent=2) + "\n")
+    return stored
 
 
 def read_hotwords() -> str:

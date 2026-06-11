@@ -23,8 +23,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .recorder import Recorder
-from .sessions import read_session_transcript, write_session_summary
+from .sessions import read_session_meta, read_session_transcript, write_session_summary
 from .summarizers import DEFAULT_SUMMARY_PROMPT, SummarizerError, load_summarizer
+from .text import read_summarizer_config
 
 
 class NoMergedTranscript(SummarizerError):
@@ -42,11 +43,39 @@ class SummarizeSessionRequest:
     defaults."""
 
     session: str
+    # NOTE (#84): the routed/pipeline paths now always pass explicit values
+    # resolved via `effective_summarizer_config` (whose built-in source is
+    # "local"); these dataclass defaults only apply to direct callers.
     source: str = "command"
     command: str = ""
     model: str = ""  # local source: which catalog model to load (empty = default)
     max_tokens: int | None = None  # local source: OUTPUT cap (None = env default)
     prompt: str = DEFAULT_SUMMARY_PROMPT
+
+
+def effective_summarizer_config(session: str) -> dict[str, Any]:
+    """Resolve the summarizer config for `session` (#84): the session-meta
+    override (source + prompt — empty falls back, a session can't assert "no
+    prompt") over the global summarizer default over built-ins ("local", the
+    bundled offline source, and `DEFAULT_SUMMARY_PROMPT`). The per-source
+    fields (command / model / max_tokens) come from the global layer only —
+    the per-session override is deliberately just source + prompt.
+
+    `batch_transcribe._effective_prompt_hotwords`'s sibling; the summarize
+    route uses it for body fields the caller omitted, the end-of-meeting
+    pipeline for everything (the tap trigger carries no summarizer fields by
+    design — operator defaults only)."""
+    meta = read_session_meta(session)
+    g = read_summarizer_config()
+    return {
+        "source": (meta.get("summary_source") or "").strip() or (g["source"] or "").strip() or "local",
+        "prompt": (meta.get("summary_prompt") or "").strip()
+        or (g["prompt"] or "").strip()
+        or DEFAULT_SUMMARY_PROMPT,
+        "command": g["command"],
+        "model": g["model"],
+        "max_tokens": g["max_tokens"],
+    }
 
 
 async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) -> dict[str, Any]:

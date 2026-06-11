@@ -31,6 +31,7 @@ from . import config
 from .audio import wav_duration_s
 from .session_paths import _safe_part, resolve_session_dir, resolve_wav, session_meta_path, stripped_dir
 from .text import (
+    SUMMARY_SOURCES,
     atomic_write_text,
     file_stat_sig,
     parse_wav_speaker_ident,
@@ -47,10 +48,16 @@ from .wav_cache import cache_listing, cache_signature, read_primary_marker, read
 
 
 # ---------------------------------------------------------------------------
-# Per-session metadata (label / aliases / prompt-hotwords overrides)
+# Per-session metadata (label / aliases / prompt-hotwords overrides, and the
+# #84 per-session summarizer override: summary_source + summary_prompt)
 # ---------------------------------------------------------------------------
 
-_META_STRING_FIELDS = ("label", "prompt", "hotwords")
+_META_STRING_FIELDS = ("label", "prompt", "hotwords", "summary_source", "summary_prompt")
+
+# The per-session summarizer source override validates against the SAME
+# `SUMMARY_SOURCES` allowlist as the global default's writer ("" = no
+# override). Per-source fields (command/model) are global-only by design,
+# so they're not meta fields at all.
 
 
 def _coerce_aliases(value: Any) -> dict[str, str]:
@@ -97,11 +104,17 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
     sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
     sanitized["aliases"] = _coerce_aliases(merged.get("aliases"))
-    for capped_field in ("prompt", "hotwords"):
+    for capped_field in ("prompt", "hotwords", "summary_prompt"):
         try:
             validate_config_text(sanitized[capped_field])
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+    if sanitized["summary_source"] not in SUMMARY_SOURCES:
+        raise HTTPException(
+            400,
+            f"unknown summary_source: {sanitized['summary_source']!r} "
+            f"(expected one of: {', '.join(s for s in SUMMARY_SOURCES if s)} — or '' to clear)",
+        )
     atomic_write_text(
         Path(real_parent) / "session-meta.json",
         json.dumps(sanitized, indent=2, ensure_ascii=False),

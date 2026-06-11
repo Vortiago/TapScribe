@@ -88,6 +88,18 @@
             <textarea class="ta" rows="3" data-slot="sumPrompt">Summarize this meeting into decisions, action items, and open questions.</textarea>
           </div>
 
+          <!-- 3b. per-session override (#84): the controls pre-fill from the
+               EFFECTIVE config (session override over global default); "save
+               for this session" persists source + prompt to session-meta,
+               "use global default" clears the override (empty falls back).
+               Generate is unaffected — it always sends the live values. -->
+          <div style="display:flex; align-items:center; gap:8px; margin-top:8px">
+            <button class="act act--sm" type="button" data-slot="sumSaveSession" title="persist source + prompt as this session's override">💾 save for this session</button>
+            <button class="act act--sm" type="button" data-slot="sumUseDefault" title="clear the override — this session falls back to the global default">↩ use global default</button>
+            <span class="dim mono" data-slot="sumSaveStatus"></span>
+          </div>
+          <div class="dim mono" data-slot="sumOverrideNote" style="margin-top:4px"></div>
+
           <!-- 4. Generate -->
           <button class="act act--sm act--primary act--wide" type="button" data-slot="sumGenerate" style="margin-top:10px">🪄 Generate summary</button>
           <div class="dim mono ovr-note" data-slot="sumNote"></div>

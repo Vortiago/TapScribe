@@ -316,10 +316,57 @@ export const putJson  = (url, body) => fetch(url, { method: "PUT",  ..._body(bod
 /** @param {string} url */
 export const del      = (url)       => fetch(url, { method: "DELETE" }).then(_unwrap);
 
+// ONE memoized fetch of the summarizer catalog (models + command presets +
+// max-token bounds): the Summary view and the Settings summarizer-default
+// card both populate from it, and the boot-time view rebuild would otherwise
+// re-fetch — this dedupes all of them to one request per page. A rejection
+// clears the memo so the next view build retries instead of inheriting a
+// poisoned promise.
+/** @type {Promise<import('./types.js').SummaryModelCatalog> | null} */
+let _summaryCatalog = null;
+/** @returns {Promise<import('./types.js').SummaryModelCatalog>} */
+export function getSummaryCatalog() {
+  if (!_summaryCatalog) {
+    _summaryCatalog = getJson("/api/summarize/models");
+    _summaryCatalog.catch(() => { _summaryCatalog = null; });
+  }
+  return _summaryCatalog;
+}
+
+// Wire a save button to an async PUT with the shared status-badge lifecycle
+// (saving… / saved / failed, success badge clears after 1.5s). The generic
+// core under wireConfigSave; structured saves (the #84 summarizer-default
+// card, the Summary view's per-session override) call it with their own
+// `put` instead of the /api/config/{key} content shape.
+/**
+ * @param {{
+ *   btn: HTMLButtonElement,
+ *   status: HTMLElement | null,
+ *   put: () => Promise<unknown>,
+ *   onSuccess?: (() => void) | undefined,
+ * }} opts
+ */
+export function wireSave({ btn, status, put, onSuccess }) {
+  btn.addEventListener("click", async () => {
+    if (!status) return;
+    btn.disabled = true;
+    status.textContent = "saving…";
+    try {
+      await put();
+      status.textContent = "saved";
+      onSuccess?.();
+      setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
+    } catch (e) {
+      status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 // Wire a textarea + save button to PUT /api/config/{key}. Used by both the
 // "default config" card editors and the live-channel's init-prompt
-// expandable. Manages the status badge lifecycle (saving / saved / failed)
-// and clears the success badge after a short delay.
+// expandable. The {content: textarea.value} specialisation of wireSave.
 /**
  * @param {{
  *   key: string,
@@ -330,19 +377,11 @@ export const del      = (url)       => fetch(url, { method: "DELETE" }).then(_un
  * }} opts
  */
 export function wireConfigSave({ key, btn, textarea, status, onSuccess }) {
-  btn.addEventListener("click", async () => {
-    if (!textarea || !status) return;
-    btn.disabled = true;
-    status.textContent = "saving…";
-    try {
-      await putJson(`/api/config/${key}`, { content: textarea.value });
-      status.textContent = "saved";
-      onSuccess?.(textarea.value);
-      setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
-    } catch (e) {
-      status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
-    } finally {
-      btn.disabled = false;
-    }
+  if (!textarea) return;
+  wireSave({
+    btn,
+    status,
+    put: () => putJson(`/api/config/${key}`, { content: textarea.value }),
+    onSuccess: () => onSuccess?.(textarea.value),
   });
 }

@@ -15,6 +15,7 @@ import pytest
 from conftest import (  # type: ignore[import-not-found]  # NeMo ships an installed `tests` package — collides with our project's tests/ dir; pytest puts tests/ on sys.path so `from conftest` resolves correctly
     TranscriberStub,
     py_cmd,
+    repoint_config_files,
     seed_merged_transcript,
 )
 from fastapi.testclient import TestClient
@@ -53,16 +54,10 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Reco
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
     cfg = tmp_path / "config"
     cfg.mkdir()
-    monkeypatch.setattr(_config, "CONFIG_DIR", cfg)
-    # The text helpers and /api/state both read these path constants
-    # directly — re-bind them to the tmp config dir so the editable-config
-    # writes land where the test expects them (and where the recorder
-    # under test reads from).
-    monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
-    monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
-    monkeypatch.setattr(_config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
-    monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
-    monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
+    # The text helpers and /api/state read the path constants directly —
+    # re-bind them all to the tmp config dir so editable-config writes land
+    # where the test expects them (and where the recorder under test reads).
+    repoint_config_files(monkeypatch, cfg)
     (tmp_path / "recordings").mkdir()
 
     return Recorder(
@@ -861,6 +856,59 @@ def test_api_state_reports_default_override_counts(client, recorder_under_test):
     counts = body["default_override_counts"]
     assert counts["prompt"] == 2
     assert counts["hotwords"] == 1
+
+
+def test_session_meta_round_trips_summarizer_override(client, recorder_under_test):
+    """#84: the per-session summarizer override (source + prompt) rides in
+    session-meta exactly like the prompt/hotwords overrides — and setting it
+    preserves fields the caller didn't mention."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    client.put("/api/session-meta/fakesession", json={"label": "kickoff"})
+    r = client.put(
+        "/api/session-meta/fakesession",
+        json={"summary_source": "command", "summary_prompt": "Action items only."},
+    )
+    assert r.status_code == 200, r.text
+    meta = client.get("/api/session-meta/fakesession").json()
+    assert meta["summary_source"] == "command"
+    assert meta["summary_prompt"] == "Action items only."
+    assert meta["label"] == "kickoff"
+
+
+def test_session_meta_rejects_bad_summary_source(client, recorder_under_test):
+    """The override source is allowlisted at write time like the global
+    default's (an unwired/unknown source must never persist); "" clears the
+    override back to the global default."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    assert client.put("/api/session-meta/fakesession", json={"summary_source": "bogus"}).status_code == 400
+    assert client.put("/api/session-meta/fakesession", json={"summary_source": "api"}).status_code == 400
+    assert client.put("/api/session-meta/fakesession", json={"summary_source": ""}).status_code == 200
+
+
+def test_session_meta_rejects_oversize_summary_prompt(client, recorder_under_test):
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    r = client.put("/api/session-meta/fakesession", json={"summary_prompt": "x" * 5000})
+    assert r.status_code == 400
+
+
+def test_api_state_counts_summarizer_overrides(client, recorder_under_test):
+    """The Settings card's '· N sessions override this' footer for the
+    summarizer default; surfaced next to the prompt/hotwords counts. The
+    per-session meta block in /api/state carries the fields themselves
+    (read_session_meta returns every _META_STRING_FIELDS member)."""
+    base = recorder_under_test.recordings_dir
+    for name in ("s1", "s2", "s3"):
+        (base / name).mkdir()
+    client.put("/api/session-meta/s1", json={"summary_source": "local"})
+    client.put("/api/session-meta/s2", json={"summary_prompt": "Action items."})
+    client.put("/api/session-meta/s3", json={"label": "no override"})
+    body = client.get("/api/state").json()
+    assert body["default_override_counts"]["summarizer"] == 2
+    row = next(s for s in body["sessions"] if s["session"] == "s1")
+    assert row["session_meta"]["summary_source"] == "local"
 
 
 # ---------------------------------------------------------------------------
@@ -2363,6 +2411,124 @@ def test_api_summarize_models_reflects_env_override(client, recorder_under_test,
         assert "summarize" in detail.lower()  # the missing-extra message it reached instead
     finally:
         set_available_backends_for_testing(None)
+
+
+# ---------------------------------------------------------------------------
+# GET/PUT /api/summarize/config — the structured global summarizer default
+# (#84). Dedicated endpoints (NOT /api/config/{key}: that map is
+# {content: str}-shaped) with write-time validation in text.py.
+# ---------------------------------------------------------------------------
+
+
+def test_summarizer_config_round_trips(client):
+    r = client.put(
+        "/api/summarize/config",
+        json={
+            "source": "command",
+            "prompt": "Summarize into action items.",
+            "command": "claude -p",
+            "model": "",
+            "max_tokens": 2048,
+        },
+    )
+    assert r.status_code == 200, r.text
+    got = client.get("/api/summarize/config").json()
+    assert got == {
+        "source": "command",
+        "prompt": "Summarize into action items.",
+        "command": "claude -p",
+        "model": "",
+        "max_tokens": 2048,
+    }
+
+
+def test_summarizer_config_put_rejects_bad_fields(client):
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    try:
+        assert client.put("/api/summarize/config", json={"source": "bogus"}).status_code == 400
+        # "api" is a visible-but-disabled source in the UI; an unwired DEFAULT
+        # would break the pipeline with no operator in the loop → 400 until #85.
+        assert client.put("/api/summarize/config", json={"source": "api"}).status_code == 400
+        r = client.put("/api/summarize/config", json={"model": "evil/not-in-catalog"})
+        assert r.status_code == 400
+        assert "evil/not-in-catalog" in r.json()["detail"]
+        assert client.put("/api/summarize/config", json={"max_tokens": 9}).status_code == 400
+        assert client.put("/api/summarize/config", json={"prompt": "x" * 5000}).status_code == 400
+        # Nothing landed on disk along the way.
+        assert client.get("/api/summarize/config").json()["source"] == ""
+    finally:
+        set_available_backends_for_testing(None)
+
+
+def test_summarizer_config_put_empty_object_clears(client):
+    client.put("/api/summarize/config", json={"source": "command", "command": "claude -p"})
+    r = client.put("/api/summarize/config", json={})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/summarize/config").json() == {
+        "source": "",
+        "prompt": "",
+        "command": "",
+        "model": "",
+        "max_tokens": None,
+    }
+
+
+def test_summarize_empty_body_resolves_from_global_default(client, recorder_under_test):
+    """#84: a body field the caller omits resolves session-override → global
+    default → built-in. With a global Command default saved, POST {} runs the
+    configured command — what the Generate button does once the view pre-fills
+    from config."""
+    client.put("/api/summarize/config", json={"source": "command", "command": _SUMMARIZE_CAT, "prompt": ""})
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="we shipped it")
+    r = client.post("/api/sessions/s/summarize", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary"] == "we shipped it"
+    assert r.json()["source"] == "command"
+
+
+def test_summarize_session_override_prompt_reaches_summarizer(client, recorder_under_test):
+    """The command source appends the prompt as the last argv element, so a
+    prompt-echo command proves the session-meta override prompt (not the
+    global one) reached the summarizer."""
+    argv_echo = py_cmd("import sys; sys.stdin.read(); sys.stdout.write(sys.argv[-1])")
+    client.put("/api/summarize/config", json={"source": "command", "command": argv_echo, "prompt": "GLOBAL"})
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    client.put("/api/session-meta/s", json={"summary_prompt": "SESSION OVERRIDE"})
+    r = client.post("/api/sessions/s/summarize", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary"] == "SESSION OVERRIDE"
+
+
+def test_summarize_explicit_body_beats_override_and_default(client, recorder_under_test):
+    """The chain is body → session override → global default: an explicit
+    Generate-time prompt wins over both saved layers."""
+    argv_echo = py_cmd("import sys; sys.stdin.read(); sys.stdout.write(sys.argv[-1])")
+    client.put("/api/summarize/config", json={"source": "command", "command": argv_echo, "prompt": "GLOBAL"})
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    client.put("/api/session-meta/s", json={"summary_prompt": "SESSION"})
+    r = client.post("/api/sessions/s/summarize", json={"prompt": "BODY WINS"})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary"] == "BODY WINS"
+
+
+def test_api_state_surfaces_summarizer_default_public_fields_only(client):
+    """The dashboard pre-fills the Settings card and the Summary view from the
+    state poll. Strict key equality pins `summarizer_default_public` as the
+    #85 redaction seam — a future API-key field must not ride along."""
+    client.put(
+        "/api/summarize/config",
+        json={"source": "command", "prompt": "P", "command": "claude -p", "max_tokens": 512},
+    )
+    blob = client.get("/api/state").json()["summarizer_default"]
+    assert blob == {
+        "source": "command",
+        "prompt": "P",
+        "command": "claude -p",
+        "model": "",
+        "max_tokens": 512,
+    }
 
 
 def test_summarize_command_source_accepts_max_tokens_field(client, recorder_under_test):

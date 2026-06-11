@@ -20,7 +20,8 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson, wireConfigSave } from "../../api.js";
+import { putJson, wireConfigSave, wireSave } from "../../api.js";
+import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header } from "../shell.js";
 import * as configCard from "../../components/config-card.js";
 
@@ -63,6 +64,64 @@ export function build(ctx) {
   const liveCardHost = pick(frag, "liveCardHost");
 
   rebuildEngine(engineHost);
+
+  // ---- Summarizer-default card (#84) ----------------------------------------
+  // Built ONCE — every control is interactive, so there is no renderRegion and
+  // no sig to drift (the Summary view's discipline). Values seed once from the
+  // first poll carrying `summarizer_default`; the per-tick update only writes
+  // the override-count hint in place. One Save persists the whole structured
+  // object via PUT /api/summarize/config.
+  const sdSourceWrap = pick(frag, "sdSource");
+  const sdButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
+    sdSourceWrap.querySelectorAll("[data-sd-src]")
+  );
+  const sdLocal = /** @type {HTMLElement} */ (pick(frag, "sdLocal"));
+  const sdCommand = /** @type {HTMLElement} */ (pick(frag, "sdCommand"));
+  const sdModelSel = /** @type {HTMLSelectElement} */ (pick(frag, "sdModel"));
+  const sdModelNote = pick(frag, "sdModelNote");
+  const sdMaxTok = /** @type {HTMLInputElement} */ (pick(frag, "sdMaxTokens"));
+  const sdPresetSel = /** @type {HTMLSelectElement} */ (pick(frag, "sdCmdPreset"));
+  const sdPresetNote = pick(frag, "sdCmdPresetNote");
+  const sdCmd = /** @type {HTMLInputElement} */ (pick(frag, "sdCmd"));
+  const sdPrompt = /** @type {HTMLTextAreaElement} */ (pick(frag, "sdPrompt"));
+  const sdOverrides = pick(frag, "sdOverrides");
+
+  /** One-shot: seed the controls from the first poll carrying the saved
+   * default, then never touch them again (interaction hold). */
+  let sdSeeded = false;
+
+  // Source segctl + model/preset/max-tokens wiring is the shared
+  // summarizer-controls component (the Summary view uses the same one).
+  const ctl = wireSummarizerControls({
+    buttons: sdButtons,
+    srcKey: "sdSrc",
+    localPane: sdLocal,
+    commandPane: sdCommand,
+    modelSel: sdModelSel,
+    modelNote: sdModelNote,
+    maxTokInput: sdMaxTok,
+    presetSel: sdPresetSel,
+    presetNote: sdPresetNote,
+    cmdInput: sdCmd,
+  });
+
+  /** Seed the controls from the saved global default — once. The card is the
+   * stored object's EDITOR, so it mirrors it exactly (clearEmptyCommand:
+   * an empty stored command clears the field, unlike the Summary view's
+   * keep-the-template-default convenience). */
+  /** @param {import('../../types.js').SummarizerDefault} d */
+  const sdSeed = (d) => {
+    ctl.setSource(d.source || "local"); // "" (unset) shows the built-in default
+    sdPrompt.value = d.prompt || "";
+    ctl.seedSaved(d, { clearEmptyCommand: true });
+  };
+
+  wireSave({
+    btn: /** @type {HTMLButtonElement} */ (pick(frag, "sdSave")),
+    status: pick(frag, "sdStatus"),
+    put: () => putJson("/api/summarize/config", { ...ctl.values(), prompt: sdPrompt.value }),
+    onSuccess: () => afterMutate(),
+  });
 
   /** Does this live model declare an initial_prompt input? Falls back to the
    * registry-wide flag when the model isn't in the live catalog. */
@@ -202,6 +261,17 @@ export function build(ctx) {
       showOverrideCounts: false,
     });
     renderLiveCard(j);
+
+    // Summarizer-default card: seed ONCE from the first poll carrying the
+    // saved default (flag flips before the seed so a re-entrant tick can't
+    // double-seed), then only the non-interactive hint updates — in place,
+    // never a rebuild (interaction hold).
+    if (!sdSeeded && j.summarizer_default) {
+      sdSeeded = true;
+      sdSeed(j.summarizer_default);
+    }
+    const n = j.default_override_counts?.summarizer || 0;
+    sdOverrides.textContent = n ? `· ${n} session${n === 1 ? "" : "s"} override this` : "";
   };
 
   return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };

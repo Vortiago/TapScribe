@@ -50,6 +50,12 @@ LIVE_MODEL_FILE: Path = CONFIG_DIR / "live-model.txt"
 # the tap-token trigger never carries a model field. Empty/missing = the
 # bundled default (transcribers.catalog.DEFAULT_BATCH_MODEL).
 BATCH_MODEL_FILE: Path = CONFIG_DIR / "batch-model.txt"
+# Operator's DEFAULT summarizer config (#84) — ONE structured JSON object
+# {source, prompt, command, model, max_tokens}, unlike the single-value text
+# configs above. The Summary view and the end-of-meeting pipeline's summarize
+# stage both resolve from it (under any per-session override). Missing or
+# unparseable = all-empty (built-in defaults apply downstream).
+SUMMARIZER_CONFIG_FILE: Path = CONFIG_DIR / "summarizer.json"
 HOTWORDS_FILE: Path = CONFIG_DIR / "hotwords.txt"
 HALLUCINATIONS_FILE: Path = CONFIG_DIR / "hallucinations.txt"
 
