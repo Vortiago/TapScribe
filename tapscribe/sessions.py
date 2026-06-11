@@ -31,6 +31,7 @@ from . import config
 from .audio import wav_duration_s
 from .session_paths import _safe_part, resolve_session_dir, resolve_wav, session_meta_path
 from .text import (
+    SUMMARY_SOURCES,
     atomic_write_text,
     file_stat_sig,
     parse_wav_speaker_ident,
@@ -53,11 +54,10 @@ from .wav_cache import cache_listing, cache_signature, read_primary_marker, read
 
 _META_STRING_FIELDS = ("label", "prompt", "hotwords", "summary_source", "summary_prompt")
 
-# The per-session summarizer source override. "" = no override (fall back to
-# the global default). Mirrors write_summarizer_config's allowlist — "api"
-# stays rejected until #85 wires it; per-source fields (command/model) are
-# global-only by design, so they're not meta fields at all.
-_SUMMARY_SOURCES = ("", "local", "command")
+# The per-session summarizer source override validates against the SAME
+# `SUMMARY_SOURCES` allowlist as the global default's writer ("" = no
+# override). Per-source fields (command/model) are global-only by design,
+# so they're not meta fields at all.
 
 
 def _coerce_aliases(value: Any) -> dict[str, str]:
@@ -109,10 +109,11 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
             validate_config_text(sanitized[capped_field])
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
-    if sanitized["summary_source"] not in _SUMMARY_SOURCES:
+    if sanitized["summary_source"] not in SUMMARY_SOURCES:
         raise HTTPException(
             400,
-            f"unknown summary_source: {sanitized['summary_source']!r} (expected 'local' or 'command', or '' to clear)",
+            f"unknown summary_source: {sanitized['summary_source']!r} "
+            f"(expected one of: {', '.join(s for s in SUMMARY_SOURCES if s)} — or '' to clear)",
         )
     atomic_write_text(
         Path(real_parent) / "session-meta.json",

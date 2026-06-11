@@ -22,8 +22,9 @@ from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
-from conftest import (
-    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # NeMo ships an installed `tests` package — explicit sys.path insertion picks up the project's tests/conftest.py
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # NeMo ships an installed `tests` package — explicit sys.path insertion picks up the project's tests/conftest.py
+    FakeWlkThread,
+    repoint_config_files,
 )
 
 from .harness import RecorderServer
@@ -71,20 +72,12 @@ def running_recorder(
     monkeypatch.setattr(_config, "AUTH_ENABLED", False)
     monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
-    monkeypatch.setattr(_config, "CONFIG_DIR", tmp_path / "config")
-    # The per-file constants were computed from CONFIG_DIR at import time, so
-    # repointing the dir alone leaves them aimed at the REPO's config/ — a
-    # test that saves global config through the API would pollute the working
-    # tree AND leak state into the next test run. Repoint them all, like the
-    # unit-suite fixtures do.
-    cfg = tmp_path / "config"
-    monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
-    monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
-    monkeypatch.setattr(_config, "LIVE_MODEL_FILE", cfg / "live-model.txt")
-    monkeypatch.setattr(_config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
-    monkeypatch.setattr(_config, "SUMMARIZER_CONFIG_FILE", cfg / "summarizer.json")
-    monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
-    monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
+    # Repoints CONFIG_DIR AND every per-file constant under it — the
+    # constants were computed from CONFIG_DIR at import time, so repointing
+    # the dir alone leaves them aimed at the REPO's config/ (a test saving
+    # global config through the API would pollute the working tree and leak
+    # state into the next run).
+    repoint_config_files(monkeypatch, tmp_path / "config")
     (tmp_path / "config").mkdir()
     (tmp_path / "recordings").mkdir()
 

@@ -577,6 +577,9 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
         "live_model_default": read_live_model(),
         "batch_model_default": read_batch_model(),
         "hotwords": read_hotwords(),
+        # Non-secret projection ONLY (`summarizer_default_public` is the #85
+        # redaction seam) — the Settings card and Summary view pre-fill from it.
+        "summarizer_default": summarizer_default_public(read_summarizer_config()),
         "halluc_rules": hallucinations_mod.parse_rules(),
         "inputs_support": _compute_inputs_support(),
     }
@@ -644,9 +647,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "inputs_support": inputs_support,
         "live_model_default": blob["live_model_default"],
         "batch_model_default": blob["batch_model_default"],
-        # Non-secret projection ONLY (`summarizer_default_public` is the #85
-        # redaction seam) — the Settings card and Summary view pre-fill from it.
-        "summarizer_default": summarizer_default_public(read_summarizer_config()),
+        "summarizer_default": blob["summarizer_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "rules": [r["raw"] for r in halluc_rules],
@@ -1023,9 +1024,10 @@ async def api_summarize_models():
 @app.get("/api/summarize/config")
 async def api_summarize_config_get():
     """The structured global summarizer default (#84) — the full stored
-    object, for the Settings card's editor. (The state poll carries the same
-    fields via `summarizer_default_public`; if #85 ever adds secret fields
-    here, THIS endpoint needs its own redaction decision too.)"""
+    object. The Settings card seeds from the state poll's projection
+    (`summarizer_default_public`) rather than this; the GET is the PUT's
+    read-back twin for scripts and tests. If #85 adds secret fields to
+    summarizer.json, THIS endpoint needs its own redaction decision too."""
     return read_summarizer_config()
 
 
@@ -1034,18 +1036,12 @@ async def api_summarize_config_put(req: Request):
     """Persist the global summarizer default. Full-object semantics (a
     missing key clears that field). Dedicated endpoint rather than a
     `_CONFIG_WRITERS` entry — that map is `{content: str}`-shaped, this is
-    one structured object. All validation (source/model allowlists, text
-    caps, max_tokens bounds) lives in `write_summarizer_config`; its
+    one structured object. ALL validation (source/model allowlists, text
+    caps, max_tokens int + bounds) lives in `write_summarizer_config`; its
     ValueError is the 400."""
     body = await _json_body(req)
-    # Coerce max_tokens through the shared bounded-int parse so a stringy
-    # number gets the same clear 400 as the summarize route's body knob.
-    cfg = dict(body)
-    cfg["max_tokens"] = _parse_bounded_int(
-        body.get("max_tokens"), "max_tokens", lo=_MAX_TOKENS_BOUNDS[0], hi=_MAX_TOKENS_BOUNDS[1]
-    )
     try:
-        stored = write_summarizer_config(cfg)
+        stored = write_summarizer_config(body)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
     except OSError as e:

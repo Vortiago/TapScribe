@@ -30,7 +30,7 @@
 // pane).
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
-import { getJson, postJson, putJson, wireSave, fetchSessionSummary, peekSessionSummary } from "../../api.js";
+import { getSummaryCatalog, postJson, putJson, wireSave, fetchSessionSummary, peekSessionSummary } from "../../api.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
 
 /**
@@ -121,12 +121,6 @@ export function build(ctx) {
    * unlike source/prompt they don't re-seed per session (they have no
    * per-session override), so a hand-edit survives session switches. */
   let globalSeeded = false;
-  /** Whether the global seed set max_tokens — so the catalog fetch landing
-   * later doesn't overwrite it with the server default. */
-  let maxTokSeeded = false;
-  /** A saved model id that arrived before the catalog populated the <select>;
-   * the catalog IIFE applies it. */
-  let pendingModel = "";
   /** The last-seen global default (mirrored each tick) — the reset button
    * seeds from it DIRECTLY rather than waiting a poll, because afterMutate's
    * synchronous re-render still carries the stale (pre-clear) session-meta. */
@@ -323,41 +317,40 @@ export function build(ctx) {
   // poll tick can never clobber a mid-edit prompt; Generate still sends the
   // live values, so hand-edits behave exactly as before.
 
-  /** Seed source + prompt from the session's effective config. Called from the
-   * session-switch block only (plus the reset button's deliberate re-seed). */
-  /** @param {import('../../types.js').AppState} j @param {import('../../types.js').Session} sess */
-  const seedEffective = (j, sess) => {
-    const d = j.summarizer_default || /** @type {Partial<import('../../types.js').SummarizerDefault>} */ ({});
-    const m = sess.session_meta || {};
-    source = m.summary_source || d.source || "local";
+  /** Seed source + prompt from the two effective-config layers — empty falls
+   * back, bottoming out on the built-ins. ONE chain, two deliberate call
+   * sites: the session-switch block (override over global) and the reset
+   * button (global only, meta just cleared). */
+  /** @param {{ summary_source?: string, summary_prompt?: string }} meta
+   *  @param {Partial<import('../../types.js').SummarizerDefault>} d */
+  const seedFromLayers = (meta, d) => {
+    source = meta.summary_source || d.source || "local";
     applySource();
-    promptTa.value = m.summary_prompt || d.prompt || builtinPrompt;
+    promptTa.value = meta.summary_prompt || d.prompt || builtinPrompt;
     reflectCmdPreview();
   };
 
-  /** Seed the global-layer fields (command/model/max_tokens) — once. */
+  /** Seed the global-layer fields (command/model/max_tokens) — once, AFTER
+   * the catalog fetch settles (`catReady` sequences it), so the model option
+   * exists, the preset match sees the real preset list, and the saved
+   * max_tokens lands on top of the catalog default rather than under it. */
   /** @param {import('../../types.js').SummarizerDefault} d */
   const seedGlobalLayer = (d) => {
-    if (d.command) {
-      cmdInput.value = d.command;
-      const match = presets.find((x) => x.template === cmdInput.value);
-      cmdPresetSel.value = match ? match.key : "";
-      reflectPresetNote();
-      reflectCmdPreview();
-    }
-    if (d.model) {
-      pendingModel = d.model;
-      if ([...modelSel.options].some((o) => o.value === d.model)) {
+    catReady.then(() => {
+      if (d.command) {
+        cmdInput.value = d.command;
+        const match = presets.find((x) => x.template === cmdInput.value);
+        cmdPresetSel.value = match ? match.key : "";
+        reflectPresetNote();
+        reflectCmdPreview();
+      }
+      if (d.model) {
         modelSel.value = d.model;
-        model = d.model;
-        pendingModel = "";
+        model = modelSel.value; // stays on the fallback option if d.model isn't listed
         reflectModelNote();
       }
-    }
-    if (typeof d.max_tokens === "number") {
-      maxTokInput.value = String(d.max_tokens);
-      maxTokSeeded = true;
-    }
+      if (typeof d.max_tokens === "number") maxTokInput.value = String(d.max_tokens);
+    });
   };
 
   // "save for this session": persist source + prompt as the per-session
@@ -376,30 +369,22 @@ export function build(ctx) {
   });
 
   // "use global default": clear the override (empty falls back server-side)
-  // and re-seed source + prompt from the global default — directly, the ONE
-  // deliberate re-seed outside a session switch. (Deliberately NOT via the
-  // switch block: afterMutate's synchronous re-render still carries the
+  // and re-seed source + prompt from the last-seen global — directly, the
+  // ONE deliberate re-seed outside a session switch. (Deliberately NOT via
+  // the switch block: afterMutate's synchronous re-render still carries the
   // stale pre-clear session-meta, which would seed the old override back.)
-  useDefaultBtn.addEventListener("click", async () => {
-    if (!session) return;
-    useDefaultBtn.disabled = true;
-    saveStatus.textContent = "clearing…";
-    try {
+  wireSave({
+    btn: useDefaultBtn,
+    status: saveStatus,
+    put: async () => {
+      if (!session) throw new Error("no session selected");
       await putJson(`/api/session-meta/${encodeURIComponent(session.session)}`, {
         summary_source: "",
         summary_prompt: "",
       });
-      saveStatus.textContent = "";
-      source = lastDefault?.source || "local";
-      applySource();
-      promptTa.value = lastDefault?.prompt || builtinPrompt;
-      reflectCmdPreview();
-    } catch (e) {
-      saveStatus.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
-    } finally {
-      useDefaultBtn.disabled = false;
-      afterMutate();
-    }
+      seedFromLayers({}, lastDefault || {});
+    },
+    onSuccess: () => afterMutate(),
   });
 
   // ---- Local model picker (REAL) --------------------------------------------
@@ -474,11 +459,13 @@ export function build(ctx) {
   promptTa.addEventListener("input", reflectCmdPreview);
   reflectCmdPreview(); // seed from the template defaults at build
 
-  (async () => {
+  // `catReady` resolves once the selects are populated (or the fallback
+  // options are in place) — `seedGlobalLayer` sequences the saved-default
+  // application on it, replacing applied-too-early/arrived-too-late flag
+  // juggling with plain ordering.
+  const catReady = (async () => {
     try {
-      const cat = /** @type {import('../../types.js').SummaryModelCatalog} */ (
-        await getJson("/api/summarize/models")
-      );
+      const cat = await getSummaryCatalog();
       models = cat.models || [];
       modelSel.replaceChildren();
       for (const m of models) modelSel.add(new Option(m.label || m.repo_id, m.repo_id, m.is_default, m.is_default));
@@ -486,21 +473,15 @@ export function build(ctx) {
         modelSel.add(new Option("no local models", "", true, true));
         modelSel.disabled = true;
       }
-      // A saved default model (#84) that landed before this fetch: apply it
-      // now that its option exists.
-      if (pendingModel && models.some((m) => m.repo_id === pendingModel)) {
-        modelSel.value = pendingModel;
-        pendingModel = "";
-      }
       model = modelSel.value;
       reflectModelNote();
       // Seed the output-cap input's bounds + default from the server (one source
       // of truth — the HTML value is only a placeholder until this lands, which
-      // is once at mount, before the operator can edit). The saved default's
-      // max_tokens (#84) wins over the catalog default when already seeded.
+      // is once at mount, before the operator can edit). A saved default's
+      // max_tokens (#84) lands AFTER this via catReady, so it wins.
       if (typeof cat.max_tokens_min === "number") maxTokInput.min = String(cat.max_tokens_min);
       if (typeof cat.max_tokens_max === "number") maxTokInput.max = String(cat.max_tokens_max);
-      if (!maxTokSeeded && typeof cat.max_tokens_default === "number") maxTokInput.value = String(cat.max_tokens_default);
+      if (typeof cat.max_tokens_default === "number") maxTokInput.value = String(cat.max_tokens_default);
       // Command presets (same fetch): "custom…" + one option per known tool.
       // Pre-select the preset whose template matches the field's default.
       presets = cat.command_presets || [];
@@ -575,7 +556,7 @@ export function build(ctx) {
       errorMsg = "";
       markRegionStale(sumOut);
       lastCtlSig = " ";
-      if (sess) seedEffective(j, sess);
+      if (sess) seedFromLayers(sess.session_meta || {}, j.summarizer_default || {});
     }
 
     // ---- Output pane — rendered through renderRegion: it gates on outSig AND

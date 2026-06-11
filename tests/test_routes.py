@@ -15,6 +15,7 @@ import pytest
 from conftest import (  # type: ignore[import-not-found]  # NeMo ships an installed `tests` package — collides with our project's tests/ dir; pytest puts tests/ on sys.path so `from conftest` resolves correctly
     TranscriberStub,
     py_cmd,
+    repoint_config_files,
     seed_merged_transcript,
 )
 from fastapi.testclient import TestClient
@@ -53,17 +54,10 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Reco
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
     cfg = tmp_path / "config"
     cfg.mkdir()
-    monkeypatch.setattr(_config, "CONFIG_DIR", cfg)
-    # The text helpers and /api/state both read these path constants
-    # directly — re-bind them to the tmp config dir so the editable-config
-    # writes land where the test expects them (and where the recorder
-    # under test reads from).
-    monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
-    monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
-    monkeypatch.setattr(_config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
-    monkeypatch.setattr(_config, "SUMMARIZER_CONFIG_FILE", cfg / "summarizer.json")
-    monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
-    monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
+    # The text helpers and /api/state read the path constants directly —
+    # re-bind them all to the tmp config dir so editable-config writes land
+    # where the test expects them (and where the recorder under test reads).
+    repoint_config_files(monkeypatch, cfg)
     (tmp_path / "recordings").mkdir()
 
     return Recorder(

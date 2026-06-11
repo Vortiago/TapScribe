@@ -159,6 +159,14 @@ def summarizer_default_public(cfg: dict) -> dict:
     return {k: cfg.get(k) for k in ("source", "prompt", "command", "model", "max_tokens")}
 
 
+# The wired summarizer sources — ONE allowlist shared by the global-default
+# writer below and the per-session override validator
+# (`tapscribe.sessions.write_session_meta`), so wiring the API source (#85)
+# is a single-tuple change that covers both write paths. "" means unset (no
+# global default) / cleared (no per-session override).
+SUMMARY_SOURCES: tuple[str, ...] = ("", "local", "command")
+
+
 def write_summarizer_config(cfg: dict) -> dict:
     """Validate + persist the operator's DEFAULT summarizer config to
     summarizer.json (#84). Full-object semantics: the PUT always sends the
@@ -180,8 +188,10 @@ def write_summarizer_config(cfg: dict) -> dict:
     The catalog import is lazy (write_batch_model's pattern) so this module
     stays free of the summarizers dependency for every other caller."""
     source = str(cfg.get("source") or "").strip()
-    if source not in ("", "local", "command"):
-        raise ValueError(f"unknown summarizer source: {source!r} (expected 'local' or 'command')")
+    if source not in SUMMARY_SOURCES:
+        raise ValueError(
+            f"unknown summarizer source: {source!r} (expected one of: {', '.join(s for s in SUMMARY_SOURCES if s)})"
+        )
     prompt = validate_config_text(str(cfg.get("prompt") or ""))
     command = validate_config_text(str(cfg.get("command") or ""))
     model = str(cfg.get("model") or "").strip()

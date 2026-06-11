@@ -261,6 +261,23 @@ export const putJson  = (url, body) => fetch(url, { method: "PUT",  ..._body(bod
 /** @param {string} url */
 export const del      = (url)       => fetch(url, { method: "DELETE" }).then(_unwrap);
 
+// ONE memoized fetch of the summarizer catalog (models + command presets +
+// max-token bounds): the Summary view and the Settings summarizer-default
+// card both populate from it, and the boot-time view rebuild would otherwise
+// re-fetch — this dedupes all of them to one request per page. A rejection
+// clears the memo so the next view build retries instead of inheriting a
+// poisoned promise.
+/** @type {Promise<import('./types.js').SummaryModelCatalog> | null} */
+let _summaryCatalog = null;
+/** @returns {Promise<import('./types.js').SummaryModelCatalog>} */
+export function getSummaryCatalog() {
+  if (!_summaryCatalog) {
+    _summaryCatalog = getJson("/api/summarize/models");
+    _summaryCatalog.catch(() => { _summaryCatalog = null; });
+  }
+  return _summaryCatalog;
+}
+
 // Wire a save button to an async PUT with the shared status-badge lifecycle
 // (saving… / saved / failed, success badge clears after 1.5s). The generic
 // core under wireConfigSave; structured saves (the #84 summarizer-default

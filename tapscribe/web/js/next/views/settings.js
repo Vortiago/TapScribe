@@ -20,7 +20,7 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { getJson, putJson, wireConfigSave, wireSave } from "../../api.js";
+import { getSummaryCatalog, putJson, wireConfigSave, wireSave } from "../../api.js";
 import { header } from "../shell.js";
 import * as configCard from "../../components/config-card.js";
 
@@ -90,9 +90,6 @@ export function build(ctx) {
   /** One-shot: seed the controls from the first poll carrying the saved
    * default, then never touch them again (interaction hold). */
   let sdSeeded = false;
-  /** The saved model id when the seed arrives BEFORE the catalog fetch — the
-   * catalog IIFE applies it after populating the <select>. */
-  let sdPendingModel = "";
   /** @type {import('../../types.js').SummaryModel[]} */
   let sdModels = [];
   /** @type {import('../../types.js').CommandPreset[]} */
@@ -144,13 +141,13 @@ export function build(ctx) {
     }
   });
 
-  // Populate model + preset selects ONCE from the hardware-routed catalog
+  // Populate model + preset selects ONCE from the memoized catalog fetch
   // (the Summary view's pattern, including the unavailable fallback).
-  (async () => {
+  // `sdCatReady` resolves once the selects hold their options; `sdSeed`
+  // sequences the catalog-dependent fields on it.
+  const sdCatReady = (async () => {
     try {
-      const cat = /** @type {import('../../types.js').SummaryModelCatalog} */ (
-        await getJson("/api/summarize/models")
-      );
+      const cat = await getSummaryCatalog();
       sdModels = cat.models || [];
       sdModelSel.replaceChildren();
       for (const m of sdModels) sdModelSel.add(new Option(m.label || m.repo_id, m.repo_id, m.is_default, m.is_default));
@@ -164,8 +161,6 @@ export function build(ctx) {
       sdPresetSel.replaceChildren();
       sdPresetSel.add(new Option("custom…", ""));
       for (const p of sdPresets) sdPresetSel.add(new Option(p.label, p.key));
-      // A saved model that arrived before the catalog: apply it now.
-      if (sdPendingModel) { sdModelSel.value = sdPendingModel; sdPendingModel = ""; }
       const match = sdPresets.find((x) => x.template === sdCmd.value);
       sdPresetSel.value = match ? match.key : "";
       sdReflectPresetNote();
@@ -180,22 +175,25 @@ export function build(ctx) {
     }
   })();
 
-  /** Seed the controls from the saved global default — once. */
+  /** Seed the controls from the saved global default — once. The
+   * catalog-dependent fields (model, preset match) apply via `sdCatReady`
+   * so their options exist, whichever of seed/fetch lands first. */
   /** @param {import('../../types.js').SummarizerDefault} d */
   const sdSeed = (d) => {
     sdSource = d.source || "local"; // "" (unset) shows the built-in default
     sdApplySource();
     sdPrompt.value = d.prompt || "";
     sdCmd.value = d.command || "";
-    if (d.model) {
-      sdModelSel.value = d.model;
-      if (sdModelSel.value !== d.model) sdPendingModel = d.model; // catalog not loaded yet
-      sdReflectModelNote();
-    }
     if (typeof d.max_tokens === "number") sdMaxTok.value = String(d.max_tokens);
-    const match = sdPresets.find((x) => x.template === sdCmd.value);
-    sdPresetSel.value = match ? match.key : "";
-    sdReflectPresetNote();
+    sdCatReady.then(() => {
+      if (d.model) {
+        sdModelSel.value = d.model; // stays on the fallback option if unlisted
+        sdReflectModelNote();
+      }
+      const match = sdPresets.find((x) => x.template === sdCmd.value);
+      sdPresetSel.value = match ? match.key : "";
+      sdReflectPresetNote();
+    });
   };
 
   wireSave({

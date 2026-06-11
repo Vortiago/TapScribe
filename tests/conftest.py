@@ -116,24 +116,39 @@ def _stub_silero(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(strip_silence, "detect_speech_silero", _stub_detect_speech_silero)
 
 
+def repoint_config_files(monkeypatch: pytest.MonkeyPatch, cfg: Path) -> None:
+    """Point `tapscribe.config.CONFIG_DIR` AND every config-file constant
+    under it at `cfg`. The per-file `*_FILE` constants are computed from
+    CONFIG_DIR at import time, so repointing the dir alone leaves them aimed
+    at the repo's `config/` — a test writing global config would then pollute
+    the working tree and leak state into the next run. ONE shared helper
+    (used by every recorder fixture, unit and e2e) instead of per-fixture
+    copies of the list; introspecting for `*_FILE` Paths under CONFIG_DIR
+    makes a new config file self-registering — zero fixture edits.
+
+    Deliberately scoped to CONFIG_DIR children: BASE_DIR-rooted `*_FILE`
+    constants (auth password, tap token, TLS material) keep their own
+    per-fixture handling."""
+    from tapscribe import config
+
+    original_dir = config.CONFIG_DIR
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+    for name in dir(config):
+        val = getattr(config, name)
+        if name.endswith("_FILE") and isinstance(val, Path) and val.parent == original_dir:
+            monkeypatch.setattr(config, name, cfg / val.name)
+
+
 @pytest.fixture
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Point the package's CONFIG_DIR + the three config files at a tmpdir.
+    """Point the package's CONFIG_DIR + every config file at a tmpdir.
 
     Tests that want to exercise prompt/hotwords/hallucinations reads write
     files into this dir directly.
     """
-    from tapscribe import config
-
     cfg = tmp_path / "config"
     cfg.mkdir()
-    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
-    monkeypatch.setattr(config, "PROMPT_FILE", cfg / "prompt.txt")
-    monkeypatch.setattr(config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
-    monkeypatch.setattr(config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
-    monkeypatch.setattr(config, "SUMMARIZER_CONFIG_FILE", cfg / "summarizer.json")
-    monkeypatch.setattr(config, "HOTWORDS_FILE", cfg / "hotwords.txt")
-    monkeypatch.setattr(config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
+    repoint_config_files(monkeypatch, cfg)
     return cfg
 
 
@@ -507,13 +522,7 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
     cfg = tmp_path / "config"
     cfg.mkdir()
-    monkeypatch.setattr(_config, "CONFIG_DIR", cfg)
-    monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
-    monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
-    monkeypatch.setattr(_config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
-    monkeypatch.setattr(_config, "SUMMARIZER_CONFIG_FILE", cfg / "summarizer.json")
-    monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
-    monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
+    repoint_config_files(monkeypatch, cfg)
     (tmp_path / "recordings").mkdir()
     return Recorder(
         recordings_dir=tmp_path / "recordings",
