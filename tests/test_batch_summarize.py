@@ -18,10 +18,11 @@ from tapscribe.batch_summarize import (
     NoMergedTranscript,
     SummarizeSessionRequest,
     summarize_session,
+    summarize_session_locked,
 )
 from tapscribe.recorder import JobState, SessionBusy
-from tapscribe.sessions import read_session_summary
-from tapscribe.summarizers import SummarizerFailed
+from tapscribe.sessions import read_session_summary, read_session_transcript
+from tapscribe.summarizers import SummarizerFailed, load_summarizer
 
 # stdin → stdout: the summary is the merged transcript text echoed back, so we
 # can assert the orchestrator handed the right text to the summarizer.
@@ -192,6 +193,32 @@ async def test_summarize_session_regenerate_replaces_summary(recorder_under_test
     stored = read_session_summary("s")
     assert stored is not None
     assert stored["summary"] == "REGENERATED"
+
+
+async def test_summarize_session_locked_persists_under_caller_slot(recorder_under_test):
+    """The end-of-meeting pipeline drives the summarize core directly under
+    its own `kind="pipeline"` claim: the core must run the summarizer and
+    persist session-summary.json without claiming or releasing the slot."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="ship the thing")
+    claimed = await recorder_under_test.jobs.claim(
+        JobState(
+            session="s", kind="pipeline", current=0, total=1, started_at=datetime.now(UTC), status="running"
+        )
+    )
+    assert claimed
+
+    req = SummarizeSessionRequest(session="s", source="command", command=_CAT, prompt="")
+    summarizer = load_summarizer(source=req.source, command=req.command, model=req.model, max_tokens=None)
+    merged = read_session_transcript("s")
+    persisted = await summarize_session_locked(req, summarizer=summarizer, merged=merged)
+
+    assert persisted["summary"] == "ship the thing"
+    stored = read_session_summary("s")
+    assert stored is not None and stored["summary"] == "ship the thing"
+    assert stored["summarized_at"] == persisted["summarized_at"]
+    # The caller's pipeline claim is untouched.
+    held = recorder_under_test.jobs.get("s")
+    assert held is not None and held.kind == "pipeline"
 
 
 async def test_summarize_session_failure_keeps_previous_summary(recorder_under_test):

@@ -277,10 +277,36 @@ Besides the audio `tap`, a Bridge may issue one **control** verb:
 `Authorization: Bearer` header) asks the Recorder to rotate to a fresh
 session — e.g. the SpatialChat Bridge's "New session" button or its opt-in
 "new session on room change." It rotates only; pruning empty sessions stays a
-dashboard/Basic-auth action. It's the only thing a Bridge sends over HTTP;
-everything else is PCM over `/tap`.
+dashboard/Basic-auth action. With body `{"detached": true}` the same verb
+instead mints a **detached session** (below) without rotating anything.
+It's the only thing a Bridge sends over HTTP; everything else is PCM over
+`/tap`.
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
+
+## Detached session
+
+A session a Bridge creates for itself and directs its own taps into,
+fully isolated from the Recorder's global current session — so two
+people can tap two meetings against one Recorder without muddling.
+Minted via `POST /api/tap/new-session` with body `{"detached": true}`
+(the global current session is untouched; the directory is created
+eagerly, de-collided from the 1 s-resolution current-session id) and
+joined by opening `/tap` with `?session=<id>`. The id crosses
+`resolve_session_dir` — the canonical path-safety seam — and an unknown
+or invalid id refuses the WS upgrade, mirroring token rejection.
+
+Session affiliation is snapshotted at WS open (like the per-identity
+`do_record`/`do_live` prefs): rotations never re-home an open tap, and
+both the tap's WAVs and its live-feed lines carry the snapshotted
+session. On disk and on the dashboard a detached session is an ordinary
+session — same layout, listing, and maintenance operations. That
+includes empty-session pruning: a detached dir with no WAV yet is
+prunable by the dashboard's prune actions, so Bridges should create it
+just-in-time, not long in advance — and a tap whose per-identity record
+preference is off never materialises a WAV at all, leaving its detached
+session prunable for its whole lifetime (a pruned id refuses the next
+`?session=` upgrade until the Bridge mints a fresh one).
 
 ## Utterance
 
@@ -460,7 +486,8 @@ single source of truth for the `<iso>_<speaker>_<ident>_<utt>.wav` format.)
 ## Session job · `JobTracker.run`
 
 The "one heavy job per session at a time" rule — a session may have at most
-one transcribe **or** strip **or** summarize running. `JobTracker` (a Recorder
+one transcribe **or** strip **or** summarize **or** end-of-meeting pipeline
+running. `JobTracker` (a Recorder
 sub-component in `tapscribe/recorder.py`) holds the per-session `JobState`; the
 batch orchestrators bracket their work with the async context manager
 `recorder.jobs.run(session, *, kind, total, …)`:
@@ -554,6 +581,41 @@ so a bad command fails fast), runs it under the `summarize` job kind, and
 returns the summary dict. As of the tracer-bullet slice (#82) there's no
 persistence (the summary is lost on reload) and no saved config (source /
 command / prompt arrive per request).
+
+## End-of-meeting pipeline
+
+The strip → batch-transcribe(stripped) → summarize chain as **one** Session
+job: one trigger takes a finished session from raw WAVs to a persisted
+summary with no operator in the loop. The fourth orchestrator sibling, in
+`tapscribe/batch_pipeline.py` — it owns no work loop of its own; each of the
+three siblings exposes a `*_locked` core (its work minus the slot claim), and
+the pipeline drives those under a single `kind="pipeline"` claim so the
+one-heavy-job rule holds across the whole chain (a concurrent trigger or a
+manual transcribe gets 409 for the chain's full duration). Stage progress
+flows through the ordinary job snapshot — `JobState.stage` names the current
+stage and the per-stage loops keep updating `current`/`total` — so the
+dashboard's job bar shows "Pipeline · Transcribing 3/12" with no extra
+plumbing.
+
+Triggered and polled by a Bridge over two tap-bearer endpoints
+(`POST`/`GET /api/tap/sessions/{session}/pipeline`). **Operator defaults
+only**: the trigger's body is ignored, never parsed — `PipelineRequest`
+carries just the session id, and the pipeline resolves the batch model from
+`batch-model.txt` (catalog-validated at write AND at read), the backend from
+the Recorder's launch preference, and the summarizer from the Local source's
+bundled/env default — so a tap-token holder can never choose what gets loaded
+or downloaded (the Summarizer catalog/allowlist invariant, one privilege
+boundary up).
+
+`start_pipeline` claims the slot **in the request path** (deterministic 409)
+and runs the chain in a background task — the one sanctioned hand-rolled
+claim/release, since claim and release live in different call frames; the
+release only ever runs in the task spawned after a successful claim. A stage
+failure aborts the chain and is recorded in `recorder.pipelines`
+(`PipelineResults`, in-memory, one record per session, overwritten on
+re-trigger) as failed-at-stage with the domain error — the poll endpoint's
+contract. "Done" is answered from the persisted `session-summary.json`, so a
+Bridge polling across a Recorder restart still gets its summary.
 
 ## Summarizer
 

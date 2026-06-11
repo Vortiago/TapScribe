@@ -1732,6 +1732,88 @@ async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder:
             await browser.close()
 
 
+async def test_meeting_pipeline_job_renders_stage_labelled_bar(running_recorder: RunningRecorder):
+    """A bridge-triggered end-of-meeting pipeline surfaces as a NORMAL session
+    job (issue #102's dashboard acceptance criterion): the shared job bar must
+    label a kind="pipeline" job with its current stage ("Pipeline ·
+    Transcribing") and re-label when the chain advances to the next stage."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-01T09-00-00Z"
+    _seed_merged_session(rec, sid, segments=5)
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#transcript", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await page.evaluate(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    s.value = sid;
+                    s.dispatchEvent(new Event('change', { bubbles: true }));
+                }""",
+                sid,
+            )
+
+            # Mid-chain: the transcribe stage with per-WAV progress. Direct
+            # dict write — same rationale as the job-ticks guard above.
+            rec.jobs._by_session[sid] = JobState(
+                session=sid,
+                kind="pipeline",
+                current=2,
+                total=9,
+                started_at=datetime.now(UTC),
+                status="transcribing",
+                current_file="f2.wav",
+                model="tiny.en",
+                stage="transcribe",
+            )
+            await page.wait_for_function(
+                """() => {
+                    const label = document.querySelector('#viewRoot [data-slot="jobLabel"]');
+                    const count = document.querySelector('#viewRoot [data-slot="jobCount"]');
+                    return label?.textContent === 'Pipeline · Transcribing'
+                        && count?.textContent === '2 / 9';
+                }""",
+                timeout=10000,
+            )
+
+            # The chain advances — the SAME job re-labels to the next stage.
+            rec.jobs._by_session[sid] = JobState(
+                session=sid,
+                kind="pipeline",
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+                status="summarizing",
+                model="tiny.en",
+                stage="summarize",
+            )
+            await page.wait_for_function(
+                """() => document.querySelector('#viewRoot [data-slot="jobLabel"]')?.textContent
+                    === 'Pipeline · Summarizing'""",
+                timeout=10000,
+            )
+            await context.close()
+        finally:
+            rec.jobs._by_session.pop(sid, None)
+            await browser.close()
+
+
 async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
     running_recorder: RunningRecorder, tmp_path: Path
 ):

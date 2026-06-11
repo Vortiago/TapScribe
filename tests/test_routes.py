@@ -60,6 +60,7 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Reco
     # under test reads from).
     monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
     monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
+    monkeypatch.setattr(_config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
     monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
     monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
     (tmp_path / "recordings").mkdir()
@@ -312,6 +313,28 @@ def test_put_config_empty_content_clears_file(client, recorder_under_test):
     r = client.put("/api/config/prompt", json={"content": ""})
     assert r.status_code == 200
     assert (recorder_under_test.config_dir / "prompt.txt").read_text(encoding="utf-8") == ""
+
+
+def test_put_config_batch_model_writes_file_and_validates(client, recorder_under_test):
+    """The batch-model default is catalog-validated at write time — it feeds
+    the end-of-meeting pipeline's model loader with no operator in the loop,
+    so an unknown id must 400 instead of landing on disk."""
+    r = client.put("/api/config/batch-model", json={"content": "small.en"})
+    assert r.status_code == 200, r.text
+    assert (recorder_under_test.config_dir / "batch-model.txt").read_text(encoding="utf-8") == "small.en"
+
+    r = client.put("/api/config/batch-model", json={"content": "not-a-model"})
+    assert r.status_code == 400
+    # The bad id never replaced the good one.
+    assert (recorder_under_test.config_dir / "batch-model.txt").read_text(encoding="utf-8") == "small.en"
+
+
+def test_api_state_includes_batch_model_default(client, recorder_under_test):  # noqa: ARG001 — recorder fixture pins the tmp config dir
+    """The dashboard's Default engine card seeds from the state poll, the
+    same way the Live engine card reads live_model_default."""
+    assert client.get("/api/state").json()["batch_model_default"] == ""
+    client.put("/api/config/batch-model", json={"content": "small.en"})
+    assert client.get("/api/state").json()["batch_model_default"] == "small.en"
 
 
 def test_put_config_unknown_key_rejected(client):
@@ -1850,6 +1873,44 @@ def test_api_transcribe_session_returns_409_when_job_already_in_flight(
                 total=1,
                 started_at=datetime.now(UTC),
                 status="running",
+            ),
+        )
+
+    r = client.post(
+        "/api/transcribe-session",
+        json={"session": "s", "model": "tiny.en"},
+    )
+    assert r.status_code == 409, r.text
+
+
+def test_manual_transcribe_session_409_while_pipeline_running(client, recorder_under_test, monkeypatch):
+    """The end-of-meeting pipeline holds ONE `kind="pipeline"` slot for its
+    whole chain — a manual transcribe started mid-pipeline gets the same 409
+    as against any other in-flight job (the other half of issue #102's
+    one-slot acceptance criterion; the trigger-side 409 lives in
+    test_tap_endpoint.py)."""
+    from tapscribe.recorder import JobState
+
+    fake = TranscriberStub(backend="fake-be", model="fake-small.en")
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", lambda *a, **kw: fake)  # noqa: ARG005
+
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+
+    import anyio.from_thread
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.jobs.claim,
+            JobState(
+                session="s",
+                kind="pipeline",
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+                status="stripping",
+                stage="strip",
             ),
         )
 

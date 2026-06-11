@@ -272,6 +272,27 @@ async def test_job_tracker_run_handle_updates_progress():
 
 
 @pytest.mark.asyncio
+async def test_job_tracker_run_accepts_pipeline_kind_and_stage_updates():
+    """The end-of-meeting pipeline claims ONE slot (`kind="pipeline"`) for the
+    whole strip → transcribe → summarize chain and re-labels the job between
+    stages via the handle — stage, totals and counters all flow through the
+    same `update` the per-stage loops already use."""
+    tracker = JobTracker()
+    async with tracker.run("s1", kind="pipeline", total=3) as job:
+        await job.update(stage="strip", total=5, current=0)
+        held = tracker.get("s1")
+        assert held is not None
+        assert held.kind == "pipeline"
+        assert held.stage == "strip"
+        assert held.total == 5
+        await job.update(stage="transcribe", current=2, current_file="b.wav")
+        held = tracker.get("s1")
+        assert held is not None
+        assert held.stage == "transcribe" and held.current == 2
+    assert tracker.get("s1") is None  # one release ends the whole chain
+
+
+@pytest.mark.asyncio
 async def test_job_tracker_run_raises_busy_without_touching_a_foreign_claim():
     """The whole point of the seam: when the slot is taken, `run` raises
     SessionBusy on entry — the body never runs and the foreign claim is NOT

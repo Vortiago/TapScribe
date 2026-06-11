@@ -155,61 +155,70 @@ async def strip_session(recorder: Recorder, req: StripSessionRequest) -> dict[st
     # recorder.jobs.run brackets the "one job per session" rule: claim on
     # entry (SessionBusy if busy, releasing nothing), release on every exit.
     async with recorder.jobs.run(req.session, kind="strip", total=len(originals), status="stripping"):
-        out_dir = stripped_dir(req.session)
-        if out_dir.exists():
+        return await strip_session_locked(req, originals=originals)
+
+
+async def strip_session_locked(req: StripSessionRequest, *, originals: list[Path]) -> dict[str, Any]:
+    """The strip core: clear `stripped/`, drive the splitter, aggregate.
+    Assumes the caller already holds the session's job slot — claims and
+    releases NOTHING, so the end-of-meeting pipeline can run it as one stage
+    of a single `kind="pipeline"` claim. `strip_session` above is the
+    single-stage wrapper that brackets it the classic way."""
+    out_dir = stripped_dir(req.session)
+    if out_dir.exists():
+        try:
+            shutil.rmtree(out_dir)
+        except OSError as e:
+            raise StrippedDirUnclearable(f"could not clear stripped/: {e}") from None
+
+    started = datetime.now(UTC)
+
+    def _run() -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for src in originals:
             try:
-                shutil.rmtree(out_dir)
-            except OSError as e:
-                raise StrippedDirUnclearable(f"could not clear stripped/: {e}") from None
+                results.append(
+                    strip_one_wav(src, out_dir, req.min_silence_ms, req.pad_ms, req.speech_floor_db)
+                )
+            except Exception as e:
+                results.append({"name": src.name, "written": False, "error": str(e)})
+        return results
 
-        started = datetime.now(UTC)
+    results = await asyncio.to_thread(_run)
+    finished = datetime.now(UTC)
 
-        def _run() -> list[dict[str, Any]]:
-            results: list[dict[str, Any]] = []
-            for src in originals:
-                try:
-                    results.append(
-                        strip_one_wav(src, out_dir, req.min_silence_ms, req.pad_ms, req.speech_floor_db)
-                    )
-                except Exception as e:
-                    results.append({"name": src.name, "written": False, "error": str(e)})
-            return results
-
-        results = await asyncio.to_thread(_run)
-        finished = datetime.now(UTC)
-
-        # Persist the committed cut (#90, schema v2): per ORIGINAL, the
-        # explicit spans each region clip was cut to (each span carries its
-        # clip's filename so a single-clip delete can prune it) plus a
-        # size/mtime fingerprint of the original (a since-rewritten WAV must
-        # read as "no committed cut", not draw stale geometry). Lives inside
-        # stripped/ so a re-strip's rmtree or a "clear stripped" wipes it
-        # with the clips it describes.
-        spans_by_original: dict[str, dict[str, Any]] = {}
-        for r in results:
-            if not (r.get("written") and r.get("region_spans")):
-                continue
-            spans_by_original[r["name"]] = {
-                "wav_size": r["wav_size"],
-                "wav_mtime_ns": r["wav_mtime_ns"],
-                "spans": r["region_spans"],
-            }
-        if spans_by_original:
-            atomic_write_text(
-                out_dir / "strip-meta.json",
-                json.dumps(
-                    {
-                        "stripped_at": finished.isoformat(),
-                        "knobs": {
-                            "min_silence_ms": req.min_silence_ms,
-                            "pad_ms": req.pad_ms,
-                            "speech_floor_db": req.speech_floor_db,
-                        },
-                        "files": spans_by_original,
+    # Persist the committed cut (#90, schema v2): per ORIGINAL, the
+    # explicit spans each region clip was cut to (each span carries its
+    # clip's filename so a single-clip delete can prune it) plus a
+    # size/mtime fingerprint of the original (a since-rewritten WAV must
+    # read as "no committed cut", not draw stale geometry). Lives inside
+    # stripped/ so a re-strip's rmtree or a "clear stripped" wipes it
+    # with the clips it describes.
+    spans_by_original: dict[str, dict[str, Any]] = {}
+    for r in results:
+        if not (r.get("written") and r.get("region_spans")):
+            continue
+        spans_by_original[r["name"]] = {
+            "wav_size": r["wav_size"],
+            "wav_mtime_ns": r["wav_mtime_ns"],
+            "spans": r["region_spans"],
+        }
+    if spans_by_original:
+        atomic_write_text(
+            out_dir / "strip-meta.json",
+            json.dumps(
+                {
+                    "stripped_at": finished.isoformat(),
+                    "knobs": {
+                        "min_silence_ms": req.min_silence_ms,
+                        "pad_ms": req.pad_ms,
+                        "speech_floor_db": req.speech_floor_db,
                     },
-                    indent=2,
-                ),
-            )
+                    "files": spans_by_original,
+                },
+                indent=2,
+            ),
+        )
 
     written = sum(1 for r in results if r.get("written"))
     in_secs = sum(r.get("in_seconds", 0.0) for r in results)

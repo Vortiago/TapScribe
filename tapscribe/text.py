@@ -117,6 +117,17 @@ def read_live_model() -> str:
     return _read_config_text_cached(config.LIVE_MODEL_FILE).strip()
 
 
+def read_batch_model() -> str:
+    """Return the operator's DEFAULT batch model id from batch-model.txt
+    (a single model_id, e.g. "small.en"), stripped. Empty when unset.
+
+    The live-model's batch twin: the dashboard's Default engine card
+    persists the default here, and the end-of-meeting pipeline resolves its
+    transcribe stage from it — the tap trigger carries no model field by
+    design (operator defaults only)."""
+    return _read_config_text_cached(config.BATCH_MODEL_FILE).strip()
+
+
 def read_hotwords() -> str:
     """Return the faster-whisper `hotwords` string from hotwords.txt — a
     comma- or space-separated list of proper nouns / tricky vocabulary."""
@@ -195,6 +206,25 @@ def write_live_model(content: str) -> None:
     input rejected. The value isn't validated against the registry here — an
     unknown id surfaces as a clear error at /api/live/start time, not silently."""
     _write_text_file_atomic(config.LIVE_MODEL_FILE, validate_config_text(content.strip()))
+
+
+def write_batch_model(content: str) -> None:
+    """Persist the default batch model id to batch-model.txt. Stored stripped
+    (a single model_id token). Atomic; oversize input rejected.
+
+    Unlike `write_live_model`, the value IS validated against the transcriber
+    catalog here: the batch default feeds the end-of-meeting pipeline's model
+    loader with no operator in the loop, so an unknown id must never land on
+    disk (`ValueError` → the config PUT's 400). Empty clears the override
+    (back to the bundled default). The catalog import is lazy to keep this
+    module free of the transcribers dependency for every other caller."""
+    model_id = content.strip()
+    if model_id:
+        from .transcribers.catalog import REGISTRY
+
+        if REGISTRY.get(model_id) is None:
+            raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
+    _write_text_file_atomic(config.BATCH_MODEL_FILE, validate_config_text(model_id))
 
 
 def write_hotwords(content: str) -> None:

@@ -24,9 +24,10 @@ from tapscribe.batch_transcribe import (
     WavUnreadable,
     transcribe_one,
     transcribe_session,
+    transcribe_session_locked,
 )
 from tapscribe.recorder import JobState, SessionBusy
-from tapscribe.session_merge import InvalidRange, NoUsableWavs
+from tapscribe.session_merge import InvalidRange, NoUsableWavs, select_session_wavs
 
 # The `recorder_under_test` fixture (tmpdir-rooted Recorder, no auth, no
 # live spawn) lives in conftest.py — shared with test_batch_strip.py.
@@ -328,6 +329,49 @@ async def test_transcribe_session_raises_session_busy_when_slot_taken(
     )
     with pytest.raises(SessionBusy):
         await transcribe_session(recorder_under_test, request)
+
+
+async def test_transcribe_session_locked_uses_caller_slot_and_releases_model(
+    recorder_under_test, install_stub_transcriber, monkeypatch
+):
+    """The end-of-meeting pipeline drives the transcribe core directly under
+    its own `kind="pipeline"` claim: the core must write the merged outputs,
+    report per-WAV progress through the CALLER's job handle, release the
+    model, and leave the caller's claim alone."""
+    install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m", text="merged"))
+    released: list = []
+    monkeypatch.setattr("tapscribe.batch_transcribe.release_transcriber", released.append)
+    sd = seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+    claimed = await recorder_under_test.jobs.claim(
+        JobState(
+            session="s", kind="pipeline", current=0, total=2, started_at=datetime.now(UTC), status="running"
+        )
+    )
+    assert claimed
+
+    selection = select_session_wavs(sd, from_iso=None, to_iso=None, source="original")
+    request = BatchSessionRequest(
+        session="s",
+        source="original",
+        model="fake-m",
+        backend="cpu",
+        from_iso=None,
+        to_iso=None,
+        force=False,
+        source_lang=None,
+        target_lang=None,
+    )
+    merged = await transcribe_session_locked(
+        request, selection=selection, job=recorder_under_test.jobs.handle("s")
+    )
+
+    assert merged["model"] == "fake-m"
+    assert (sd / "session-transcript.json").is_file()
+    held = recorder_under_test.jobs.get("s")
+    assert held is not None and held.kind == "pipeline"  # claim untouched
+    # Per-WAV progress flowed through the caller's slot, not a fresh claim.
+    assert held.current_file == SESSION_WAVS[-1]
+    assert len(released) == 1  # model released on the way out
 
 
 async def test_transcribe_session_raises_no_usable_wavs_on_empty_range(

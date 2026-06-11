@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 import pytest
 from wav_builders import seed_session  # type: ignore[import-not-found]
 
-from tapscribe.batch_strip import StripSessionRequest, strip_session
+from tapscribe.batch_strip import StripSessionRequest, strip_session, strip_session_locked
 from tapscribe.recorder import JobState, SessionBusy
 from tapscribe.session_merge import NoUsableWavs
 
@@ -94,3 +94,24 @@ async def test_strip_session_rows_carry_region_spans_and_persist_meta(recorder_u
         assert entry["spans"] == row["region_spans"]
         # v2: every span names the region clip it was written to.
         assert [sp["name"] for sp in entry["spans"]] == row["regions_written"]
+
+
+async def test_strip_session_locked_runs_under_a_caller_held_slot(recorder_under_test):
+    """The end-of-meeting pipeline claims ONE slot for the whole chain and
+    drives the strip core directly — the core must do the work without
+    claiming or releasing, so the caller's claim survives it."""
+    sd = seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    claimed = await recorder_under_test.jobs.claim(
+        JobState(
+            session="s", kind="pipeline", current=0, total=1, started_at=datetime.now(UTC), status="running"
+        )
+    )
+    assert claimed
+
+    out = await strip_session_locked(StripSessionRequest(session="s"), originals=sorted(sd.glob("*.wav")))
+
+    assert out["ok"] is True and out["files_written"] >= 1
+    assert any((sd / "stripped").glob("*.wav"))
+    # The caller's pipeline claim is untouched — neither released nor replaced.
+    held = recorder_under_test.jobs.get("s")
+    assert held is not None and held.kind == "pipeline"

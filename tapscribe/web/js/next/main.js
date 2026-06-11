@@ -112,6 +112,22 @@ function seedEngineModels() {
   if (!overrideEngine.model) overrideEngine = { ...overrideEngine, model: first.model_id };
 }
 
+// One-shot adoption of the operator's persisted batch default (batch-model.txt,
+// surfaced as batch_model_default in /api/state). Runs once on the first poll —
+// never per tick, so the poll can't clobber a Settings select the operator has
+// open (Interaction hold) — and a user change flips the flag too, so a slow
+// first poll can't overwrite a pick made before it landed.
+let defaultEngineAdoptedSaved = false;
+/** @param {import('../types.js').AppState} j */
+function adoptSavedBatchModel(j) {
+  if (defaultEngineAdoptedSaved) return;
+  defaultEngineAdoptedSaved = true;
+  const saved = j.batch_model_default || "";
+  if (!saved || saved === defaultEngine.model) return;
+  defaultEngine = { ...defaultEngine, model: saved };
+  viewCache.get("settings")?.rebuildEngine?.();
+}
+
 /**
  * Per-(selected default model) input support — mirrors the server's
  * _compute_inputs_support, but for the ONE model chosen in Settings' "Default
@@ -138,6 +154,13 @@ function renderDefaultEngine(host) {
     catalog: modelCatalog,
     onChange: (next) => {
       defaultEngine = next;
+      // The user's pick wins over a not-yet-landed first poll's saved value…
+      defaultEngineAdoptedSaved = true;
+      // …and persists as the operator default (batch-model.txt) — the same
+      // value the end-of-meeting pipeline resolves its transcribe stage from.
+      putJson("/api/config/batch-model", { content: next.model }).catch((e) => {
+        alert(`Save batch model failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      });
       const v = viewCache.get("settings");
       v?.rebuildEngine?.();
       // Re-gate the prompt/hotwords editors on the newly-picked model right
@@ -488,6 +511,7 @@ function renderAll(j) {
   // Keep selectedSessionId honest so the spine select reflects the resolved
   // session even before the operator explicitly picks one.
   if (session && selectedSessionId == null) selectedSessionId = session.session;
+  adoptSavedBatchModel(j);
   renderSpine(j, session);
   renderView(j, session);
   // The active-taps rail is global — render it every tick regardless of the

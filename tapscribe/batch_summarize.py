@@ -76,19 +76,7 @@ async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) ->
         )
 
     async with recorder.jobs.run(req.session, kind="summarize", total=1, status="summarizing"):
-        result = await asyncio.to_thread(summarizer.summarize, text, prompt=req.prompt)
-        # Persist next to the merged transcript (#83) — only after a successful
-        # run, so a failed re-generate can't clobber the stored summary. The
-        # `summarized_at` stamp is the slim listing marker's re-fetch signal.
-        persisted = {
-            **result.to_mapping(),
-            "summarized_at": datetime.now(UTC).isoformat(),
-            # Carry the source transcript's stamp (#94) so the Summary view can flag
-            # a summary that predates a later re-transcribe. `merged` is the
-            # session-transcript.json dict read above.
-            "transcribed_at": (merged or {}).get("transcribed_at"),
-        }
-        await asyncio.to_thread(write_session_summary, req.session, persisted)
+        persisted = await summarize_session_locked(req, summarizer=summarizer, merged=merged)
 
     print(
         f"[tapscribe] summarize {req.session}: source={persisted['source']} "
@@ -96,3 +84,29 @@ async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) ->
         flush=True,
     )
     return {"ok": True, "session": req.session, **persisted}
+
+
+async def summarize_session_locked(
+    req: SummarizeSessionRequest, *, summarizer: Any, merged: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The summarize core: run the prepared `Summarizer` over the merged
+    transcript's text and persist session-summary.json. Assumes the caller
+    already holds the session's job slot — claims and releases NOTHING, so
+    the end-of-meeting pipeline can run it as one stage of a single
+    `kind="pipeline"` claim. Returns the persisted dict (result mapping +
+    `summarized_at` + the source transcript's `transcribed_at`)."""
+    text = (merged or {}).get("plain_text") or ""
+    result = await asyncio.to_thread(summarizer.summarize, text, prompt=req.prompt)
+    # Persist next to the merged transcript (#83) — only after a successful
+    # run, so a failed re-generate can't clobber the stored summary. The
+    # `summarized_at` stamp is the slim listing marker's re-fetch signal.
+    persisted = {
+        **result.to_mapping(),
+        "summarized_at": datetime.now(UTC).isoformat(),
+        # Carry the source transcript's stamp (#94) so the Summary view can flag
+        # a summary that predates a later re-transcribe. `merged` is the
+        # session-transcript.json dict the caller read.
+        "transcribed_at": (merged or {}).get("transcribed_at"),
+    }
+    await asyncio.to_thread(write_session_summary, req.session, persisted)
+    return persisted

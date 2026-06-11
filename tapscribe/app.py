@@ -16,6 +16,8 @@ The big-picture route map:
   DELETE /api/live-transcript   — clear the live transcripts feed (dashboard "clear")
   WS   /tap?identity&name       — Bridge audio in (one WS per utterance);
                                   Recorder fans out to WAV + WlK relay (ADR-0002).
+                                  Optional &session=<id> pins the tap to a
+                                  detached session (unknown id → upgrade refused).
                                   Auth: Sec-WebSocket-Protocol "tapscribe.v1.tap.<token>"
                                   when AUTH_ENABLED; gate is in the route handler.
 """
@@ -51,6 +53,7 @@ from fastapi.staticfiles import StaticFiles
 from . import auth, config
 from . import hallucinations as hallucinations_mod
 from .audio import compute_peaks
+from .batch_pipeline import PipelineRequest, start_pipeline
 from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
 from .batch_summarize import NoMergedTranscript, SummarizeSessionRequest, summarize_session
 from .batch_transcribe import (
@@ -86,17 +89,19 @@ from .summarizers.catalog import _MAX_TOKENS_BOUNDS
 from .tap_fan_out import TapFanOut
 from .text import (
     MAX_CONFIG_TEXT_LEN,
+    read_batch_model,
     read_hotwords,
     read_live_model,
     read_live_prompt,
     read_prompt,
+    write_batch_model,
     write_hotwords,
     write_live_model,
     write_live_prompt,
     write_prompt,
 )
 from .transcribers import evict_idle_now, run_on_model_thread
-from .transcribers.catalog import REGISTRY, available_backends
+from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY, available_backends
 from .wav_cache import set_primary_transcript
 
 
@@ -141,6 +146,7 @@ _CONFIG_WRITERS = {
     "prompt": write_prompt,
     "live-prompt": write_live_prompt,
     "live-model": write_live_model,
+    "batch-model": write_batch_model,
     "hotwords": write_hotwords,
 }
 
@@ -402,13 +408,48 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     prune empty sessions. The tap token is a deliberately lower-privilege
     credential handed to browser extensions, so deleting session folders stays
     a Basic-auth action (the dashboard's "+ new session" / "prune empty"). No
-    filesystem path is derived from the request (the new session id is a
-    server-minted UTC timestamp), so there is no path-injection surface here.
+    filesystem path is derived from the request (session ids are server-minted
+    UTC timestamps and the optional body carries only a boolean), so there is
+    no path-injection surface here.
+
+    With a JSON body of `{"detached": true}` the verb creates a DETACHED
+    session instead: a fresh session directory is minted and returned WITHOUT
+    rotating the global current session, for the bridge to direct its taps
+    into via /tap?session=<id> (per-bridge isolation; see "Detached session"
+    in CONTEXT.md). The legacy no-body call keeps the rotate semantics below.
     """
     if config.AUTH_ENABLED and not auth.check_tap_bearer(
         req.headers.get("authorization"), recorder.tap.value
     ):
         return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+
+    # The body is optional (the legacy no-body call = rotate) but, when
+    # present, must parse as a JSON object: a malformed {"detached": true}
+    # falling through to the legacy branch would silently rotate the GLOBAL
+    # session out from under every plain tap — reject so the bridge retries.
+    raw_body = await req.body()
+    if raw_body:
+        try:
+            body = json.loads(raw_body)
+        except ValueError:
+            return JSONResponse({"detail": "malformed JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"detail": "JSON body must be an object"}, status_code=400)
+    else:
+        body = {}
+    if body.get("detached"):
+        session_id, session_dir = recorder.create_detached_session()
+        print(
+            f"[tapscribe] tap detached session {session_id} (current: {recorder.session_start})",
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "detached": True,
+            "session": session_id,
+            "path": str(session_dir),
+            "current": recorder.session_start,
+        }
 
     # Idempotency guard (tap path only): if the current session is empty, a
     # rotation would only churn the session-id timestamp — no-op it. The
@@ -428,6 +469,91 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     }
 
 
+@app.post("/api/tap/sessions/{session}/pipeline", status_code=202)
+async def api_tap_pipeline_trigger(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):
+    """Bridge-initiated end-of-meeting pipeline: strip → transcribe →
+    summarize the session as ONE session job. Tap-bearer authenticated like
+    /api/tap/new-session (exempt from Basic auth via the /api/tap/ prefix;
+    the bearer check below is the gate).
+
+    Fire-and-forget: the job slot is claimed before this returns (so a
+    concurrent trigger or manual transcribe gets a deterministic 409 via
+    `SessionBusy`) and the chain runs in the background — poll the GET twin
+    for progress and the result.
+
+    The request body is IGNORED entirely, never parsed: the pipeline resolves
+    the batch model, backend, and summarizer from operator-side configuration
+    (`PipelineRequest` carries only the session), so a tap-token holder can
+    never choose which model gets loaded or downloaded."""
+    if config.AUTH_ENABLED and not auth.check_tap_bearer(
+        req.headers.get("authorization"), recorder.tap.value
+    ):
+        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+    resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
+    await start_pipeline(recorder, PipelineRequest(session=session))
+    return {"ok": True, "session": session, "state": "running"}
+
+
+@app.get("/api/tap/sessions/{session}/pipeline")
+async def api_tap_pipeline_poll(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):
+    """Poll the end-of-meeting pipeline: stage progress while running (from
+    the live job snapshot), the persisted summary when done, the failing
+    stage's domain error when failed. `state: "idle"` when this session has
+    no pipeline record and no persisted summary.
+
+    The done branch reads session-summary.json rather than process memory,
+    so a Bridge that polls across a Recorder restart still gets its summary
+    (`recorder.pipelines` is in-memory only and rebuilt empty at boot)."""
+    if config.AUTH_ENABLED and not auth.check_tap_bearer(
+        req.headers.get("authorization"), recorder.tap.value
+    ):
+        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
+    resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
+
+    record = recorder.pipelines.get(session)
+    if record is not None and record.state == "running":
+        out: dict = {
+            "ok": True,
+            "session": session,
+            "state": "running",
+            "started_at": record.started_at.isoformat() if record.started_at else None,
+        }
+        job = recorder.jobs.get(session)
+        if job is not None and job.kind == "pipeline":
+            out.update(
+                stage=job.stage,
+                status=job.status,
+                current=job.current,
+                total=job.total,
+                current_file=job.current_file,
+            )
+        return out
+    if record is not None and record.state == "failed":
+        return {
+            "ok": True,
+            "session": session,
+            "state": "failed",
+            "stage": record.stage,
+            "error": record.error,
+            "error_kind": record.error_kind,
+            "finished_at": record.finished_at.isoformat() if record.finished_at else None,
+        }
+    summary = await asyncio.to_thread(read_session_summary, session)
+    if record is not None and record.state == "done":
+        return {
+            "ok": True,
+            "session": session,
+            "state": "done",
+            "summary": summary,
+            "finished_at": record.finished_at.isoformat() if record.finished_at else None,
+        }
+    if summary is not None:
+        # No record (Recorder restarted since the run) but a persisted summary
+        # exists — that IS the done answer the polling Bridge is waiting for.
+        return {"ok": True, "session": session, "state": "done", "summary": summary}
+    return {"ok": True, "session": session, "state": "idle"}
+
+
 # ---------------------------------------------------------------------------
 # /api/state — the dashboard's once-per-second polling endpoint
 # ---------------------------------------------------------------------------
@@ -444,6 +570,7 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
         "prompt": read_prompt(),
         "live_prompt": read_live_prompt(),
         "live_model_default": read_live_model(),
+        "batch_model_default": read_batch_model(),
         "hotwords": read_hotwords(),
         "halluc_rules": hallucinations_mod.parse_rules(),
         "inputs_support": _compute_inputs_support(),
@@ -509,6 +636,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         },
         "inputs_support": inputs_support,
         "live_model_default": blob["live_model_default"],
+        "batch_model_default": blob["batch_model_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "rules": [r["raw"] for r in halluc_rules],
@@ -1240,7 +1368,7 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         session=session,
         name=name,
         source=source,
-        model=body.get("model") or "small.en",
+        model=body.get("model") or DEFAULT_BATCH_MODEL,
         # Per-call backend override — falls back to the Recorder's
         # preference when the body didn't carry one.
         backend=(body.get("backend") or "").strip() or recorder.backend,
@@ -1269,7 +1397,7 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     request = BatchSessionRequest(
         session=session,
         source=source,
-        model=body.get("model") or "small.en",
+        model=body.get("model") or DEFAULT_BATCH_MODEL,
         backend=(body.get("backend") or "").strip() or recorder.backend,
         from_iso=body.get("from_iso") or None,
         to_iso=body.get("to_iso") or None,
@@ -1289,7 +1417,10 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
 async def tap(ws: WebSocket):
     """The Bridge's only endpoint. One WS per utterance.
 
-    The route's job is small: gate auth, accept the upgrade, honour the
+    The route's job is small: gate auth, resolve the tap's session
+    (?session=<id> → that detached session, validated against the
+    path-safety seam with the upgrade refused on an unknown id; absent →
+    the global current session), accept the upgrade, honour the
     recording-paused toggle, build a TapFanOut, and pump PCM frames into
     it. The fan-out owns WAV writing, UtteranceIndex bookkeeping,
     ActiveStream registration, and the WlKRelay (per ADR-0002).
@@ -1324,6 +1455,20 @@ async def tap(ws: WebSocket):
             await ws.close(code=4401, reason="missing or invalid tap token")
             return
 
+    # Detached-session routing: ?session=<id> pins this tap to an existing
+    # session, resolved through the canonical path-safety seam
+    # (session_paths.resolve_session_dir). Absent → the recorder's current
+    # session. Affiliation is snapshotted here at WS open — like the
+    # per-identity record/live prefs below — so a rotation never re-homes
+    # an open tap.
+    session_param = ws.query_params.get("session")
+    if session_param is not None:
+        tap_session_dir = resolve_session_dir(session_param)
+        tap_session = tap_session_dir.name
+    else:
+        tap_session = recorder.session_start
+        tap_session_dir = recorder.session_dir
+
     await ws.accept(subprotocol=accept_subprotocol)
 
     # Honor the operator's pause toggle: accept the WS so the bridge knows
@@ -1350,6 +1495,8 @@ async def tap(ws: WebSocket):
         utterance_id=utterance_id,
         do_record=tap_pref.record,
         do_live=tap_pref.live,
+        session=tap_session,
+        session_dir=tap_session_dir,
     ) as fan_out:
         try:
             while True:

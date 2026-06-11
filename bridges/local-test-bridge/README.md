@@ -59,6 +59,7 @@ land in the "live transcripts" panel attributed to your identity.
 | `--identity` | `$USER` / `$USERNAME` / `local-tester` | Stable per-speaker identifier. Used as the WAV filename slug + the `identity` field on settled-line entries. Override with different values to simulate multi-speaker scenarios from multiple terminals. |
 | `--name` | `Local Tester` | Display name shown on the dashboard. |
 | `--mic` | system default | sounddevice input device name or index. List devices with `python -c "import sounddevice as sd; print(sd.query_devices())"`. |
+| `--session` | global current session | Detached-session id to direct this bridge's taps into (sent as `?session=` on each `/tap` WS). Mint one with `POST /api/tap/new-session` body `{"detached": true}`; see "Detached sessions" in `bridges/README.md`. Two terminals — one with `--session`, one without — demo per-bridge isolation against a single Recorder. |
 
 ## Multi-speaker testing
 

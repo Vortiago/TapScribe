@@ -212,17 +212,20 @@ class SessionBusy(Exception):
 
 @dataclass
 class JobState:
-    """State for an in-flight session-scoped job (transcribe, strip, or
-    summarize)."""
+    """State for an in-flight session-scoped job (transcribe, strip,
+    summarize, or the end-of-meeting pipeline chaining all three)."""
 
     session: str
-    kind: Literal["transcribe", "strip", "summarize"]
+    kind: Literal["transcribe", "strip", "summarize", "pipeline"]
     current: int
     total: int
     started_at: datetime
     status: str = "running"
     current_file: str | None = None
     model: str | None = None
+    # Which stage a `kind="pipeline"` job is in ("strip" / "transcribe" /
+    # "summarize"); None for single-stage jobs.
+    stage: str | None = None
 
 
 class _JobHandle:
@@ -274,7 +277,7 @@ class JobTracker:
         self,
         session: str,
         *,
-        kind: Literal["transcribe", "strip", "summarize"],
+        kind: Literal["transcribe", "strip", "summarize", "pipeline"],
         total: int,
         model: str | None = None,
         status: str = "running",
@@ -309,6 +312,13 @@ class JobTracker:
         finally:
             await self.release(session)
 
+    def handle(self, session: str) -> _JobHandle:
+        """A progress handle for a claim the caller made via `claim()`
+        directly — the hand-held twin of the handle `run` yields. The
+        end-of-meeting pipeline uses this: it claims in the request path
+        (deterministic 409) and updates/releases from its background task."""
+        return _JobHandle(self, session)
+
     def get(self, session: str) -> JobState | None:
         """Read-only access — lock not strictly needed for a single dict
         get, and most callers just want a snapshot for /api/state."""
@@ -339,6 +349,61 @@ class LiveTranscripts:
 
     def snapshot(self) -> list[dict]:
         return list(self._entries)
+
+
+# ---------------------------------------------------------------------------
+# PipelineResults — last end-of-meeting pipeline outcome per session
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PipelineRecord:
+    """The last end-of-meeting pipeline outcome for one session. The job
+    snapshot vanishes when the slot releases, so the tap poll endpoint reads
+    THIS to answer done-with-summary / failed-at-stage after the run."""
+
+    session: str
+    state: str  # "running" | "done" | "failed"
+    stage: str | None = None  # the failing stage when state == "failed"
+    error: str | None = None
+    error_kind: str | None = None  # the domain error's class name
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class PipelineResults:
+    """session -> last PipelineRecord, in memory only and overwritten on the
+    next trigger. A Recorder restart loses it by design — the persisted
+    session-summary.json still answers "done" for a re-polling Bridge.
+
+    Methods are sync for the same reason as UtteranceIndex: every caller runs
+    on the single asyncio event loop with no await points inside."""
+
+    def __init__(self) -> None:
+        self._by_session: dict[str, PipelineRecord] = {}
+
+    def begin(self, session: str) -> None:
+        self._by_session[session] = PipelineRecord(
+            session=session, state="running", started_at=datetime.now(UTC)
+        )
+
+    def finish_done(self, session: str) -> None:
+        rec = self._by_session.get(session)
+        if rec is not None:
+            rec.state = "done"
+            rec.finished_at = datetime.now(UTC)
+
+    def finish_failed(self, session: str, *, stage: str, error: str, error_kind: str) -> None:
+        rec = self._by_session.get(session)
+        if rec is not None:
+            rec.state = "failed"
+            rec.stage = stage
+            rec.error = error
+            rec.error_kind = error_kind
+            rec.finished_at = datetime.now(UTC)
+
+    def get(self, session: str) -> PipelineRecord | None:
+        return self._by_session.get(session)
 
 
 # ---------------------------------------------------------------------------
@@ -384,12 +449,14 @@ class UtteranceIndex:
         """Return the existing record marked open=True if resumable, else
         None. Caller is expected to reopen the WAV for append.
 
-        `session_dir` is the Recorder's current session folder. A record
-        whose WAV lives in a different folder (Recorder rotated session
-        between the original open and the resume attempt) is dropped from
-        the index and reported as not-resumable — appending across a
-        session rotation would put the resumed audio in a session the
-        operator is no longer looking at.
+        `session_dir` is the resuming tap's snapshotted session folder
+        (the global current session, or the detached session a
+        /tap?session= reconnect names again). A record whose WAV lives in
+        a different folder (Recorder rotated session between the original
+        open and the resume attempt, or the reconnect targets another
+        session) is dropped from the index and reported as not-resumable —
+        appending across a session boundary would put the resumed audio in
+        a session nobody is looking at.
         """
         self._prune_expired()
         rec = self._by_id.get(utterance_id)
@@ -551,6 +618,7 @@ class Recorder:
         self.streams = ActiveStreams()
         self.tap_settings = TapSettings()
         self.jobs = JobTracker()
+        self.pipelines = PipelineResults()
         self.transcripts = LiveTranscripts(max_entries=200)
         self.utterances = UtteranceIndex()
         self.auth = SecretFile.load_or_create(auth_password_file, label="password")
@@ -596,15 +664,46 @@ class Recorder:
                 return False
         return False
 
+    def _mint_unclaimed_session_id(self, *, avoid: str | None = None) -> str:
+        """Mint a fresh session id, de-collided with a numeric suffix.
+        Ids are second-resolution timestamps, so a same-second mint would
+        otherwise alias an id that is already taken — either `avoid` (the
+        not-necessarily-materialised current session) or any directory
+        already on disk (detached sessions are created eagerly; a rotation
+        that re-minted one would silently point the global current session
+        at the detached dir and merge two meetings)."""
+        base = _utc_session_id()
+        candidate = base
+        n = 2
+        while candidate == avoid or (self.recordings_dir / candidate).exists():
+            candidate = f"{base}-{n}"
+            n += 1
+        return candidate
+
     def rotate_session(self) -> tuple[str, str]:
         """Rotate to a fresh session ID. Returns (previous, current).
         Existing /record WebSockets keep writing to their original
         session_dir (captured at WS open); only new opens land in the
-        new folder."""
+        new folder. A same-second rotation may re-mint the previous id
+        when its folder never materialised (harmless: both point at the
+        same lazy dir) but never an id that exists on disk."""
         prev = self.session_start
-        self.session_start = _utc_session_id()
+        self.session_start = self._mint_unclaimed_session_id()
         self.session_dir = self.recordings_dir / self.session_start
         return prev, self.session_start
+
+    def create_detached_session(self) -> tuple[str, Path]:
+        """Mint a fresh session directory WITHOUT touching the global
+        current session — a detached session a Bridge can direct its
+        taps into via /tap?session=<id>. Returns (session_id, session_dir).
+
+        The directory is created eagerly (unlike rotate_session's lazy
+        materialisation) because /tap validates ?session= through
+        resolve_session_dir, which requires the dir to exist."""
+        session_id = self._mint_unclaimed_session_id(avoid=self.session_start)
+        session_dir = self.recordings_dir / session_id
+        session_dir.mkdir(parents=True)
+        return session_id, session_dir
 
     def toggle_recording(self, enabled: bool | None = None) -> bool:
         if enabled is None:
