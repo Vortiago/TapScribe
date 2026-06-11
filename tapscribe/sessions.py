@@ -157,26 +157,34 @@ def read_wav_transcript(session: str, name: str, source: str = "original") -> di
     return read_primary_payload(wav_path)
 
 
+def read_strip_meta(stripped: Path) -> dict[str, Any] | None:
+    """Parse `<stripped>/strip-meta.json` if present and shaped like the v2
+    sidecar ({"files": {...}}). None on missing/unparseable/legacy content —
+    every consumer (the per-WAV committed-cut read below, the maintenance
+    prune/absorb ops) treats a bad sidecar as absent rather than failing.
+    The ONE reader for the sidecar's shape contract;
+    `_read_json_or_none` re-checks containment before opening it."""
+    meta = _read_json_or_none(stripped / "strip-meta.json")
+    if not isinstance(meta, dict) or not isinstance(meta.get("files"), dict):
+        return None
+    return meta
+
+
 def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
     """The committed strip-silence cut for one ORIGINAL wav — the explicit
     {name, start_s, end_s} spans the last strip run wrote (plus its knobs
     and run stamp), or None when the session has no strip-meta or this wav
     produced no regions. Entries are fingerprinted against the original's
     current size/mtime, so spans for a since-rewritten WAV read as absent
-    instead of drawing a stale cut. `resolve_wav` validates session + name;
-    `_read_json_or_none` re-checks containment before opening the sidecar."""
+    instead of drawing a stale cut. `resolve_wav` validates session + name."""
     wav_path = resolve_wav(session, name, "original")
-    meta = _read_json_or_none(stripped_dir(session) / "strip-meta.json")
-    if not isinstance(meta, dict):
+    meta = read_strip_meta(stripped_dir(session))
+    if meta is None:
         return None
-    entry = (meta.get("files") or {}).get(name)
+    entry = meta["files"].get(name)
     if not isinstance(entry, dict) or not entry.get("spans"):
         return None
-    try:
-        st = os.stat(wav_path)
-    except OSError:
-        return None
-    if st.st_size != entry.get("wav_size") or st.st_mtime_ns != entry.get("wav_mtime_ns"):
+    if file_stat_sig(wav_path) != (entry.get("wav_mtime_ns"), entry.get("wav_size")):
         return None
     return {"spans": entry["spans"], "stripped_at": meta.get("stripped_at"), "knobs": meta.get("knobs")}
 

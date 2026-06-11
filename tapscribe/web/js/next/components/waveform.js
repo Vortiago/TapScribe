@@ -185,6 +185,19 @@ export function createWaveform() {
     axisHost.replaceChildren(out);
   };
 
+  /** Derive the overlay chrome — the data-cut-spans / data-previewSpans e2e
+   * hooks, the ✂ badge, and the legend — from the current cutSpans /
+   * previewSpans state. ONE owner, called by every mutation path below, so
+   * the three can't fall out of agreement when a setter forgets a bit. */
+  const syncChrome = () => {
+    if (cutSpans) canvas.dataset.cutSpans = JSON.stringify(cutSpans);
+    else delete canvas.dataset.cutSpans;
+    if (previewSpans) canvas.dataset.previewSpans = JSON.stringify(previewSpans);
+    else delete canvas.dataset.previewSpans;
+    cutBadge.hidden = !cutSpans;
+    legend.hidden = !(cutSpans || previewSpans);
+  };
+
   /** Draw the waveform for one WAV's peaks + duration. `cut` (optional) is
    * the committed strip-silence cut to overlay — the kept {start_s, end_s}
    * spans; the canvas exposes it on data-cut-spans as a stable e2e hook. */
@@ -193,10 +206,7 @@ export function createWaveform() {
     peaks = p;
     durationS = d;
     cutSpans = cut && cut.length ? cut : null;
-    if (cutSpans) canvas.dataset.cutSpans = JSON.stringify(cutSpans);
-    else delete canvas.dataset.cutSpans;
-    cutBadge.hidden = !cutSpans;
-    legend.hidden = !(cutSpans || previewSpans);
+    syncChrome();
     msgHost.textContent = "";
     msgHost.hidden = true;
     paint();
@@ -210,12 +220,9 @@ export function createWaveform() {
     peaks = null;
     durationS = 0;
     cutSpans = null;
-    delete canvas.dataset.cutSpans;
-    cutBadge.hidden = true;
     previewSpans = null;
     previewFloorDb = null;
-    delete canvas.dataset.previewSpans;
-    legend.hidden = true;
+    syncChrome();
     msgHost.textContent = text;
     msgHost.hidden = false;
     axisHost.replaceChildren();
@@ -230,9 +237,7 @@ export function createWaveform() {
   const setPreview = (preview) => {
     previewSpans = preview ? preview.spans : null;
     previewFloorDb = preview ? preview.speech_floor_db : null;
-    if (previewSpans) canvas.dataset.previewSpans = JSON.stringify(previewSpans);
-    else delete canvas.dataset.previewSpans;
-    legend.hidden = !(cutSpans || previewSpans);
+    syncChrome();
     paint();
   };
 

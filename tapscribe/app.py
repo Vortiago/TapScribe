@@ -922,12 +922,29 @@ async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
     return {"ok": True, **result}
 
 
-# Strip-silence knob bounds — shared by the strip route (body knobs) and the
-# strip-preview route (query knobs) so the two can never drift. The request
-# value object (StripSessionRequest) owns the DEFAULTS; these own the lo/hi.
-_STRIP_MIN_SILENCE_BOUNDS = (100, 600_000)
-_STRIP_PAD_BOUNDS = (0, 5_000)
-_STRIP_FLOOR_BOUNDS = (-120.0, 0.0)
+def _parse_strip_knob_overrides(
+    min_silence_ms: Any, pad_ms: Any, speech_floor_db: Any
+) -> dict[str, Any]:
+    """Range-bound the strip-silence knobs and return only the explicitly
+    provided ones, ready to splat into StripSessionRequest (which owns the
+    DEFAULTS). One owner for the names + bounds + only-forward-explicit
+    contract, shared by the strip route (body knobs) and the strip-preview
+    route (query knobs) so the two can never drift — the preview must plan
+    with exactly the knobs a commit would use. The `is not None` checks keep
+    an explicit 0 (e.g. pad_ms=0 to disable region padding for A/B) from
+    silently falling back to the default; out-of-range values → 400 instead
+    of a 500 from int()/float()."""
+    overrides: dict[str, Any] = {}
+    bounded_min_silence = _parse_bounded_int(min_silence_ms, "min_silence_ms", lo=100, hi=600_000)
+    if bounded_min_silence is not None:
+        overrides["min_silence_ms"] = bounded_min_silence
+    bounded_pad = _parse_bounded_int(pad_ms, "pad_ms", lo=0, hi=5_000)
+    if bounded_pad is not None:
+        overrides["pad_ms"] = bounded_pad
+    bounded_floor = _parse_bounded_float(speech_floor_db, "speech_floor_db", lo=-120.0, hi=0.0)
+    if bounded_floor is not None:
+        overrides["speech_floor_db"] = bounded_floor
+    return overrides
 
 
 @app.post("/api/sessions/{session}/strip-silence")
@@ -940,27 +957,9 @@ async def api_session_strip_silence(
     HTTP shim over `batch_strip.strip_session` — parse + range-bound the knobs;
     the registered domain-error handlers map failures to status codes."""
     body = await _json_body(req)
-    # Range-bound everything that hits the silero detector so a malformed
-    # dashboard POST returns 400 instead of a 500 from int()/float().
-    # Only explicitly-provided knobs are forwarded — StripSessionRequest
-    # owns the defaults — and the `is not None` checks keep an explicit 0
-    # (e.g. pad_ms=0 to disable region padding for A/B) from silently
-    # falling back to the default.
-    overrides: dict[str, Any] = {}
-    min_silence_ms = _parse_bounded_int(
-        body.get("min_silence_ms"), "min_silence_ms", lo=_STRIP_MIN_SILENCE_BOUNDS[0], hi=_STRIP_MIN_SILENCE_BOUNDS[1]
+    overrides = _parse_strip_knob_overrides(
+        body.get("min_silence_ms"), body.get("pad_ms"), body.get("speech_floor_db")
     )
-    if min_silence_ms is not None:
-        overrides["min_silence_ms"] = min_silence_ms
-    pad_ms = _parse_bounded_int(body.get("pad_ms"), "pad_ms", lo=_STRIP_PAD_BOUNDS[0], hi=_STRIP_PAD_BOUNDS[1])
-    if pad_ms is not None:
-        overrides["pad_ms"] = pad_ms
-    speech_floor_db = _parse_bounded_float(
-        body.get("speech_floor_db"), "speech_floor_db", lo=_STRIP_FLOOR_BOUNDS[0], hi=_STRIP_FLOOR_BOUNDS[1]
-    )
-    if speech_floor_db is not None:
-        overrides["speech_floor_db"] = speech_floor_db
-
     return await strip_session(recorder, StripSessionRequest(session=session, **overrides))
 
 
@@ -1206,20 +1205,7 @@ async def api_wav_strip_preview(
     defaults, mirroring the strip route's only-forward-explicit contract."""
     if source not in ("original", "stripped"):
         raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
-    overrides: dict[str, Any] = {}
-    bounded_min_silence = _parse_bounded_int(
-        min_silence_ms, "min_silence_ms", lo=_STRIP_MIN_SILENCE_BOUNDS[0], hi=_STRIP_MIN_SILENCE_BOUNDS[1]
-    )
-    if bounded_min_silence is not None:
-        overrides["min_silence_ms"] = bounded_min_silence
-    bounded_pad = _parse_bounded_int(pad_ms, "pad_ms", lo=_STRIP_PAD_BOUNDS[0], hi=_STRIP_PAD_BOUNDS[1])
-    if bounded_pad is not None:
-        overrides["pad_ms"] = bounded_pad
-    bounded_floor = _parse_bounded_float(
-        speech_floor_db, "speech_floor_db", lo=_STRIP_FLOOR_BOUNDS[0], hi=_STRIP_FLOOR_BOUNDS[1]
-    )
-    if bounded_floor is not None:
-        overrides["speech_floor_db"] = bounded_floor
+    overrides = _parse_strip_knob_overrides(min_silence_ms, pad_ms, speech_floor_db)
     knobs = StripSessionRequest(session=session, **overrides)
     path = resolve_wav(session, name, source)
 

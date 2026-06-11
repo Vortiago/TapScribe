@@ -14,8 +14,9 @@ strip-silence endpoint, and is also runnable as a CLI via
 
 from __future__ import annotations
 
+import math
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +53,16 @@ def write_wav_int16(path: Path, samples: np.ndarray) -> None:
         w.writeframes(samples.astype(np.int16).tobytes())
 
 
+def rms_dbfs_int16(samples_int16: np.ndarray) -> float:
+    """RMS amplitude of int16 samples in dBFS. Single pass with a float64
+    accumulator (einsum) — no full-length float temporaries, which matters at
+    the whole-file sizes the strip planner and preview route hand in (an
+    hour of 16 kHz audio would otherwise materialise two ~460 MB float32
+    copies per call). Callers guard against empty input."""
+    mean_sq = float(np.einsum("i,i->", samples_int16, samples_int16, dtype=np.float64)) / len(samples_int16)
+    return dbfs_from_rms(math.sqrt(mean_sq))
+
+
 def filter_low_energy_regions(samples_int16: np.ndarray, regions, floor_dbfs: float = SPEECH_RMS_DBFS_FLOOR):
     """Drop regions whose RMS amplitude is below floor_dbfs.
 
@@ -66,10 +77,25 @@ def filter_low_energy_regions(samples_int16: np.ndarray, regions, floor_dbfs: fl
         region = samples_int16[s:e]
         if len(region) == 0:
             continue
-        rms = float(np.sqrt((region.astype(np.float32) ** 2).mean()))
-        if dbfs_from_rms(rms) >= floor_dbfs:
+        if rms_dbfs_int16(region) >= floor_dbfs:
             out.append((s, e))
     return out
+
+
+_silero_model = None
+
+
+def _get_silero_model():
+    """Load (and cache) the Silero VAD model once per process — mirrors
+    `speech_gate._get_silero_model`. The strip-preview route runs the
+    detector per knob pause, so reloading the model from disk on every
+    call would put its deserialisation cost on every slider drag."""
+    global _silero_model
+    if _silero_model is None:
+        from silero_vad import load_silero_vad
+
+        _silero_model = load_silero_vad()
+    return _silero_model
 
 
 def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms: int):
@@ -82,14 +108,15 @@ def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms:
     """
     try:
         import torch
-        from silero_vad import get_speech_timestamps, load_silero_vad
+        from silero_vad import get_speech_timestamps
+
+        model = _get_silero_model()
     except ImportError as e:
         raise RuntimeError(
             "silero-vad/torch import failed — TapScribe install is corrupt. "
             "Reinstall the package (`pip install -e .`)."
         ) from e
     audio = torch.from_numpy(samples_int16).float() / 32768.0
-    model = load_silero_vad()
     ts = get_speech_timestamps(
         audio,
         model,
@@ -109,21 +136,30 @@ class StripPlan:
     route serialises `spans` + the stats for the dashboard's live overlay.
 
     `regions` are (start_sample, end_sample) tuples — the exact slice
-    bounds the splitter writes from; `spans` are the same boundaries as
-    rounded {start_s, end_s} second-dicts (the wire/UI shape). Empty
+    bounds the splitter writes from; `spans` derives the same boundaries
+    as rounded {start_s, end_s} second-dicts (the wire/UI shape). Empty
     `regions` with a non-None `reason` explains why nothing would be
     written; `detector` is None when detection never ran (empty or
-    whole-file-silent input)."""
+    whole-file-silent input). The defaults are the empty-plan values, so
+    the planner's early exits state only what differs."""
 
-    regions: list[tuple[int, int]]
-    spans: list[dict[str, float]]
     in_seconds: float
-    speech_seconds: float
-    segments_filtered_below_floor: int
     silent: bool
     rms_dbfs: float
-    reason: str | None
-    detector: str | None
+    regions: list[tuple[int, int]] = field(default_factory=list)
+    speech_seconds: float = 0.0
+    segments_filtered_below_floor: int = 0
+    reason: str | None = None
+    detector: str | None = None
+
+    @property
+    def spans(self) -> list[dict[str, float]]:
+        """`regions` as the wire/UI shape — derived, so the two
+        representations can never drift."""
+        return [
+            {"start_s": round(s / SAMPLE_RATE, 3), "end_s": round(e / SAMPLE_RATE, 3)}
+            for s, e in self.regions
+        ]
 
 
 def plan_strip_regions(
@@ -142,27 +178,19 @@ def plan_strip_regions(
     total = len(samples)
     in_secs = total / SAMPLE_RATE
     if total == 0:
-        return StripPlan(
-            regions=[], spans=[], in_seconds=0.0, speech_seconds=0.0,
-            segments_filtered_below_floor=0, silent=True, rms_dbfs=-200.0,
-            reason="empty", detector=None,
-        )
+        return StripPlan(in_seconds=0.0, silent=True, rms_dbfs=-200.0, reason="empty")
 
-    rms = float(np.sqrt((samples.astype(np.float32) ** 2).mean()))
-    rms_dbfs = dbfs_from_rms(rms)
+    rms_dbfs = rms_dbfs_int16(samples)
     if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
         return StripPlan(
-            regions=[], spans=[], in_seconds=round(in_secs, 2), speech_seconds=0.0,
-            segments_filtered_below_floor=0, silent=True, rms_dbfs=rms_dbfs,
+            in_seconds=round(in_secs, 2), silent=True, rms_dbfs=rms_dbfs,
             reason=f"whole-file silent ({rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)",
-            detector=None,
         )
 
     regions = detect_speech_silero(samples, min_silence_ms=min_silence_ms, pad_ms=pad_ms)
     if not regions:
         return StripPlan(
-            regions=[], spans=[], in_seconds=round(in_secs, 2), speech_seconds=0.0,
-            segments_filtered_below_floor=0, silent=False, rms_dbfs=rms_dbfs,
+            in_seconds=round(in_secs, 2), silent=False, rms_dbfs=rms_dbfs,
             reason="no speech detected", detector="silero-vad",
         )
 
@@ -170,20 +198,17 @@ def plan_strip_regions(
     regions = filter_low_energy_regions(samples, regions, floor_dbfs=speech_floor_db)
     if not regions:
         return StripPlan(
-            regions=[], spans=[], in_seconds=round(in_secs, 2), speech_seconds=0.0,
-            segments_filtered_below_floor=pre_filter_count, silent=False, rms_dbfs=rms_dbfs,
+            in_seconds=round(in_secs, 2), silent=False, rms_dbfs=rms_dbfs,
+            segments_filtered_below_floor=pre_filter_count,
             reason=f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
             detector="silero-vad",
         )
 
-    spans = [
-        {"start_s": round(s / SAMPLE_RATE, 3), "end_s": round(e / SAMPLE_RATE, 3)}
-        for s, e in regions
-    ]
     speech_samples = sum(e - s for s, e in regions)
     return StripPlan(
-        regions=regions, spans=spans, in_seconds=round(in_secs, 2),
+        in_seconds=round(in_secs, 2), silent=False, rms_dbfs=rms_dbfs,
+        regions=regions,
         speech_seconds=round(speech_samples / SAMPLE_RATE, 2),
         segments_filtered_below_floor=pre_filter_count - len(regions),
-        silent=False, rms_dbfs=rms_dbfs, reason=None, detector="silero-vad",
+        detector="silero-vad",
     )

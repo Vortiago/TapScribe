@@ -267,9 +267,7 @@ const _stripMetaKey = (session, name, sig) => `${session}/${name}@${sig}`;
  */
 export function fetchWavStripMeta(session, name, sig) {
   const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-meta`;
-  return _getOrFetch(_wavStripMetaCache, _stripMetaKey(session, name, sig), () =>
-    fetch(url, { cache: "no-store" }).then(_unwrap),
-  );
+  return _getOrFetch(_wavStripMetaCache, _stripMetaKey(session, name, sig), () => getJson(url));
 }
 
 /**
