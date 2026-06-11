@@ -2673,6 +2673,60 @@ async def test_summary_persists_across_reload(running_recorder: RunningRecorder)
             await browser.close()
 
 
+async def test_settings_summarizer_default_card_saves_and_prefills(running_recorder: RunningRecorder):
+    """#84: the Settings stage's Summarizer card edits the structured global
+    default. Pick the Command source, type a template + prompt, Save — then
+    reload: the card pre-fills from the persisted config (state poll), not
+    from view memory."""
+    rr = running_recorder
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
+
+            # The card builds once; the source segctl scopes its own buttons.
+            await page.wait_for_selector('[data-slot="sdSource"] [data-src="command"]', timeout=6000)
+            await page.click('[data-slot="sdSource"] [data-src="command"]')
+            await page.wait_for_selector('[data-slot="sdCmd"]', state="visible", timeout=6000)
+            await page.fill('[data-slot="sdCmd"]', "claude -p --bare")
+            await page.fill('[data-slot="sdPrompt"]', "GLOBAL DEFAULT PROMPT")
+            await page.click('[data-slot="sdSave"]')
+            await page.wait_for_function(
+                """() => (document.querySelector('[data-slot="sdStatus"]')?.textContent || '') === 'saved'""",
+                timeout=8000,
+            )
+
+            # Reload: the card must pre-fill from the persisted global default.
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sdPrompt"]', timeout=6000)
+            await page.wait_for_function(
+                """() => {
+                  const ta = document.querySelector('[data-slot="sdPrompt"]');
+                  return ta && ta.value === 'GLOBAL DEFAULT PROMPT';
+                }""",
+                timeout=8000,
+            )
+            on = await page.get_attribute('[data-slot="sdSource"] [data-src="command"]', "class")
+            assert "is-on" in (on or ""), f"saved source must pre-select, got class {on!r}"
+            cmd_visible = await page.is_visible('[data-slot="sdCmd"]')
+            assert cmd_visible, "command detail pane must show for the saved Command source"
+            assert (await page.input_value('[data-slot="sdCmd"]')) == "claude -p --bare"
+
+            # The backend agrees (the card saved through PUT /api/summarize/config).
+            cfg = json.loads(await (await context.request.get(rr.base_url + "/api/summarize/config")).text())
+            assert cfg["source"] == "command"
+            assert cfg["prompt"] == "GLOBAL DEFAULT PROMPT"
+        finally:
+            await browser.close()
+
+
 async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRecorder):
     """Every renderRegion call carries a `sig` that gates whether the build
     closure re-runs. If the sig is missing a value the build actually reads,

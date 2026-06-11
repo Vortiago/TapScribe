@@ -1,0 +1,7 @@
+{
+  "source": "command",
+  "prompt": "GLOBAL DEFAULT PROMPT",
+  "command": "claude -p --bare",
+  "model": "ggml-org/gemma-4-E4B-it-GGUF",
+  "max_tokens": 2048
+}

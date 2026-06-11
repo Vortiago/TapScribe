@@ -20,7 +20,7 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson, wireConfigSave } from "../../api.js";
+import { getJson, putJson, wireConfigSave, wireSave } from "../../api.js";
 import { header } from "../shell.js";
 import * as configCard from "../../components/config-card.js";
 
@@ -63,6 +63,156 @@ export function build(ctx) {
   const liveCardHost = pick(frag, "liveCardHost");
 
   rebuildEngine(engineHost);
+
+  // ---- Summarizer-default card (#84) ----------------------------------------
+  // Built ONCE — every control is interactive, so there is no renderRegion and
+  // no sig to drift (the Summary view's discipline). Values seed once from the
+  // first poll carrying `summarizer_default`; the per-tick update only writes
+  // the override-count hint in place. One Save persists the whole structured
+  // object via PUT /api/summarize/config.
+  const sdSourceWrap = pick(frag, "sdSource");
+  const sdButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
+    sdSourceWrap.querySelectorAll("[data-src]")
+  );
+  const sdLocal = /** @type {HTMLElement} */ (pick(frag, "sdLocal"));
+  const sdCommand = /** @type {HTMLElement} */ (pick(frag, "sdCommand"));
+  const sdModelSel = /** @type {HTMLSelectElement} */ (pick(frag, "sdModel"));
+  const sdModelNote = pick(frag, "sdModelNote");
+  const sdMaxTok = /** @type {HTMLInputElement} */ (pick(frag, "sdMaxTokens"));
+  const sdPresetSel = /** @type {HTMLSelectElement} */ (pick(frag, "sdCmdPreset"));
+  const sdPresetNote = pick(frag, "sdCmdPresetNote");
+  const sdCmd = /** @type {HTMLInputElement} */ (pick(frag, "sdCmd"));
+  const sdPrompt = /** @type {HTMLTextAreaElement} */ (pick(frag, "sdPrompt"));
+  const sdOverrides = pick(frag, "sdOverrides");
+
+  /** The card's selected default source ("local" until the seed lands). */
+  let sdSource = "local";
+  /** One-shot: seed the controls from the first poll carrying the saved
+   * default, then never touch them again (interaction hold). */
+  let sdSeeded = false;
+  /** The saved model id when the seed arrives BEFORE the catalog fetch — the
+   * catalog IIFE applies it after populating the <select>. */
+  let sdPendingModel = "";
+  /** @type {import('../../types.js').SummaryModel[]} */
+  let sdModels = [];
+  /** @type {import('../../types.js').CommandPreset[]} */
+  let sdPresets = [];
+
+  const sdApplySource = () => {
+    for (const b of sdButtons) {
+      const on = b.dataset.src === sdSource;
+      b.classList.toggle("is-on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    sdLocal.hidden = sdSource !== "local";
+    sdCommand.hidden = sdSource !== "command";
+  };
+  for (const b of sdButtons) {
+    b.addEventListener("click", () => {
+      const next = b.dataset.src;
+      if (b.disabled || !next || next === sdSource) return;
+      sdSource = next;
+      sdApplySource();
+    });
+  }
+  sdApplySource();
+
+  /** @param {number} t */
+  const sdCtxLabel = (t) => (t >= 1000 ? `${Math.round(t / 1000)}K` : `${t}`);
+  const sdReflectModelNote = () => {
+    const m = sdModels.find((x) => x.repo_id === sdModelSel.value);
+    sdModelNote.textContent = m
+      ? `≈${m.approx_gb} GB · ${sdCtxLabel(m.context_tokens)} ctx${m.note ? ` · ${m.note}` : ""}`
+      : "";
+  };
+  sdModelSel.addEventListener("change", sdReflectModelNote);
+
+  const sdReflectPresetNote = () => {
+    const p = sdPresets.find((x) => x.key === sdPresetSel.value);
+    sdPresetNote.textContent = p ? p.note : "";
+  };
+  sdPresetSel.addEventListener("change", () => {
+    const p = sdPresets.find((x) => x.key === sdPresetSel.value);
+    if (p) sdCmd.value = p.template;
+    sdReflectPresetNote();
+  });
+  sdCmd.addEventListener("input", () => {
+    const p = sdPresets.find((x) => x.key === sdPresetSel.value);
+    if (p && p.template !== sdCmd.value) {
+      sdPresetSel.value = "";
+      sdReflectPresetNote();
+    }
+  });
+
+  // Populate model + preset selects ONCE from the hardware-routed catalog
+  // (the Summary view's pattern, including the unavailable fallback).
+  (async () => {
+    try {
+      const cat = /** @type {import('../../types.js').SummaryModelCatalog} */ (
+        await getJson("/api/summarize/models")
+      );
+      sdModels = cat.models || [];
+      sdModelSel.replaceChildren();
+      for (const m of sdModels) sdModelSel.add(new Option(m.label || m.repo_id, m.repo_id, m.is_default, m.is_default));
+      if (!sdModels.length) {
+        sdModelSel.add(new Option("no local models", "", true, true));
+        sdModelSel.disabled = true;
+      }
+      if (typeof cat.max_tokens_min === "number") sdMaxTok.min = String(cat.max_tokens_min);
+      if (typeof cat.max_tokens_max === "number") sdMaxTok.max = String(cat.max_tokens_max);
+      sdPresets = cat.command_presets || [];
+      sdPresetSel.replaceChildren();
+      sdPresetSel.add(new Option("custom…", ""));
+      for (const p of sdPresets) sdPresetSel.add(new Option(p.label, p.key));
+      // A saved model that arrived before the catalog: apply it now.
+      if (sdPendingModel) { sdModelSel.value = sdPendingModel; sdPendingModel = ""; }
+      const match = sdPresets.find((x) => x.template === sdCmd.value);
+      sdPresetSel.value = match ? match.key : "";
+      sdReflectPresetNote();
+      sdReflectModelNote();
+    } catch {
+      // Best-effort (the Summary view's fallback): leave the selects disabled
+      // and let the server resolve its defaults from an empty model field.
+      sdModelSel.add(new Option("model list unavailable — using default", "", true, true));
+      sdModelSel.disabled = true;
+      sdPresetSel.add(new Option("presets unavailable", "", true, true));
+      sdPresetSel.disabled = true;
+    }
+  })();
+
+  /** Seed the controls from the saved global default — once. */
+  /** @param {import('../../types.js').SummarizerDefault} d */
+  const sdSeed = (d) => {
+    sdSource = d.source || "local"; // "" (unset) shows the built-in default
+    sdApplySource();
+    sdPrompt.value = d.prompt || "";
+    sdCmd.value = d.command || "";
+    if (d.model) {
+      sdModelSel.value = d.model;
+      if (sdModelSel.value !== d.model) sdPendingModel = d.model; // catalog not loaded yet
+      sdReflectModelNote();
+    }
+    if (typeof d.max_tokens === "number") sdMaxTok.value = String(d.max_tokens);
+    const match = sdPresets.find((x) => x.template === sdCmd.value);
+    sdPresetSel.value = match ? match.key : "";
+    sdReflectPresetNote();
+  };
+
+  wireSave({
+    btn: /** @type {HTMLButtonElement} */ (pick(frag, "sdSave")),
+    status: pick(frag, "sdStatus"),
+    put: () => {
+      const mt = parseInt(sdMaxTok.value, 10);
+      return putJson("/api/summarize/config", {
+        source: sdSource,
+        prompt: sdPrompt.value,
+        command: sdCmd.value.trim(),
+        model: sdModelSel.value || "",
+        max_tokens: Number.isFinite(mt) ? mt : null,
+      });
+    },
+    onSuccess: () => afterMutate(),
+  });
 
   /** Does this live model declare an initial_prompt input? Falls back to the
    * registry-wide flag when the model isn't in the live catalog. */
@@ -202,6 +352,17 @@ export function build(ctx) {
       showOverrideCounts: false,
     });
     renderLiveCard(j);
+
+    // Summarizer-default card: seed ONCE from the first poll carrying the
+    // saved default (flag flips before the seed so a re-entrant tick can't
+    // double-seed), then only the non-interactive hint updates — in place,
+    // never a rebuild (interaction hold).
+    if (!sdSeeded && j.summarizer_default) {
+      sdSeeded = true;
+      sdSeed(j.summarizer_default);
+    }
+    const n = j.default_override_counts?.summarizer || 0;
+    sdOverrides.textContent = n ? `· ${n} session${n === 1 ? "" : "s"} override this` : "";
   };
 
   return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };
