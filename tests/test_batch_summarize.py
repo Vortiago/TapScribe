@@ -14,15 +14,17 @@ from datetime import UTC, datetime
 import pytest
 from conftest import py_cmd, seed_merged_transcript  # type: ignore[import-not-found]
 
+from tapscribe import text
 from tapscribe.batch_summarize import (
     NoMergedTranscript,
     SummarizeSessionRequest,
+    effective_summarizer_config,
     summarize_session,
     summarize_session_locked,
 )
 from tapscribe.recorder import JobState, SessionBusy
-from tapscribe.sessions import read_session_summary, read_session_transcript
-from tapscribe.summarizers import SummarizerFailed, load_summarizer
+from tapscribe.sessions import read_session_summary, read_session_transcript, write_session_meta
+from tapscribe.summarizers import DEFAULT_SUMMARY_PROMPT, SummarizerFailed, load_summarizer
 
 # stdin → stdout: the summary is the merged transcript text echoed back, so we
 # can assert the orchestrator handed the right text to the summarizer.
@@ -238,3 +240,64 @@ async def test_summarize_session_failure_keeps_previous_summary(recorder_under_t
     stored = read_session_summary("s")
     assert stored is not None
     assert stored["summary"] == "the good take"
+
+
+# ---------------------------------------------------------------------------
+# effective_summarizer_config (#84) — session-meta override (source + prompt)
+# over the global summarizer default over built-ins. The same chain shape as
+# batch_transcribe's prompt/hotwords resolution.
+# ---------------------------------------------------------------------------
+
+
+def test_effective_summarizer_config_override_beats_global(recorder_under_test):
+    text.write_summarizer_config(
+        {"source": "local", "prompt": "GLOBAL", "command": "claude -p", "max_tokens": 512}
+    )
+    write_session_meta("s", {"summary_source": "command", "summary_prompt": "SESSION"})
+
+    cfg = effective_summarizer_config("s")
+    assert cfg["source"] == "command"
+    assert cfg["prompt"] == "SESSION"
+    # Per-source fields stay global-only — the override is source + prompt by design.
+    assert cfg["command"] == "claude -p"
+    assert cfg["max_tokens"] == 512
+
+
+def test_effective_summarizer_config_empty_override_falls_back_to_global(recorder_under_test):
+    """An empty-string override is "no override" — the acceptance criterion's
+    empty-falls-back. (Inherited limitation of the chain shape: a session
+    cannot assert "no prompt", same as the prompt/hotwords resolution.)"""
+    text.write_summarizer_config({"source": "command", "prompt": "GLOBAL", "command": "claude -p"})
+    write_session_meta("s", {"summary_source": "", "summary_prompt": "  "})
+
+    cfg = effective_summarizer_config("s")
+    assert cfg["source"] == "command"
+    assert cfg["prompt"] == "GLOBAL"
+
+
+def test_effective_summarizer_config_built_ins_when_nothing_configured(recorder_under_test):
+    """No meta, no global file: the bundled offline source + default prompt —
+    exactly what the pre-#84 pipeline hardcoded."""
+    cfg = effective_summarizer_config("never-seen")
+    assert cfg == {
+        "source": "local",
+        "prompt": DEFAULT_SUMMARY_PROMPT,
+        "command": "",
+        "model": "",
+        "max_tokens": None,
+    }
+
+
+def test_effective_summarizer_config_override_is_source_and_prompt_only(recorder_under_test):
+    """A session-meta file can't smuggle per-source fields past the global
+    layer — command/model/max_tokens resolve from the global default even
+    when stray keys exist in session-meta.json."""
+    text.write_summarizer_config({"source": "local", "model": ""})
+    (recorder_under_test.recordings_dir / "s").mkdir(exist_ok=True)
+    (recorder_under_test.recordings_dir / "s" / "session-meta.json").write_text(
+        '{"summary_source": "command", "command": "evil --cmd", "model": "evil/repo"}',
+        encoding="utf-8",
+    )
+    cfg = effective_summarizer_config("s")
+    assert cfg["command"] == ""
+    assert cfg["model"] == ""
