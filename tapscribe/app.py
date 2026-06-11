@@ -600,13 +600,15 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         active.append(row)
     sessions_list = blob["sessions"]
     # Powers the "· N sessions override this" footer in the default config panel.
-    override_counts = {"prompt": 0, "hotwords": 0}
+    override_counts = {"prompt": 0, "hotwords": 0, "summarizer": 0}
     for s in sessions_list:
         m = s.get("session_meta") or {}
         if m.get("prompt"):
             override_counts["prompt"] += 1
         if m.get("hotwords"):
             override_counts["hotwords"] += 1
+        if m.get("summary_source") or m.get("summary_prompt"):
+            override_counts["summarizer"] += 1
     payload = {
         "current_session": recorder.session_start,
         "active": active,

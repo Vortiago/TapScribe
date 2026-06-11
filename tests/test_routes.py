@@ -864,6 +864,59 @@ def test_api_state_reports_default_override_counts(client, recorder_under_test):
     assert counts["hotwords"] == 1
 
 
+def test_session_meta_round_trips_summarizer_override(client, recorder_under_test):
+    """#84: the per-session summarizer override (source + prompt) rides in
+    session-meta exactly like the prompt/hotwords overrides — and setting it
+    preserves fields the caller didn't mention."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    client.put("/api/session-meta/fakesession", json={"label": "kickoff"})
+    r = client.put(
+        "/api/session-meta/fakesession",
+        json={"summary_source": "command", "summary_prompt": "Action items only."},
+    )
+    assert r.status_code == 200, r.text
+    meta = client.get("/api/session-meta/fakesession").json()
+    assert meta["summary_source"] == "command"
+    assert meta["summary_prompt"] == "Action items only."
+    assert meta["label"] == "kickoff"
+
+
+def test_session_meta_rejects_bad_summary_source(client, recorder_under_test):
+    """The override source is allowlisted at write time like the global
+    default's (an unwired/unknown source must never persist); "" clears the
+    override back to the global default."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    assert client.put("/api/session-meta/fakesession", json={"summary_source": "bogus"}).status_code == 400
+    assert client.put("/api/session-meta/fakesession", json={"summary_source": "api"}).status_code == 400
+    assert client.put("/api/session-meta/fakesession", json={"summary_source": ""}).status_code == 200
+
+
+def test_session_meta_rejects_oversize_summary_prompt(client, recorder_under_test):
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    r = client.put("/api/session-meta/fakesession", json={"summary_prompt": "x" * 5000})
+    assert r.status_code == 400
+
+
+def test_api_state_counts_summarizer_overrides(client, recorder_under_test):
+    """The Settings card's '· N sessions override this' footer for the
+    summarizer default; surfaced next to the prompt/hotwords counts. The
+    per-session meta block in /api/state carries the fields themselves
+    (read_session_meta returns every _META_STRING_FIELDS member)."""
+    base = recorder_under_test.recordings_dir
+    for name in ("s1", "s2", "s3"):
+        (base / name).mkdir()
+    client.put("/api/session-meta/s1", json={"summary_source": "local"})
+    client.put("/api/session-meta/s2", json={"summary_prompt": "Action items."})
+    client.put("/api/session-meta/s3", json={"label": "no override"})
+    body = client.get("/api/state").json()
+    assert body["default_override_counts"]["summarizer"] == 2
+    row = next(s for s in body["sessions"] if s["session"] == "s1")
+    assert row["session_meta"]["summary_source"] == "local"
+
+
 # ---------------------------------------------------------------------------
 # /api/sessions/{target}/absorb
 # ---------------------------------------------------------------------------
