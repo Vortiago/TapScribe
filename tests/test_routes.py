@@ -61,6 +61,7 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Reco
     monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
     monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
     monkeypatch.setattr(_config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
+    monkeypatch.setattr(_config, "SUMMARIZER_CONFIG_FILE", cfg / "summarizer.json")
     monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
     monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
     (tmp_path / "recordings").mkdir()
@@ -2207,6 +2208,86 @@ def test_api_summarize_models_reflects_env_override(client, recorder_under_test,
         assert "summarize" in detail.lower()  # the missing-extra message it reached instead
     finally:
         set_available_backends_for_testing(None)
+
+
+# ---------------------------------------------------------------------------
+# GET/PUT /api/summarize/config — the structured global summarizer default
+# (#84). Dedicated endpoints (NOT /api/config/{key}: that map is
+# {content: str}-shaped) with write-time validation in text.py.
+# ---------------------------------------------------------------------------
+
+
+def test_summarizer_config_round_trips(client):
+    r = client.put(
+        "/api/summarize/config",
+        json={
+            "source": "command",
+            "prompt": "Summarize into action items.",
+            "command": "claude -p",
+            "model": "",
+            "max_tokens": 2048,
+        },
+    )
+    assert r.status_code == 200, r.text
+    got = client.get("/api/summarize/config").json()
+    assert got == {
+        "source": "command",
+        "prompt": "Summarize into action items.",
+        "command": "claude -p",
+        "model": "",
+        "max_tokens": 2048,
+    }
+
+
+def test_summarizer_config_put_rejects_bad_fields(client):
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    try:
+        assert client.put("/api/summarize/config", json={"source": "bogus"}).status_code == 400
+        # "api" is a visible-but-disabled source in the UI; an unwired DEFAULT
+        # would break the pipeline with no operator in the loop → 400 until #85.
+        assert client.put("/api/summarize/config", json={"source": "api"}).status_code == 400
+        r = client.put("/api/summarize/config", json={"model": "evil/not-in-catalog"})
+        assert r.status_code == 400
+        assert "evil/not-in-catalog" in r.json()["detail"]
+        assert client.put("/api/summarize/config", json={"max_tokens": 9}).status_code == 400
+        assert client.put("/api/summarize/config", json={"prompt": "x" * 5000}).status_code == 400
+        # Nothing landed on disk along the way.
+        assert client.get("/api/summarize/config").json()["source"] == ""
+    finally:
+        set_available_backends_for_testing(None)
+
+
+def test_summarizer_config_put_empty_object_clears(client):
+    client.put("/api/summarize/config", json={"source": "command", "command": "claude -p"})
+    r = client.put("/api/summarize/config", json={})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/summarize/config").json() == {
+        "source": "",
+        "prompt": "",
+        "command": "",
+        "model": "",
+        "max_tokens": None,
+    }
+
+
+def test_api_state_surfaces_summarizer_default_public_fields_only(client):
+    """The dashboard pre-fills the Settings card and the Summary view from the
+    state poll. Strict key equality pins `summarizer_default_public` as the
+    #85 redaction seam — a future API-key field must not ride along."""
+    client.put(
+        "/api/summarize/config",
+        json={"source": "command", "prompt": "P", "command": "claude -p", "max_tokens": 512},
+    )
+    blob = client.get("/api/state").json()["summarizer_default"]
+    assert blob == {
+        "source": "command",
+        "prompt": "P",
+        "command": "claude -p",
+        "model": "",
+        "max_tokens": 512,
+    }
 
 
 def test_summarize_command_source_accepts_max_tokens_field(client, recorder_under_test):
