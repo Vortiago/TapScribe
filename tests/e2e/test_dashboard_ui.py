@@ -2828,11 +2828,7 @@ async def test_summary_prefills_effective_config_and_saves_session_override(
                 timeout=8000,
             )
             meta = json.loads(
-                await (
-                    await context.request.get(
-                        rr.base_url + f"/api/session-meta/{sid}"
-                    )
-                ).text()
+                await (await context.request.get(rr.base_url + f"/api/session-meta/{sid}")).text()
             )
             assert meta.get("summary_source", "") == ""
             assert meta.get("summary_prompt", "") == ""

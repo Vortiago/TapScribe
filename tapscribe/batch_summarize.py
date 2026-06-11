@@ -69,7 +69,9 @@ def effective_summarizer_config(session: str) -> dict[str, Any]:
     g = read_summarizer_config()
     return {
         "source": (meta.get("summary_source") or "").strip() or (g["source"] or "").strip() or "local",
-        "prompt": (meta.get("summary_prompt") or "").strip() or (g["prompt"] or "").strip() or DEFAULT_SUMMARY_PROMPT,
+        "prompt": (meta.get("summary_prompt") or "").strip()
+        or (g["prompt"] or "").strip()
+        or DEFAULT_SUMMARY_PROMPT,
         "command": g["command"],
         "model": g["model"],
         "max_tokens": g["max_tokens"],

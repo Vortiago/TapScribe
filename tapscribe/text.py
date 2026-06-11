@@ -142,7 +142,9 @@ def read_summarizer_config() -> dict:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    out = {k: data[k] if isinstance(data.get(k), str) else "" for k in ("source", "prompt", "command", "model")}
+    out = {
+        k: data[k] if isinstance(data.get(k), str) else "" for k in ("source", "prompt", "command", "model")
+    }
     mt = data.get("max_tokens")
     out["max_tokens"] = mt if isinstance(mt, int) and not isinstance(mt, bool) else None
     return out
@@ -202,7 +204,13 @@ def write_summarizer_config(cfg: dict) -> dict:
         lo, hi = _MAX_TOKENS_BOUNDS
         if not (lo <= max_tokens <= hi):
             raise ValueError(f"max_tokens must be within {lo}–{hi}, got {max_tokens}")
-    stored = {"source": source, "prompt": prompt, "command": command, "model": model, "max_tokens": max_tokens}
+    stored = {
+        "source": source,
+        "prompt": prompt,
+        "command": command,
+        "model": model,
+        "max_tokens": max_tokens,
+    }
     atomic_write_text(config.SUMMARIZER_CONFIG_FILE, json.dumps(stored, indent=2) + "\n")
     return stored
 
