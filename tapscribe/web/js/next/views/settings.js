@@ -20,7 +20,8 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { getSummaryCatalog, putJson, wireConfigSave, wireSave } from "../../api.js";
+import { putJson, wireConfigSave, wireSave } from "../../api.js";
+import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header } from "../shell.js";
 import * as configCard from "../../components/config-card.js";
 
@@ -85,130 +86,40 @@ export function build(ctx) {
   const sdPrompt = /** @type {HTMLTextAreaElement} */ (pick(frag, "sdPrompt"));
   const sdOverrides = pick(frag, "sdOverrides");
 
-  /** The card's selected default source ("local" until the seed lands). */
-  let sdSource = "local";
   /** One-shot: seed the controls from the first poll carrying the saved
    * default, then never touch them again (interaction hold). */
   let sdSeeded = false;
-  /** @type {import('../../types.js').SummaryModel[]} */
-  let sdModels = [];
-  /** @type {import('../../types.js').CommandPreset[]} */
-  let sdPresets = [];
 
-  const sdApplySource = () => {
-    for (const b of sdButtons) {
-      const on = b.dataset.sdSrc === sdSource;
-      b.classList.toggle("is-on", on);
-      b.setAttribute("aria-pressed", on ? "true" : "false");
-    }
-    sdLocal.hidden = sdSource !== "local";
-    sdCommand.hidden = sdSource !== "command";
-  };
-  for (const b of sdButtons) {
-    b.addEventListener("click", () => {
-      const next = b.dataset.sdSrc;
-      if (b.disabled || !next || next === sdSource) return;
-      sdSource = next;
-      sdApplySource();
-    });
-  }
-  sdApplySource();
-
-  /** @param {number} t */
-  const sdCtxLabel = (t) => (t >= 1000 ? `${Math.round(t / 1000)}K` : `${t}`);
-  const sdReflectModelNote = () => {
-    const m = sdModels.find((x) => x.repo_id === sdModelSel.value);
-    sdModelNote.textContent = m
-      ? `≈${m.approx_gb} GB · ${sdCtxLabel(m.context_tokens)} ctx${m.note ? ` · ${m.note}` : ""}`
-      : "";
-  };
-  sdModelSel.addEventListener("change", sdReflectModelNote);
-
-  const sdReflectPresetNote = () => {
-    const p = sdPresets.find((x) => x.key === sdPresetSel.value);
-    sdPresetNote.textContent = p ? p.note : "";
-  };
-  sdPresetSel.addEventListener("change", () => {
-    const p = sdPresets.find((x) => x.key === sdPresetSel.value);
-    if (p) sdCmd.value = p.template;
-    sdReflectPresetNote();
-  });
-  sdCmd.addEventListener("input", () => {
-    const p = sdPresets.find((x) => x.key === sdPresetSel.value);
-    if (p && p.template !== sdCmd.value) {
-      sdPresetSel.value = "";
-      sdReflectPresetNote();
-    }
+  // Source segctl + model/preset/max-tokens wiring is the shared
+  // summarizer-controls component (the Summary view uses the same one).
+  const ctl = wireSummarizerControls({
+    buttons: sdButtons,
+    srcKey: "sdSrc",
+    localPane: sdLocal,
+    commandPane: sdCommand,
+    modelSel: sdModelSel,
+    modelNote: sdModelNote,
+    maxTokInput: sdMaxTok,
+    presetSel: sdPresetSel,
+    presetNote: sdPresetNote,
+    cmdInput: sdCmd,
   });
 
-  // Populate model + preset selects ONCE from the memoized catalog fetch
-  // (the Summary view's pattern, including the unavailable fallback).
-  // `sdCatReady` resolves once the selects hold their options; `sdSeed`
-  // sequences the catalog-dependent fields on it.
-  const sdCatReady = (async () => {
-    try {
-      const cat = await getSummaryCatalog();
-      sdModels = cat.models || [];
-      sdModelSel.replaceChildren();
-      for (const m of sdModels) sdModelSel.add(new Option(m.label || m.repo_id, m.repo_id, m.is_default, m.is_default));
-      if (!sdModels.length) {
-        sdModelSel.add(new Option("no local models", "", true, true));
-        sdModelSel.disabled = true;
-      }
-      if (typeof cat.max_tokens_min === "number") sdMaxTok.min = String(cat.max_tokens_min);
-      if (typeof cat.max_tokens_max === "number") sdMaxTok.max = String(cat.max_tokens_max);
-      sdPresets = cat.command_presets || [];
-      sdPresetSel.replaceChildren();
-      sdPresetSel.add(new Option("custom…", ""));
-      for (const p of sdPresets) sdPresetSel.add(new Option(p.label, p.key));
-      const match = sdPresets.find((x) => x.template === sdCmd.value);
-      sdPresetSel.value = match ? match.key : "";
-      sdReflectPresetNote();
-      sdReflectModelNote();
-    } catch {
-      // Best-effort (the Summary view's fallback): leave the selects disabled
-      // and let the server resolve its defaults from an empty model field.
-      sdModelSel.add(new Option("model list unavailable — using default", "", true, true));
-      sdModelSel.disabled = true;
-      sdPresetSel.add(new Option("presets unavailable", "", true, true));
-      sdPresetSel.disabled = true;
-    }
-  })();
-
-  /** Seed the controls from the saved global default — once. The
-   * catalog-dependent fields (model, preset match) apply via `sdCatReady`
-   * so their options exist, whichever of seed/fetch lands first. */
+  /** Seed the controls from the saved global default — once. The card is the
+   * stored object's EDITOR, so it mirrors it exactly (clearEmptyCommand:
+   * an empty stored command clears the field, unlike the Summary view's
+   * keep-the-template-default convenience). */
   /** @param {import('../../types.js').SummarizerDefault} d */
   const sdSeed = (d) => {
-    sdSource = d.source || "local"; // "" (unset) shows the built-in default
-    sdApplySource();
+    ctl.setSource(d.source || "local"); // "" (unset) shows the built-in default
     sdPrompt.value = d.prompt || "";
-    sdCmd.value = d.command || "";
-    if (typeof d.max_tokens === "number") sdMaxTok.value = String(d.max_tokens);
-    sdCatReady.then(() => {
-      if (d.model) {
-        sdModelSel.value = d.model; // stays on the fallback option if unlisted
-        sdReflectModelNote();
-      }
-      const match = sdPresets.find((x) => x.template === sdCmd.value);
-      sdPresetSel.value = match ? match.key : "";
-      sdReflectPresetNote();
-    });
+    ctl.seedSaved(d, { clearEmptyCommand: true });
   };
 
   wireSave({
     btn: /** @type {HTMLButtonElement} */ (pick(frag, "sdSave")),
     status: pick(frag, "sdStatus"),
-    put: () => {
-      const mt = parseInt(sdMaxTok.value, 10);
-      return putJson("/api/summarize/config", {
-        source: sdSource,
-        prompt: sdPrompt.value,
-        command: sdCmd.value.trim(),
-        model: sdModelSel.value || "",
-        max_tokens: Number.isFinite(mt) ? mt : null,
-      });
-    },
+    put: () => putJson("/api/summarize/config", { ...ctl.values(), prompt: sdPrompt.value }),
     onSuccess: () => afterMutate(),
   });
 

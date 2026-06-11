@@ -30,7 +30,8 @@
 // pane).
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
-import { getSummaryCatalog, postJson, putJson, wireSave, fetchSessionSummary, peekSessionSummary } from "../../api.js";
+import { postJson, putJson, wireSave, fetchSessionSummary, peekSessionSummary } from "../../api.js";
+import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
 
 /**
@@ -64,19 +65,16 @@ export function build(ctx) {
   const jobFill = /** @type {HTMLElement} */ (pick(frag, "jobFill"));
   const jobWav = pick(frag, "jobWav");
 
-  // Source selector (segmented) + the per-source detail panes. The buttons and
-  // both panes are built ONCE from the template; a click switches `source` and
-  // toggles which pane shows — never a per-tick rebuild, so the interaction
-  // hold holds (the command <input> / prompt <textarea> live inside, untouched).
+  // Source selector + per-source detail panes + the local model picker —
+  // all built ONCE from the template and handed to the shared
+  // summarizer-controls component below (never a per-tick rebuild, so the
+  // interaction hold holds; the command <input> / prompt <textarea> live
+  // inside, untouched).
   const srcButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
     frag.querySelectorAll(".segctl--wide [data-src]")
   );
   const srcLocal = /** @type {HTMLElement} */ (pick(frag, "srcLocal"));
   const srcCommand = /** @type {HTMLElement} */ (pick(frag, "srcCommand"));
-
-  // Local model picker. The <select> is populated ONCE from the hardware-routed
-  // catalog (GET /api/summarize/models) and never rebuilt per-tick, so the
-  // interaction hold holds (same discipline as the source buttons / inputs).
   const modelSel = /** @type {HTMLSelectElement} */ (pick(frag, "sumModel"));
   const modelNote = pick(frag, "sumModelNote");
   const maxTokInput = /** @type {HTMLInputElement} */ (pick(frag, "sumMaxTokens"));
@@ -96,22 +94,6 @@ export function build(ctx) {
   /** Sticky error message from the last failed Generate — shown in the note
    * until the next Generate clears it. */
   let errorMsg = "";
-  /** The selected summarizer source. Local (bundled, offline) is the default
-   * for this view — view-local until #84 makes the default operator-configurable.
-   * Command is also wired (#82); API (#85) is present but disabled. */
-  let source = "local";
-  /** The selected Local model repo id. Empty until the catalog loads (the
-   * server then falls back to its default); once loaded, mirrors the <select>.
-   * Sent in the Generate body ONLY for the local source. */
-  let model = "";
-  /** The loaded catalog rows, kept so the note can show the picked model's
-   * footprint/context. */
-  /** @type {import('../../types.js').SummaryModel[]} */
-  let models = [];
-  /** The loaded command presets — known CLI tools whose template a pick seeds
-   * into the (still editable) command field. NOT an allowlist. */
-  /** @type {import('../../types.js').CommandPreset[]} */
-  let presets = [];
   /** The template's baked-in prompt — the view-side bottom of the effective
    * chain (matches the server's DEFAULT_SUMMARY_PROMPT). Captured before any
    * seed touches the textarea. */
@@ -253,15 +235,15 @@ export function build(ctx) {
     lastCtlSig = " "; // re-sync the button immediately, don't wait for a poll
     reflectControls();
     try {
-      // The Local source carries the picked model + output cap (empty/NaN →
+      // The Local source carries the picked model + output cap (empty/null →
       // server defaults); the Command source carries a CLI template instead.
+      const v = ctl.values();
       /** @type {{ source: string, prompt: string, command?: string, model?: string, max_tokens?: number }} */
-      const body = { source, prompt: promptTa.value };
-      if (source === "command") body.command = cmdInput.value.trim();
-      if (source === "local") {
-        if (model) body.model = model;
-        const mt = parseInt(maxTokInput.value, 10);
-        if (Number.isFinite(mt)) body.max_tokens = mt;
+      const body = { source: v.source, prompt: promptTa.value };
+      if (v.source === "command") body.command = v.command;
+      if (v.source === "local") {
+        if (v.model) body.model = v.model;
+        if (v.max_tokens != null) body.max_tokens = v.max_tokens;
       }
       const res = /** @type {import('../../types.js').SummaryResult} */ (
         await postJson(`/api/sessions/${encodeURIComponent(sid)}/summarize`, body)
@@ -283,31 +265,46 @@ export function build(ctx) {
     }
   });
 
-  // ---- Source selector (REAL) -----------------------------------------------
-  // Bound ONCE at build time. Switching source toggles which detail pane shows;
-  // the command/prompt inputs inside are never rebuilt (interaction hold).
+  // ---- Summarizer controls (shared component) ---------------------------------
+  // Source segctl + model/preset/max-tokens wiring is the shared
+  // summarizer-controls component (the Settings card uses the same one);
+  // this view adds the "will run" preview, which also reads the prompt.
 
-  /** Reflect the selected `source` onto the segmented buttons + detail panes.
-   * Pure view sync, no fetch — called on a click and once at build. */
-  const applySource = () => {
-    for (const b of srcButtons) {
-      const on = b.dataset.src === source;
-      b.classList.toggle("is-on", on);
-      b.setAttribute("aria-pressed", on ? "true" : "false");
+  /** Spell out what Generate will run: the template verbatim + the prompt as
+   * a quoted trailing argument (elided past 80 chars), then the stdin note. */
+  const reflectCmdPreview = () => {
+    const cmd = cmdInput.value.trim();
+    if (!cmd) {
+      cmdPreview.replaceChildren();
+      return;
     }
-    srcLocal.hidden = source !== "local";
-    srcCommand.hidden = source !== "command";
+    const p = promptTa.value.trim();
+    const shown = p.length > 80 ? `${p.slice(0, 77)}…` : p;
+    const promptArg = shown ? ` "${shown.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : "";
+    const l1 = document.createElement("div");
+    l1.textContent = `will run: ${cmd}${promptArg}`;
+    const l2 = document.createElement("div");
+    l2.textContent = "merged transcript → stdin";
+    cmdPreview.replaceChildren(l1, l2);
   };
+  promptTa.addEventListener("input", reflectCmdPreview);
 
-  for (const b of srcButtons) {
-    b.addEventListener("click", () => {
-      const next = b.dataset.src;
-      if (b.disabled || generating || !next || next === source) return;
-      source = next;
-      applySource();
-    });
-  }
-  applySource(); // seed the default (Local) selection + pane visibility
+  const ctl = wireSummarizerControls({
+    buttons: srcButtons,
+    srcKey: "src",
+    localPane: srcLocal,
+    commandPane: srcCommand,
+    modelSel,
+    modelNote,
+    emptyModelNote: "first Generate downloads the model, then it runs fully offline",
+    maxTokInput,
+    presetSel: cmdPresetSel,
+    presetNote: cmdPresetNote,
+    cmdInput,
+    canSwitch: () => !generating,
+    onCommandInput: reflectCmdPreview,
+  });
+  reflectCmdPreview(); // seed from the template defaults at build
 
   // ---- Effective config (#84) -----------------------------------------------
   // The controls pre-fill from the EFFECTIVE config: the session-meta override
@@ -324,33 +321,9 @@ export function build(ctx) {
   /** @param {{ summary_source?: string, summary_prompt?: string }} meta
    *  @param {Partial<import('../../types.js').SummarizerDefault>} d */
   const seedFromLayers = (meta, d) => {
-    source = meta.summary_source || d.source || "local";
-    applySource();
+    ctl.setSource(meta.summary_source || d.source || "local");
     promptTa.value = meta.summary_prompt || d.prompt || builtinPrompt;
     reflectCmdPreview();
-  };
-
-  /** Seed the global-layer fields (command/model/max_tokens) — once, AFTER
-   * the catalog fetch settles (`catReady` sequences it), so the model option
-   * exists, the preset match sees the real preset list, and the saved
-   * max_tokens lands on top of the catalog default rather than under it. */
-  /** @param {import('../../types.js').SummarizerDefault} d */
-  const seedGlobalLayer = (d) => {
-    catReady.then(() => {
-      if (d.command) {
-        cmdInput.value = d.command;
-        const match = presets.find((x) => x.template === cmdInput.value);
-        cmdPresetSel.value = match ? match.key : "";
-        reflectPresetNote();
-        reflectCmdPreview();
-      }
-      if (d.model) {
-        modelSel.value = d.model;
-        model = modelSel.value; // stays on the fallback option if d.model isn't listed
-        reflectModelNote();
-      }
-      if (typeof d.max_tokens === "number") maxTokInput.value = String(d.max_tokens);
-    });
   };
 
   // "save for this session": persist source + prompt as the per-session
@@ -361,7 +334,7 @@ export function build(ctx) {
     put: () => {
       if (!session) return Promise.reject(new Error("no session selected"));
       return putJson(`/api/session-meta/${encodeURIComponent(session.session)}`, {
-        summary_source: source,
+        summary_source: ctl.source,
         summary_prompt: promptTa.value,
       });
     },
@@ -387,121 +360,6 @@ export function build(ctx) {
     onSuccess: () => afterMutate(),
   });
 
-  // ---- Local model picker (REAL) --------------------------------------------
-  // Populate the <select> ONCE from the hardware-routed catalog, then leave it
-  // alone — a click on an option mutates `model`, never a per-tick rebuild, so
-  // the interaction hold holds (the dashboard sweep covers it).
-
-  /** @param {number} t */
-  const ctxLabel = (t) => (t >= 1000 ? `${Math.round(t / 1000)}K` : `${t}`);
-
-  /** Show the picked model's footprint + context + note under the dropdown. */
-  const reflectModelNote = () => {
-    const m = models.find((x) => x.repo_id === model);
-    modelNote.textContent = m
-      ? `≈${m.approx_gb} GB · ${ctxLabel(m.context_tokens)} ctx${m.note ? ` · ${m.note}` : ""}`
-      : "first Generate downloads the model, then it runs fully offline";
-  };
-
-  modelSel.addEventListener("change", () => {
-    model = modelSel.value;
-    reflectModelNote();
-  });
-
-  // ---- Command presets + the "will run" preview (REAL) ----------------------
-  // The preset <select> SEEDS the editable command field; the preview spells
-  // out the exact invocation so the operator can see where the prompt and the
-  // transcript go: template + prompt as ONE trailing argv element, transcript
-  // on stdin (mirrors build_command_argv server-side). Both are input-event-
-  // driven — never tick-driven — so the interaction hold is untouched (the
-  // pane is built once and never rebuilt).
-
-  /** Reflect the picked preset's caveat note under the dropdown. */
-  const reflectPresetNote = () => {
-    const p = presets.find((x) => x.key === cmdPresetSel.value);
-    cmdPresetNote.textContent = p ? p.note : "";
-  };
-
-  /** Spell out what Generate will run: the template verbatim + the prompt as
-   * a quoted trailing argument (elided past 80 chars), then the stdin note. */
-  const reflectCmdPreview = () => {
-    const cmd = cmdInput.value.trim();
-    if (!cmd) {
-      cmdPreview.replaceChildren();
-      return;
-    }
-    const p = promptTa.value.trim();
-    const shown = p.length > 80 ? `${p.slice(0, 77)}…` : p;
-    const promptArg = shown ? ` "${shown.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : "";
-    const l1 = document.createElement("div");
-    l1.textContent = `will run: ${cmd}${promptArg}`;
-    const l2 = document.createElement("div");
-    l2.textContent = "merged transcript → stdin";
-    cmdPreview.replaceChildren(l1, l2);
-  };
-
-  cmdPresetSel.addEventListener("change", () => {
-    const p = presets.find((x) => x.key === cmdPresetSel.value);
-    if (p) cmdInput.value = p.template;
-    reflectPresetNote();
-    reflectCmdPreview();
-  });
-  cmdInput.addEventListener("input", () => {
-    // A hand-edited template is no longer the preset verbatim — flip the
-    // dropdown back to "custom…" so it doesn't claim otherwise.
-    const p = presets.find((x) => x.key === cmdPresetSel.value);
-    if (p && p.template !== cmdInput.value) {
-      cmdPresetSel.value = "";
-      reflectPresetNote();
-    }
-    reflectCmdPreview();
-  });
-  promptTa.addEventListener("input", reflectCmdPreview);
-  reflectCmdPreview(); // seed from the template defaults at build
-
-  // `catReady` resolves once the selects are populated (or the fallback
-  // options are in place) — `seedGlobalLayer` sequences the saved-default
-  // application on it, replacing applied-too-early/arrived-too-late flag
-  // juggling with plain ordering.
-  const catReady = (async () => {
-    try {
-      const cat = await getSummaryCatalog();
-      models = cat.models || [];
-      modelSel.replaceChildren();
-      for (const m of models) modelSel.add(new Option(m.label || m.repo_id, m.repo_id, m.is_default, m.is_default));
-      if (!models.length) {
-        modelSel.add(new Option("no local models", "", true, true));
-        modelSel.disabled = true;
-      }
-      model = modelSel.value;
-      reflectModelNote();
-      // Seed the output-cap input's bounds + default from the server (one source
-      // of truth — the HTML value is only a placeholder until this lands, which
-      // is once at mount, before the operator can edit). A saved default's
-      // max_tokens (#84) lands AFTER this via catReady, so it wins.
-      if (typeof cat.max_tokens_min === "number") maxTokInput.min = String(cat.max_tokens_min);
-      if (typeof cat.max_tokens_max === "number") maxTokInput.max = String(cat.max_tokens_max);
-      if (typeof cat.max_tokens_default === "number") maxTokInput.value = String(cat.max_tokens_default);
-      // Command presets (same fetch): "custom…" + one option per known tool.
-      // Pre-select the preset whose template matches the field's default.
-      presets = cat.command_presets || [];
-      cmdPresetSel.replaceChildren();
-      cmdPresetSel.add(new Option("custom…", ""));
-      for (const p of presets) cmdPresetSel.add(new Option(p.label, p.key));
-      const match = presets.find((x) => x.template === cmdInput.value);
-      cmdPresetSel.value = match ? match.key : "";
-      reflectPresetNote();
-    } catch {
-      // Best-effort: if the catalog fetch fails, leave the dropdown disabled and
-      // let the server fall back to its default model (an empty `model` in the
-      // Generate body), rather than blocking the operator.
-      modelSel.add(new Option("model list unavailable — using default", "", true, true));
-      modelSel.disabled = true;
-      cmdPresetSel.add(new Option("presets unavailable", "", true, true));
-      cmdPresetSel.disabled = true;
-    }
-  })();
-
   // ---- Per-tick update ------------------------------------------------------
 
   /**
@@ -520,7 +378,7 @@ export function build(ctx) {
     if (j.summarizer_default) lastDefault = j.summarizer_default;
     if (!globalSeeded && j.summarizer_default) {
       globalSeeded = true;
-      seedGlobalLayer(j.summarizer_default);
+      ctl.seedSaved(j.summarizer_default);
     }
     const meta = sess?.session_meta || {};
     overrideNote.textContent =

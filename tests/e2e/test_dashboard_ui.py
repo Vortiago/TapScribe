@@ -2717,7 +2717,12 @@ async def test_settings_summarizer_default_card_saves_and_prefills(running_recor
             assert "is-on" in (on or ""), f"saved source must pre-select, got class {on!r}"
             cmd_visible = await page.is_visible('[data-slot="sdCmd"]')
             assert cmd_visible, "command detail pane must show for the saved Command source"
-            assert (await page.input_value('[data-slot="sdCmd"]')) == "claude -p --bare"
+            # The command value applies once the catalog fetch settles (the
+            # shared controls sequence saved values on it) — wait, don't race it.
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sdCmd"]')?.value === 'claude -p --bare'""",
+                timeout=8000,
+            )
 
             # The backend agrees (the card saved through PUT /api/summarize/config).
             cfg = json.loads(await (await context.request.get(rr.base_url + "/api/summarize/config")).text())
@@ -2783,7 +2788,12 @@ async def test_summary_prefills_effective_config_and_saves_session_override(
             )
             on = await page.get_attribute('.segctl--wide [data-src="command"]', "class")
             assert "is-on" in (on or ""), f"global default source must pre-select, got {on!r}"
-            assert (await page.input_value('[data-slot="sumCmd"]')) == "claude -p"
+            # The command value applies once the catalog fetch settles (the
+            # shared controls sequence saved values on it) — wait, don't race it.
+            await page.wait_for_function(
+                """() => document.querySelector('[data-slot="sumCmd"]')?.value === 'claude -p'""",
+                timeout=8000,
+            )
 
             # (b) Save a per-session override: Local source + a session prompt.
             await page.click('.segctl--wide [data-src="local"]')
