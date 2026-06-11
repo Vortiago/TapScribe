@@ -675,3 +675,9 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
 
 
 REGISTRY: TranscriberRegistry = TranscriberRegistry(_DEFAULT_ENTRIES)
+
+# The bundled fallback batch model — what a transcribe runs with when neither
+# the request body nor the operator's batch-model.txt default names one. The
+# single source the /api/transcribe* routes and the end-of-meeting pipeline
+# all resolve through.
+DEFAULT_BATCH_MODEL: str = "small.en"

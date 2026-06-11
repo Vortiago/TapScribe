@@ -44,6 +44,12 @@ LIVE_PROMPT_FILE: Path = CONFIG_DIR / "live-prompt.txt"
 # — so the UI can show "restart to apply" when this differs from what's running.
 # Empty/missing = no saved default (the live channel uses its boot/auto model).
 LIVE_MODEL_FILE: Path = CONFIG_DIR / "live-model.txt"
+# Operator's DEFAULT batch model id (a single model_id, e.g. "small.en") — the
+# live-model's batch twin. The dashboard's Default engine card persists it
+# here; the end-of-meeting pipeline resolves its transcribe stage from it so
+# the tap-token trigger never carries a model field. Empty/missing = the
+# bundled default (transcribers.catalog.DEFAULT_BATCH_MODEL).
+BATCH_MODEL_FILE: Path = CONFIG_DIR / "batch-model.txt"
 HOTWORDS_FILE: Path = CONFIG_DIR / "hotwords.txt"
 HALLUCINATIONS_FILE: Path = CONFIG_DIR / "hallucinations.txt"
 
@@ -95,6 +101,15 @@ AUTH_EXEMPT_ROUTES = frozenset(
         ("POST", "/api/tap/new-session"),
     }
 )
+
+# Path PREFIXES exempt from Basic auth — for tap-token routes with a path
+# parameter (e.g. /api/tap/sessions/{session}/pipeline), which exact
+# (method, path) matching can never cover. The exemption widens ONLY to
+# routes that carry their OWN gate: every handler under /api/tap/ MUST
+# validate the tap bearer itself (auth.check_tap_bearer), exactly like
+# /api/tap/new-session — a bearer-less /api/tap/* route would be an open
+# door. test_tap_endpoint.py's 401 sweeps are the guard.
+AUTH_EXEMPT_PREFIXES: tuple[str, ...] = ("/api/tap/",)
 
 # Whether the FastAPI app's lifespan should auto-start the live channel.
 # Flipped off by --no-auto-live.

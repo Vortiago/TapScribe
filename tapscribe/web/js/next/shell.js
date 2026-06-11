@@ -81,6 +81,7 @@ export const JOB_LABELS = {
   transcribe: "Transcribing",
   strip: "Stripping silence",
   summarize: "Summarizing",
+  pipeline: "Pipeline",
 };
 
 /**
@@ -97,13 +98,19 @@ export const JOB_LABELS = {
  * @param {{ only?: import('../types.js').JobStateSnapshot["kind"] }} [opts]
  */
 export function renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job, { only } = {}) {
-  if (!job || (only && job.kind !== only)) {
+  // A pipeline job in stage X counts as an X job for the `only` filter, so
+  // e.g. the Summary panel's bar shows the pipeline's summarize stage.
+  const effectiveKind = job?.kind === "pipeline" && job.stage ? job.stage : job?.kind;
+  if (!job || (only && effectiveKind !== only)) {
     jobBar.hidden = true;
     return;
   }
   jobBar.hidden = false;
   const pct = job.total > 0 ? Math.round((100 * job.current) / job.total) : 0;
-  jobLabel.textContent = JOB_LABELS[job.kind] || "Working";
+  jobLabel.textContent =
+    job.kind === "pipeline" && job.stage
+      ? `${JOB_LABELS.pipeline} · ${JOB_LABELS[job.stage] || job.stage}`
+      : JOB_LABELS[job.kind] || "Working";
   jobCount.textContent = `${job.current} / ${job.total}`;
   jobFill.style.width = `${pct}%`;
   jobWav.textContent = job.current_file ? `current: ${job.current_file}` : "";

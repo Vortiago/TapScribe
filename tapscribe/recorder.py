@@ -212,17 +212,20 @@ class SessionBusy(Exception):
 
 @dataclass
 class JobState:
-    """State for an in-flight session-scoped job (transcribe, strip, or
-    summarize)."""
+    """State for an in-flight session-scoped job (transcribe, strip,
+    summarize, or the end-of-meeting pipeline chaining all three)."""
 
     session: str
-    kind: Literal["transcribe", "strip", "summarize"]
+    kind: Literal["transcribe", "strip", "summarize", "pipeline"]
     current: int
     total: int
     started_at: datetime
     status: str = "running"
     current_file: str | None = None
     model: str | None = None
+    # Which stage a `kind="pipeline"` job is in ("strip" / "transcribe" /
+    # "summarize"); None for single-stage jobs.
+    stage: str | None = None
 
 
 class _JobHandle:
@@ -274,7 +277,7 @@ class JobTracker:
         self,
         session: str,
         *,
-        kind: Literal["transcribe", "strip", "summarize"],
+        kind: Literal["transcribe", "strip", "summarize", "pipeline"],
         total: int,
         model: str | None = None,
         status: str = "running",
@@ -309,6 +312,13 @@ class JobTracker:
         finally:
             await self.release(session)
 
+    def handle(self, session: str) -> _JobHandle:
+        """A progress handle for a claim the caller made via `claim()`
+        directly — the hand-held twin of the handle `run` yields. The
+        end-of-meeting pipeline uses this: it claims in the request path
+        (deterministic 409) and updates/releases from its background task."""
+        return _JobHandle(self, session)
+
     def get(self, session: str) -> JobState | None:
         """Read-only access — lock not strictly needed for a single dict
         get, and most callers just want a snapshot for /api/state."""
@@ -339,6 +349,61 @@ class LiveTranscripts:
 
     def snapshot(self) -> list[dict]:
         return list(self._entries)
+
+
+# ---------------------------------------------------------------------------
+# PipelineResults — last end-of-meeting pipeline outcome per session
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PipelineRecord:
+    """The last end-of-meeting pipeline outcome for one session. The job
+    snapshot vanishes when the slot releases, so the tap poll endpoint reads
+    THIS to answer done-with-summary / failed-at-stage after the run."""
+
+    session: str
+    state: str  # "running" | "done" | "failed"
+    stage: str | None = None  # the failing stage when state == "failed"
+    error: str | None = None
+    error_kind: str | None = None  # the domain error's class name
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class PipelineResults:
+    """session -> last PipelineRecord, in memory only and overwritten on the
+    next trigger. A Recorder restart loses it by design — the persisted
+    session-summary.json still answers "done" for a re-polling Bridge.
+
+    Methods are sync for the same reason as UtteranceIndex: every caller runs
+    on the single asyncio event loop with no await points inside."""
+
+    def __init__(self) -> None:
+        self._by_session: dict[str, PipelineRecord] = {}
+
+    def begin(self, session: str) -> None:
+        self._by_session[session] = PipelineRecord(
+            session=session, state="running", started_at=datetime.now(UTC)
+        )
+
+    def finish_done(self, session: str) -> None:
+        rec = self._by_session.get(session)
+        if rec is not None:
+            rec.state = "done"
+            rec.finished_at = datetime.now(UTC)
+
+    def finish_failed(self, session: str, *, stage: str, error: str, error_kind: str) -> None:
+        rec = self._by_session.get(session)
+        if rec is not None:
+            rec.state = "failed"
+            rec.stage = stage
+            rec.error = error
+            rec.error_kind = error_kind
+            rec.finished_at = datetime.now(UTC)
+
+    def get(self, session: str) -> PipelineRecord | None:
+        return self._by_session.get(session)
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +618,7 @@ class Recorder:
         self.streams = ActiveStreams()
         self.tap_settings = TapSettings()
         self.jobs = JobTracker()
+        self.pipelines = PipelineResults()
         self.transcripts = LiveTranscripts(max_entries=200)
         self.utterances = UtteranceIndex()
         self.auth = SecretFile.load_or_create(auth_password_file, label="password")

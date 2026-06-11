@@ -486,7 +486,8 @@ single source of truth for the `<iso>_<speaker>_<ident>_<utt>.wav` format.)
 ## Session job · `JobTracker.run`
 
 The "one heavy job per session at a time" rule — a session may have at most
-one transcribe **or** strip **or** summarize running. `JobTracker` (a Recorder
+one transcribe **or** strip **or** summarize **or** end-of-meeting pipeline
+running. `JobTracker` (a Recorder
 sub-component in `tapscribe/recorder.py`) holds the per-session `JobState`; the
 batch orchestrators bracket their work with the async context manager
 `recorder.jobs.run(session, *, kind, total, …)`:
@@ -580,6 +581,41 @@ so a bad command fails fast), runs it under the `summarize` job kind, and
 returns the summary dict. As of the tracer-bullet slice (#82) there's no
 persistence (the summary is lost on reload) and no saved config (source /
 command / prompt arrive per request).
+
+## End-of-meeting pipeline
+
+The strip → batch-transcribe(stripped) → summarize chain as **one** Session
+job: one trigger takes a finished session from raw WAVs to a persisted
+summary with no operator in the loop. The fourth orchestrator sibling, in
+`tapscribe/batch_pipeline.py` — it owns no work loop of its own; each of the
+three siblings exposes a `*_locked` core (its work minus the slot claim), and
+the pipeline drives those under a single `kind="pipeline"` claim so the
+one-heavy-job rule holds across the whole chain (a concurrent trigger or a
+manual transcribe gets 409 for the chain's full duration). Stage progress
+flows through the ordinary job snapshot — `JobState.stage` names the current
+stage and the per-stage loops keep updating `current`/`total` — so the
+dashboard's job bar shows "Pipeline · Transcribing 3/12" with no extra
+plumbing.
+
+Triggered and polled by a Bridge over two tap-bearer endpoints
+(`POST`/`GET /api/tap/sessions/{session}/pipeline`). **Operator defaults
+only**: the trigger's body is ignored, never parsed — `PipelineRequest`
+carries just the session id, and the pipeline resolves the batch model from
+`batch-model.txt` (catalog-validated at write AND at read), the backend from
+the Recorder's launch preference, and the summarizer from the Local source's
+bundled/env default — so a tap-token holder can never choose what gets loaded
+or downloaded (the Summarizer catalog/allowlist invariant, one privilege
+boundary up).
+
+`start_pipeline` claims the slot **in the request path** (deterministic 409)
+and runs the chain in a background task — the one sanctioned hand-rolled
+claim/release, since claim and release live in different call frames; the
+release only ever runs in the task spawned after a successful claim. A stage
+failure aborts the chain and is recorded in `recorder.pipelines`
+(`PipelineResults`, in-memory, one record per session, overwritten on
+re-trigger) as failed-at-stage with the domain error — the poll endpoint's
+contract. "Done" is answered from the persisted `session-summary.json`, so a
+Bridge polling across a Recorder restart still gets its summary.
 
 ## Summarizer
 

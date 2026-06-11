@@ -219,10 +219,10 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
 
     Brackets the work in `recorder.jobs.run(...)` — one transcribe / strip /
     summarize job per session at a time. The cm raises `SessionBusy` when the
-    slot is already taken (releasing nothing in that case) and releases the
-    slot on every other exit path. Raises `NoUsableWavs` when the range filter
-    rejected every WAV; per-WAV failures inside the loop propagate through the
-    cm, which still releases."""
+    slot is already taken (releasing nothing in that case — and before the
+    model is even loaded) and releases the slot on every other exit path.
+    Raises `NoUsableWavs` when the range filter rejected every WAV; per-WAV
+    failures inside the loop propagate through the cm, which still releases."""
     session_dir = resolve_session_dir(req.session)
 
     try:
@@ -237,40 +237,55 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
     if not selection.wavs:
         raise NoUsableWavs("no usable WAVs in the given range")
 
+    async with recorder.jobs.run(
+        req.session, kind="transcribe", total=len(selection.wavs), model=req.model
+    ) as job:
+        return await transcribe_session_locked(req, selection=selection, job=job)
+
+
+async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job) -> dict:
+    """The transcribe core: load the model, drive the cache loop with per-WAV
+    progress on the CALLER's job handle, merge, write the session outputs.
+    Assumes the caller already holds the session's job slot — claims and
+    releases NOTHING (the model release in the finally is the Transcriber
+    idle-TTL bookkeeping, not the job slot), so the end-of-meeting pipeline
+    can run it as one stage of a single `kind="pipeline"` claim.
+
+    `selection` is the `SessionSelection` the wrapper validated; `job` is any
+    object with `async update(**fields)` — `JobTracker.run`'s handle or
+    `JobTracker.handle(session)` for a hand-held claim."""
+    session_dir = resolve_session_dir(req.session)
     transcriber = await run_on_model_thread(load_transcriber, req.model, backend=req.backend)
     try:
         inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
 
-        async with recorder.jobs.run(
-            req.session, kind="transcribe", total=len(selection.wavs), model=req.model
-        ) as job:
-            for idx, wav in enumerate(selection.wavs):
-                await job.update(current=idx, current_file=wav.name)
-                await run_on_model_thread(
-                    cached_transcribe,
-                    wav,
-                    transcriber,
-                    initial_prompt=inv.initial_prompt,
-                    hotwords=inv.hotwords,
-                    source_lang=inv.source_lang,
-                    target_lang=inv.target_lang,
-                    hallucination_rules=list(inv.hallucination_rules),
-                    force=req.force,
-                    source=selection.source,
-                )
+        for idx, wav in enumerate(selection.wavs):
+            await job.update(current=idx, current_file=wav.name)
+            await run_on_model_thread(
+                cached_transcribe,
+                wav,
+                transcriber,
+                initial_prompt=inv.initial_prompt,
+                hotwords=inv.hotwords,
+                source_lang=inv.source_lang,
+                target_lang=inv.target_lang,
+                hallucination_rules=list(inv.hallucination_rules),
+                force=req.force,
+                source=selection.source,
+            )
 
-            transcript = merge_session(selection)
-            merged = transcript.to_dict()
-            if not merged.get("model"):
-                merged["model"] = req.model
+        transcript = merge_session(selection)
+        merged = transcript.to_dict()
+        if not merged.get("model"):
+            merged["model"] = req.model
 
-            out_path = session_dir / "session-transcript.json"
-            out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-            (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
+        out_path = session_dir / "session-transcript.json"
+        out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+        (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
 
-            return merged
+        return merged
     finally:
-        # Release our use of the model on every exit path (success, the
-        # SessionBusy short-circuit, or a per-WAV failure) so the idle-TTL
-        # policy can unload it. Offloaded for the same reason as transcribe_one.
+        # Release our use of the model on every exit path (success or a
+        # per-WAV failure) so the idle-TTL policy can unload it. Offloaded
+        # because eviction may run gc + GPU-cache reclaim.
         await run_on_model_thread(release_transcriber, transcriber)

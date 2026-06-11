@@ -130,6 +130,7 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config, "CONFIG_DIR", cfg)
     monkeypatch.setattr(config, "PROMPT_FILE", cfg / "prompt.txt")
     monkeypatch.setattr(config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
+    monkeypatch.setattr(config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
     monkeypatch.setattr(config, "HOTWORDS_FILE", cfg / "hotwords.txt")
     monkeypatch.setattr(config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
     return cfg
@@ -508,6 +509,7 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_config, "CONFIG_DIR", cfg)
     monkeypatch.setattr(_config, "PROMPT_FILE", cfg / "prompt.txt")
     monkeypatch.setattr(_config, "LIVE_PROMPT_FILE", cfg / "live-prompt.txt")
+    monkeypatch.setattr(_config, "BATCH_MODEL_FILE", cfg / "batch-model.txt")
     monkeypatch.setattr(_config, "HOTWORDS_FILE", cfg / "hotwords.txt")
     monkeypatch.setattr(_config, "HALLUCINATIONS_FILE", cfg / "hallucinations.txt")
     (tmp_path / "recordings").mkdir()
