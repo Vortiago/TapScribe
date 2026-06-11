@@ -30,7 +30,7 @@
 // pane).
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
-import { getJson, postJson, fetchSessionSummary, peekSessionSummary } from "../../api.js";
+import { getJson, postJson, putJson, wireSave, fetchSessionSummary, peekSessionSummary } from "../../api.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
 
 /**
@@ -52,6 +52,10 @@ export function build(ctx) {
   const cmdPresetNote = pick(frag, "sumCmdPresetNote");
   const cmdPreview = pick(frag, "sumCmdPreview");
   const promptTa = /** @type {HTMLTextAreaElement} */ (pick(frag, "sumPrompt"));
+  const saveSessBtn = /** @type {HTMLButtonElement} */ (pick(frag, "sumSaveSession"));
+  const useDefaultBtn = /** @type {HTMLButtonElement} */ (pick(frag, "sumUseDefault"));
+  const saveStatus = pick(frag, "sumSaveStatus");
+  const overrideNote = pick(frag, "sumOverrideNote");
   const genBtn = /** @type {HTMLButtonElement} */ (pick(frag, "sumGenerate"));
   const sumNote = pick(frag, "sumNote");
   const jobBar = pick(frag, "jobBar");
@@ -108,6 +112,26 @@ export function build(ctx) {
    * into the (still editable) command field. NOT an allowlist. */
   /** @type {import('../../types.js').CommandPreset[]} */
   let presets = [];
+  /** The template's baked-in prompt — the view-side bottom of the effective
+   * chain (matches the server's DEFAULT_SUMMARY_PROMPT). Captured before any
+   * seed touches the textarea. */
+  const builtinPrompt = promptTa.value;
+  /** One-shot: the GLOBAL-layer fields (command/model/max_tokens) seed from
+   * the first poll carrying `summarizer_default` and are then left alone —
+   * unlike source/prompt they don't re-seed per session (they have no
+   * per-session override), so a hand-edit survives session switches. */
+  let globalSeeded = false;
+  /** Whether the global seed set max_tokens — so the catalog fetch landing
+   * later doesn't overwrite it with the server default. */
+  let maxTokSeeded = false;
+  /** A saved model id that arrived before the catalog populated the <select>;
+   * the catalog IIFE applies it. */
+  let pendingModel = "";
+  /** The last-seen global default (mirrored each tick) — the reset button
+   * seeds from it DIRECTLY rather than waiting a poll, because afterMutate's
+   * synchronous re-render still carries the stale (pre-clear) session-meta. */
+  /** @type {import('../../types.js').SummarizerDefault | null} */
+  let lastDefault = null;
 
   // Split render gates: the header and the controls each update independently so
   // an idle tick rebuilds nothing. The output pane has no closure sig — it
@@ -153,6 +177,8 @@ export function build(ctx) {
   /** Sync the Generate button + the note line from current state. Never touches
    * the command/prompt inputs (the operator owns those). */
   const reflectControls = () => {
+    saveSessBtn.disabled = !session || generating;
+    useDefaultBtn.disabled = !session || generating;
     genBtn.disabled = !session || generating;
     genBtn.textContent = generating ? "⟳ Generating…" : "🪄 Generate summary";
     if (errorMsg) {
@@ -289,6 +315,93 @@ export function build(ctx) {
   }
   applySource(); // seed the default (Local) selection + pane visibility
 
+  // ---- Effective config (#84) -----------------------------------------------
+  // The controls pre-fill from the EFFECTIVE config: the session-meta override
+  // (source + prompt) over the global default over built-ins — the same chain
+  // the server resolves for omitted Generate fields and the pipeline. Seeding
+  // is keyed strictly on a session-id CHANGE (the switch block below), so a
+  // poll tick can never clobber a mid-edit prompt; Generate still sends the
+  // live values, so hand-edits behave exactly as before.
+
+  /** Seed source + prompt from the session's effective config. Called from the
+   * session-switch block only (plus the reset button's deliberate re-seed). */
+  /** @param {import('../../types.js').AppState} j @param {import('../../types.js').Session} sess */
+  const seedEffective = (j, sess) => {
+    const d = j.summarizer_default || /** @type {Partial<import('../../types.js').SummarizerDefault>} */ ({});
+    const m = sess.session_meta || {};
+    source = m.summary_source || d.source || "local";
+    applySource();
+    promptTa.value = m.summary_prompt || d.prompt || builtinPrompt;
+    reflectCmdPreview();
+  };
+
+  /** Seed the global-layer fields (command/model/max_tokens) — once. */
+  /** @param {import('../../types.js').SummarizerDefault} d */
+  const seedGlobalLayer = (d) => {
+    if (d.command) {
+      cmdInput.value = d.command;
+      const match = presets.find((x) => x.template === cmdInput.value);
+      cmdPresetSel.value = match ? match.key : "";
+      reflectPresetNote();
+      reflectCmdPreview();
+    }
+    if (d.model) {
+      pendingModel = d.model;
+      if ([...modelSel.options].some((o) => o.value === d.model)) {
+        modelSel.value = d.model;
+        model = d.model;
+        pendingModel = "";
+        reflectModelNote();
+      }
+    }
+    if (typeof d.max_tokens === "number") {
+      maxTokInput.value = String(d.max_tokens);
+      maxTokSeeded = true;
+    }
+  };
+
+  // "save for this session": persist source + prompt as the per-session
+  // override (the shared saving…/saved badge lifecycle).
+  wireSave({
+    btn: saveSessBtn,
+    status: saveStatus,
+    put: () => {
+      if (!session) return Promise.reject(new Error("no session selected"));
+      return putJson(`/api/session-meta/${encodeURIComponent(session.session)}`, {
+        summary_source: source,
+        summary_prompt: promptTa.value,
+      });
+    },
+    onSuccess: () => afterMutate(),
+  });
+
+  // "use global default": clear the override (empty falls back server-side)
+  // and re-seed source + prompt from the global default — directly, the ONE
+  // deliberate re-seed outside a session switch. (Deliberately NOT via the
+  // switch block: afterMutate's synchronous re-render still carries the
+  // stale pre-clear session-meta, which would seed the old override back.)
+  useDefaultBtn.addEventListener("click", async () => {
+    if (!session) return;
+    useDefaultBtn.disabled = true;
+    saveStatus.textContent = "clearing…";
+    try {
+      await putJson(`/api/session-meta/${encodeURIComponent(session.session)}`, {
+        summary_source: "",
+        summary_prompt: "",
+      });
+      saveStatus.textContent = "";
+      source = lastDefault?.source || "local";
+      applySource();
+      promptTa.value = lastDefault?.prompt || builtinPrompt;
+      reflectCmdPreview();
+    } catch (e) {
+      saveStatus.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+    } finally {
+      useDefaultBtn.disabled = false;
+      afterMutate();
+    }
+  });
+
   // ---- Local model picker (REAL) --------------------------------------------
   // Populate the <select> ONCE from the hardware-routed catalog, then leave it
   // alone — a click on an option mutates `model`, never a per-tick rebuild, so
@@ -373,14 +486,21 @@ export function build(ctx) {
         modelSel.add(new Option("no local models", "", true, true));
         modelSel.disabled = true;
       }
+      // A saved default model (#84) that landed before this fetch: apply it
+      // now that its option exists.
+      if (pendingModel && models.some((m) => m.repo_id === pendingModel)) {
+        modelSel.value = pendingModel;
+        pendingModel = "";
+      }
       model = modelSel.value;
       reflectModelNote();
       // Seed the output-cap input's bounds + default from the server (one source
       // of truth — the HTML value is only a placeholder until this lands, which
-      // is once at mount, before the operator can edit).
+      // is once at mount, before the operator can edit). The saved default's
+      // max_tokens (#84) wins over the catalog default when already seeded.
       if (typeof cat.max_tokens_min === "number") maxTokInput.min = String(cat.max_tokens_min);
       if (typeof cat.max_tokens_max === "number") maxTokInput.max = String(cat.max_tokens_max);
-      if (typeof cat.max_tokens_default === "number") maxTokInput.value = String(cat.max_tokens_default);
+      if (!maxTokSeeded && typeof cat.max_tokens_default === "number") maxTokInput.value = String(cat.max_tokens_default);
       // Command presets (same fetch): "custom…" + one option per known tool.
       // Pre-select the preset whose template matches the field's default.
       presets = cat.command_presets || [];
@@ -404,13 +524,26 @@ export function build(ctx) {
   // ---- Per-tick update ------------------------------------------------------
 
   /**
-   * @param {import('../../types.js').AppState} _j
+   * @param {import('../../types.js').AppState} j
    * @param {import('../../types.js').Session | null} sess
    */
-  const update = (_j, sess) => {
+  const update = (j, sess) => {
     session = sess;
     const sid = sess?.session || "";
     const job = sess?.progress || null;
+
+    // ---- Saved config (#84): the global-layer fields seed once; the
+    // override indicator is a derived, non-interactive display bit, so it
+    // updates in place every tick (the #94 sibling-toggle pattern) — never
+    // through a sig-gated pane.
+    if (j.summarizer_default) lastDefault = j.summarizer_default;
+    if (!globalSeeded && j.summarizer_default) {
+      globalSeeded = true;
+      seedGlobalLayer(j.summarizer_default);
+    }
+    const meta = sess?.session_meta || {};
+    overrideNote.textContent =
+      meta.summary_source || meta.summary_prompt ? "session override active" : "";
 
     // ---- Job progress — in-place writes on prebuilt nodes, EVERY tick
     // (deliberately outside the signature gates, same as transcript.js). Scoped
@@ -432,13 +565,17 @@ export function build(ctx) {
     }
 
     // ---- Session switch — drop a summary/error that belonged to another
-    // session, and force the output + controls to re-sync.
+    // session, force the output + controls to re-sync, and pre-fill source +
+    // prompt from the session's EFFECTIVE config (#84). The id is recorded
+    // FIRST, so re-seeding requires a different session — a later tick can't
+    // clobber a mid-edit prompt.
     if (sid !== summarySession) {
-      lastSummary = null;
       summarySession = sid;
+      lastSummary = null;
       errorMsg = "";
       markRegionStale(sumOut);
       lastCtlSig = " ";
+      if (sess) seedEffective(j, sess);
     }
 
     // ---- Output pane — rendered through renderRegion: it gates on outSig AND

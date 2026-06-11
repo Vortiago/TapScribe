@@ -72,7 +72,7 @@ export function build(ctx) {
   // object via PUT /api/summarize/config.
   const sdSourceWrap = pick(frag, "sdSource");
   const sdButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
-    sdSourceWrap.querySelectorAll("[data-src]")
+    sdSourceWrap.querySelectorAll("[data-sd-src]")
   );
   const sdLocal = /** @type {HTMLElement} */ (pick(frag, "sdLocal"));
   const sdCommand = /** @type {HTMLElement} */ (pick(frag, "sdCommand"));
@@ -100,7 +100,7 @@ export function build(ctx) {
 
   const sdApplySource = () => {
     for (const b of sdButtons) {
-      const on = b.dataset.src === sdSource;
+      const on = b.dataset.sdSrc === sdSource;
       b.classList.toggle("is-on", on);
       b.setAttribute("aria-pressed", on ? "true" : "false");
     }
@@ -109,7 +109,7 @@ export function build(ctx) {
   };
   for (const b of sdButtons) {
     b.addEventListener("click", () => {
-      const next = b.dataset.src;
+      const next = b.dataset.sdSrc;
       if (b.disabled || !next || next === sdSource) return;
       sdSource = next;
       sdApplySource();
