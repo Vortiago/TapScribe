@@ -2325,6 +2325,44 @@ def test_summarizer_config_put_empty_object_clears(client):
     }
 
 
+def test_summarize_empty_body_resolves_from_global_default(client, recorder_under_test):
+    """#84: a body field the caller omits resolves session-override → global
+    default → built-in. With a global Command default saved, POST {} runs the
+    configured command — what the Generate button does once the view pre-fills
+    from config."""
+    client.put("/api/summarize/config", json={"source": "command", "command": _SUMMARIZE_CAT, "prompt": ""})
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="we shipped it")
+    r = client.post("/api/sessions/s/summarize", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary"] == "we shipped it"
+    assert r.json()["source"] == "command"
+
+
+def test_summarize_session_override_prompt_reaches_summarizer(client, recorder_under_test):
+    """The command source appends the prompt as the last argv element, so a
+    prompt-echo command proves the session-meta override prompt (not the
+    global one) reached the summarizer."""
+    argv_echo = py_cmd("import sys; sys.stdin.read(); sys.stdout.write(sys.argv[-1])")
+    client.put("/api/summarize/config", json={"source": "command", "command": argv_echo, "prompt": "GLOBAL"})
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    client.put("/api/session-meta/s", json={"summary_prompt": "SESSION OVERRIDE"})
+    r = client.post("/api/sessions/s/summarize", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary"] == "SESSION OVERRIDE"
+
+
+def test_summarize_explicit_body_beats_override_and_default(client, recorder_under_test):
+    """The chain is body → session override → global default: an explicit
+    Generate-time prompt wins over both saved layers."""
+    argv_echo = py_cmd("import sys; sys.stdin.read(); sys.stdout.write(sys.argv[-1])")
+    client.put("/api/summarize/config", json={"source": "command", "command": argv_echo, "prompt": "GLOBAL"})
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    client.put("/api/session-meta/s", json={"summary_prompt": "SESSION"})
+    r = client.post("/api/sessions/s/summarize", json={"prompt": "BODY WINS"})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary"] == "BODY WINS"
+
+
 def test_api_state_surfaces_summarizer_default_public_fields_only(client):
     """The dashboard pre-fills the Settings card and the Summary view from the
     state poll. Strict key equality pins `summarizer_default_public` as the

@@ -54,7 +54,12 @@ from . import hallucinations as hallucinations_mod
 from .audio import compute_peaks
 from .batch_pipeline import PipelineRequest, start_pipeline
 from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
-from .batch_summarize import NoMergedTranscript, SummarizeSessionRequest, summarize_session
+from .batch_summarize import (
+    NoMergedTranscript,
+    SummarizeSessionRequest,
+    effective_summarizer_config,
+    summarize_session,
+)
 from .batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
@@ -965,15 +970,18 @@ async def api_session_summarize(
 ):
     """Summarize a session's merged transcript. Thin HTTP shim over
     `batch_summarize.summarize_session` — parse the body; the registered
-    domain-error handlers map failures to status codes. For this slice the
-    source / command / prompt arrive in the body (no saved config yet); the
-    Local (bundled, offline — #86) and Command (#82) sources are wired, while
-    the API source (#85) still maps to a clear 400."""
+    domain-error handlers map failures to status codes. The Local (bundled,
+    offline — #86) and Command (#82) sources are wired, while the API source
+    (#85) still maps to a clear 400.
+
+    Body fields the caller omits resolve through the saved config (#84):
+    session-meta override → global default → built-ins, via
+    `effective_summarizer_config`. An explicit body field wins over both
+    saved layers, so a Generate with hand-edited values behaves exactly as
+    before. The effective model/source were allowlist-validated at write
+    time AND are re-validated inside `load_summarizer` (double guard)."""
     body = await _json_body(req)
-    # Forward only explicitly-provided fields and let SummarizeSessionRequest own
-    # the defaults (source="command", prompt=DEFAULT_SUMMARY_PROMPT) — the same
-    # "value object owns the defaults" contract as the strip-silence route.
-    overrides: dict[str, Any] = {}
+    overrides: dict[str, Any] = await asyncio.to_thread(effective_summarizer_config, session)
     source = body.get("source")
     if isinstance(source, str) and source.strip():
         overrides["source"] = source.strip()
