@@ -40,8 +40,9 @@ export function axisTicks(durationS, count) {
  * where clientWidth is still 0) redraws without the caller re-supplying data.
  * @returns {{
  *   node: DocumentFragment,
- *   showWaveform: (peaks: number[], durationS: number) => void,
+ *   showWaveform: (peaks: number[], durationS: number, cut?: import('../../types.js').CutSpan[] | null) => void,
  *   showMessage: (text: string) => void,
+ *   setPreview: (preview: { spans: import('../../types.js').CutSpan[], speech_floor_db: number } | null) => void,
  * }}
  */
 export function createWaveform() {
@@ -49,10 +50,18 @@ export function createWaveform() {
   const canvas = /** @type {HTMLCanvasElement} */ (pick(frag, "canvas"));
   const axisHost = pick(frag, "axis");
   const msgHost = pick(frag, "msg");
+  const cutBadge = pick(frag, "cutBadge");
+  const legend = pick(frag, "legend");
 
   /** @type {number[] | null} */
   let peaks = null;
   let durationS = 0;
+  /** @type {import('../../types.js').CutSpan[] | null} */
+  let cutSpans = null;
+  /** @type {import('../../types.js').CutSpan[] | null} */
+  let previewSpans = null;
+  /** @type {number | null} */
+  let previewFloorDb = null;
 
   const paint = () => {
     const ctx = canvas.getContext("2d");
@@ -89,6 +98,81 @@ export function createWaveform() {
       const w = bw > 1.5 ? bw - 0.5 : bw;
       ctx.fillRect(x, mid - h, w, h * 2);
     }
+
+    // Cut overlays — #90 committed (solid) + #89 live preview (dashed).
+    // The PREVIEW is the live thing being tuned: it owns the region shading
+    // (kept tint + dropped dim), the dashed edge markers, and the
+    // speech-floor guide. The COMMITTED cut always keeps its solid edge
+    // ticks, but only dims dropped intervals when no preview is active —
+    // two stacked shadings would be unreadable. An EMPTY preview spans
+    // array is meaningful ("this cut drops everything") and dims it all.
+    if (durationS > 0 && (cutSpans || previewSpans)) {
+      /** @param {number} s */
+      const xAt = (s) => Math.max(0, Math.min(cssW, (s / durationS) * cssW));
+      /** @param {import('../../types.js').CutSpan[]} spans @param {number} alpha */
+      const dimDropped = (spans, alpha) => {
+        ctx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+        let cursor = 0;
+        for (const sp of spans) {
+          const x0 = xAt(sp.start_s);
+          const x1 = xAt(sp.end_s);
+          if (x0 > cursor) ctx.fillRect(cursor, 0, x0 - cursor, cssH);
+          cursor = Math.max(cursor, x1);
+        }
+        if (cursor < cssW) ctx.fillRect(cursor, 0, cssW - cursor, cssH);
+      };
+      /** @param {import('../../types.js').CutSpan[]} spans @param {string} color @param {boolean} dashed */
+      const edgeLines = (spans, color, dashed) => {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash(dashed ? [3, 3] : []);
+        ctx.beginPath();
+        for (const sp of spans) {
+          for (const edge of [sp.start_s, sp.end_s]) {
+            const x = Math.max(0.5, Math.min(cssW - 0.5, (edge / durationS) * cssW));
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, cssH);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+      };
+      const cutColor = styles.getPropertyValue("--rec").trim() || "#d75d6a";
+      const okColor = styles.getPropertyValue("--ok").trim() || "#69b76b";
+      const infoColor = styles.getPropertyValue("--info").trim() || "#6ab0f3";
+      if (previewSpans) {
+        dimDropped(previewSpans, 0.45);
+        ctx.save();
+        ctx.globalAlpha = 0.16;
+        ctx.fillStyle = okColor;
+        for (const sp of previewSpans) {
+          const x0 = xAt(sp.start_s);
+          ctx.fillRect(x0, 0, xAt(sp.end_s) - x0, cssH);
+        }
+        ctx.restore();
+        if (previewFloorDb != null) {
+          // The floor knob as a horizontal guide: dBFS → normalised
+          // amplitude, mirrored around the baseline like the bars.
+          const dy = Math.max(1, Math.pow(10, previewFloorDb / 20) * (mid - 1));
+          ctx.save();
+          ctx.strokeStyle = infoColor;
+          ctx.globalAlpha = 0.7;
+          ctx.setLineDash([2, 4]);
+          ctx.beginPath();
+          ctx.moveTo(0, mid - dy);
+          ctx.lineTo(cssW, mid - dy);
+          ctx.moveTo(0, mid + dy);
+          ctx.lineTo(cssW, mid + dy);
+          ctx.stroke();
+          ctx.restore();
+        }
+        edgeLines(previewSpans, cutColor, true);
+      } else if (cutSpans && cutSpans.length) {
+        dimDropped(cutSpans, 0.55);
+      }
+      if (cutSpans && cutSpans.length) edgeLines(cutSpans, cutColor, false);
+    }
   };
 
   const renderAxis = () => {
@@ -101,11 +185,28 @@ export function createWaveform() {
     axisHost.replaceChildren(out);
   };
 
-  /** Draw the waveform for one WAV's peaks + duration. */
-  /** @param {number[]} p @param {number} d */
-  const showWaveform = (p, d) => {
+  /** Derive the overlay chrome — the data-cut-spans / data-previewSpans e2e
+   * hooks, the ✂ badge, and the legend — from the current cutSpans /
+   * previewSpans state. ONE owner, called by every mutation path below, so
+   * the three can't fall out of agreement when a setter forgets a bit. */
+  const syncChrome = () => {
+    if (cutSpans) canvas.dataset.cutSpans = JSON.stringify(cutSpans);
+    else delete canvas.dataset.cutSpans;
+    if (previewSpans) canvas.dataset.previewSpans = JSON.stringify(previewSpans);
+    else delete canvas.dataset.previewSpans;
+    cutBadge.hidden = !cutSpans;
+    legend.hidden = !(cutSpans || previewSpans);
+  };
+
+  /** Draw the waveform for one WAV's peaks + duration. `cut` (optional) is
+   * the committed strip-silence cut to overlay — the kept {start_s, end_s}
+   * spans; the canvas exposes it on data-cut-spans as a stable e2e hook. */
+  /** @param {number[]} p @param {number} d @param {import('../../types.js').CutSpan[] | null} [cut] */
+  const showWaveform = (p, d, cut) => {
     peaks = p;
     durationS = d;
+    cutSpans = cut && cut.length ? cut : null;
+    syncChrome();
     msgHost.textContent = "";
     msgHost.hidden = true;
     paint();
@@ -118,9 +219,25 @@ export function createWaveform() {
   const showMessage = (text) => {
     peaks = null;
     durationS = 0;
+    cutSpans = null;
+    previewSpans = null;
+    previewFloorDb = null;
+    syncChrome();
     msgHost.textContent = text;
     msgHost.hidden = false;
     axisHost.replaceChildren();
+    paint();
+  };
+
+  /** Update (or clear) the live strip-preview overlay (#89) without
+   * re-supplying peaks — the debounced knob path repaints in place. An
+   * EMPTY spans array is meaningful ("this cut drops everything"); null
+   * clears the preview entirely. */
+  /** @param {{ spans: import('../../types.js').CutSpan[], speech_floor_db: number } | null} preview */
+  const setPreview = (preview) => {
+    previewSpans = preview ? preview.spans : null;
+    previewFloorDb = preview ? preview.speech_floor_db : null;
+    syncChrome();
     paint();
   };
 
@@ -130,5 +247,5 @@ export function createWaveform() {
   const ro = new ResizeObserver(() => paint());
   ro.observe(canvas);
 
-  return { node: frag, showWaveform, showMessage };
+  return { node: frag, showWaveform, showMessage, setPreview };
 }

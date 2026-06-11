@@ -68,6 +68,8 @@ const _sessionSummaryCache = new Map();
 const _wavTxCache = new Map();
 /** @type {Map<string, TxEntry<import('./types.js').WavePeaks>>} */
 const _wavPeaksCache = new Map();
+/** @type {Map<string, TxEntry<import('./types.js').WavStripMeta | null>>} */
+const _wavStripMetaCache = new Map();
 
 // Bound the caches so a long-lived tab that opens hundreds of (id,
 // transcribed_at) pairs over its lifetime doesn't grow unbounded. Map
@@ -246,6 +248,59 @@ export function peekWavePeaks(session, name, source, sig) {
   const e = _wavPeaksCache.get(_peaksKey(session, name, source, sig));
   return e && e.settled ? e.value : undefined;
 }
+
+/**
+ * @param {string} session
+ * @param {string} name
+ * @param {string} sig
+ */
+const _stripMetaKey = (session, name, sig) => `${session}/${name}@${sig}`;
+
+/**
+ * The committed strip-silence cut for one ORIGINAL wav, cached per (session,
+ * name, sig) — callers pass the session's stripped_at stamp as sig so a
+ * re-strip busts the key. Resolves null when the wav has no committed cut.
+ * @param {string} session
+ * @param {string} name
+ * @param {string} sig
+ * @returns {Promise<import('./types.js').WavStripMeta | null>}
+ */
+export function fetchWavStripMeta(session, name, sig) {
+  const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-meta`;
+  return _getOrFetch(_wavStripMetaCache, _stripMetaKey(session, name, sig), () => getJson(url));
+}
+
+/**
+ * Synchronous peek — the resolved strip-meta for (session, name, sig) if the
+ * fetch already settled, else undefined. See `peekWavTranscript`.
+ * @param {string} session
+ * @param {string} name
+ * @param {string} sig
+ * @returns {import('./types.js').WavStripMeta | null | undefined}
+ */
+export function peekWavStripMeta(session, name, sig) {
+  const e = _wavStripMetaCache.get(_stripMetaKey(session, name, sig));
+  return e && e.settled ? e.value : undefined;
+}
+
+/**
+ * What ✂ strip WOULD cut for one WAV at the given knobs — the live
+ * strip-preview (#89). Deliberately NOT cached: the knob space is unbounded
+ * and the caller debounces; latest-wins is the view's request token's job.
+ * @param {string} session
+ * @param {string} name
+ * @param {import('./types.js').StripOpts} knobs
+ * @returns {Promise<import('./types.js').StripPreview>}
+ */
+export function fetchStripPreview(session, name, knobs) {
+  const qs = new URLSearchParams({
+    min_silence_ms: String(knobs.min_silence_ms),
+    pad_ms: String(knobs.pad_ms),
+    speech_floor_db: String(knobs.speech_floor_db),
+  });
+  return getJson(`/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-preview?${qs}`);
+}
+
 /** @param {string} url */
 export const getJson = (url) => fetch(url, { cache: "no-store" }).then(_unwrap);
 /**

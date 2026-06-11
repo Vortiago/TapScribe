@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import shutil
+import wave
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Any
@@ -78,9 +79,11 @@ from .sessions import (
     read_session_meta,
     read_session_summary,
     read_session_transcript,
+    read_wav_strip_meta,
     read_wav_transcript,
     write_session_meta,
 )
+from .strip_silence import plan_strip_regions, read_wav_int16
 from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
 from .summarizers.catalog import _MAX_TOKENS_BOUNDS
 from .tap_fan_out import TapFanOut
@@ -919,6 +922,31 @@ async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
     return {"ok": True, **result}
 
 
+def _parse_strip_knob_overrides(
+    min_silence_ms: Any, pad_ms: Any, speech_floor_db: Any
+) -> dict[str, Any]:
+    """Range-bound the strip-silence knobs and return only the explicitly
+    provided ones, ready to splat into StripSessionRequest (which owns the
+    DEFAULTS). One owner for the names + bounds + only-forward-explicit
+    contract, shared by the strip route (body knobs) and the strip-preview
+    route (query knobs) so the two can never drift — the preview must plan
+    with exactly the knobs a commit would use. The `is not None` checks keep
+    an explicit 0 (e.g. pad_ms=0 to disable region padding for A/B) from
+    silently falling back to the default; out-of-range values → 400 instead
+    of a 500 from int()/float()."""
+    overrides: dict[str, Any] = {}
+    bounded_min_silence = _parse_bounded_int(min_silence_ms, "min_silence_ms", lo=100, hi=600_000)
+    if bounded_min_silence is not None:
+        overrides["min_silence_ms"] = bounded_min_silence
+    bounded_pad = _parse_bounded_int(pad_ms, "pad_ms", lo=0, hi=5_000)
+    if bounded_pad is not None:
+        overrides["pad_ms"] = bounded_pad
+    bounded_floor = _parse_bounded_float(speech_floor_db, "speech_floor_db", lo=-120.0, hi=0.0)
+    if bounded_floor is not None:
+        overrides["speech_floor_db"] = bounded_floor
+    return overrides
+
+
 @app.post("/api/sessions/{session}/strip-silence")
 async def api_session_strip_silence(
     session: str,
@@ -929,23 +957,9 @@ async def api_session_strip_silence(
     HTTP shim over `batch_strip.strip_session` — parse + range-bound the knobs;
     the registered domain-error handlers map failures to status codes."""
     body = await _json_body(req)
-    # Range-bound everything that hits the silero detector so a malformed
-    # dashboard POST returns 400 instead of a 500 from int()/float().
-    # Only explicitly-provided knobs are forwarded — StripSessionRequest
-    # owns the defaults — and the `is not None` checks keep an explicit 0
-    # (e.g. pad_ms=0 to disable region padding for A/B) from silently
-    # falling back to the default.
-    overrides: dict[str, Any] = {}
-    min_silence_ms = _parse_bounded_int(body.get("min_silence_ms"), "min_silence_ms", lo=100, hi=600_000)
-    if min_silence_ms is not None:
-        overrides["min_silence_ms"] = min_silence_ms
-    pad_ms = _parse_bounded_int(body.get("pad_ms"), "pad_ms", lo=0, hi=5_000)
-    if pad_ms is not None:
-        overrides["pad_ms"] = pad_ms
-    speech_floor_db = _parse_bounded_float(body.get("speech_floor_db"), "speech_floor_db", lo=-120.0, hi=0.0)
-    if speech_floor_db is not None:
-        overrides["speech_floor_db"] = speech_floor_db
-
+    overrides = _parse_strip_knob_overrides(
+        body.get("min_silence_ms"), body.get("pad_ms"), body.get("speech_floor_db")
+    )
     return await strip_session(recorder, StripSessionRequest(session=session, **overrides))
 
 
@@ -1163,6 +1177,72 @@ async def api_wav_transcript(session: str, name: str, source: str = "original"):
     if source not in ("original", "stripped"):
         raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
     return await asyncio.to_thread(read_wav_transcript, session, name, source)
+
+
+@app.get("/api/wav/{session}/{name}/strip-meta")
+async def api_wav_strip_meta(session: str, name: str):
+    """The committed strip-silence cut for one ORIGINAL wav (or null when the
+    session was never stripped or this wav produced no regions). Lazy
+    companion to /api/state, same contract as the transcript sidecar route:
+    resolve_wav path-safety inside the reader, disk read off the event loop."""
+    return await asyncio.to_thread(read_wav_strip_meta, session, name)
+
+
+@app.get("/api/wav/{session}/{name}/strip-preview")
+async def api_wav_strip_preview(
+    session: str,
+    name: str,
+    min_silence_ms: int | None = None,
+    pad_ms: int | None = None,
+    speech_floor_db: float | None = None,
+    source: str = "original",
+):
+    """What ✂ strip WOULD cut for one WAV at the given knobs — the live
+    waveform overlay's data source (#89). Runs the REAL detector through the
+    same plan the splitter writes from, with NO disk writes. Shares the
+    strip route's knob bounds (out-of-range → 400) and get_wav's
+    path-sanitiser; omitted knobs fall back to StripSessionRequest's
+    defaults, mirroring the strip route's only-forward-explicit contract."""
+    if source not in ("original", "stripped"):
+        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    overrides = _parse_strip_knob_overrides(min_silence_ms, pad_ms, speech_floor_db)
+    knobs = StripSessionRequest(session=session, **overrides)
+    path = resolve_wav(session, name, source)
+
+    def _plan() -> dict[str, Any]:
+        samples = read_wav_int16(path)
+        plan = plan_strip_regions(
+            samples,
+            min_silence_ms=knobs.min_silence_ms,
+            pad_ms=knobs.pad_ms,
+            speech_floor_db=knobs.speech_floor_db,
+        )
+        return {
+            "spans": plan.spans,
+            "in_seconds": plan.in_seconds,
+            "speech_seconds": plan.speech_seconds,
+            "segments": len(plan.regions),
+            "segments_filtered_below_floor": plan.segments_filtered_below_floor,
+            "silent": plan.silent,
+            "rms_dbfs": round(plan.rms_dbfs, 1),
+            "reason": plan.reason,
+            "detector": plan.detector,
+            "knobs": {
+                "min_silence_ms": knobs.min_silence_ms,
+                "pad_ms": knobs.pad_ms,
+                "speech_floor_db": knobs.speech_floor_db,
+            },
+        }
+
+    try:
+        return await asyncio.to_thread(_plan)
+    except (ValueError, wave.Error, EOFError, OSError) as e:
+        # read_wav_int16 rejects non-recorder formats with ValueError and
+        # surfaces corrupt/truncated/vanished files as wave.Error/EOFError/
+        # OSError — every "this WAV can't be planned" case → 422
+        # unprocessable, the same outcome the peaks route reaches via
+        # compute_peaks's RuntimeError wrapping.
+        raise HTTPException(422, str(e)) from e
 
 
 # Waveform downsample resolution. The route CLAMPS the operator-supplied bins

@@ -9,6 +9,7 @@ strip into exactly one clip each.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -62,6 +63,37 @@ async def test_strip_session_raises_session_busy_and_leaves_foreign_claim_alone(
 
     # The pre-existing transcribe claim must still be in place.
     assert recorder_under_test.jobs.snapshot()["s"].kind == "transcribe"
+
+
+async def test_strip_session_rows_carry_region_spans_and_persist_meta(recorder_under_test):
+    """Written rows carry explicit {start_s, end_s} spans (one per region,
+    inside the source duration), and the same spans land keyed-by-original in
+    stripped/strip-meta.json with the knobs that produced them (#90)."""
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+
+    out = await strip_session(recorder_under_test, StripSessionRequest(session="s"))
+
+    rows = [r for r in out["files"] if r.get("written")]
+    assert rows, "the audible seed WAV should strip into at least one clip"
+    for row in rows:
+        spans = row["region_spans"]
+        assert len(spans) == row["segments"]
+        for sp in spans:
+            assert 0.0 <= sp["start_s"] < sp["end_s"] <= row["in_seconds"] + 0.01
+
+    meta_path = recorder_under_test.recordings_dir / "s" / "stripped" / "strip-meta.json"
+    assert meta_path.is_file()
+    meta = json.loads(meta_path.read_text())
+    assert meta["knobs"] == {"min_silence_ms": 500, "pad_ms": 200, "speech_floor_db": -45.0}
+    assert meta["stripped_at"] == out["stripped_at"]
+    for row in rows:
+        entry = meta["files"][row["name"]]
+        st = (recorder_under_test.recordings_dir / "s" / row["name"]).stat()
+        assert entry["wav_size"] == st.st_size
+        assert entry["wav_mtime_ns"] == st.st_mtime_ns
+        assert entry["spans"] == row["region_spans"]
+        # v2: every span names the region clip it was written to.
+        assert [sp["name"] for sp in entry["spans"]] == row["regions_written"]
 
 
 async def test_strip_session_locked_runs_under_a_caller_held_slot(recorder_under_test):

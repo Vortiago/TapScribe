@@ -508,6 +508,259 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
             await browser.close()
 
 
+async def test_recordings_committed_cut_overlay_persists_across_reload(
+    running_recorder: RunningRecorder,
+    tmp_path: Path,
+):
+    """After ✂ strip, the selected original's waveform draws the committed
+    cut — the EXACT {start_s, end_s} spans the strip response returned,
+    surfaced on the canvas's data-cut-spans hook. Pins four paths: the
+    cold-load resolve from persisted strip-meta, the negative control (no
+    overlay on the stripped source), the LIVE swap when a re-strip lands
+    while the page is open (the /api/state stripped_at stamp busts the
+    client cache — no reload), and a final reload proving the LATEST cut
+    survives with nothing in memory. The #90 acceptance guard."""
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    src_wav = _build_speech_silence_wav(tmp_path / "alice-multi.wav")
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src_wav,
+        utterance_id="utt-cut-overlay",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    import httpx
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            f"/api/sessions/{rec.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert resp.status_code == 200, resp.text
+        rows = [f for f in resp.json()["files"] if f.get("written")]
+    assert len(rows) == 1
+    expected_spans = rows[0]["region_spans"]
+    assert len(expected_spans) == 3, (
+        f"the 3-burst source should commit 3 spans, got {expected_spans}"
+    )
+
+    # The canvas's committed-cut hook: the JSON spans it is currently drawing,
+    # or null while the overlay isn't up yet.
+    overlay_js = """
+    () => {
+      const c = document.querySelector('#viewRoot .wave-canvas');
+      return (c && c.dataset.cutSpans) ? c.dataset.cutSpans : null;
+    }
+    """
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+
+            # The default source is "original", and the first WAV is the
+            # auto-selected one — the overlay lands once the peaks and
+            # strip-meta fetches settle.
+            await page.wait_for_function(overlay_js, timeout=10000)
+            first_attr = await page.evaluate(overlay_js)
+            spans = json.loads(first_attr)
+            assert spans == expected_spans, (
+                f"overlay spans {spans} != committed {expected_spans}"
+            )
+
+            # The badge is the operator-visible "this is the committed cut"
+            # cue, distinct from the future live knob preview (#89).
+            await page.locator('#viewRoot [data-slot="cutBadge"]').wait_for(state="visible", timeout=3000)
+
+            await _shot(page, "09-committed-cut-overlay.png")
+
+            # Negative control: the overlay belongs to the ORIGINAL source
+            # only (the stripped waveform IS the cut result) — toggling away
+            # must drop it, toggling back must restore it.
+            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.wait_for_function(
+                """() => !document.querySelector('#viewRoot .wave-canvas')?.dataset.cutSpans""",
+                timeout=5000,
+            )
+            await page.locator('#viewRoot .srcsw__opt[data-src="original"]').click()
+            await page.wait_for_function(overlay_js, timeout=5000)
+
+            # Live path: a re-strip with a wider pad lands while the page is
+            # open. The poll's new stripped_at stamp must bust the client
+            # cache and swap the overlay to the NEW spans without a reload.
+            async with httpx.AsyncClient(base_url=base, timeout=30.0) as client2:
+                resp2 = await client2.post(
+                    f"/api/sessions/{rec.session_start}/strip-silence",
+                    json={"min_silence_ms": 400, "pad_ms": 150, "speech_floor_db": -40.0},
+                )
+                assert resp2.status_code == 200, resp2.text
+                rows2 = [f for f in resp2.json()["files"] if f.get("written")]
+            assert len(rows2) == 1
+            new_spans = rows2[0]["region_spans"]
+            assert new_spans != expected_spans, "a wider pad must move the committed spans"
+            await page.wait_for_function(
+                f"""() => {{
+                  const c = document.querySelector('#viewRoot .wave-canvas');
+                  return !!(c && c.dataset.cutSpans) && c.dataset.cutSpans !== {json.dumps(first_attr)};
+                }}""",
+                timeout=10000,
+            )
+            live_spans = json.loads(await page.evaluate(overlay_js))
+            assert live_spans == new_spans, (
+                f"live overlay spans {live_spans} != re-strip committed {new_spans}"
+            )
+
+            # Reload: the LATEST spans must come back EXACTLY from the
+            # persisted strip-meta — no strip response left in memory.
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_function(overlay_js, timeout=10000)
+            spans2 = json.loads(await page.evaluate(overlay_js))
+            assert spans2 == new_spans, (
+                f"reload lost the committed cut: {spans2} != {new_spans}"
+            )
+        finally:
+            await browser.close()
+
+
+async def test_recordings_strip_preview_tracks_knobs_and_matches_commit(
+    running_recorder: RunningRecorder,
+    tmp_path: Path,
+):
+    """Dragging a strip knob fires a debounced live preview (#89): the
+    waveform redraws in place with the would-be cut (data-preview-spans),
+    the stats row tracks the preview, and the preview spans EXACTLY match
+    what a real ✂ strip with the same knobs then commits. A second drag
+    re-computes the overlay."""
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    src_wav = _build_speech_silence_wav(tmp_path / "alice-multi.wav")
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src_wav,
+        utterance_id="utt-strip-preview",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    preview_js = """
+    () => {
+      const c = document.querySelector('#viewRoot .wave-canvas');
+      return (c && c.dataset.previewSpans) ? c.dataset.previewSpans : null;
+    }
+    """
+
+    def set_knob_js(key: str, value: int) -> str:
+        return f"""
+        () => {{
+          const k = document.querySelector('#viewRoot [data-strip-knob="{key}"]');
+          if (!k) return false;
+          k.value = "{value}";
+          k.dispatchEvent(new Event("input", {{ bubbles: true }}));
+          return true;
+        }}
+        """
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+
+            # Wait for the real waveform (the message overlay empties once
+            # peaks land) — the preview overlay needs a drawn canvas.
+            await page.wait_for_function(
+                """() => {
+                  const m = document.querySelector('#viewRoot .wave-msg');
+                  return m && m.hidden;
+                }""",
+                timeout=10000,
+            )
+            assert await page.evaluate(preview_js) is None, "no preview before any knob input"
+
+            # Drag the pad knob: 200 -> 150. The debounced strip-preview
+            # fires and the canvas redraws in place with the would-be cut.
+            assert await page.evaluate(set_knob_js("pad_ms", 150))
+            await page.wait_for_function(preview_js, timeout=10000)
+            first_preview_raw = await page.evaluate(preview_js)
+            first_preview = json.loads(first_preview_raw)
+            assert len(first_preview) == 3, f"3-burst source should preview 3 spans, got {first_preview}"
+
+            # The stats row tracks the preview…
+            await page.wait_for_function(
+                """() => document.querySelector('#viewRoot [data-slot="sClips"]')?.textContent === '3'""",
+                timeout=5000,
+            )
+            # …and the legend explains the overlay.
+            legend = page.locator('#viewRoot [data-slot="legend"]')
+            await legend.wait_for(state="visible", timeout=3000)
+
+            await _shot(page, "10-strip-preview-overlay.png")
+
+            # The preview IS the cut: a real ✂ strip with the same knobs
+            # (defaults except the dragged pad) commits exactly these spans.
+            import httpx
+
+            async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+                resp = await client.post(
+                    f"/api/sessions/{rec.session_start}/strip-silence",
+                    json={"min_silence_ms": 500, "pad_ms": 150, "speech_floor_db": -45.0},
+                )
+                assert resp.status_code == 200, resp.text
+                rows = [f for f in resp.json()["files"] if f.get("written")]
+            assert len(rows) == 1
+            committed = [
+                {"start_s": sp["start_s"], "end_s": sp["end_s"]} for sp in rows[0]["region_spans"]
+            ]
+            assert committed == first_preview, (
+                f"committed cut {committed} != live preview {first_preview}"
+            )
+
+            # The committed overlay lands on the same canvas (solid ticks vs
+            # the preview's dashed — both data hooks present).
+            await page.wait_for_function(
+                """() => !!document.querySelector('#viewRoot .wave-canvas')?.dataset.cutSpans""",
+                timeout=10000,
+            )
+
+            # A second drag re-computes the preview in place.
+            assert await page.evaluate(set_knob_js("pad_ms", 50))
+            await page.wait_for_function(
+                f"""() => {{
+                  const c = document.querySelector('#viewRoot .wave-canvas');
+                  return !!(c && c.dataset.previewSpans) && c.dataset.previewSpans !== {json.dumps(first_preview_raw)};
+                }}""",
+                timeout=10000,
+            )
+            second_preview = json.loads(await page.evaluate(preview_js))
+            assert len(second_preview) == 3
+            assert second_preview != first_preview, "a narrower pad must move the preview spans"
+        finally:
+            await browser.close()
+
+
 async def test_dashboard_delete_session_audio_keeps_transcript(
     running_recorder: RunningRecorder,
 ):

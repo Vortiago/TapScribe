@@ -18,7 +18,7 @@
 // strip slider isn't clobbered).
 
 import { tpl, pick, selectionInside } from "../../templates.js";
-import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks } from "../../api.js";
+import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks, fetchWavStripMeta, peekWavStripMeta, fetchStripPreview } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 import { createWaveform } from "../components/waveform.js";
@@ -110,8 +110,32 @@ export function build(ctx) {
   const pendingWave = new Set();
   /** @type {Map<string, string>} */
   const failedWave = new Map();
+  /** Committed-cut (strip-meta) fetches in flight / failed, keyed
+   * `sid/name@strippedAt` — same dedupe + no-retry-loop discipline as the
+   * peaks cache above. A failed key never refetches; a re-strip changes the
+   * stamp and therefore the key. */
+  /** @type {Set<string>} */
+  const pendingCutMeta = new Set();
+  /** @type {Set<string>} */
+  const failedCutMeta = new Set();
+
+  /** Live strip-preview bookkeeping (#89). At most ONE preview is live at a
+   * time: `livePreview` pins the latest response to the exact waveKey it was
+   * computed for, so a selection/source/session change drops it instead of
+   * overlaying (or re-stating stats for) the wrong WAV; `previewToken` makes
+   * the debounced fetches latest-wins. */
+  /** @type {{ key: string, p: import('../../types.js').StripPreview } | null} */
+  let livePreview = null;
+  let previewToken = 0;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let previewTimer = null;
 
   // ---- Helpers --------------------------------------------------------------
+
+  /** Identity of what the canvas shows — shared by the draw guard and the
+   * preview fire/land/pin checks, which must agree byte-for-byte. */
+  /** @param {string} sid @param {string} name @param {string} src @param {number} size */
+  const waveKey = (sid, name, src, size) => `${sid}/${name}@${src}@${size}`;
 
   /** @param {string} sid @returns {"original" | "stripped"} */
   const effectiveSource = (sid) => {
@@ -146,6 +170,10 @@ export function build(ctx) {
   const drawWaveform = (sel, src) => {
     const sid = session?.session || "";
     if (!sel || !sid) {
+      if (livePreview) {
+        livePreview = null;
+        waveform.setPreview(null);
+      }
       const wsig = `none:${session ? "nofiles" : "nosession"}`;
       if (wsig === lastWaveSig) return;
       lastWaveSig = wsig;
@@ -153,7 +181,14 @@ export function build(ctx) {
       return;
     }
     const fileSig = String(sel.size);
-    const key = `${sid}/${sel.name}@${src}@${fileSig}`;
+    const key = waveKey(sid, sel.name, src, sel.size);
+    // A live strip-preview belongs to ONE (wav, source, size) — drop it the
+    // moment the waveform moves elsewhere so stale spans never overlay a
+    // different recording.
+    if (livePreview && livePreview.key !== key) {
+      livePreview = null;
+      waveform.setPreview(null);
+    }
     /** @type {"ok" | "loading" | "error"} */
     let state;
     /** @type {import('../../types.js').WavePeaks | undefined} */
@@ -186,10 +221,39 @@ export function build(ctx) {
         }
       }
     }
-    const wsig = `${key}@${state}`;
+
+    // Committed strip cut (#90): only the ORIGINAL's waveform carries the
+    // overlay (the stripped source IS the cut result). Resolved lazily from
+    // /strip-meta, cached on the stripped_at stamp so a re-strip refetches;
+    // spans come from the persisted sidecar — never reconstructed from
+    // region filenames.
+    const stripped = session?.stripped || null;
+    const cutStamp = src === "original" && stripped ? stripped.stripped_at || "" : "";
+    /** @type {import('../../types.js').CutSpan[] | null} */
+    let cut = null;
+    if (src === "original" && stripped) {
+      const mkey = `${sid}/${sel.name}@${cutStamp}`;
+      const meta = peekWavStripMeta(sid, sel.name, cutStamp);
+      if (meta !== undefined) {
+        cut = meta && meta.spans && meta.spans.length ? meta.spans : null;
+      } else if (!pendingCutMeta.has(mkey) && !failedCutMeta.has(mkey)) {
+        pendingCutMeta.add(mkey);
+        fetchWavStripMeta(sid, sel.name, cutStamp)
+          .catch(() => { failedCutMeta.add(mkey); })
+          .finally(() => {
+            pendingCutMeta.delete(mkey);
+            // Same redraw-only contract as the peaks fetch above: reset just
+            // the wave sig and re-resolve the current selection.
+            lastWaveSig = " ";
+            drawWaveform(selectedFor(), session ? effectiveSource(session.session) : "original");
+          });
+      }
+    }
+
+    const wsig = `${key}@${state}@cut:${cutStamp}:${cut ? cut.length : 0}`;
     if (wsig === lastWaveSig) return;
     lastWaveSig = wsig;
-    if (state === "ok" && data) waveform.showWaveform(data.peaks, data.duration_s);
+    if (state === "ok" && data) waveform.showWaveform(data.peaks, data.duration_s, cut);
     else if (state === "loading") waveform.showMessage("loading waveform…");
     else waveform.showMessage(message);
   };
@@ -201,13 +265,73 @@ export function build(ctx) {
   /** @param {keyof StripKnobs} key */
   const paintKnob = (key) => { knobVals[key].textContent = `${knobs[key]} ${knobUnit(key)}`; };
 
+  /** Debounce so a knob drag fires one strip-preview per pause, not one per
+   * pixel — silero on the worker thread is O(samples) per call. */
+  const PREVIEW_DEBOUNCE_MS = 300;
+
+  /** Paint the clips / speech / in / kept stats row — one painter for every
+   * source shape (live preview, last strip response), so the kept% formula
+   * and the stat quartet can't diverge between them. */
+  /** @param {number} clips @param {number} speechS @param {number} inS */
+  const paintCutStats = (clips, speechS, inS) => {
+    const kept = inS > 0 ? Math.round(100 * speechS / inS) : 0;
+    setStat(stats.clips, String(clips));
+    setStat(stats.speech, `${Math.round(speechS)}s`);
+    setStat(stats.in, `${Math.round(inS)}s`);
+    setStat(stats.kept, `${kept}%`);
+  };
+
+  /** @param {import('../../types.js').StripPreview} p */
+  const paintPreviewStats = (p) => paintCutStats(p.segments, p.speech_seconds, p.in_seconds);
+
+  /** Fire the strip-preview for the CURRENT knobs + selection. Only the
+   * latest response lands (token check), and only while the original
+   * source is shown — the stripped waveform IS a cut result already. */
+  const firePreview = () => {
+    if (!session) return;
+    const sid = session.session;
+    const sel = selectedFor();
+    if (!sel || effectiveSource(sid) !== "original") return;
+    const token = ++previewToken;
+    const key = waveKey(sid, sel.name, "original", sel.size);
+    fetchStripPreview(sid, sel.name, { ...knobs })
+      .then((p) => {
+        if (token !== previewToken) return; // superseded by a newer drag
+        // Identity at land time, not just ordering: the selection/source/
+        // session may have moved while the fetch was in flight — never
+        // paint another WAV's preview (the next drawWaveform tick would
+        // only reconcile it up to a poll later).
+        const cur = selectedFor();
+        if (!session || !cur || effectiveSource(session.session) !== "original") return;
+        if (waveKey(session.session, cur.name, "original", cur.size) !== key) return;
+        livePreview = { key, p };
+        waveform.setPreview({ spans: p.spans, speech_floor_db: p.knobs.speech_floor_db });
+        paintPreviewStats(p);
+      })
+      .catch(() => { /* transient — the next knob input refires */ });
+  };
+
+  const schedulePreview = () => {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => { previewTimer = null; firePreview(); }, PREVIEW_DEBOUNCE_MS);
+  };
+
+  /** Drop the live preview entirely — overlay, stats, AND any debounce still
+   * pending, so a drag scheduled just before a ✂ strip / clear doesn't
+   * re-create the preview ~300ms after it was deliberately dropped. */
+  const dropPreview = () => {
+    if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+    livePreview = null;
+    waveform.setPreview(null);
+  };
+
   for (const inp of /** @type {NodeListOf<HTMLInputElement>} */ (frag.querySelectorAll("[data-strip-knob]"))) {
     const key = /** @type {keyof StripKnobs} */ (inp.dataset.stripKnob);
     inp.value = String(knobs[key]);
     paintKnob(key);
     inp.addEventListener("input", () => {
       const n = Number(inp.value);
-      if (Number.isFinite(n)) { knobs[key] = n; paintKnob(key); }
+      if (Number.isFinite(n)) { knobs[key] = n; paintKnob(key); schedulePreview(); }
     });
   }
 
@@ -222,6 +346,8 @@ export function build(ctx) {
       const res = /** @type {import('../../types.js').StripSilenceResult} */ (
         await postJson(`/api/sessions/${encodeURIComponent(sid)}/strip-silence`, { ...knobs }));
       lastStrip.set(sid, res);
+      // The committed cut now reflects these knobs — drop the live preview.
+      dropPreview();
       // Flip to the cleaned audio on success so the operator can act on it.
       if ((res.files_written || 0) > 0) sourcePick.set(sid, "stripped");
     } catch (e) {
@@ -241,6 +367,7 @@ export function build(ctx) {
     try { await del(`/api/sessions/${encodeURIComponent(sid)}/stripped`); }
     catch (e) { alert(`Clear stripped failed: ${String(e).replace(/^Error:\s*/, "")}`); return; }
     lastStrip.delete(sid);
+    dropPreview();
     if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
     lastSig = " ";
     afterMutate();
@@ -577,13 +704,15 @@ export function build(ctx) {
       ? `🌊 ${truncMid(sel.name, 40)} · ${fmtDur(sel.duration_s)} · ${src}`
       : "no WAV selected";
     drawWaveform(sel, src);
+    // drawWaveform above already dropped a preview that no longer matches
+    // the shown WAV, so a surviving livePreview is this session's by
+    // construction — the sid check is belt-and-braces.
+    const pv = livePreview && livePreview.key.startsWith(`${sid}/`) ? livePreview.p : null;
     const ls = lastStrip.get(sid);
-    if (ls) {
-      const kept = ls.in_seconds > 0 ? Math.round(100 * ls.speech_seconds / ls.in_seconds) : 0;
-      setStat(stats.clips, String(ls.files_written ?? 0));
-      setStat(stats.speech, `${Math.round(ls.speech_seconds)}s`);
-      setStat(stats.in, `${Math.round(ls.in_seconds)}s`);
-      setStat(stats.kept, `${kept}%`);
+    if (pv) {
+      paintPreviewStats(pv);
+    } else if (ls) {
+      paintCutStats(ls.files_written ?? 0, ls.speech_seconds, ls.in_seconds);
     } else if (stripped) {
       setStat(stats.clips, String(stripped.count));
       setStat(stats.speech, `${Math.round(stripped.speech_seconds)}s`);

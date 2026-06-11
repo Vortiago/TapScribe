@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from tapscribe import strip_silence as ss
+from tapscribe.strip_silence import SAMPLE_RATE, plan_strip_regions
 
 
 def test_filter_low_energy_regions_drops_quiet_ones():
@@ -67,3 +68,66 @@ def test_detect_speech_silero_without_silero_raises_runtime_error(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", _no_silero)
     with pytest.raises(RuntimeError, match=r"install is corrupt"):
         ss.detect_speech_silero(np.zeros(16000, dtype=np.int16), min_silence_ms=500, pad_ms=200)
+
+
+def _speech_silence_samples(bursts: int = 2, burst_s: float = 0.5, gap_s: float = 0.8) -> np.ndarray:
+    """Int16 samples alternating loud square-wave bursts and zero gaps —
+    the same shape the e2e builder writes, kept inline so the planner tests
+    need no WAV on disk."""
+    chunks = []
+    n_burst = int(burst_s * SAMPLE_RATE)
+    burst = np.tile(np.array([12000, -12000], dtype=np.int16), n_burst // 2 + 1)[:n_burst]
+    for i in range(bursts):
+        chunks.append(burst)
+        if i < bursts - 1:
+            chunks.append(np.zeros(int(gap_s * SAMPLE_RATE), dtype=np.int16))
+    return np.concatenate(chunks)
+
+
+def test_plan_strip_regions_returns_spans_stats_and_no_writes():
+    samples = _speech_silence_samples(bursts=2)
+    plan = plan_strip_regions(samples, min_silence_ms=400, pad_ms=50)
+    assert len(plan.regions) == 2
+    assert len(plan.spans) == 2
+    for (s, e), span in zip(plan.regions, plan.spans, strict=True):
+        assert span["start_s"] == round(s / SAMPLE_RATE, 3)
+        assert span["end_s"] == round(e / SAMPLE_RATE, 3)
+        assert 0.0 <= span["start_s"] < span["end_s"] <= plan.in_seconds + 0.01
+    assert plan.silent is False
+    assert plan.reason is None
+    assert plan.detector == "silero-vad"
+    assert plan.speech_seconds > 0
+    assert plan.segments_filtered_below_floor == 0
+
+
+def test_plan_strip_regions_knobs_change_the_plan():
+    samples = _speech_silence_samples(bursts=2, gap_s=0.8)
+    narrow = plan_strip_regions(samples, min_silence_ms=400, pad_ms=50)
+    wide = plan_strip_regions(samples, min_silence_ms=400, pad_ms=200)
+    assert len(narrow.regions) == len(wide.regions) == 2
+    # A wider pad extends every interior region edge outward.
+    assert wide.spans[0]["end_s"] > narrow.spans[0]["end_s"]
+    assert wide.spans[1]["start_s"] < narrow.spans[1]["start_s"]
+    # A min_silence longer than the gap merges the bursts into one region.
+    merged = plan_strip_regions(samples, min_silence_ms=900, pad_ms=50)
+    assert len(merged.regions) == 1
+
+
+def test_plan_strip_regions_floor_filters_all_regions():
+    samples = _speech_silence_samples(bursts=2)
+    plan = plan_strip_regions(samples, min_silence_ms=400, pad_ms=50, speech_floor_db=-1.0)
+    assert plan.regions == [] and plan.spans == []
+    assert plan.segments_filtered_below_floor == 2
+    assert plan.silent is False
+    assert plan.reason is not None and "below" in plan.reason
+    assert plan.detector == "silero-vad"
+
+
+def test_plan_strip_regions_silence_verdicts():
+    silent = plan_strip_regions(np.zeros(SAMPLE_RATE, dtype=np.int16), min_silence_ms=400, pad_ms=50)
+    assert silent.silent is True
+    assert silent.regions == []
+    assert silent.reason is not None and "whole-file silent" in silent.reason
+    assert silent.detector is None
+    empty = plan_strip_regions(np.zeros(0, dtype=np.int16), min_silence_ms=400, pad_ms=50)
+    assert empty.silent is True and empty.reason == "empty" and empty.in_seconds == 0.0

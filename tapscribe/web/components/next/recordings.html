@@ -85,8 +85,16 @@
     <div class="wave-canvas-wrap">
       <canvas class="wave-canvas" data-slot="canvas"></canvas>
       <div class="wave-msg" data-slot="msg" hidden></div>
+      <span class="wave-cutbadge mono" data-slot="cutBadge" hidden>✂ committed cut</span>
     </div>
     <div class="wave-axis mono" data-slot="axis"></div>
+    <div class="wave-legend mono" data-slot="legend" hidden>
+      <span class="wave-legend__item"><i class="sw sw--kept"></i>kept</span>
+      <span class="wave-legend__item"><i class="sw sw--dropped"></i>dropped</span>
+      <span class="wave-legend__item"><i class="sw sw--committed"></i>committed cut</span>
+      <span class="wave-legend__item"><i class="sw sw--preview"></i>preview cut</span>
+      <span class="wave-legend__item"><i class="sw sw--floor"></i>speech floor</span>
+    </div>
   </div>
 </template>
 

@@ -1209,6 +1209,162 @@ def test_wav_peaks_non_recorder_format_is_422(client, recorder_under_test):
     assert "format" in r.json()["detail"].lower()
 
 
+def test_strip_meta_roundtrips_response_spans(client, recorder_under_test):
+    """POST strip-silence returns explicit region_spans per written WAV, and
+    GET /strip-meta serves the SAME spans back from the persisted sidecar —
+    the no-filename-reconstruction contract of #90."""
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    r = client.post("/api/sessions/s/strip-silence", json={})
+    assert r.status_code == 200, r.text
+    rows = [f for f in r.json()["files"] if f.get("written")]
+    assert rows and all(f["region_spans"] for f in rows)
+    for sp in rows[0]["region_spans"]:
+        assert sp["start_s"] < sp["end_s"]
+
+    m = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m.status_code == 200
+    body = m.json()
+    assert body["spans"] == rows[0]["region_spans"]
+    assert body["knobs"] == {"min_silence_ms": 500, "pad_ms": 200, "speech_floor_db": -45.0}
+    assert body["stripped_at"] == r.json()["stripped_at"]
+
+
+def test_strip_meta_null_when_never_stripped_and_404_on_bad_input(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    # Never stripped → JSON null, not an error.
+    m = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m.status_code == 200
+    assert m.json() is None
+    # Missing WAV → 404 via resolve_wav.
+    assert client.get("/api/wav/s/20260101T999999Z__nope__zzz.wav/strip-meta").status_code == 404
+    # Non-.wav name → 404 (resolve_wav rejects non-audio).
+    assert client.get("/api/wav/s/strip-meta.json/strip-meta").status_code == 404
+
+
+def test_strip_meta_null_after_original_rewritten(client, recorder_under_test):
+    """The fingerprint guard: a re-recorded/rewritten original must read as
+    'no committed cut' rather than draw the old spans against new audio."""
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    r = client.post("/api/sessions/s/strip-silence", json={})
+    assert r.status_code == 200, r.text
+    m = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m.status_code == 200 and m.json() is not None
+
+    # Rewrite the original (longer file -> new size + mtime).
+    seed_wav(sd / "20260101T000000Z__alice__abc.wav", seconds=2.0)
+    m2 = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m2.status_code == 200
+    assert m2.json() is None
+
+
+def test_delete_stripped_clip_prunes_strip_meta(client, recorder_under_test):
+    """Deleting one region clip must remove ITS span from strip-meta (an
+    original whose spans all vanish loses its entry) while other originals'
+    committed cuts stay intact."""
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"])
+    r = client.post("/api/sessions/s/strip-silence", json={})
+    assert r.status_code == 200, r.text
+    rows = {f["name"]: f for f in r.json()["files"] if f.get("written")}
+    assert set(rows) == {"20260101T000000Z__alice__abc.wav", "20260101T010000Z__bob__def.wav"}
+    alice_clip = rows["20260101T000000Z__alice__abc.wav"]["regions_written"][0]
+
+    d = client.delete(f"/api/wav/s/{alice_clip}?source=stripped")
+    assert d.status_code == 200, d.text
+
+    # Alice's only clip is gone -> her committed cut reads as absent…
+    m = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m.status_code == 200 and m.json() is None
+    # …while Bob's is untouched.
+    m2 = client.get("/api/wav/s/20260101T010000Z__bob__def.wav/strip-meta")
+    assert m2.status_code == 200
+    assert m2.json()["spans"] == rows["20260101T010000Z__bob__def.wav"]["region_spans"]
+
+
+def test_absorb_carries_strip_meta_into_target(client, recorder_under_test):
+    """Absorb moves region clips AND their committed-cut sidecar: both the
+    target's own spans and the absorbed source's spans must resolve in the
+    target afterwards, with the target's knobs preserved."""
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "src", ["20260101T010000Z__bob__def.wav"])
+    rt = client.post("/api/sessions/tgt/strip-silence", json={"pad_ms": 100})
+    assert rt.status_code == 200, rt.text
+    rs = client.post("/api/sessions/src/strip-silence", json={"pad_ms": 50})
+    assert rs.status_code == 200, rs.text
+    tgt_spans = [f for f in rt.json()["files"] if f.get("written")][0]["region_spans"]
+    src_spans = [f for f in rs.json()["files"] if f.get("written")][0]["region_spans"]
+
+    a = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert a.status_code == 200, a.text
+
+    m_tgt = client.get("/api/wav/tgt/20260101T000000Z__alice__abc.wav/strip-meta")
+    assert m_tgt.status_code == 200 and m_tgt.json() is not None
+    assert m_tgt.json()["spans"] == tgt_spans
+    assert m_tgt.json()["knobs"]["pad_ms"] == 100  # target's knobs win
+    m_src = client.get("/api/wav/tgt/20260101T010000Z__bob__def.wav/strip-meta")
+    assert m_src.status_code == 200 and m_src.json() is not None
+    assert m_src.json()["spans"] == src_spans
+
+
+def test_strip_preview_matches_committed_strip_and_writes_nothing(client, recorder_under_test):
+    """The preview IS the cut: for the same knobs, /strip-preview's spans
+    must equal what a real ✂ strip then commits (modulo the clip filenames
+    only the real run mints) — and the preview itself writes nothing."""
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+
+    p = client.get(
+        "/api/wav/s/20260101T000000Z__alice__abc.wav/strip-preview"
+        "?min_silence_ms=400&pad_ms=50&speech_floor_db=-40"
+    )
+    assert p.status_code == 200, p.text
+    preview = p.json()
+    assert preview["segments"] >= 1
+    assert preview["silent"] is False
+    assert preview["detector"] == "silero-vad"
+    assert preview["knobs"] == {"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0}
+    assert preview["speech_seconds"] <= preview["in_seconds"]
+    for sp in preview["spans"]:
+        assert 0.0 <= sp["start_s"] < sp["end_s"] <= preview["in_seconds"] + 0.01
+    # A preview must not create stripped/ (or anything else).
+    assert not (sd / "stripped").exists()
+
+    r = client.post(
+        "/api/sessions/s/strip-silence",
+        json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+    )
+    assert r.status_code == 200, r.text
+    committed = [f for f in r.json()["files"] if f.get("written")][0]["region_spans"]
+    assert [{"start_s": sp["start_s"], "end_s": sp["end_s"]} for sp in committed] == preview["spans"]
+
+
+def test_strip_preview_shares_strip_knob_bounds_and_sanitiser(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    base = "/api/wav/s/20260101T000000Z__alice__abc.wav/strip-preview"
+    # Out-of-range knobs → 400, same bounds as the strip route.
+    assert client.get(f"{base}?min_silence_ms=50").status_code == 400
+    assert client.get(f"{base}?pad_ms=9999").status_code == 400
+    assert client.get(f"{base}?speech_floor_db=5").status_code == 400
+    # Unknown source → 400, whitelisted before any filesystem touch.
+    assert client.get(f"{base}?source=bogus").status_code == 400
+    # Missing WAV → 404 via resolve_wav.
+    assert client.get("/api/wav/s/20260101T999999Z__nope__zzz.wav/strip-preview").status_code == 404
+    # Omitted knobs fall back to the StripSessionRequest defaults.
+    ok = client.get(base)
+    assert ok.status_code == 200
+    assert ok.json()["knobs"] == {"min_silence_ms": 500, "pad_ms": 200, "speech_floor_db": -45.0}
+    # Corrupt bytes behind a .wav name → 422 (wave.Error path), not a 500 —
+    # the same unreadable-WAV outcome the peaks route maps.
+    bad = root / "s" / "20260101T020000Z__alice__bad.wav"
+    bad.write_bytes(b"RIFFgarbage-not-a-wav")
+    assert client.get("/api/wav/s/20260101T020000Z__alice__bad.wav/strip-preview").status_code == 422
+
+
 def test_absorb_refuses_missing_source(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", [])
