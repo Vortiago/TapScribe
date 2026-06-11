@@ -271,3 +271,77 @@ async def test_pipeline_zero_speech_session_fails_at_transcribe_stage(recorder_u
     assert record.stage == "transcribe"
     assert record.error_kind == "NoUsableWavs"
     assert recorder_under_test.jobs.get("s") is None
+
+
+# ---------------------------------------------------------------------------
+# run_summarize_stage × effective_summarizer_config (#84) — the summarize
+# stage resolves session override → global default → built-ins; the tap
+# trigger still carries no summarizer fields (operator defaults only).
+# ---------------------------------------------------------------------------
+
+
+async def _run_summarize_stage_capturing(recorder, monkeypatch, session="s"):
+    """Run the summarize stage directly over a seeded merged transcript with
+    `load_summarizer` (in batch_pipeline's namespace, per convention) swapped
+    for a capturing fake. Returns the captured factory kwargs + prompt."""
+    from conftest import seed_merged_transcript  # type: ignore[import-not-found]
+
+    from tapscribe.batch_pipeline import run_summarize_stage
+
+    seen: dict = {}
+
+    class _FakeResult:
+        @staticmethod
+        def to_mapping():
+            return {"summary": "ok", "source": "x", "model": "", "command": "", "took_ms": 1}
+
+    class _FakeSummarizer:
+        @staticmethod
+        def summarize(text, *, prompt):  # noqa: ARG004
+            seen["prompt"] = prompt
+            return _FakeResult()
+
+    def _fake_load(**kw):
+        seen.update(kw)
+        return _FakeSummarizer()
+
+    monkeypatch.setattr("tapscribe.batch_pipeline.load_summarizer", _fake_load)
+    seed_merged_transcript(recorder.recordings_dir, session)
+    await run_summarize_stage(PipelineRequest(session=session), job=None)
+    return seen
+
+
+async def test_pipeline_summarize_stage_resolves_global_default(recorder_under_test, monkeypatch):
+    from tapscribe import text
+
+    text.write_summarizer_config(
+        {"source": "command", "command": "claude -p", "prompt": "GLOBAL", "max_tokens": 512}
+    )
+    seen = await _run_summarize_stage_capturing(recorder_under_test, monkeypatch)
+    assert seen["source"] == "command"
+    assert seen["command"] == "claude -p"
+    assert seen["max_tokens"] == 512
+    assert seen["prompt"] == "GLOBAL"
+
+
+async def test_pipeline_summarize_stage_session_override_beats_global(recorder_under_test, monkeypatch):
+    from tapscribe import text
+    from tapscribe.sessions import write_session_meta
+
+    text.write_summarizer_config({"source": "command", "command": "claude -p", "prompt": "GLOBAL"})
+    write_session_meta("s", {"summary_source": "local", "summary_prompt": "SESSION"})
+    seen = await _run_summarize_stage_capturing(recorder_under_test, monkeypatch)
+    assert seen["source"] == "local"
+    assert seen["prompt"] == "SESSION"
+
+
+async def test_pipeline_summarize_stage_built_ins_when_nothing_configured(recorder_under_test, monkeypatch):
+    """No saved config at all → today's pre-#84 behaviour: the bundled local
+    source with the catalog/env default model."""
+    from tapscribe.summarizers import DEFAULT_SUMMARY_PROMPT
+
+    seen = await _run_summarize_stage_capturing(recorder_under_test, monkeypatch)
+    assert seen["source"] == "local"
+    assert seen["model"] == ""
+    assert seen["max_tokens"] is None
+    assert seen["prompt"] == DEFAULT_SUMMARY_PROMPT

@@ -36,7 +36,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .batch_strip import StripSessionRequest, strip_session_locked
-from .batch_summarize import NoMergedTranscript, SummarizeSessionRequest, summarize_session_locked
+from .batch_summarize import (
+    NoMergedTranscript,
+    SummarizeSessionRequest,
+    effective_summarizer_config,
+    summarize_session_locked,
+)
 from .batch_transcribe import BatchSessionRequest, transcribe_session_locked
 from .recorder import JobState, Recorder, SessionBusy
 from .session_merge import InvalidRange, NoUsableWavs, select_session_wavs
@@ -182,11 +187,15 @@ async def run_transcribe_stage(req: PipelineRequest, *, job, model: str, backend
 
 
 async def run_summarize_stage(req: PipelineRequest, *, job) -> dict[str, Any]:  # noqa: ARG001 — job kept for stage-signature symmetry; this stage has no inner progress loop
-    """`summarize_session` minus the claim: the local-source summarizer with
-    the catalog/env default model (`model=""` resolves operator-side inside
-    `load_summarizer` — allowlist invariant intact) over the merged
-    transcript the stage before just wrote."""
-    sreq = SummarizeSessionRequest(session=req.session, source="local")
+    """`summarize_session` minus the claim, over the merged transcript the
+    stage before just wrote. The config resolves the full #84 chain —
+    session-meta override → global summarizer default → built-ins (the
+    bundled local source) — the same "operator defaults only" contract as
+    the transcribe stage's model/prompt; the tap trigger never carries
+    summarizer fields. Every resolved value was operator-side validated at
+    write time, and `load_summarizer` re-checks the model allowlist."""
+    cfg = await asyncio.to_thread(effective_summarizer_config, req.session)
+    sreq = SummarizeSessionRequest(session=req.session, **cfg)
     summarizer = load_summarizer(
         source=sreq.source, command=sreq.command, model=sreq.model, max_tokens=sreq.max_tokens
     )
