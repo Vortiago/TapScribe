@@ -547,9 +547,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
         rows = [f for f in resp.json()["files"] if f.get("written")]
     assert len(rows) == 1
     expected_spans = rows[0]["region_spans"]
-    assert len(expected_spans) == 3, (
-        f"the 3-burst source should commit 3 spans, got {expected_spans}"
-    )
+    assert len(expected_spans) == 3, f"the 3-burst source should commit 3 spans, got {expected_spans}"
 
     # The canvas's committed-cut hook: the JSON spans it is currently drawing,
     # or null while the overlay isn't up yet.
@@ -577,9 +575,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
             await page.wait_for_function(overlay_js, timeout=10000)
             first_attr = await page.evaluate(overlay_js)
             spans = json.loads(first_attr)
-            assert spans == expected_spans, (
-                f"overlay spans {spans} != committed {expected_spans}"
-            )
+            assert spans == expected_spans, f"overlay spans {spans} != committed {expected_spans}"
 
             # The badge is the operator-visible "this is the committed cut"
             # cue, distinct from the future live knob preview (#89).
@@ -628,9 +624,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
             await page.reload(wait_until="domcontentloaded")
             await page.wait_for_function(overlay_js, timeout=10000)
             spans2 = json.loads(await page.evaluate(overlay_js))
-            assert spans2 == new_spans, (
-                f"reload lost the committed cut: {spans2} != {new_spans}"
-            )
+            assert spans2 == new_spans, f"reload lost the committed cut: {spans2} != {new_spans}"
         finally:
             await browser.close()
 
@@ -731,12 +725,8 @@ async def test_recordings_strip_preview_tracks_knobs_and_matches_commit(
                 assert resp.status_code == 200, resp.text
                 rows = [f for f in resp.json()["files"] if f.get("written")]
             assert len(rows) == 1
-            committed = [
-                {"start_s": sp["start_s"], "end_s": sp["end_s"]} for sp in rows[0]["region_spans"]
-            ]
-            assert committed == first_preview, (
-                f"committed cut {committed} != live preview {first_preview}"
-            )
+            committed = [{"start_s": sp["start_s"], "end_s": sp["end_s"]} for sp in rows[0]["region_spans"]]
+            assert committed == first_preview, f"committed cut {committed} != live preview {first_preview}"
 
             # The committed overlay lands on the same canvas (solid ticks vs
             # the preview's dashed — both data hooks present).
