@@ -121,6 +121,46 @@ jobs:
       - name: Typecheck
         run: cd frontend && npm run typecheck
 
+  # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:
+  # a cross-platform bridge-core class library, a Windows WASAPI capture
+  # backend, and a WinForms tray runner. This job builds the whole solution on
+  # its native OS (so the net*-windows WASAPI/WinForms projects compile too) and
+  # runs the core unit tests. Standalone job — same rationale as bridge-js /
+  # frontend-typecheck: a C# regression surfaces as its own red check.
+  dotnet-build:
+    name: dotnet build + test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: bridges/windows-tray-bridge/global.json
+
+      - name: Build + test the whole solution
+        run: dotnet test bridges/windows-tray-bridge/TapScribe.WindowsTrayBridge.slnx -c Release
+
+  # Guards the bridge-core's cross-platform invariant: the core (resampler, /tap
+  # WS client, control client) must build and its tests run with no Windows
+  # dependency. Building only the test project — which references the core and
+  # never the WASAPI/WinForms projects — on Linux fails the moment the core
+  # takes a Windows dependency, since the net*-windows projects can't build
+  # here. The in-process /tap test server uses Kestrel, so it runs on Linux too.
+  dotnet-core-crossplatform:
+    name: dotnet core cross-platform (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: bridges/windows-tray-bridge/global.json
+
+      - name: Build + test bridge-core only
+        run: dotnet test bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+
   # Dashboard UI E2E with headless Chromium. The synthetic variant
   # (FakeTranscriber + synthetic WAVs) verifies the active-taps / live
   # transcripts / merged-session pipeline end-to-end. The

@@ -1,0 +1,88 @@
+using System.Text;
+
+namespace TapScribe.Bridge.Core;
+
+/// <summary>
+/// Everything needed to open one `/tap` WebSocket, plus the pure builders that
+/// turn it into a URL and a subprotocol. Kept pure (no socket) so URL/auth
+/// construction is unit-tested without a live connection — mirrors the
+/// local-test-bridge's build_tap_url / build_subprotocols helpers.
+/// </summary>
+public sealed class TapConnectionOptions
+{
+    public string Host { get; init; } = "localhost";
+    public int Port { get; init; } = 8001;
+
+    /// <summary>Use wss:// (the Recorder was started with --tls).</summary>
+    public bool Tls { get; init; }
+
+    /// <summary>Stable per-speaker identifier; the WAV filename slug.</summary>
+    public string Identity { get; init; } = "windows-tray";
+
+    /// <summary>Human-readable display name shown on the dashboard.</summary>
+    public string Name { get; init; } = "";
+
+    /// <summary>Per-utterance id, kept stable across reconnects within an utterance.</summary>
+    public string? UtteranceId { get; init; }
+
+    /// <summary>Detached-session id to route this tap into; null = global current session.</summary>
+    public string? Session { get; init; }
+
+    /// <summary>Tap token. Empty = no subprotocol offered (Recorder under --no-auth).</summary>
+    public string Token { get; init; } = "";
+
+    /// <summary>
+    /// Build the `/tap` WebSocket URI with query params. utterance_id and session
+    /// are only sent when set (the Recorder 404s an unknown session id).
+    /// </summary>
+    public Uri BuildTapUri()
+    {
+        var query = new StringBuilder();
+        query.Append("identity=").Append(Uri.EscapeDataString(Identity));
+        query.Append("&name=").Append(Uri.EscapeDataString(Name));
+        if (!string.IsNullOrEmpty(UtteranceId))
+            query.Append("&utterance_id=").Append(Uri.EscapeDataString(UtteranceId));
+        if (!string.IsNullOrEmpty(Session))
+            query.Append("&session=").Append(Uri.EscapeDataString(Session));
+
+        // UriBuilder (not string interpolation) so a host the user pasted with a
+        // scheme/port/path/whitespace can't produce a malformed URI or land on the
+        // wrong port. NormalizeHost reduces it to a bare hostname; the Port/Tls
+        // fields stay authoritative.
+        return new UriBuilder
+        {
+            Scheme = Tls ? "wss" : "ws",
+            Host = NormalizeHost(Host),
+            Port = Port,
+            Path = "/tap",
+            Query = query.ToString(),
+        }.Uri;
+    }
+
+    /// <summary>
+    /// Reduce a user-entered host to a bare hostname. Accepts a plain hostname or
+    /// one pasted with a scheme ("wss://host"), a port ("host:9000"), a path
+    /// ("host/path"), or surrounding whitespace. The Port and TLS settings remain
+    /// authoritative, so an embedded scheme/port here is ignored — this just stops
+    /// a stray paste from producing a malformed connection URI.
+    /// </summary>
+    public static string NormalizeHost(string host)
+    {
+        string trimmed = (host ?? string.Empty).Trim();
+        if (trimmed.Length == 0)
+            return "localhost";
+        string withScheme = trimmed.Contains("://", StringComparison.Ordinal) ? trimmed : "ws://" + trimmed;
+        return Uri.TryCreate(withScheme, UriKind.Absolute, out Uri? parsed) && !string.IsNullOrEmpty(parsed.Host)
+            ? parsed.Host
+            : trimmed;
+    }
+
+    /// <summary>
+    /// The `Sec-WebSocket-Protocol` value to offer, or null under --no-auth
+    /// (empty token). The token is produced by the Recorder via
+    /// secrets.token_urlsafe, i.e. the base64url charset, which is a valid RFC
+    /// token, so the joined string passes ClientWebSocket subprotocol validation.
+    /// </summary>
+    public string? BuildSubprotocol() =>
+        string.IsNullOrEmpty(Token) ? null : TapWire.SubprotocolPrefix + Token;
+}

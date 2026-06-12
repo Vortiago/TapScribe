@@ -16,6 +16,7 @@ Each bridge gets its own directory:
 bridges/
 ├── spacialchat-bridge/      Chrome MV3 extension for spatial.chat
 ├── local-test-bridge/       Python dev tool: mic-to-Recorder for local testing
+├── windows-tray-bridge/     Native Windows tray app (C# / .NET): mic capture
 ├── <future>-bridge/         drop another platform's bridge here
 └── README.md                this file
 ```
