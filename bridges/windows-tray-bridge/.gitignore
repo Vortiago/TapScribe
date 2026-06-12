@@ -1,0 +1,8 @@
+# .NET build output (the repo root .gitignore is Python-oriented).
+bin/
+obj/
+*.user
+
+# Rider / VS local cruft
+.idea/
+.vs/

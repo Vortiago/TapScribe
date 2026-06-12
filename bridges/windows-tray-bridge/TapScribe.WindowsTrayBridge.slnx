@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TapScribe.Bridge.Core/TapScribe.Bridge.Core.csproj" />
+    <Project Path="src/TapScribe.Bridge.Windows/TapScribe.Bridge.Windows.csproj" />
+    <Project Path="src/TapScribe.TrayBridge/TapScribe.TrayBridge.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj" />
+    <Project Path="tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj" />
+  </Folder>
+</Solution>

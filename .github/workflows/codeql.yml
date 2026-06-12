@@ -1,9 +1,10 @@
 name: CodeQL
 
-# CodeQL static analysis across Python (tapscribe/) and JavaScript (bridges/).
-# Runs on push to main, on PRs, and weekly so a freshly-disclosed CVE gets
-# surfaced even without a code change. Uses the default query suite — we are
-# not tuning rules until the noise level justifies it.
+# CodeQL static analysis across Python (tapscribe/), JavaScript (bridges/,
+# tapscribe/web/js/) and C# (bridges/windows-tray-bridge/). Runs on push to
+# main, on PRs, and weekly so a freshly-disclosed CVE gets surfaced even
+# without a code change. Uses the default query suite — we are not tuning
+# rules until the noise level justifies it.
 on:
   push:
     branches: [main]
@@ -31,7 +32,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [python, javascript]
+        # build-mode: none for every language — Python/JS are interpreted, and
+        # C# is analysed source-only so the CodeQL ubuntu runner needs no .NET
+        # SDK and the net*-windows (WinForms/WASAPI) projects don't block it.
+        # That also means no Autobuild step.
+        include:
+          - language: python
+            build-mode: none
+          - language: javascript
+            build-mode: none
+          - language: csharp
+            build-mode: none
     steps:
       - uses: actions/checkout@v6
 
@@ -39,13 +50,11 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
           # config-file declares custom sanitiser models for our
           # tapscribe.sessions path-traversal helpers; see the file for
           # the audit rationale. `queries:` moves into the config too.
           config-file: ./.github/codeql/codeql-config.yml
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4

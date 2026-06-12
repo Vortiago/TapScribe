@@ -936,9 +936,7 @@ async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
     return {"ok": True, **result}
 
 
-def _parse_strip_knob_overrides(
-    min_silence_ms: Any, pad_ms: Any, speech_floor_db: Any
-) -> dict[str, Any]:
+def _parse_strip_knob_overrides(min_silence_ms: Any, pad_ms: Any, speech_floor_db: Any) -> dict[str, Any]:
     """Range-bound the strip-silence knobs and return only the explicitly
     provided ones, ready to splat into StripSessionRequest (which owns the
     DEFAULTS). One owner for the names + bounds + only-forward-explicit

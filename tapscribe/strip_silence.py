@@ -183,22 +183,29 @@ def plan_strip_regions(
     rms_dbfs = rms_dbfs_int16(samples)
     if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
         return StripPlan(
-            in_seconds=round(in_secs, 2), silent=True, rms_dbfs=rms_dbfs,
+            in_seconds=round(in_secs, 2),
+            silent=True,
+            rms_dbfs=rms_dbfs,
             reason=f"whole-file silent ({rms_dbfs:.1f} dBFS RMS, floor {config.SILENT_RMS_DBFS_FLOOR} dBFS)",
         )
 
     regions = detect_speech_silero(samples, min_silence_ms=min_silence_ms, pad_ms=pad_ms)
     if not regions:
         return StripPlan(
-            in_seconds=round(in_secs, 2), silent=False, rms_dbfs=rms_dbfs,
-            reason="no speech detected", detector="silero-vad",
+            in_seconds=round(in_secs, 2),
+            silent=False,
+            rms_dbfs=rms_dbfs,
+            reason="no speech detected",
+            detector="silero-vad",
         )
 
     pre_filter_count = len(regions)
     regions = filter_low_energy_regions(samples, regions, floor_dbfs=speech_floor_db)
     if not regions:
         return StripPlan(
-            in_seconds=round(in_secs, 2), silent=False, rms_dbfs=rms_dbfs,
+            in_seconds=round(in_secs, 2),
+            silent=False,
+            rms_dbfs=rms_dbfs,
             segments_filtered_below_floor=pre_filter_count,
             reason=f"all {pre_filter_count} regions below {speech_floor_db:.1f} dBFS speech floor",
             detector="silero-vad",
@@ -206,7 +213,9 @@ def plan_strip_regions(
 
     speech_samples = sum(e - s for s, e in regions)
     return StripPlan(
-        in_seconds=round(in_secs, 2), silent=False, rms_dbfs=rms_dbfs,
+        in_seconds=round(in_secs, 2),
+        silent=False,
+        rms_dbfs=rms_dbfs,
         regions=regions,
         speech_seconds=round(speech_samples / SAMPLE_RATE, 2),
         segments_filtered_below_floor=pre_filter_count - len(regions),
