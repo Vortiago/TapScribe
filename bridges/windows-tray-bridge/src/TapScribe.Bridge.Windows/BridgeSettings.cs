@@ -83,7 +83,7 @@ public sealed class BridgeSettings
 /// <summary>Loads/saves <see cref="BridgeSettings"/> as JSON under %APPDATA%.</summary>
 public static class BridgeSettingsStore
 {
-    private static string DefaultPath => Path.Combine(
+    private static string DefaultPath => Path.Join(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "TapScribe", "windows-tray-bridge.json");
 
