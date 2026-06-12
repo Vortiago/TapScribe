@@ -8,7 +8,7 @@ namespace TapScribe.Bridge.Windows.Tests;
 public class BridgeSettingsStoreTests : IDisposable
 {
     private readonly string _path =
-        Path.Combine(Path.GetTempPath(), $"tapscribe-tray-{Guid.NewGuid():N}.json");
+        Path.Join(Path.GetTempPath(), $"tapscribe-tray-{Guid.NewGuid():N}.json");
 
     [Fact]
     public void SaveThenLoad_RoundTripsAllFields_IncludingToken()
