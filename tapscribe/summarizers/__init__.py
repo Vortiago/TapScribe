@@ -22,6 +22,7 @@ This `__init__` re-exports the public interface so callers keep importing from
 
 from __future__ import annotations
 
+from .api import ApiSummarizer
 from .base import (
     DEFAULT_SUMMARY_PROMPT,
     Summarizer,
@@ -51,6 +52,7 @@ __all__ = [
     "ENV_MAX_TOKENS",
     "LOCAL_GGUF_MODEL",
     "LOCAL_MLX_MODEL",
+    "ApiSummarizer",
     "CommandSummarizer",
     "LocalSummarizer",
     "Summarizer",
@@ -71,27 +73,31 @@ def load_summarizer(
     model: str = "",
     max_tokens: int | None = None,
     timeout_s: float | None = None,
+    base_url: str = "",
+    api_key: str = "",
 ) -> Summarizer:
     """Return a `Summarizer` for the chosen source, dispatching on `source`
     exactly as `load_transcriber` resolves a backend.
 
-    `command` (#82) and `local` (#86, the bundled offline default) are wired;
-    `api` (#85) still raises `SummarizerUnavailable` until its slice lands, so
-    the view shows it disabled and a stray request fails with a clear 400. The
-    `local` branch itself raises `SummarizerUnavailable` when the `[summarize]`
-    extra isn't installed — the 'degrade clearly' path — or when `model` isn't in
-    the backend's catalog allowlist.
+    `command` (#82), `local` (#86, the bundled offline default), and `api`
+    (#85) are all wired. The `api` branch constructs an `ApiSummarizer`; an
+    empty `base_url` raises `SummarizerUnavailable` (misconfigured → 400).
+    The `local` branch itself raises `SummarizerUnavailable` when the
+    `[summarize]` extra isn't installed — the 'degrade clearly' path — or
+    when `model` isn't in the backend's catalog allowlist.
 
     `model` selects which bundled model the `local` source loads (the dashboard's
     model dropdown sends it); empty falls back to the backend default. `max_tokens`
     caps the OUTPUT length (the dashboard's number input sends it); None falls back
-    to the env default. Both are ignored by the `command` source (an external CLI
-    owns its own model + length)."""
+    to the env default for `local` and is omitted from the request body for `api`.
+    Both are ignored by the `command` source (an external CLI owns its own model + length)."""
     src = (source or "").strip().lower()
     if src == "command":
         return CommandSummarizer(command, timeout_s=timeout_s)
     if src == "local":
         return LocalSummarizer(model=model, max_tokens=max_tokens)
     if src == "api":
-        raise SummarizerUnavailable("the 'api' summarizer source isn't wired yet")
+        return ApiSummarizer(
+            base_url=base_url, model=model, api_key=api_key, max_tokens=max_tokens, timeout_s=timeout_s
+        )
     raise SummarizerUnavailable(f"unknown summarizer source: {source!r}")

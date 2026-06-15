@@ -48,9 +48,11 @@ class SummarizeSessionRequest:
     # "local"); these dataclass defaults only apply to direct callers.
     source: str = "command"
     command: str = ""
-    model: str = ""  # local source: which catalog model to load (empty = default)
-    max_tokens: int | None = None  # local source: OUTPUT cap (None = env default)
+    model: str = ""  # local/api source: which model to use (empty = default)
+    max_tokens: int | None = None  # local source: OUTPUT cap; api: omit when None
     prompt: str = DEFAULT_SUMMARY_PROMPT
+    base_url: str = ""  # api source: endpoint base URL
+    api_key: str = ""  # api source: write-only bearer token
 
 
 def effective_summarizer_config(session: str) -> dict[str, Any]:
@@ -75,6 +77,8 @@ def effective_summarizer_config(session: str) -> dict[str, Any]:
         "command": g["command"],
         "model": g["model"],
         "max_tokens": g["max_tokens"],
+        "base_url": g["base_url"],
+        "api_key": g["api_key"],
     }
 
 
@@ -94,7 +98,12 @@ async def summarize_session(recorder: Recorder, req: SummarizeSessionRequest) ->
     # fast — before the merged-transcript disk read, and without ever touching
     # the JobTracker slot.
     summarizer = load_summarizer(
-        source=req.source, command=req.command, model=req.model, max_tokens=req.max_tokens
+        source=req.source,
+        command=req.command,
+        model=req.model,
+        max_tokens=req.max_tokens,
+        base_url=req.base_url,
+        api_key=req.api_key,
     )
 
     merged = await asyncio.to_thread(read_session_transcript, req.session)

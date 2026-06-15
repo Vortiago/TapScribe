@@ -3,9 +3,8 @@
      WIRED for the Command source (#82): the operator picks a CLI template
      (e.g. `claude -p`), edits the prompt, and clicks Generate; TapScribe pipes
      the session's merged transcript to the command on stdin and renders the
-     summary it prints to stdout. The Local + API sources are present but
-     disabled until their slices land (#86 / #85). No persistence yet — the
-     summary is lost on reload (that's #83).
+     summary it prints to stdout. The Local (#86) and API (#85) sources are
+     wired too — API targets an OpenAI-compatible / Ollama endpoint.
      Mounted into #viewRoot by js/next/views/summary.js.
      ====================================================================== -->
 <template id="tpl-next-view-summary">
@@ -37,7 +36,7 @@
             <label>source</label>
             <span class="segctl segctl--wide">
               <button class="segctl__opt is-on" type="button" data-src="local" aria-pressed="true" title="bundled offline model — runs with no network">🖥️ Local</button>
-              <button class="segctl__opt" type="button" data-src="api" disabled title="OpenAI-compatible / Ollama endpoint — coming in a later slice">🌐 API</button>
+              <button class="segctl__opt" type="button" data-src="api" aria-pressed="false" title="OpenAI-compatible / Ollama endpoint">🌐 API</button>
               <button class="segctl__opt" type="button" data-src="command" aria-pressed="false" title="pipe the transcript to a CLI tool">⌨️ Command</button>
             </span>
           </div>
@@ -80,6 +79,29 @@
             <div class="dim mono" data-slot="sumCmdPresetNote" style="margin-top:4px"></div>
             <div class="field" style="margin-top:8px"><label>command template</label><input class="inp-txt mono" type="text" data-slot="sumCmd" value='claude -p --tools "" --bare'></div>
             <div class="dim mono" data-slot="sumCmdPreview" style="margin-top:4px"></div>
+          </div>
+
+          <!-- 2c. API source detail (#85): an OpenAI-compatible chat-completions
+               endpoint (Ollama's /v1, etc.). base_url + model are sent in the
+               clear; the API key is WRITE-ONLY — the server never echoes it
+               back (state/config expose only a key_set boolean), the field is
+               never pre-filled, and a blank key on save preserves the stored
+               one. Hidden until the operator picks the API source. -->
+          <div class="srcdetail" data-slot="srcApi" hidden>
+            <div class="srcdetail__lab">🌐 API <span class="dim">— OpenAI-compatible endpoint · chat completions</span></div>
+            <div class="field" style="margin-top:6px">
+              <label>base URL</label>
+              <input class="inp-txt mono" type="text" data-slot="sumApiBase" placeholder="http://localhost:11434/v1" aria-label="API base URL">
+            </div>
+            <div class="field" style="margin-top:8px">
+              <label>model</label>
+              <input class="inp-txt mono" type="text" data-slot="sumApiModel" placeholder="qwen3" aria-label="API model name">
+            </div>
+            <div class="field" style="margin-top:8px">
+              <label>API key <span class="dim">— write-only · never displayed</span></label>
+              <input class="inp-txt mono" type="password" data-slot="sumApiKey" autocomplete="off" aria-label="API key">
+            </div>
+            <div class="dim mono" data-slot="sumApiKeyNote" style="margin-top:4px"></div>
           </div>
 
           <!-- 3. prompt (appended to the command argv) -->

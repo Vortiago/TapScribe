@@ -143,7 +143,8 @@ def read_summarizer_config() -> dict:
     if not isinstance(data, dict):
         data = {}
     out = {
-        k: data[k] if isinstance(data.get(k), str) else "" for k in ("source", "prompt", "command", "model")
+        k: data[k] if isinstance(data.get(k), str) else ""
+        for k in ("source", "prompt", "command", "model", "base_url", "api_key")
     }
     mt = data.get("max_tokens")
     out["max_tokens"] = mt if isinstance(mt, int) and not isinstance(mt, bool) else None
@@ -153,10 +154,18 @@ def read_summarizer_config() -> dict:
 def summarizer_default_public(cfg: dict) -> dict:
     """The /api/state projection of the stored summarizer default — an
     explicit field ALLOWLIST, not a passthrough. This is the redaction seam
-    for #85: when the API source adds key/base-url fields to summarizer.json,
-    they must NOT be added here (the state poll is long-lived, cached and
-    rendered into the DOM). Pinned by a test asserting the exact key set."""
-    return {k: cfg.get(k) for k in ("source", "prompt", "command", "model", "max_tokens")}
+    for #85: the API source's `base_url` is non-secret and included; `api_key`
+    is NEVER exposed, only `key_set` (a boolean). Pinned by a test asserting
+    the exact key set."""
+    return {
+        "source": cfg.get("source"),
+        "prompt": cfg.get("prompt"),
+        "command": cfg.get("command"),
+        "model": cfg.get("model"),
+        "max_tokens": cfg.get("max_tokens"),
+        "base_url": cfg.get("base_url"),
+        "key_set": bool((cfg.get("api_key") or "").strip()),
+    }
 
 
 # The wired summarizer sources — ONE allowlist shared by the global-default
@@ -164,26 +173,30 @@ def summarizer_default_public(cfg: dict) -> dict:
 # (`tapscribe.sessions.write_session_meta`), so wiring the API source (#85)
 # is a single-tuple change that covers both write paths. "" means unset (no
 # global default) / cleared (no per-session override).
-SUMMARY_SOURCES: tuple[str, ...] = ("", "local", "command")
+SUMMARY_SOURCES: tuple[str, ...] = ("", "local", "command", "api")
 
 
 def write_summarizer_config(cfg: dict) -> dict:
     """Validate + persist the operator's DEFAULT summarizer config to
     summarizer.json (#84). Full-object semantics: the PUT always sends the
-    whole structured object, so a missing key clears that field. Returns the
-    normalised stored dict.
+    whole structured object, so a missing key clears that field — EXCEPT for
+    `api_key` which uses preserve-on-omit semantics (the browser never
+    receives the key, only `key_set`, so it cannot echo it back on a partial
+    update; omitting it preserves the stored value). Returns the normalised
+    stored dict.
 
     Like `write_batch_model`, validation happens at WRITE time — the value
     feeds the end-of-meeting pipeline's summarizer with no operator in the
     loop, and a model id arriving from the dashboard is external input that
     must never reach a Hub download (`ValueError` → the PUT's 400):
 
-    - `source`: "" (no default) | "local" | "command". "api" is REJECTED
-      until #85 wires it — an unwired default would break the pipeline.
+    - `source`: "" (no default) | "local" | "command" | "api".
     - `model`: "" (catalog default) or a member of the local backend's
       catalog allowlist / env-override model (`_is_allowed_local_model`).
-    - `prompt` / `command`: free text under the MAX_CONFIG_TEXT_LEN cap.
+    - `prompt` / `command` / `base_url`: free text under the MAX_CONFIG_TEXT_LEN
+      cap. `base_url` must start with http:// or https:// if non-empty.
     - `max_tokens`: None (env default) or an int within the catalog bounds.
+    - `api_key`: write-only; omit to preserve, empty string to clear.
 
     The catalog import is lazy (write_batch_model's pattern) so this module
     stays free of the summarizers dependency for every other caller."""
@@ -214,12 +227,25 @@ def write_summarizer_config(cfg: dict) -> dict:
         lo, hi = _MAX_TOKENS_BOUNDS
         if not (lo <= max_tokens <= hi):
             raise ValueError(f"max_tokens must be within {lo}–{hi}, got {max_tokens}")
+    # base_url: validate text cap, then scheme guard.
+    base_url = validate_config_text(str(cfg.get("base_url") or ""))
+    if base_url and not base_url.startswith(("http://", "https://")):
+        raise ValueError(f"base_url must be an http(s) URL, got {base_url!r}")
+    # api_key: preserve-on-omit — the browser never receives the key (only
+    # key_set), so it cannot echo it back; a PUT editing base_url must NOT
+    # wipe the stored key. Present + non-empty → set; present + "" → clear.
+    if "api_key" in cfg:
+        api_key = validate_config_text(str(cfg.get("api_key") or ""))
+    else:
+        api_key = read_summarizer_config()["api_key"]  # preserve — write-only field
     stored = {
         "source": source,
         "prompt": prompt,
         "command": command,
         "model": model,
         "max_tokens": max_tokens,
+        "base_url": base_url,
+        "api_key": api_key,
     }
     atomic_write_text(config.SUMMARIZER_CONFIG_FILE, json.dumps(stored, indent=2) + "\n")
     return stored
