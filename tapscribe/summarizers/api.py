@@ -48,7 +48,7 @@ def _http_post_json(
     data = _json.dumps(body).encode("utf-8")
     req = urllib_request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 — operator-config http(s) URL, scheme-validated at write time
+        with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310 — operator-config http(s) URL, scheme-validated at write time
             return _json.loads(resp.read().decode("utf-8"))
     except urllib_error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace").strip()[:200]
