@@ -42,13 +42,20 @@ def _http_post_json(
     url: str, headers: dict[str, str], body: dict[str, Any], *, timeout_s: float
 ) -> dict[str, Any]:
     """Default ApiPostFn: POST `body` as JSON to `url`, return the parsed JSON
-    response. urllib (stdlib) keeps this dependency-free. base_url is
-    operator-controlled config (validated to http(s) at write time), the same
-    trust level as the command source's template."""
+    response. urllib (stdlib) keeps this dependency-free.
+
+    The scheme is HARD-ENFORCED here, at the urlopen boundary, not trusted from
+    upstream: `write_summarizer_config` validates the STORED base_url to http(s)
+    at write time, but the per-generate `base_url` override on
+    POST /api/sessions/{s}/summarize bypasses that path entirely. Re-checking at
+    the call site closes urlopen's file://-and-custom-scheme vector (the B310 /
+    S310 finding) regardless of how the URL arrived."""
+    if not url.startswith(("http://", "https://")):
+        raise SummarizerFailed(f"refusing to call non-http(s) summarizer url: {url!r}")
     data = _json.dumps(body).encode("utf-8")
     req = urllib_request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310 — operator-config http(s) URL, scheme-validated at write time
+        with urllib_request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310 — scheme hard-enforced to http(s) immediately above
             return _json.loads(resp.read().decode("utf-8"))
     except urllib_error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace").strip()[:200]

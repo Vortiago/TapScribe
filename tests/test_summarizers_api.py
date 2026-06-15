@@ -186,3 +186,22 @@ class TestApiSummarizerDefaultTransport:
         assert res.summary == "OK SUMMARY"
         assert captured["timeout"] == 12.5  # the bound per-call timeout reached urlopen
         assert captured["url"].endswith("/chat/completions")
+
+    @pytest.mark.parametrize("bad_base", ["file:///etc/passwd", "ftp://host/x", "gopher://h", "x/v1"])
+    def test_non_http_scheme_rejected_before_urlopen(self, monkeypatch, bad_base):
+        """The urlopen boundary HARD-ENFORCES http(s): a non-http(s) base_url
+        (which can arrive via the per-generate body override, bypassing the
+        write-time config validation) is refused WITHOUT opening anything —
+        closing urlopen's file:// / custom-scheme vector (B310/S310)."""
+        called = False
+
+        def _boom_urlopen(req, timeout=None):
+            nonlocal called
+            called = True
+            raise AssertionError("urlopen must NOT be reached for a non-http(s) scheme")
+
+        monkeypatch.setattr("tapscribe.summarizers.api.urllib_request.urlopen", _boom_urlopen)
+        s = ApiSummarizer(base_url=bad_base, model="m")  # default transport (no stub)
+        with pytest.raises(SummarizerFailed, match="non-http"):
+            s.summarize("t", prompt="p")
+        assert called is False
