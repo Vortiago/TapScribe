@@ -249,6 +249,8 @@ def test_read_summarizer_config_returns_defaults_when_missing(tmp_config_dir):
         "command": "",
         "model": "",
         "max_tokens": None,
+        "base_url": "",
+        "api_key": "",
     }
 
 
@@ -278,18 +280,17 @@ def test_write_summarizer_config_missing_keys_clear_fields(tmp_config_dir):
         "command": "",
         "model": "",
         "max_tokens": None,
+        "base_url": "",
+        "api_key": "",
     }
 
 
 def test_write_summarizer_config_rejects_unknown_and_unwired_sources(tmp_config_dir):
+    # "api" is now wired (#85) — accepted at the config layer.
+    assert text.write_summarizer_config({"source": "api"})["source"] == "api"
+    # An unknown source is still rejected.
     with pytest.raises(ValueError):
         text.write_summarizer_config({"source": "bogus"})
-    # "api" exists in the UI as a disabled button but is unwired (#85): an
-    # unwired DEFAULT would break the end-of-meeting pipeline with no
-    # operator in the loop, so reject it at write time until it lands.
-    with pytest.raises(ValueError):
-        text.write_summarizer_config({"source": "api"})
-    assert text.read_summarizer_config()["source"] == ""
 
 
 def test_write_summarizer_config_rejects_non_catalog_model(tmp_config_dir, monkeypatch):
@@ -342,16 +343,92 @@ def test_read_summarizer_config_garbage_json_reads_as_defaults(tmp_config_dir):
         "command": "",
         "model": "",
         "max_tokens": None,
+        "base_url": "",
+        "api_key": "",
     }
 
 
 def test_summarizer_default_public_exposes_exactly_the_public_fields(tmp_config_dir):
-    """The state-poll filter is the redaction seam: when #85 adds API-key
-    fields to summarizer.json they must NOT appear here. Pin the exact key
-    set so adding a field to the blob is a deliberate act."""
-    text.write_summarizer_config({"source": "local", "prompt": "P"})
-    blob = text.summarizer_default_public(text.read_summarizer_config())
-    assert set(blob.keys()) == {"source", "prompt", "command", "model", "max_tokens"}
-    assert blob["source"] == "local"
-    # A future secret-ish key on the stored dict is dropped, not forwarded.
-    assert "api_key" not in text.summarizer_default_public({**blob, "api_key": "s3cret"})
+    """The state-poll filter is the redaction seam: key_set reflects whether a
+    stored api_key is non-empty; api_key itself is NEVER exposed. Pin the exact
+    key set so adding a field to the blob without also updating this projection
+    is caught by CI."""
+    cfg = {
+        "source": "api",
+        "prompt": "P",
+        "command": "",
+        "model": "m",
+        "max_tokens": 2048,
+        "base_url": "http://h:1/v1",
+        "api_key": "s3cret",
+    }
+    blob = text.summarizer_default_public(cfg)
+    assert set(blob.keys()) == {"source", "prompt", "command", "model", "max_tokens", "base_url", "key_set"}
+    assert blob["source"] == "api"
+    assert blob["base_url"] == "http://h:1/v1"
+    assert blob["key_set"] is True
+    assert "api_key" not in blob
+
+
+def test_summarizer_default_public_key_set_false_when_no_key(tmp_config_dir):
+    cfg = {
+        "source": "local",
+        "prompt": "",
+        "command": "",
+        "model": "",
+        "max_tokens": None,
+        "base_url": "",
+        "api_key": "",
+    }
+    blob = text.summarizer_default_public(cfg)
+    assert blob["key_set"] is False
+
+
+def test_write_summarizer_config_rejects_non_https_base_url(tmp_config_dir):
+    """The base_url flows into an outbound HTTP request — must start with
+    http:// or https:// so we never accidentally send data to a local
+    file path or other scheme."""
+    for bad in ("ftp://evil", "file:///etc/passwd", "not-a-url"):
+        text.write_summarizer_config({})  # reset first
+        with pytest.raises(ValueError, match="http\\(s\\) URL"):
+            text.write_summarizer_config({"base_url": bad})
+
+
+def test_write_summarizer_config_accepts_valid_base_urls(tmp_config_dir):
+    assert text.write_summarizer_config({"base_url": "http://h:1/v1"})["base_url"] == "http://h:1/v1"
+    assert text.write_summarizer_config({"base_url": "https://h:443/v1"})["base_url"] == "https://h:443/v1"
+
+
+def test_write_summarizer_config_api_key_preserve_on_omit(tmp_config_dir):
+    """The browser never receives api_key (only key_set), so it can't echo
+    it back on a partial update. Omitting api_key preserves the stored value;
+    setting it to "" clears it."""
+    # 1) Store a key.
+    stored = text.write_summarizer_config(
+        {
+            "source": "api",
+            "base_url": "http://x:1/v1",
+            "api_key": "s3cret",
+        }
+    )
+    assert stored["api_key"] == "s3cret"
+
+    # 2) Omit api_key — base_url changes, key persists.
+    stored = text.write_summarizer_config(
+        {
+            "source": "api",
+            "base_url": "http://y:1/v1",
+        }
+    )
+    assert stored["base_url"] == "http://y:1/v1"
+    assert stored["api_key"] == "s3cret"
+
+    # 3) Explicitly clear the key.
+    stored = text.write_summarizer_config(
+        {
+            "source": "api",
+            "base_url": "http://y:1/v1",
+            "api_key": "",
+        }
+    )
+    assert stored["api_key"] == ""

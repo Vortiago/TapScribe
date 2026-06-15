@@ -285,6 +285,8 @@ def test_effective_summarizer_config_built_ins_when_nothing_configured(recorder_
         "command": "",
         "model": "",
         "max_tokens": None,
+        "base_url": "",
+        "api_key": "",
     }
 
 

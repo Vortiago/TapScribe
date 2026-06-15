@@ -77,12 +77,17 @@ export function build(ctx) {
   );
   const sdLocal = /** @type {HTMLElement} */ (pick(frag, "sdLocal"));
   const sdCommand = /** @type {HTMLElement} */ (pick(frag, "sdCommand"));
+  const sdApi = /** @type {HTMLElement} */ (pick(frag, "sdApi"));
   const sdModelSel = /** @type {HTMLSelectElement} */ (pick(frag, "sdModel"));
   const sdModelNote = pick(frag, "sdModelNote");
   const sdMaxTok = /** @type {HTMLInputElement} */ (pick(frag, "sdMaxTokens"));
   const sdPresetSel = /** @type {HTMLSelectElement} */ (pick(frag, "sdCmdPreset"));
   const sdPresetNote = pick(frag, "sdCmdPresetNote");
   const sdCmd = /** @type {HTMLInputElement} */ (pick(frag, "sdCmd"));
+  const sdApiBase = /** @type {HTMLInputElement} */ (pick(frag, "sdApiBase"));
+  const sdApiModel = /** @type {HTMLInputElement} */ (pick(frag, "sdApiModel"));
+  const sdApiKey = /** @type {HTMLInputElement} */ (pick(frag, "sdApiKey"));
+  const sdApiKeyNote = pick(frag, "sdApiKeyNote");
   const sdPrompt = /** @type {HTMLTextAreaElement} */ (pick(frag, "sdPrompt"));
   const sdOverrides = pick(frag, "sdOverrides");
 
@@ -97,12 +102,17 @@ export function build(ctx) {
     srcKey: "sdSrc",
     localPane: sdLocal,
     commandPane: sdCommand,
+    apiPane: sdApi,
     modelSel: sdModelSel,
     modelNote: sdModelNote,
     maxTokInput: sdMaxTok,
     presetSel: sdPresetSel,
     presetNote: sdPresetNote,
     cmdInput: sdCmd,
+    apiBaseInput: sdApiBase,
+    apiModelInput: sdApiModel,
+    apiKeyInput: sdApiKey,
+    apiKeyNote: sdApiKeyNote,
   });
 
   /** Seed the controls from the saved global default — once. The card is the

@@ -936,9 +936,7 @@ async def api_sessions_prune_empty(recorder: Recorder = Depends(get_recorder)):
     return {"ok": True, **result}
 
 
-def _parse_strip_knob_overrides(
-    min_silence_ms: Any, pad_ms: Any, speech_floor_db: Any
-) -> dict[str, Any]:
+def _parse_strip_knob_overrides(min_silence_ms: Any, pad_ms: Any, speech_floor_db: Any) -> dict[str, Any]:
     """Range-bound the strip-silence knobs and return only the explicitly
     provided ones, ready to splat into StripSessionRequest (which owns the
     DEFAULTS). One owner for the names + bounds + only-forward-explicit
@@ -1017,6 +1015,12 @@ async def api_session_summarize(
     prompt = body.get("prompt")
     if isinstance(prompt, str):
         overrides["prompt"] = prompt
+    base_url = body.get("base_url")
+    if isinstance(base_url, str):
+        overrides["base_url"] = base_url.strip()
+    api_key = body.get("api_key")
+    if isinstance(api_key, str) and api_key.strip():
+        overrides["api_key"] = api_key
     return await summarize_session(recorder, SummarizeSessionRequest(session=session, **overrides))
 
 
@@ -1037,12 +1041,10 @@ async def api_summarize_models():
 
 @app.get("/api/summarize/config")
 async def api_summarize_config_get():
-    """The structured global summarizer default (#84) — the full stored
-    object. The Settings card seeds from the state poll's projection
-    (`summarizer_default_public`) rather than this; the GET is the PUT's
-    read-back twin for scripts and tests. If #85 adds secret fields to
-    summarizer.json, THIS endpoint needs its own redaction decision too."""
-    return read_summarizer_config()
+    """The structured global summarizer default (#84) as the REDACTED public
+    projection. The api_key is write-only and never returned; `key_set`
+    reflects whether one is stored. See `summarizer_default_public`."""
+    return summarizer_default_public(read_summarizer_config())
 
 
 @app.put("/api/summarize/config")

@@ -197,7 +197,12 @@ async def run_summarize_stage(req: PipelineRequest, *, job) -> dict[str, Any]:  
     cfg = await asyncio.to_thread(effective_summarizer_config, req.session)
     sreq = SummarizeSessionRequest(session=req.session, **cfg)
     summarizer = load_summarizer(
-        source=sreq.source, command=sreq.command, model=sreq.model, max_tokens=sreq.max_tokens
+        source=sreq.source,
+        command=sreq.command,
+        model=sreq.model,
+        max_tokens=sreq.max_tokens,
+        base_url=sreq.base_url,
+        api_key=sreq.api_key,
     )
     merged = await asyncio.to_thread(read_session_transcript, req.session)
     if not ((merged or {}).get("plain_text") or "").strip():

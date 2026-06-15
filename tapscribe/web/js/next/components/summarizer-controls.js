@@ -4,7 +4,7 @@
 // view's template owns the MARKUP (different slots, different extras); this
 // module owns the BEHAVIOR they'd otherwise duplicate:
 //
-//   - source segctl (Local / API-disabled / Command) toggling the detail panes
+//   - source segctl (Local / API / Command) toggling the detail panes
 //   - local model <select> + footprint note, populated once from the memoized
 //     catalog fetch (getSummaryCatalog), with the unavailable fallback
 //   - max-output-tokens bounds + server default
@@ -31,6 +31,7 @@ const ctxLabel = (t) => (t >= 1000 ? `${Math.round(t / 1000)}K` : `${t}`);
  *   srcKey: string,
  *   localPane: HTMLElement,
  *   commandPane: HTMLElement,
+ *   apiPane: HTMLElement,
  *   modelSel: HTMLSelectElement,
  *   modelNote: Element,
  *   emptyModelNote?: string,
@@ -38,18 +39,42 @@ const ctxLabel = (t) => (t >= 1000 ? `${Math.round(t / 1000)}K` : `${t}`);
  *   presetSel: HTMLSelectElement,
  *   presetNote: Element,
  *   cmdInput: HTMLInputElement,
+ *   apiBaseInput: HTMLInputElement,
+ *   apiModelInput: HTMLInputElement,
+ *   apiKeyInput: HTMLInputElement,
+ *   apiKeyNote: Element,
  *   canSwitch?: () => boolean,
  *   onCommandInput?: () => void,
  * }} els — the view's prebuilt elements. `srcKey` names the dataset field
  *   carrying each button's source id (Summary uses `data-src`, Settings
  *   `data-sd-src` so the two views' selectors stay distinct while mounted
- *   together). `canSwitch` vetoes a source click (e.g. mid-Generate);
- *   `onCommandInput` fires whenever the command template changes (preset
- *   pick, hand-edit, seed) so a view can refresh derived UI like the preview.
+ *   together). The `api*` elements drive the #85 API pane (OpenAI-compatible /
+ *   Ollama): `apiModelInput` is the remote model name (free text, NOT the local
+ *   catalog <select>); `apiKeyInput` is WRITE-ONLY — its value is sent only when
+ *   non-empty (so the never-serialised key is preserved on save), and
+ *   `apiKeyNote` reflects whether a key is already stored (`key_set`).
+ *   `canSwitch` vetoes a source click (e.g. mid-Generate); `onCommandInput`
+ *   fires whenever the command template changes (preset pick, hand-edit, seed)
+ *   so a view can refresh derived UI like the preview.
  */
 export function wireSummarizerControls(els) {
-  const { buttons, srcKey, localPane, commandPane, modelSel, modelNote, maxTokInput, presetSel, presetNote, cmdInput } =
-    els;
+  const {
+    buttons,
+    srcKey,
+    localPane,
+    commandPane,
+    apiPane,
+    modelSel,
+    modelNote,
+    maxTokInput,
+    presetSel,
+    presetNote,
+    cmdInput,
+    apiBaseInput,
+    apiModelInput,
+    apiKeyInput,
+    apiKeyNote,
+  } = els;
 
   /** @type {import('../../types.js').SummaryModel[]} */
   let models = [];
@@ -68,6 +93,17 @@ export function wireSummarizerControls(els) {
     }
     localPane.hidden = source !== "local";
     commandPane.hidden = source !== "command";
+    apiPane.hidden = source !== "api";
+  };
+
+  /** Reflect whether a key is already stored: the field is write-only (never
+   * pre-filled), so the note is the only signal that a save persisted one.
+   * @param {boolean} keySet */
+  const reflectKeyNote = (keySet) => {
+    apiKeyInput.placeholder = keySet ? "•••• stored — leave blank to keep" : "(optional — e.g. blank for local Ollama)";
+    apiKeyNote.textContent = keySet
+      ? "a key is stored — leave blank to keep it, or type a new one to replace"
+      : "no key stored — leave blank for a keyless endpoint (local Ollama)";
   };
   for (const b of buttons) {
     b.addEventListener("click", () => {
@@ -178,18 +214,31 @@ export function wireSummarizerControls(els) {
       if (d.model) {
         modelSel.value = d.model; // stays on the fallback option if unlisted
         reflectModelNote();
+        apiModelInput.value = d.model; // `model` is one stored field, shared by local + api
       }
       if (typeof d.max_tokens === "number") maxTokInput.value = String(d.max_tokens);
+      // API pane: base_url mirrors the stored value (empty clears it); the key
+      // is write-only — never seeded, only its presence reflected via key_set.
+      if (typeof d.base_url === "string") apiBaseInput.value = d.base_url;
+      reflectKeyNote(!!d.key_set);
     });
 
-  /** The card's current values, PUT/POST-body-shaped. */
+  /** The card's current values, PUT/POST-body-shaped. `model` comes from
+   * whichever source owns the shared field (the local <select> or the api text
+   * input). `base_url` is always carried (non-secret, so a local-source save
+   * doesn't wipe a configured endpoint); `api_key` is included ONLY when the
+   * write-only field is non-empty, so the stored key is preserved-on-omit.
+   * @returns {{ source: string, command: string, model: string, max_tokens: number | null, base_url: string, api_key?: string }} */
   const values = () => {
     const mt = parseInt(maxTokInput.value, 10);
+    const key = apiKeyInput.value;
     return {
       source,
       command: cmdInput.value.trim(),
-      model: modelSel.value || "",
+      model: (source === "api" ? apiModelInput.value : modelSel.value).trim() || "",
       max_tokens: Number.isFinite(mt) ? mt : null,
+      base_url: apiBaseInput.value.trim(),
+      ...(key ? { api_key: key } : {}),
     };
   };
 

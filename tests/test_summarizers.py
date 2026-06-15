@@ -20,6 +20,7 @@ import pytest
 from conftest import py_cmd  # type: ignore[import-not-found]
 
 from tapscribe.summarizers import (
+    ApiSummarizer,
     CommandSummarizer,
     SummarizerFailed,
     SummarizerUnavailable,
@@ -112,11 +113,18 @@ def test_load_summarizer_command_source_is_case_insensitive():
 
 # `local` is no longer here — it's wired in #86 (see tests/test_summarizers_local.py,
 # where its missing-extra → Unavailable path is forced deterministically). `api`
-# stays unwired until #85.
-@pytest.mark.parametrize("source", ["api"])
-def test_load_summarizer_unwired_sources_raise_unavailable(source):
+# is now wired (#85) and tested against a stub post_fn in test_summarizers_api.py.
+
+
+def test_load_summarizer_api_source_returns_api_summarizer():
+    s = load_summarizer(source="api", base_url="http://h:1/v1")
+    assert isinstance(s, ApiSummarizer)
+    assert s.source == "api"
+
+
+def test_load_summarizer_api_source_empty_base_url_raises_unavailable():
     with pytest.raises(SummarizerUnavailable):
-        load_summarizer(source=source, command="")
+        load_summarizer(source="api", base_url="")
 
 
 def test_load_summarizer_unknown_source_raises_unavailable():

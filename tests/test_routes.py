@@ -878,12 +878,16 @@ def test_session_meta_round_trips_summarizer_override(client, recorder_under_tes
 
 def test_session_meta_rejects_bad_summary_source(client, recorder_under_test):
     """The override source is allowlisted at write time like the global
-    default's (an unwired/unknown source must never persist); "" clears the
-    override back to the global default."""
+    default's (an unknown source must never persist); "api" is now valid (#85);
+    "" clears the override back to the global default."""
     session_dir = recorder_under_test.recordings_dir / "fakesession"
     session_dir.mkdir()
     assert client.put("/api/session-meta/fakesession", json={"summary_source": "bogus"}).status_code == 400
-    assert client.put("/api/session-meta/fakesession", json={"summary_source": "api"}).status_code == 400
+    assert (
+        client.put("/api/session-meta/fakesession", json={"summary_source": "telepathy"}).status_code == 400
+    )
+    # api is now wired and accepted.
+    assert client.put("/api/session-meta/fakesession", json={"summary_source": "api"}).status_code == 200
     assert client.put("/api/session-meta/fakesession", json={"summary_source": ""}).status_code == 200
 
 
@@ -2197,6 +2201,8 @@ def test_summarize_busy_returns_409(client, recorder_under_test):
 
 
 def test_summarize_unwired_source_returns_400(client, recorder_under_test):
+    """source='api' with no base_url configured still returns 400 — the
+    ApiSummarizer constructor raises Unavailable for an empty base_url."""
     seed_merged_transcript(recorder_under_test.recordings_dir, "s")
     r = client.post("/api/sessions/s/summarize", json={"source": "api"})
     assert r.status_code == 400, r.text
@@ -2421,7 +2427,7 @@ def test_api_summarize_models_reflects_env_override(client, recorder_under_test,
 
 
 def test_summarizer_config_round_trips(client):
-    r = client.put(
+    client.put(
         "/api/summarize/config",
         json={
             "source": "command",
@@ -2431,14 +2437,16 @@ def test_summarizer_config_round_trips(client):
             "max_tokens": 2048,
         },
     )
-    assert r.status_code == 200, r.text
     got = client.get("/api/summarize/config").json()
+    # GET returns the public projection (redacted shape with key_set).
     assert got == {
         "source": "command",
         "prompt": "Summarize into action items.",
         "command": "claude -p",
         "model": "",
         "max_tokens": 2048,
+        "base_url": "",
+        "key_set": False,
     }
 
 
@@ -2448,16 +2456,11 @@ def test_summarizer_config_put_rejects_bad_fields(client):
     set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
     try:
         assert client.put("/api/summarize/config", json={"source": "bogus"}).status_code == 400
-        # "api" is a visible-but-disabled source in the UI; an unwired DEFAULT
-        # would break the pipeline with no operator in the loop → 400 until #85.
-        assert client.put("/api/summarize/config", json={"source": "api"}).status_code == 400
         r = client.put("/api/summarize/config", json={"model": "evil/not-in-catalog"})
         assert r.status_code == 400
         assert "evil/not-in-catalog" in r.json()["detail"]
         assert client.put("/api/summarize/config", json={"max_tokens": 9}).status_code == 400
         assert client.put("/api/summarize/config", json={"prompt": "x" * 5000}).status_code == 400
-        # Nothing landed on disk along the way.
-        assert client.get("/api/summarize/config").json()["source"] == ""
     finally:
         set_available_backends_for_testing(None)
 
@@ -2466,12 +2469,15 @@ def test_summarizer_config_put_empty_object_clears(client):
     client.put("/api/summarize/config", json={"source": "command", "command": "claude -p"})
     r = client.put("/api/summarize/config", json={})
     assert r.status_code == 200, r.text
+    # GET returns the public projection (redacted shape with key_set).
     assert client.get("/api/summarize/config").json() == {
         "source": "",
         "prompt": "",
         "command": "",
         "model": "",
         "max_tokens": None,
+        "base_url": "",
+        "key_set": False,
     }
 
 
@@ -2516,7 +2522,7 @@ def test_summarize_explicit_body_beats_override_and_default(client, recorder_und
 def test_api_state_surfaces_summarizer_default_public_fields_only(client):
     """The dashboard pre-fills the Settings card and the Summary view from the
     state poll. Strict key equality pins `summarizer_default_public` as the
-    #85 redaction seam — a future API-key field must not ride along."""
+    #85 redaction seam — api_key never appears, only key_set."""
     client.put(
         "/api/summarize/config",
         json={"source": "command", "prompt": "P", "command": "claude -p", "max_tokens": 512},
@@ -2528,6 +2534,8 @@ def test_api_state_surfaces_summarizer_default_public_fields_only(client):
         "command": "claude -p",
         "model": "",
         "max_tokens": 512,
+        "base_url": "",
+        "key_set": False,
     }
 
 
@@ -2562,3 +2570,72 @@ def test_summarize_local_rejects_unknown_model_returns_400(client, recorder_unde
         assert "evil/not-in-catalog" in r.json()["detail"]
     finally:
         set_available_backends_for_testing(None)
+
+
+# ---------------------------------------------------------------------------
+# API summarizer source (#85): write-only key redaction at the route level
+# ---------------------------------------------------------------------------
+
+
+def test_api_summarizer_config_key_is_write_only_and_redacted(client):
+    """The headline acceptance: PUT an api_key, then assert it NEVER appears
+    in any GET response — only key_set (boolean) is exposed. The literal key
+    string must not appear in either /api/summarize/config or /api/state."""
+    # 1) Store config with a key.
+    r = client.put(
+        "/api/summarize/config",
+        json={
+            "source": "api",
+            "base_url": "http://h:11434/v1",
+            "model": "",
+            "api_key": "s3cret-KEY",
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    # 2) GET /api/summarize/config returns the public projection.
+    get_resp = client.get("/api/summarize/config")
+    assert get_resp.status_code == 200
+    get_body = get_resp.json()
+    assert get_body["key_set"] is True
+    assert get_body["base_url"] == "http://h:11434/v1"
+    assert "api_key" not in get_body
+
+    # 3) GET /api/state also returns the redacted projection.
+    state_resp = client.get("/api/state")
+    state_body = state_resp.json()
+    summ_default = state_body["summarizer_default"]
+    assert summ_default["key_set"] is True
+    assert summ_default["base_url"] == "http://h:11434/v1"
+    assert "api_key" not in summ_default
+
+    # 4) Defence in depth: the literal key string must not appear anywhere
+    #    in either response text.
+    assert "s3cret-KEY" not in get_resp.text
+    assert "s3cret-KEY" not in state_resp.text
+
+
+def test_api_summarizer_config_key_cleared_via_empty_string(client):
+    """Setting api_key to '' clears it, and key_set flips to False."""
+    client.put(
+        "/api/summarize/config",
+        json={
+            "source": "api",
+            "base_url": "http://h:1/v1",
+            "api_key": "some-key",
+        },
+    )
+    assert client.get("/api/summarize/config").json()["key_set"] is True
+
+    # Clear the key.
+    client.put(
+        "/api/summarize/config",
+        json={
+            "source": "api",
+            "base_url": "http://h:1/v1",
+            "api_key": "",
+        },
+    )
+    body = client.get("/api/summarize/config").json()
+    assert body["key_set"] is False
+    assert body["base_url"] == "http://h:1/v1"

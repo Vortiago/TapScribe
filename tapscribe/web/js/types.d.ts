@@ -48,11 +48,13 @@ export interface AppState {
 // The operator's global summarizer default — GET/PUT /api/summarize/config
 // and AppState.summarizer_default share this shape.
 export interface SummarizerDefault {
-  source: string;            // "" (unset → built-in "local") | "local" | "command"
+  source: string;            // "" (unset → built-in "local") | "local" | "command" | "api"
   prompt: string;
   command: string;           // command source: the CLI template
-  model: string;             // local source: catalog repo id ("" = catalog default)
-  max_tokens: number | null; // local source: output cap (null = env default)
+  model: string;             // local source: catalog repo id ("" = catalog default); api source: remote model name
+  max_tokens: number | null; // local/api source: output cap (null = env default)
+  base_url: string;          // api source: OpenAI-compatible base URL (Ollama /v1, etc.)
+  key_set: boolean;          // api source: whether an api_key is stored — the key itself is NEVER serialised, only this boolean
 }
 
 // Active /tap WebSocket (one per recording utterance). `record` and `live`

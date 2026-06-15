@@ -2394,7 +2394,7 @@ async def test_summary_stage_command_source_generates_and_renders(
 
 async def test_summary_stage_has_no_mock_not_wired_tags(running_recorder: RunningRecorder):
     """The 'mock · not wired' tags are gone from the Summary stage now that it's
-    real; Local + Command are wired and only the API source stays disabled."""
+    real; Local + Command + API (#85) are all wired — no source stays disabled."""
     rr = running_recorder
     async with async_playwright() as pw:
         try:
@@ -2413,11 +2413,11 @@ async def test_summary_stage_has_no_mock_not_wired_tags(running_recorder: Runnin
             assert await page.locator("#viewRoot .mocktag").count() == 0, (
                 "the mock·not-wired tag must be gone"
             )
-            # Local + Command enabled; only API disabled now (#85 not yet wired).
+            # Local + Command + API all enabled now (#85 wired the API source).
             seg = page.locator("#viewRoot .segctl--wide .segctl__opt")
             assert await seg.count() == 3
             disabled = await page.locator("#viewRoot .segctl--wide .segctl__opt[disabled]").count()
-            assert disabled == 1, f"only API must be disabled, got {disabled} disabled options"
+            assert disabled == 0, f"no source must be disabled, got {disabled} disabled options"
             # Local is the bundled-offline default selected source (#86).
             assert await page.locator('#viewRoot .segctl--wide [data-src="local"].is-on').count() == 1
         finally:
@@ -2455,6 +2455,45 @@ async def test_summary_stage_local_is_default_and_toggles_command_field(running_
             # Switch back to Local → it hides again, and Local is is-on.
             await page.click('[data-src="local"]')
             await page.locator('[data-slot="sumCmd"]').wait_for(state="hidden", timeout=4000)
+            assert await page.locator('[data-src="local"].is-on').count() == 1
+        finally:
+            await browser.close()
+
+
+async def test_summary_api_source_reveals_pane_with_write_only_key(running_recorder: RunningRecorder):
+    """The API source (#85): switching to it reveals the base-URL / model / key
+    pane, and the key field is WRITE-ONLY — a password input that is never
+    pre-filled (the server exposes only key_set, never the key itself). Switching
+    away hides the pane. All click-driven, so the poll never rebuilds it."""
+    rr = running_recorder
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            await page.wait_for_selector('[data-src="api"]', timeout=6000)
+            # API pane hidden under the Local default.
+            assert not await page.locator('[data-slot="sumApiBase"]').is_visible()
+
+            # Switch to API → base URL, model, and key fields appear.
+            await page.click('[data-src="api"]')
+            await page.locator('[data-slot="sumApiBase"]').wait_for(state="visible", timeout=4000)
+            assert await page.locator('[data-slot="sumApiModel"]').is_visible()
+
+            # The key field is write-only: a password input, never pre-filled.
+            key = page.locator('[data-slot="sumApiKey"]')
+            assert await key.get_attribute("type") == "password"
+            assert await key.input_value() == "", "the API key field must never be pre-filled"
+
+            # Switch back to Local → the API pane hides again.
+            await page.click('[data-src="local"]')
+            await page.locator('[data-slot="sumApiBase"]').wait_for(state="hidden", timeout=4000)
             assert await page.locator('[data-src="local"].is-on').count() == 1
         finally:
             await browser.close()

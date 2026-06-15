@@ -1,18 +1,19 @@
 // @ts-check
 // Stages · Summary (SESSION stage 4) — the post-transcription summarizer.
 //
-// WIRED for the Local + Command sources. Local (#86) is the bundled, offline,
-// hardware-routed model and the DEFAULT source here (view-local default until
-// #84 makes it operator-configurable) — it carries a model picker, populated
-// once from the hardware-routed catalog (GET /api/summarize/models), so the
-// operator can A/B local models. Command (#82) takes a CLI template (e.g.
-// `claude -p`). The operator picks a source,
+// WIRED for the Local, Command, and API sources. Local (#86) is the bundled,
+// offline, hardware-routed model and the DEFAULT source here (view-local
+// default until #84 makes it operator-configurable) — it carries a model
+// picker, populated once from the hardware-routed catalog
+// (GET /api/summarize/models), so the operator can A/B local models. Command
+// (#82) takes a CLI template (e.g. `claude -p`). API (#85) targets an
+// OpenAI-compatible / Ollama chat-completions endpoint (base_url + model + a
+// write-only key). The operator picks a source,
 // edits the prompt, and clicks Generate; we POST to
 // /api/sessions/{session}/summarize, which summarizes the session's merged
 // transcript and returns the result. We render the summary + the source/model
 // (or command) that produced it, surface errors, and drive the shared
-// job-progress bar while the job runs. The API source (#85) is present but
-// disabled until its slice lands.
+// job-progress bar while the job runs.
 //
 // Persistence (#83): a generated summary is stored server-side next to the
 // merged transcript; the session row carries a slim `session_summary` marker
@@ -75,9 +76,14 @@ export function build(ctx) {
   );
   const srcLocal = /** @type {HTMLElement} */ (pick(frag, "srcLocal"));
   const srcCommand = /** @type {HTMLElement} */ (pick(frag, "srcCommand"));
+  const srcApi = /** @type {HTMLElement} */ (pick(frag, "srcApi"));
   const modelSel = /** @type {HTMLSelectElement} */ (pick(frag, "sumModel"));
   const modelNote = pick(frag, "sumModelNote");
   const maxTokInput = /** @type {HTMLInputElement} */ (pick(frag, "sumMaxTokens"));
+  const apiBaseInput = /** @type {HTMLInputElement} */ (pick(frag, "sumApiBase"));
+  const apiModelInput = /** @type {HTMLInputElement} */ (pick(frag, "sumApiModel"));
+  const apiKeyInput = /** @type {HTMLInputElement} */ (pick(frag, "sumApiKey"));
+  const apiKeyNote = pick(frag, "sumApiKeyNote");
 
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
@@ -238,10 +244,18 @@ export function build(ctx) {
       // The Local source carries the picked model + output cap (empty/null →
       // server defaults); the Command source carries a CLI template instead.
       const v = ctl.values();
-      /** @type {{ source: string, prompt: string, command?: string, model?: string, max_tokens?: number }} */
+      /** @type {{ source: string, prompt: string, command?: string, model?: string, max_tokens?: number, base_url?: string, api_key?: string }} */
       const body = { source: v.source, prompt: promptTa.value };
       if (v.source === "command") body.command = v.command;
-      if (v.source === "local") {
+      if (v.source === "api") {
+        // base_url in the clear; the key only when the operator typed one this
+        // Generate (blank → fall back to the stored default's key).
+        body.base_url = v.base_url;
+        if (v.api_key) body.api_key = v.api_key;
+      }
+      // model + max_tokens are shared by the local + api sources (the command
+      // source carries neither); empty/null fall back to the server defaults.
+      if (v.source !== "command") {
         if (v.model) body.model = v.model;
         if (v.max_tokens != null) body.max_tokens = v.max_tokens;
       }
@@ -294,6 +308,7 @@ export function build(ctx) {
     srcKey: "src",
     localPane: srcLocal,
     commandPane: srcCommand,
+    apiPane: srcApi,
     modelSel,
     modelNote,
     emptyModelNote: "first Generate downloads the model, then it runs fully offline",
@@ -301,6 +316,10 @@ export function build(ctx) {
     presetSel: cmdPresetSel,
     presetNote: cmdPresetNote,
     cmdInput,
+    apiBaseInput,
+    apiModelInput,
+    apiKeyInput,
+    apiKeyNote,
     canSwitch: () => !generating,
     onCommandInput: reflectCmdPreview,
   });

@@ -248,7 +248,7 @@
         <label>source <span class="dim">— sessions can override source + prompt</span></label>
         <span class="segctl segctl--wide" data-slot="sdSource">
           <button class="segctl__opt is-on" type="button" data-sd-src="local" aria-pressed="true" title="bundled offline model — runs with no network">🖥️ Local</button>
-          <button class="segctl__opt" type="button" data-sd-src="api" disabled title="OpenAI-compatible / Ollama endpoint — coming in a later slice">🌐 API</button>
+          <button class="segctl__opt" type="button" data-sd-src="api" aria-pressed="false" title="OpenAI-compatible / Ollama endpoint">🌐 API</button>
           <button class="segctl__opt" type="button" data-sd-src="command" aria-pressed="false" title="pipe the transcript to a CLI tool">⌨️ Command</button>
         </span>
       </div>
@@ -275,6 +275,26 @@
         </div>
         <div class="dim mono" data-slot="sdCmdPresetNote" style="margin-top:4px"></div>
         <div class="field" style="margin-top:8px"><label>command template</label><input class="inp-txt mono" type="text" data-slot="sdCmd" value=""></div>
+      </div>
+
+      <!-- API detail (#85): OpenAI-compatible endpoint. The API key is
+           write-only — never serialised back (state/config expose only
+           key_set), never pre-filled, and a blank key on Save preserves the
+           stored one. -->
+      <div class="srcdetail" data-slot="sdApi" hidden>
+        <div class="field">
+          <label>base URL</label>
+          <input class="inp-txt mono" type="text" data-slot="sdApiBase" placeholder="http://localhost:11434/v1" aria-label="Default API base URL">
+        </div>
+        <div class="field" style="margin-top:8px">
+          <label>model</label>
+          <input class="inp-txt mono" type="text" data-slot="sdApiModel" placeholder="qwen3" aria-label="Default API model name">
+        </div>
+        <div class="field" style="margin-top:8px">
+          <label>API key <span class="dim">— write-only · never displayed</span></label>
+          <input class="inp-txt mono" type="password" data-slot="sdApiKey" autocomplete="off" aria-label="Default API key">
+        </div>
+        <div class="dim mono" data-slot="sdApiKeyNote" style="margin-top:4px"></div>
       </div>
 
       <div class="field" style="margin-top:11px">
