@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Runtime.InteropServices;
 
 namespace TapScribe.Bridge.Core;
 
@@ -55,14 +56,13 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
         // core can't dedupe meaningfully, so it fails loudly here rather than record a
         // muddled session. (Raw equality only; a collision that survives only after the
         // Recorder's 10-char truncation is a caller responsibility — see README.)
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (PipelineSpec spec in specs)
-        {
-            if (!seen.Add(spec.Options.Identity))
-                throw new ArgumentException(
-                    $"Duplicate pipeline identity '{spec.Options.Identity}'. Each device must stream " +
-                    "under a distinct identity.", nameof(specs));
-        }
+        var duplicate = specs
+            .GroupBy(s => s.Options.Identity, StringComparer.Ordinal)
+            .FirstOrDefault(g => g.Count() > 1);
+        if (duplicate is not null)
+            throw new ArgumentException(
+                $"Duplicate pipeline identity '{duplicate.Key}'. Each device must stream " +
+                "under a distinct identity.", nameof(specs));
 
         var sessions = new List<TapSession>(specs.Count);
         foreach (PipelineSpec spec in specs)
@@ -76,23 +76,19 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                     onFailed: ex => onFailed(identity, ex),
                     gate, stream, connectionFactory));
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is COMException or InvalidOperationException)
             {
                 // TapSession.Begin opens the device in its ctor (capture.Start) and
                 // rethrows WITHOUT disposing the capture — it only unsubscribes. Dispose
-                // it here so a device that fails to open can't leak, and surface the
+                // it here so a device that fails to open can't leak, then surface the
                 // failure tagged by identity. Best-effort: the remaining devices still
-                // start, so one dead device doesn't sink the whole meeting.
-                try
-                {
-                    spec.Capture.Dispose();
-                }
-                catch
-                {
-                    // Disposing an already-failed device can itself throw (COM teardown
-                    // of an invalidated endpoint). Nothing to recover — we're discarding
-                    // it regardless — so swallow rather than mask the original failure.
-                }
+                // start, so one dead device doesn't sink the whole meeting. The filter is
+                // what capture.Start throws — WASAPI's COMException, or
+                // InvalidOperationException for an already-started/closed device — so an
+                // unexpected exception still propagates rather than being swallowed.
+                // Dispose is contract-bound not to throw (the WASAPI backend swallows COM
+                // teardown errors internally), so it needs no guard of its own.
+                spec.Capture.Dispose();
                 onFailed(identity, ex);
             }
         }
