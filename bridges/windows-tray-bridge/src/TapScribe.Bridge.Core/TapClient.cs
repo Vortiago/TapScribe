@@ -11,7 +11,7 @@ namespace TapScribe.Bridge.Core;
 /// Sends are serialised: ClientWebSocket forbids concurrent SendAsync calls, and
 /// the reference pipeline drives sends from a single consumer anyway.
 /// </summary>
-public sealed class TapClient : IAsyncDisposable
+public sealed class TapClient : ITapConnection
 {
     private readonly TapConnectionOptions _options;
     private readonly ClientWebSocket _ws = new();
