@@ -28,6 +28,47 @@ internal static class Poll
     }
 }
 
+/// <summary>
+/// Synthetic-audio fixtures shared by the gated-pipeline tests (TapSession +
+/// CaptureOrchestrator): the recorder wire format, fast gate/stream tunings so tests
+/// don't wait real hangovers/backoffs, and DC-level PCM builders. Hoisted here next to
+/// the shared <see cref="Poll"/> / fakes instead of a per-class copy. 16 kHz mono int16,
+/// so the resampler is a near-identity and the gate sees the level emitted: value 8000
+/// -> RMS 0.24 (opens the gate); 0 -> silent.
+/// </summary>
+internal static class Fixtures
+{
+    public static AudioFormat RecorderFormat => new(16_000, 1, SampleKind.Int16);
+
+    public static TapStreamOptions FastStream() => new()
+    {
+        Backoff = [TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(20)],
+        BackoffCap = TimeSpan.FromMilliseconds(40),
+        BackoffJitter = 0,
+        DrainBudget = TimeSpan.FromMilliseconds(500),
+        PollInterval = TimeSpan.FromMilliseconds(10),
+    };
+
+    // Opens easily, closes after a short hangover, so tests run fast.
+    public static GateOptions FastGate() => new()
+    {
+        OpenThreshold = 0.02,
+        Hangover = TimeSpan.FromMilliseconds(60), // 3 silent frames
+        PreRoll = TimeSpan.Zero,
+    };
+
+    public static byte[] Pcm(short value, int frames)
+    {
+        var bytes = new byte[frames * TapWire.FrameBytes];
+        for (int i = 0; i < frames * TapWire.FrameSamples; i++)
+            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(i * 2, 2), value);
+        return bytes;
+    }
+
+    public static byte[] Loud(int frames) => Pcm(8000, frames);
+    public static byte[] Silence(int frames) => Pcm(0, frames);
+}
+
 /// <summary>A scripted capture: raises <see cref="DataAvailable"/> on demand via
 /// <see cref="Emit"/>, so a test feeds synthetic PCM with no real audio device.</summary>
 internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
@@ -46,6 +87,51 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     public void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(pcm));
 }
 
+/// <summary>A capture whose <see cref="Start"/> throws — a device that fails to open
+/// (in use, invalidated, unsupported format). Records disposal so a test can assert
+/// the orchestrator's failure path cleaned it up rather than leaking it.</summary>
+internal sealed class ThrowingOnStartCapture(AudioFormat format) : IAudioCapture
+{
+    public AudioFormat Format { get; } = format;
+    public bool Disposed { get; private set; }
+
+    // Never raised; empty accessors keep it off the unused-event warning radar.
+    public event EventHandler<AudioCapturedEventArgs>? DataAvailable { add { } remove { } }
+
+    public void Start() => throw new InvalidOperationException("device open failed");
+    public void Stop() { }
+    public void Dispose() => Disposed = true;
+}
+
+/// <summary>
+/// A scripted device enumerator: returns a fixed <see cref="CaptureDevice"/> list
+/// and hands out a per-device <see cref="FakeAudioCapture"/> from <see cref="Open"/>,
+/// so the orchestration is driven with synthetic PCM and no real audio hardware.
+/// The capture-side analog of <see cref="FakeTapTransport"/>.
+/// </summary>
+internal sealed class FakeAudioDeviceEnumerator : IAudioDeviceEnumerator
+{
+    private readonly List<CaptureDevice> _devices = [];
+    private readonly Dictionary<string, FakeAudioCapture> _captures = new(StringComparer.Ordinal);
+
+    /// <summary>Register a device and the format its <see cref="Open"/>ed capture
+    /// reports; returns that capture so the test can <c>Emit</c> PCM into it.</summary>
+    public FakeAudioCapture Add(CaptureDevice device, AudioFormat format)
+    {
+        var capture = new FakeAudioCapture(format);
+        _devices.Add(device);
+        _captures[device.Id] = capture;
+        return capture;
+    }
+
+    public IReadOnlyList<CaptureDevice> List() => _devices.ToList();
+
+    public IAudioCapture Open(CaptureDevice device) =>
+        _captures.TryGetValue(device.Id, out FakeAudioCapture? capture)
+            ? capture
+            : throw new ArgumentException($"unknown device id '{device.Id}'", nameof(device));
+}
+
 /// <summary>
 /// Hands out <see cref="FakeTapConnection"/>s gated by one switch: <see cref="Up"/>
 /// false makes every connect and every active send throw (a blip / outage), with
@@ -60,9 +146,26 @@ internal sealed class FakeTapTransport
 
     public volatile bool Up = true;
 
+    // Per-identity outage: a connection whose options.Identity is listed here
+    // fails to connect/send while the others stay up, so a multi-pipeline test can
+    // knock out exactly one device. Snapshot array (like Up) so pump threads read
+    // it lock-free; configure it before emitting audio.
+    private volatile string[] _down = [];
+    public void SetDown(params string[] identities) => _down = identities;
+    internal bool IsUpFor(string identity) => Up && Array.IndexOf(_down, identity) < 0;
+
     public IReadOnlyList<FakeTapConnection> Connections
     {
         get { lock (_lock) return _conns.ToList(); }
+    }
+
+    /// <summary>All connections opened under <paramref name="identity"/> — the
+    /// per-pipeline view a multi-device test asserts on (frame bytes can't be used
+    /// for attribution; they're rewritten by the Resampler and RMS-gated).</summary>
+    public IReadOnlyList<FakeTapConnection> ConnectionsFor(string identity)
+    {
+        lock (_lock)
+            return _conns.Where(c => c.Identity == identity).ToList();
     }
 
     public int SentCount(int connIndex)
@@ -84,7 +187,14 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
 {
     private readonly object _lock = new();
 
-    public string? UtteranceId { get; } = options.UtteranceId;
+    /// <summary>The options this connection was opened with, snapshotted once. Per-
+    /// identity attribution (Identity/Name/Session) is read off this, since the
+    /// frame bytes are rewritten by the Resampler and never carry identity.</summary>
+    public TapConnectionOptions Options { get; } = options;
+    public string Identity => Options.Identity;
+    public string Name => Options.Name;
+    public string? Session => Options.Session;
+    public string? UtteranceId => Options.UtteranceId;
     public List<int> Sent { get; } = [];
     public bool Closed { get; private set; }
     public bool Disposed { get; private set; }
@@ -97,7 +207,7 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     public Task ConnectAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!transport.Up)
+        if (!transport.IsUpFor(Options.Identity))
             throw new WebSocketException(WebSocketError.Faulted, "transport down");
         return Task.CompletedTask;
     }
@@ -105,7 +215,7 @@ internal sealed class FakeTapConnection(FakeTapTransport transport, TapConnectio
     public Task SendFrameAsync(ReadOnlyMemory<byte> frame, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!transport.Up)
+        if (!transport.IsUpFor(Options.Identity))
             throw new WebSocketException(WebSocketError.ConnectionClosedPrematurely, "blip");
         int index = BinaryPrimitives.ReadInt32LittleEndian(frame.Span);
         lock (_lock)
