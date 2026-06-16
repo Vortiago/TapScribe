@@ -44,18 +44,6 @@ public class TapStreamTests
             stream.Enqueue(IndexFrame(i));
     }
 
-    private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout, string what)
-    {
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < timeout)
-        {
-            if (predicate())
-                return;
-            await Task.Delay(10);
-        }
-        throw new TimeoutException($"timed out waiting for {what}");
-    }
-
     // --- happy path: real Kestrel /tap server, real TapClient ----------------
 
     [Fact]
@@ -73,7 +61,7 @@ public class TapStreamTests
 
         EnqueueRange(stream, 0, 50);
         await stream.DrainAndDisposeAsync().WaitAsync(Wait);
-        await WaitUntilAsync(() => server.Connections.Count == 1 && server.Connections[0].ClosedNormally,
+        await Poll.UntilAsync(() => server.Connections.Count == 1 && server.Connections[0].ClosedNormally,
             Wait, "the server to see all frames and a clean close");
 
         RecordingTapServer.Conn conn = server.Connections[0];
@@ -94,13 +82,13 @@ public class TapStreamTests
 
         // First batch lands on connection 0.
         EnqueueRange(stream, 0, 20);
-        await WaitUntilAsync(() => transport.SentCount(0) >= 20, Wait, "conn0 to receive 20 frames");
+        await Poll.UntilAsync(() => transport.SentCount(0) >= 20, Wait, "conn0 to receive 20 frames");
 
         // Blip: the link drops and the Recorder is briefly unreachable, so the
         // client buffers the gap audio while it retries.
         transport.Up = false;
         EnqueueRange(stream, 20, 30); // gap frames, buffered during the outage
-        await WaitUntilAsync(() => transport.Connections.Count >= 2, Wait, "a reconnect attempt");
+        await Poll.UntilAsync(() => transport.Connections.Count >= 2, Wait, "a reconnect attempt");
 
         transport.Up = true; // Recorder back
         await stream.DrainAndDisposeAsync().WaitAsync(Wait);
@@ -127,12 +115,12 @@ public class TapStreamTests
 
         // Connect once so a later drop is treated as a recoverable blip.
         stream.Enqueue(IndexFrame(0));
-        await WaitUntilAsync(() => transport.SentCount(0) >= 1, Wait, "conn0 to receive frame 0");
+        await Poll.UntilAsync(() => transport.SentCount(0) >= 1, Wait, "conn0 to receive frame 0");
 
         // Go down and stay down, then capture a long burst while offline.
         transport.Up = false;
         EnqueueRange(stream, 1, 200);
-        await WaitUntilAsync(() => stream.DroppedFrames > 0, Wait, "the gap buffer to overflow");
+        await Poll.UntilAsync(() => stream.DroppedFrames > 0, Wait, "the gap buffer to overflow");
 
         transport.Up = true; // Recorder returns: only the newest frames survived
         await stream.DrainAndDisposeAsync().WaitAsync(Wait);
@@ -151,12 +139,12 @@ public class TapStreamTests
         var stream = TapStream.Begin(options, FastOptions(drainMs: 4000), connectionFactory: transport.Create);
 
         EnqueueRange(stream, 0, 10);
-        await WaitUntilAsync(() => transport.SentCount(0) >= 10, Wait, "conn0 to receive 10 frames");
+        await Poll.UntilAsync(() => transport.SentCount(0) >= 10, Wait, "conn0 to receive 10 frames");
 
         // The utterance ends (drain) while disconnected: the tail must still land.
         transport.Up = false;
         EnqueueRange(stream, 10, 10);
-        await WaitUntilAsync(() => transport.Connections.Count >= 2, Wait, "a reconnect attempt");
+        await Poll.UntilAsync(() => transport.Connections.Count >= 2, Wait, "a reconnect attempt");
         transport.Up = true;
 
         var sw = Stopwatch.StartNew();
@@ -177,7 +165,7 @@ public class TapStreamTests
         var stream = TapStream.Begin(options, FastOptions(drainMs: 300), connectionFactory: transport.Create);
 
         EnqueueRange(stream, 0, 5);
-        await WaitUntilAsync(() => transport.SentCount(0) >= 5, Wait, "conn0 to receive 5 frames");
+        await Poll.UntilAsync(() => transport.SentCount(0) >= 5, Wait, "conn0 to receive 5 frames");
 
         // Recorder vanishes and never comes back.
         transport.Up = false;

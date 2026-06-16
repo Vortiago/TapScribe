@@ -7,7 +7,9 @@ namespace TapScribe.Bridge.Core.Tests;
 /// Unit tests for the <see cref="LevelGate"/> — the Bridge-side Mute — driven by
 /// synthetic 16 kHz mono int16 PCM. Frames are DC (every sample the same value)
 /// so a frame's RMS is exactly <c>|value| / 32768</c>, which makes "above /
-/// below threshold" deterministic without any real audio.
+/// below threshold" deterministic without any real audio. The gate emits one
+/// 640-byte frame per event: an <c>Opened</c> for the utterance's first frame,
+/// then an <c>Audio</c> per following frame, then a <c>Closed</c>.
 /// </summary>
 public class LevelGateTests
 {
@@ -29,17 +31,11 @@ public class LevelGateTests
         return events;
     }
 
-    private static byte[] Concat(params byte[][] parts)
-    {
-        var result = new byte[parts.Sum(p => p.Length)];
-        int offset = 0;
-        foreach (byte[] p in parts)
-        {
-            p.CopyTo(result, offset);
-            offset += p.Length;
-        }
-        return result;
-    }
+    private static byte[] Bytes(params byte[][] parts) => parts.SelectMany(p => p).ToArray();
+
+    // The PCM streamed for the utterance, in order, across Opened + Audio events.
+    private static byte[] StreamedFrames(IEnumerable<GateEvent> events) =>
+        events.Where(e => e.Kind != GateEventKind.Closed).SelectMany(e => e.Frame).ToArray();
 
     // value 8000 -> RMS 0.244 (loud); 1000 -> 0.0305 (quiet); threshold 0.1.
     private static GateOptions Opts(double threshold = 0.1, int hangoverMs = 100, int preRollMs = 0) =>
@@ -61,17 +57,18 @@ public class LevelGateTests
     }
 
     [Fact]
-    public void ThresholdCrossing_Opens_WithPreRollPreserved()
+    public void ThresholdCrossing_Opens_WithPreRollReplayed()
     {
         var gate = new LevelGate(Opts(preRollMs: 60)); // 3 frames of pre-roll
         byte[] q1 = Frame(1001), q2 = Frame(1002), q3 = Frame(1003), loud = Frame(8000);
 
         var events = PushAll(gate, q1, q2, q3, loud);
 
-        GateEvent opened = Assert.Single(events);
-        Assert.Equal(GateEventKind.Opened, opened.Kind);
+        Assert.Equal(GateEventKind.Opened, events[0].Kind);
+        Assert.Equal(q1, events[0].Frame); // the oldest pre-roll frame opens the utterance
+        Assert.All(events.Skip(1), e => Assert.Equal(GateEventKind.Audio, e.Kind));
         // The three quiet pre-roll frames, oldest first, then the triggering frame.
-        Assert.Equal(Concat(q1, q2, q3, loud), opened.Pcm);
+        Assert.Equal(Bytes(q1, q2, q3, loud), StreamedFrames(events));
         Assert.True(gate.IsOpen);
     }
 
@@ -84,9 +81,9 @@ public class LevelGateTests
 
         var events = PushAll(gate, [.. quiet, loud]);
 
-        GateEvent opened = Assert.Single(events);
         // Oldest three quiet frames dropped; only the last three survive as pre-roll.
-        Assert.Equal(Concat(quiet[3], quiet[4], quiet[5], loud), opened.Pcm);
+        Assert.Equal(quiet[3], events[0].Frame);
+        Assert.Equal(Bytes(quiet[3], quiet[4], quiet[5], loud), StreamedFrames(events));
     }
 
     [Fact]
@@ -98,7 +95,8 @@ public class LevelGateTests
         var events = PushAll(gate, Frame(1000), Frame(1000), loud);
 
         GateEvent opened = Assert.Single(events);
-        Assert.Equal(loud, opened.Pcm);
+        Assert.Equal(GateEventKind.Opened, opened.Kind);
+        Assert.Equal(loud, opened.Frame);
     }
 
     [Fact]
@@ -111,7 +109,7 @@ public class LevelGateTests
         Assert.DoesNotContain(events, e => e.Kind == GateEventKind.Closed);
         Assert.True(gate.IsOpen);
         Assert.Equal(GateEventKind.Opened, events[0].Kind);
-        Assert.Equal(5, events.Count(e => e.Kind == GateEventKind.Audio)); // 4 quiet + 1 loud
+        Assert.Equal(5, events.Count(e => e.Kind == GateEventKind.Audio)); // 4 quiet + 1 loud after the open
     }
 
     [Fact]
@@ -144,11 +142,11 @@ public class LevelGateTests
     public void Threshold_GovernsWhetherAFrameIsActive()
     {
         // value 4000 -> RMS 0.122. High threshold treats it as silence; low opens.
-        Assert.False(new LevelGate(Opts(threshold: 0.2)).IsOpen);
         Assert.Empty(new LevelGate(Opts(threshold: 0.2)).Push(Frame(4000)));
 
         var low = new LevelGate(Opts(threshold: 0.05));
-        Assert.Single(low.Push(Frame(4000)));
+        GateEvent opened = Assert.Single(low.Push(Frame(4000)));
+        Assert.Equal(GateEventKind.Opened, opened.Kind);
         Assert.True(low.IsOpen);
     }
 
@@ -163,9 +161,9 @@ public class LevelGateTests
         Assert.False(gate.IsOpen);
 
         // The rest completes the 640-byte frame and opens the utterance.
-        var events = gate.Push(loud.AsSpan(200));
-        GateEvent opened = Assert.Single(events);
-        Assert.Equal(loud, opened.Pcm);
+        GateEvent opened = Assert.Single(gate.Push(loud.AsSpan(200)));
+        Assert.Equal(GateEventKind.Opened, opened.Kind);
+        Assert.Equal(loud, opened.Frame);
     }
 
     [Fact]

@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Diagnostics;
 using System.Net.WebSockets;
 using TapScribe.Bridge.Core;
 
@@ -48,18 +47,6 @@ public class TapSessionTests
     private static byte[] Loud(int frames) => Pcm(8000, frames);
     private static byte[] Silence(int frames) => Pcm(0, frames);
 
-    private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout, string what)
-    {
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < timeout)
-        {
-            if (predicate())
-                return;
-            await Task.Delay(10);
-        }
-        throw new TimeoutException($"timed out waiting for {what}");
-    }
-
     [Fact]
     public async Task Begin_StartsCaptureImmediately_SoTheGateCanHearSpeech()
     {
@@ -87,7 +74,7 @@ public class TapSessionTests
 
         capture.Emit(Loud(40)); // crosses the threshold -> opens an Utterance, connects, streams
         await connected.Task.WaitAsync(Wait);
-        await WaitUntilAsync(() => transport.SentCount(0) > 0, Wait, "frames to stream");
+        await Poll.UntilAsync(() => transport.SentCount(0) > 0, Wait, "frames to stream");
 
         await session.DisposeAsync();
 
@@ -105,12 +92,12 @@ public class TapSessionTests
             onConnected: () => { }, onFailed: _ => { }, FastGate(), FastStream(), transport.Create);
 
         capture.Emit(Loud(20)); // Utterance 1
-        await WaitUntilAsync(() => transport.SentCount(0) > 0, Wait, "utterance 1 to stream");
+        await Poll.UntilAsync(() => transport.SentCount(0) > 0, Wait, "utterance 1 to stream");
         capture.Emit(Silence(10)); // > hangover -> Utterance 1 closes (drains + closes cleanly)
-        await WaitUntilAsync(() => transport.Connections[0].Closed, Wait, "utterance 1 to close");
+        await Poll.UntilAsync(() => transport.Connections[0].Closed, Wait, "utterance 1 to close");
 
         capture.Emit(Loud(20)); // Utterance 2 -> a new WS
-        await WaitUntilAsync(() => transport.Connections.Count >= 2, Wait, "utterance 2 to open");
+        await Poll.UntilAsync(() => transport.Connections.Count >= 2, Wait, "utterance 2 to open");
 
         await session.DisposeAsync();
 
@@ -147,7 +134,7 @@ public class TapSessionTests
             onConnected: () => { }, onFailed: _ => { }, FastGate(), FastStream(), transport.Create);
 
         capture.Emit(Loud(20));
-        await WaitUntilAsync(() => transport.SentCount(0) > 0, Wait, "the Utterance to stream");
+        await Poll.UntilAsync(() => transport.SentCount(0) > 0, Wait, "the Utterance to stream");
 
         await session.DisposeAsync();
 

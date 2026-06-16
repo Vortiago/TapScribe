@@ -8,11 +8,11 @@ namespace TapScribe.Bridge.Core;
 /// <summary>
 /// One resilient Utterance over <c>/tap</c>: a buffer of 640-byte frames drained
 /// by a single pump that keeps a <see cref="TapClient"/> connected, recovering
-/// across blips. The Bridge mints one <c>utterance_id</c> at the start of a
-/// speech segment (carried on <see cref="TapConnectionOptions.UtteranceId"/>) and
-/// this stream keeps it stable across every reconnect, so the Recorder appends to
-/// the same WAV (per the wire contract's RESUME_WINDOW) instead of producing a
-/// second file.
+/// across blips. The stream owns the <c>utterance_id</c> — it mints a fresh one at
+/// construction when the caller didn't supply it (see
+/// <see cref="TapConnectionOptions.UtteranceId"/>) and keeps it stable across every
+/// reconnect, so the Recorder appends to the same WAV (per the wire contract's
+/// RESUME_WINDOW) instead of producing a second file.
 ///
 /// Three resilience behaviours, all bounded:
 /// <list type="bullet">
@@ -66,7 +66,12 @@ public sealed class TapStream : IAsyncDisposable
                       Func<TapConnectionOptions, ITapConnection> connect,
                       Action? onConnected, Action<Exception>? onTerminalFailure)
     {
-        _options = options;
+        // One TapStream is one Utterance, so it owns the utterance_id: mint a fresh
+        // one if the caller didn't supply it. Fixed for the stream's lifetime, so
+        // every reconnect reuses it and the Recorder appends to the same WAV.
+        _options = string.IsNullOrEmpty(options.UtteranceId)
+            ? options with { UtteranceId = Guid.NewGuid().ToString("N") }
+            : options;
         _stream = stream;
         _connect = connect;
         _onConnected = onConnected;

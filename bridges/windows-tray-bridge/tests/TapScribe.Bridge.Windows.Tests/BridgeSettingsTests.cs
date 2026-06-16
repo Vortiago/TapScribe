@@ -62,7 +62,7 @@ public class BridgeSettingsTests
         Assert.Equal("localhost", options.Host);                  // blank host -> localhost
         Assert.Equal(9000, options.Port);
         Assert.False(string.IsNullOrEmpty(options.Identity));     // blank identity -> username/windows-tray
-        Assert.False(string.IsNullOrEmpty(options.UtteranceId));  // a fresh id per call
+        Assert.True(string.IsNullOrEmpty(options.UtteranceId));   // minted per-Utterance by TapStream, not here
     }
 
     [Fact]

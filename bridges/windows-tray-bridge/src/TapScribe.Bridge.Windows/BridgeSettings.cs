@@ -37,7 +37,10 @@ public sealed class BridgeSettings
         set => ProtectedToken = TokenProtection.Protect(value);
     }
 
-    /// <summary>Build the per-tap connection options, minting a fresh utterance id.</summary>
+    /// <summary>
+    /// Build the connection options for a tap. The per-Utterance <c>utterance_id</c>
+    /// is minted by the <see cref="TapStream"/> at each speech segment, not here.
+    /// </summary>
     public TapConnectionOptions ToConnectionOptions() => new()
     {
         Host = string.IsNullOrWhiteSpace(Host) ? "localhost" : Host.Trim(),
@@ -46,7 +49,6 @@ public sealed class BridgeSettings
         Identity = string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim(),
         Name = Name,
         Token = Token,
-        UtteranceId = Guid.NewGuid().ToString("N"),
     };
 
     /// <summary>

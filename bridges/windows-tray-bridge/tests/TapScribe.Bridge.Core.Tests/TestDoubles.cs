@@ -11,6 +11,23 @@ using TapScribe.Bridge.Core;
 
 namespace TapScribe.Bridge.Core.Tests;
 
+/// <summary>Shared spin-wait used across the async tests (and the server's
+/// WaitFor* helpers) instead of a per-file copy.</summary>
+internal static class Poll
+{
+    public static async Task UntilAsync(Func<bool> predicate, TimeSpan timeout, string what)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            if (predicate())
+                return;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException($"timed out waiting for {what}");
+    }
+}
+
 /// <summary>A scripted capture: raises <see cref="DataAvailable"/> on demand via
 /// <see cref="Emit"/>, so a test feeds synthetic PCM with no real audio device.</summary>
 internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
@@ -205,29 +222,11 @@ internal sealed class RecordingTapServer : IAsyncDisposable
         get { lock (_lock) return _conns.Sum(c => c.Indices.Count); }
     }
 
-    public async Task WaitForFramesAsync(int total, TimeSpan timeout)
-    {
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < timeout)
-        {
-            if (TotalFrames >= total)
-                return;
-            await Task.Delay(10);
-        }
-        throw new TimeoutException($"server did not receive {total} frames within {timeout}");
-    }
+    public Task WaitForFramesAsync(int total, TimeSpan timeout) =>
+        Poll.UntilAsync(() => TotalFrames >= total, timeout, $"the server to receive {total} frames");
 
-    public async Task WaitForConnectionsAsync(int n, TimeSpan timeout)
-    {
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < timeout)
-        {
-            if (Connections.Count >= n)
-                return;
-            await Task.Delay(10);
-        }
-        throw new TimeoutException($"server did not accept {n} connections within {timeout}");
-    }
+    public Task WaitForConnectionsAsync(int n, TimeSpan timeout) =>
+        Poll.UntilAsync(() => Connections.Count >= n, timeout, $"the server to accept {n} connections");
 
     public async ValueTask DisposeAsync()
     {

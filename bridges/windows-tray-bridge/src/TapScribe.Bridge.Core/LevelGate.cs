@@ -5,39 +5,42 @@ namespace TapScribe.Bridge.Core;
 /// <summary>The kind of boundary a <see cref="LevelGate"/> emits.</summary>
 public enum GateEventKind
 {
-    /// <summary>An utterance just started. <see cref="GateEvent.Pcm"/> carries the
-    /// pre-roll plus the first above-threshold frame.</summary>
+    /// <summary>The first frame of a new utterance (the oldest pre-roll frame, or
+    /// the triggering frame when there is no pre-roll). The consumer starts a tap
+    /// here.</summary>
     Opened,
 
-    /// <summary>One 640-byte frame of an open utterance.</summary>
+    /// <summary>A subsequent 640-byte frame of the open utterance (pre-roll tail,
+    /// speech, or trailing hangover silence).</summary>
     Audio,
 
     /// <summary>The open utterance just ended (silence held for the hangover).
-    /// <see cref="GateEvent.Pcm"/> is empty.</summary>
+    /// <see cref="GateEvent.Frame"/> is empty.</summary>
     Closed,
 }
 
-/// <summary>One boundary or frame emitted by <see cref="LevelGate.Push"/>.</summary>
-public readonly record struct GateEvent(GateEventKind Kind, byte[] Pcm)
+/// <summary>One boundary or 640-byte frame emitted by <see cref="LevelGate.Push"/>.</summary>
+public readonly record struct GateEvent(GateEventKind Kind, byte[] Frame)
 {
-    public static GateEvent Opened(byte[] pcm) => new(GateEventKind.Opened, pcm);
-    public static GateEvent Audio(byte[] pcm) => new(GateEventKind.Audio, pcm);
+    public static GateEvent Opened(byte[] frame) => new(GateEventKind.Opened, frame);
+    public static GateEvent Audio(byte[] frame) => new(GateEventKind.Audio, frame);
     public static readonly GateEvent Closed = new(GateEventKind.Closed, []);
 }
 
 /// <summary>
 /// The Bridge-side Mute: turns a continuous 16 kHz mono int16 PCM stream into
-/// gated Utterances. While closed it watches the per-frame level and keeps a
-/// short pre-roll ring; when a 20 ms frame's RMS crosses
-/// <see cref="GateOptions.OpenThreshold"/> it opens an utterance — emitting the
-/// buffered pre-roll plus the triggering frame so leading audio isn't clipped —
-/// and streams every following frame as <see cref="GateEventKind.Audio"/> until
-/// the level stays below the threshold for <see cref="GateOptions.Hangover"/>,
-/// at which point it closes.
+/// gated Utterances, one 640-byte frame at a time. While closed it watches the
+/// per-frame level and keeps a short pre-roll ring; when a 20 ms frame's RMS
+/// crosses <see cref="GateOptions.OpenThreshold"/> it opens an utterance —
+/// replaying the buffered pre-roll frames so leading audio isn't clipped — and
+/// streams every following frame as <see cref="GateEventKind.Audio"/> until the
+/// level stays below the threshold for <see cref="GateOptions.Hangover"/>, then
+/// closes.
 ///
-/// Pure and synchronous: <see cref="Push"/> returns the events for the bytes it
-/// was given and holds only a sub-frame remainder and the pre-roll ring between
-/// calls, so the whole thing is unit-testable with synthetic PCM — the output of
+/// Framing is delegated to <see cref="FrameChunker"/> (the one place that splits a
+/// byte stream into exact 640-byte frames), so the gate's output is already
+/// frame-aligned and the consumer streams each <see cref="GateEvent.Frame"/>
+/// straight to a tap with no further chunking. Pure and synchronous: the output of
 /// N small pushes matches one big push. Not thread-safe: drive it from one thread
 /// (the resampler output of one capture pipeline).
 /// </summary>
@@ -49,12 +52,10 @@ public sealed class LevelGate
     private readonly int _preRollFrames;
     private readonly int _hangoverFrames;
 
+    private readonly FrameChunker _chunker = new();
     // Recent below-threshold frames while closed (capacity _preRollFrames), so an
-    // open can prepend the audio that came just before the threshold crossing.
+    // open can replay the audio that came just before the threshold crossing.
     private readonly Queue<byte[]> _preRoll = new();
-    // Carried sub-frame bytes so frame decisions stay 640-byte aligned even when a
-    // backend hands us an odd-sized resampled chunk.
-    private byte[] _pending = [];
 
     private bool _open;
     private int _silenceFrames; // consecutive below-threshold frames while open
@@ -83,31 +84,15 @@ public sealed class LevelGate
 
     /// <summary>
     /// Feed the next chunk of 16 kHz mono int16 PCM and return the gate events it
-    /// produced — zero or more, in order. The trailing sub-frame bytes (&lt; 640)
-    /// are retained for the next call.
+    /// produced — zero or more, in order, each carrying one 640-byte frame. The
+    /// trailing sub-frame bytes are retained for the next call.
     /// </summary>
     public IReadOnlyList<GateEvent> Push(ReadOnlySpan<byte> pcm)
     {
-        var events = new List<GateEvent>();
-
-        byte[] combined;
-        if (_pending.Length == 0)
-        {
-            combined = pcm.ToArray();
-        }
-        else
-        {
-            combined = new byte[_pending.Length + pcm.Length];
-            _pending.CopyTo(combined, 0);
-            pcm.CopyTo(combined.AsSpan(_pending.Length));
-        }
-
-        int frameCount = combined.Length / TapWire.FrameBytes;
-        for (int i = 0; i < frameCount; i++)
-            ProcessFrame(combined[(i * TapWire.FrameBytes)..((i + 1) * TapWire.FrameBytes)], events);
-
-        _pending = combined[(frameCount * TapWire.FrameBytes)..];
-        return events;
+        List<GateEvent>? events = null;
+        foreach (byte[] frame in _chunker.Push(pcm))
+            ProcessFrame(frame, events ??= []);
+        return events ?? (IReadOnlyList<GateEvent>)Array.Empty<GateEvent>();
     }
 
     private void ProcessFrame(byte[] frame, List<GateEvent> events)
@@ -118,19 +103,24 @@ public sealed class LevelGate
         {
             if (active)
             {
-                // Open: the utterance starts with the buffered pre-roll (oldest
-                // first) followed by this triggering frame.
-                byte[] opening = Concat(_preRoll, frame);
-                _preRoll.Clear();
+                // Open: replay the buffered pre-roll (oldest first) then this
+                // triggering frame. The very first emitted frame is the Opened
+                // boundary; the rest are Audio.
                 _open = true;
                 _silenceFrames = 0;
-                events.Add(GateEvent.Opened(opening));
+                bool first = true;
+                while (_preRoll.TryDequeue(out byte[]? pre))
+                {
+                    events.Add(first ? GateEvent.Opened(pre) : GateEvent.Audio(pre));
+                    first = false;
+                }
+                events.Add(first ? GateEvent.Opened(frame) : GateEvent.Audio(frame));
             }
             else
             {
                 // Still closed: remember this frame as pre-roll, dropping the
-                // oldest beyond the configured window. With _preRollFrames == 0
-                // this discards it immediately (pre-roll disabled).
+                // oldest beyond the window. With _preRollFrames == 0 this discards
+                // it immediately (pre-roll disabled).
                 _preRoll.Enqueue(frame);
                 while (_preRoll.Count > _preRollFrames)
                     _preRoll.Dequeue();
@@ -151,23 +141,6 @@ public sealed class LevelGate
             _silenceFrames = 0;
             events.Add(GateEvent.Closed);
         }
-    }
-
-    private static byte[] Concat(Queue<byte[]> preRoll, byte[] last)
-    {
-        int total = last.Length;
-        foreach (byte[] f in preRoll)
-            total += f.Length;
-
-        var result = new byte[total];
-        int offset = 0;
-        foreach (byte[] f in preRoll)
-        {
-            f.CopyTo(result, offset);
-            offset += f.Length;
-        }
-        last.CopyTo(result, offset);
-        return result;
     }
 
     /// <summary>

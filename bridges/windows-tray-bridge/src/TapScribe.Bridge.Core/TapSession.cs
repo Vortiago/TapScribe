@@ -34,7 +34,6 @@ public sealed class TapSession : IAsyncDisposable
     private readonly List<Task> _draining = [];
 
     private TapStream? _current;
-    private FrameChunker? _chunker;
     private bool _captureStarted;
     private bool _disposed;
 
@@ -89,15 +88,17 @@ public sealed class TapSession : IAsyncDisposable
         byte[] pcm = _resampler.Process(e.Data.Span);
         if (pcm.Length == 0)
             return;
+        // The gate's output is already 640-byte frame-aligned, so each frame goes
+        // straight to the stream — no second chunking.
         foreach (GateEvent ev in _gate.Push(pcm))
         {
             switch (ev.Kind)
             {
                 case GateEventKind.Opened:
-                    OpenUtterance(ev.Pcm);
+                    OpenUtterance(ev.Frame);
                     break;
                 case GateEventKind.Audio:
-                    EnqueueToCurrent(ev.Pcm);
+                    EnqueueToCurrent(ev.Frame);
                     break;
                 case GateEventKind.Closed:
                     CloseUtterance();
@@ -106,32 +107,24 @@ public sealed class TapSession : IAsyncDisposable
         }
     }
 
-    private void OpenUtterance(byte[] openingPcm)
+    private void OpenUtterance(byte[] firstFrame)
     {
         lock (_lock)
         {
             if (_disposed)
                 return;
 
-            var options = _options with { UtteranceId = NewUtteranceId() };
-            var chunker = new FrameChunker();
-            var stream = TapStream.Begin(options, _streamOptions, _onConnected, _onFailed, _connectionFactory);
-            _current = stream;
-            _chunker = chunker;
-            foreach (byte[] frame in chunker.Push(openingPcm))
-                stream.Enqueue(frame);
+            // A fresh TapStream mints its own utterance_id, so each speech segment
+            // is a distinct Utterance / WAV.
+            _current = TapStream.Begin(_options, _streamOptions, _onConnected, _onFailed, _connectionFactory);
+            _current.Enqueue(firstFrame);
         }
     }
 
-    private void EnqueueToCurrent(byte[] pcm)
+    private void EnqueueToCurrent(byte[] frame)
     {
         lock (_lock)
-        {
-            if (_current is null || _chunker is null)
-                return;
-            foreach (byte[] frame in _chunker.Push(pcm))
-                _current.Enqueue(frame);
-        }
+            _current?.Enqueue(frame);
     }
 
     private void CloseUtterance()
@@ -145,11 +138,8 @@ public sealed class TapSession : IAsyncDisposable
             _draining.RemoveAll(static t => t.IsCompleted);
             _draining.Add(_current.DrainAndDisposeAsync());
             _current = null;
-            _chunker = null;
         }
     }
-
-    private static string NewUtteranceId() => Guid.NewGuid().ToString("N");
 
     public async ValueTask DisposeAsync()
     {
@@ -162,7 +152,6 @@ public sealed class TapSession : IAsyncDisposable
             _disposed = true;
             current = _current;
             _current = null;
-            _chunker = null;
             draining = [.. _draining];
         }
 
