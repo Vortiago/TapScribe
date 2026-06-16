@@ -8,7 +8,7 @@ namespace TapScribe.Bridge.Core;
 /// construction is unit-tested without a live connection — mirrors the
 /// local-test-bridge's build_tap_url / build_subprotocols helpers.
 /// </summary>
-public sealed class TapConnectionOptions
+public sealed record TapConnectionOptions
 {
     public string Host { get; init; } = "localhost";
     public int Port { get; init; } = 8001;

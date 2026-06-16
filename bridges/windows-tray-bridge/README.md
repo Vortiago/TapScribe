@@ -12,18 +12,21 @@ contract every Bridge speaks and `../../CONTEXT.md` for the domain vocabulary
 
 ## What's here / what's deferred
 
-**Now (this slice):** default-mic capture behind a core interface, a resampler
-to 16 kHz mono int16, a `/tap` WebSocket client (subprotocol auth), a control
-client, a minimal tray runner (Start / Stop / Quit), and a **Settings dialog**
-(host / port / TLS / identity / name / tap token) persisted to `%APPDATA%`, with
-the token protected at rest by Windows DPAPI.
+**Now (the core audio lifecycle):** default-mic capture behind a core interface,
+a resampler to 16 kHz mono int16, a **level gate** that opens/closes Utterances on
+speech with pre-roll so leading consonants aren't clipped (the Bridge-side Mute —
+a loopback device has no mute event), a resilient `/tap` stream with
+`utterance_id` **reconnect** across blips, a bounded during-gap buffer, and bounded
+**Drain**, a control client, a minimal tray runner (Start / Stop / Quit), and a
+**Settings dialog** (host / port / TLS / identity / name / tap token) persisted to
+`%APPDATA%`, with the token protected at rest by Windows DPAPI.
 
-**Deferred to later PRD #99 slices (user stories 1–11, 12+):** the level gate
-(open/close Utterances on speech) and pre-roll, `utterance_id` reconnect + Drain,
-system-audio loopback capture ("the other side" of a meeting), multi-device, and
-the end-of-meeting pipeline trigger. The tray here is intentionally no-frills;
-the depth lives in the cross-platform core so those slices (and a future
-macOS/Linux shell) build on it.
+**Deferred to later PRD #99 slices:** system-audio loopback capture ("the other
+side" of a meeting) and multi-device (#105); the tray device-picker and the
+detached-session **Start meeting** (#106); and the end-of-meeting pipeline trigger
+with summary display (#107). The tray here is intentionally no-frills; the depth
+lives in the cross-platform core so those slices (and a future macOS/Linux shell)
+build on it.
 
 ## Layout
 
@@ -37,11 +40,14 @@ windows-tray-bridge/
 │   │   ├── AudioFormat.cs, IAudioCapture.cs   # the capture seam
 │   │   ├── Resampler.cs                 # device format -> 16 kHz mono int16
 │   │   ├── FrameChunker.cs              # -> exact 640-byte / 20 ms frames
+│   │   ├── LevelGate.cs                 # Bridge-side Mute: gate Utterances on level + pre-roll (+ GateOptions.cs)
 │   │   ├── TapConnectionOptions.cs      # URL + subprotocol builders; host normalisation
-│   │   ├── TapClient.cs                 # the /tap WebSocket
+│   │   ├── ITapConnection.cs            # the connection seam TapStream drives (TapClient is the impl)
+│   │   ├── TapClient.cs                 # one /tap WebSocket (implements ITapConnection)
+│   │   ├── TapStream.cs                 # resilient Utterance: reconnect + gap buffer + Drain (+ TapStreamOptions.cs)
 │   │   ├── ControlClient.cs             # tap-bearer POST /api/tap/new-session; GET /health
 │   │   ├── ConnectionTester.cs          # "Test connection": /health + tap-token probe
-│   │   └── TapSession.cs                # pipeline: capture -> resampler -> chunker -> TapClient
+│   │   └── TapSession.cs                # pipeline: capture -> resampler -> level gate -> a TapStream per Utterance
 │   ├── TapScribe.Bridge.Windows/       # net10.0-windows — WASAPI + settings (NAudio + DPAPI)
 │   │   ├── WasapiAudioCapture.cs        # IAudioCapture over the default mic
 │   │   └── BridgeSettings.cs            # %APPDATA% persistence; DPAPI-protected token
@@ -121,9 +127,11 @@ source of truth thereafter.
 1. Start a Recorder. Simplest: `python -m tapscribe --no-auth` (or `./start.ps1`).
 2. `dotnet run --project src/TapScribe.TrayBridge`. A TapScribe icon appears in
    the notification area.
-3. Right-click → **Start tap**, speak, then **Stop tap**.
-4. A WAV appears under the Recorder's `recordings/<current-session>/` and shows
-   on the dashboard. That is the tracer bullet working end-to-end.
+3. Right-click → **Start tap**, speak (pause between sentences), then **Stop tap**.
+4. A WAV appears under the Recorder's `recordings/<current-session>/` per speech
+   segment and shows on the dashboard — the level gate opens an Utterance when you
+   start talking and closes it after the silence hangover, so each segment is its
+   own WAV. Start..Stop runs the capture; the gate decides the Utterances within it.
 5. To exercise the tokened path: open **Settings…**, paste the token (from the
    Recorder's boot log / `.tap-token`) into the **Tap token** field, Save, then
    **Start tap** — against a Recorder started **without** `--no-auth`.
@@ -135,6 +143,9 @@ server, so a wire regression is caught in CI without needing a live Recorder.
 ## Wire contract (summary)
 
 One `/tap` WebSocket per Utterance; raw PCM, 16 kHz mono int16, 20 ms (640-byte)
-binary frames; tap token via the `tapscribe.v1.tap.<token>` subprotocol. The
-Bridge sends only PCM — no JSON, no control messages, and it never talks to
-WhisperLiveKit (ADR-0002). The full contract lives in `../README.md`.
+binary frames; tap token via the `tapscribe.v1.tap.<token>` subprotocol. The level
+gate mints a fresh `utterance_id` per speech segment and the stream keeps it stable
+across reconnects, so a mid-Utterance blip appends to the same WAV; **Drain**
+flushes the trailing buffered audio (bounded) when an Utterance ends while
+reconnecting. The Bridge sends only PCM — no JSON, no control messages, and it
+never talks to WhisperLiveKit (ADR-0002). The full contract lives in `../README.md`.

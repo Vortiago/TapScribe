@@ -7,9 +7,11 @@ namespace TapScribe.TrayBridge;
 /// <summary>
 /// The tray shell: a NotifyIcon with Start tap / Stop tap / Settings / Quit.
 /// Connection settings are edited in a small dialog and persisted to %APPDATA%
-/// (env vars only seed the first-run defaults). One Start..Stop is one Utterance.
-/// The richer tray UX (device picker, level gate, reconnect, end-meeting) lands
-/// in later PRD #99 slices; the depth lives in the cross-platform core.
+/// (env vars only seed the first-run defaults). Start..Stop runs one capture
+/// pipeline; the core's level gate opens/closes an Utterance per speech segment
+/// within it, with reconnect + Drain. The richer tray UX (device picker,
+/// loopback capture, end-meeting) lands in later PRD #99 slices (#105–#107); the
+/// depth lives in the cross-platform core.
 /// </summary>
 internal sealed class TrayContext : ApplicationContext
 {

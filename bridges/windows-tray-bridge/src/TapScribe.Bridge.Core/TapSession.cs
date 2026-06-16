@@ -1,124 +1,182 @@
-using System.Net.Sockets;
-using System.Net.WebSockets;
-using System.Runtime.InteropServices;
-using System.Threading.Channels;
-
 namespace TapScribe.Bridge.Core;
 
 /// <summary>
-/// One live tap: a capture source -> <see cref="Resampler"/> -> <see cref="FrameChunker"/>
-/// -> 640-byte frames over a single <see cref="TapClient"/> WebSocket. Capture
-/// frames are queued on a channel and drained by one async pump so sends stay
-/// serialised and off the capture thread. One TapSession == one Utterance for
-/// this tracer bullet (the level gate that opens/closes utterances on speech is
-/// a later PRD slice).
+/// One capture pipeline for one speaker: a capture device →
+/// <see cref="Resampler"/> → <see cref="LevelGate"/> → a fresh
+/// <see cref="TapStream"/> per gated Utterance. The level gate is the Bridge-side
+/// Mute — a loopback device has no mute event, so the session opens an Utterance
+/// when the level crosses the threshold and closes it after the hangover. Each
+/// Utterance mints its own <c>utterance_id</c> (stable across reconnects within
+/// the Utterance, per the wire contract), so the Recorder writes one WAV per
+/// speech segment with blip resilience for free.
 ///
-/// The capture is injected (<see cref="IAudioCapture"/>), so the whole pipeline
-/// is integration-testable with a fake capture against an in-process /tap server
-/// — no real microphone or Windows audio stack required. The WASAPI
-/// implementation lives in the Windows project; the tray supplies it.
+/// Resample → gate → chunk runs synchronously on the capture thread (all cheap,
+/// no I/O); the WebSocket send, reconnect, and Drain happen on each
+/// <see cref="TapStream"/>'s own pump. The capture is injected
+/// (<see cref="IAudioCapture"/>) and the per-utterance connection is injectable
+/// too, so the whole pipeline is testable with a fake capture and a fake transport
+/// — no real microphone, Windows audio stack, or socket required.
 /// </summary>
 public sealed class TapSession : IAsyncDisposable
 {
+    private static readonly TimeSpan DisposeDrainTimeout = TimeSpan.FromSeconds(2);
+
     private readonly IAudioCapture _capture;
+    private readonly TapConnectionOptions _options;
+    private readonly TapStreamOptions _streamOptions;
+    private readonly Func<TapConnectionOptions, ITapConnection> _connectionFactory;
+    private readonly Action _onConnected;
+    private readonly Action<Exception> _onFailed;
+
     private readonly Resampler _resampler;
-    private readonly FrameChunker _chunker;
-    private readonly Channel<byte[]> _frames;
-    private readonly TapClient _tap;
-    private readonly CancellationTokenSource _cts = new();
-    private readonly Task _pump;
-    private volatile bool _captureStarted;
+    private readonly LevelGate _gate;
+    private readonly object _lock = new();
+    private readonly List<Task> _draining = [];
 
-    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(2);
+    private TapStream? _current;
+    private FrameChunker? _chunker;
+    private bool _captureStarted;
+    private bool _disposed;
 
-    private TapSession(IAudioCapture capture, TapConnectionOptions options,
+    private TapSession(IAudioCapture capture, TapConnectionOptions options, GateOptions gate,
+                       TapStreamOptions stream, Func<TapConnectionOptions, ITapConnection> connectionFactory,
                        Action onConnected, Action<Exception> onFailed)
     {
         _capture = capture;
+        _options = options;
+        _streamOptions = stream;
+        _connectionFactory = connectionFactory;
+        _onConnected = onConnected;
+        _onFailed = onFailed;
         _resampler = new Resampler(capture.Format);
-        _chunker = new FrameChunker();
-        _frames = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
-        _tap = new TapClient(options);
+        _gate = new LevelGate(gate);
+
+        // Capture must run continuously so the gate can hear speech start; unlike
+        // the pre-gate tracer bullet there is no WS to wait for. A device-open /
+        // Start failure surfaces synchronously to the caller (the tray catches it).
         _capture.DataAvailable += OnData;
-        _pump = Task.Run(() => RunAsync(onConnected, onFailed));
+        try
+        {
+            _capture.Start();
+            _captureStarted = true;
+        }
+        catch
+        {
+            _capture.DataAvailable -= OnData;
+            throw;
+        }
     }
 
     /// <summary>
-    /// Start a tap over the given <paramref name="capture"/>: connect the /tap WS,
-    /// then start capturing and stream frames. Connection/streaming failures
-    /// arrive via <paramref name="onFailed"/>. The session takes ownership of
-    /// <paramref name="capture"/> and disposes it. Construct the capture (which
-    /// may throw if the device can't be opened) before calling, so the caller can
-    /// surface that synchronously.
+    /// Start a gated capture pipeline over <paramref name="capture"/>.
+    /// <paramref name="onConnected"/> fires when an Utterance's WS connects;
+    /// <paramref name="onFailed"/> fires if an Utterance can't reach the Recorder on
+    /// its first connect (refused token / unreachable / unknown session). The
+    /// session takes ownership of <paramref name="capture"/> and disposes it.
+    /// Construct the capture before calling so a device-open failure surfaces to the
+    /// caller. <paramref name="connectionFactory"/> defaults to a real
+    /// <see cref="TapClient"/>; tests inject a fake.
     /// </summary>
     public static TapSession Begin(IAudioCapture capture, TapConnectionOptions options,
-                                   Action onConnected, Action<Exception> onFailed) =>
-        new(capture, options, onConnected, onFailed);
+                                   Action onConnected, Action<Exception> onFailed,
+                                   GateOptions? gate = null, TapStreamOptions? stream = null,
+                                   Func<TapConnectionOptions, ITapConnection>? connectionFactory = null) =>
+        new(capture, options, gate ?? new GateOptions(), stream ?? new TapStreamOptions(),
+            connectionFactory ?? (static o => new TapClient(o)), onConnected, onFailed);
 
     private void OnData(object? sender, AudioCapturedEventArgs e)
     {
         byte[] pcm = _resampler.Process(e.Data.Span);
         if (pcm.Length == 0)
             return;
-        foreach (byte[] frame in _chunker.Push(pcm))
-            _frames.Writer.TryWrite(frame); // unbounded: never fails; completed channel just drops
+        foreach (GateEvent ev in _gate.Push(pcm))
+        {
+            switch (ev.Kind)
+            {
+                case GateEventKind.Opened:
+                    OpenUtterance(ev.Pcm);
+                    break;
+                case GateEventKind.Audio:
+                    EnqueueToCurrent(ev.Pcm);
+                    break;
+                case GateEventKind.Closed:
+                    CloseUtterance();
+                    break;
+            }
+        }
     }
 
-    private async Task RunAsync(Action onConnected, Action<Exception> onFailed)
+    private void OpenUtterance(byte[] openingPcm)
     {
-        try
+        lock (_lock)
         {
-            await _tap.ConnectAsync(_cts.Token).ConfigureAwait(false);
-            _capture.Start();
-            _captureStarted = true;
-            onConnected();
-            await foreach (byte[] frame in _frames.Reader.ReadAllAsync(_cts.Token).ConfigureAwait(false))
-                await _tap.SendFrameAsync(frame, _cts.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected: Stop()/Dispose cancelled the pump. Nothing to report.
-        }
-        catch (Exception ex) when (
-            ex is WebSocketException
-                or IOException
-                or SocketException
-                or InvalidOperationException
-                or FormatException
-                or COMException)
-        {
-            // Expected operational failures at the connect/stream/device boundary
-            // (Recorder unreachable, refused token, mic removed, or a malformed
-            // host that slipped past NormalizeHost -> UriFormatException). The
-            // filter keeps this off CodeQL's catch-of-all radar AND lets a genuine
-            // bug fault the task loudly instead of being silently swallowed.
-            // onFailed surfaces it to the user and tears the session down.
-            onFailed(ex);
+            if (_disposed)
+                return;
+
+            var options = _options with { UtteranceId = NewUtteranceId() };
+            var chunker = new FrameChunker();
+            var stream = TapStream.Begin(options, _streamOptions, _onConnected, _onFailed, _connectionFactory);
+            _current = stream;
+            _chunker = chunker;
+            foreach (byte[] frame in chunker.Push(openingPcm))
+                stream.Enqueue(frame);
         }
     }
+
+    private void EnqueueToCurrent(byte[] pcm)
+    {
+        lock (_lock)
+        {
+            if (_current is null || _chunker is null)
+                return;
+            foreach (byte[] frame in _chunker.Push(pcm))
+                _current.Enqueue(frame);
+        }
+    }
+
+    private void CloseUtterance()
+    {
+        lock (_lock)
+        {
+            if (_current is null)
+                return;
+            // Drain + dispose off the capture thread so a slow flush never stalls
+            // capture; prune finished drains so a long session doesn't accumulate.
+            _draining.RemoveAll(static t => t.IsCompleted);
+            _draining.Add(_current.DrainAndDisposeAsync());
+            _current = null;
+            _chunker = null;
+        }
+    }
+
+    private static string NewUtteranceId() => Guid.NewGuid().ToString("N");
 
     public async ValueTask DisposeAsync()
     {
-        _capture.DataAvailable -= OnData; // stop producing frames
+        _capture.DataAvailable -= OnData; // stop producing gate events
 
-        // Graceful drain: complete the writer and let the pump send the 640-byte
-        // frames still buffered, bounded by DrainTimeout. Only cancel (hard stop)
-        // if the drain stalls — cancelling first would abort ReadAllAsync and drop
-        // the buffered tail (worst case a sub-second tail of an utterance).
-        _frames.Writer.TryComplete();
-        Task finished = await Task.WhenAny(_pump, Task.Delay(DrainTimeout)).ConfigureAwait(false);
-        if (finished != _pump)
-            _cts.Cancel();
-
-        // Observe the pump's completion without rethrowing: expected errors were
-        // already surfaced via onFailed, and marking any unexpected fault observed
-        // here keeps DisposeAsync throw-free so a fire-and-forget caller can't crash.
-        await _pump.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default).ConfigureAwait(false);
+        TapStream? current;
+        List<Task> draining;
+        lock (_lock)
+        {
+            _disposed = true;
+            current = _current;
+            _current = null;
+            _chunker = null;
+            draining = [.. _draining];
+        }
 
         if (_captureStarted)
             _capture.Stop();
-        await _tap.DisposeAsync().ConfigureAwait(false);
+
+        if (current is not null)
+            draining.Add(current.DrainAndDisposeAsync());
+
+        // Bound teardown so Stop/Quit can't hang on an unreachable Recorder. Any
+        // still-draining utterance self-disposes within its own drain budget.
+        if (draining.Count > 0)
+            await Task.WhenAny(Task.WhenAll(draining), Task.Delay(DisposeDrainTimeout)).ConfigureAwait(false);
+
         _capture.Dispose();
-        _cts.Dispose();
     }
 }
