@@ -1,6 +1,6 @@
-using System.Buffers.Binary;
 using System.Net.WebSockets;
 using TapScribe.Bridge.Core;
+using static TapScribe.Bridge.Core.Tests.Fixtures;
 
 namespace TapScribe.Bridge.Core.Tests;
 
@@ -14,38 +14,6 @@ namespace TapScribe.Bridge.Core.Tests;
 public class TapSessionTests
 {
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
-
-    private static TapStreamOptions FastStream() => new()
-    {
-        Backoff = [TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(20)],
-        BackoffCap = TimeSpan.FromMilliseconds(40),
-        BackoffJitter = 0,
-        DrainBudget = TimeSpan.FromMilliseconds(500),
-        PollInterval = TimeSpan.FromMilliseconds(10),
-    };
-
-    // Gate that opens easily and closes after a short hangover, so tests run fast.
-    private static GateOptions FastGate() => new()
-    {
-        OpenThreshold = 0.02,
-        Hangover = TimeSpan.FromMilliseconds(60), // 3 silent frames
-        PreRoll = TimeSpan.Zero,
-    };
-
-    // 16 kHz mono int16, so the resampler is a near-identity and the gate sees the
-    // level we emit. value 8000 -> RMS 0.24 (loud); 0 -> silent.
-    private static AudioFormat RecorderFormat => new(16_000, 1, SampleKind.Int16);
-
-    private static byte[] Pcm(short value, int frames)
-    {
-        var bytes = new byte[frames * TapWire.FrameBytes];
-        for (int i = 0; i < frames * TapWire.FrameSamples; i++)
-            BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(i * 2, 2), value);
-        return bytes;
-    }
-
-    private static byte[] Loud(int frames) => Pcm(8000, frames);
-    private static byte[] Silence(int frames) => Pcm(0, frames);
 
     [Fact]
     public async Task Begin_StartsCaptureImmediately_SoTheGateCanHearSpeech()

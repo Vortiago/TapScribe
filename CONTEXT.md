@@ -308,6 +308,38 @@ preference is off never materialises a WAV at all, leaving its detached
 session prunable for its whole lifetime (a pruned id refuses the next
 `?session=` upgrade until the Bridge mints a fresh one).
 
+## Capture device · render device · loopback
+
+The two kinds of audio endpoint a native Bridge can tap (see
+`bridges/windows-tray-bridge/`). A **capture device** is an input — a
+microphone. A **render device** is an output — speakers/headphones — and
+is the **loopback** candidate: capturing its output mix (WASAPI
+**loopback** on Windows) records the system audio out, i.e. the "other
+side" of a meeting, which has no mute event of its own. Both sit behind
+the bridge core's single capture seam (`IAudioCapture`); loopback is just
+another capture source, so it flows through the same resample → level gate
+→ `/tap` pipeline as a mic. Device **enumeration** (`IAudioDeviceEnumerator`)
+lists both kinds tagged by `DeviceFlow` (Capture/Render); the Windows impl
+is over NAudio's `MMDeviceEnumerator`. The cross-platform bridge core never
+sees a platform audio API — WASAPI is one implementation behind the seam.
+
+## One device = one speaker · CaptureOrchestrator
+
+A Bridge that taps several devices at once runs **one independent pipeline
+per device**, each opening its own `/tap` WS under its own stable
+`identity`/`name`, so recordings stay attributable per source instead of
+mixed into one stream — the coarse "me vs. them" split ahead of real
+diarization (#78). Defaults: the microphone streams under the operator's
+identity, the system **loopback** under `system`. The bridge core's
+**CaptureOrchestrator** owns the set of pipelines: it starts one per
+selected device (best-effort — a device that fails to open is surfaced and
+skipped while the rest still run), rejects duplicate identities up front
+(the Recorder buckets WAVs by the sanitised identity, so a collision would
+cross-attribute two devices into one speaker), and tears them all down
+concurrently and bounded. The devices co-locate in one **detached
+session** (above), so both sides of a meeting land in one folder as
+distinct speakers.
+
 ## Utterance
 
 A continuous speech segment from one speaker, delimited by mute
