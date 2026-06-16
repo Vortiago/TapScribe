@@ -34,7 +34,7 @@ public sealed class TapSession : IAsyncDisposable
     private readonly List<Task> _draining = [];
 
     private TapStream? _current;
-    private bool _captureStarted;
+    private readonly bool _captureStarted; // set once in the ctor (Start succeeded)
     private bool _disposed;
 
     private TapSession(IAudioCapture capture, TapConnectionOptions options, GateOptions gate,
