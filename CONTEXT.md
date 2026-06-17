@@ -501,7 +501,16 @@ operations:
   Owns the two-layer `py/path-injection` guard (`_safe_part` + the canonical
   `realpath(x).startswith(root + os.sep)` check) so callers cross it instead of
   re-deriving it. New code that turns request input into a recordings path goes
-  through here — never `config.RECORDINGS_DIR / <raw>` by hand.
+  through here — never `config.RECORDINGS_DIR / <raw>` by hand. It is ALSO the
+  one owner of the on-disk session-layout filenames — `FILENAME_TRANSCRIPT_JSON`
+  / `_TXT`, `FILENAME_SUMMARY_JSON`, `FILENAME_META_JSON`,
+  `FILENAME_STRIP_META_JSON`, and `DIRNAME_STRIPPED` — which readers, writers,
+  and maintenance ops compose onto an already-resolved session (or stripped)
+  dir instead of hand-typing the literal, so a rename touches one line
+  (`test_session_layout.py` pins this). Note `DIRNAME_STRIPPED` (the directory
+  name) is deliberately distinct from the `source == "stripped"` API selector
+  value in `resolve_source_dir` — a wire enum, free to diverge from the dir
+  name.
 - **`sessions`** — the dashboard read model: `gather_sessions` (the poll-path
   listing, memoised on cheap stat signatures), `read_session_meta` /
   `write_session_meta`, and the lazy full-transcript reads the slim poll

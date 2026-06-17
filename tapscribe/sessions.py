@@ -29,7 +29,18 @@ from fastapi import HTTPException
 
 from . import config
 from .audio import wav_duration_s
-from .session_paths import _safe_part, resolve_session_dir, resolve_wav, session_meta_path, stripped_dir
+from .session_paths import (
+    DIRNAME_STRIPPED,
+    FILENAME_META_JSON,
+    FILENAME_STRIP_META_JSON,
+    FILENAME_SUMMARY_JSON,
+    FILENAME_TRANSCRIPT_JSON,
+    _safe_part,
+    resolve_session_dir,
+    resolve_wav,
+    session_meta_path,
+    stripped_dir,
+)
 from .text import (
     SUMMARY_SOURCES,
     atomic_write_text,
@@ -116,7 +127,7 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
             f"(expected one of: {', '.join(s for s in SUMMARY_SOURCES if s)} — or '' to clear)",
         )
     atomic_write_text(
-        Path(real_parent) / "session-meta.json",
+        Path(real_parent) / FILENAME_META_JSON,
         json.dumps(sanitized, indent=2, ensure_ascii=False),
     )
 
@@ -134,7 +145,7 @@ def read_session_transcript(session: str) -> dict[str, Any] | None:
     is read through `_read_json_or_none`, which re-checks containment so static
     analysis sees the guard at the point of file access."""
     session_dir = resolve_session_dir(session)
-    data = _read_json_or_none(session_dir / "session-transcript.json")
+    data = _read_json_or_none(session_dir / FILENAME_TRANSCRIPT_JSON)
     return data if isinstance(data, dict) else None
 
 
@@ -145,7 +156,7 @@ def read_session_summary(session: str) -> dict[str, Any] | None:
     `resolve_session_dir` validates traversal, `_read_json_or_none` re-checks
     containment at the point of file access."""
     session_dir = resolve_session_dir(session)
-    data = _read_json_or_none(session_dir / "session-summary.json")
+    data = _read_json_or_none(session_dir / FILENAME_SUMMARY_JSON)
     return data if isinstance(data, dict) else None
 
 
@@ -156,7 +167,7 @@ def write_session_summary(session: str, summary: dict[str, Any]) -> None:
     session — a re-generate overwrites."""
     session_dir = resolve_session_dir(session)
     atomic_write_text(
-        session_dir / "session-summary.json",
+        session_dir / FILENAME_SUMMARY_JSON,
         json.dumps(summary, indent=2, ensure_ascii=False),
     )
 
@@ -177,7 +188,7 @@ def read_strip_meta(stripped: Path) -> dict[str, Any] | None:
     prune/absorb ops) treats a bad sidecar as absent rather than failing.
     The ONE reader for the sidecar's shape contract;
     `_read_json_or_none` re-checks containment before opening it."""
-    meta = _read_json_or_none(stripped / "strip-meta.json")
+    meta = _read_json_or_none(stripped / FILENAME_STRIP_META_JSON)
     if not isinstance(meta, dict) or not isinstance(meta.get("files"), dict):
         return None
     return meta
@@ -436,7 +447,7 @@ def _describe_session(
     # (pre-split refactor) bucket against their originals the same way —
     # those filenames preserved the same convention.
     region_buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    stripped_root = sd / "stripped"
+    stripped_root = sd / DIRNAME_STRIPPED
     if stripped_root.is_dir():
         for rw in sorted(stripped_root.glob("*.wav")):
             if visited is not None:
@@ -462,9 +473,9 @@ def _describe_session(
         # The poll formerly embedded the entire (hundreds-of-KB) merged JSON for
         # EVERY session on disk on every ~0.5s tick.
         "session_transcript": _session_transcript_marker(
-            _read_session_json_cached(sd / "session-transcript.json")
+            _read_session_json_cached(sd / FILENAME_TRANSCRIPT_JSON)
         ),
-        "session_summary": _session_summary_marker(_read_session_json_cached(sd / "session-summary.json")),
+        "session_summary": _session_summary_marker(_read_session_json_cached(sd / FILENAME_SUMMARY_JSON)),
         "progress": jobs.get(sd.name),
         "session_meta": read_session_meta(sd.name),
         "stripped": _stripped_summary(stripped_root, region_buckets),
@@ -491,8 +502,8 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
         if not sd.is_dir():
             continue
         seen_names.add(sd.name)
-        visited_session_jsons.add(str(sd / "session-transcript.json"))
-        visited_session_jsons.add(str(sd / "session-summary.json"))
+        visited_session_jsons.add(str(sd / FILENAME_TRANSCRIPT_JSON))
+        visited_session_jsons.add(str(sd / FILENAME_SUMMARY_JSON))
         out.append(_describe_session(sd, jobs=jobs, current_session=current_session, visited=visited_wavs))
 
     # Prune the poll caches down to what this walk actually saw so deleted

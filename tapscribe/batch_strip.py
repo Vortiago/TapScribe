@@ -26,7 +26,7 @@ from typing import Any
 from . import strip_silence as _ss
 from .recorder import Recorder
 from .session_merge import NoUsableWavs
-from .session_paths import resolve_session_dir, stripped_dir
+from .session_paths import FILENAME_STRIP_META_JSON, resolve_session_dir, stripped_dir
 from .strip_silence import SPEECH_RMS_DBFS_FLOOR
 from .text import atomic_write_text, build_recorder_wav_name, parse_wav_speaker_ident, parse_wav_start
 
@@ -205,7 +205,7 @@ async def strip_session_locked(req: StripSessionRequest, *, originals: list[Path
         }
     if spans_by_original:
         atomic_write_text(
-            out_dir / "strip-meta.json",
+            out_dir / FILENAME_STRIP_META_JSON,
             json.dumps(
                 {
                     "stripped_at": finished.isoformat(),

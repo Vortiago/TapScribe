@@ -21,7 +21,15 @@ from typing import Any
 from fastapi import HTTPException
 
 from . import config
-from .session_paths import resolve_session_dir, resolve_wav, stripped_dir
+from .session_paths import (
+    DIRNAME_STRIPPED,
+    FILENAME_STRIP_META_JSON,
+    FILENAME_SUMMARY_JSON,
+    FILENAME_TRANSCRIPT_JSON,
+    resolve_session_dir,
+    resolve_wav,
+    stripped_dir,
+)
 from .sessions import read_session_meta, read_strip_meta, write_session_meta
 from .text import atomic_write_text
 
@@ -37,7 +45,7 @@ def session_is_empty(session_dir: Path) -> bool:
     """
     if any(session_dir.glob("*.wav")):
         return False
-    if (session_dir / "session-transcript.json").exists():
+    if (session_dir / FILENAME_TRANSCRIPT_JSON).exists():
         return False
     if read_session_meta(session_dir.name).get("label"):
         return False
@@ -173,7 +181,7 @@ def _prune_strip_meta_clip(session: str, clip_name: str) -> None:
         else:
             del files[orig]
     if changed:
-        atomic_write_text(stripped / "strip-meta.json", json.dumps(meta, indent=2))
+        atomic_write_text(stripped / FILENAME_STRIP_META_JSON, json.dumps(meta, indent=2))
 
 
 def absorb_session(target: str, source: str) -> dict[str, Any]:
@@ -198,7 +206,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     source_dir = resolve_session_dir(source)
 
     src_wavs = sorted(source_dir.glob("*.wav"))
-    src_stripped_dir = source_dir / "stripped"
+    src_stripped_dir = source_dir / DIRNAME_STRIPPED
     src_stripped_wavs = sorted(src_stripped_dir.glob("*.wav")) if src_stripped_dir.is_dir() else []
 
     # Refuse the merge rather than silently overwrite. Caller can rename
@@ -207,7 +215,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     for w in src_wavs:
         if (target_dir / w.name).exists():
             collisions.append(w.name)
-    tgt_stripped_dir = target_dir / "stripped"
+    tgt_stripped_dir = target_dir / DIRNAME_STRIPPED
     for w in src_stripped_wavs:
         if (tgt_stripped_dir / w.name).exists():
             collisions.append(f"stripped/{w.name}")
@@ -246,7 +254,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
             if tgt_strip_meta is not None:
                 tgt_strip_meta["files"] = {**src_strip_meta["files"], **tgt_strip_meta["files"]}
             atomic_write_text(
-                tgt_stripped_dir / "strip-meta.json",
+                tgt_stripped_dir / FILENAME_STRIP_META_JSON,
                 json.dumps(tgt_strip_meta or src_strip_meta, indent=2),
             )
 
@@ -273,7 +281,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     # The target's merged transcript predates the just-moved WAVs, so it's
     # now stale. Drop it so the operator's next "transcribe whole session"
     # rebuilds against the fuller WAV set.
-    tgt_transcript = target_dir / "session-transcript.json"
+    tgt_transcript = target_dir / FILENAME_TRANSCRIPT_JSON
     transcript_invalidated = tgt_transcript.exists()
     if transcript_invalidated:
         try:
@@ -288,7 +296,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
     # The target's persisted summary was built from that same now-dropped
     # transcript, so it is stale too. Drop it alongside, with the same
     # best-effort handling — the operator regenerates after the next transcribe.
-    tgt_summary = target_dir / "session-summary.json"
+    tgt_summary = target_dir / FILENAME_SUMMARY_JSON
     summary_invalidated = tgt_summary.exists()
     if summary_invalidated:
         try:
@@ -337,7 +345,7 @@ def delete_session_audio(session: str) -> dict[str, Any]:
     for w in sorted(session_dir.glob("*.wav")):
         bytes_freed += _delete_wav_with_sidecars(w)
         wavs_deleted += 1
-    stripped = session_dir / "stripped"
+    stripped = session_dir / DIRNAME_STRIPPED
     if stripped.is_dir():
         bytes_freed += _dir_size(stripped)
         try:

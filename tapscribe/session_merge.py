@@ -25,6 +25,7 @@ from typing import Any
 
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
+from .session_paths import DIRNAME_STRIPPED
 from .text import parse_iso, parse_wav_start
 from .wav_cache import read_cached
 
@@ -90,7 +91,7 @@ def select_session_wavs(
     """
     base_dir = session_dir
     if source == "stripped":
-        wav_dir = session_dir / "stripped"
+        wav_dir = session_dir / DIRNAME_STRIPPED
         if not wav_dir.is_dir():
             return SessionSelection(
                 session_dir=session_dir,
