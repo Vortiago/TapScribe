@@ -24,16 +24,15 @@ import ast
 from pathlib import Path
 
 import tapscribe
-from tapscribe import session_paths
 
 # The literals whose single owner is session_paths.py. Each is unambiguous —
 # it never legitimately appears as a non-path string elsewhere.
 OWNED_FILENAMES = {
-    session_paths.FILENAME_TRANSCRIPT_JSON,
-    session_paths.FILENAME_TRANSCRIPT_TXT,
-    session_paths.FILENAME_SUMMARY_JSON,
-    session_paths.FILENAME_META_JSON,
-    session_paths.FILENAME_STRIP_META_JSON,
+    tapscribe.session_paths.FILENAME_TRANSCRIPT_JSON,
+    tapscribe.session_paths.FILENAME_TRANSCRIPT_TXT,
+    tapscribe.session_paths.FILENAME_SUMMARY_JSON,
+    tapscribe.session_paths.FILENAME_META_JSON,
+    tapscribe.session_paths.FILENAME_STRIP_META_JSON,
 }
 
 _PKG_DIR = Path(tapscribe.__file__).parent
