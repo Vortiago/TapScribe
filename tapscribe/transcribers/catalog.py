@@ -619,7 +619,7 @@ def _moonshine(model_id: str, display: str, description: str) -> ModelEntry:
         display_name=display,
         description=description,
         languages=("en",),
-        contexts=frozenset({"live"}),
+        contexts=_LIVE_ONLY,
         backends=_MOONSHINE_BACKENDS,
         inputs=NO_INPUTS,
     )
@@ -627,6 +627,7 @@ def _moonshine(model_id: str, display: str, description: str) -> ModelEntry:
 
 _BATCH_AND_LIVE = frozenset({"batch", "live"})
 _BATCH_ONLY = frozenset({"batch"})
+_LIVE_ONLY = frozenset({"live"})
 
 
 def _whisper(model_id: str, display: str, description: str, *, en_only: bool) -> ModelEntry:
