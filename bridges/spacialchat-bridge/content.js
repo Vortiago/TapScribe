@@ -153,34 +153,38 @@
     return scheme + "://" + recorderHost + ":" + recorderPort + "/tap?" + qp.toString();
   };
 
+  // The recorder config the shared control-client takes, snapshotted from
+  // the live in-memory settings at call time.
+  const recorderCfg = () => ({
+    host: recorderHost,
+    port: recorderPort,
+    useTls: recorderUseTls,
+    token: tapToken,
+  });
+
   // HTTP sibling of the /tap WS: ask the recorder to rotate to a fresh
-  // session (and prune now-empty ones). Same tap token, but as a Bearer
-  // header — fetch can set headers whereas the WS handshake can't, which is
-  // why /tap carries the token in the subprotocol slot instead. Fire-and-
+  // session (and prune now-empty ones). Routed through the shared
+  // control-client (control-client.js, loaded ahead of us in the manifest),
+  // which owns the Bearer header, scheme derivation, and the mixed-content
+  // guard — an http:// POST from the https SpatialChat page to a
+  // non-trustworthy host would put the tap-token on the wire in cleartext,
+  // so the client skips it and throws `mixed-content-blocked`. Fire-and-
   // forget: the dashboard reflects the new session via its own polling.
-  const newSessionUrl = () => {
-    const scheme = recorderUseTls ? "https" : "http";
-    return scheme + "://" + recorderHost + ":" + recorderPort + "/api/tap/new-session";
-  };
   const postNewSession = (reason) => {
-    if (typeof fetch !== "function") return; // defensive: very old runtimes
-    if (wouldBeMixedContentBlocked()) {
-      // Same guard the /tap WS uses: an http:// POST from the https
-      // SpatialChat page to a non-trustworthy host is mixed-content-blocked,
-      // and would put the Bearer tap-token on the wire in cleartext on any
-      // client that relaxes that policy. Skip it and surface the cause.
-      console.warn(
-        "[tapscribe-bridge] new-session POST skipped (" + reason +
-        "): recorder is http:// on a non-trustworthy host — enable TLS",
-      );
-      return;
-    }
-    const headers = tapToken ? { Authorization: "Bearer " + tapToken } : {};
-    fetch(newSessionUrl(), { method: "POST", headers })
-      .then((r) => {
-        if (!r.ok) console.warn("[tapscribe-bridge] new-session POST -> " + r.status);
+    TapscribeControlClient.rotateSession(recorderCfg())
+      .then((res) => {
+        if (!res.ok) console.warn("[tapscribe-bridge] new-session POST -> " + res.status);
       })
-      .catch((e) => console.warn("[tapscribe-bridge] new-session POST failed (" + reason + ")", e));
+      .catch((e) => {
+        if (e && e.kind === "mixed-content-blocked") {
+          console.warn(
+            "[tapscribe-bridge] new-session POST skipped (" + reason +
+            "): recorder is http:// on a non-trustworthy host — enable TLS",
+          );
+        } else {
+          console.warn("[tapscribe-bridge] new-session POST failed (" + reason + ")", e);
+        }
+      });
   };
 
   // Construct the WebSocket with the tap-token carried via subprotocol

@@ -25,6 +25,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
+const CONTROL_CLIENT_JS = path.join(__dirname, "..", "control-client.js");
 const CONTENT_JS = path.join(__dirname, "..", "content.js");
 
 function createClock() {
@@ -235,6 +236,7 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     },
     crypto: { randomUUID: () => "u-" + Math.random().toString(36).slice(2) },
     URLSearchParams,
+    AbortController,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
     setInterval: () => 0, // disable the 2 Hz publishStatus tick — tests
@@ -245,6 +247,10 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
+  // Mirror the manifest's load order: control-client.js defines the shared
+  // global the content script's control calls go through, and must run
+  // before content.js.
+  vm.runInContext(fs.readFileSync(CONTROL_CLIENT_JS, "utf8"), sandbox, { filename: "control-client.js" });
   const code = fs.readFileSync(CONTENT_JS, "utf8");
   vm.runInContext(code, sandbox, { filename: "content.js" });
 
