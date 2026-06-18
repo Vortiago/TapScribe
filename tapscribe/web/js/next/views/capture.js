@@ -150,8 +150,15 @@ export function build(ctx) {
     });
 
     // Reused components — each touches only its passed hosts. (The active-taps
-    // rows moved to the global #tapsRail, rendered by main.js every tick.)
-    liveFeed.render(j, liveFeedCtx);
+    // rows moved to the global #tapsRail, rendered by main.js every tick.) The
+    // live captions are scoped to the focused session: the deque is global, but
+    // each line carries its session, so an archived session shows only its own
+    // (aged-out → empty) lines, never the live session's captions.
+    liveFeed.render(j, {
+      ...liveFeedCtx,
+      sessionId: sess?.session || "",
+      isCurrent: !!sess?.is_current,
+    });
     liveChannel.render(j, {
       ...liveChannelHosts,
       liveCatalog,
@@ -167,6 +174,12 @@ export function build(ctx) {
     recPill.textContent = recEnabled ? "● recording" : "⏸ paused";
     recPill.classList.toggle("is-on", recEnabled);
     recPill.classList.toggle("is-paused", !recEnabled);
+
+    // Clear wipes the GLOBAL live-caption deque, so only the live session owns
+    // it. Off the current session the panel shows another session's lines (or
+    // none), where a Clear would surprisingly nuke the live captions — disable
+    // and hide it there.
+    liveClear.disabled = liveClear.hidden = !sess?.is_current;
 
     // Override fields — re-seed when the focused session changes (but never
     // clobber an in-progress edit on the same session).

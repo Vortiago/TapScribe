@@ -13,7 +13,7 @@
 // re-renders; we mirror it into location.hash so a reload lands on the same
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
-import { fetchState, postJson, putJson, del } from "../api.js";
+import { fetchState, postJson, putJson } from "../api.js";
 import { loadTemplates, pick } from "../templates.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import * as spine from "./components/spine.js";
@@ -468,10 +468,10 @@ function renderSpine(j, session) {
       if (!confirm("Start a new recording session?\n\nNew utterances land in a fresh folder; in-progress ones finish in their current folder.")) return;
       try { await postJson("/api/new-session"); }
       catch (e) { alert(`Failed to start new session: ${e}`); return; }
-      // Fresh session → clear the live captions. The feed is the live channel's
-      // transcript buffer (not session-scoped), so it would otherwise keep
-      // showing the previous session's lines. Best-effort.
-      await del("/api/live-transcript").catch(() => {});
+      // The live captions are session-scoped now (live-feed filters by the
+      // focused session), so the previous session's lines never leak into the
+      // new session's view — no global clear needed. The just-rotated session
+      // keeps its trailing captions until they age out of the deque.
       selectedSessionId = null;
       currentView = "capture";
       syncHash();

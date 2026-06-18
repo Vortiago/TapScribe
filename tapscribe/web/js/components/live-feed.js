@@ -32,10 +32,11 @@ import { fmtClock } from "../formatters.js";
 // turn rather than the next word of the same sentence.
 const GROUP_GAP_MS = 30_000;
 
-// "::empty::" sentinel for the idle ascii state (mounted once, then skipped —
-// re-mounting it every poll churned ~100 detached nodes/sec; see the
-// idle-churn guard in tests/e2e/test_dashboard_ui.py). Otherwise holds the
-// raw-feed signature (tail + length) so an unchanged poll skips all work.
+// "::empty-live::" / "::empty-archived::" sentinels for the two idle states
+// (mounted once, then skipped — re-mounting every poll churned ~100 detached
+// nodes/sec; see the idle-churn guard in tests/e2e/test_dashboard_ui.py).
+// Otherwise holds the raw-feed signature (focused session + tail + length) so
+// an unchanged poll skips all work.
 let lastSig = "";
 // Set by invalidate(): force the next non-empty render down the full-rebuild
 // path even if the rendered keys would match (e.g. after a clear).
@@ -85,6 +86,22 @@ export function joinFragments(parts) {
  */
 export function splitSentences(text) {
   return (text.match(/.*?[.!?]["'”’)\]]*(?=\s|$)|.+$/gs) || []).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Scope the global live-caption deque to one session. The deque is shared
+ * across all open taps (max 200 lines); each line carries the session it was
+ * snapshotted to at `/tap` open (tap_fan_out.py), so the dashboard shows only
+ * the FOCUSED session's lines — an archived session never displays the live
+ * session's captions (CONTEXT.md Detached-session isolation, honored in the
+ * UI). No focused session (empty id) shows nothing, not everything. Pure.
+ * @param {import('../types.js').LiveFeedEntry[]} feed
+ * @param {string} sessionId
+ * @returns {import('../types.js').LiveFeedEntry[]}
+ */
+export function entriesForSession(feed, sessionId) {
+  if (!sessionId) return [];
+  return feed.filter((e) => e.session === sessionId);
 }
 
 /**
@@ -176,17 +193,24 @@ function shiftOf(rendered, keys) {
  * @param {import('../types.js').AppState} j
  * @param {import('../types.js').LiveFeedCtx} ctx
  */
-export function render(j, { countEl, shell, autoscrollEl }) {
-  const feed = j.live_feed || [];
+export function render(j, { countEl, shell, autoscrollEl, sessionId, isCurrent }) {
+  // The deque is global; scope it to the focused session so an archived
+  // session never shows the live session's captions (see entriesForSession).
+  const feed = entriesForSession(j.live_feed || [], sessionId);
 
   if (!feed.length) {
     if (countEl.textContent !== "0") countEl.textContent = "0";
-    // Mount the empty-state ascii ONCE, then skip — re-mounting it every poll
-    // tick (the common idle state) churns ~100 detached nodes/sec, which the
-    // operator's tab accumulates between GCs until it OOMs.
-    if (lastSig !== "::empty::") {
-      mount(shell, tpl("tpl-feed-empty"));
-      lastSig = "::empty::";
+    // Two empty states: the live (current) session is "awaiting" — captions may
+    // still arrive; an archived session shows it isn't recording (live captions
+    // are ephemeral, its durable text is the merged Transcript). Mount ONCE per
+    // state, then skip — re-mounting every poll tick (the common idle state)
+    // churns ~100 detached nodes/sec, which the tab accumulates between GCs
+    // until it OOMs. The sentinel carries isCurrent so a current↔archived
+    // switch (both empty) still swaps the message.
+    const emptySig = isCurrent ? "::empty-live::" : "::empty-archived::";
+    if (lastSig !== emptySig) {
+      mount(shell, tpl(isCurrent ? "tpl-feed-empty" : "tpl-feed-archived"));
+      lastSig = emptySig;
     }
     return;
   }
@@ -195,8 +219,10 @@ export function render(j, { countEl, shell, autoscrollEl }) {
   // change" (a new fragment always moves the tail, even after the deque
   // saturates at 200). Avoids re-coalescing + re-diffing on an unchanged poll.
   // forceNext (post-clear) bypasses it.
+  // sessionId leads the sig so switching the focused session repaints even
+  // when the global deque's tail is unchanged (the panel is a page-singleton).
   const tail = feed.at(-1);
-  const feedSig = `${feed.length}::${tail?.ts || ""}::${tail?.identity || ""}::${(tail?.text || "").slice(0, 20)}`;
+  const feedSig = `${sessionId}::${feed.length}::${tail?.ts || ""}::${tail?.identity || ""}::${(tail?.text || "").slice(0, 20)}`;
   if (!forceNext && feedSig === lastSig) return;
 
   let body = /** @type {HTMLElement | null} */ (shell.querySelector(".feed-body"));

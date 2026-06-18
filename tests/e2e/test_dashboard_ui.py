@@ -1636,6 +1636,145 @@ def _seed_merged_session(rec, sid: str, *, segments: int) -> None:
 _MERGED_FIRST_LINE = '#viewRoot [data-slot="mergedHost"] [data-slot="lines"] > div'
 
 
+async def test_live_captions_scoped_to_focused_session(running_recorder: RunningRecorder):
+    """The 'Live captions' panel is the GLOBAL LiveTranscripts deque, but each
+    line carries the session it was snapshotted to at /tap open (the
+    detached-session isolation in CONTEXT.md). The dashboard must scope the
+    panel to the FOCUSED session: an archived session never shows the live
+    session's captions, an old session with no lines of its own shows a
+    session-aware empty state, and Clear (which wipes the whole deque) is
+    disabled off the current session. Pins the 'old session shows live text'
+    bug — pre-fix every session's Capture rendered the whole deque."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    current = rec.session_start
+
+    old_a = "2025-01-02T09-00-00Z"
+    old_empty = "2025-01-01T09-00-00Z"
+    _seed_merged_session(rec, old_a, segments=2)
+    _seed_merged_session(rec, old_empty, segments=2)
+
+    # Seed the global deque: one line for the LIVE (current) session, one for an
+    # archived session. Pre-fix, BOTH rendered in every session's Capture view.
+    rec.transcripts.append(
+        {
+            "ts": "2026-01-01T00:00:01+00:00",
+            "identity": "live",
+            "name": "Live",
+            "text": "LIVECAPTION charlie",
+            "session": current,
+        }
+    )
+    rec.transcripts.append(
+        {
+            "ts": "2026-01-01T00:00:02+00:00",
+            "identity": "olda",
+            "name": "OldA",
+            "text": "ARCHIVED alpha",
+            "session": old_a,
+        }
+    )
+
+    feed_txts = (
+        "() => Array.from(document.querySelectorAll("
+        "'#viewRoot [data-slot=\"liveFeedShell\"] .feed-body .line .txt'"
+        ")).map((n) => n.textContent)"
+    )
+    count_sel = '#viewRoot [data-slot="liveFeedCount"]'
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+
+            # Boot: the spine picker lists all three sessions.
+            await page.wait_for_function(
+                """(ids) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    if (!s) return false;
+                    const have = new Set(Array.from(s.options).map((o) => o.value));
+                    return ids.every((id) => have.has(id));
+                }""",
+                arg=[current, old_a, old_empty],
+                timeout=10000,
+            )
+
+            async def focus_capture(sid: str) -> None:
+                # Pick the session in the spine, then open its Capture stage
+                # (an archived pick routes to Transcript; gotoView opens Capture).
+                await page.evaluate(
+                    """(sid) => {
+                        const s = document.querySelector('[data-slot="sessionPick"]');
+                        s.value = sid;
+                        s.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    sid,
+                )
+                await page.evaluate("() => window.gotoView('capture')")
+
+            async def clear_disabled() -> bool:
+                return await page.evaluate(
+                    """() => {
+                        const b = document.querySelector('#viewRoot [data-slot="liveClear"]');
+                        return !!b && b.disabled === true;
+                    }"""
+                )
+
+            # --- LIVE (current) session: shows its own caption, not the other's,
+            # and Clear is enabled (it owns the live deque). ---
+            await focus_capture(current)
+            await page.wait_for_function(
+                f"{feed_txts}.some((t) => t.includes('LIVECAPTION charlie'))",
+                timeout=8000,
+            )
+            texts = await page.evaluate(feed_txts)
+            assert not any("ARCHIVED alpha" in t for t in texts), texts
+            assert not await clear_disabled()
+
+            # --- ARCHIVED session WITH its own line: shows ONLY it, never the
+            # live session's caption (the reported bug), Clear disabled. ---
+            await focus_capture(old_a)
+            await page.wait_for_function(
+                f"{feed_txts}.some((t) => t.includes('ARCHIVED alpha'))",
+                timeout=8000,
+            )
+            texts = await page.evaluate(feed_txts)
+            assert not any("LIVECAPTION charlie" in t for t in texts), texts
+            await page.wait_for_function(
+                f"""() => document.querySelector('{count_sel}')?.textContent === '1'""",
+                timeout=5000,
+            )
+            assert await clear_disabled()
+
+            # --- ARCHIVED EMPTY session: session-aware empty state, no foreign
+            # lines, count 0, Clear disabled. ---
+            await focus_capture(old_empty)
+            await page.wait_for_function(
+                """() => {
+                    const shell = document.querySelector('#viewRoot [data-slot="liveFeedShell"]');
+                    return !!shell && /isn.t recording/i.test(shell.textContent || "");
+                }""",
+                timeout=8000,
+            )
+            texts = await page.evaluate(feed_txts)
+            assert texts == [], texts
+            await page.wait_for_function(
+                f"""() => document.querySelector('{count_sel}')?.textContent === '0'""",
+                timeout=5000,
+            )
+            assert await clear_disabled()
+
+            await context.close()
+        finally:
+            await browser.close()
+
+
 async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder: RunningRecorder):
     """Job progress ticks (~1/s during a transcribe/strip) must update the job
     bar IN PLACE, not invalidate the merged transcript's render signature —

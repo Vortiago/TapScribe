@@ -8,7 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { joinFragments, splitSentences, groupFeed } from "./live-feed.js";
+import { joinFragments, splitSentences, groupFeed, entriesForSession } from "./live-feed.js";
 
 describe("joinFragments", () => {
   it("joins fragments with single spaces and trims each", () => {
@@ -127,5 +127,41 @@ describe("groupFeed", () => {
 
   it("returns [] for an empty feed", () => {
     assert.deepEqual(groupFeed([]), []);
+  });
+});
+
+describe("entriesForSession", () => {
+  it("keeps only entries whose session matches the focused session", () => {
+    const feed = [
+      entry({ session: "A", text: "from A" }),
+      entry({ session: "B", text: "from B" }),
+      entry({ session: "A", text: "also A" }),
+    ];
+    // The deque is global; the dashboard scopes it to the focused session so an
+    // archived session never shows the live session's captions (CONTEXT.md
+    // Detached-session isolation, honored in the UI).
+    assert.deepEqual(
+      entriesForSession(feed, "A").map((e) => e.text),
+      ["from A", "also A"],
+    );
+    assert.deepEqual(
+      entriesForSession(feed, "B").map((e) => e.text),
+      ["from B"],
+    );
+  });
+
+  it("returns [] for a foreign session id with no matching lines", () => {
+    const feed = [entry({ session: "A" }), entry({ session: "B" })];
+    assert.deepEqual(entriesForSession(feed, "ghost"), []);
+  });
+
+  it("returns [] when no session is focused (empty id)", () => {
+    // sess === null in capture.js → sessionId "" → show nothing, not everything.
+    const feed = [entry({ session: "A" }), entry({ session: "B" })];
+    assert.deepEqual(entriesForSession(feed, ""), []);
+  });
+
+  it("returns [] for an empty feed", () => {
+    assert.deepEqual(entriesForSession([], "A"), []);
   });
 });
