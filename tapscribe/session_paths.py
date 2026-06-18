@@ -53,8 +53,25 @@ def _safe_part(part: object, what: str = "session") -> str:
     return part
 
 
+# ---------------------------------------------------------------------------
+# On-disk session layout — the canonical name for each per-session bookkeeping
+# file and the stripped/ subdir. The ONE owner of each literal: every reader,
+# writer, and maintenance op composes these onto an already-resolved session
+# (or stripped) dir instead of hand-typing the string, so a rename touches one
+# line. Distinct from the `source == "stripped"` API selector value in
+# resolve_source_dir below — that's a wire enum, not a path component, and the
+# two are free to diverge.
+# ---------------------------------------------------------------------------
+FILENAME_TRANSCRIPT_JSON = "session-transcript.json"
+FILENAME_TRANSCRIPT_TXT = "session-transcript.txt"
+FILENAME_SUMMARY_JSON = "session-summary.json"
+FILENAME_META_JSON = "session-meta.json"
+FILENAME_STRIP_META_JSON = "strip-meta.json"
+DIRNAME_STRIPPED = "stripped"
+
+
 def session_meta_path(session: str) -> Path:
-    return config.RECORDINGS_DIR / _safe_part(session, "session") / "session-meta.json"
+    return config.RECORDINGS_DIR / _safe_part(session, "session") / FILENAME_META_JSON
 
 
 def stripped_dir(session: str) -> Path:
@@ -65,7 +82,7 @@ def stripped_dir(session: str) -> Path:
     use without re-checking."""
     session = _safe_part(session, "session")
     root = os.path.realpath(config.RECORDINGS_DIR)
-    real = os.path.realpath(os.path.join(root, session, "stripped"))
+    real = os.path.realpath(os.path.join(root, session, DIRNAME_STRIPPED))
     if real != root and not real.startswith(root + os.sep):
         raise HTTPException(404, "session not found")
     return Path(real)

@@ -27,7 +27,12 @@ from . import hallucinations as hallucinations_mod
 from .audio import wav_duration_s, wav_rms_dbfs
 from .recorder import Recorder
 from .session_merge import InvalidRange, NoUsableWavs, merge_session, select_session_wavs
-from .session_paths import resolve_session_dir, resolve_wav
+from .session_paths import (
+    FILENAME_TRANSCRIPT_JSON,
+    FILENAME_TRANSCRIPT_TXT,
+    resolve_session_dir,
+    resolve_wav,
+)
 from .sessions import read_session_meta
 from .text import read_hotwords, read_prompt
 from .transcribers import load_transcriber, release_transcriber, run_on_model_thread
@@ -279,9 +284,9 @@ async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job)
         if not merged.get("model"):
             merged["model"] = req.model
 
-        out_path = session_dir / "session-transcript.json"
+        out_path = session_dir / FILENAME_TRANSCRIPT_JSON
         out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-        (session_dir / "session-transcript.txt").write_text(transcript.plain_text, encoding="utf-8")
+        (session_dir / FILENAME_TRANSCRIPT_TXT).write_text(transcript.plain_text, encoding="utf-8")
 
         return merged
     finally:
