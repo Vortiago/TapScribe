@@ -118,7 +118,15 @@ class CommandSummarizer:
         took_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
         if proc.returncode != 0:
             stderr = proc.stderr.decode("utf-8", "replace").strip()
-            detail = f" — {stderr}" if stderr else ""
+            # Some CLIs write their failure REASON to stdout, not stderr — e.g.
+            # `claude -p` prints "Not logged in · Please run /login" to stdout
+            # and exits 1. Reading stderr alone yields a bare "command exited 1"
+            # and the dashboard surfaces an opaque 502 with no clue what broke.
+            # Prefer stderr; fall back to a bounded stdout snippet so the real
+            # reason reaches the operator. Cap the length so a chatty tool can't
+            # blow up the error payload.
+            diag = stderr or proc.stdout.decode("utf-8", "replace").strip()
+            detail = f" — {diag[:500]}" if diag else ""
             raise SummarizerFailed(f"command exited {proc.returncode}{detail}")
         summary = proc.stdout.decode("utf-8", "replace").strip()
         if not summary:

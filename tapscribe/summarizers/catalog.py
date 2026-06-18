@@ -234,8 +234,19 @@ class CommandPreset:
 COMMAND_PRESETS: tuple[CommandPreset, ...] = (
     CommandPreset(
         key="claude",
+        # Two non-obvious flags, both load-bearing — DON'T simplify to
+        # `claude -p --tools ""`:
+        #   --tools ""          disables tool use (the hardening; see note).
+        #   --output-format text serves DOUBLE duty: it pins plain-text output
+        #     AND, because `--tools <tools...>` is variadic, it terminates that
+        #     list so the prompt CommandSummarizer appends as a trailing arg
+        #     isn't swallowed as a tool name. Drop it and the prompt vanishes.
+        # We deliberately do NOT use `--bare`: it skips the OAuth/keychain
+        # credential read and demands ANTHROPIC_API_KEY in the recorder's env,
+        # so for the common subscription-login operator it exits "Not logged
+        # in" → non-zero → SummarizerFailed → 502 Bad Gateway.
         label="Claude Code",
-        template='claude -p --tools "" --bare',
+        template='claude -p --tools "" --output-format text',
         note="tools disabled — a prompt-injected transcript can't read files or fetch URLs",
     ),
     CommandPreset(

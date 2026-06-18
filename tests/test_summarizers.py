@@ -76,6 +76,18 @@ def test_command_summarizer_nonzero_exit_raises_failed_with_stderr():
     assert "2" in msg and "boom detail" in msg
 
 
+def test_command_summarizer_nonzero_exit_falls_back_to_stdout_when_stderr_empty():
+    """A CLI that prints its failure reason to STDOUT (not stderr) and exits
+    non-zero must still surface that reason — else the operator gets a bare
+    'command exited N' and an opaque 502. `claude -p` does exactly this with its
+    'Not logged in' auth prompt; reading stderr alone would lose it."""
+    cmd = py_cmd("import sys; sys.stdout.write('Not logged in - run /login'); sys.exit(1)")
+    with pytest.raises(SummarizerFailed) as ei:
+        CommandSummarizer(cmd).summarize("x", prompt="")
+    msg = str(ei.value)
+    assert "exited 1" in msg and "Not logged in" in msg
+
+
 def test_command_summarizer_empty_output_raises_failed():
     """Exit 0 but nothing on stdout is a useless summary — treat it as a
     failure so the operator isn't handed a blank panel."""
