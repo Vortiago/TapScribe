@@ -72,4 +72,40 @@ public class BridgeSettingsTests
 
         Assert.Equal("tok-123", settings.ToConnectionOptions().Token);
     }
+
+    [Fact]
+    public void EffectiveDevices_WhenNoneSaved_DefaultsToFollowDefaultMicAndLoopback()
+    {
+        // A pre-#106 settings file has no devices key. The effective selection must be
+        // the default pair so first run / upgrade still captures mic + system audio. Each
+        // carries one label used as both identity and name (the dialog edits one Name per
+        // device); the mic label prefers the operator's Name, then Identity.
+        var settings = new BridgeSettings { Identity = "alice", Name = "Alice" };
+
+        IReadOnlyList<DeviceSelection> effective = settings.EffectiveDevices;
+
+        Assert.Equal(2, effective.Count);
+
+        var mic = Assert.IsType<DeviceSelection.FollowDefault>(effective[0]);
+        Assert.Equal(DeviceFlow.Capture, mic.Flow);
+        Assert.Equal("Alice", mic.Identity);
+        Assert.Equal("Alice", mic.Name);
+
+        var system = Assert.IsType<DeviceSelection.FollowDefault>(effective[1]);
+        Assert.Equal(DeviceFlow.Render, system.Flow);
+        Assert.Equal("System audio", system.Identity);
+        Assert.Equal("System audio", system.Name);
+    }
+
+    [Fact]
+    public void EffectiveDevices_WhenSelectionsSaved_UsesThemVerbatim()
+    {
+        var settings = new BridgeSettings
+        {
+            Devices = [new DeviceSelection.Pinned("usb", "mic", "USB")],
+        };
+
+        DeviceSelection only = Assert.Single(settings.EffectiveDevices);
+        Assert.IsType<DeviceSelection.Pinned>(only);
+    }
 }

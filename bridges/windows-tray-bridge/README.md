@@ -13,26 +13,29 @@ contract every Bridge speaks and `../../CONTEXT.md` for the domain vocabulary
 
 ## What's here / what's deferred
 
-**Now (the core audio lifecycle + multi-device capture):** capture behind a core
-interface for both **microphones** and **system-audio loopback** (WASAPI is the
-Windows impl of each), device **enumeration** (mics + loopback-capable render
+**Now (the core audio lifecycle + multi-device capture + the tray shell):** capture
+behind a core interface for both **microphones** and **system-audio loopback** (WASAPI
+is the Windows impl of each), device **enumeration** (mics + loopback-capable render
 devices), a resampler to 16 kHz mono int16, a **level gate** that opens/closes
 Utterances on speech with pre-roll so leading consonants aren't clipped (the
 Bridge-side Mute — a loopback device has no mute event), a resilient `/tap` stream
 with `utterance_id` **reconnect** across blips, a bounded during-gap buffer, and
 bounded **Drain**, a **multi-pipeline orchestrator** that runs N devices
-concurrently — each under its own stable `identity`/`name` (the mic under the
-operator's identity, the loopback under `system`) — co-located in one **detached
-session**, a control client, a tray runner (Start meeting / Stop meeting / Quit),
-and a **Settings dialog** (host / port / TLS / identity / name / tap token)
-persisted to `%APPDATA%`, with the token protected at rest by Windows DPAPI.
+concurrently — each under its own stable `identity`/`name` — co-located in one
+**detached session**, a control client, a tray runner with at-a-glance **status**
+(idle / streaming / error — event-driven, no idle polling) and Start meeting / Stop
+meeting / Quit, and a **3-tab Settings dialog** — Connection (host / port / TLS /
+tap token + Test connection), **Devices** (capture the mic and/or system audio, each
+with one Name, plus an Advanced expander to pin specific endpoints), and **Level
+gate** (a sensitivity slider + hangover/pre-roll in ms) — all persisted to
+`%APPDATA%`, with the token protected at rest by Windows DPAPI. Start meeting **resolves** the saved selection against the devices present now
+(follow-default binds to the current default), so a bad token or unreachable Recorder
+fails with a clear, classified message *before* any device opens.
 
-**Deferred to later PRD #99 slices:** a tray **device-picker UI** to choose exactly
-which devices to tap and edit per-device identities/names (#106 — the runner here
-auto-taps the default mic + default loopback); and the end-of-meeting pipeline
-trigger with summary display (#107). The tray here is intentionally no-frills; the
-depth lives in the cross-platform core (`CaptureOrchestrator`) so those slices (and
-a future macOS/Linux shell) build on it.
+**Deferred to a later PRD #99 slice:** the end-of-meeting pipeline trigger with
+progress and summary display (#107). The depth lives in the cross-platform core
+(`CaptureOrchestrator`, `DeviceSelection`, `StatusView`, `GateTuning`) so #107 (and a
+future macOS/Linux shell) builds on it.
 
 ## Layout
 
@@ -56,7 +59,11 @@ windows-tray-bridge/
 │   │   ├── TapSession.cs                # pipeline: capture -> resampler -> level gate -> a TapStream per Utterance
 │   │   ├── CaptureDevice.cs             # platform-neutral device descriptor + DeviceFlow (Capture/Render)
 │   │   ├── IAudioDeviceEnumerator.cs    # device-listing seam: List() + Open() (WASAPI is the impl)
-│   │   └── CaptureOrchestrator.cs       # runs N per-identity pipelines (mic + loopback) concurrently
+│   │   ├── CaptureOrchestrator.cs       # runs N per-identity pipelines (mic + loopback) concurrently
+│   │   ├── DeviceSelection.cs           # follow-default/pinned selections -> Resolve() -> verdict + ToTapOptions (ADR-0005)
+│   │   ├── StartFailure.cs              # classify a Start error: TokenRejected / Unreachable / Other
+│   │   ├── StatusView.cs                # TrayStatus -> menu header + icon + tooltip (pure)
+│   │   └── GateTuning.cs                # sensitivity slider <-> linear RMS threshold
 │   ├── TapScribe.Bridge.Windows/       # net10.0-windows — WASAPI + settings (NAudio + DPAPI)
 │   │   ├── WasapiCaptureBase.cs         # shared WASAPI normalisation + lifecycle (one authority)
 │   │   ├── WasapiAudioCapture.cs        # IAudioCapture over a microphone (default or specific)
@@ -64,8 +71,9 @@ windows-tray-bridge/
 │   │   ├── WasapiDeviceEnumerator.cs    # IAudioDeviceEnumerator over NAudio MMDeviceEnumerator
 │   │   └── BridgeSettings.cs            # %APPDATA% persistence; DPAPI-protected token
 │   └── TapScribe.TrayBridge/           # net10.0-windows WinForms tray runner (GUI only)
-│       ├── Program.cs, TrayContext.cs   # NotifyIcon: Start meeting / Stop meeting / Settings / Quit
-│       └── SettingsForm.cs              # settings dialog incl. "Test connection"
+│       ├── Program.cs, TrayContext.cs   # NotifyIcon: status header + Start / Stop / Settings / Quit
+│       ├── TrayIcons.cs                 # the 3 status icons, drawn at runtime (idle/streaming/error)
+│       └── SettingsForm.cs              # 3-tab dialog: Connection / Devices / Level gate
 └── tests/
     ├── TapScribe.Bridge.Core.Tests/     # net10.0 xUnit — cross-platform (most of the suite, incl. CaptureOrchestrator)
     └── TapScribe.Bridge.Windows.Tests/  # net10.0-windows xUnit — DPAPI / settings + NAudio upstream-contract smoke test
@@ -100,40 +108,89 @@ Cross-platform core only (what the ubuntu CI job runs — works on Linux/macOS):
 dotnet test tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
 ```
 
+## Packaging: a self-contained single-file exe
+
+To hand someone a single `.exe` that runs without a .NET install, publish the tray
+runner self-contained:
+
+```powershell
+# from this directory (bridges/windows-tray-bridge/)
+dotnet publish src/TapScribe.TrayBridge -c Release -r win-x64 `
+  --self-contained `
+  -p:PublishSingleFile=true `
+  -p:IncludeNativeLibrariesForSelfExtract=true
+```
+
+The exe lands at
+`src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe`.
+It bundles the .NET runtime and the NAudio native bits (the `IncludeNative…` flag
+self-extracts them on launch), so it runs on a clean Windows 10/11 box. Use
+`-r win-arm64` for ARM machines. No installer, code signing, or auto-update — those
+are explicitly out of scope for this PRD (#99); it's a copy-and-run exe.
+
 ## Configuring the Recorder target
 
-Right-click the tray icon → **Settings…** to edit everything in a dialog — no
+Right-click the tray icon → **Settings…** to edit everything in a tabbed dialog — no
 environment variables required. Settings are saved to
 `%APPDATA%\TapScribe\windows-tray-bridge.json` and remembered across restarts.
 The **tap token is never written in cleartext**: it is protected at rest with
 Windows DPAPI (CurrentUser scope), so only the same Windows user can read it.
 
-The dialog has a **Test connection** button (like the SpatialChat bridge): it
-probes `GET /health` for reachability and then opens a throwaway `/tap` handshake
-to confirm the tap token is accepted, reporting "Recorder reachable; tap token
-accepted" or the specific failure. The **Recorder host** field is tolerant — a
-plain hostname, an IP, or a pasted `wss://host:9000/`-style value all work; the
-scheme/port/path are stripped and the Port/TLS fields stay authoritative.
+### Connection tab
 
 | Field | Default | Meaning |
 |---|---|---|
 | Recorder host | `localhost` | Recorder host |
 | Port | `8001` | Recorder port |
 | Use TLS | off | connect over `wss://` (Recorder started with `--tls`) |
-| Identity | OS username | the **microphone's** per-speaker identity (WAV filename slug) |
-| Name | empty | the microphone's display name shown on the dashboard |
 | Tap token | empty | tap token; **empty = `--no-auth`** (offer no subprotocol) |
 
-The Identity/Name above apply to the **microphone** pipeline; the system-audio
-loopback always streams under identity `system` / name `System Audio`, so the two
-sides never collide. (A device-picker UI to tap more devices and edit each one's
-identity is the next slice, #106.)
+The **Test connection** button (like the SpatialChat bridge) probes `GET /health`
+for reachability and then opens a throwaway `/tap` handshake to confirm the tap
+token is accepted, reporting "Recorder reachable; tap token accepted" or the
+specific failure. The **Recorder host** field is tolerant — a plain hostname, an
+IP, or a pasted `wss://host:9000/`-style value all work; the scheme/port/path are
+stripped and the Port/TLS fields stay authoritative. The tap token is the value the
+Recorder prints at boot (also stored in `.tap-token`). (Per-source names are edited on
+the **Devices** tab, below — not here.)
 
-The tap token is the value the Recorder prints at boot (also stored in
-`.tap-token`). With an empty token the Bridge offers no `Sec-WebSocket-Protocol`,
-which only works against a Recorder started with `--no-auth`.
+### Devices tab
 
-On first run the dialog is pre-seeded from the legacy `TAPSCRIBE_HOST` /
+The common case is two checkboxes, each with a single **Name**:
+
+- **Capture my microphone** — your mic.
+- **Capture system audio (the other side of the meeting)** — the system loopback.
+
+The Name labels the source on the dashboard *and* tags it in the recording filenames
+— the Recorder makes a filename-safe version automatically, so you only fill in one
+thing. Give the two different names (a shared name is refused at Start, since the
+Recorder would cross-attribute them into one speaker).
+
+Both are *follow-default* selections: they bind to whatever your current default
+device is *at Start*, so switching your default output (Bluetooth ↔ speakers) keeps
+"system audio" working without reconfiguring (see ADR-0005). If no default is
+configured but devices exist, the first device of that kind is used.
+
+**▸ Advanced — pin specific devices…** expands a grid of every concrete endpoint so a
+power user can pin a specific interface (e.g. a particular USB mic) instead of
+following the default, again with its own Name. **Refresh devices** re-enumerates
+after you plug something in. A pinned device that's currently unplugged is kept (not
+erased) so re-plugging it restores the pin.
+
+With nothing selected, the Bridge falls back to the default mic + system-audio pair
+(the pre-#106 behaviour). A selection where nothing is available is refused at Start
+with a clear message rather than recording an empty session.
+
+### Level gate tab
+
+The Bridge-side gate that turns sound into Utterances (a loopback device has no mute
+event, so the level gate *is* the Mute — see CONTEXT.md). **Sensitivity** (0–100,
+higher opens on quieter sound) maps to the gate's linear RMS threshold; **Hangover**
+(ms) is how long silence must last before an Utterance closes; **Pre-roll** (ms) is
+how much leading audio is replayed when it opens so the first consonants aren't
+clipped.
+
+On first run the **Connection** fields are pre-seeded from the legacy `TAPSCRIBE_HOST` /
 `TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` / `TAPSCRIBE_IDENTITY` / `TAPSCRIBE_NAME` /
 `TAPSCRIBE_TAP_TOKEN` environment variables when present, so an existing
 env-based setup migrates automatically. They are optional, and the dialog is the
@@ -159,6 +216,24 @@ source of truth thereafter.
 The `TapClientWebSocketTests` cover the same negotiation + binary-frame
 round-trip (both `--no-auth` and tokened) against an in-process Kestrel `/tap`
 server, so a wire regression is caught in CI without needing a live Recorder.
+
+### Isolation demo (per-bridge sessions)
+
+To see that the tray Bridge's **detached** session is isolated from other bridges,
+run a second bridge concurrently against the same Recorder:
+
+1. Start the Recorder and **Start meeting** from the tray (above).
+2. In parallel, run the developer bridge **without** a session id, e.g.
+   `python bridges/local-test-bridge/local_test_bridge.py` (it taps `/tap` with no
+   `?session=`, so it lands in the Recorder's global current session).
+3. On the dashboard you'll see **two** sessions filling at once: the tray Bridge's
+   detached session (mic + `system`) and the local-test-bridge's global one — never
+   muddled into one folder.
+
+That isolation is a Recorder-side property (the `?session=` routing landed in #100,
+covered by the Recorder's Python tests); on the bridge side, `ResolveResult.ToTapOptions`
+stamps the detached session id onto **every** device's tap, which is asserted by
+`DeviceSelectionTests.ToTapOptions_StampsTheDetachedSessionAndPerDeviceIdentityName`.
 
 ## Wire contract (summary)
 

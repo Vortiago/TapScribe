@@ -26,6 +26,24 @@ public sealed class BridgeSettings
     public string Identity { get; set; } = "";
     public string Name { get; set; } = "";
 
+    /// <summary>
+    /// Which devices to tap, as resolvable selections (follow-default or pinned). An
+    /// empty list means "use the default pair" — see <see cref="EffectiveDevices"/>;
+    /// this keeps a pre-#106 settings file (no devices key) behaving like today.
+    /// </summary>
+    public List<DeviceSelection> Devices { get; set; } = [];
+
+    /// <summary>Level-gate open threshold as the 0–100 sensitivity slider (higher =
+    /// opens on quieter sound). Persisted as the slider, mapped to a linear RMS
+    /// threshold via <see cref="GateTuning"/>.</summary>
+    public int GateSensitivity { get; set; } = GateTuning.ThresholdToSlider(new GateOptions().OpenThreshold);
+
+    /// <summary>Level-gate hangover (silence-to-close) in milliseconds.</summary>
+    public int GateHangoverMs { get; set; } = (int)new GateOptions().Hangover.TotalMilliseconds;
+
+    /// <summary>Level-gate pre-roll (audio replayed when the gate opens) in milliseconds.</summary>
+    public int GatePreRollMs { get; set; } = (int)new GateOptions().PreRoll.TotalMilliseconds;
+
     /// <summary>The tap token at rest: a base64 DPAPI blob, or null for --no-auth.</summary>
     public string? ProtectedToken { get; set; }
 
@@ -36,6 +54,46 @@ public sealed class BridgeSettings
         get => TokenProtection.Unprotect(ProtectedToken);
         set => ProtectedToken = TokenProtection.Protect(value);
     }
+
+    /// <summary>
+    /// The selections to actually resolve at Start: the saved <see cref="Devices"/> if
+    /// any, else the default pair — follow-default mic (under the operator's
+    /// identity/name) + follow-default system loopback. This is what makes an empty/old
+    /// settings file behave like the pre-#106 hardcoded "mic + system" capture.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<DeviceSelection> EffectiveDevices =>
+        Devices.Count > 0 ? Devices : DefaultDevices();
+
+    /// <summary>
+    /// The default device pair when nothing is saved: follow-default mic + follow-default
+    /// system loopback. Each carries a single label used as both identity and display name
+    /// (the dialog edits one Name per device); the mic label is the operator's name /
+    /// identity / OS username. The ONE definition of the default pair — both
+    /// <see cref="EffectiveDevices"/> and the settings dialog's seed consume it, so the
+    /// defaults can't drift apart.
+    /// </summary>
+    public IReadOnlyList<DeviceSelection> DefaultDevices()
+    {
+        string micLabel =
+            !string.IsNullOrWhiteSpace(Name) ? Name.Trim()
+            : !string.IsNullOrWhiteSpace(Identity) ? Identity.Trim()
+            : FallbackIdentity();
+        return
+        [
+            new DeviceSelection.FollowDefault(DeviceFlow.Capture, micLabel, micLabel),
+            new DeviceSelection.FollowDefault(DeviceFlow.Render, "System audio", "System audio"),
+        ];
+    }
+
+    /// <summary>Build the Level-gate options from the persisted sensitivity slider +
+    /// hangover/pre-roll knobs.</summary>
+    public GateOptions ToGateOptions() => new()
+    {
+        OpenThreshold = GateTuning.SliderToThreshold(GateSensitivity),
+        Hangover = TimeSpan.FromMilliseconds(GateHangoverMs),
+        PreRoll = TimeSpan.FromMilliseconds(GatePreRollMs),
+    };
 
     /// <summary>
     /// Build the connection options for a tap. The per-Utterance <c>utterance_id</c>
