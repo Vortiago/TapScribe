@@ -29,10 +29,11 @@ from tapscribe.summarizers import (
 )
 from tapscribe.summarizers.command import build_command_argv
 
-# Echoes "<argv[1]>|<stdin>" so one command proves BOTH the prompt-as-argv and
-# the transcript-on-stdin contracts at once. `python -c` puts the trailing args
-# at sys.argv[1:], so sys.argv[1] is the prompt the adapter appended.
-_ECHO_BOTH = py_cmd("import sys; sys.stdout.write(sys.argv[1] + '|' + sys.stdin.read())")
+# Echoes "<last argv>|<stdin>" so one command proves BOTH the prompt-as-argv and
+# the transcript-on-stdin contracts at once. The adapter appends the prompt as
+# the LAST positional (after a `--` separator), so sys.argv[-1] is that prompt
+# whether or not the interpreter keeps the `--` in argv.
+_ECHO_BOTH = py_cmd("import sys; sys.stdout.write(sys.argv[-1] + '|' + sys.stdin.read())")
 # cat-equivalent: stdin straight to stdout (used with an empty prompt → no
 # trailing arg, so it's a clean transcript-on-stdin probe).
 _CAT = py_cmd("import sys; sys.stdout.write(sys.stdin.read())")
@@ -74,6 +75,18 @@ def test_command_summarizer_nonzero_exit_raises_failed_with_stderr():
         CommandSummarizer(cmd).summarize("x", prompt="")
     msg = str(ei.value)
     assert "2" in msg and "boom detail" in msg
+
+
+def test_command_summarizer_nonzero_exit_falls_back_to_stdout_when_stderr_empty():
+    """A CLI that prints its failure reason to STDOUT (not stderr) and exits
+    non-zero must still surface that reason — else the operator gets a bare
+    'command exited N' and an opaque 502. `claude -p` does exactly this with its
+    'Not logged in' auth prompt; reading stderr alone would lose it."""
+    cmd = py_cmd("import sys; sys.stdout.write('Not logged in - run /login'); sys.exit(1)")
+    with pytest.raises(SummarizerFailed) as ei:
+        CommandSummarizer(cmd).summarize("x", prompt="")
+    msg = str(ei.value)
+    assert "exited 1" in msg and "Not logged in" in msg
 
 
 def test_command_summarizer_empty_output_raises_failed():
@@ -144,11 +157,23 @@ def test_load_summarizer_command_source_empty_command_raises_unavailable():
 
 def test_build_command_argv_splits_template_and_appends_prompt():
     argv = build_command_argv('claude -p --tools "" --bare', "Sum it")
-    assert argv == ["claude", "-p", "--tools", "", "--bare", "Sum it"]
+    assert argv == ["claude", "-p", "--tools", "", "--bare", "--", "Sum it"]
 
 
 def test_build_command_argv_empty_prompt_appends_nothing():
+    # No prompt → no trailing positional AND no `--`, so a stdin-only tool sees
+    # exactly the template it was given.
     assert build_command_argv("opencode run", "") == ["opencode", "run"]
+
+
+def test_build_command_argv_separates_prompt_with_double_dash_after_variadic_flag():
+    """The `--` end-of-options separator keeps a trailing variadic flag in the
+    template (here, Claude Code's `--tools <tools...>`) from swallowing the
+    appended prompt as one more tool name — the bug that made the preset's
+    prompt vanish. The prompt must be the LAST element, immediately after `--`."""
+    argv = build_command_argv('claude -p --tools ""', "Summarize this")
+    assert argv == ["claude", "-p", "--tools", "", "--", "Summarize this"]
+    assert argv[-2:] == ["--", "Summarize this"]
 
 
 def test_build_command_argv_empty_template_raises_unavailable():

@@ -3,10 +3,12 @@
 The tracer-bullet source (#82): no network, no heavy dependency, which is why it
 proved the whole vertical seam (protocol → Batch-summarize orchestrator → route
 → wired view) first. Security: argv is built in **list form** (`shlex.split` of
-the operator's template, with the prompt appended as a trailing positional) and
-run with `shell=False` — never an f-string, never `shell=True` — so a transcript
-or prompt can't break out into a shell. Same subprocess-argv discipline as
-`tapscribe.live.build_live_cmd`.
+the operator's template, with the prompt appended as a trailing positional after
+a `--` end-of-options separator) and run with `shell=False` — never an f-string,
+never `shell=True` — so a transcript or prompt can't break out into a shell. Same
+subprocess-argv discipline as `tapscribe.live.build_live_cmd`. The `--` keeps a
+trailing variadic flag in the template (e.g. `--tools <tools...>`) from eating
+the prompt — see `build_command_argv`.
 
 Why the transcript travels on **stdin** (not argv, not a file path): argv would
 hit ARG_MAX and leak meeting content into `ps`; a file reference wouldn't
@@ -54,15 +56,23 @@ def _default_timeout_s() -> float:
 def build_command_argv(command: str, prompt: str) -> list[str]:
     """List-form argv for one summarize call: the operator's shell-style
     template split by `shlex`, with the prompt appended as ONE trailing
-    positional (only when non-empty, so a stdin-only tool sees exactly the
-    transcript). Pure — no subprocess spawn — the same testable-builder shape
-    as `tapscribe.live.build_live_cmd`. Raises `SummarizerUnavailable` on an
-    empty template."""
+    positional after a ``--`` end-of-options separator (only when non-empty, so
+    a stdin-only tool sees exactly the transcript). Pure — no subprocess spawn —
+    the same testable-builder shape as `tapscribe.live.build_live_cmd`. Raises
+    `SummarizerUnavailable` on an empty template.
+
+    The ``--`` matters: a template whose last flag is *variadic* (e.g. Claude
+    Code's ``--tools <tools...>``) would otherwise swallow the appended prompt
+    as one more value of that flag, and the tool would run with no instruction.
+    ``--`` is the POSIX end-of-options marker, honoured by argv parsers on both
+    macOS and Windows (it's parsed by the tool, not the shell — and we never use
+    a shell), so the prompt always lands as a positional regardless of what
+    precedes it."""
     argv = shlex.split(command or "")
     if not argv:
         raise SummarizerUnavailable("the command source needs a non-empty command template")
     if prompt:
-        argv.append(prompt)
+        argv += ["--", prompt]
     return argv
 
 
@@ -118,7 +128,15 @@ class CommandSummarizer:
         took_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
         if proc.returncode != 0:
             stderr = proc.stderr.decode("utf-8", "replace").strip()
-            detail = f" — {stderr}" if stderr else ""
+            # Some CLIs write their failure REASON to stdout, not stderr — e.g.
+            # `claude -p` prints "Not logged in · Please run /login" to stdout
+            # and exits 1. Reading stderr alone yields a bare "command exited 1"
+            # and the dashboard surfaces an opaque 502 with no clue what broke.
+            # Prefer stderr; fall back to a bounded stdout snippet so the real
+            # reason reaches the operator. Cap the length so a chatty tool can't
+            # blow up the error payload.
+            diag = stderr or proc.stdout.decode("utf-8", "replace").strip()
+            detail = f" — {diag[:500]}" if diag else ""
             raise SummarizerFailed(f"command exited {proc.returncode}{detail}")
         summary = proc.stdout.decode("utf-8", "replace").strip()
         if not summary:
