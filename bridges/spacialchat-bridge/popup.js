@@ -12,10 +12,12 @@ let currentTapToken = "";
 let currentUseTls = false;
 let pollTimer = null;
 
-const TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap.";
-
-function httpScheme() { return currentUseTls ? "https" : "http"; }
-function wsScheme()   { return currentUseTls ? "wss" : "ws"; }
+// The recorder config the shared control-client takes (control-client.js,
+// loaded ahead of us by popup.html). It owns the bearer header, scheme
+// derivation, response parsing, and timeouts for every control call.
+function cfg() {
+  return { host: currentHost, port: currentPort, useTls: currentUseTls, token: currentTapToken };
+}
 
 async function load() {
   const { recorderHost, recorderPort, tapToken, useTls, autoNewSessionOnRoomChange } =
@@ -48,95 +50,36 @@ function setPill(id, ok, label) {
   el.className = "pill " + (ok === true ? "ok" : ok === false ? "err" : "wait");
 }
 
-async function probeHealth(host, port, signal) {
-  const url = httpScheme() + "://" + host + ":" + port + "/health";
-  try {
-    const r = await fetch(url, { method: "GET", signal });
-    if (!r.ok) return { ok: false, status: r.status, url };
-    const body = await r.json().catch(() => ({}));
-    return { ok: true, body, url };
-  } catch (e) {
-    return { ok: false, error: String(e && e.message || e), url };
-  }
-}
-
-// POST /api/tap/new-session with the tap token as a bearer header. The
-// recorder rotates to a fresh session folder and prunes empty ones. Same
-// token as the /tap WS, but over an HTTP header — fetch can set headers,
-// whereas the WS handshake can't, which is why /tap uses the subprotocol
-// slot and this uses Authorization: Bearer.
+// POST /api/tap/new-session with no body — the legacy GLOBAL rotate.
+// Routed through the shared control-client, which owns the bearer header
+// and scheme derivation; the popup keeps the status-label rendering. The
+// recorder rotates to a fresh session folder and prunes empty ones.
 async function postNewSession() {
-  const url = httpScheme() + "://" + currentHost + ":" + currentPort + "/api/tap/new-session";
-  const headers = currentTapToken ? { Authorization: "Bearer " + currentTapToken } : {};
   setStatus("newSessionStatus", "Starting new session…", "");
-  const ctrl = new AbortController();
-  const tmo = setTimeout(() => ctrl.abort(), 4000);
   try {
-    const r = await fetch(url, { method: "POST", headers, signal: ctrl.signal });
-    if (!r.ok) {
-      setStatus("newSessionStatus", "New session failed (HTTP " + r.status + ").", "err");
+    const res = await TapscribeControlClient.rotateSession(cfg(), { timeoutMs: 4000 });
+    if (!res.ok) {
+      setStatus("newSessionStatus", "New session failed (HTTP " + res.status + ").", "err");
       return;
     }
-    const body = await r.json().catch(() => ({}));
-    const label = body && body.rotated === false
+    const body = res.body || {};
+    const label = body.rotated === false
       ? "Already on a fresh session — nothing to rotate."
-      : "New session started" + (body && body.current ? " (" + body.current + ")" : "") + ".";
+      : "New session started" + (body.current ? " (" + body.current + ")" : "") + ".";
     setStatus("newSessionStatus", label, "ok");
   } catch (e) {
     setStatus("newSessionStatus", "New session failed: " + String(e && e.message || e), "err");
-  } finally {
-    clearTimeout(tmo);
   }
-}
-
-// Verifies the tap token by opening a /tap WS with the right subprotocol
-// and closing immediately. If the server accepts the upgrade (readyState
-// hits OPEN), the token is good; if it rejects (4401), we see a close
-// before open. Empty token + auth-disabled recorder = open without
-// subprotocol negotiation.
-async function probeTapToken(host, port, token, signal) {
-  return new Promise((resolve) => {
-    const url = wsScheme() + "://" + host + ":" + port + "/tap?identity=__probe__&name=probe";
-    let ws;
-    try {
-      ws = token ? new WebSocket(url, [TAP_SUBPROTOCOL_PREFIX + token]) : new WebSocket(url);
-    } catch (e) {
-      resolve({ ok: false, error: String(e && e.message || e) });
-      return;
-    }
-    let settled = false;
-    const finish = (res) => {
-      if (settled) return;
-      settled = true;
-      try { ws.close(1000, "probe done"); } catch (e) {}
-      resolve(res);
-    };
-    if (signal) signal.addEventListener("abort", () => finish({ ok: false, error: "timeout" }));
-    ws.onopen = () => finish({ ok: true });
-    ws.onerror = () => finish({ ok: false, error: "rejected" });
-    ws.onclose = (ev) => finish({ ok: ev.code === 1000, error: "code " + ev.code });
-  });
-}
-
-// Chrome/Edge treat these hosts as "potentially trustworthy", so ws://
-// to them is allowed from an https:// page like app.spatial.chat.
-// Anything else is mixed-content-blocked and the bridge can't dial it
-// even though the popup's own probe (chrome-extension://) succeeds.
-function isTrustworthyWsHost(host) {
-  if (!host) return false;
-  const h = host.toLowerCase();
-  return (
-    h === "localhost" ||
-    h.endsWith(".localhost") ||
-    h === "127.0.0.1" ||
-    h === "::1"
-  );
 }
 
 function renderMixedContentWarning() {
   const el = $("mixedContentWarn");
   if (!el) return;
-  const risky = !currentUseTls && !isTrustworthyWsHost(currentHost);
+  // The content script's ws:// to a non-trustworthy host from the https
+  // SpatialChat page is mixed-content-blocked. We can't probe that from the
+  // popup's own chrome-extension:// origin, so we evaluate the host against
+  // the control-client's shared trustworthy-host allowlist directly.
+  const risky = !currentUseTls && !TapscribeControlClient.isTrustworthyHost(currentHost);
   if (risky) {
     el.innerHTML =
       "<strong>Mixed-content blocked:</strong> the bridge runs inside " +
@@ -157,10 +100,10 @@ async function probeAll() {
   setPill("recorderStatus", null, "checking…");
   setPill("tokenStatus", null, "checking…");
   $("probeMeta").textContent = "Probing " + currentHost + ":" + currentPort + " …";
-  const ctrl = new AbortController();
-  const tmo = setTimeout(() => ctrl.abort(), 4000);
-  const rec = await probeHealth(currentHost, currentPort, ctrl.signal);
-  clearTimeout(tmo);
+  // Both probes route through the shared control-client, which owns the
+  // /health reachability check (no token) and the /tap WS token probe,
+  // plus the 4 s abort timeout.
+  const rec = await TapscribeControlClient.checkHealth(cfg(), { timeoutMs: 4000 });
   setPill("recorderStatus", rec.ok, rec.ok ? "reachable" : "unreachable");
   const detail = rec.ok ? "ok" : (rec.error || ("HTTP " + rec.status));
 
@@ -168,10 +111,7 @@ async function probeAll() {
   // failure is just the same network error twice.
   let tokenDetail = "n/a";
   if (rec.ok) {
-    const ctrl2 = new AbortController();
-    const tmo2 = setTimeout(() => ctrl2.abort(), 4000);
-    const tok = await probeTapToken(currentHost, currentPort, currentTapToken, ctrl2.signal);
-    clearTimeout(tmo2);
+    const tok = await TapscribeControlClient.probeTapToken(cfg(), { timeoutMs: 4000 });
     setPill("tokenStatus", tok.ok, tok.ok ? "accepted" : "rejected");
     tokenDetail = tok.ok ? "ok" : (tok.error || "rejected");
   } else {
@@ -301,7 +241,7 @@ $("autoNewSessionOnRoomChange").addEventListener("change", () => {
 
 $("openDash").addEventListener("click", (ev) => {
   ev.preventDefault();
-  chrome.tabs.create({ url: httpScheme() + "://" + currentHost + ":" + currentPort + "/" });
+  chrome.tabs.create({ url: TapscribeControlClient.httpBase(cfg()) + "/" });
 });
 
 load();

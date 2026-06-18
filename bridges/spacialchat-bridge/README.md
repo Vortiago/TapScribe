@@ -17,13 +17,25 @@ back. (See ADR-0002 for the architectural reasoning.)
 
 ```
 spacialchat-bridge/
-├── manifest.json     MV3 manifest
-├── content.js        ISOLATED-world content script: /tap WS lifecycle, status snapshot
-├── page-script.js    MAIN-world script: LiveKit Room tap + 48k→16k AudioWorklet
-├── popup.html        configuration UI markup
-├── popup.js          configuration UI logic (host/port, /health probe, status table)
-└── README.md         this file
+├── manifest.json      MV3 manifest
+├── control-client.js  shared, dependency-free tap-token control plane (loaded into both content.js and popup.js): new-session / detached-session create, pipeline trigger + poll, /health + tap-token probe
+├── content.js         ISOLATED-world content script: /tap WS lifecycle, status snapshot
+├── page-script.js     MAIN-world script: LiveKit Room tap + 48k→16k AudioWorklet
+├── popup.html         configuration UI markup
+├── popup.js           configuration UI logic (host/port, /health probe, status table)
+└── README.md          this file
 ```
+
+`control-client.js` is loaded ahead of both `content.js` (via the
+manifest's `content_scripts.js` array) and `popup.js` (via a `<script>`
+tag in `popup.html`), exposing a single `TapscribeControlClient` global.
+It centralises the tap-token HTTP/WS control calls — scheme derivation
+from the TLS toggle, the mixed-content guard, the `Authorization: Bearer`
+header, response parsing, and timeouts — so that logic lives in one
+tested place rather than copy-pasted across the two worlds. Its surface
+is create / trigger / poll / rotate / probe only: there is deliberately
+no delete or prune call, keeping a leaked tap token's blast radius
+bounded (deletion stays a dashboard Basic-auth action).
 
 ## How it works
 
