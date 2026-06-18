@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from tapscribe import hallucinations
-from tapscribe import tap_fan_out as tfo
+from tapscribe import tap_relay as tr
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import ActiveStream, Recorder
 from tapscribe.tap_fan_out import TapFanOut
@@ -120,8 +120,8 @@ async def test_relay_reconnect_attempts_are_bounded_by_real_backoff(
 
     r = _build_recorder_with_running_live(tmp_path, port=_unused_port())
 
-    original_backoff = tfo.RELAY_RECONNECT_BACKOFF_S
-    tfo.RELAY_RECONNECT_BACKOFF_S = BACKOFF
+    original_backoff = tr.RELAY_RECONNECT_BACKOFF_S
+    tr.RELAY_RECONNECT_BACKOFF_S = BACKOFF
     try:
         async with await TapFanOut.open(
             r,
@@ -132,8 +132,8 @@ async def test_relay_reconnect_attempts_are_bounded_by_real_backoff(
             do_live=True,
         ) as fan_out:
             # The initial connect (in _open) failed via the patched
-            # WlKRelay.connect, so _relay_alive starts False.
-            assert fan_out._relay_alive is False
+            # WlKRelay.connect, so the relay never bound (connected None).
+            assert fan_out.relay.connected is None
 
             # Drive write_frame for WINDOW_S real seconds. Each frame
             # checks the backoff and either schedules a reconnect or
@@ -147,13 +147,11 @@ async def test_relay_reconnect_attempts_are_bounded_by_real_backoff(
                 # 20 ms frame cadence to match production.
                 await asyncio.sleep(0.02)
 
-            # Let any in-flight reconnect task settle so the attempt
-            # counter reflects the final state.
-            if fan_out._relay_reconnect_task is not None:
-                with suppress_all():
-                    await fan_out._relay_reconnect_task
-
-            attempts = fan_out._relay_reconnect_attempts
+            # The attempt counter increments when an attempt is SCHEDULED
+            # (in TapRelay._maybe_schedule_reconnect), not when the task
+            # completes, so the public read-surface already reflects the
+            # final count — no need to await any in-flight task.
+            attempts = fan_out.relay.reconnect_attempts
 
             # Upper bound: window / backoff + 2 (rounding + one
             # in-flight at the boundary). With a 0.1 s backoff over a
@@ -173,7 +171,7 @@ async def test_relay_reconnect_attempts_are_bounded_by_real_backoff(
                 f"Drove {frames} frames."
             )
     finally:
-        tfo.RELAY_RECONNECT_BACKOFF_S = original_backoff
+        tr.RELAY_RECONNECT_BACKOFF_S = original_backoff
 
 
 def _unused_port() -> int:
@@ -182,19 +180,6 @@ def _unused_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("localhost", 0))
         return s.getsockname()[1]
-
-
-class suppress_all:
-    """Bare-bones `contextlib.suppress(Exception)` shim that also covers
-    `asyncio.CancelledError` (which is a BaseException on 3.10+ so the
-    plain Exception suppress wouldn't catch it). Used when awaiting a
-    cancellable background task purely to give it a chance to finish."""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return exc_type is not None and issubclass(exc_type, (Exception, asyncio.CancelledError))
 
 
 # ---------------------------------------------------------------------------
