@@ -444,3 +444,86 @@ def test_textinput_label_and_description_round_trip():
         "placeholder": "p",
         "description": "d",
     }
+
+
+# ── Moonshine (live-only) — issue #121 ───────────────────────────────────────
+# Contract for the new live family: catalog registration + availability +
+# /api/models surfacing (no inference wiring yet — see #122/#123). These pin the
+# acceptance criteria; the route-level surfacing is asserted in test_routes.py.
+
+_MOONSHINE_IDS = ("moonshine-tiny", "moonshine-base")
+
+
+def _moonshine_entries():
+    return tuple(e for e in REGISTRY.entries() if e.family == "moonshine")
+
+
+def test_moonshine_family_registered_with_both_models():
+    assert {e.model_id for e in _moonshine_entries()} == set(_MOONSHINE_IDS)
+
+
+def test_moonshine_entry_metadata_is_english_live_no_inputs():
+    entries = _moonshine_entries()
+    assert entries  # registered at all
+    for e in entries:
+        assert e.languages == ("en",)
+        assert e.contexts == frozenset({"live"})
+        assert e.inputs == ()
+        assert "english" in e.description.lower()
+
+
+def test_moonshine_listed_for_live_context():
+    live_ids = {e.model_id for e in REGISTRY.for_context("live")}
+    assert set(_MOONSHINE_IDS) <= live_ids
+
+
+def test_moonshine_excluded_from_batch_context():
+    batch_ids = {e.model_id for e in REGISTRY.for_context("batch")}
+    assert batch_ids.isdisjoint(_MOONSHINE_IDS)
+
+
+def test_moonshine_backends_cover_mlx_and_cpu_cuda_with_probes():
+    for e in _moonshine_entries():
+        kindsets = {b.kinds for b in e.backends}
+        assert frozenset({"mlx"}) in kindsets
+        assert frozenset({"cuda", "cpu"}) in kindsets
+        assert all(b.probe_module for b in e.backends)  # each declares a probe module
+
+
+def test_moonshine_resolve_auto_prefers_mlx_when_available():
+    set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    rb = REGISTRY.resolve("moonshine-tiny", preference="auto")
+    assert isinstance(rb, ResolvedBinding)
+    assert rb.kind == "mlx"
+
+
+def test_moonshine_resolve_auto_falls_back_to_cpu():
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    rb = REGISTRY.resolve("moonshine-base", preference="auto")
+    assert rb.kind == "cpu"
+
+
+def test_moonshine_explicit_unavailable_backend_raises_runtimeerror():
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    with pytest.raises(RuntimeError, match="mlx"):
+        REGISTRY.resolve("moonshine-tiny", preference="mlx")
+
+
+def test_moonshine_install_probe_gates_is_installed():
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    probes = frozenset(
+        b.probe_module for e in _moonshine_entries() for b in e.backends if b.probe_module
+    )
+    assert probes
+    set_installed_modules_for_testing(frozenset())  # nothing importable
+    try:
+        assert all(not e.is_installed() for e in _moonshine_entries())
+        set_installed_modules_for_testing(probes)  # all importable
+        assert all(e.is_installed() for e in _moonshine_entries())
+    finally:
+        set_installed_modules_for_testing(None)
+
+
+def test_unknown_model_id_rejected_before_loader():
+    with pytest.raises((KeyError, RuntimeError)):
+        REGISTRY.resolve("not-a-real-moonshine", preference="auto")

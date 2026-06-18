@@ -312,12 +312,29 @@ def _load_canary_nemo(model_id: str, kind: BackendKind) -> Transcriber:
     return CanaryTranscriber.load(model_id, kind=kind)
 
 
+# ── Moonshine placeholder loaders (issue #121 — real inference in #122/#123) ──────────
+
+
+def _load_moonshine_mlx(model_id: str, kind: BackendKind) -> Transcriber:  # noqa: ARG001
+    raise NotImplementedError(
+        "Moonshine MLX backend not yet implemented (see issue #122). "
+        "Install `pip install tapscribe[moonshine-mlx]` once available."
+    )
+
+
+def _load_moonshine_onnx(model_id: str, kind: BackendKind) -> Transcriber:  # noqa: ARG001
+    raise NotImplementedError(
+        "Moonshine ONNX (CPU/CUDA) backend not yet implemented (see issue #123). "
+        "Install `pip install tapscribe[moonshine-onnx]` once available."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core data types
 # ---------------------------------------------------------------------------
 
 
-Family = Literal["whisper", "nb-whisper", "voxtral", "parakeet", "canary"]
+Family = Literal["whisper", "nb-whisper", "voxtral", "parakeet", "canary", "moonshine"]
 Context = Literal["batch", "live"]
 
 
@@ -585,8 +602,32 @@ _CANARY_BACKENDS: tuple[BackendBinding, ...] = (
 )
 
 
+_MOONSHINE_BACKENDS: tuple[BackendBinding, ...] = (
+    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_moonshine_mlx, probe_module="moonshine"),
+    BackendBinding(
+        kinds=frozenset({"cuda", "cpu"}),
+        loader=_load_moonshine_onnx,
+        probe_module="optimum",
+    ),
+)
+
+
+def _moonshine(model_id: str, display: str, description: str) -> ModelEntry:
+    return ModelEntry(
+        model_id=model_id,
+        family="moonshine",
+        display_name=display,
+        description=description,
+        languages=("en",),
+        contexts=_LIVE_ONLY,
+        backends=_MOONSHINE_BACKENDS,
+        inputs=NO_INPUTS,
+    )
+
+
 _BATCH_AND_LIVE = frozenset({"batch", "live"})
 _BATCH_ONLY = frozenset({"batch"})
+_LIVE_ONLY = frozenset({"live"})
 
 
 def _whisper(model_id: str, display: str, description: str, *, en_only: bool) -> ModelEntry:
@@ -671,6 +712,9 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
         backends=_CANARY_BACKENDS,
         inputs=CANARY_INPUTS,
     ),
+    # ── Moonshine (live-only, English) — issue #121; inference lands in #122/#123 ──
+    _moonshine("moonshine-tiny", "moonshine-tiny", "Moonshine Tiny · English · ultra-fast live"),
+    _moonshine("moonshine-base", "moonshine-base", "Moonshine Base · English · fast live"),
 )
 
 
