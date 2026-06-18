@@ -104,9 +104,8 @@ internal sealed class TrayContext : ApplicationContext
                         "Two devices share an identity. Give each a distinct identity in Settings.",
                     _ => "Cannot start with the current device selection.",
                 };
-                enumerator.Dispose();
                 FailToIdle(ui, "Could not start meeting", reason);
-                return;
+                return; // the finally disposes the enumerator on this early exit
             }
 
             // 2) Mint a detached session — this doubles as the connection pre-flight: if the
@@ -152,7 +151,7 @@ internal sealed class TrayContext : ApplicationContext
                 _orchestrator = orchestrator;
                 _enumerator = enumerator;
             }
-            enumerator = null; // ownership transferred; the catch below must not dispose it
+            enumerator = null; // ownership transferred; the finally below must not dispose it
 
             // Devices that didn't resolve are a non-fatal warning — the meeting runs on the
             // ones that did.
@@ -182,9 +181,16 @@ internal sealed class TrayContext : ApplicationContext
             // session-mint timeout (OperationCanceledException) and a malformed new-session
             // response (JsonException) so neither can escape and wedge the tray on
             // "Starting…". The filter keeps this off CodeQL's catch-of-all radar.
-            enumerator?.Dispose();
             StartFailure failure = StartFailure.Classify(ex, settings.Host, settings.Port);
             FailToIdle(ui, "Could not start meeting", failure.Message);
+        }
+        finally
+        {
+            // Dispose on every exit path — the non-Ok early return, an exception from
+            // List()/Resolve() (whether or not the catch filter matches it), or normal
+            // completion. Once the orchestrator owns the enumerator (line above), this is
+            // null and the dispose is a no-op, so the running meeting keeps its devices.
+            enumerator?.Dispose();
         }
     }
 

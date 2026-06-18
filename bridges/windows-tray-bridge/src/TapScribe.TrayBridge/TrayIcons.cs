@@ -1,6 +1,6 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Runtime.InteropServices;
+using System.Drawing.Imaging;
 using TapScribe.Bridge.Core;
 
 namespace TapScribe.TrayBridge;
@@ -13,9 +13,6 @@ namespace TapScribe.TrayBridge;
 /// </summary>
 internal sealed class TrayIcons : IDisposable
 {
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool DestroyIcon(IntPtr handle);
-
     private readonly Dictionary<TrayIcon, Icon> _icons = new()
     {
         [TrayIcon.Idle] = Dot(Color.Gray),
@@ -36,19 +33,35 @@ internal sealed class TrayIcons : IDisposable
             g.FillEllipse(brush, 2, 2, 12, 12);
         }
 
-        // Icon.FromHandle does not own the HICON, so capture it, build a standalone
-        // Icon via its serialized form, and free the handle immediately — no per-icon
-        // GDI leak for the life of the process.
-        IntPtr handle = bitmap.GetHicon();
-        try
+        // Wrap the 16x16 PNG in a one-entry ICONDIR and hand it to the managed
+        // Icon(Stream) constructor, which reads the data into its own copy. This avoids
+        // bitmap.GetHicon() — whose HICON would have to be released via the user32
+        // DestroyIcon P/Invoke — so there's no unmanaged handle to track and no GDI leak.
+        using var png = new MemoryStream();
+        bitmap.Save(png, ImageFormat.Png);
+        byte[] pngBytes = png.ToArray();
+
+        using var ico = new MemoryStream();
+        using (var w = new BinaryWriter(ico, System.Text.Encoding.UTF8, leaveOpen: true))
         {
-            using var temp = Icon.FromHandle(handle);
-            return (Icon)temp.Clone();
+            // ICONDIR header.
+            w.Write((short)0);            // reserved, must be 0
+            w.Write((short)1);            // image type, 1 = icon
+            w.Write((short)1);            // number of images
+            // ICONDIRENTRY (PNG-encoded, supported by modern Windows icon loading).
+            w.Write((byte)16);            // width
+            w.Write((byte)16);            // height
+            w.Write((byte)0);             // colours in palette (0 = no palette)
+            w.Write((byte)0);             // reserved, must be 0
+            w.Write((short)1);            // colour planes
+            w.Write((short)32);           // bits per pixel
+            w.Write(pngBytes.Length);     // size of the image data
+            w.Write(6 + 16);              // offset of the image data from the start
+            w.Write(pngBytes);
         }
-        finally
-        {
-            DestroyIcon(handle);
-        }
+
+        ico.Position = 0;
+        return new Icon(ico, new Size(16, 16));
     }
 
     public void Dispose()

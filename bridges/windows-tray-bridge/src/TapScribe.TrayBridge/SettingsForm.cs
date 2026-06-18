@@ -346,9 +346,8 @@ internal sealed class SettingsForm : Form
 
         // Pre-tick any device the saved selection pinned.
         var savedPinned = new Dictionary<string, DeviceSelection.Pinned>(StringComparer.Ordinal);
-        foreach (DeviceSelection selection in _current.Devices)
-            if (selection is DeviceSelection.Pinned pinned)
-                savedPinned[pinned.DeviceId] = pinned;
+        foreach (DeviceSelection.Pinned pinned in _current.Devices.OfType<DeviceSelection.Pinned>())
+            savedPinned[pinned.DeviceId] = pinned;
 
         foreach (CaptureDevice device in available)
         {
