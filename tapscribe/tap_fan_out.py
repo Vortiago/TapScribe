@@ -1,10 +1,12 @@
 """TapFanOut — the per-`/tap`-WS lifecycle object.
 
 One TapFanOut owns one Bridge utterance's worth of audio fan-out: the
-WAV write, the UtteranceIndex bookkeeping, the ActiveStream row, and
-(when do_live + the LiveChannel is running) the WlKRelay. The `/tap`
-route just reads the WS, calls `write_frame(buf)` per PCM frame, and
-relies on the async context manager to clean up on exit.
+WAV write, the UtteranceIndex bookkeeping, the ActiveStream row (level
+meter + gate-open transition), and the live leg — which it holds as one
+`TapRelay` (the WlK relay + gate + reconnect machinery; see
+`tap_relay.py`). The `/tap` route just reads the WS, calls
+`write_frame(buf)` per PCM frame, and relies on the async context
+manager to clean up on exit.
 
 See ADR-0002 for the "Recorder fans the audio out internally" decision
 this object embodies, and CONTEXT.md for the Bridge / Utterance / Drain
@@ -14,16 +16,14 @@ vocabulary used throughout.
 from __future__ import annotations
 
 import asyncio
-import time
 import wave
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .audio import int16_peak_norm, open_recorder_wav
-from .live_relay import WlKRelay
 from .recorder import ActiveStream, Recorder, UtteranceRecord
-from .speech_gate import SpeechGate, build_gate_for_config
+from .tap_relay import RelayHandlers, TapRelay
 from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 
 # Per-frame decay factor for the volume-meter peak hold. Frames are 20 ms
@@ -32,20 +32,6 @@ from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 # enough that it falls back to silence within a few hundred ms of speech
 # ending. Tuned visually rather than from first principles.
 LEVEL_DECAY_PER_FRAME: float = 0.92
-
-# Minimum seconds between in-fan-out relay reconnect attempts. The relay
-# can die mid-utterance for two reasons we want to recover from
-# transparently — without forcing the bridge to drop and re-open /tap:
-#   1. WhisperLiveKit child crashed.
-#   2. Operator clicked Apply (restart) on the dashboard to swap the
-#      model / language; the recorder stopped the old child and started
-#      a new one (possibly with a different config).
-# At 20 ms frames that's 50 candidate reconnect points per second per
-# stream — without backoff we'd hammer a still-starting WlK. One second
-# leaves a small audio gap during restart but is responsive enough that
-# the operator sees captions resume within ~1 cycle past WlK's ready
-# time. Lowered to ~0 in tests to keep the suite quick.
-RELAY_RECONNECT_BACKOFF_S: float = 1.0
 
 
 class TapFanOut:
@@ -63,6 +49,7 @@ class TapFanOut:
         do_live: bool,
         session: str | None = None,
         session_dir: Path | None = None,
+        tap_relay: TapRelay | None = None,
     ) -> None:
         self._recorder = recorder
         self._identity = identity
@@ -81,14 +68,13 @@ class TapFanOut:
         self._record: UtteranceRecord | None = None
         self._conn_id: str = ""
         self._bytes_received: int = 0
-        self._relay: WlKRelay | None = None
-        self._relay_alive: bool = False
-        # Per-tap SpeechGate (Silero-backed). None when gate_kind=
-        # "backend" — PCM then bypasses the gate and the backend's
-        # own VAD handles silence. `_gate_open_last` mirrors
-        # `_gate.is_open` so write_frame only writes to the
-        # ActiveStream on transitions (not at the 50 Hz frame rate).
-        self._gate: SpeechGate | None = None
+        # The live leg — WlK relay + per-tap SpeechGate + transparent
+        # reconnect-with-backoff — lives entirely behind TapRelay (built
+        # in `_open`, or injected here for tests). `_gate_open_last`
+        # tracks the gate-open state TapRelay reports through `feed` so
+        # write_frame pushes an ActiveStream gate-open update only on a
+        # transition, not at the 50 Hz frame rate.
+        self._tap_relay: TapRelay | None = tap_relay
         self._gate_open_last: bool = False
         # Strong refs to the buffer-forward tasks fired from
         # `_on_buffer` so a failure inside them surfaces immediately
@@ -96,16 +82,6 @@ class TapFanOut:
         # retrieved" log. Race-wise we accept latest-wins ordering
         # under heavy load — the field is a cosmetic in-flight hint.
         self._buffer_tasks: set[asyncio.Task] = set()
-        # Backoff bookkeeping for transparent relay reconnection across
-        # WhisperLiveKit restarts (model swap, child crash). The task
-        # handle lets _close cancel an in-flight attempt cleanly; the
-        # monotonic timestamp + attempt counter implement the backoff.
-        # `_relay_reconnect_attempts` is also read by tests as a way to
-        # verify the backoff actually coalesces bursts of frames into a
-        # single connect attempt.
-        self._relay_reconnect_task: asyncio.Task | None = None
-        self._relay_last_attempt_at: float = 0.0
-        self._relay_reconnect_attempts: int = 0
         # Peak-hold for the dashboard's per-tap volume meter, decayed
         # per frame (see LEVEL_DECAY_PER_FRAME). Mirrored onto the
         # ActiveStream row via update_bytes so /api/state surfaces it.
@@ -123,6 +99,7 @@ class TapFanOut:
         do_live: bool,
         session: str | None = None,
         session_dir: Path | None = None,
+        tap_relay: TapRelay | None = None,
     ) -> TapFanOut:
         self = cls(
             recorder,
@@ -133,6 +110,7 @@ class TapFanOut:
             do_live=do_live,
             session=session,
             session_dir=session_dir,
+            tap_relay=tap_relay,
         )
         await self._open()
         return self
@@ -143,39 +121,47 @@ class TapFanOut:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self._close()
 
+    @property
+    def relay(self) -> TapRelay:
+        """This tap's live leg. Its `reconnect_attempts` / `connected`
+        read-surface is what reconnect tests assert on — formerly the
+        private relay fields on this object. Set in `_open`."""
+        assert self._tap_relay is not None
+        return self._tap_relay
+
     async def write_frame(self, buf: bytes) -> None:
         # Recording first — we persist EVERY incoming frame regardless
         # of the gate's verdict so the WAV is a faithful record of what
         # the bridge sent (the gate is a relay-side filter, not a
-        # recording filter). The level meter, by contrast, reflects
-        # POST-gate audio so the operator can see the gate's effect in
-        # real time: silence between speech reads as dark, confirmed
-        # speech lights the bar.
+        # recording filter).
         if self._wf is not None:
             self._wf.writeframes(buf)
             self._bytes_received += len(buf)
-        if self._gate is not None:
-            frames_to_send = self._gate.feed(buf)
-            # Surface gate transitions to the dashboard. Skip the lock
-            # acquire when the value hasn't changed — otherwise we'd
-            # hit the ActiveStreams mutex 50× per second per /tap.
-            current_open = self._gate.is_open
-            if current_open != self._gate_open_last:
-                self._gate_open_last = current_open
-                await self._recorder.streams.update_gate_open(self._conn_id, current_open)
-        else:
-            frames_to_send = (buf,)
+
+        # The live leg: feed the frame through the gate to the relay,
+        # reconnecting transparently if WlK restarted. TapRelay hands back
+        # the POST-gate frames + gate-open state so the meter and the
+        # ActiveStream row reflect the gate's effect in real time —
+        # silence between speech reads as dark, confirmed speech lights
+        # the bar. Recording to disk is unaffected if the relay is dead
+        # (ADR-0002 graceful degradation).
+        assert self._tap_relay is not None  # built in _open
+        fed = await self._tap_relay.feed(buf)
+
+        # Surface gate transitions to the dashboard. Skip the lock acquire
+        # when the value hasn't changed — otherwise we'd hit the
+        # ActiveStreams mutex 50× per second per /tap.
+        if fed.gate_open != self._gate_open_last:
+            self._gate_open_last = fed.gate_open
+            await self._recorder.streams.update_gate_open(self._conn_id, fed.gate_open)
 
         # Peak-hold-with-decay on what survived the gate. During pending
-        # warm-up or pure silence, frames_to_send is empty → peak=0 →
-        # the meter decays to dark within its ~165 ms half-life.
-        # max() — not a strict `>` test — so a steady tone whose
-        # per-frame peak equals the prior level stays pinned instead
-        # of leaking down by `LEVEL_DECAY_PER_FRAME` every frame.
-        if frames_to_send:
-            peak = max(int16_peak_norm(f) for f in frames_to_send)
-        else:
-            peak = 0.0
+        # warm-up or pure silence, fed.frames is empty → peak=0 → the
+        # meter decays to dark within its ~165 ms half-life. max() — not a
+        # strict `>` test — so a steady tone whose per-frame peak equals
+        # the prior level stays pinned instead of leaking down by
+        # `LEVEL_DECAY_PER_FRAME` every frame.
+        peak = max(int16_peak_norm(f) for f in fed.frames) if fed.frames else 0.0
         decayed = self._level * LEVEL_DECAY_PER_FRAME
         self._level = peak if peak > decayed else decayed
         await self._recorder.streams.update_bytes(
@@ -183,26 +169,6 @@ class TapFanOut:
             self._bytes_received,
             level=self._level,
         )
-
-        if not frames_to_send:
-            return
-
-        # Best-effort relay with transparent reconnect across WhisperLiveKit
-        # restarts. If the relay is alive, forward the frame(s). If it
-        # died (operator clicked Apply (restart) on the dashboard, or the
-        # WlK child crashed) but LiveChannel is back up, schedule a rebuild
-        # so frames start flowing again without the bridge having to
-        # drop and re-open /tap. Recording to disk continues unaffected
-        # regardless — per ADR-0002 graceful degradation.
-        for frame in frames_to_send:
-            if self._relay_alive:
-                assert self._relay is not None
-                if not await self._relay.send(frame):
-                    self._relay_alive = False
-                    break
-            elif self._do_live and self._recorder.live.running():
-                self._maybe_schedule_relay_reconnect()
-                break
 
     # ------------------------------------------------------------------
     # Lifecycle internals
@@ -286,8 +252,22 @@ class TapFanOut:
             )
         )
 
-        if self._do_live and self._recorder.live.running():
-            await self._attach_relay_and_gate(self._recorder.live.config)
+        # Build the live leg (relay + gate + reconnect) and let it attach
+        # if this is a live tap and the channel is up. A record-only or
+        # live-down tap holds an inert TapRelay, so write_frame can call
+        # feed() unconditionally with no do_live branch of its own.
+        if self._tap_relay is None:
+            self._tap_relay = TapRelay(
+                self._recorder.live,
+                do_live=self._do_live,
+                handlers=RelayHandlers(
+                    on_settled_line=self._on_settled_line,
+                    on_metrics=self._on_metrics,
+                    on_buffer=self._on_buffer,
+                ),
+                label=self._identity,
+            )
+        await self._tap_relay.open()
 
     async def _on_metrics(self, lag_s: float) -> None:
         """Push the relay's latest reported lag to this tap's row so the
@@ -306,76 +286,6 @@ class TapFanOut:
         )
         self._buffer_tasks.add(task)
         task.add_done_callback(self._buffer_tasks.discard)
-
-    def _maybe_schedule_relay_reconnect(self) -> None:
-        """Kick off a background relay reconnect if none is pending and
-        we're outside the backoff window. Synchronous (no await) so
-        write_frame keeps moving — the actual connect happens in a task
-        so a slow / unreachable WlK can't stall the frame stream."""
-        if self._relay_reconnect_task is not None and not self._relay_reconnect_task.done():
-            return
-        now = time.monotonic()
-        if now - self._relay_last_attempt_at < RELAY_RECONNECT_BACKOFF_S:
-            return
-        self._relay_last_attempt_at = now
-        self._relay_reconnect_attempts += 1
-        self._relay_reconnect_task = asyncio.create_task(self._reconnect_relay())
-
-    async def _reconnect_relay(self) -> None:
-        """Rebuild the WlK relay using the recorder's CURRENT live
-        config — so a model / language / port change applied via the
-        dashboard takes effect for already-open /tap WebSockets too.
-
-        The stale relay is closed first; failures there are swallowed
-        because the connection is already known-dead. A connect failure
-        on the new attempt just leaves _relay_alive=False; the backoff
-        guard in _maybe_schedule_relay_reconnect rate-limits retries
-        until WlK comes up."""
-        stale = self._relay
-        self._relay = None
-        if stale is not None:
-            with suppress(Exception):
-                await stale.close()
-        cfg = self._recorder.live.config
-        if await self._attach_relay_and_gate(cfg):
-            print(
-                f"[tapscribe] /tap relay reconnected for {self._identity} "
-                f"-> {cfg.host}:{cfg.port} (model={cfg.model}, lang={cfg.language})",
-                flush=True,
-            )
-
-    async def _attach_relay_and_gate(self, cfg) -> bool:
-        """Build the WlK relay + (optional) SpeechGate against `cfg`.
-        Sets `self._relay` / `self._relay_alive` / `self._gate` on
-        success and returns True. Returns False if the relay fails to
-        connect; the gate is only built (and only paid for) when the
-        relay is actually going to be fed.
-
-        Gate-construction failures (Silero load error, etc.) don't kill
-        the tap — we log and fall through with `self._gate = None`, so
-        the bridge sees passthrough rather than a dropped /tap WS."""
-        candidate = WlKRelay(
-            host=cfg.host,
-            port=cfg.port,
-            language=cfg.language,
-            on_settled_line=self._on_settled_line,
-            on_metrics=self._on_metrics,
-            on_buffer=self._on_buffer,
-        )
-        if not await candidate.connect():
-            return False
-        self._relay = candidate
-        self._relay_alive = True
-        try:
-            self._gate = build_gate_for_config(cfg)
-        except Exception as e:
-            print(
-                f"[tapscribe] /tap gate construction failed for "
-                f"{self._identity}: {e}; falling back to passthrough",
-                flush=True,
-            )
-            self._gate = None
-        return True
 
     def _on_settled_line(self, text: str) -> None:
         """Settled-line consumer for the WlKRelay. Cleans Whisper
@@ -423,15 +333,10 @@ class TapFanOut:
             )
         else:
             print(f"[tapscribe] /tap closed (record off) for {self._identity}", flush=True)
-        # Cancel any in-flight reconnect attempt before we close the
-        # current relay — otherwise the task could land a fresh relay
-        # right after we tried to close it, leaving a stray WS to the
-        # WlK child after the fan-out has gone away.
-        if self._relay_reconnect_task is not None and not self._relay_reconnect_task.done():
-            self._relay_reconnect_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await self._relay_reconnect_task
-        self._relay_reconnect_task = None
-        if self._relay is not None:
-            await self._relay.close()  # drains tail captions per Q2
+        # Tear down the live leg: TapRelay cancels any in-flight reconnect
+        # (so it can't land a fresh relay right after teardown, leaking a
+        # WS to the WlK child) and then closes the relay, which drains
+        # tail captions. Present on every path that registered a stream.
+        if self._tap_relay is not None:
+            await self._tap_relay.close()
         await self._recorder.streams.remove(self._conn_id)

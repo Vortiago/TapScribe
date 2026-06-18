@@ -255,15 +255,63 @@ Concerns the fan-out owns (the route knows none of these):
 - WAV-file open / resume-via-`UtteranceIndex.try_resume` / writeframes /
   finalize / unlink-when-empty.
 - UtteranceIndex `register_new` / `release` bookkeeping.
-- ActiveStream registration and per-frame `bytes_received` updates.
-- WlKRelay create / connect / send / close-with-drain (when `do_live`
-  and the LiveChannel is running), including the `on_settled_line`
-  callback that cleans Whisper meta-tokens and appends to LiveTranscripts.
+- ActiveStream registration and per-frame `bytes_received` updates,
+  plus the post-gate level meter and the gate-open transition push.
+- The **live leg** — but only by holding one **TapRelay** (below) and
+  feeding each frame through it. The relay/gate/reconnect machinery
+  itself is no longer TapFanOut's concern.
 
 Lives in `tapscribe/tap_fan_out.py`. One instance per `/tap` WS;
 construction takes `do_record` / `do_live` snapshotted at WS open from
 `recorder.tap_settings.get(identity)`, mirroring the global recording
-toggle's "next-utterance, not this one" semantics.
+toggle's "next-utterance, not this one" semantics. `write_frame` writes
+the WAV, calls `tap_relay.feed(buf)`, then uses the returned post-gate
+frames for the level meter and `gate_open` for the ActiveStream
+transition — so the gate's *output* crosses the seam but the gate lives
+behind it. Exposes its `TapRelay` as a `relay` property (the read-surface
+that replaced the old private-field test backdoors).
+
+## TapRelay
+
+The per-`/tap` **live leg**: the sub-unit of TapFanOut that owns the WlK
+relay lifecycle, the per-tap SpeechGate, and the transparent
+reconnect-with-backoff across WhisperLiveKit restarts (model swap, child
+crash). Extracted from TapFanOut so the reconnect state machine — the
+live path's most intricate, most-broken part — has its own interface and
+is the test surface, instead of being assertable only by poking
+TapFanOut's private fields. Lives in `tapscribe/tap_relay.py`.
+
+Interface:
+
+- `open()` — attach a relay + gate against the LiveChannel's current
+  config, but only when `do_live` and the channel is running; otherwise
+  stay dormant (a record-only or live-down tap holds an inert TapRelay,
+  so TapFanOut needs no `do_live` branch of its own).
+- `feed(buf) -> FedFrames` — feed the gate, forward the surviving frames
+  to the relay (or schedule a reconnect if the relay died and the
+  channel is back up), and hand back `FedFrames(frames, gate_open)` so
+  TapFanOut can drive the meter and the ActiveStream gate-open row.
+  Recording to disk is unaffected — per ADR-0002 graceful degradation,
+  the relay dying never stops the WAV.
+- `close()` — cancel any in-flight reconnect, then close the relay
+  (draining tail captions; see **Tail flush**).
+- read-surface: `reconnect_attempts` (backoff coalesces a burst of
+  frames into one attempt) and `connected -> (host, port, language) |
+  None` (what the live relay is currently bound to, or `None` when
+  dead). These are what tests assert on.
+
+`RelayHandlers(on_settled_line, on_metrics, on_buffer)` is the named
+handler contract TapFanOut supplies as bound methods that read the tap's
+`identity`/`name`/`session`/`conn_id` at invocation; `WlKRelay` and the gate are
+built through injectable `relay_factory` / `gate_factory` seams so the
+reconnect/backoff behaviour is unit-testable with a fake relay, no live
+WhisperLiveKit child required. `RELAY_RECONNECT_BACKOFF_S` lives here.
+
+This is an internal sub-unit, **not** a new architectural boundary —
+ADR-0002 (Bridge → one `/tap` WS → the Recorder fans out internally) is
+unchanged. The gate-less future `ParakeetLiveChannel` does not need this
+seam; that variation rides the existing `LiveChannel` Protocol +
+`supports_native_vad` flag.
 
 ## Bridge
 

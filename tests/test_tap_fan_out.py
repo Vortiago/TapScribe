@@ -6,8 +6,9 @@ open-code in its finally block:
 
   - WAV-file open / resume / writeframes / finalize / unlink-if-empty
   - UtteranceIndex bookkeeping (try_resume, register_new, release)
-  - ActiveStream registration + per-frame bytes_received updates
-  - WlKRelay create / connect / send / close-with-drain (when do_live)
+  - ActiveStream registration + per-frame bytes_received / level updates
+  - the live leg, held as one TapRelay (relay + gate + reconnect) — its
+    own reconnect/backoff unit tests live in test_tap_relay.py
 
 These tests construct a TapFanOut directly against a real Recorder and
 synthesised PCM frames — no TestClient, no WebSocket. The end-to-end
@@ -17,7 +18,6 @@ relay path stays exercised by test_tap_endpoint.py.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import wave
 from pathlib import Path
 
@@ -664,7 +664,7 @@ async def test_tapscribe_gate_blocks_silence_from_reaching_relay(
 
         return SpeechGate(vad=analyze, pre_roll_ms=0)
 
-    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _never_starts)
+    monkeypatch.setattr("tapscribe.tap_relay.build_gate_for_config", _never_starts)
 
     async with await TapFanOut.open(
         recorder_with_relay,
@@ -717,7 +717,7 @@ async def test_tapscribe_gate_passes_speech_frames_through(
 
         return SpeechGate(vad=analyze, pre_roll_ms=0)
 
-    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _opens_immediately)
+    monkeypatch.setattr("tapscribe.tap_relay.build_gate_for_config", _opens_immediately)
 
     async with await TapFanOut.open(
         recorder_with_relay,
@@ -774,7 +774,7 @@ async def test_gate_construction_failure_falls_back_to_passthrough(
     def _exploding_factory(*args, **kwargs):
         raise RuntimeError("silero unavailable")
 
-    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _exploding_factory)
+    monkeypatch.setattr("tapscribe.tap_relay.build_gate_for_config", _exploding_factory)
 
     async with await TapFanOut.open(
         recorder_with_relay,
@@ -813,7 +813,7 @@ async def test_gate_open_state_propagates_to_active_stream(
 
         return SpeechGate(vad=analyze, pre_roll_ms=0)
 
-    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _open_then_close)
+    monkeypatch.setattr("tapscribe.tap_relay.build_gate_for_config", _open_then_close)
 
     async with await TapFanOut.open(
         recorder_with_relay,
@@ -864,7 +864,7 @@ async def test_level_meter_reads_zero_while_gate_is_closed_even_on_loud_input(
     def _never_starts(*args, **kwargs):
         return SpeechGate(vad=lambda _c: None, pre_roll_ms=0)
 
-    monkeypatch.setattr("tapscribe.tap_fan_out.build_gate_for_config", _never_starts)
+    monkeypatch.setattr("tapscribe.tap_relay.build_gate_for_config", _never_starts)
 
     loud = b"\xff\x7f" * 320  # full-scale int16
 
@@ -1007,12 +1007,12 @@ async def test_relay_auto_reconnects_after_live_channel_restart(
     unmutes — the exact bug the user reported."""
     from dataclasses import replace
 
-    from tapscribe import tap_fan_out as tfo
+    from tapscribe import tap_relay as tr
 
     # Shrink the per-fan-out reconnect backoff so the test doesn't sit
     # waiting full production-cadence seconds between attempts.
-    original_backoff = tfo.RELAY_RECONNECT_BACKOFF_S
-    tfo.RELAY_RECONNECT_BACKOFF_S = 0.05
+    original_backoff = tr.RELAY_RECONNECT_BACKOFF_S
+    tr.RELAY_RECONNECT_BACKOFF_S = 0.05
 
     wlk_b: FakeWlkThread | None = None
     try:
@@ -1042,19 +1042,18 @@ async def test_relay_auto_reconnects_after_live_channel_restart(
                 port=wlk_b.port,
             )
 
-            # Phase 3: keep streaming on the same /tap WS. The first
-            # frame to detect the dead relay (after the TCP close
-            # propagates through websockets) kicks off a reconnect task;
-            # drive frames until that task is scheduled, then await it
-            # directly instead of sleeping for "long enough".
-            async def _drive_until_reconnect_scheduled() -> None:
-                while fan_out._relay_reconnect_task is None:
+            # Phase 3: keep streaming on the same /tap WS. The first frame
+            # to detect the dead relay (after the TCP close propagates
+            # through websockets) marks it disconnected; the next kicks off
+            # a reconnect. Drive frames until the relay rebinds to B —
+            # observed through the public `relay.connected` read-surface,
+            # no reconnect-task poking.
+            async def _pump_until_rebound_to_b() -> None:
+                while fan_out.relay.connected is None or fan_out.relay.connected[1] != wlk_b.port:
                     await fan_out.write_frame(PCM_FRAME)
                     await asyncio.sleep(0.005)
 
-            await asyncio.wait_for(_drive_until_reconnect_scheduled(), timeout=2.0)
-            with contextlib.suppress(Exception):
-                await fan_out._relay_reconnect_task
+            await asyncio.wait_for(_pump_until_rebound_to_b(), timeout=3.0)
             for _ in range(5):
                 await fan_out.write_frame(PCM_FRAME)
 
@@ -1083,7 +1082,7 @@ async def test_relay_auto_reconnects_after_live_channel_restart(
                 "captions from the new WlK must be attributed to the original speaker"
             )
     finally:
-        tfo.RELAY_RECONNECT_BACKOFF_S = original_backoff
+        tr.RELAY_RECONNECT_BACKOFF_S = original_backoff
         if wlk_b is not None:
             wlk_b.stop()
 
@@ -1097,11 +1096,11 @@ async def test_relay_reconnect_attempts_respect_backoff(
     — that would mean ~50 connect attempts per second per stream against
     a still-starting WlK. The backoff guard limits attempts to one per
     `RELAY_RECONNECT_BACKOFF_S` window per stream."""
-    from tapscribe import tap_fan_out as tfo
+    from tapscribe import tap_relay as tr
 
-    original_backoff = tfo.RELAY_RECONNECT_BACKOFF_S
+    original_backoff = tr.RELAY_RECONNECT_BACKOFF_S
     # Long enough that 10 fast frames clearly fit inside one window.
-    tfo.RELAY_RECONNECT_BACKOFF_S = 5.0
+    tr.RELAY_RECONNECT_BACKOFF_S = 5.0
 
     try:
         async with await TapFanOut.open(
@@ -1113,17 +1112,17 @@ async def test_relay_reconnect_attempts_respect_backoff(
             do_live=True,
         ) as fan_out:
             # Kill the relay by stopping WlK; subsequent send() returns
-            # False, fan_out sets _relay_alive=False.
+            # False, so the relay reports disconnected (relay.connected None).
             fake_wlk.stop()
             # Drive write_frames until the relay is marked dead — the WS
             # close has to propagate through the websockets library before
             # send() reports the failure, which is a real-clock event.
             for _ in range(20):
                 await fan_out.write_frame(PCM_FRAME)
-                if not fan_out._relay_alive:
+                if fan_out.relay.connected is None:
                     break
                 await asyncio.sleep(0.005)
-            assert not fan_out._relay_alive, "relay should be marked dead after WlK stops"
+            assert fan_out.relay.connected is None, "relay should be marked dead after WlK stops"
             # Now the relay is known-dead. Fire a burst of frames; only
             # ONE reconnect task should be scheduled because backoff is
             # 5s and the burst takes ~50 ms.
@@ -1133,13 +1132,13 @@ async def test_relay_reconnect_attempts_respect_backoff(
                 # the burst to ensure it fits inside one backoff window).
                 await asyncio.sleep(0.005)
 
-            # The internal counter `_relay_reconnect_attempts` (we add
-            # this in the impl) must be exactly 1 for the burst.
-            assert getattr(fan_out, "_relay_reconnect_attempts", None) == 1, (
+            # The relay's public reconnect_attempts read-surface must be
+            # exactly 1 for the burst (backoff coalesced it).
+            assert fan_out.relay.reconnect_attempts == 1, (
                 "backoff window should coalesce burst of frames into one reconnect attempt"
             )
     finally:
-        tfo.RELAY_RECONNECT_BACKOFF_S = original_backoff
+        tr.RELAY_RECONNECT_BACKOFF_S = original_backoff
 
 
 async def test_relay_reconnect_picks_up_new_config(
@@ -1153,10 +1152,10 @@ async def test_relay_reconnect_picks_up_new_config(
     taps even after reconnect."""
     from dataclasses import replace
 
-    from tapscribe import tap_fan_out as tfo
+    from tapscribe import tap_relay as tr
 
-    original_backoff = tfo.RELAY_RECONNECT_BACKOFF_S
-    tfo.RELAY_RECONNECT_BACKOFF_S = 0.05
+    original_backoff = tr.RELAY_RECONNECT_BACKOFF_S
+    tr.RELAY_RECONNECT_BACKOFF_S = 0.05
 
     wlk_b: FakeWlkThread | None = None
     try:
@@ -1169,10 +1168,10 @@ async def test_relay_reconnect_picks_up_new_config(
             do_live=True,
         ) as fan_out:
             await fan_out.write_frame(PCM_FRAME)
-            # _relay is established by TapFanOut.open() (synchronously, as
-            # part of _open) — no wait needed before asserting on it.
-            assert fan_out._relay is not None
-            assert fan_out._relay._language == recorder_with_relay.live.config.language
+            # The relay is established by TapFanOut.open() (synchronously,
+            # as part of _open) — assert on the public read-surface.
+            assert fan_out.relay.connected is not None
+            assert fan_out.relay.connected[2] == recorder_with_relay.live.config.language
 
             # Swap config to a new language + port (new WlK instance).
             fake_wlk.stop()
@@ -1184,40 +1183,28 @@ async def test_relay_reconnect_picks_up_new_config(
                 port=wlk_b.port,
             )
 
-            # Force the relay into a known-dead state. We could rely on
-            # the WS close from fake_wlk.stop() propagating naturally,
-            # but that races against websockets' close detection; for a
-            # config-introspection test we want determinism. The
-            # production reconnect path is the same either way — it
-            # branches on `_relay_alive`, not on how the death was
-            # discovered.
-            fan_out._relay_alive = False
+            # Drive frames on the SAME /tap WS until the relay detects the
+            # death and rebinds to the NEW config — observed through
+            # `relay.connected`, not by poking the relay's private fields
+            # or forcing internal state. Same death-then-reconnect path
+            # the auto-reconnect test exercises.
+            async def _pump_until_rebound_to_b() -> None:
+                while fan_out.relay.connected is None or fan_out.relay.connected[1] != wlk_b.port:
+                    await fan_out.write_frame(PCM_FRAME)
+                    await asyncio.sleep(0.005)
 
-            # Trigger reconnect. The first write_frame schedules the
-            # background _reconnect_relay task; await it directly instead
-            # of sleeping for "long enough".
-            await fan_out.write_frame(PCM_FRAME)
-            await _wait_for(lambda: fan_out._relay_reconnect_task is not None)
-            with contextlib.suppress(Exception):
-                await fan_out._relay_reconnect_task
-            # Drive a few more frames so a successful reconnect can
-            # actually send something through the rebuilt relay.
-            for _ in range(4):
-                await fan_out.write_frame(PCM_FRAME)
+            await asyncio.wait_for(_pump_until_rebound_to_b(), timeout=3.0)
 
-            # The rebuilt relay must reflect the NEW config — language
-            # gets baked into the WlK WS URL, so reading the wrong field
-            # at reconnect time would route audio at the right port but
-            # request the wrong-language model on the recorder restart.
-            assert fan_out._relay is not None, "relay should be rebuilt after config swap"
-            assert fan_out._relay._language == "nb", (
-                "rebuilt relay must use the current (post-restart) language, "
-                "not the language captured at fan-out open"
-            )
-            assert fan_out._relay._port == wlk_b.port, (
-                "rebuilt relay must use the current (post-restart) port"
-            )
+            # The rebuilt relay must reflect the NEW config — language gets
+            # baked into the WlK WS URL, so reading the wrong field at
+            # reconnect time would request the wrong-language model on the
+            # recorder restart.
+            assert fan_out.relay.connected == (
+                recorder_with_relay.live.config.host,
+                wlk_b.port,
+                "nb",
+            ), "rebuilt relay must bind to the current (post-restart) host/port/language"
     finally:
-        tfo.RELAY_RECONNECT_BACKOFF_S = original_backoff
+        tr.RELAY_RECONNECT_BACKOFF_S = original_backoff
         if wlk_b is not None:
             wlk_b.stop()
