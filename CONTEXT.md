@@ -374,6 +374,27 @@ the Bridge's perspective. If audio is still buffered when mute fires
 (typical during a network blip), the Bridge enters **drain** mode rather
 than closing immediately.
 
+On platforms with no native mute event (Windows WASAPI loopback emits
+none), the **Level gate** (below) synthesises Mute: it opens an utterance
+when the input level crosses its threshold and fires Mute after a silence
+hangover.
+
+## Level gate
+
+The Bridge-side RMS **level** gate that decides utterance boundaries on
+platforms that have no native mute event — it is how the Windows tray
+Bridge produces **Mute**. Lives in the cross-platform bridge core
+(`GateOptions` / `LevelGate` under `bridges/windows-tray-bridge/`); its
+knobs are the **open threshold** (a linear RMS amplitude), the
+**hangover** (silence-to-close), and the **pre-roll** (leading audio
+replayed when the gate opens so the first consonants aren't clipped).
+
+Distinct from the Recorder-side **SpeechGate**: that one is Silero-backed
+and its threshold is a speech *probability*; the Level gate is amplitude
+RMS. The two gates live on opposite sides of the `/tap` wire and **never
+share threshold units** — UI that surfaces the Level gate must not borrow
+SpeechGate's "speech threshold" vocabulary.
+
 ## Drain
 
 The flush of trailing PCM that was buffered on the Bridge when mute fired

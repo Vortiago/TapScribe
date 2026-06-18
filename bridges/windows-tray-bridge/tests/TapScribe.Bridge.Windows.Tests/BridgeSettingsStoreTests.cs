@@ -1,3 +1,5 @@
+using TapScribe.Bridge.Core;
+
 namespace TapScribe.Bridge.Windows.Tests;
 
 /// <summary>
@@ -32,6 +34,41 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Equal("alice", loaded.Identity);
         Assert.Equal("Alice B", loaded.Name);
         Assert.Equal("tok-xyz", loaded.Token); // DPAPI blob round-trips through the file
+    }
+
+    [Fact]
+    public void SaveThenLoad_RoundTripsDeviceSelectionsAndGateKnobs()
+    {
+        var original = new BridgeSettings
+        {
+            Devices =
+            [
+                new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "My Mic"),
+                new DeviceSelection.Pinned("usb-123", "system", "USB Loopback"),
+            ],
+            GateSensitivity = 70,
+            GateHangoverMs = 500,
+            GatePreRollMs = 250,
+        };
+
+        BridgeSettingsStore.Save(original, _path);
+        BridgeSettings loaded = BridgeSettingsStore.Load(_path);
+
+        Assert.Equal(2, loaded.Devices.Count);
+
+        // Polymorphic selections survive the file faithfully (kind + per-case fields).
+        var follow = Assert.IsType<DeviceSelection.FollowDefault>(loaded.Devices[0]);
+        Assert.Equal(DeviceFlow.Capture, follow.Flow);
+        Assert.Equal("mic", follow.Identity);
+        Assert.Equal("My Mic", follow.Name);
+
+        var pinned = Assert.IsType<DeviceSelection.Pinned>(loaded.Devices[1]);
+        Assert.Equal("usb-123", pinned.DeviceId);
+        Assert.Equal("system", pinned.Identity);
+
+        Assert.Equal(70, loaded.GateSensitivity);
+        Assert.Equal(500, loaded.GateHangoverMs);
+        Assert.Equal(250, loaded.GatePreRollMs);
     }
 
     [Fact]

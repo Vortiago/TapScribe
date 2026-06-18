@@ -1,0 +1,50 @@
+using TapScribe.Bridge.Core;
+
+namespace TapScribe.Bridge.Core.Tests;
+
+/// <summary>
+/// Tests for <see cref="StatusView"/> — the pure map from a <see cref="TrayStatus"/> to
+/// the three things the NotifyIcon shows: a context-menu header line, an icon key, and a
+/// tooltip. Keeping it pure lets the at-a-glance status (issue #106) be unit-tested with
+/// no WinForms; the shell just applies the result on the events it already raises.
+/// </summary>
+public class StatusViewTests
+{
+    [Fact]
+    public void For_Streaming_UsesStreamingIcon_AndShowsTheDeviceCount()
+    {
+        StatusView view = StatusView.For(new TrayStatus.Streaming(Connected: 1, Total: 2));
+
+        Assert.Equal(TrayIcon.Streaming, view.Icon);
+        Assert.Contains("1", view.Header, StringComparison.Ordinal);
+        Assert.Contains("2", view.Header, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void For_Idle_UsesIdleIcon()
+    {
+        StatusView view = StatusView.For(new TrayStatus.Idle());
+
+        Assert.Equal(TrayIcon.Idle, view.Icon);
+        Assert.False(string.IsNullOrWhiteSpace(view.Header));
+    }
+
+    [Fact]
+    public void For_Starting_UsesIdleIcon()
+    {
+        StatusView view = StatusView.For(new TrayStatus.Starting());
+
+        Assert.Equal(TrayIcon.Idle, view.Icon);
+        Assert.False(string.IsNullOrWhiteSpace(view.Header));
+    }
+
+    [Fact]
+    public void For_Error_UsesErrorIcon_AndSurfacesTheReason()
+    {
+        StatusView view = StatusView.For(new TrayStatus.Error("Tap token rejected"));
+
+        Assert.Equal(TrayIcon.Error, view.Icon);
+        Assert.Contains("Tap token rejected", view.Header, StringComparison.Ordinal);
+        Assert.Contains("Tap token rejected", view.Tooltip, StringComparison.Ordinal);
+    }
+}
