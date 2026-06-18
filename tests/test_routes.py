@@ -2639,3 +2639,34 @@ def test_api_summarizer_config_key_cleared_via_empty_string(client):
     body = client.get("/api/summarize/config").json()
     assert body["key_set"] is False
     assert body["base_url"] == "http://h:1/v1"
+
+
+# ── Moonshine live surfacing — issue #121 ────────────────────────────────────
+
+
+def test_api_models_live_includes_moonshine_when_installed(client):
+    # autouse `_force_all_probes_installed` marks moonshine's probes importable
+    r = client.get("/api/models?context=live")
+    assert r.status_code == 200
+    ids = {m["model_id"] for m in r.json()["models"]}
+    assert {"moonshine-tiny", "moonshine-base"} <= ids
+
+
+def test_api_models_live_excludes_moonshine_when_probe_absent(client):
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+
+    # nothing importable → the install-probe filter drops moonshine
+    set_installed_modules_for_testing(frozenset())
+    r = client.get("/api/models?context=live")
+    assert r.status_code == 200
+    ids = {m["model_id"] for m in r.json()["models"]}
+    assert "moonshine-tiny" not in ids
+    assert "moonshine-base" not in ids
+
+
+def test_api_models_batch_excludes_moonshine(client):
+    r = client.get("/api/models?context=batch")
+    assert r.status_code == 200
+    ids = {m["model_id"] for m in r.json()["models"]}
+    assert "moonshine-tiny" not in ids
+    assert "moonshine-base" not in ids
