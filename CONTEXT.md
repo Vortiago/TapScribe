@@ -229,10 +229,18 @@ LiveTranscripts. The dashboard's three panels each map to one of these.
 |---|---|---|---|
 | **LiveChannel** | The supervised `whisperlivekit-server` child process (port 8000). | Bytes relayed by the Recorder from each open `/tap` WS — one internal client connection per `/tap` WS, so settled lines stay attributable to a single speaker. | "live channel" |
 | **ActiveStreams** | The map of currently-open `/tap` WebSockets that are writing per-utterance WAVs. | One Bridge WebSocket per remote participant per utterance, raw PCM frames. | "active streams" |
-| **LiveTranscripts** | A bounded in-memory deque of settled caption lines (max 200). | Settled lines consumed by the Recorder from its WhisperLiveKit relays, attributed to the originating `/tap` WS's `identity` / `name`. | "live transcripts" |
+| **LiveTranscripts** | A bounded in-memory deque of settled caption lines (max 200). | Settled lines consumed by the Recorder from its WhisperLiveKit relays, attributed to the originating `/tap` WS's `identity` / `name` **and snapshotted `session`**. | "Live captions" |
 
 The Bridge produces audio for exactly one place (`/tap`); the Recorder is
 the orchestrator that routes those bytes into all three concerns.
+
+**Live captions are session-scoped and ephemeral.** Each settled line carries
+the session it was snapshotted to at `/tap` open — the same attribution the
+*Detached session* entry relies on — and the dashboard's **Live captions**
+panel shows only the **focused** session's lines, so an archived session never
+displays the live session's captions (the isolation the model guarantees on
+disk, now honored in the UI). The deque is a bounded in-memory tail (max 200);
+a session's durable text is its merged **Transcript**, not the live feed.
 
 ## TapFanOut
 

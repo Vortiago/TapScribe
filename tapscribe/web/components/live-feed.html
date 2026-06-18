@@ -9,6 +9,20 @@
   </div>
 </template>
 
+<!-- Empty state for an ARCHIVED (non-current) session: captions are ephemeral
+     and only flow into the live session, so this one will never fill — point
+     the operator at the durable merged Transcript instead. -->
+<template id="tpl-feed-archived">
+  <div class="feed-empty">
+    <div class="ascii">┌──────────────────────┐
+│   ░ ░ ░ ░ ░ ░ ░ ░    │
+│       archived       │
+└──────────────────────┘</div>
+    <div>this session isn't recording</div>
+    <div class="dim tiny mt-s">live captions appear only while a session is live — this session's text is in the Transcript stage</div>
+  </div>
+</template>
+
 <template id="tpl-feed-body">
   <div class="feed-body"></div>
 </template>

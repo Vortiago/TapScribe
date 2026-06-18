@@ -511,9 +511,7 @@ def test_moonshine_explicit_unavailable_backend_raises_runtimeerror():
 
 def test_moonshine_install_probe_gates_is_installed():
     set_available_backends_for_testing(frozenset({"cpu"}))
-    probes = frozenset(
-        b.probe_module for e in _moonshine_entries() for b in e.backends if b.probe_module
-    )
+    probes = frozenset(b.probe_module for e in _moonshine_entries() for b in e.backends if b.probe_module)
     assert probes
     set_installed_modules_for_testing(frozenset())  # nothing importable
     try:

@@ -521,6 +521,12 @@ export interface LiveFeedCtx {
   countEl: HTMLElement;
   shell: HTMLElement;
   autoscrollEl: HTMLElement;
+  // The focused session id; the panel renders only this session's lines. ""
+  // (no session focused) renders nothing. Drives entriesForSession + the sig.
+  sessionId: string;
+  // Whether the focused session is the live (current) one — picks the empty
+  // state ("awaiting" vs "not recording") and gates the global Clear button.
+  isCurrent: boolean;
 }
 
 export interface ActiveTapsCtx {
