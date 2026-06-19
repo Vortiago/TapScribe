@@ -20,32 +20,60 @@ back. (See ADR-0002 for the architectural reasoning.)
 ```
 spacialchat-bridge/
 ├── manifest.json      MV3 manifest
-├── control-client.js  shared, dependency-free tap-token control plane (loaded into both content.js and popup.js): new-session / detached-session create, pipeline trigger + poll, /health + tap-token probe
-├── pipeline-view.js   pure poll → view-model mapper (loaded into popup.js): turns a raw pipeline poll into the card's phase / progress / summary / failure
+├── control-client.js  shared, classic-global tap-token control plane (loaded into both content.js and popup): new-session / detached-session create, pipeline trigger + poll, /health + tap-token probe
+├── pipeline-view.js   pure poll → view-model mapper (ES module, popup-only): turns a raw pipeline poll into the card's phase / progress / summary / failure
 ├── content.js         ISOLATED-world content script: /tap WS lifecycle, status snapshot
 ├── page-script.js     MAIN-world script: LiveKit Room tap + 48k→16k AudioWorklet
-├── popup.html         configuration UI markup
-├── popup.js           configuration UI logic (host/port, /health probe, status table, meeting card)
-├── typecheck/         tsc --noEmit gate for the helpers below (devDep only, never shipped)
+├── popup.html         popup markup: tokens + popup.css + the module entry + the card <template>
+├── popup.js           popup DOM shell (ES module): builds the UI from components, applies the presenter, wires actions
+├── popup-presenter.js pure meetingView(state) — the popup's lifecycle decisions, DOM-free + unit-tested
+├── popup-actions.js   DOM-free Start / End / Dismiss side-effects (inject control + storage), unit-tested
+├── popup.css          popup shell layout on the shared tokens
+├── tokens.css         design tokens (vendored from vanilla-components)
+├── lib/               templates.js + component.js (vendored vanilla-web engine)
+├── components/        vendored vanilla-components (button, status-dot, panel, table-shell, empty-state)
+├── types.d.ts         ambient types for the popup module (the TapscribeControlClient global + chrome.*)
+├── typecheck/         tsc --noEmit gate (devDep only, never shipped)
 └── README.md          this file
 ```
 
+### Popup architecture (vanilla-web)
+
+The popup is a **vanilla-web** ES-module app — no build, no runtime deps. The
+markup lives in `<template>`s (no HTML strings in JS); buttons, pills, the card
+panel and the tap table come from the vendored **vanilla-components** library
+(`components/`, each self-loading its own `@scope`'d CSS via `lib/templates.js`);
+styling is the shared `tokens.css`. The split is **deep module + thin shell**:
+
+- `popup-presenter.js` derives the whole meeting region's view-model
+  (`meetingView(state)`) and `popup-actions.js` performs the Start/End/Dismiss
+  effects — both **DOM-free**, so they're unit-tested with plain inputs / fakes
+  (no jsdom). `pipeline-view.js` (the pure poll mapper) is tested the same way.
+- `popup.js` is the thin DOM shell: it owns no "what to show" decisions, just
+  applies the presenter's view-model to the components and re-derives from the
+  recorder on every open. It's covered by the typecheck gate (the rendering
+  itself is verified by loading the unpacked extension, not in CI).
+
+`control-client.js` stays a **classic global** (not an ES module): the content
+script needs it in the isolated world, and MV3 content scripts can't be ES
+modules. The module popup reads it as the `TapscribeControlClient` global
+(typed via `types.d.ts`); `pipeline-view.js` is popup-only, so it's a normal ES
+module the popup imports.
+
 ### Typecheck gate
 
-`control-client.js` and `pipeline-view.js` opt into `// @ts-check` and are
-gated by `tsc --noEmit --strict` (the `bridge-typecheck` CI job). They're
-the shared, dependency-free helpers — the security-sensitive tap-token
-control plane and the pure poll → view-model mapper — so pinning their
-types catches a contract break (a renamed field, a wrong shape) on the PR
-rather than at request time. Run it locally with:
+`control-client.js`, `pipeline-view.js`, `popup-presenter.js`,
+`popup-actions.js`, `popup.js`, the vendored `lib/` + `components/`, and
+`types.d.ts` are all `// @ts-check`'d and gated by `tsc --noEmit --strict`
+(the `bridge-typecheck` CI job, aligned with the canonical vanilla-web
+tsconfig). Run it locally with:
 
 ```
 cd bridges/spacialchat-bridge/typecheck && npm install && npm run typecheck
 ```
 
-The gate is **incremental** — only `// @ts-check`'d files are checked.
-`popup.js` and `content.js` join it as they're typed (the popup gets typed
-when it moves to ES-module + `<template>` components, a planned follow-up).
+The gate is **incremental** — only `// @ts-check`'d files are checked;
+`content.js` / `page-script.js` join it as they're typed.
 
 `control-client.js` is loaded ahead of both `content.js` (via the
 manifest's `content_scripts.js` array) and `popup.js` (via a `<script>`

@@ -8,9 +8,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 // popup-presenter.js is an ES module; load it via dynamic import once.
-let meetingView;
+let meetingView, shouldKeepPolling;
 test.before(async () => {
-  ({ meetingView } = await import("../popup-presenter.js"));
+  ({ meetingView, shouldKeepPolling } = await import("../popup-presenter.js"));
 });
 
 const base = { meetingSessionId: null, meetingActive: false, lastEnd: null, pollView: null };
@@ -114,4 +114,14 @@ test("ending shows a flushing-audio progress line", () => {
   });
   assert.equal(v.card.visible, true);
   assert.match(v.card.progress, /flushing audio/i);
+});
+
+// ---- polling cadence ------------------------------------------------------
+
+test("polling continues only for the in-flight phases", () => {
+  assert.equal(shouldKeepPolling("running"), true);
+  assert.equal(shouldKeepPolling("ending"), true);
+  for (const p of ["done", "failed", "idle", "recording", null, undefined]) {
+    assert.equal(shouldKeepPolling(p), false, `stops on ${p}`);
+  }
 });

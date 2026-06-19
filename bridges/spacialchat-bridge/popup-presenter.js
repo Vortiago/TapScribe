@@ -65,10 +65,13 @@ function summaryMeta(s) {
  * @returns {{ text: string, tone: "ok" | "err" | "" } | null}
  */
 function headline(st) {
+  const end = st.lastEnd;
+  // An in-progress End takes precedence over "active": the taps are draining,
+  // so showing "Meeting active" would contradict the card's ending line.
+  if (end && end.phase === "ending") return { text: "Ending meeting…", tone: "" };
   if (st.meetingActive && st.meetingSessionId) {
     return { text: "Meeting active — capturing into " + st.meetingSessionId + ".", tone: "ok" };
   }
-  const end = st.lastEnd;
   if (!end) return null;
   if (end.phase === "busy") {
     return { text: "Recorder busy — another job is already running on this session.", tone: "err" };
@@ -79,7 +82,6 @@ function headline(st) {
   if (end.phase === "started") {
     return { text: "Meeting ended — processing started on the recorder.", tone: "ok" };
   }
-  if (end.phase === "ending") return { text: "Ending meeting…", tone: "" };
   return null;
 }
 
@@ -115,6 +117,17 @@ function cardView(st) {
     ? { text: v.summaryText || "", meta: summaryMeta(v.summary) }
     : null;
   return { visible: true, progress, failure, summary, dismissHidden };
+}
+
+/**
+ * Whether the card should schedule another poll. Only the in-flight phases
+ * (running, ending) warrant a timer; done / failed / idle / recording are
+ * steady states the next popup-open re-derives, so polling stops there.
+ * @param {string | null | undefined} phase
+ * @returns {boolean}
+ */
+export function shouldKeepPolling(phase) {
+  return phase === "running" || phase === "ending";
 }
 
 /**

@@ -8,22 +8,12 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const vm = require("node:vm");
 
-// Load the IIFE into a sandbox and read the global it installs — same pattern
-// the other bridge suites use for the plain-global scripts (no CJS exports).
-const sandbox = {};
-sandbox.self = sandbox;
-sandbox.globalThis = sandbox;
-vm.createContext(sandbox);
-vm.runInContext(
-  fs.readFileSync(path.join(__dirname, "..", "pipeline-view.js"), "utf8"),
-  sandbox,
-  { filename: "pipeline-view.js" },
-);
-const { map } = sandbox.TapscribePipelineView;
+// pipeline-view.js is an ES module (popup-only); import it directly.
+let map;
+test.before(async () => {
+  ({ map } = await import("../pipeline-view.js"));
+});
 
 // ---- running: each of the three stages -----------------------------------
 

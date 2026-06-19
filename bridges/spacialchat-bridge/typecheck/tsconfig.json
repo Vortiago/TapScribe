@@ -16,9 +16,12 @@
     "skipLibCheck": true
   },
   "include": [
+    "../types.d.ts",
     "../control-client.js",
     "../pipeline-view.js",
     "../popup-presenter.js",
+    "../popup-actions.js",
+    "../popup.js",
     "../lib/**/*.js",
     "../components/**/*.js"
   ],
