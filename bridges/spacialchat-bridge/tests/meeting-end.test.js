@@ -105,6 +105,30 @@ test("after End meeting, capture falls back to the global Session", async () => 
   assert.equal(sessionParam(b.lastSocket()), null, "no session param → global Session");
 });
 
+test("End meeting keeps the stored Session id (durable for the popup card) and only marks it inactive", async () => {
+  // The card re-derives progress/summary from the stored meetingSessionId
+  // even after the popup closed or the Recorder restarted, so End must NOT
+  // wipe it — it only flips meetingActive false so live routing falls back to
+  // the global Session. The id is cleared on the next Start or a Dismiss.
+  const b = createBridge({ settings: { meetingSessionId: "sess-keep" } });
+  await ready(b);
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  b.lastSocket().triggerOpen();
+
+  b.requestEndMeeting();
+  await b.flushMicrotasks();
+
+  const wrote = b.writes();
+  assert.ok(
+    !wrote.some((w) => "meetingSessionId" in w && w.meetingSessionId === null),
+    "the durable meetingSessionId is NOT cleared on End",
+  );
+  const flip = wrote.find((w) => "meetingActive" in w);
+  assert.ok(flip, "End wrote a meetingActive flag");
+  assert.equal(flip.meetingActive, false, "meeting marked inactive (routing falls back to global)");
+});
+
 test("a 409 Session-busy response surfaces 'busy' and does not auto-hammer", async () => {
   const b = createBridge({ settings: { meetingSessionId: "sess-1" }, triggerStatus: 409 });
   await ready(b);

@@ -328,17 +328,53 @@ disk. Bridges don't talk to WhisperLiveKit themselves and don't POST
 settled lines back; the verb the Bridge performs is "tap," and the
 endpoint name reflects that.
 
-Besides the audio `tap`, a Bridge may issue one **control** verb:
-`POST /api/tap/new-session` (authenticated by the tap token as an
-`Authorization: Bearer` header) asks the Recorder to rotate to a fresh
-session — e.g. the SpatialChat Bridge's "New session" button or its opt-in
-"new session on room change." It rotates only; pruning empty sessions stays a
-dashboard/Basic-auth action. With body `{"detached": true}` the same verb
-instead mints a **detached session** (below) without rotating anything.
-It's the only thing a Bridge sends over HTTP; everything else is PCM over
-`/tap`.
+Besides the audio `tap`, a Bridge may issue a small **control** plane over
+HTTP, all authenticated by the tap token as an `Authorization: Bearer`
+header (never the cleartext-vulnerable subprotocol slot the `/tap` WS must
+use). `POST /api/tap/new-session` asks the Recorder to rotate to a fresh
+session (pruning empty sessions stays a dashboard/Basic-auth action); with
+body `{"detached": true}` the same verb instead mints a **detached
+session** (below) without rotating anything. A Bridge that brackets
+meetings also calls the **end-of-meeting pipeline** endpoints
+(`POST`/`GET /api/tap/sessions/{session}/pipeline`) to trigger and poll
+processing for its detached session — see [Bracketed meeting](#bracketed-meeting).
+These HTTP control calls are the only thing a Bridge sends besides PCM over
+`/tap`; the surface is create / trigger / poll / rotate / probe, never
+delete or prune, so a leaked tap token's blast radius stays bounded.
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
+
+## Bracketed meeting
+
+A **Start meeting → End meeting** bracket a Bridge wraps around a recording
+so the user gets meeting notes without ever opening the dashboard (the
+SpatialChat Bridge and the Windows tray Bridge both implement it). The
+bracket governs Session **routing, not capture**: capture stays automatic —
+speakers are tapped as they speak and a [Mute](#mute) still ends the
+[Utterance](#utterance), exactly as without a meeting — the bracket only
+decides *which* Session new taps feed.
+
+- **Start meeting** mints a fresh [detached session](#detached-session) and
+  marks the meeting active. While active, every `/tap` open and reconnect
+  carries `&session=<id>`, so the whole meeting lands in one Session even
+  across a SpatialChat room change (which performs no Session action of its
+  own). When no meeting is active, taps fall back to the Recorder's global
+  current session.
+- **End meeting** closes every open tap honouring [Drain](#drain), waits for
+  a close-all barrier (so the last Utterance's WAV is finalised first), then
+  triggers the [end-of-meeting pipeline](#end-of-meeting-pipeline) for the
+  detached Session and marks the meeting no longer active (routing falls back
+  to global). The trigger carries no model/summarizer/prompt — operator
+  defaults only.
+
+The detached Session id is the bracket's **durable handle**: it is persisted
+(the in-memory "active" flag is the live routing source of truth; the stored
+id is what an ephemeral popup re-reads) and survives End, so a **meeting
+card** can poll the pipeline for progress and the finished summary — even
+after the popup closed or the Recorder restarted (the *done* branch is served
+from the persisted `session-summary.json`). The card holds no local summary
+cache; it re-derives from the stored id on each open. The id is cleared only
+on the next Start meeting or an explicit Dismiss.
 
 ## Detached session
 

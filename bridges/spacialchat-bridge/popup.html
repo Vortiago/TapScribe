@@ -30,6 +30,11 @@
   code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
   a { color: inherit; }
   .meta { font-size: 10px; opacity: 0.55; margin-top: 2px; }
+  .card { margin-top: 8px; padding: 8px; border: 1px solid rgba(127,127,127,0.3); border-radius: 6px; }
+  .card[hidden] { display: none; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .summary-text { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; max-height: 220px; overflow: auto;
+                  font: inherit; background: rgba(127,127,127,0.08); padding: 6px; border-radius: 4px; user-select: text; }
 </style>
 </head>
 <body>
@@ -71,6 +76,26 @@
 <div class="small">Starts a bracketed recording in its own <strong>detached session</strong> on the recorder and routes every speaker you tap into it — no dashboard needed. The whole meeting stays in one session, even across SpatialChat room changes, until you end it. <strong>End meeting</strong> flushes any trailing audio, closes the taps, and kicks off the recorder's strip → transcribe → summarize pipeline for that session.</div>
 <div id="meetingStatus" class="status"></div>
 
+<!-- Meeting card: live pipeline progress + the finished summary. Driven
+     entirely by polling the recorder for the stored session id (no local
+     summary cache), so closing/re-opening the popup always re-derives the
+     true current state. Hidden until there is pipeline activity to show. -->
+<div id="meetingCard" class="card" hidden>
+  <div id="meetingProgress" class="status"></div>
+  <div id="meetingFailure" class="status err" hidden></div>
+  <div id="meetingSummaryPane" hidden>
+    <div class="card-head">
+      <strong>Summary</strong>
+      <button id="meetingCopy">Copy</button>
+    </div>
+    <div id="meetingSummaryText" class="summary-text"></div>
+    <div id="meetingSummaryMeta" class="meta"></div>
+  </div>
+  <div class="row">
+    <button id="meetingDismiss" hidden>Dismiss</button>
+  </div>
+</div>
+
 <h4>Recorder reachability</h4>
 <div class="row" style="gap:14px;">
   <div>Recorder <span id="recorderStatus" class="pill wait">checking…</span></div>
@@ -88,6 +113,7 @@
 </div>
 
 <script src="control-client.js"></script>
+<script src="pipeline-view.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

@@ -67,13 +67,18 @@
   // answers "is an End in progress?".
   let endingSessionId = null;
   let settingsReady = false;
-  const SETTINGS_KEYS = ["recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId"];
+  const SETTINGS_KEYS = ["recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId", "meetingActive"];
   chrome.storage.local.get(SETTINGS_KEYS).then((s) => {
     if (s && s.recorderHost) recorderHost = s.recorderHost;
     if (s && s.recorderPort) recorderPort = Number(s.recorderPort) || 8001;
     if (s && typeof s.tapToken === "string") tapToken = s.tapToken;
     if (s && typeof s.useTls === "boolean") recorderUseTls = s.useTls;
-    if (s && typeof s.meetingSessionId === "string" && s.meetingSessionId) {
+    // The stored meetingSessionId is DURABLE — it lingers after End as the
+    // popup card's poll target. Only resume live tap routing into it if the
+    // meeting is still active (meetingActive !== false), so a tab reload after
+    // End doesn't re-home fresh taps into the just-ended Session. Absent
+    // meetingActive (the only-id-was-written case) is treated as active.
+    if (s && typeof s.meetingSessionId === "string" && s.meetingSessionId && s.meetingActive !== false) {
       meetingSessionId = s.meetingSessionId;
     }
     settingsReady = true;
@@ -709,10 +714,14 @@
     // The meeting's taps are all closed; drop them so a later speaker starts
     // a fresh channel routed to the global Session.
     channels.clear();
-    // Routing falls back to the global Session now. Clear in memory AND in
-    // storage so this content script and a re-opened popup agree.
+    // Routing falls back to the global Session now: clear the IN-MEMORY id so
+    // new utterances carry no session param. But KEEP the stored
+    // meetingSessionId — it's the popup card's durable poll target (it polls
+    // the pipeline/summary even after the popup closed or the Recorder
+    // restarted). Only mark the meeting no longer active; the stored id is
+    // cleared on the next Start meeting or an explicit Dismiss.
     meetingSessionId = null;
-    try { chrome.storage.local.set({ meetingSessionId: null }); } catch (e) { /* best-effort */ }
+    try { chrome.storage.local.set({ meetingActive: false }); } catch (e) { /* best-effort */ }
     console.log("[tapscribe-bridge] all taps CLOSED; triggering pipeline for " + sessionId);
     // Fire the end-of-meeting pipeline. No body: the Recorder uses
     // operator-configured defaults, so a low-privilege tap token can't choose
