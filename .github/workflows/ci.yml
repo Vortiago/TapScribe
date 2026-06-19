@@ -173,6 +173,38 @@ jobs:
       - name: Run popup E2E
         run: cd bridges/spacialchat-bridge/e2e && npm test
 
+  # Bridge meeting E2E — the FULL dashboard-free flow with no mocked seams:
+  # the real extension (loaded headed under xvfb) taps real audio over /tap to
+  # a real Recorder, Start/End meeting from the real popup fires the real
+  # end-of-meeting pipeline (strip[silero] → transcribe[faster-whisper] →
+  # summarize[command]), and the popup card shows the real summary. Heavy
+  # (CPU torch + a real transcribe) so it's its own opt-in job.
+  bridge-meeting-e2e:
+    name: bridge meeting E2E (full pipeline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime + faster-whisper + silero-vad (CPU torch)
+        run: |
+          pip install -e ".[whisper-cpu,vad]" playwright
+          # silero-vad pulls torch/torchaudio from PyPI whose native libs can
+          # mismatch; pin the CPU build last so torchaudio's extension loads.
+          pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install Chromium + xvfb
+        run: |
+          python -m playwright install --with-deps chromium
+          sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Run meeting E2E (headed, under xvfb)
+        run: xvfb-run -a pytest tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e -q
+
   # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:
   # a cross-platform bridge-core class library, a Windows WASAPI capture
   # backend, and a WinForms tray runner. This job builds the whole solution on

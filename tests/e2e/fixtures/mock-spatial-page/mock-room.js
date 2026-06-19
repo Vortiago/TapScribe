@@ -64,11 +64,28 @@
   function makeRealMediaStreamTrack() {
     const ctx = new AudioContext({ sampleRate: 48000 });
     _trackCtxs.push(ctx);
-    const osc = ctx.createOscillator();
-    osc.frequency.value = 220;
     const dst = ctx.createMediaStreamDestination();
-    osc.connect(dst);
-    osc.start();
+    // Full-pipeline E2E: when the test seeds `window.__tsSpeechPcm` (int16 @
+    // 16 kHz mono), drive the track with REAL speech on a loop so the bridge's
+    // worklet resamples genuine words to the Recorder (an oscillator tone gets
+    // stripped as non-speech). Default stays an oscillator for the bridge-side
+    // integration tests that only need bytes to flow.
+    const pcm = window.__tsSpeechPcm;
+    if (pcm && pcm.length) {
+      const buf = ctx.createBuffer(1, pcm.length, 16000);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      src.connect(dst);
+      src.start();
+    } else {
+      const osc = ctx.createOscillator();
+      osc.frequency.value = 220;
+      osc.connect(dst);
+      osc.start();
+    }
     return dst.stream.getAudioTracks()[0];
   }
 
