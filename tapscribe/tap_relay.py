@@ -148,7 +148,14 @@ class TapRelay:
         # the backoff and the counter is the read-surface that proves a
         # burst of frames coalesces into a single connect attempt.
         self._reconnect_task: asyncio.Task | None = None
-        self._last_attempt_at: float = 0.0
+        # `None` means "no reconnect attempted yet" — distinct from "attempted
+        # at monotonic time 0.0". The backoff window only applies BETWEEN
+        # attempts, so the first attempt must never be gated by it; folding
+        # "never attempted" into 0.0 made the first reconnect compare
+        # `monotonic() - 0.0 < BACKOFF`, which wrongly suppresses it whenever
+        # the monotonic clock reads below BACKOFF (a freshly-booted host —
+        # CLOCK_MONOTONIC is seconds since boot on Linux).
+        self._last_attempt_at: float | None = None
         self._reconnect_attempts: int = 0
 
     # ------------------------------------------------------------------
@@ -231,7 +238,7 @@ class TapRelay:
         if self._reconnect_task is not None and not self._reconnect_task.done():
             return
         now = time.monotonic()
-        if now - self._last_attempt_at < RELAY_RECONNECT_BACKOFF_S:
+        if self._last_attempt_at is not None and now - self._last_attempt_at < RELAY_RECONNECT_BACKOFF_S:
             return
         self._last_attempt_at = now
         self._reconnect_attempts += 1
