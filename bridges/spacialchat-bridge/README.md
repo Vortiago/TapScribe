@@ -34,6 +34,7 @@ spacialchat-bridge/
 ├── components/        vendored vanilla-components (button, status-dot, panel, table-shell, empty-state)
 ├── types.d.ts         ambient types for the popup module (the TapscribeControlClient global + chrome.*)
 ├── typecheck/         tsc --noEmit gate (devDep only, never shipped)
+├── e2e/               Playwright popup E2E (devDep only, never shipped)
 └── README.md          this file
 ```
 
@@ -51,8 +52,12 @@ styling is the shared `tokens.css`. The split is **deep module + thin shell**:
   (no jsdom). `pipeline-view.js` (the pure poll mapper) is tested the same way.
 - `popup.js` is the thin DOM shell: it owns no "what to show" decisions, just
   applies the presenter's view-model to the components and re-derives from the
-  recorder on every open. It's covered by the typecheck gate (the rendering
-  itself is verified by loading the unpacked extension, not in CI).
+  recorder on every open. It's covered by the typecheck gate, and the rendering
+  itself by a Playwright **popup E2E** (`e2e/`) that drives `popup.html` in
+  Chromium — served statically, with `chrome.*` shimmed and the recorder
+  stubbed — asserting the module graph loads, the components render, and each
+  meeting-card state (running / done + copy / failed / active) shows correctly.
+  Run it with `cd e2e && npm install && npx playwright install chromium && npm test`.
 
 `control-client.js` stays a **classic global** (not an ES module): the content
 script needs it in the isolated world, and MV3 content scripts can't be ES

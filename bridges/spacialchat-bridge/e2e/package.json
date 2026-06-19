@@ -1,0 +1,8 @@
+{
+  "name": "spacialchat-bridge-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright popup E2E for the SpatialChat Bridge. Dev-only; never shipped.",
+  "scripts": { "test": "playwright test" },
+  "devDependencies": { "@playwright/test": "1.56.x" }
+}

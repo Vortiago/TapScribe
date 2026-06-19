@@ -146,6 +146,33 @@ jobs:
       - name: Typecheck
         run: cd bridges/spacialchat-bridge/typecheck && npm run typecheck
 
+  # Bridge popup E2E — drives the real popup.html in Chromium (served
+  # statically, chrome.* shimmed, the recorder stubbed). Verifies the
+  # rendering the node tests can't reach: the ES-module graph loads, the
+  # vendored vanilla-components fetch + render, and each meeting-card state is
+  # shown correctly. Its own job, like the dashboard playwright E2E.
+  bridge-e2e:
+    name: bridge popup E2E (playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bridges/spacialchat-bridge/e2e/package.json
+
+      - name: Install deps
+        run: cd bridges/spacialchat-bridge/e2e && npm install --no-audit --no-fund
+
+      - name: Install Chromium
+        run: cd bridges/spacialchat-bridge/e2e && npx playwright install --with-deps chromium
+
+      - name: Run popup E2E
+        run: cd bridges/spacialchat-bridge/e2e && npm test
+
   # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:
   # a cross-platform bridge-core class library, a Windows WASAPI capture
   # backend, and a WinForms tray runner. This job builds the whole solution on
