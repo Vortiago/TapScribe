@@ -223,6 +223,30 @@ async def test_relay_death_then_backoff_coalesces_burst(monkeypatch: pytest.Monk
     assert relay.connected is None  # still down
 
 
+async def test_first_reconnect_fires_when_monotonic_below_backoff(monkeypatch: pytest.MonkeyPatch):
+    """The FIRST reconnect must fire regardless of the absolute monotonic
+    clock. The backoff applies only BETWEEN attempts, so with no prior
+    attempt there's nothing to back off from. Regression for a CI flake:
+    `_last_attempt_at` initialised to 0.0 made the first attempt compare
+    `monotonic() - 0.0 < BACKOFF`, which suppressed it on a freshly-booted
+    host where CLOCK_MONOTONIC (seconds since boot) reads below the backoff.
+    Pinned by forcing monotonic below the (large) backoff window."""
+    monkeypatch.setattr(tr, "RELAY_RECONNECT_BACKOFF_S", 100.0)
+    monkeypatch.setattr(tr.time, "monotonic", lambda: 42.0)  # < backoff: fresh boot
+    live = _FakeLive(_FakeConfig())
+    factory = _RecordingFactory(connect_ok=True)
+    relay = _tap_relay(live, do_live=True, factory=factory)
+    await relay.open()
+
+    factory.connect_ok = False
+    factory.relays[0].alive = False
+    await relay.feed(PCM_FRAME)  # detect death
+    await relay.feed(PCM_FRAME)  # schedule the first reconnect
+    await asyncio.sleep(0)
+
+    assert relay.reconnect_attempts == 1  # fired despite monotonic() < backoff
+
+
 async def test_reconnect_picks_up_current_config(monkeypatch: pytest.MonkeyPatch):
     """After a config swap (operator changed model/language/port), a
     reconnect must bind to the CURRENT config — asserted through the
