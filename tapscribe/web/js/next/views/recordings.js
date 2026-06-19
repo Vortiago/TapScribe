@@ -536,10 +536,13 @@ export function build(ctx) {
       });
     }
 
-    // Download — a plain anchor straight to the API (matches classic).
+    // Download — a plain anchor straight to the API (matches classic). Stop the
+    // click bubbling so downloading a row doesn't also re-select it (the row is
+    // a select target now); the expand/delete buttons below do the same.
     const dl = /** @type {HTMLAnchorElement} */ (pick(node, "download"));
     const dlQs = src === "stripped" ? "?source=stripped" : "";
     dl.href = `/api/wav/${encodeURIComponent(sid)}/${encodeURIComponent(f.name)}${dlQs}`;
+    dl.addEventListener("click", (e) => e.stopPropagation());
 
     // Delete — the backend refuses the current session (409), so hide it there.
     const delBtn = /** @type {HTMLButtonElement} */ (node.querySelector("[data-wav-delete]"));
@@ -573,15 +576,26 @@ export function build(ctx) {
     pick(node, "sub").textContent = `${who}${fmtBytes(f.size)}`;
     pick(node, "dur").textContent = fmtDur(f.duration_s);
 
-    // Select the WAV (drives the waveform header) from the name/sub block.
-    const selectEl = /** @type {HTMLElement} */ (node.querySelector("[data-wav-select]"));
+    // Select the WAV (drives the waveform hero). The WHOLE row is the click
+    // target — the row carries cursor:pointer, so binding select only to the
+    // name block left the duration / tag / gap looking clickable but inert
+    // (operator report: "doesn't really let me select different files to look
+    // at"). The action controls in .wavrow__r all stopPropagation, so a
+    // tx/⬇/🗑 click never doubles as a selection.
     const select = () => {
       if (session) { selectedWav.set(session.session, f.name); lastSig = " "; afterMutate(); }
     };
-    selectEl.addEventListener("click", select);
+    row.addEventListener("click", select);
+    // The name block stays the single keyboard-focusable button (role=button,
+    // tabindex=0); it reflects selection via aria-pressed and carries the hint.
+    const selectEl = /** @type {HTMLElement} */ (node.querySelector("[data-wav-select]"));
+    selectEl.setAttribute("aria-pressed", String(selected));
+    selectEl.title = "Show this WAV in the waveform above";
     selectEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); }
     });
+    // The "🌊 viewing" badge on the selected row is a pure CSS consequence of
+    // .is-sel (see next.css) — no per-row JS toggle.
 
     decorateRow(out, node, f, src, isCurrent);
 

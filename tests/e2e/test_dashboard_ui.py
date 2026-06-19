@@ -2242,6 +2242,80 @@ async def test_recordings_waveform_renders_real_canvas_not_mock(
             await browser.close()
 
 
+async def test_recordings_clicking_anywhere_on_row_selects_its_waveform(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """Operator report: "the Recordings waveform only shows one file and I can't
+    select different files to look at". The whole .wavrow carries
+    cursor:pointer, but selection used to be wired only to the name block, so a
+    click on the duration / tag / gap was silently inert — selection felt
+    broken. Guard: clicking a NON-name part of a row (its .wavrow__dur) selects
+    that WAV — the hero name follows, .is-sel moves, and the "🌊 viewing" badge
+    lands on the clicked row (and only it). The action buttons (⬇/🗑/tx) still
+    stopPropagation, so they never double as a selection.
+    """
+    rr = running_recorder
+    for i, who in enumerate(("alice", "bob")):
+        wav = synth_speech_like_wav(tmp_path / f"{who}.wav", seconds=1.0, freq_hz=200.0 + i * 60)
+        await stream_wav_via_tap(
+            ws_base_url=rr.ws_base_url,
+            identity=who,
+            name=who.capitalize(),
+            wav_path=wav,
+            utterance_id=f"utt-{who}",
+        )
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=12.0)
+
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#recordings", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                "() => document.querySelectorAll('#viewRoot .wavlist .wavrow').length >= 2",
+                timeout=8000,
+            )
+
+            # The first WAV auto-selects; switch to the OTHER (non-selected) row.
+            sel0 = await page.locator("#viewRoot .wavlist .wavrow.is-sel").get_attribute("data-wav")
+            other = page.locator("#viewRoot .wavlist .wavrow:not(.is-sel)").first
+            target = await other.get_attribute("data-wav")
+            assert target and target != sel0
+            wave_before = await page.locator("#viewRoot [data-slot=waveName]").inner_text()
+
+            # Click the DURATION cell — inside the row but NOT the name block and
+            # NOT an action button. Before the fix this did nothing.
+            await other.locator(".wavrow__dur").click()
+
+            # Selection follows the click: .is-sel moves to the target row.
+            await page.wait_for_function(
+                """(want) => {
+                  const sel = document.querySelector('#viewRoot .wavlist .wavrow.is-sel');
+                  return sel && sel.getAttribute('data-wav') === want;
+                }""",
+                arg=target,
+                timeout=6000,
+            )
+            assert await page.locator("#viewRoot .wavlist .wavrow.is-sel").count() == 1
+
+            # The hero name actually changed (the canvas now reflects the pick).
+            wave_after = await page.locator("#viewRoot [data-slot=waveName]").inner_text()
+            assert wave_after != wave_before, "the waveform hero name must follow the selection"
+
+            # The "🌊 viewing" badge is visible on exactly the selected row.
+            target_badge = page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{target}"] .wavrow__viewing')
+            other_badge = page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{sel0}"] .wavrow__viewing')
+            assert await target_badge.is_visible(), "selected row must show the 🌊 viewing badge"
+            assert not await other_badge.is_visible(), "non-selected row must hide the badge"
+        finally:
+            await browser.close()
+
+
 async def test_transcribe_page_source_toggle_picks_original_or_stripped(
     running_recorder: RunningRecorder, tmp_path: Path
 ):
