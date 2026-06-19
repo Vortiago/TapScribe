@@ -10,6 +10,11 @@ let currentHost = "localhost";
 let currentPort = 8001;
 let currentTapToken = "";
 let currentUseTls = false;
+// The active bracketed meeting's detached Session id (or null). Mirrors the
+// `meetingSessionId` stored in chrome.storage.local that the content script
+// reads to route taps. While set, "Start meeting" is disabled so a second
+// start can't orphan the first.
+let currentMeetingSessionId = null;
 let pollTimer = null;
 
 // The recorder config the shared control-client takes (control-client.js,
@@ -20,19 +25,21 @@ function cfg() {
 }
 
 async function load() {
-  const { recorderHost, recorderPort, tapToken, useTls, autoNewSessionOnRoomChange } =
+  const { recorderHost, recorderPort, tapToken, useTls, meetingSessionId } =
     await chrome.storage.local.get(
-      ["recorderHost", "recorderPort", "tapToken", "useTls", "autoNewSessionOnRoomChange"],
+      ["recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId"],
     );
   currentHost = (recorderHost || "localhost").trim();
   currentPort = Number(recorderPort) || 8001;
   currentTapToken = (tapToken || "").trim();
   currentUseTls = !!useTls;
+  currentMeetingSessionId =
+    typeof meetingSessionId === "string" && meetingSessionId ? meetingSessionId : null;
   $("host").value = currentHost;
   $("port").value = String(currentPort);
   $("tapToken").value = currentTapToken;
   $("useTls").checked = currentUseTls;
-  $("autoNewSessionOnRoomChange").checked = !!autoNewSessionOnRoomChange;
+  renderMeeting();
   await refresh();
 }
 
@@ -50,25 +57,80 @@ function setPill(id, ok, label) {
   el.className = "pill " + (ok === true ? "ok" : ok === false ? "err" : "wait");
 }
 
-// POST /api/tap/new-session with no body — the legacy GLOBAL rotate.
-// Routed through the shared control-client, which owns the bearer header
-// and scheme derivation; the popup keeps the status-label rendering. The
-// recorder rotates to a fresh session folder and prunes empty ones.
-async function postNewSession() {
-  setStatus("newSessionStatus", "Starting new session…", "");
+// Reflect the bracketed-meeting state in the popup. While a meeting is
+// active (a meetingSessionId is stored), "Start meeting" is disabled (so a
+// second start can't orphan the first), "End meeting" is enabled, and the
+// active Session id is shown. With no meeting active the buttons flip and any
+// prior status line (e.g. a failure / end outcome) is left untouched.
+function renderMeeting() {
+  const start = $("startMeeting");
+  const end = $("endMeeting");
+  const active = !!currentMeetingSessionId;
+  if (start) start.disabled = active;
+  if (end) end.disabled = !active;
+  if (active) {
+    setStatus("meetingStatus", "Meeting active — capturing into " + currentMeetingSessionId + ".", "ok");
+  }
+}
+
+// "End meeting": ask the content script (which owns the /tap WebSockets and
+// outlives this ephemeral popup) to drain + close every tap and trigger the
+// end-of-meeting pipeline. We only signal via storage; the content script
+// publishes the outcome back via `meetingEnd`, rendered in renderMeetingEnd.
+function endMeeting() {
+  setStatus("meetingStatus", "Ending meeting…", "");
+  if ($("startMeeting")) $("startMeeting").disabled = true;
+  if ($("endMeeting")) $("endMeeting").disabled = true;
+  // A timestamp nonce so a repeat End fires storage.onChanged again.
+  chrome.storage.local.set({ meetingEndRequestedAt: Date.now() }).catch(() => {
+    setStatus("meetingStatus", "Couldn't request End meeting — try again.", "err");
+    renderMeeting();
+  });
+}
+
+// Render the End-meeting outcome the content script published to storage.
+// (Live pipeline progress + the finished summary are a later slice; this
+// just confirms the pipeline was — or couldn't be — kicked off.)
+function renderMeetingEnd(end) {
+  if (!end || !end.phase) return;
+  if (end.phase === "ending") {
+    setStatus("meetingStatus", "Ending meeting…", "");
+  } else if (end.phase === "started") {
+    setStatus("meetingStatus", "Meeting ended — processing started on the recorder.", "ok");
+  } else if (end.phase === "busy") {
+    setStatus("meetingStatus", "Recorder busy — another job is already running on this session.", "err");
+  } else if (end.phase === "failed") {
+    setStatus("meetingStatus", "End meeting failed: " + (end.error || "unknown error") + ".", "err");
+  }
+}
+
+// "Start meeting": mint a fresh DETACHED session via the shared
+// control-client and persist its server-minted id to chrome.storage.local.
+// The content script reads `meetingSessionId` (live, via storage.onChanged)
+// and routes every /tap into it — no SpatialChat tab reload needed. On
+// failure the button is re-enabled so the operator can retry.
+async function startMeeting() {
+  const btn = $("startMeeting");
+  if (btn) btn.disabled = true; // optimistic: block a double-click mid-flight
+  setStatus("meetingStatus", "Starting meeting…", "");
   try {
-    const res = await TapscribeControlClient.rotateSession(cfg(), { timeoutMs: 4000 });
-    if (!res.ok) {
-      setStatus("newSessionStatus", "New session failed (HTTP " + res.status + ").", "err");
-      return;
-    }
-    const body = res.body || {};
-    const label = body.rotated === false
-      ? "Already on a fresh session — nothing to rotate."
-      : "New session started" + (body.current ? " (" + body.current + ")" : "") + ".";
-    setStatus("newSessionStatus", label, "ok");
+    const res = await TapscribeControlClient.createDetachedSession(cfg(), { timeoutMs: 6000 });
+    // Persist FIRST: the stored id is what the content script routes on, so
+    // it is the real "meeting started" signal. Only mirror it into local
+    // state once the write lands — if the set rejects, the catch below
+    // leaves currentMeetingSessionId null and re-enables the button rather
+    // than showing a green "Meeting active" the content script never saw.
+    await chrome.storage.local.set({ meetingSessionId: res.sessionId });
+    currentMeetingSessionId = res.sessionId;
+    renderMeeting();
   } catch (e) {
-    setStatus("newSessionStatus", "New session failed: " + String(e && e.message || e), "err");
+    const why = e && e.kind === "mixed-content-blocked"
+      ? "recorder is http:// on a non-trustworthy host — enable TLS, or run it on localhost"
+      : String((e && e.message) || e);
+    setStatus("meetingStatus", "Start meeting failed: " + why, "err");
+    // No meeting was started, so re-enable via the single enable/disable
+    // rule in renderMeeting (which leaves the error status above intact).
+    renderMeeting();
   }
 }
 
@@ -231,13 +293,9 @@ $("save").addEventListener("click", async () => {
 
 $("recheck").addEventListener("click", probeAll);
 
-$("newSession").addEventListener("click", postNewSession);
+$("startMeeting").addEventListener("click", startMeeting);
 
-// Persist the room-change toggle immediately (not gated on Save) so
-// content.js picks it up via chrome.storage.onChanged without a tab reload.
-$("autoNewSessionOnRoomChange").addEventListener("change", () => {
-  chrome.storage.local.set({ autoNewSessionOnRoomChange: $("autoNewSessionOnRoomChange").checked });
-});
+$("endMeeting").addEventListener("click", endMeeting);
 
 $("openDash").addEventListener("click", (ev) => {
   ev.preventDefault();
@@ -254,6 +312,19 @@ const onStorageChanged = (changes, areaName) => {
   if (areaName !== "local") return;
   if (changes.bridgeStatus && changes.bridgeStatus.newValue) {
     renderTaps(changes.bridgeStatus.newValue);
+  }
+  // The content script is the source of truth for the meeting lifecycle: it
+  // clears meetingSessionId when a meeting ends (or another popup starts
+  // one). Re-derive the button state live so this popup never shows a stale
+  // "active"/"idle" once it loses ownership.
+  if (changes.meetingSessionId) {
+    const v = changes.meetingSessionId.newValue;
+    currentMeetingSessionId = (typeof v === "string" && v) ? v : null;
+    renderMeeting();
+  }
+  // The content script publishes the End-meeting outcome here.
+  if (changes.meetingEnd && changes.meetingEnd.newValue) {
+    renderMeetingEnd(changes.meetingEnd.newValue);
   }
 };
 chrome.storage.onChanged.addListener(onStorageChanged);

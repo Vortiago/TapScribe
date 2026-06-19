@@ -6,8 +6,10 @@ endpoint.
 
 See `../README.md` for the wire contract the Recorder expects. The short
 version: one WebSocket per active speaker per utterance to
-`ws://<recorder-host>:8001/tap?identity=<spatial-id>&name=<display>`,
-streaming raw 16 kHz mono int16 PCM in 20 ms (640-byte) frames. The
+`ws://<recorder-host>:8001/tap?identity=<spatial-id>&name=<display>`
+(plus `&session=<id>` while a [meeting](#bracketed-meetings-start-meeting)
+is active), streaming raw 16 kHz mono int16 PCM in 20 ms (640-byte)
+frames. The
 Recorder fans that audio out internally to its supervised WhisperLiveKit
 child (live captions) and to a per-utterance WAV on disk — the bridge
 never sees the WhisperLiveKit protocol and doesn't POST settled lines
@@ -61,6 +63,72 @@ bounded (deletion stays a dashboard Basic-auth action).
 4. A status snapshot is written to `chrome.storage.local` whenever
    anything changes, so the popup can show live per-speaker state
    without opening DevTools.
+
+## Bracketed meetings (Start / End meeting)
+
+By default the bridge taps into the Recorder's **global** session — the
+`/tap` URL carries no `session` parameter and audio lands wherever the
+Recorder's current session points. Click **Start meeting** in the popup
+to bracket a recording into its own isolated **detached session**
+instead:
+
+1. The popup mints a detached session on the Recorder
+   (`POST /api/tap/new-session` with `{"detached": true}`, via the shared
+   `control-client.js`) and persists the server-minted id to
+   `chrome.storage.local` as `meetingSessionId`.
+2. The content script reads that id live (via `chrome.storage.onChanged`
+   — no SpatialChat tab reload) and, while a meeting is active, stamps
+   `&session=<id>` onto every `/tap` URL it opens. The affiliation is
+   snapshotted at the start of each utterance, so an utterance — including
+   any mid-utterance reconnect — always lands in one session, matching the
+   Recorder snapshotting the session at WS open and stitching reconnects by
+   `utterance_id`.
+3. Capture stays automatic: speakers are tapped as they speak and mute
+   still ends the utterance, exactly as without a meeting. The bracket
+   only decides **which** session new taps feed.
+
+The meeting's detached session **persists across SpatialChat room
+changes** — moving rooms mid-meeting doesn't split or rotate it. While a
+meeting is active, **Start meeting** is disabled (so a second start can't
+orphan the first) and the in-page pill / tab title show a `meeting`
+marker so you can tell capture is going into a bracketed session rather
+than the global default. With no meeting active, taps carry no `session`
+param and fall back to the global session, unchanged.
+
+Click **End meeting** to finish and kick off processing — no dashboard:
+
+1. The popup signals the content script (via a `meetingEndRequestedAt`
+   marker in `chrome.storage.local`); the content script owns the /tap
+   WebSockets and outlives the popup, so the teardown completes even if
+   you close the popup.
+2. **Drain, then close-all barrier.** Every open tap is closed honouring
+   the same **Drain-on-mute** semantics as a mute: buffered trailing PCM
+   is flushed before the WebSocket closes, so the last words of an
+   in-flight utterance still land and are transcribed, never clipped. The
+   trigger fires only once **every** tap has reached `CLOSED`, so the last
+   utterance's WAV is part of the session before processing starts.
+3. **Trigger.** The bridge calls the control client's
+   `triggerPipeline(meetingSessionId)`
+   (`POST /api/tap/sessions/<id>/pipeline`) to run the Recorder's
+   end-of-meeting pipeline (strip → transcribe → summarize) as one session
+   job, visible on the dashboard like any other. The trigger carries **no**
+   model / backend / summarizer / prompt — the Recorder ignores the request
+   body and uses the operator's configured defaults, so a low-privilege tap
+   token can never choose what gets loaded.
+4. The meeting then clears: `meetingSessionId` is removed and capture falls
+   back to the global session.
+
+If the Recorder is already running a job on that session it replies `409`
+and the popup shows **"Recorder busy"** rather than failing silently or
+hammering the endpoint; re-triggering is safe once the session is free.
+(Live pipeline progress and the finished summary in the popup are the next
+slice; for now End meeting confirms the pipeline started — or surfaces why
+it couldn't.)
+
+> **Removed:** the old global **New session** button and the **start new
+> session on room change** toggle are gone. The bracketed Start/End-meeting
+> model replaces them; a SpatialChat room change now performs no session
+> action.
 
 ## Loading unpacked (dev)
 

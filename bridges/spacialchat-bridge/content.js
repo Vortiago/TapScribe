@@ -51,16 +51,30 @@
   let recorderPort = 8001;
   let recorderUseTls = false;
   let tapToken = "";
-  let autoNewSessionOnRoomChange = false;
+  // Bracketed-meeting routing (#133). The popup mints a detached Session
+  // ("Start meeting"), persists its server-minted id to
+  // chrome.storage.local, and the content script reads it here as the live
+  // source of truth for tap routing: while it is set, every /tap open and
+  // reconnect carries `&session=<meetingSessionId>` so the meeting's audio
+  // lands in its own Session. null → no meeting → taps fall back to the
+  // Recorder's global Session, unchanged. Normalised to null-or-nonempty so
+  // truthiness alone answers "is a meeting active?".
+  let meetingSessionId = null;
+  // End-meeting teardown state (#134). While `endingSessionId` is set, every
+  // open channel is draining+closing toward a close-all barrier; once all
+  // taps reach CLOSED the pipeline trigger fires for that id (captured before
+  // meetingSessionId is cleared back to the global Session). Truthiness alone
+  // answers "is an End in progress?".
+  let endingSessionId = null;
   let settingsReady = false;
-  const SETTINGS_KEYS = ["recorderHost", "recorderPort", "tapToken", "useTls", "autoNewSessionOnRoomChange"];
+  const SETTINGS_KEYS = ["recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId"];
   chrome.storage.local.get(SETTINGS_KEYS).then((s) => {
     if (s && s.recorderHost) recorderHost = s.recorderHost;
     if (s && s.recorderPort) recorderPort = Number(s.recorderPort) || 8001;
     if (s && typeof s.tapToken === "string") tapToken = s.tapToken;
     if (s && typeof s.useTls === "boolean") recorderUseTls = s.useTls;
-    if (s && typeof s.autoNewSessionOnRoomChange === "boolean") {
-      autoNewSessionOnRoomChange = s.autoNewSessionOnRoomChange;
+    if (s && typeof s.meetingSessionId === "string" && s.meetingSessionId) {
+      meetingSessionId = s.meetingSessionId;
     }
     settingsReady = true;
     console.log(
@@ -99,10 +113,20 @@
         recorderUseTls = !!changes.useTls.newValue;
         touched = true;
       }
-      if (changes.autoNewSessionOnRoomChange) {
-        // Pure behaviour toggle for future room-changed events — no open WS
-        // is affected, so don't set `touched` / trigger a reconnect.
-        autoNewSessionOnRoomChange = !!changes.autoNewSessionOnRoomChange.newValue;
+      if (changes.meetingSessionId) {
+        // The popup started or ended a bracketed meeting. This only changes
+        // where NEW utterances route (their affiliation is snapshotted at
+        // utterance start), so no open WS is affected — don't set `touched`
+        // / trigger a reconnect. publishStatus so the pill reflects it.
+        const v = changes.meetingSessionId.newValue;
+        meetingSessionId = (typeof v === "string" && v) ? v : null;
+        publishStatus();
+      }
+      if (changes.meetingEndRequestedAt) {
+        // The popup clicked "End meeting": drain + close every open tap, then
+        // trigger the end-of-meeting pipeline. Gated on settingsReady so the
+        // trigger uses the real recorder config (not boot defaults).
+        if (settingsReady) endMeeting();
       }
       if (!touched) return;
       console.log(
@@ -143,49 +167,29 @@
     publishStatus();
   }
 
-  const tapWsUrl = (identity, name, utteranceId) => {
+  const tapWsUrl = (identity, name, utteranceId, sessionId) => {
     const qp = new URLSearchParams({
       identity,
       name: name || "",
       utterance_id: utteranceId,
     });
+    // Route into the meeting's detached Session when this utterance was
+    // affiliated to one (snapshotted at utterance start; see ensureUtterance).
+    // Absent → the Recorder uses its global Session, unchanged.
+    if (sessionId) qp.set("session", sessionId);
     const scheme = recorderUseTls ? "wss" : "ws";
     return scheme + "://" + recorderHost + ":" + recorderPort + "/tap?" + qp.toString();
   };
 
-  // The recorder config the shared control-client takes, snapshotted from
-  // the live in-memory settings at call time.
+  // The recorder config the shared control-client takes, snapshotted from the
+  // live in-memory settings at call time. Used by the end-of-meeting pipeline
+  // trigger — the one control-plane HTTP call the content script makes.
   const recorderCfg = () => ({
     host: recorderHost,
     port: recorderPort,
     useTls: recorderUseTls,
     token: tapToken,
   });
-
-  // HTTP sibling of the /tap WS: ask the recorder to rotate to a fresh
-  // session (and prune now-empty ones). Routed through the shared
-  // control-client (control-client.js, loaded ahead of us in the manifest),
-  // which owns the Bearer header, scheme derivation, and the mixed-content
-  // guard — an http:// POST from the https SpatialChat page to a
-  // non-trustworthy host would put the tap-token on the wire in cleartext,
-  // so the client skips it and throws `mixed-content-blocked`. Fire-and-
-  // forget: the dashboard reflects the new session via its own polling.
-  const postNewSession = (reason) => {
-    TapscribeControlClient.rotateSession(recorderCfg())
-      .then((res) => {
-        if (!res.ok) console.warn("[tapscribe-bridge] new-session POST -> " + res.status);
-      })
-      .catch((e) => {
-        if (e && e.kind === "mixed-content-blocked") {
-          console.warn(
-            "[tapscribe-bridge] new-session POST skipped (" + reason +
-            "): recorder is http:// on a non-trustworthy host — enable TLS",
-          );
-        } else {
-          console.warn("[tapscribe-bridge] new-session POST failed (" + reason + ")", e);
-        }
-      });
-  };
 
   // Construct the WebSocket with the tap-token carried via subprotocol
   // when the operator set one. With --no-auth the recorder ignores
@@ -236,6 +240,17 @@
   // this point the trailing audio is lost — but we'd rather give up than
   // wedge an utterance forever against an unreachable recorder.
   const DRAIN_MAX_MS = 8000;
+
+  // Begin an utterance for `ch` if one isn't already in flight: mint the
+  // utterance_id the Recorder uses to stitch reconnects together, and
+  // snapshot the meeting affiliation. The affiliation is fixed for the
+  // life of the utterance — a meeting that starts or ends mid-utterance
+  // doesn't re-route the open utterance; the next one picks up the change.
+  function ensureUtterance(ch) {
+    if (ch.utteranceId) return;
+    ch.utteranceId = newUtteranceId();
+    ch.sessionId = meetingSessionId; // null when no meeting is active
+  }
 
   function newUtteranceId() {
     if (crypto && typeof crypto.randomUUID === "function") {
@@ -296,6 +311,12 @@
     ch = {
       tapWs: null,
       utteranceId: null,
+      // Meeting Session this utterance is affiliated to, snapshotted at
+      // utterance start (ensureUtterance). Reused across reconnects so the
+      // whole utterance lands in ONE Session — matching the Recorder
+      // snapshotting Session at WS open and stitching reconnects by
+      // utterance_id. null → routes to the global Session.
+      sessionId: null,
       reconnectAttempt: 0,
       reconnectTimer: null,
       buffer: [],
@@ -443,8 +464,8 @@
       }
       return;
     }
-    if (!ch.utteranceId) ch.utteranceId = newUtteranceId();
-    const url = tapWsUrl(identity, ch.name, ch.utteranceId);
+    ensureUtterance(ch);
+    const url = tapWsUrl(identity, ch.name, ch.utteranceId, ch.sessionId);
     console.log(
       "[tapscribe-bridge] opening /tap for " + identity +
       " utt=" + ch.utteranceId.slice(0, 8) + " -> " + url,
@@ -538,6 +559,7 @@
 
   function resetUtteranceState(ch) {
     ch.utteranceId = null;
+    ch.sessionId = null;
     ch.reconnectAttempt = 0;
     ch.buffer = [];
     ch.bufferBytes = 0;
@@ -563,6 +585,9 @@
       closeTapWs(identity, ch, "drain timeout");
       resetUtteranceState(ch);
       publishStatus();
+      // Give up on this tap's tail audio — but it's still CLOSED now, so the
+      // End-meeting barrier shouldn't wait on it forever.
+      if (endingSessionId) maybeFinishEndMeeting();
     }, DRAIN_MAX_MS);
   }
 
@@ -577,6 +602,9 @@
       "; closing /tap (reason=" + reason + ")");
     closeTapWs(identity, ch, reason);
     resetUtteranceState(ch);
+    // A draining channel finishing may be the last tap the End-meeting
+    // close-all barrier was waiting on.
+    if (endingSessionId) maybeFinishEndMeeting();
   }
 
   // Force-close the utterance and reset state, regardless of any
@@ -625,6 +653,89 @@
     }
   }
 
+  // ---- End meeting: drain → close-all barrier → pipeline trigger (#134) ------
+  // Publish the end-of-meeting outcome to chrome.storage so the (ephemeral)
+  // popup can show "ending" / "started" / "Recorder busy" / "failed" — the
+  // content script owns the sequence because it outlives the popup.
+  function publishMeetingEnd(phase, sessionId, error) {
+    try {
+      chrome.storage.local.set({
+        meetingEnd: { phase, sessionId, error: error || null, ts: Date.now() },
+      });
+    } catch (e) { /* best-effort; absence just means no end-state to show */ }
+  }
+
+  // Begin the End-meeting teardown. Idempotent: a stale/duplicate request
+  // (or one with no active meeting) is a no-op. Closes every open channel
+  // through the existing Drain-on-mute path — muting each first so no fresh
+  // utterance starts mid-teardown — then waits for the close-all barrier.
+  function endMeeting() {
+    if (!meetingSessionId || endingSessionId) return;
+    endingSessionId = meetingSessionId;
+    publishMeetingEnd("ending", endingSessionId);
+    console.log("[tapscribe-bridge] end meeting " + endingSessionId +
+      "; draining " + channels.size + " channel(s)");
+    for (const [identity, ch] of channels) {
+      ch.muted = true; // stop the PCM path starting a new utterance mid-teardown
+      endUtterance(identity, ch, "meeting ended");
+    }
+    publishStatus();
+    // Synchronous closes are already done; channels still draining will
+    // finish via finalizeDrain / the drain timeout. Check the barrier now in
+    // case nothing needed draining (or there were no open taps at all).
+    maybeFinishEndMeeting();
+  }
+
+  // The close-all barrier: fire the trigger only once EVERY tap has reached
+  // CLOSED (no live/connecting/closing WS, none draining or mid-reconnect),
+  // so the last Utterance's WAV is finalised before processing starts.
+  function maybeFinishEndMeeting() {
+    if (!endingSessionId) return;
+    for (const [, ch] of channels) {
+      const ws = ch.tapWs;
+      const wsLive = ws && (
+        ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING ||
+        ws.readyState === WebSocket.CLOSING
+      );
+      if (wsLive || ch.draining || ch.reconnectTimer !== null) return; // not all CLOSED yet
+    }
+    finishEndMeeting();
+  }
+
+  function finishEndMeeting() {
+    const sessionId = endingSessionId;
+    endingSessionId = null;
+    // The meeting's taps are all closed; drop them so a later speaker starts
+    // a fresh channel routed to the global Session.
+    channels.clear();
+    // Routing falls back to the global Session now. Clear in memory AND in
+    // storage so this content script and a re-opened popup agree.
+    meetingSessionId = null;
+    try { chrome.storage.local.set({ meetingSessionId: null }); } catch (e) { /* best-effort */ }
+    console.log("[tapscribe-bridge] all taps CLOSED; triggering pipeline for " + sessionId);
+    // Fire the end-of-meeting pipeline. No body: the Recorder uses
+    // operator-configured defaults, so a low-privilege tap token can't choose
+    // the model. 409 = Session busy → surface it; do NOT auto-hammer.
+    TapscribeControlClient.triggerPipeline(recorderCfg(), sessionId)
+      .then((res) => {
+        if (res.outcome === "busy") {
+          console.warn("[tapscribe-bridge] pipeline trigger: recorder busy (409) for " + sessionId);
+          publishMeetingEnd("busy", sessionId);
+        } else {
+          publishMeetingEnd("started", sessionId);
+        }
+      })
+      .catch((e) => {
+        const reason = (e && e.kind === "mixed-content-blocked")
+          ? "recorder is http:// on a non-trustworthy host — enable TLS"
+          : String((e && e.message) || e);
+        console.warn("[tapscribe-bridge] pipeline trigger failed for " + sessionId + ": " + reason);
+        publishMeetingEnd("failed", sessionId, reason);
+      });
+    publishStatus();
+  }
+
   // ---- Message handler from page world --------------------------------------
   window.addEventListener("message", (ev) => {
     if (ev.source !== window) return;
@@ -655,17 +766,13 @@
         break;
       }
       case "room-changed": {
-        // SpatialChat swapped us into a different room. When the operator
-        // opted in, ask the recorder to start a fresh session so the new
-        // room's audio lands in its own folder. Room-wide event — no
-        // identity, no WS bookkeeping. Defer until settings have loaded
-        // (like the pcm path) so a swap racing storage load can't POST to
-        // the default host/token.
-        if (!settingsReady) break;
-        if (autoNewSessionOnRoomChange) {
-          console.log("[tapscribe-bridge] room changed; requesting new recording session");
-          postNewSession("room-changed");
-        }
+        // The bracketed-meeting model (#133) replaced the legacy global
+        // rotate: a SpatialChat room change performs NO Session action. An
+        // active meeting's detached Session persists across room swaps until
+        // the user ends it; with no meeting active, taps keep falling back
+        // to the global Session. Kept as an explicit no-op so the next
+        // contributor sees the deliberate decision rather than wondering
+        // where the old auto-rotate went.
         break;
       }
       case "mute": {
@@ -694,6 +801,12 @@
         break;
       }
       case "pcm": {
+        // While an End is in progress, ignore new audio. The meeting's taps
+        // are muted and draining toward the close-all barrier; a fresh tap
+        // opened here (a new speaker, or a new utterance) would route into
+        // the Session we're about to process and keep the barrier from ever
+        // completing — leaving the meeting wedged in "Ending…".
+        if (endingSessionId) return;
         const ch = ensureChannel(d.identity, d.name);
         if (d.name && d.name !== ch.name) ch.name = d.name;
         if (ch.muted) return;
@@ -703,8 +816,8 @@
         if (!settingsReady) return;
 
         // First frame of a new utterance — mint the id the recorder will
-        // use to stitch reconnects together.
-        if (!ch.utteranceId) ch.utteranceId = newUtteranceId();
+        // use to stitch reconnects together and snapshot the meeting routing.
+        ensureUtterance(ch);
 
         if (!ch.tapWs && ch.reconnectTimer === null) {
           openTapWs(d.identity, ch);
@@ -942,27 +1055,34 @@
       setIndicator("warn", "draining", "Flushing trailing audio after mute.");
       return;
     }
+    // While a meeting is active, mark the non-error states so the operator
+    // can tell at a glance that capture is going into a bracketed detached
+    // Session rather than the Recorder's global default.
+    const mtg = meetingSessionId ? " · meeting" : "";
+    const mtgTip = meetingSessionId
+      ? " Capturing into the meeting session " + meetingSessionId + "."
+      : "";
     if (openTaps > 0) {
       const noun = openTaps === 1 ? " stream" : " streams";
       setIndicator(
         "ok",
-        openTaps + noun,
-        "Live audio is reaching the recorder.",
+        openTaps + noun + mtg,
+        "Live audio is reaching the recorder." + mtgTip,
       );
       return;
     }
     if (total > 0 && anyMuted) {
       setIndicator(
         "idle",
-        "muted",
-        "Speakers are tapped but currently muted.",
+        "muted" + mtg,
+        "Speakers are tapped but currently muted." + mtgTip,
       );
       return;
     }
     setIndicator(
       "idle",
-      "idle",
-      "No remote speakers detected yet. The bridge will start when someone speaks.",
+      "idle" + mtg,
+      "No remote speakers detected yet. The bridge will start when someone speaks." + mtgTip,
     );
   }
 
@@ -985,6 +1105,10 @@
       recorderPort,
       settingsReady,
       audioContextState,
+      // Bracketed-meeting state so the popup can show that taps are routing
+      // into a detached Session rather than the global one.
+      meetingActive: !!meetingSessionId,
+      meetingSessionId,
       channels: Array.from(channels.entries()).map(([id, ch]) => ({
         identity: id,
         name: ch.name,
@@ -1006,7 +1130,8 @@
   // skip storage writes when nothing observable changed, so we don't fan
   // out chrome.storage.onChanged events at 2 Hz for no reason.
   function snapshotFingerprint(snap) {
-    return (snap.audioContextState || "") + "::" + snap.channels.map(c =>
+    return (snap.meetingSessionId || "") + "::" +
+      (snap.audioContextState || "") + "::" + snap.channels.map(c =>
       c.identity + "|" + c.tapWs + "|" + c.muted + "|" + c.draining + "|" +
       c.error + "|" + c.framesSent + "|" + c.reconnecting + "|" + c.bufferedFrames,
     ).join(";");
@@ -1061,15 +1186,19 @@
     const ctxBlocked =
       audioContextState && audioContextState !== "running";
 
+    // Mark the title when capture is bracketed into a meeting Session so the
+    // operator can tell the tab is recording into a named Session, not the
+    // global default — even when glancing at the title bar.
+    const mtg = meetingSessionId ? " mtg" : "";
     let suffix;
     if (ctxBlocked) {
-      suffix = " [tap PAUSED audio " + audioContextState + "]";
+      suffix = " [tap" + mtg + " PAUSED audio " + audioContextState + "]";
     } else if (firstError) {
-      suffix = " [tap ERR " + firstError + "]";
+      suffix = " [tap" + mtg + " ERR " + firstError + "]";
     } else if (anyReconnecting) {
-      suffix = " [tap reconnecting…]";
+      suffix = " [tap" + mtg + " reconnecting…]";
     } else {
-      suffix = " [tap " + openTaps + "/" + total + " " + Math.round(totalBytes / 1024) + "K]";
+      suffix = " [tap" + mtg + " " + openTaps + "/" + total + " " + Math.round(totalBytes / 1024) + "K]";
     }
     const next = origTitle + suffix;
     if (document.title !== next) document.title = next;
