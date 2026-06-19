@@ -26,8 +26,26 @@ spacialchat-bridge/
 ├── page-script.js     MAIN-world script: LiveKit Room tap + 48k→16k AudioWorklet
 ├── popup.html         configuration UI markup
 ├── popup.js           configuration UI logic (host/port, /health probe, status table, meeting card)
+├── typecheck/         tsc --noEmit gate for the helpers below (devDep only, never shipped)
 └── README.md          this file
 ```
+
+### Typecheck gate
+
+`control-client.js` and `pipeline-view.js` opt into `// @ts-check` and are
+gated by `tsc --noEmit --strict` (the `bridge-typecheck` CI job). They're
+the shared, dependency-free helpers — the security-sensitive tap-token
+control plane and the pure poll → view-model mapper — so pinning their
+types catches a contract break (a renamed field, a wrong shape) on the PR
+rather than at request time. Run it locally with:
+
+```
+cd bridges/spacialchat-bridge/typecheck && npm install && npm run typecheck
+```
+
+The gate is **incremental** — only `// @ts-check`'d files are checked.
+`popup.js` and `content.js` join it as they're typed (the popup gets typed
+when it moves to ES-module + `<template>` components, a planned follow-up).
 
 `control-client.js` is loaded ahead of both `content.js` (via the
 manifest's `content_scripts.js` array) and `popup.js` (via a `<script>`

@@ -1,3 +1,4 @@
+// @ts-check
 // SpatialChat Bridge — pipeline-view.js (pure view-model mapper)
 //
 // Module ② of the bracketed-meeting flow: a single pure function that turns
@@ -21,7 +22,41 @@
 //                    · SummarizerFailed · InvalidRange.
 //   - idle:    { state:"idle" }  (no pipeline record AND no persisted summary)
 
-(function (root) {
+/**
+ * A raw poll body from `GET /api/tap/sessions/{session}/pipeline`. Every field
+ * is optional: which ones are present depends on `state` (see app.py
+ * api_tap_pipeline_poll). The mapper reads them defensively.
+ * @typedef {{
+ *   ok?: boolean,
+ *   state?: string,
+ *   stage?: string,
+ *   status?: string,
+ *   current?: number,
+ *   total?: number,
+ *   current_file?: string,
+ *   summary?: Record<string, unknown> | null,
+ *   error?: string,
+ *   error_kind?: string,
+ *   session?: string,
+ * }} PipelinePoll
+ */
+
+/**
+ * The view-model the card renders. Every field is always present so the
+ * renderer never has to feature-detect; irrelevant fields are null.
+ * @typedef {{
+ *   phase: string,
+ *   progress: string | null,
+ *   stage: string | null,
+ *   currentFile: string | null,
+ *   summary: Record<string, unknown> | null,
+ *   summaryText: string | null,
+ *   failureStage: string | null,
+ *   failureReason: string | null,
+ * }} PipelineView
+ */
+
+(function (/** @type {any} */ root) {
   "use strict";
 
   // stage → the live progress line shown while the pipeline runs. `current`/
@@ -29,6 +64,7 @@
   // and summarize are single-shot. A running poll that has no `stage` yet
   // (the job snapshot hasn't attached in the instant after the trigger) gets
   // a generic line rather than a blank.
+  /** @param {PipelinePoll | null | undefined} raw @returns {string} */
   function progressLabel(raw) {
     const stage = raw && raw.stage;
     const total = Number(raw && raw.total) || 0;
@@ -42,22 +78,25 @@
   }
 
   // error_kind → a human-readable, operator-free explanation. Each maps to a
-  // domain error the pipeline can raise (session_merge / batch_summarize). An
-  // unrecognised kind falls back to the raw `error` text, then a generic line,
-  // so a future Recorder error never renders as a blank failure.
-  const FAILURE_REASONS = {
-    NoUsableWavs: "No usable audio was captured — there was nothing to transcribe.",
-    NoMergedTranscript: "Nothing was transcribed, so there was nothing to summarize.",
-    SummarizerUnavailable: "The summarizer isn't configured on the recorder.",
-    SummarizerFailed: "The summarizer failed while writing the notes.",
-    InvalidRange: "The recorder rejected the session's audio range.",
-  };
+  // domain error the pipeline can raise (session_merge / batch_summarize). A
+  // Map (not a plain object) so an attacker-ish error_kind like "constructor"
+  // or "toString" can't resolve to an inherited prototype member.
+  /** @type {Map<string, string>} */
+  const FAILURE_REASONS = new Map([
+    ["NoUsableWavs", "No usable audio was captured — there was nothing to transcribe."],
+    ["NoMergedTranscript", "Nothing was transcribed, so there was nothing to summarize."],
+    ["SummarizerUnavailable", "The summarizer isn't configured on the recorder."],
+    ["SummarizerFailed", "The summarizer failed while writing the notes."],
+    ["InvalidRange", "The recorder rejected the session's audio range."],
+  ]);
 
+  // An unrecognised kind falls back to the raw `error` text, then a generic
+  // line, so a future Recorder error never renders as a blank failure.
+  /** @param {PipelinePoll | null | undefined} raw @returns {string} */
   function failureReason(raw) {
     const kind = raw && raw.error_kind;
-    if (kind && Object.prototype.hasOwnProperty.call(FAILURE_REASONS, kind)) {
-      return FAILURE_REASONS[kind];
-    }
+    const known = typeof kind === "string" ? FAILURE_REASONS.get(kind) : undefined;
+    if (known) return known;
     const err = raw && raw.error;
     if (typeof err === "string" && err) return err;
     return "The end-of-meeting pipeline failed.";
@@ -65,6 +104,7 @@
 
   // The view-model shape the card renders. Every field is always present so
   // the renderer never has to feature-detect: irrelevant fields are null.
+  /** @param {string} phase @param {Partial<PipelineView>} [extra] @returns {PipelineView} */
   function vm(phase, extra) {
     return Object.assign(
       {
@@ -91,6 +131,11 @@
   //   - recording: a meeting is active but hasn't been ended.
   // Every informative poll state (running / done / failed) is resolved from
   // the body alone, so those branches are pure functions of the response.
+  /**
+   * @param {PipelinePoll | null | undefined} [raw]
+   * @param {{ meetingActive?: boolean, ending?: boolean }} [opts]
+   * @returns {PipelineView}
+   */
   function map(raw, opts) {
     const o = opts || {};
     const state = raw && raw.state;

@@ -1,3 +1,4 @@
+// @ts-check
 // SpatialChat Bridge — control-client.js (shared, dependency-free)
 //
 // One helper for the Recorder's tap-token *control plane* (the HTTP/WS
@@ -30,10 +31,21 @@
 // never destroy one, so a leaked Bridge token's reach stays bounded right
 // here at the client boundary. Dashboard Basic-auth owns deletion.
 
-(function (root) {
+/**
+ * @typedef {{ host: string, port: number | string, useTls?: boolean, token?: string }} RecorderCfg
+ * @typedef {{ signal?: AbortSignal, timeoutMs?: number }} CallOpts
+ */
+(function (/** @type {any} */ root) {
   "use strict";
 
   const TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap.";
+
+  // A caught value is `unknown`; pull a printable message from it defensively.
+  /** @param {unknown} e @returns {string} */
+  function errText(e) {
+    const m = e && /** @type {{ message?: unknown }} */ (e).message;
+    return String(m || e);
+  }
 
   // A classified error so callers can branch on `e.kind` instead of
   // string-matching messages. `status` is set for HTTP errors.
@@ -43,6 +55,11 @@
   //                              expected field (e.g. no `session` id)
   //   - "network":              fetch rejected / timed out / fetch missing
   class ControlError extends Error {
+    /**
+     * @param {string} kind
+     * @param {string} [message]
+     * @param {{ status?: number, cause?: unknown }} [extra]
+     */
     constructor(kind, message, extra) {
       super(message || kind);
       this.name = "ControlError";
@@ -52,8 +69,11 @@
     }
   }
 
+  /** @param {RecorderCfg} cfg */
   function httpScheme(cfg) { return cfg && cfg.useTls ? "https" : "http"; }
+  /** @param {RecorderCfg} cfg */
   function wsScheme(cfg) { return cfg && cfg.useTls ? "wss" : "ws"; }
+  /** @param {RecorderCfg} cfg */
   function httpBase(cfg) { return httpScheme(cfg) + "://" + cfg.host + ":" + cfg.port; }
 
   // Chrome/Edge treat these origins as "potentially trustworthy", so a
@@ -61,6 +81,7 @@
   // page. Anything else is mixed-content-blocked. Kept identical to the
   // predicate content.js applies to the /tap WS so the HTTP control plane
   // and the audio transport agree on what "trustworthy" means.
+  /** @param {string | null | undefined} host @returns {boolean} */
   function isTrustworthyHost(host) {
     if (!host) return false;
     const h = String(host).toLowerCase();
@@ -78,6 +99,7 @@
   // SpatialChat content-script world); from the popup's own
   // chrome-extension:// origin `location.protocol` isn't "https:", so this
   // returns false and the popup keeps its existing always-fire behaviour.
+  /** @param {RecorderCfg} cfg @returns {boolean} */
   function wouldBlockHttp(cfg) {
     if (cfg && cfg.useTls) return false;
     if (typeof location === "undefined") return false;
@@ -85,7 +107,9 @@
     return !isTrustworthyHost(cfg && cfg.host);
   }
 
+  /** @param {RecorderCfg} cfg @param {Record<string, string>} [extra] @returns {Record<string, string>} */
   function bearerHeaders(cfg, extra) {
+    /** @type {Record<string, string>} */
     const headers = extra ? Object.assign({}, extra) : {};
     if (cfg && cfg.token) headers.Authorization = "Bearer " + cfg.token;
     return headers;
@@ -95,6 +119,7 @@
   // pass `{ signal }` to thread your own, or `{ timeoutMs }` to have the
   // client arm an AbortController and tear it down when the call settles.
   // With neither, the call has no timeout (fire-and-forget callers).
+  /** @param {CallOpts} [opts] */
   function resolveSignal(opts) {
     if (opts && opts.signal) return { signal: opts.signal, clear: null };
     if (opts && opts.timeoutMs) {
@@ -112,6 +137,7 @@
   // body is read INSIDE the armed-signal try, so a `timeoutMs` abort covers
   // the body stream too — not just the connection (a stalled body still
   // trips the timeout instead of hanging).
+  /** @param {RecorderCfg} cfg @param {string} path @param {RequestInit} init @param {CallOpts} [opts] */
   async function controlFetch(cfg, path, init, opts) {
     if (wouldBlockHttp(cfg)) {
       throw new ControlError(
@@ -130,7 +156,7 @@
       const body = await r.json().catch(() => ({}));
       return { ok: r.ok, status: r.status, body };
     } catch (e) {
-      throw new ControlError("network", String((e && e.message) || e), { cause: e });
+      throw new ControlError("network", errText(e), { cause: e });
     } finally {
       if (clear) clear();
     }
@@ -141,6 +167,7 @@
   // tap param so the bridge's audio lands in its own folder. Throws a
   // classified ControlError on any failure (mixed-content, HTTP error, or
   // a success body missing the `session` id).
+  /** @param {RecorderCfg} cfg @param {CallOpts} [opts] @returns {Promise<{ sessionId: string, path: unknown }>} */
   async function createDetachedSession(cfg, opts) {
     const { ok, status, body } = await controlFetch(
       cfg,
@@ -167,6 +194,7 @@
   // defaults), so none is sent. Distinguishes accepted (202) from busy
   // (409 — another job already running on this session) and throws a
   // classified ControlError for any other status.
+  /** @param {RecorderCfg} cfg @param {string} sessionId @param {CallOpts} [opts] */
   async function triggerPipeline(cfg, sessionId, opts) {
     const { status } = await controlFetch(
       cfg,
@@ -184,6 +212,7 @@
   // response to a UI phase/progress/summary view-model is a separate
   // concern (a later slice). Throws a classified ControlError on
   // mixed-content / network failure / a non-success HTTP status.
+  /** @param {RecorderCfg} cfg @param {string} sessionId @param {CallOpts} [opts] @returns {Promise<any>} */
   async function pollPipeline(cfg, sessionId, opts) {
     const { ok, status, body } = await controlFetch(
       cfg,
@@ -203,6 +232,7 @@
   // throws ControlError only for the mixed-content guard / network failure.
   // (The button/room-change consumers render different copy from the
   // parsed body, so success/non-success is reported as data, not a throw.)
+  /** @param {RecorderCfg} cfg @param {CallOpts} [opts] */
   async function rotateSession(cfg, opts) {
     return await controlFetch(
       cfg,
@@ -217,6 +247,7 @@
   // subject to the mixed-content guard either. Returns a result object
   // rather than throwing so the popup can render a reachable/unreachable
   // pill directly.
+  /** @param {RecorderCfg} cfg @param {CallOpts} [opts] */
   async function checkHealth(cfg, opts) {
     const url = httpBase(cfg) + "/health";
     if (typeof fetch !== "function") {
@@ -229,7 +260,7 @@
       const body = await r.json().catch(() => ({}));
       return { ok: true, body, url };
     } catch (e) {
-      return { ok: false, error: String((e && e.message) || e), url };
+      return { ok: false, error: errText(e), url };
     } finally {
       if (clear) clear();
     }
@@ -240,20 +271,22 @@
   // token is good; a 4401 close (or onerror) means it was rejected. An
   // empty token + an --no-auth recorder upgrades without subprotocol
   // negotiation. Returns `{ ok, error? }`.
+  /** @param {RecorderCfg} cfg @param {CallOpts} [opts] @returns {Promise<{ ok: boolean, error?: string }>} */
   function probeTapToken(cfg, opts) {
     return new Promise((resolve) => {
       const url =
         wsScheme(cfg) + "://" + cfg.host + ":" + cfg.port + "/tap?identity=__probe__&name=probe";
+      /** @type {WebSocket} */
       let ws;
       try {
         ws = cfg.token ? new WebSocket(url, [TAP_SUBPROTOCOL_PREFIX + cfg.token]) : new WebSocket(url);
       } catch (e) {
-        resolve({ ok: false, error: String((e && e.message) || e) });
+        resolve({ ok: false, error: errText(e) });
         return;
       }
       let settled = false;
       const { signal, clear } = resolveSignal(opts);
-      const finish = (res) => {
+      const finish = (/** @type {{ ok: boolean, error?: string }} */ res) => {
         if (settled) return;
         settled = true;
         if (clear) clear();
