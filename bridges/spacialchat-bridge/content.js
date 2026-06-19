@@ -60,11 +60,11 @@
   // Recorder's global Session, unchanged. Normalised to null-or-nonempty so
   // truthiness alone answers "is a meeting active?".
   let meetingSessionId = null;
-  // End-meeting teardown state (#134). While `meetingEnding`, every open
-  // channel is draining+closing toward a close-all barrier; once all taps
-  // reach CLOSED the pipeline trigger fires for `endingSessionId` (captured
-  // before meetingSessionId is cleared back to the global Session).
-  let meetingEnding = false;
+  // End-meeting teardown state (#134). While `endingSessionId` is set, every
+  // open channel is draining+closing toward a close-all barrier; once all
+  // taps reach CLOSED the pipeline trigger fires for that id (captured before
+  // meetingSessionId is cleared back to the global Session). Truthiness alone
+  // answers "is an End in progress?".
   let endingSessionId = null;
   let settingsReady = false;
   const SETTINGS_KEYS = ["recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId"];
@@ -587,7 +587,7 @@
       publishStatus();
       // Give up on this tap's tail audio — but it's still CLOSED now, so the
       // End-meeting barrier shouldn't wait on it forever.
-      if (meetingEnding) maybeFinishEndMeeting();
+      if (endingSessionId) maybeFinishEndMeeting();
     }, DRAIN_MAX_MS);
   }
 
@@ -604,7 +604,7 @@
     resetUtteranceState(ch);
     // A draining channel finishing may be the last tap the End-meeting
     // close-all barrier was waiting on.
-    if (meetingEnding) maybeFinishEndMeeting();
+    if (endingSessionId) maybeFinishEndMeeting();
   }
 
   // Force-close the utterance and reset state, regardless of any
@@ -670,8 +670,7 @@
   // through the existing Drain-on-mute path — muting each first so no fresh
   // utterance starts mid-teardown — then waits for the close-all barrier.
   function endMeeting() {
-    if (!meetingSessionId || meetingEnding) return;
-    meetingEnding = true;
+    if (!meetingSessionId || endingSessionId) return;
     endingSessionId = meetingSessionId;
     publishMeetingEnd("ending", endingSessionId);
     console.log("[tapscribe-bridge] end meeting " + endingSessionId +
@@ -691,7 +690,7 @@
   // CLOSED (no live/connecting/closing WS, none draining or mid-reconnect),
   // so the last Utterance's WAV is finalised before processing starts.
   function maybeFinishEndMeeting() {
-    if (!meetingEnding) return;
+    if (!endingSessionId) return;
     for (const [, ch] of channels) {
       const ws = ch.tapWs;
       const wsLive = ws && (
@@ -706,7 +705,6 @@
 
   function finishEndMeeting() {
     const sessionId = endingSessionId;
-    meetingEnding = false;
     endingSessionId = null;
     // The meeting's taps are all closed; drop them so a later speaker starts
     // a fresh channel routed to the global Session.
@@ -803,6 +801,12 @@
         break;
       }
       case "pcm": {
+        // While an End is in progress, ignore new audio. The meeting's taps
+        // are muted and draining toward the close-all barrier; a fresh tap
+        // opened here (a new speaker, or a new utterance) would route into
+        // the Session we're about to process and keep the barrier from ever
+        // completing — leaving the meeting wedged in "Ending…".
+        if (endingSessionId) return;
         const ch = ensureChannel(d.identity, d.name);
         if (d.name && d.name !== ch.name) ch.name = d.name;
         if (ch.muted) return;

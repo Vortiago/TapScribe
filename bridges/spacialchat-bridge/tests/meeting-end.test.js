@@ -141,3 +141,52 @@ test("End meeting with no active meeting is a no-op", async () => {
   b.requestEndMeeting();
   assert.equal(triggerCalls(b).length, 0, "no trigger when no meeting is active");
 });
+
+test("a new speaker during teardown does not stall the close-all barrier", async () => {
+  // While a tap is mid-drain after End, a NEW speaker must not open a fresh
+  // tap into the ending Session — that live WS would block the barrier and
+  // the trigger would never fire (the meeting hangs in "Ending…").
+  const b = createBridge({ settings: { meetingSessionId: "sess-1" } });
+  await ready(b);
+
+  // u1 streams, then a blip leaves buffered PCM with the WS down → drains on End.
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  const ws1 = b.lastSocket();
+  ws1.triggerOpen();
+  ws1.triggerClose({ code: 1006, wasClean: false });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() }); // buffered
+
+  b.requestEndMeeting();
+  assert.equal(triggerCalls(b).length, 0, "u1 still draining → no trigger yet");
+
+  // A different speaker starts talking mid-teardown — must be ignored.
+  b.post({ kind: "tap-start", identity: "u2", name: "Bob" });
+  b.post({ kind: "pcm", identity: "u2", name: "Bob", buffer: pcmFrame() });
+
+  // u1's drain reconnect lands and flushes; the barrier should now complete.
+  b.clock.tick(500);
+  b.lastSocket().triggerOpen();
+
+  assert.equal(triggerCalls(b).length, 1, "trigger fired; the late speaker did not stall the barrier");
+});
+
+test("a trigger error surfaces 'failed' (and still clears the meeting)", async () => {
+  const b = createBridge({ settings: { meetingSessionId: "sess-1" }, triggerStatus: 500 });
+  await ready(b);
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  b.lastSocket().triggerOpen();
+
+  b.requestEndMeeting();
+  await b.flushMicrotasks(); // let triggerPipeline reject + publish the outcome
+
+  const end = b.meetingEnd();
+  assert.equal(end.phase, "failed", "a non-202/409 trigger surfaces as failed");
+  assert.ok(end.error, "a human-readable failure reason is included");
+
+  // The meeting still cleared, so capture falls back to the global Session.
+  b.post({ kind: "tap-start", identity: "u2", name: "Bob" });
+  b.post({ kind: "pcm", identity: "u2", name: "Bob", buffer: pcmFrame() });
+  assert.equal(sessionParam(b.lastSocket()), null, "routing fell back to global after a failed trigger");
+});
