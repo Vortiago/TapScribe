@@ -154,7 +154,7 @@ function makeChromeMock(initialSettings) {
   };
 }
 
-function createBridge({ settings = {}, location: locationOverride } = {}) {
+function createBridge({ settings = {}, location: locationOverride, triggerStatus = 202 } = {}) {
   FakeWebSocket.reset();
   const clock = createClock();
   // Records every fetch() the content script makes (the new-session POST).
@@ -232,7 +232,14 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     WebSocket: FakeWebSocket,
     fetch: (url, options) => {
       fetchCalls.push({ url, options: options || {} });
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      // The only control call the content script makes is the end-of-meeting
+      // pipeline trigger; default to 202 (accepted). Tests override
+      // triggerStatus to exercise 409 (busy) / other failures.
+      return Promise.resolve({
+        ok: triggerStatus >= 200 && triggerStatus < 300,
+        status: triggerStatus,
+        json: () => Promise.resolve({}),
+      });
     },
     crypto: { randomUUID: () => "u-" + Math.random().toString(36).slice(2) },
     URLSearchParams,
@@ -272,8 +279,19 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
 
   function status() {
     if (chrome._writes.length === 0) return null;
-    const last = chrome._writes[chrome._writes.length - 1];
-    return last.bridgeStatus || null;
+    for (let i = chrome._writes.length - 1; i >= 0; i--) {
+      if (chrome._writes[i].bridgeStatus) return chrome._writes[i].bridgeStatus;
+    }
+    return null;
+  }
+
+  // The latest `meetingEnd` outcome the content script published to storage
+  // (the popup's view of the End-meeting result), or null if none yet.
+  function meetingEnd() {
+    for (let i = chrome._writes.length - 1; i >= 0; i--) {
+      if (chrome._writes[i].meetingEnd) return chrome._writes[i].meetingEnd;
+    }
+    return null;
   }
 
   // Simulate the operator changing settings in the popup — fires the
@@ -283,10 +301,31 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
     chrome._fireChange({ useTls: { newValue: !!useTls, oldValue: !useTls } });
   }
 
-  // Simulate the operator toggling "start new session on room change" in the
-  // popup — fires the same onChanged listener content.js registered at boot.
-  function flipAutoNewSession(on) {
-    chrome._fireChange({ autoNewSessionOnRoomChange: { newValue: !!on, oldValue: !on } });
+  // Simulate the popup starting / ending a bracketed meeting — fires the
+  // same onChanged listener content.js registered at boot, mirroring the
+  // popup persisting (or clearing) meetingSessionId in chrome.storage.local.
+  function startMeeting(sessionId) {
+    chrome._fireChange({
+      meetingSessionId: { newValue: sessionId, oldValue: null },
+    });
+  }
+  function endMeeting() {
+    chrome._fireChange({
+      meetingSessionId: { newValue: null, oldValue: "stale" },
+    });
+  }
+
+  // Simulate the popup's "End meeting" button: bump the meetingEndRequestedAt
+  // nonce in storage, which the content script's onChanged listener turns
+  // into the drain → close-all → trigger sequence. A monotonic nonce so a
+  // second End fires onChanged again.
+  let endNonce = 0;
+  function requestEndMeeting() {
+    const prev = endNonce;
+    endNonce += 1;
+    chrome._fireChange({
+      meetingEndRequestedAt: { newValue: endNonce, oldValue: prev },
+    });
   }
 
   // The in-page status pill lives in a shadow root attached to a host
@@ -329,13 +368,16 @@ function createBridge({ settings = {}, location: locationOverride } = {}) {
   return {
     post,
     status,
+    meetingEnd,
     openSockets: () => FakeWebSocket._all,
     lastSocket: () => FakeWebSocket._all[FakeWebSocket._all.length - 1],
     fetches: () => fetchCalls,
     clock,
     flushMicrotasks,
     flipUseTls,
-    flipAutoNewSession,
+    startMeeting,
+    endMeeting,
+    requestEndMeeting,
     indicator,
     detachIndicator,
   };
