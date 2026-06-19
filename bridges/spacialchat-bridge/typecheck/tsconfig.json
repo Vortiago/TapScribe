@@ -18,6 +18,7 @@
   "include": [
     "../control-client.js",
     "../pipeline-view.js",
+    "../popup-presenter.js",
     "../lib/**/*.js",
     "../components/**/*.js"
   ],
