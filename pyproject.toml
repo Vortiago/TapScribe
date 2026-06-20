@@ -16,6 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 
@@ -38,10 +39,13 @@ dependencies = [
     # (tapscribe/speech_gate.py) and strip-silence's region detector
     # (tapscribe/strip_silence.py). Both are core operator features, so
     # silero ships as a hard dependency rather than an opt-in extra.
-    # Torch is pulled in transitively (silero ships its model as a
-    # TorchScript .jit file); the ~500 MB payload is unavoidable for
-    # the live channel anyway.
-    "silero-vad>=5.0",
+    # The `[onnx-cpu]` extra pulls onnxruntime so we load the model via
+    # ONNX, NOT the TorchScript `.jit` through `torch.jit.load` — PyTorch
+    # deprecated that loader and flags it unsupported on Python 3.14+.
+    # silero still imports torch + torchaudio and uses torch tensors for
+    # I/O (both come via silero's own deps), so torch stays — the ~500 MB
+    # payload is unavoidable for the live channel anyway.
+    "silero-vad[onnx-cpu]>=5.0",
     "torch>=2.1",
 ]
 
@@ -241,10 +245,8 @@ filterwarnings = [
     "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
     "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
     "ignore:remove second argument of ws_handler:DeprecationWarning",
-    # silero-vad ships its model as a TorchScript .jit file; torch 2.6
-    # deprecated jit.load. Tracked at github.com/snakers4/silero-vad —
-    # remove when silero migrates to torch.export.
-    "ignore:.*torch\\.jit\\.load.*is deprecated.*:DeprecationWarning",
+    # (No torch.jit.load ignore needed: _get_silero_model loads silero via
+    #  ONNX, so the deprecated TorchScript loader is never called.)
     # starlette 1.x started nagging that `httpx` should become `httpx2`
     # in TestClient. fastapi.testclient -> starlette.testclient imports
     # raise this at module load, which breaks every collection that uses
