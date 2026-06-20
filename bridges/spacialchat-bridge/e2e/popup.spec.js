@@ -27,10 +27,17 @@ async function openPopup(page, { store = {}, poll = null } = {}) {
           get: (keys) =>
             Promise.resolve(Object.fromEntries(keys.map((/** @type {string} */ k) => [k, data[k]]))),
           set: (obj) => {
-            Object.assign(data, obj);
+            // Match real chrome.storage.onChanged: fire ONLY for keys whose value
+            // actually changed. A no-op re-set of an unchanged key (e.g. dismiss
+            // re-writing meetingActive:false) fires nothing — emitting it here
+            // would drive listeners down code paths Chrome never reaches.
             const ch = {};
-            for (const k of Object.keys(obj)) ch[k] = { newValue: obj[k] };
-            for (const fn of listeners) fn(ch, "local");
+            for (const k of Object.keys(obj)) {
+              if (data[k] === obj[k]) continue;
+              ch[k] = { oldValue: data[k], newValue: obj[k] };
+            }
+            Object.assign(data, obj);
+            if (Object.keys(ch).length) for (const fn of listeners) fn(ch, "local");
             return Promise.resolve();
           },
         },
@@ -148,24 +155,33 @@ test("an end-meeting failure surfaces the failure headline", async ({ page }) =>
   await expect(status).toHaveClass(/err/);
 });
 
-test("dismissing a failed meeting clears the card and re-enables Start", async ({ page }) => {
-  // A finished/failed meeting offers Dismiss (the meeting is no longer active).
-  // Dismissing clears the durable result so the next open is idle — the operator
-  // can immediately start the next meeting (the restart path).
+test("dismissing a failed meeting clears the headline and the card", async ({ page }) => {
+  // Seed BOTH a failed-End headline and a failed pipeline poll, so there is
+  // something to clear: the headline AND the card are present before Dismiss
+  // (otherwise an empty-after-dismiss check would pass vacuously). Dismiss clears
+  // the durable result, returning the popup to idle — the restart path; Start is
+  // already enabled whenever Dismiss is offered, since the meeting is inactive.
   await openPopup(page, {
-    store: { meetingSessionId: "s", meetingActive: false },
+    store: {
+      meetingSessionId: "s",
+      meetingActive: false,
+      meetingEnd: { phase: "failed", error: "the recorder rejected the range" },
+    },
     poll: { ok: true, state: "failed", stage: "transcribe", error: "boom", error_kind: "NoUsableWavs" },
   });
 
+  const status = page.locator("#meetingStatus");
   const failure = page.locator('[data-slot="failure"]');
+  await expect(status).toContainText("End meeting failed");
   await expect(failure).toBeVisible();
   const dismiss = page.getByRole("button", { name: "Dismiss" });
   await expect(dismiss).toBeVisible();
 
   await dismiss.click();
 
+  // Both the headline and the card are gone; the popup is idle and ready.
+  await expect(status).toBeEmpty();
   await expect(failure).toBeHidden();
   await expect(page.getByRole("button", { name: "Start meeting" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "End meeting" })).toBeDisabled();
-  await expect(page.locator("#meetingStatus")).toBeEmpty();
 });

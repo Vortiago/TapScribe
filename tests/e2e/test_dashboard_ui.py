@@ -3422,26 +3422,27 @@ async def test_dashboard_flags_stale_summary_after_retranscribe_and_clears_on_re
     sd = rr.recorder.session_dir
     sd.mkdir(parents=True, exist_ok=True)
 
-    def _write_transcript(*, stamp: str, model: str) -> None:
-        # `model` varies the file size between writes so the /api/state JSON
-        # cache (keyed on mtime_ns + size) is guaranteed to invalidate even on a
-        # filesystem with coarse mtime resolution — the two stamps are equal-length.
+    def _write_transcript(*, stamp: str, text: str) -> None:
+        # A re-transcribe rewrites session-transcript.json with new text + stamp.
+        # The /api/state JSON cache is keyed on (mtime_ns, size); the distinct
+        # `text` between the two writes changes the size, so the next poll re-reads
+        # the bumped stamp without the test relying on mtime granularity.
         (sd / "session-transcript.json").write_text(
             json.dumps(
                 {
                     "session": rr.recorder.session_start,
-                    "model": model,
+                    "model": "test",
                     "transcribed_at": stamp,
                     "speakers": ["Alice"],
                     "segments": [],
-                    "plain_text": "Alice: we decided to ship the dashboard.",
+                    "plain_text": text,
                 }
             ),
             encoding="utf-8",
         )
 
     # Transcript v1 (older stamp).
-    _write_transcript(stamp="2026-01-01T00:00:00+00:00", model="test")
+    _write_transcript(stamp="2026-01-01T00:00:00+00:00", text="Alice: we decided to ship the dashboard.")
 
     marker = "STALE_CUE_SUMMARY_OK"
     echo_cmd = _py_summarize_cmd(f"import sys; sys.stdout.write({marker!r})")
@@ -3485,7 +3486,10 @@ async def test_dashboard_flags_stale_summary_after_retranscribe_and_clears_on_re
             # /api/state poll picks it up and the view flags the summary stale IN
             # PLACE (no reload) — its recorded stamp is now older than the live
             # transcript's.
-            _write_transcript(stamp="2026-02-01T00:00:00+00:00", model="retranscribed")
+            _write_transcript(
+                stamp="2026-02-01T00:00:00+00:00",
+                text="Alice: we decided to ship the dashboard, and to cut a release this week.",
+            )
             await page.wait_for_function(
                 """(s) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(s)""",
                 arg=stale_text,
