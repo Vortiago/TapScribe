@@ -1,17 +1,29 @@
 {
+  "//": "Aligned with the canonical vanilla-web/vanilla-components tsconfig so the vendored lib/ + components/ typecheck copy-verbatim (no fork). Explicit include (not **/*.js) so content.js / page-script.js / tests opt in only when typed.",
   "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "allowJs": true,
     "checkJs": true,
     "noEmit": true,
     "strict": true,
-    "noUncheckedIndexedAccess": true,
     "noUnusedLocals": true,
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": [],
     "skipLibCheck": true
   },
-  "include": ["../control-client.js", "../pipeline-view.js"],
+  "include": [
+    "../types.d.ts",
+    "../control-client.js",
+    "../pipeline-view.js",
+    "../popup-presenter.js",
+    "../popup-actions.js",
+    "../popup.js",
+    "../lib/**/*.js",
+    "../components/**/*.js"
+  ],
   "exclude": ["node_modules"]
 }

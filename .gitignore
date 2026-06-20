@@ -31,6 +31,13 @@ frontend/package-lock.json
 bridges/spacialchat-bridge/typecheck/node_modules/
 bridges/spacialchat-bridge/typecheck/package-lock.json
 
+# SpatialChat Bridge popup E2E (Playwright; devDep only, never shipped)
+bridges/spacialchat-bridge/e2e/node_modules/
+bridges/spacialchat-bridge/e2e/package-lock.json
+bridges/spacialchat-bridge/e2e/test-results/
+bridges/spacialchat-bridge/e2e/playwright-report/
+bridges/spacialchat-bridge/e2e/blob-report/
+
 # Perf soak reports (tests/e2e/test_next_perf_soak.py) — local measurements
 perf-reports/
 

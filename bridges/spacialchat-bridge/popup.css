@@ -1,0 +1,67 @@
+/* SpatialChat Bridge popup — shell layout. Pills, buttons, the card panel and
+   the tap table come from vanilla-components (each self-loads its own @scope'd
+   CSS); this file owns only the popup chrome + form layout, on the shared
+   tokens (tokens.css). */
+
+body {
+  font: 13px/1.4 var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  padding: var(--space-m);
+  width: 340px;
+  margin: 0;
+}
+
+h3 { margin: 0 0 6px; font-size: 14px; }
+h4 {
+  margin: 14px 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+label { display: block; margin: 10px 0 4px; font-weight: 600; }
+
+input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 6px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+
+.row { display: flex; gap: 6px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+.row.fields { gap: 8px; align-items: flex-end; }
+.row.fields .host { flex: 1 1 auto; }
+.row.fields .port { flex: 0 0 80px; }
+
+.small { font-size: 11px; color: var(--text-dim); }
+.muted { color: var(--text-dim); opacity: 0.85; }
+.meta { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+
+.status { margin-top: 8px; font-size: 12px; }
+.status.ok { color: var(--ok); }
+.status.err { color: var(--bad); }
+
+code { font-family: var(--mono); font-size: 11px; }
+a { color: inherit; }
+
+/* Meeting card body (cloned from #tpl-meeting-card, wrapped in a panel). */
+.meeting-card-body { display: flex; flex-direction: column; gap: 6px; }
+.summary-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.summary-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  font: inherit;
+  background: var(--bg-elev-2);
+  padding: 6px;
+  border-radius: var(--r);
+  user-select: text;
+}
