@@ -16,6 +16,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const CONTROL_CLIENT_JS = path.join(__dirname, "..", "control-client.js");
+const PIPELINE_VIEW_JS = path.join(__dirname, "..", "pipeline-view.js");
 const POPUP_JS = path.join(__dirname, "..", "popup.js");
 
 function makeEl(id) {
@@ -129,8 +130,10 @@ function createPopup({ settings = {}, post, setRejects = false } = {}) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   // Loaded ahead of popup.js exactly as popup.html orders the <script>
-  // tags — it defines the TapscribeControlClient global popup.js calls.
+  // tags — control-client.js + pipeline-view.js define the globals popup.js
+  // calls (TapscribeControlClient + TapscribePipelineView).
   vm.runInContext(fs.readFileSync(CONTROL_CLIENT_JS, "utf8"), sandbox, { filename: "control-client.js" });
+  vm.runInContext(fs.readFileSync(PIPELINE_VIEW_JS, "utf8"), sandbox, { filename: "pipeline-view.js" });
   vm.runInContext(fs.readFileSync(POPUP_JS, "utf8"), sandbox, { filename: "popup.js" });
 
   // Drain the load() → refresh() → probeAll() promise chain.

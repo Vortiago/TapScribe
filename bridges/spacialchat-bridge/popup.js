@@ -10,12 +10,34 @@ let currentHost = "localhost";
 let currentPort = 8001;
 let currentTapToken = "";
 let currentUseTls = false;
-// The active bracketed meeting's detached Session id (or null). Mirrors the
-// `meetingSessionId` stored in chrome.storage.local that the content script
-// reads to route taps. While set, "Start meeting" is disabled so a second
-// start can't orphan the first.
+// The bracketed meeting's detached Session id (or null). Mirrors the durable
+// `meetingSessionId` stored in chrome.storage.local. It is the popup's poll
+// target for the meeting card and persists across End — the content script
+// keeps it stored after the meeting ends so a re-opened (ephemeral) popup can
+// still re-derive progress/summary. It is cleared only on the next "Start
+// meeting" or an explicit "Dismiss".
 let currentMeetingSessionId = null;
+// Whether a meeting is actively *recording* (taps routing into it). Distinct
+// from `currentMeetingSessionId` being set: after End the id lingers for the
+// card while `meetingActive` is false (capture has fallen back to the global
+// Session). Drives the Start/End button enable/disable.
+let currentMeetingActive = false;
+// The latest End-meeting outcome the content script published (phase: ending
+// / started / busy / failed). Used as the card's "ending" lifecycle hint and
+// to kick off polling the instant the pipeline is triggered.
+let lastMeetingEnd = null;
 let pollTimer = null;
+
+// --- Meeting card state (module ④) ----------------------------------------
+// The card polls the recorder for the stored Session id and renders through
+// the pure mapper (pipeline-view.js). It holds NO local summary cache — every
+// open re-derives from the poll, so a finished summary survives a popup close
+// or a Recorder restart. Interaction-hold by hand: progress text updates in
+// place and the summary pane is built ONCE on the transition to done, so a
+// poll tick can never clobber a mid-copy text selection.
+let cardTimer = null;             // setTimeout id for the next running-state poll
+let summaryRenderedFor = null;    // Session id whose summary pane is already built
+let currentSummaryText = "";      // text the Copy button writes to the clipboard
 
 // The recorder config the shared control-client takes (control-client.js,
 // loaded ahead of us by popup.html). It owns the bearer header, scheme
@@ -25,9 +47,9 @@ function cfg() {
 }
 
 async function load() {
-  const { recorderHost, recorderPort, tapToken, useTls, meetingSessionId } =
+  const { recorderHost, recorderPort, tapToken, useTls, meetingSessionId, meetingActive, meetingEnd } =
     await chrome.storage.local.get(
-      ["recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId"],
+      ["recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId", "meetingActive", "meetingEnd"],
     );
   currentHost = (recorderHost || "localhost").trim();
   currentPort = Number(recorderPort) || 8001;
@@ -35,11 +57,20 @@ async function load() {
   currentUseTls = !!useTls;
   currentMeetingSessionId =
     typeof meetingSessionId === "string" && meetingSessionId ? meetingSessionId : null;
+  // The id can outlive the active meeting (kept for the card after End), so
+  // read `meetingActive` explicitly; default to "active when an id is present"
+  // for the bring-up case where only the id was ever written.
+  currentMeetingActive =
+    typeof meetingActive === "boolean" ? meetingActive : !!currentMeetingSessionId;
+  lastMeetingEnd = meetingEnd || null;
   $("host").value = currentHost;
   $("port").value = String(currentPort);
   $("tapToken").value = currentTapToken;
   $("useTls").checked = currentUseTls;
   renderMeeting();
+  // Re-derive the card from the recorder on every open: a stored Session id
+  // means there may be a meeting in flight (or a finished summary) to show.
+  if (currentMeetingSessionId) pollCardOnce();
   await refresh();
 }
 
@@ -58,14 +89,15 @@ function setPill(id, ok, label) {
 }
 
 // Reflect the bracketed-meeting state in the popup. While a meeting is
-// active (a meetingSessionId is stored), "Start meeting" is disabled (so a
-// second start can't orphan the first), "End meeting" is enabled, and the
-// active Session id is shown. With no meeting active the buttons flip and any
-// prior status line (e.g. a failure / end outcome) is left untouched.
+// actively recording, "Start meeting" is disabled (so a second start can't
+// orphan the first), "End meeting" is enabled, and the active Session id is
+// shown. Once the meeting ends the buttons flip (Start usable again) even
+// though the Session id lingers for the card; any prior status line (e.g. a
+// failure / end outcome) is left untouched.
 function renderMeeting() {
   const start = $("startMeeting");
   const end = $("endMeeting");
-  const active = !!currentMeetingSessionId;
+  const active = currentMeetingActive;
   if (start) start.disabled = active;
   if (end) end.disabled = !active;
   if (active) {
@@ -88,17 +120,26 @@ function endMeeting() {
   });
 }
 
-// Render the End-meeting outcome the content script published to storage.
-// (Live pipeline progress + the finished summary are a later slice; this
-// just confirms the pipeline was — or couldn't be — kicked off.)
+// Render the End-meeting outcome the content script published to storage and
+// hand off to the meeting card. The content script owns the drain → close-all
+// → trigger sequence (it outlives the popup); once it reports the pipeline is
+// in flight (started / busy) the card starts polling for live progress and the
+// finished summary.
 function renderMeetingEnd(end) {
   if (!end || !end.phase) return;
+  lastMeetingEnd = end;
   if (end.phase === "ending") {
     setStatus("meetingStatus", "Ending meeting…", "");
+    pollCardOnce(); // surface the "ending" lifecycle in the card too
   } else if (end.phase === "started") {
     setStatus("meetingStatus", "Meeting ended — processing started on the recorder.", "ok");
+    pollCardOnce(); // the pipeline is now running — begin tracking progress
   } else if (end.phase === "busy") {
     setStatus("meetingStatus", "Recorder busy — another job is already running on this session.", "err");
+    // A 409 means a job is already on this Session; it may be the pipeline
+    // itself (re-trigger) or another job. Poll: if it reaches done, the card
+    // simply shows the summary.
+    pollCardOnce();
   } else if (end.phase === "failed") {
     setStatus("meetingStatus", "End meeting failed: " + (end.error || "unknown error") + ".", "err");
   }
@@ -120,8 +161,17 @@ async function startMeeting() {
     // state once the write lands — if the set rejects, the catch below
     // leaves currentMeetingSessionId null and re-enables the button rather
     // than showing a green "Meeting active" the content script never saw.
-    await chrome.storage.local.set({ meetingSessionId: res.sessionId });
+    // `meetingActive: true` marks routing live; clearing `meetingEnd` drops
+    // any previous meeting's outcome so the card starts fresh (#26).
+    await chrome.storage.local.set({
+      meetingSessionId: res.sessionId,
+      meetingActive: true,
+      meetingEnd: null,
+    });
     currentMeetingSessionId = res.sessionId;
+    currentMeetingActive = true;
+    lastMeetingEnd = null;
+    resetCard();
     renderMeeting();
   } catch (e) {
     const why = e && e.kind === "mixed-content-blocked"
@@ -132,6 +182,186 @@ async function startMeeting() {
     // rule in renderMeeting (which leaves the error status above intact).
     renderMeeting();
   }
+}
+
+// --- Meeting card: poll the pipeline + render progress / summary ----------
+
+function stopCardPolling() {
+  if (cardTimer != null) {
+    clearTimeout(cardTimer);
+    cardTimer = null;
+  }
+}
+
+// Schedule the next poll. Only running / ending are live states worth a
+// timer; done / failed / idle / recording are steady states the next
+// popup-open re-derives, so we stop polling there (and never busy-loop).
+function scheduleNextPoll() {
+  stopCardPolling();
+  cardTimer = setTimeout(pollCardOnce, 1500);
+}
+
+// One poll of the recorder for the stored Session id, mapped through the pure
+// view-model mapper and rendered. No local summary cache — this is the only
+// source of truth, so a finished summary survives a popup close / Recorder
+// restart (the recorder's done branch serves the persisted summary).
+async function pollCardOnce() {
+  const sid = currentMeetingSessionId;
+  if (!sid) {
+    hideCard();
+    return;
+  }
+  let raw;
+  try {
+    raw = await TapscribeControlClient.pollPipeline(cfg(), sid, { timeoutMs: 6000 });
+  } catch (e) {
+    // A transient poll failure (network blip, a Recorder mid-restart) leaves
+    // the meeting state and any rendered summary intact — don't tear them
+    // down over one failed poll. Self-heal: keep retrying at the poll cadence
+    // while the meeting id is still live, so a Recorder that comes back up
+    // resumes progress / serves the persisted summary without a reopen.
+    if (currentMeetingSessionId) scheduleNextPoll();
+    return;
+  }
+  const view = TapscribePipelineView.map(raw, {
+    meetingActive: currentMeetingActive,
+    ending: !!(lastMeetingEnd && lastMeetingEnd.phase === "ending"),
+  });
+  renderCard(view);
+  if (view.phase === "running" || view.phase === "ending") scheduleNextPoll();
+  else stopCardPolling();
+}
+
+// Render the card from a view-model. Progress text is updated IN PLACE (never
+// a node rebuild) and the summary pane is built once on the transition to
+// done, so a poll tick can't clobber a mid-copy text selection.
+function renderCard(view) {
+  const card = $("meetingCard");
+  if (!card) return;
+  const phaseEl = $("meetingProgress");
+  const failEl = $("meetingFailure");
+  const pane = $("meetingSummaryPane");
+  const dismiss = $("meetingDismiss");
+
+  // The card only has something to show once the pipeline is in flight or
+  // finished (or while ending). Recording / idle is covered by the status line.
+  const show =
+    view.phase === "running" || view.phase === "done" ||
+    view.phase === "failed" || view.phase === "ending";
+  card.hidden = !show;
+  if (!show) return;
+
+  // Progress line (in place).
+  if (view.phase === "running") {
+    phaseEl.hidden = false;
+    phaseEl.className = "status";
+    phaseEl.textContent =
+      view.progress + (view.currentFile ? " — " + view.currentFile : "");
+  } else if (view.phase === "ending") {
+    phaseEl.hidden = false;
+    phaseEl.className = "status";
+    phaseEl.textContent = "Ending meeting — flushing audio, then processing…";
+  } else if (view.phase === "done") {
+    phaseEl.hidden = false;
+    phaseEl.className = "status ok";
+    phaseEl.textContent = "Summary ready.";
+  } else {
+    phaseEl.hidden = true;
+  }
+
+  // Failure line.
+  if (view.phase === "failed") {
+    failEl.hidden = false;
+    failEl.textContent =
+      "Failed" + (view.failureStage ? " during " + view.failureStage : "") +
+      ": " + view.failureReason;
+  } else {
+    failEl.hidden = true;
+  }
+
+  // Summary pane — built once per Session (render-once guard).
+  if (view.phase === "done") {
+    renderSummaryOnce(view);
+  } else if (pane) {
+    pane.hidden = true;
+  }
+
+  // Dismiss is offered once the meeting is over (not while still recording).
+  if (dismiss) dismiss.hidden = currentMeetingActive;
+}
+
+// Build the summary pane exactly once for the current Session. A later poll
+// tick (or a reopen) for the same Session must NOT rewrite the text node —
+// that would clobber a mid-copy selection. `currentSummaryText` is refreshed
+// each call so the Copy button always copies the latest text even when the
+// DOM is left untouched.
+function renderSummaryOnce(view) {
+  const pane = $("meetingSummaryPane");
+  if (!pane) return;
+  pane.hidden = false;
+  currentSummaryText = view.summaryText || "";
+  if (summaryRenderedFor === currentMeetingSessionId) return;
+  summaryRenderedFor = currentMeetingSessionId;
+  $("meetingSummaryText").textContent = currentSummaryText;
+  const s = view.summary || {};
+  const bits = [];
+  if (s.model) bits.push("model: " + s.model);
+  if (s.source) bits.push("source: " + s.source);
+  $("meetingSummaryMeta").textContent = bits.join(" · ");
+}
+
+function hideCard() {
+  stopCardPolling();
+  const card = $("meetingCard");
+  if (card) card.hidden = true;
+}
+
+// Reset the transient card render state for a fresh meeting (without touching
+// storage). Called on Start so a new meeting never shows the previous one's
+// summary even for one frame.
+function resetCard() {
+  stopCardPolling();
+  summaryRenderedFor = null;
+  currentSummaryText = "";
+  const pane = $("meetingSummaryPane");
+  if (pane) pane.hidden = true;
+  const fail = $("meetingFailure");
+  if (fail) fail.hidden = true;
+  hideCard();
+}
+
+// Copy the finished summary to the clipboard. Only ever called from the
+// card's Copy button (a user gesture), so navigator.clipboard is permitted.
+async function copySummary() {
+  const btn = $("meetingCopy");
+  try {
+    await navigator.clipboard.writeText(currentSummaryText);
+    if (btn) {
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = "Copy"; }, 1200);
+    }
+  } catch (e) {
+    if (btn) btn.textContent = "Copy failed";
+  }
+}
+
+// "Dismiss" a finished/failed meeting: clear the durable Session id and the
+// end outcome so the card stops re-deriving last meeting's result on every
+// open. Routing already fell back to the global Session at End, so this is
+// purely the popup forgetting a finished meeting.
+async function dismissMeeting() {
+  stopCardPolling();
+  try {
+    await chrome.storage.local.set({ meetingSessionId: null, meetingActive: false, meetingEnd: null });
+  } catch (e) {
+    // best-effort: even if the write fails, drop the local card below
+  }
+  currentMeetingSessionId = null;
+  currentMeetingActive = false;
+  lastMeetingEnd = null;
+  resetCard();
+  setStatus("meetingStatus", "", "");
+  renderMeeting();
 }
 
 function renderMixedContentWarning() {
@@ -297,6 +527,10 @@ $("startMeeting").addEventListener("click", startMeeting);
 
 $("endMeeting").addEventListener("click", endMeeting);
 
+$("meetingCopy").addEventListener("click", copySummary);
+
+$("meetingDismiss").addEventListener("click", dismissMeeting);
+
 $("openDash").addEventListener("click", (ev) => {
   ev.preventDefault();
   chrome.tabs.create({ url: TapscribeControlClient.httpBase(cfg()) + "/" });
@@ -313,16 +547,37 @@ const onStorageChanged = (changes, areaName) => {
   if (changes.bridgeStatus && changes.bridgeStatus.newValue) {
     renderTaps(changes.bridgeStatus.newValue);
   }
-  // The content script is the source of truth for the meeting lifecycle: it
-  // clears meetingSessionId when a meeting ends (or another popup starts
-  // one). Re-derive the button state live so this popup never shows a stale
-  // "active"/"idle" once it loses ownership.
+  // The content script (or another popup) drives the meeting lifecycle via
+  // two keys: `meetingSessionId` (the durable id — set on Start, replaced on
+  // the next Start, cleared on Dismiss) and `meetingActive` (routing live;
+  // flipped false on End while the id lingers for the card). Re-derive button
+  // state + the card live so this popup never shows a stale state once it
+  // loses ownership.
+  if (changes.meetingActive) {
+    currentMeetingActive = !!changes.meetingActive.newValue;
+    renderMeeting();
+    // The meeting just ended (active → false) but its Session id is still
+    // stored: poll so the card picks up the pipeline the End just triggered.
+    if (!currentMeetingActive && currentMeetingSessionId) pollCardOnce();
+  }
   if (changes.meetingSessionId) {
     const v = changes.meetingSessionId.newValue;
     currentMeetingSessionId = (typeof v === "string" && v) ? v : null;
+    if (!currentMeetingSessionId) {
+      // Dismissed / cleared: nothing left to record into or to show.
+      currentMeetingActive = false;
+      resetCard();
+    } else {
+      // A fresh Start (possibly from another popup) — reset the card and
+      // re-derive from the new Session.
+      resetCard();
+      pollCardOnce();
+    }
     renderMeeting();
   }
-  // The content script publishes the End-meeting outcome here.
+  // The content script publishes the End-meeting outcome here; renderMeetingEnd
+  // both shows the headline and hands off to the card (begins polling once the
+  // pipeline is in flight).
   if (changes.meetingEnd && changes.meetingEnd.newValue) {
     renderMeetingEnd(changes.meetingEnd.newValue);
   }
@@ -338,5 +593,6 @@ pollTimer = setInterval(async () => {
 }, 1500);
 window.addEventListener("unload", () => {
   if (pollTimer) clearInterval(pollTimer);
+  stopCardPolling();
   try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch (e) {}
 });

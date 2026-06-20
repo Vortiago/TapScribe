@@ -21,10 +21,11 @@ back. (See ADR-0002 for the architectural reasoning.)
 spacialchat-bridge/
 ├── manifest.json      MV3 manifest
 ├── control-client.js  shared, dependency-free tap-token control plane (loaded into both content.js and popup.js): new-session / detached-session create, pipeline trigger + poll, /health + tap-token probe
+├── pipeline-view.js   pure poll → view-model mapper (loaded into popup.js): turns a raw pipeline poll into the card's phase / progress / summary / failure
 ├── content.js         ISOLATED-world content script: /tap WS lifecycle, status snapshot
 ├── page-script.js     MAIN-world script: LiveKit Room tap + 48k→16k AudioWorklet
 ├── popup.html         configuration UI markup
-├── popup.js           configuration UI logic (host/port, /health probe, status table)
+├── popup.js           configuration UI logic (host/port, /health probe, status table, meeting card)
 └── README.md          this file
 ```
 
@@ -115,15 +116,45 @@ Click **End meeting** to finish and kick off processing — no dashboard:
    model / backend / summarizer / prompt — the Recorder ignores the request
    body and uses the operator's configured defaults, so a low-privilege tap
    token can never choose what gets loaded.
-4. The meeting then clears: `meetingSessionId` is removed and capture falls
-   back to the global session.
+4. Capture falls back to the global session: live tap routing stops, but the
+   detached session id stays stored as the **meeting card's** durable poll
+   target (below). It's cleared on the next **Start meeting** or an explicit
+   **Dismiss**, never on End — so a popup re-opened after the meeting can
+   still show its progress and summary.
 
 If the Recorder is already running a job on that session it replies `409`
 and the popup shows **"Recorder busy"** rather than failing silently or
 hammering the endpoint; re-triggering is safe once the session is free.
-(Live pipeline progress and the finished summary in the popup are the next
-slice; for now End meeting confirms the pipeline started — or surfaces why
-it couldn't.)
+
+### Meeting card (progress + summary)
+
+Once a meeting is ending or processing, a **meeting card** in the popup
+shows the live pipeline state and the finished result — no dashboard:
+
+- The card **polls** `GET /api/tap/sessions/<id>/pipeline` for the stored
+  session id on every popup open, and on a short interval while the
+  pipeline is **running**. Each raw poll is mapped through the pure
+  `pipeline-view.js` view-model mapper.
+- **Per-stage progress** is shown while running — *Stripping silence…*,
+  *Transcribing 3/12…*, *Summarizing…* — updated **in place** so a poll
+  tick never disturbs the page.
+- The finished **summary** is rendered once on the transition to *done*,
+  with **Copy** to put it on the clipboard (and light `model · source`
+  metadata). Rendering once — rather than rebuilding the pane every tick —
+  applies the dashboard's *Interaction-hold* principle by hand, so a poll
+  tick can't clobber a mid-copy text selection.
+- A **failed** stage surfaces its name and a human-readable reason mapped
+  from the Recorder's `error_kind` (e.g. *no usable audio*, *summarizer
+  unavailable*).
+- The card holds **no local summary cache**: it re-derives everything from
+  the stored session id on each open, so closing and re-opening the popup
+  (or a transient Recorder restart) always shows the true current state —
+  the Recorder serves the persisted `session-summary.json` on the *done*
+  branch even after a restart. The result is identical to a dashboard-run
+  pipeline: the same persisted summary is visible on the dashboard for that
+  session afterward.
+- **Dismiss** clears the stored meeting state so the card stops re-deriving
+  a finished meeting's result on every open.
 
 > **Removed:** the old global **New session** button and the **start new
 > session on room change** toggle are gone. The bracketed Start/End-meeting

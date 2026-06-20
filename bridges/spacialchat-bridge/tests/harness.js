@@ -369,6 +369,10 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     post,
     status,
     meetingEnd,
+    // Every chrome.storage.local.set the content script made, in order — lets
+    // a test assert on the durable meeting state (id kept, meetingActive
+    // flipped) the popup card re-reads.
+    writes: () => chrome._writes,
     openSockets: () => FakeWebSocket._all,
     lastSocket: () => FakeWebSocket._all[FakeWebSocket._all.length - 1],
     fetches: () => fetchCalls,
