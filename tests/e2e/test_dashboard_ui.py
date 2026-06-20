@@ -3397,6 +3397,115 @@ async def test_dashboard_renders_real_end_of_meeting_pipeline_summary(
             await browser.close()
 
 
+async def test_dashboard_flags_stale_summary_after_retranscribe_and_clears_on_regenerate(
+    running_recorder: RunningRecorder,
+):
+    """#94: a summary built before a re-transcribe is flagged stale, and the cue
+    clears when the operator regenerates.
+
+    The persisted summary carries the `transcribed_at` of the transcript it was
+    built from (batch_summarize), projected onto the session's slim
+    `session_summary` marker in /api/state. The Summary view compares that stamp
+    against the live `session_transcript.transcribed_at` and, when the transcript
+    is newer (the session was re-transcribed since), renders a 'predates the
+    current transcript' cue — in place on the poll tick, with NO reload.
+    Regenerating rebuilds from the current transcript, so the summary's stamp
+    catches up and the cue clears.
+
+    Full-stack proof the Generate route persists the stamp, /api/state projects
+    it, and the view's staleness compare + sibling cue render all line up — which
+    the unit/route tests (persisted field + marker shape in isolation) can't
+    exercise together.
+    """
+    rr = running_recorder
+
+    sd = rr.recorder.session_dir
+    sd.mkdir(parents=True, exist_ok=True)
+
+    def _write_transcript(*, stamp: str, model: str) -> None:
+        # `model` varies the file size between writes so the /api/state JSON
+        # cache (keyed on mtime_ns + size) is guaranteed to invalidate even on a
+        # filesystem with coarse mtime resolution — the two stamps are equal-length.
+        (sd / "session-transcript.json").write_text(
+            json.dumps(
+                {
+                    "session": rr.recorder.session_start,
+                    "model": model,
+                    "transcribed_at": stamp,
+                    "speakers": ["Alice"],
+                    "segments": [],
+                    "plain_text": "Alice: we decided to ship the dashboard.",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    # Transcript v1 (older stamp).
+    _write_transcript(stamp="2026-01-01T00:00:00+00:00", model="test")
+
+    marker = "STALE_CUE_SUMMARY_OK"
+    echo_cmd = _py_summarize_cmd(f"import sys; sys.stdout.write({marker!r})")
+    stale_text = "predates the current transcript"
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            # Generate once via the Command source — the summary records the v1
+            # transcript stamp.
+            await page.wait_for_selector('[data-src="command"]', timeout=6000)
+            await page.click('[data-src="command"]')
+            await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('[data-slot="sumGenerate"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=8000,
+            )
+            await page.fill('[data-slot="sumCmd"]', echo_cmd)
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """(m) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(m)""",
+                arg=marker,
+                timeout=10000,
+            )
+            # Fresh summary — no stale cue yet (its stamp matches the transcript's).
+            out = await page.locator('[data-slot="sumOut"]').text_content()
+            assert stale_text not in (out or ""), f"summary must not be stale yet, got {out!r}"
+
+            # Re-transcribe: bump the merged transcript's stamp on disk. The
+            # /api/state poll picks it up and the view flags the summary stale IN
+            # PLACE (no reload) — its recorded stamp is now older than the live
+            # transcript's.
+            _write_transcript(stamp="2026-02-01T00:00:00+00:00", model="retranscribed")
+            await page.wait_for_function(
+                """(s) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(s)""",
+                arg=stale_text,
+                timeout=10000,
+            )
+
+            # Regenerate against the current transcript: the new summary records
+            # the newer stamp, so the cue clears (and the summary still renders).
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """(s) => !(document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(s)""",
+                arg=stale_text,
+                timeout=10000,
+            )
+            out2 = await page.locator('[data-slot="sumOut"]').text_content()
+            assert marker in (out2 or ""), f"regenerated summary must still render, got {out2!r}"
+        finally:
+            await browser.close()
+
+
 async def test_settings_summarizer_default_card_saves_and_prefills(running_recorder: RunningRecorder):
     """#84: the Settings stage's Summarizer card edits the structured global
     default. Pick the Command source, type a template + prompt, Save — then

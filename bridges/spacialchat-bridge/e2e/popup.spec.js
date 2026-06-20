@@ -110,3 +110,62 @@ test("a failed pipeline surfaces the stage and a human-readable reason", async (
   await expect(failure).toContainText("transcribe");
   await expect(failure).toContainText(/no usable audio/i);
 });
+
+// ── busy / failure / restart branches ───────────────────────────────────────
+// The popup re-derives its headline from durable meeting state on open, so the
+// busy + end-failed branches are storage-driven (no poll). The restart path —
+// Dismiss after a finished/failed meeting — was untested entirely; only the
+// happy-path Copy used the card's buttons.
+
+test("a busy end-of-meeting surfaces the recorder-busy headline", async ({ page }) => {
+  // content.js publishes meetingEnd { phase: "busy" } when the pipeline trigger
+  // gets a 409 (another job already running on the session). The popup derives
+  // the headline from that durable state on open — the poll stays idle.
+  await openPopup(page, {
+    store: {
+      meetingSessionId: "2026-06-19T10-00-00Z",
+      meetingActive: false,
+      meetingEnd: { phase: "busy" },
+    },
+  });
+  const status = page.locator("#meetingStatus");
+  await expect(status).toContainText("Recorder busy");
+  await expect(status).toHaveClass(/err/);
+});
+
+test("an end-meeting failure surfaces the failure headline", async ({ page }) => {
+  // Distinct from the failed-pipeline CARD above: this is the End trigger itself
+  // failing (meetingEnd { phase: "failed" }), surfaced as a headline.
+  await openPopup(page, {
+    store: {
+      meetingSessionId: "2026-06-19T10-00-00Z",
+      meetingActive: false,
+      meetingEnd: { phase: "failed", error: "the recorder rejected the range" },
+    },
+  });
+  const status = page.locator("#meetingStatus");
+  await expect(status).toContainText("End meeting failed: the recorder rejected the range");
+  await expect(status).toHaveClass(/err/);
+});
+
+test("dismissing a failed meeting clears the card and re-enables Start", async ({ page }) => {
+  // A finished/failed meeting offers Dismiss (the meeting is no longer active).
+  // Dismissing clears the durable result so the next open is idle — the operator
+  // can immediately start the next meeting (the restart path).
+  await openPopup(page, {
+    store: { meetingSessionId: "s", meetingActive: false },
+    poll: { ok: true, state: "failed", stage: "transcribe", error: "boom", error_kind: "NoUsableWavs" },
+  });
+
+  const failure = page.locator('[data-slot="failure"]');
+  await expect(failure).toBeVisible();
+  const dismiss = page.getByRole("button", { name: "Dismiss" });
+  await expect(dismiss).toBeVisible();
+
+  await dismiss.click();
+
+  await expect(failure).toBeHidden();
+  await expect(page.getByRole("button", { name: "Start meeting" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "End meeting" })).toBeDisabled();
+  await expect(page.locator("#meetingStatus")).toBeEmpty();
+});
