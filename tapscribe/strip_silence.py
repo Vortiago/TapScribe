@@ -89,12 +89,15 @@ def _get_silero_model():
     """Load (and cache) the Silero VAD model once per process — mirrors
     `speech_gate._get_silero_model`. The strip-preview route runs the
     detector per knob pause, so reloading the model from disk on every
-    call would put its deserialisation cost on every slider drag."""
+    call would put its deserialisation cost on every slider drag.
+
+    `onnx=True` for the same reason as `speech_gate._get_silero_model`:
+    avoid the `torch.jit.load` PyTorch deprecated / 3.14-flagged as unsupported."""
     global _silero_model
     if _silero_model is None:
         from silero_vad import load_silero_vad
 
-        _silero_model = load_silero_vad()
+        _silero_model = load_silero_vad(onnx=True)
     return _silero_model
 
 

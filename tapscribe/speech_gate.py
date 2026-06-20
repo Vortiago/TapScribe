@@ -211,12 +211,18 @@ def _get_silero_model() -> object:
     """Load (and cache) the Silero VAD model. Imports are inside the
     function so a TapScribe install without the `vad` extra doesn't
     fail at import time — the gate is constructible without Silero,
-    used by tests, and only `make_silero_vad` reaches for the model."""
+    used by tests, and only `make_silero_vad` reaches for the model.
+
+    `onnx=True` loads the ONNX build via onnxruntime rather than the
+    TorchScript `.jit` via `torch.jit.load`, which PyTorch deprecated and
+    flags as unsupported on Python 3.14+ ("may break"). Same model, same
+    results; silero still uses torch tensors for I/O so torch stays a
+    dependency — we just don't ride the deprecated loader."""
     global _silero_model
     if _silero_model is None:
         from silero_vad import load_silero_vad  # noqa: PLC0415
 
-        _silero_model = load_silero_vad()
+        _silero_model = load_silero_vad(onnx=True)
     return _silero_model
 
 

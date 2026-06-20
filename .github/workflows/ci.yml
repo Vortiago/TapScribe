@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
 
@@ -190,9 +190,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install runtime + faster-whisper + silero-vad (CPU torch)
+      - name: Install runtime + test harness + faster-whisper + silero-vad
         run: |
-          pip install -e ".[whisper-cpu,vad]" playwright
+          pip install -e ".[whisper-cpu,vad]" playwright pytest pytest-asyncio
           # silero-vad pulls torch/torchaudio from PyPI whose native libs can
           # mismatch; pin the CPU build last so torchaudio's extension loads.
           pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cpu
