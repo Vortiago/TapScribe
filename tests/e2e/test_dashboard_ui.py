@@ -44,12 +44,16 @@ from tapscribe.recorder import JobState
 
 from .conftest import RunningRecorder
 from .fake_transcriber import FakeTranscriber
-from .harness import stream_wav_via_tap, streams_drained, synth_speech_like_wav, wait_until
+from .harness import (
+    playwright_session,
+    stream_wav_via_tap,
+    streams_drained,
+    synth_speech_like_wav,
+    wait_until,
+)
 
 if importlib.util.find_spec("playwright") is None:  # pragma: no cover
     pytest.skip("playwright not installed", allow_module_level=True)
-
-from playwright.async_api import async_playwright  # noqa: E402 — must follow the skip
 
 ALICE_TEXT = "The quick brown fox jumps over the lazy dog."
 BOB_TEXT = "Hello operator, this is a transcription pipeline check."
@@ -127,7 +131,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
         "bob": synth_speech_like_wav(tmp_path / "bob.wav", seconds=6.0, freq_hz=440.0),
     }
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -412,7 +416,7 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
         f"got {[w.name for w in region_wavs]}"
     )
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -558,7 +562,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
     }
     """
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -672,7 +676,7 @@ async def test_recordings_strip_preview_tracks_knobs_and_matches_commit(
         }}
         """
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -781,7 +785,7 @@ async def test_dashboard_delete_session_audio_keeps_transcript(
         encoding="utf-8",
     )
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -850,7 +854,7 @@ async def test_sessions_view_absorb_delete_and_prune(
     source_dir = seed(source_id, wavs=1)
     empty_dir = seed(empty_id, wavs=0)
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -957,7 +961,7 @@ async def test_dashboard_with_real_audio_and_whisper(
     assert await wait_until(lambda: streams_drained(rec), timeout=10.0)
     assert (rec.session_dir / "armstrong-en").with_suffix(".wav").parent.exists()
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -1096,7 +1100,7 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
         )
         assert resp.status_code == 200, resp.text
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -1203,7 +1207,7 @@ async def test_lazy_transcript_fetch_is_cached_not_per_poll(
         )
         assert resp.status_code == 200, resp.text
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -1347,7 +1351,7 @@ async def test_next_poll_render_does_not_clobber_open_controls(
         )
         assert resp.status_code == 200, resp.text
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -1553,7 +1557,7 @@ async def test_dashboard_idle_polling_does_not_churn_dom(running_recorder: Runni
     enough to OOM a long-lived operator tab.
     """
     base = running_recorder.base_url
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -1682,7 +1686,7 @@ async def test_live_captions_scoped_to_focused_session(running_recorder: Running
     )
     count_sel = '#viewRoot [data-slot="liveFeedCount"]'
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -1785,7 +1789,7 @@ async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder:
     sid = "2025-02-01T09-00-00Z"
     _seed_merged_session(rec, sid, segments=120)
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -1871,7 +1875,7 @@ async def test_meeting_pipeline_job_renders_stage_labelled_bar(running_recorder:
     sid = "2025-03-01T09-00-00Z"
     _seed_merged_session(rec, sid, segments=5)
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -1975,7 +1979,7 @@ async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
         # The relay must be connected before a caption can broadcast.
         assert await wait_until(lambda: len(rr.fake_wlk.connections) >= 1, timeout=10.0)
 
-        async with async_playwright() as pw:
+        async with playwright_session() as pw:
             try:
                 browser = await pw.chromium.launch(headless=True)
             except Exception as e:  # pragma: no cover
@@ -2065,7 +2069,7 @@ async def test_live_log_dialog_refresh_preserves_text_selection(
     for i in range(5):
         rr.recorder.live.log.append(f"INFO:whisperlivekit:seed line {i}")
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2152,7 +2156,7 @@ async def test_recordings_strip_controls_stay_visible_with_many_wavs(
     await asyncio.gather(*(_one(i) for i in range(n_wavs)))
     assert await wait_until(lambda: streams_drained(rr.recorder), timeout=15.0)
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2207,7 +2211,7 @@ async def test_recordings_waveform_renders_real_canvas_not_mock(
     )
     assert await wait_until(lambda: streams_drained(rr.recorder), timeout=10.0)
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2266,7 +2270,7 @@ async def test_recordings_clicking_anywhere_on_row_selects_its_waveform(
         )
     assert await wait_until(lambda: streams_drained(rr.recorder), timeout=12.0)
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2344,7 +2348,7 @@ async def test_transcribe_page_source_toggle_picks_original_or_stripped(
     n_clips = len(sorted((rr.recorder.session_dir / "stripped").glob("*.wav")))
     assert n_clips >= 1
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2438,7 +2442,7 @@ async def test_transcribe_cache_panel_unions_original_and_stripped_variants(
             source="stripped",
         )
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2538,7 +2542,7 @@ async def test_summary_stage_command_source_generates_and_renders(
     echo_cmd = _py_summarize_cmd(f"import sys; sys.stdout.write({marker!r})")
     fail_cmd = _py_summarize_cmd("import sys; sys.stderr.write('kaboom'); sys.exit(1)")
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2599,7 +2603,7 @@ async def test_summary_stage_has_no_mock_not_wired_tags(running_recorder: Runnin
     """The 'mock · not wired' tags are gone from the Summary stage now that it's
     real; Local + Command + API (#85) are all wired — no source stays disabled."""
     rr = running_recorder
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2634,7 +2638,7 @@ async def test_summary_stage_local_is_default_and_toggles_command_field(running_
     the Local slice adds on top of the Command tracer bullet — no model download
     needed, so it runs offline on CI."""
     rr = running_recorder
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2669,7 +2673,7 @@ async def test_summary_api_source_reveals_pane_with_write_only_key(running_recor
     pre-filled (the server exposes only key_set, never the key itself). Switching
     away hides the pane. All click-driven, so the poll never rebuilds it."""
     rr = running_recorder
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2709,7 +2713,7 @@ async def test_summary_command_preset_seeds_template_and_preview(running_recorde
     transcript-on-stdin; hand-editing the template flips the preset back to
     custom. All input-event-driven — the poll never rebuilds the pane."""
     rr = running_recorder
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2798,7 +2802,7 @@ async def test_summary_output_renders_markdown_safely(running_recorder: RunningR
     md = "# Decisions\n- ship the MD_MARKER dashboard\n**bold** <img src=x onerror=alert(1)>"
     md_cmd = _py_summarize_cmd(f"import sys; sys.stdin.read(); sys.stdout.write({md!r})")
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -2908,7 +2912,7 @@ async def test_summary_stage_local_sends_picked_model_and_max_tokens(running_rec
     }
     captured: dict[str, object] = {}
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -3031,7 +3035,7 @@ async def test_summary_stage_local_seeds_max_tokens_and_surfaces_error(running_r
         "max_tokens_max": 4096,
     }
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -3121,7 +3125,7 @@ async def test_summary_persists_across_reload(running_recorder: RunningRecorder)
     marker = "PERSISTED_SUMMARY_SURVIVES_RELOAD"
     echo_cmd = _py_summarize_cmd(f"import sys; sys.stdout.write({marker!r})")
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -3175,7 +3179,7 @@ async def test_settings_summarizer_default_card_saves_and_prefills(running_recor
     from view memory."""
     rr = running_recorder
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -3265,7 +3269,7 @@ async def test_summary_prefills_effective_config_and_saves_session_override(
         encoding="utf-8",
     )
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -3354,7 +3358,7 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
     trip it as soon as a region's build output changes without its sig changing."""
     base = running_recorder.base_url
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -3394,5 +3398,36 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
                 f"but the sig did not — those regions will go stale. Inspect "
                 "window.__TAPSCRIBE_SIG_DRIFT in the browser for details."
             )
+        finally:
+            await browser.close()
+
+
+async def test_get_by_test_id_is_wired_to_data_slot() -> None:
+    """Pin the repo's e2e selector convention.
+
+    `playwright_session()` points Playwright's test-id attribute at `data-slot`
+    — the native `data-*` marker the dashboard templates already bind through
+    (`slot()`/`pick()` in `web/js/templates.js`) — so `page.get_by_test_id("x")`
+    resolves `[data-slot="x"]`. This test is hermetic (no server): it sets its
+    own DOM, so it asserts the *wiring*, not any view. A Playwright/Chromium
+    bump or a stray `set_test_id_attribute` that reverted the convention turns
+    this red instead of silently breaking every `get_by_test_id` in the suite.
+    """
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
+        try:
+            context = await browser.new_context()
+            page = await context.new_page()
+            await page.set_content('<button data-slot="startMeeting">Start</button>')
+
+            by_test_id = page.get_by_test_id("startMeeting")
+            assert await by_test_id.count() == 1, "get_by_test_id must resolve [data-slot=…]"
+            assert (await by_test_id.text_content()) == "Start"
+            # Resolves the same node the suite's existing CSS-attribute locators target.
+            assert await page.locator('[data-slot="startMeeting"]').count() == 1
         finally:
             await browser.close()

@@ -234,6 +234,25 @@ green, check what's in the CI matrix you're not running:
 - The dashboard-UI CI job runs `pytest tests/e2e/test_dashboard_ui.py
   -q -m "not real_audio"`. Run the same locally before pushing.
 
+### e2e selectors: `data-slot` is the test-id; open Playwright via `playwright_session()`
+
+Browser tests open Playwright through `playwright_session()`
+(`tests/e2e/harness.py`), NOT raw `async_playwright()`. The wrapper points
+Playwright's test-id attribute at `data-slot` — the native `data-*` marker the
+dashboard templates already bind through (`slot()`/`pick()` in
+`web/js/templates.js`), so `page.get_by_test_id("waveName")` resolves
+`[data-slot="waveName"]` with auto-waiting. Existing `[data-slot=…]` CSS
+locators still work; `get_by_test_id` is the additive entry point. There is no
+native HTML `testid` — `data-*` is the platform's scriptable-handle mechanism,
+so this is the native convention, not a borrowed framework idiom. New e2e files
+import `playwright_session` from `.harness` rather than reintroducing
+`async_playwright()`. Prefer accessible selectors (`get_by_role` /
+`get_by_label`) for controls and `data-slot` only for structural seams that have
+no role; never select on presentational classes (`.wavrow__dur`, `.segctl__opt`)
+— they break on a restyle. `test_get_by_test_id_is_wired_to_data_slot` pins the
+wiring. The full convention + copyable configs (JS + Python) live in the
+vanilla-web skill (`reference/testing.md`, `testing/`).
+
 ### The pre-push hook will stop a red push for you
 
 `.claude/hooks/pre-push.sh` (wired into `.claude/settings.json` as a
