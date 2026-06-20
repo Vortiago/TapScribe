@@ -229,6 +229,7 @@ async def stream_wav_via_tap(
     wav_path: Path,
     utterance_id: str | None = None,
     tap_token: str = "",
+    session: str | None = None,
     frame_interval_s: float = 0.0,
 ) -> BridgeRun:
     """Open one /tap WS, stream `wav_path` as 20 ms PCM frames, close.
@@ -237,11 +238,23 @@ async def stream_wav_via_tap(
     frame per WebSocket message so the relay's caption granularity is
     realistic; if `frame_interval_s > 0` the bridge paces frames so a
     test can sample mid-stream state rather than only post-close.
+
+    `session` stamps `&session=<id>` on the /tap URL — the bridge's
+    detached-session routing (the SpatialChat Bridge does this on every
+    open while a meeting is active). Absent → the recorder's global
+    current session, exactly as an un-bracketing bridge behaves.
     """
     pcm = read_wav_as_pcm_bytes(wav_path)
     frames = frame_pcm(pcm)
 
-    qs = urlencode({"identity": identity, "name": name, "utterance_id": utterance_id or ""})
+    params = {"identity": identity, "name": name, "utterance_id": utterance_id or ""}
+    # Stamp `&session=` only when truthy — same rule the production bridges use
+    # (local_test_bridge `if session:`, content.js `if (sessionId)`, the C#
+    # client's non-empty check): an empty/absent value means "use the global
+    # session, send no param", never an empty `session=` the recorder rejects.
+    if session:
+        params["session"] = session
+    qs = urlencode(params)
     url = f"{ws_base_url}/tap?{qs}"
     subprotocols = [f"{TAP_SUBPROTOCOL_PREFIX}{tap_token}"] if tap_token else None
 
