@@ -27,10 +27,17 @@ async function openPopup(page, { store = {}, poll = null } = {}) {
           get: (keys) =>
             Promise.resolve(Object.fromEntries(keys.map((/** @type {string} */ k) => [k, data[k]]))),
           set: (obj) => {
-            Object.assign(data, obj);
+            // Match real chrome.storage.onChanged: fire ONLY for keys whose value
+            // actually changed. A no-op re-set of an unchanged key (e.g. dismiss
+            // re-writing meetingActive:false) fires nothing — emitting it here
+            // would drive listeners down code paths Chrome never reaches.
             const ch = {};
-            for (const k of Object.keys(obj)) ch[k] = { newValue: obj[k] };
-            for (const fn of listeners) fn(ch, "local");
+            for (const k of Object.keys(obj)) {
+              if (data[k] === obj[k]) continue;
+              ch[k] = { oldValue: data[k], newValue: obj[k] };
+            }
+            Object.assign(data, obj);
+            if (Object.keys(ch).length) for (const fn of listeners) fn(ch, "local");
             return Promise.resolve();
           },
         },
@@ -109,4 +116,72 @@ test("a failed pipeline surfaces the stage and a human-readable reason", async (
   await expect(failure).toBeVisible();
   await expect(failure).toContainText("transcribe");
   await expect(failure).toContainText(/no usable audio/i);
+});
+
+// ── busy / failure / restart branches ───────────────────────────────────────
+// The popup re-derives its headline from durable meeting state on open, so the
+// busy + end-failed branches are storage-driven (no poll). The restart path —
+// Dismiss after a finished/failed meeting — was untested entirely; only the
+// happy-path Copy used the card's buttons.
+
+test("a busy end-of-meeting surfaces the recorder-busy headline", async ({ page }) => {
+  // content.js publishes meetingEnd { phase: "busy" } when the pipeline trigger
+  // gets a 409 (another job already running on the session). The popup derives
+  // the headline from that durable state on open — the poll stays idle.
+  await openPopup(page, {
+    store: {
+      meetingSessionId: "2026-06-19T10-00-00Z",
+      meetingActive: false,
+      meetingEnd: { phase: "busy" },
+    },
+  });
+  const status = page.locator("#meetingStatus");
+  await expect(status).toContainText("Recorder busy");
+  await expect(status).toHaveClass(/err/);
+});
+
+test("an end-meeting failure surfaces the failure headline", async ({ page }) => {
+  // Distinct from the failed-pipeline CARD above: this is the End trigger itself
+  // failing (meetingEnd { phase: "failed" }), surfaced as a headline.
+  await openPopup(page, {
+    store: {
+      meetingSessionId: "2026-06-19T10-00-00Z",
+      meetingActive: false,
+      meetingEnd: { phase: "failed", error: "the recorder rejected the range" },
+    },
+  });
+  const status = page.locator("#meetingStatus");
+  await expect(status).toContainText("End meeting failed: the recorder rejected the range");
+  await expect(status).toHaveClass(/err/);
+});
+
+test("dismissing a failed meeting clears the headline and the card", async ({ page }) => {
+  // Seed BOTH a failed-End headline and a failed pipeline poll, so there is
+  // something to clear: the headline AND the card are present before Dismiss
+  // (otherwise an empty-after-dismiss check would pass vacuously). Dismiss clears
+  // the durable result, returning the popup to idle — the restart path; Start is
+  // already enabled whenever Dismiss is offered, since the meeting is inactive.
+  await openPopup(page, {
+    store: {
+      meetingSessionId: "s",
+      meetingActive: false,
+      meetingEnd: { phase: "failed", error: "the recorder rejected the range" },
+    },
+    poll: { ok: true, state: "failed", stage: "transcribe", error: "boom", error_kind: "NoUsableWavs" },
+  });
+
+  const status = page.locator("#meetingStatus");
+  const failure = page.locator('[data-slot="failure"]');
+  await expect(status).toContainText("End meeting failed");
+  await expect(failure).toBeVisible();
+  const dismiss = page.getByRole("button", { name: "Dismiss" });
+  await expect(dismiss).toBeVisible();
+
+  await dismiss.click();
+
+  // Both the headline and the card are gone; the popup is idle and ready.
+  await expect(status).toBeEmpty();
+  await expect(failure).toBeHidden();
+  await expect(page.getByRole("button", { name: "Start meeting" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "End meeting" })).toBeDisabled();
 });

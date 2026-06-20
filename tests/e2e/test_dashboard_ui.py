@@ -37,12 +37,13 @@ from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 
+import httpx
 import pytest
 
 from tapscribe import transcribers as _transcribers
 from tapscribe.recorder import JobState
 
-from .conftest import RunningRecorder
+from .conftest import RunningRecorder, _FakeAliveProc
 from .fake_transcriber import FakeTranscriber
 from .harness import (
     playwright_session,
@@ -1779,6 +1780,135 @@ async def test_live_captions_scoped_to_focused_session(running_recorder: Running
             await browser.close()
 
 
+async def test_dashboard_live_channel_start_stop(
+    running_recorder: RunningRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """The operator starts and stops the live channel from the dashboard
+    (#101's explicit `(e2e)` acceptance criterion; PRD #99 story 20).
+
+    Nothing else in the suite drives this control: every fixture pre-marks the
+    channel running and `AUTO_START_LIVE` is off. Here the channel begins
+    STOPPED, the operator clicks **start** in the live panel, the panel flips
+    to running and a tap's settled caption begins to flow, then the operator
+    clicks **stop** and the channel goes down while `/tap` recording keeps
+    working (graceful degradation, ADR-0002).
+
+    The OS subprocess spawn is the ONE faked seam — `whisperlivekit-server`
+    isn't installed in CI, and `build_live_cmd` + the relay have their own
+    tests. Faking only `live.start` / `live.stop` (and leaving the channel's
+    port aimed at the fake WlK) keeps the route, the `begin_transition` state
+    machine, `/api/state`, and the panel's render all real — which is exactly
+    what this criterion is about.
+    """
+    rr = running_recorder
+    rec = rr.recorder
+    fake_wlk = rr.fake_wlk
+
+    # The fixture pre-marks the channel alive; begin from a clean STOPPED state.
+    rec.live._proc = None
+    rec.live.info["state"] = "stopped"
+
+    def _fake_start(*, model=None, language=None):  # noqa: ARG001
+        # Stand in for a fully-started child: alive proc (`_FakeAliveProc` —
+        # poll() is None) + running state, config.port still aimed at the fake
+        # WlK so the relay connects.
+        rec.live._proc = _FakeAliveProc()
+        rec.live.info["state"] = "running"
+        rec.live.info["pid"] = "fake"
+        return True, "started (faked spawn)"
+
+    def _fake_stop(*, timeout=5.0):  # noqa: ARG001
+        rec.live._proc = None
+        rec.live.info["state"] = "stopped"
+        rec.live.info["pid"] = ""
+        return True, "stopped (faked)"
+
+    monkeypatch.setattr(rec.live, "start", _fake_start)
+    monkeypatch.setattr(rec.live, "stop", _fake_stop)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+
+            async def _wait_live(state: str, btn: str) -> None:
+                """Block until the live-panel badge reads `state` AND its
+                state-specific action button (`btn`) is present."""
+                await page.wait_for_function(
+                    """([s, b]) =>
+                         document.querySelector('[data-slot="liveStateBadge"]')?.textContent?.trim() === s
+                         && !!document.querySelector(b)""",
+                    arg=[state, btn],
+                    timeout=10000,
+                )
+
+            await page.goto(rr.base_url + "/#capture", wait_until="domcontentloaded")
+
+            # Stopped: the live panel offers Start.
+            await _wait_live("stopped", "#liveStartBtn")
+
+            # Click Start → POST /api/live/start → the channel reports running.
+            await page.click("#liveStartBtn")
+            await _wait_live("running", "#liveStopBtn")
+            assert rec.live.running(), "channel must be running after dashboard Start"
+
+            # Captions flow now that live is up: a tap opens a relay to the
+            # fake WlK whose settled line lands in the live feed.
+            stream_task = asyncio.create_task(
+                stream_wav_via_tap(
+                    ws_base_url=rr.ws_base_url,
+                    identity="alice",
+                    name="Alice",
+                    wav_path=synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0),
+                    utterance_id="utt-live-on",
+                    frame_interval_s=0.025,
+                )
+            )
+            async with httpx.AsyncClient(base_url=rr.base_url, timeout=10.0) as client:
+
+                async def _alice_active() -> bool:
+                    rows = (await client.get("/api/state")).json().get("active", [])
+                    return any(r["identity"] == "alice" for r in rows)
+
+                assert await wait_until(_alice_active, timeout=5.0), "tap never went active"
+                fake_wlk.push_committed("live caption after start")
+                await stream_task
+                assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+                feed = (await client.get("/api/state")).json()["live_feed"]
+                assert any(
+                    e["identity"] == "alice" and e["text"] == "live caption after start" for e in feed
+                ), feed
+
+            # Click Stop → the channel goes down.
+            await page.click("#liveStopBtn")
+            await _wait_live("stopped", "#liveStartBtn")
+            assert not rec.live.running(), "channel must be down after dashboard Stop"
+
+            # Recording still works with the live channel down (ADR-0002).
+            before = len(list(rec.session_dir.glob("*.wav")))
+            await stream_wav_via_tap(
+                ws_base_url=rr.ws_base_url,
+                identity="bob",
+                name="Bob",
+                wav_path=synth_speech_like_wav(tmp_path / "bob.wav", seconds=0.5, freq_hz=330.0),
+                utterance_id="utt-live-off",
+            )
+            assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+            assert await wait_until(
+                lambda: len(list(rec.session_dir.glob("*.wav"))) == before + 1, timeout=5.0
+            ), "recording must continue with the live channel stopped"
+        finally:
+            await browser.close()
+
+
 async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder: RunningRecorder):
     """Job progress ticks (~1/s during a transcribe/strip) must update the job
     bar IN PLACE, not invalidate the merged transcript's render signature —
@@ -3168,6 +3298,214 @@ async def test_summary_persists_across_reload(running_recorder: RunningRecorder)
             # view memory).
             hint = await page.locator('[data-slot="sumOutHint"]').text_content()
             assert "command" in (hint or ""), f"hint must name the persisted source, got {hint!r}"
+        finally:
+            await browser.close()
+
+
+async def test_dashboard_renders_real_end_of_meeting_pipeline_summary(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,  # noqa: ARG001 — fake ASR keeps it CI-runnable; the chain is otherwise real
+    tmp_path: Path,
+):
+    """The dashboard surfaces a REAL end-of-meeting pipeline run.
+
+    The existing job-bar coverage injects a synthetic JobState
+    (`test_meeting_pipeline_job_renders_stage_labelled_bar`), and the
+    summary-stage tests drive the single Generate button on a hand-seeded
+    transcript — neither runs the unified pipeline orchestrator. Here a
+    captured session is put through the real strip → transcribe → summarize
+    chain as ONE Session job (triggered through the tap pipeline endpoint the
+    Bridges use), and the dashboard's Summary view must render the summary
+    that real chain produced — and keep it across a reload, served from the
+    persisted session-summary.json the pipeline wrote, never seeded by the
+    test. The transcriber is faked (so this runs in the dashboard CI job
+    without faster-whisper); every other stage — strip, merge, the Command
+    summarizer subprocess, persistence — is real.
+    """
+    rr = running_recorder
+    rec = rr.recorder
+
+    # Operator-default summarizer = a Command source that proves BOTH that the
+    # summarize stage ran AND that the real merged transcript reached it
+    # (fake_transcriber emits "…quick brown fox…" for Alice, so 'quick' only
+    # appears if the chain actually transcribed + merged before summarizing).
+    marker = "REAL_PIPELINE_SUMMARY_OK"
+    summary_cmd = _py_summarize_cmd(
+        "import sys; t = sys.stdin.read();"
+        f" sys.stdout.write({marker!r} + (' quick' if 'quick' in t else ' NO_TRANSCRIPT'))"
+    )
+    rec.config_dir.joinpath("summarizer.json").write_text(
+        json.dumps({"source": "command", "command": summary_cmd}), encoding="utf-8"
+    )
+
+    # Capture: one real /tap recording into the current session.
+    await stream_wav_via_tap(
+        ws_base_url=rr.ws_base_url,
+        identity="alice",
+        name="Alice",
+        wav_path=synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0),
+        utterance_id="utt-pipeline",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+    sid = rec.session_start
+
+    # Trigger the unified pipeline through the tap endpoint and wait for the
+    # whole chain to finish (a failed stage fails the test with its reason).
+    async with httpx.AsyncClient(base_url=rr.base_url, timeout=30.0) as client:
+        r = await client.post(f"/api/tap/sessions/{sid}/pipeline")
+        assert r.status_code == 202, r.text
+
+        async def _pipeline_done() -> bool:
+            body = (await client.get(f"/api/tap/sessions/{sid}/pipeline")).json()
+            assert body.get("state") != "failed", f"pipeline failed: {body}"
+            return body.get("state") == "done"
+
+        assert await wait_until(_pipeline_done, timeout=60.0, interval=0.25), "pipeline did not finish"
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            # Current session is the default Summary-view selection; its
+            # persisted summary lazy-loads with no Generate click (the same
+            # marker → GET /api/sessions/{s}/summary path the reload test pins).
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(m) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(m)""",
+                arg=marker,
+                timeout=15000,
+            )
+            out = await page.locator('[data-slot="sumOut"]').text_content()
+            assert "quick" in (out or ""), f"summary must reflect the real merged transcript, got {out!r}"
+
+            # Survives reload — served from the pipeline's persisted summary,
+            # not view memory (the reload wiped that).
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(m) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(m)""",
+                arg=marker,
+                timeout=15000,
+            )
+            hint = await page.locator('[data-slot="sumOutHint"]').text_content()
+            assert "command" in (hint or ""), f"hint must name the persisted source, got {hint!r}"
+        finally:
+            await browser.close()
+
+
+async def test_dashboard_flags_stale_summary_after_retranscribe_and_clears_on_regenerate(
+    running_recorder: RunningRecorder,
+):
+    """#94: a summary built before a re-transcribe is flagged stale, and the cue
+    clears when the operator regenerates.
+
+    The persisted summary carries the `transcribed_at` of the transcript it was
+    built from (batch_summarize), projected onto the session's slim
+    `session_summary` marker in /api/state. The Summary view compares that stamp
+    against the live `session_transcript.transcribed_at` and, when the transcript
+    is newer (the session was re-transcribed since), renders a 'predates the
+    current transcript' cue — in place on the poll tick, with NO reload.
+    Regenerating rebuilds from the current transcript, so the summary's stamp
+    catches up and the cue clears.
+
+    Full-stack proof the Generate route persists the stamp, /api/state projects
+    it, and the view's staleness compare + sibling cue render all line up — which
+    the unit/route tests (persisted field + marker shape in isolation) can't
+    exercise together.
+    """
+    rr = running_recorder
+
+    sd = rr.recorder.session_dir
+    sd.mkdir(parents=True, exist_ok=True)
+
+    def _write_transcript(*, stamp: str, text: str) -> None:
+        # A re-transcribe rewrites session-transcript.json with new text + stamp.
+        # The /api/state JSON cache is keyed on (mtime_ns, size); the distinct
+        # `text` between the two writes changes the size, so the next poll re-reads
+        # the bumped stamp without the test relying on mtime granularity.
+        (sd / "session-transcript.json").write_text(
+            json.dumps(
+                {
+                    "session": rr.recorder.session_start,
+                    "model": "test",
+                    "transcribed_at": stamp,
+                    "speakers": ["Alice"],
+                    "segments": [],
+                    "plain_text": text,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    # Transcript v1 (older stamp).
+    _write_transcript(stamp="2026-01-01T00:00:00+00:00", text="Alice: we decided to ship the dashboard.")
+
+    marker = "STALE_CUE_SUMMARY_OK"
+    echo_cmd = _py_summarize_cmd(f"import sys; sys.stdout.write({marker!r})")
+    stale_text = "predates the current transcript"
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
+
+            # Generate once via the Command source — the summary records the v1
+            # transcript stamp.
+            await page.wait_for_selector('[data-src="command"]', timeout=6000)
+            await page.click('[data-src="command"]')
+            await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
+            await page.wait_for_function(
+                """() => {
+                  const b = document.querySelector('[data-slot="sumGenerate"]');
+                  return b && !b.disabled;
+                }""",
+                timeout=8000,
+            )
+            await page.fill('[data-slot="sumCmd"]', echo_cmd)
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """(m) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(m)""",
+                arg=marker,
+                timeout=10000,
+            )
+            # Fresh summary — no stale cue yet (its stamp matches the transcript's).
+            out = await page.locator('[data-slot="sumOut"]').text_content()
+            assert stale_text not in (out or ""), f"summary must not be stale yet, got {out!r}"
+
+            # Re-transcribe: bump the merged transcript's stamp on disk. The
+            # /api/state poll picks it up and the view flags the summary stale IN
+            # PLACE (no reload) — its recorded stamp is now older than the live
+            # transcript's.
+            _write_transcript(
+                stamp="2026-02-01T00:00:00+00:00",
+                text="Alice: we decided to ship the dashboard, and to cut a release this week.",
+            )
+            await page.wait_for_function(
+                """(s) => (document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(s)""",
+                arg=stale_text,
+                timeout=10000,
+            )
+
+            # Regenerate against the current transcript: the new summary records
+            # the newer stamp, so the cue clears (and the summary still renders).
+            await page.click('[data-slot="sumGenerate"]')
+            await page.wait_for_function(
+                """(s) => !(document.querySelector('[data-slot="sumOut"]')?.textContent || '').includes(s)""",
+                arg=stale_text,
+                timeout=10000,
+            )
+            out2 = await page.locator('[data-slot="sumOut"]').text_content()
+            assert marker in (out2 or ""), f"regenerated summary must still render, got {out2!r}"
         finally:
             await browser.close()
 

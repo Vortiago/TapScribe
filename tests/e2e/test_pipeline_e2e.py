@@ -262,6 +262,123 @@ async def test_session_label_persists_through_meta_endpoint(
         assert session["session_meta"].get("label") == "Kickoff meeting"
 
 
+async def test_two_detached_sessions_capture_concurrently_without_cross_leak(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,
+    synthetic_wavs: dict[str, Path],
+):
+    """Per-bridge isolation, full stack: two bridges, each carrying its OWN
+    detached ?session=<id>, stream CONCURRENTLY into one real Recorder.
+
+    This is the structural promise per-bridge Sessions exist for (PRD #99
+    user story 13 — "two concurrent meetings produce two clean sessions
+    instead of one muddled folder"). The route suite pins it with the
+    serialized TestClient (`test_session_param_isolates_tap_from_concurrent_
+    global_tap`); here it runs as real, overlapping WS streams on a real
+    event loop, and each session is transcribed independently so a cross-leak
+    would show up in the merged transcript, not just on disk.
+    """
+    rec = running_recorder.recorder
+    fake_wlk = running_recorder.fake_wlk
+    base = running_recorder.base_url
+    ws_base = running_recorder.ws_base_url
+
+    async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
+        # Two detached sessions of the bridges' own. Neither rotates the
+        # global current session — the no-yank property of #100.
+        global_session = rec.session_start
+        sid_alice = (await client.post("/api/tap/new-session", json={"detached": True})).json()["session"]
+        sid_bob = (await client.post("/api/tap/new-session", json={"detached": True})).json()["session"]
+        assert sid_alice != sid_bob, "two detached creates must mint distinct sessions"
+        assert rec.session_start == global_session, "detached create must not rotate the global session"
+
+        # Stream BOTH bridges at once, each pinned to its own detached session.
+        # Pace frames so the WSes overlap long enough for /api/state and the
+        # relay broadcast to see both (mirrors the two-bridges test).
+        alice_task = asyncio.create_task(
+            stream_wav_via_tap(
+                ws_base_url=ws_base,
+                identity="alice",
+                name="Alice",
+                wav_path=synthetic_wavs["alice"],
+                utterance_id="utt-alice-detached",
+                session=sid_alice,
+                frame_interval_s=0.025,
+            )
+        )
+        bob_task = asyncio.create_task(
+            stream_wav_via_tap(
+                ws_base_url=ws_base,
+                identity="bob",
+                name="Bob",
+                wav_path=synthetic_wavs["bob"],
+                utterance_id="utt-bob-detached",
+                session=sid_bob,
+                frame_interval_s=0.025,
+            )
+        )
+
+        async def _both_active() -> bool:
+            resp = await client.get("/api/state")
+            ids = {row["identity"] for row in resp.json().get("active", [])}
+            return {"alice", "bob"}.issubset(ids)
+
+        assert await wait_until(_both_active, timeout=3.0), (
+            "expected /api/state.active to surface both concurrent detached-session bridges"
+        )
+
+        # Settled lines broadcast to every open relay; each tap's live feed
+        # entry must be stamped with ITS OWN detached session, not the global.
+        fake_wlk.push_committed("settled line")
+
+        await asyncio.gather(alice_task, bob_task)
+        assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+        # 1) WAVs landed in the RIGHT folders — and nowhere else.
+        alice_wavs = list((rec.recordings_dir / sid_alice).glob("*.wav"))
+        bob_wavs = list((rec.recordings_dir / sid_bob).glob("*.wav"))
+        assert len(alice_wavs) == 1 and "Alice" in alice_wavs[0].name, [p.name for p in alice_wavs]
+        assert len(bob_wavs) == 1 and "Bob" in bob_wavs[0].name, [p.name for p in bob_wavs]
+        # The global current session captured nothing — no leak across the bracket.
+        assert list((rec.recordings_dir / global_session).glob("*.wav")) == []
+
+        # 2) Live feed attribution is per detached session (issue #100's
+        #    `test_detached_tap_live_captions_attributed_to_its_session`,
+        #    here through the real relay over two concurrent taps).
+        feed = (await client.get("/api/state")).json()["live_feed"]
+        by_identity = {e["identity"]: e["session"] for e in feed if e["text"] == "settled line"}
+        assert by_identity.get("alice") == sid_alice, feed
+        assert by_identity.get("bob") == sid_bob, feed
+
+        # 3) Each session transcribes INDEPENDENTLY: its merged transcript
+        #    holds only its own speaker + scripted text. A cross-leak would
+        #    surface the other speaker's line here.
+        merged_alice = (
+            await client.post(
+                "/api/transcribe-session",
+                json={"session": sid_alice, "model": "fake-small.en"},
+                timeout=30.0,
+            )
+        ).json()
+        merged_bob = (
+            await client.post(
+                "/api/transcribe-session",
+                json={"session": sid_bob, "model": "fake-small.en"},
+                timeout=30.0,
+            )
+        ).json()
+
+        assert merged_alice["session"] == sid_alice
+        assert set(merged_alice["speakers"]) == {"Alice"}
+        assert ALICE_SCRIPTED_TEXT in merged_alice["plain_text"]
+        assert BOB_SCRIPTED_TEXT not in merged_alice["plain_text"]
+
+        assert merged_bob["session"] == sid_bob
+        assert set(merged_bob["speakers"]) == {"Bob"}
+        assert BOB_SCRIPTED_TEXT in merged_bob["plain_text"]
+        assert ALICE_SCRIPTED_TEXT not in merged_bob["plain_text"]
+
+
 # Real-audio variant: gated by both a fixture and the optional dependency.
 # When either is missing the test is skipped with a clear message; adding
 # real audio later is just dropping a file + reference transcript in
