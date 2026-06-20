@@ -20,6 +20,7 @@ import socket
 import threading
 import time
 import wave
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,35 @@ import websockets
 
 from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX
 from tapscribe.recorder import Recorder
+
+
+@asynccontextmanager
+async def playwright_session():
+    """`async_playwright()` plus this repo's e2e selector convention.
+
+    `data-slot` is the native `data-*` marker the dashboard templates already
+    carry — `slot()`/`pick()` bind through it (`web/js/templates.js`), and
+    `pick()` throws on a missing slot, so a renamed slot breaks the app's own
+    render in the same commit a test would. That makes it a stable,
+    can't-silently-rot test hook. Pointing Playwright's test-id attribute at it
+    lets tests address elements by intent — `page.get_by_test_id("waveName")`
+    resolves `[data-slot="waveName"]` with auto-waiting and clean errors.
+    Existing `[data-slot=...]` CSS locators keep working unchanged; this only
+    *adds* the `get_by_test_id` entry point. There is no native HTML `testid`
+    attribute — `data-*` is the spec's mechanism for a scriptable handle, so
+    this is the native convention, not a borrowed framework idiom.
+
+    The `playwright` import is local: this module is imported during collection
+    on the unit-test boxes that don't install playwright (conftest imports
+    harness unconditionally), while the e2e test modules skip themselves when
+    playwright is absent.
+    """
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as pw:
+        # One source of truth for the data-slot test-id convention; see docstring.
+        pw.selectors.set_test_id_attribute("data-slot")
+        yield pw
 
 
 def free_port() -> int:

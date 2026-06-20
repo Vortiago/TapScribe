@@ -54,7 +54,13 @@ import pytest
 from tapscribe.recorder import JobState
 
 from .conftest import RunningRecorder
-from .harness import stream_wav_via_tap, streams_drained, synth_speech_like_wav, wait_until
+from .harness import (
+    playwright_session,
+    stream_wav_via_tap,
+    streams_drained,
+    synth_speech_like_wav,
+    wait_until,
+)
 from .perf_probe import PROBE_INIT_JS, PassMetrics, PerfProbe, compute_pass, passes_as_json, summarize
 
 if os.environ.get("TAPSCRIBE_PERF_SOAK") != "1":  # pragma: no cover
@@ -65,8 +71,6 @@ if os.environ.get("TAPSCRIBE_PERF_SOAK") != "1":  # pragma: no cover
 
 if importlib.util.find_spec("playwright") is None:  # pragma: no cover
     pytest.skip("playwright not installed", allow_module_level=True)
-
-from playwright.async_api import async_playwright  # noqa: E402 — must follow the skips
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -353,7 +357,7 @@ def _report(scenario: str, passes: list[PassMetrics], extra: dict | None = None)
 async def test_soak_idle(running_recorder: RunningRecorder):
     """Floor: open the dashboard on an empty recorder, do nothing. Long tasks should
     be ~zero and post-GC growth flat; this is also the leak detector."""
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -377,7 +381,7 @@ async def test_soak_live_meeting(running_recorder: RunningRecorder, tmp_path: Pa
     rr = running_recorder
     stream_s = SETTLE_S + SOAK_S + 25.0
     passes: list[PassMetrics] = []
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -407,7 +411,7 @@ async def test_soak_big_library(running_recorder: RunningRecorder, tmp_path: Pat
     _seed_library(rr, sessions=24, wavs_per=8)
     stream_s = SETTLE_S + SOAK_S + 25.0
     passes: list[PassMetrics] = []
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -464,7 +468,7 @@ async def test_soak_transcript_heavy(running_recorder: RunningRecorder, tmp_path
 
     stream_s = SETTLE_S + SOAK_S + 25.0
     passes: list[PassMetrics] = []
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover
@@ -507,7 +511,7 @@ async def test_soak_view_cycle(running_recorder: RunningRecorder, tmp_path: Path
             i += 1
 
     passes: list[PassMetrics] = []
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
         except Exception as e:  # pragma: no cover

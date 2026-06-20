@@ -44,7 +44,8 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
     pytest.skip("playwright not installed", allow_module_level=True)
 
 import websockets  # noqa: E402
-from playwright.async_api import async_playwright  # noqa: E402
+
+from .harness import playwright_session  # noqa: E402
 
 pytestmark = pytest.mark.browser_e2e
 
@@ -237,7 +238,7 @@ async def loaded_bridge(fake_tap_server: FakeTapServer) -> AsyncIterator[LoadedE
     fixture_index = (FIXTURE_DIR / "index.html").read_text(encoding="utf-8")
     fixture_mock = (FIXTURE_DIR / "mock-room.js").read_text(encoding="utf-8")
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         # tempfile contextmanager so the user-data-dir is cleaned up
         # even if pytest cancels the test mid-run.
         with tempfile.TemporaryDirectory() as udd:
