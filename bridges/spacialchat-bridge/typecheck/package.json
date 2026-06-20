@@ -1,0 +1,13 @@
+{
+  "name": "spacialchat-bridge-typecheck",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "tsc --noEmit gate for the SpatialChat Bridge's shared, dependency-free helpers (control-client.js + pipeline-view.js). Never shipped; devDep only.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

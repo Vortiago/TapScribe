@@ -121,6 +121,31 @@ jobs:
       - name: Typecheck
         run: cd frontend && npm run typecheck
 
+  # Bridge typecheck — the SpatialChat Bridge's shared, dependency-free
+  # helpers (control-client.js + pipeline-view.js) opt into `// @ts-check`
+  # and are gated by `tsc --noEmit --strict`. Same rationale + shape as
+  # frontend-typecheck, but its own package (bridges/.../typecheck/) so the
+  # extension's chrome/global idioms stay out of the dashboard's tsconfig.
+  # Incremental: popup.js / content.js join the gate as they're typed.
+  bridge-typecheck:
+    name: bridge typecheck (tsc --noEmit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bridges/spacialchat-bridge/typecheck/package.json
+
+      - name: Install TypeScript
+        run: cd bridges/spacialchat-bridge/typecheck && npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: cd bridges/spacialchat-bridge/typecheck && npm run typecheck
+
   # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:
   # a cross-platform bridge-core class library, a Windows WASAPI capture
   # backend, and a WinForms tray runner. This job builds the whole solution on

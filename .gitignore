@@ -27,6 +27,10 @@ recordings/
 frontend/node_modules/
 frontend/package-lock.json
 
+# SpatialChat Bridge typecheck tooling (devDep only, never shipped)
+bridges/spacialchat-bridge/typecheck/node_modules/
+bridges/spacialchat-bridge/typecheck/package-lock.json
+
 # Perf soak reports (tests/e2e/test_next_perf_soak.py) — local measurements
 perf-reports/
 
