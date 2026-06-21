@@ -92,27 +92,29 @@ the picker runs:
   gate the operator picked is silently a no-op. `start.sh` runs
   `pip install -e ".[vad]"` when the module isn't importable.
 
-**`ffmpeg` is NOT required, period.** Every MLX backend
-(`mlx_whisper`, `mlx_parakeet`, `mlx_canary`) pre-decodes the
-recorder's WAV via `tapscribe.wav_predecode.load_recorder_wav_as_pcm`
-into a numpy float32 array and hands it directly to the model's
-array-accepting entry point:
+**`ffmpeg` is NOT required, period.** Every array-accepting backend
+(`mlx_whisper`, `mlx_parakeet`, and the `transformers` Parakeet path in
+`parakeet.py`) pre-decodes the recorder's WAV via
+`tapscribe.wav_predecode.load_recorder_wav_as_pcm` into a numpy float32
+array and hands it directly to the model's array-accepting entry point:
 
 - `mlx_whisper.transcribe(array, …)` for Whisper. The model's own
   30-s internal windowing covers long inputs.
 - `parakeet_mlx.audio.get_logmel(mx.array(array), preproc)` →
-  `model.generate(mel)` for Parakeet, **inside a chunking loop**
+  `model.generate(mel)` for MLX Parakeet, **inside a chunking loop**
   (`chunk_duration_s` / `overlap_duration_s` knobs on
   `MlxParakeetTranscriber`) so long sessions stay under the Metal
   GPU's per-buffer cap. Per-window timestamps are shifted by the
   window's start so the merged result is session-relative.
-- `mlx_audio.stt.models.canary.Model.generate(array, …)` for Canary,
-  **also chunked** — the upstream `max_tokens=200` default caps a
-  single call to roughly 30 s of speech, so the adapter calls
-  generate once per ~30 s window and stitches text. Canary 0.4.x's
-  `STTOutput` no longer reports segment or word-level timestamps,
-  so the adapter synthesises segment start/end from the window
-  offsets.
+- `processor([array], sampling_rate=16000)` →
+  `AutoModelForTDT.generate(..., return_dict_in_generate=True)` →
+  `processor.decode(sequences, durations=…)` for `transformers`
+  Parakeet (CUDA/CPU), **also chunked** through the same
+  `chunking.chunk_windows`. The decode returns per-token timestamps;
+  `_parakeet_tdt.build_segments_from_tdt_tokens` folds them into
+  word/segment alignment (a leading-space token starts a new word).
+  Note: the high-level ASR *pipeline*'s `return_timestamps="word"` is
+  CTC-only and raises on a TDT transducer — use the lower-level path.
 
 The pre-decode trick lives in its own module
 (`tapscribe/wav_predecode.py`) so the next contributor poking at
@@ -127,8 +129,7 @@ re-introduce ffmpeg. Reintroducing a `model.transcribe(str(path))`
 fallback would defeat the whole point and is rejected at review.
 
 The chunk-size knobs are env-tunable (`TAPSCRIBE_PARAKEET_CHUNK_S`,
-`TAPSCRIBE_PARAKEET_OVERLAP_S`, `TAPSCRIBE_CANARY_CHUNK_S`,
-`TAPSCRIBE_CANARY_OVERLAP_S`, `TAPSCRIBE_CANARY_MAX_TOKENS`); env
+`TAPSCRIBE_PARAKEET_OVERLAP_S` — shared by both Parakeet adapters); env
 names are exported as module constants from each adapter
 (`ENV_CHUNK_S`, `ENV_OVERLAP_S`) so the dashboard wiring — when it
 lands — has one source of truth. Every operator-tunable setting
@@ -141,29 +142,29 @@ Python package gated by a lazy import) lands, add it to the `Runtime
 python deps` block in `start.sh` rather than as a Python preflight —
 operators hit it once on bring-up instead of mid-request.
 
-### Upstream MLX symbols: lock the contract with a smoke test
+### Upstream adapter symbols: lock the contract with a smoke test
 
-The MLX adapters import undocumented symbols from `mlx_whisper`,
-`parakeet_mlx.audio`, and `mlx_audio.stt.models.canary`. Upstream
-renames (Canary was renamed `Canary` → `Model` between mlx-audio
-0.3.x and 0.4.x) silently break those imports at request time,
-*after* a clean unit-test run that mocked the model object. The
-convention to catch this earlier:
+Several adapters import undocumented or version-volatile symbols from
+upstream packages — `mlx_whisper`, `parakeet_mlx.audio`, the
+`mlx_voxtral` port, and `transformers` (`AutoModelForTDT` +
+`processor.decode(durations=…)` for Parakeet). Upstream renames silently
+break those imports at request time, *after* a clean unit-test run that
+mocked the model object. The convention to catch this earlier:
 
 - **Pin a narrow upper bound** in `pyproject.toml`
-  (`mlx-audio>=0.4,<0.5`, `parakeet-mlx>=0.5,<0.6`, etc.) — primary
+  (`transformers>=5.12,<6`, `parakeet-mlx>=0.5,<0.6`, etc.) — primary
   defence.
 - **Add an `importorskip`-gated smoke test** that asserts every
   imported symbol exists with the expected shape (signature kwargs,
-  classmethod presence). One per adapter, at the bottom of
-  `tests/test_transcribers_mlx_*.py`. The test no-ops on hosts
-  where the upstream package isn't importable (the Linux CI matrix)
-  and runs in full on the macOS-arm64 CI runner.
+  classmethod presence). One per adapter, at the bottom of its
+  `tests/test_transcribers_*.py`. The test no-ops on hosts where the
+  upstream package isn't importable (e.g. the Linux CI matrix for the
+  MLX adapters) and runs in full where it is.
 
 A future upstream API change then fails CI on the PR that bumps the
 pin instead of failing in production weeks later. The pattern is
-short — see `test_mlx_audio_canary_upstream_contract` in
-`tests/test_transcribers_mlx_canary.py` for the template.
+short — see `test_transformers_parakeet_upstream_contract` in
+`tests/test_transcribers_parakeet.py` for the template.
 
 ## Security: avoid CodeQL "security-and-quality" tripwires
 

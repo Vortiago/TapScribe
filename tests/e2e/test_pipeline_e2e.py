@@ -497,3 +497,120 @@ async def test_pipeline_with_real_whisper(running_recorder: RunningRecorder):
     assert len(on_disk["plain_text"]) > 20, (
         f"session transcript suspiciously short: {on_disk['plain_text']!r}"
     )
+
+
+def _english_fixtures() -> list[AudioFixture]:
+    """English fixtures only. Parakeet (`parakeet-tdt-0.6b-v3`) covers 25 EU
+    languages but NOT Norwegian, so the `-nb` clip would legitimately
+    mis-transcribe; the `-en` suffix convention (see fixtures README) picks
+    the ones Parakeet can handle."""
+    return [fx for fx in _real_audio_fixtures() if fx.wav.stem.endswith("-en")]
+
+
+@pytest.mark.real_audio
+async def test_pipeline_with_real_parakeet(running_recorder: RunningRecorder):
+    """Full pipeline against real audio with the real `transformers` Parakeet
+    backend (`backend="parakeet-hf"`): bridge `/tap` → finalized WAV on disk
+    → `POST /api/transcribe-session` → merged session transcript + per-WAV
+    sidecar. The non-MLX counterpart to `test_pipeline_with_real_whisper`,
+    and the end-to-end proof that the NeMo→transformers migration works
+    through the real route, factory, cache, and merge.
+
+    Skipped unless `transformers` + `librosa` are importable and at least one
+    English `<name>-en.wav` + `<name>-en.reference.txt` pair sits under
+    `tests/fixtures/audio/`.
+
+    Two layers of assertion. (1) Content: each fixture's sidecar transcript
+    must share at least one ≥ 4-char word with the reference — soft, like the
+    Whisper test, because a 0.6 B model on a 12 s NASA clip won't be verbatim,
+    but enough to rule out silence / hallucination / a broken bridge.
+    (2) Structure: Parakeet's headline feature is real word-level timestamps,
+    so at least one segment must carry `words`, and every segment/word time
+    must land inside the clip — proof the token→word→segment aggregation
+    survived the full round-trip, not just the unit test's mocked decode.
+    """
+    if importlib.util.find_spec("transformers") is None or importlib.util.find_spec("librosa") is None:
+        pytest.skip("transformers/librosa not installed — install with `pip install -e .[parakeet-cpu]`")
+    fixtures = _english_fixtures()
+    if not fixtures:
+        pytest.skip(
+            "no English real-audio fixtures present — add one via tests/fixtures/audio/README.md to enable",
+        )
+
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    ws_base = running_recorder.ws_base_url
+
+    for idx, fx in enumerate(fixtures):
+        await stream_wav_via_tap(
+            ws_base_url=ws_base,
+            identity=f"fixture-{idx}",
+            name=fx.wav.stem,
+            wav_path=fx.wav,
+            utterance_id=f"utt-{idx}",
+        )
+    assert await wait_until(lambda: streams_drained(rec), timeout=10.0)
+    assert len(list(rec.session_dir.glob("*.wav"))) == len(fixtures)
+
+    async with httpx.AsyncClient(base_url=base, timeout=600.0) as client:
+        resp = await client.post(
+            "/api/transcribe-session",
+            json={"session": rec.session_start, "model": "parakeet-tdt-0.6b-v3"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    from tapscribe.wav_cache import read_cached
+
+    sidecars_by_speaker = {}
+    for wav in rec.session_dir.glob("*.wav"):
+        cached = read_cached(wav)
+        if cached is None:
+            continue
+        sidecars_by_speaker[cached.speaker_name] = cached
+
+    for fx in fixtures:
+        sidecar = sidecars_by_speaker.get(fx.wav.stem)
+        assert sidecar is not None, (
+            f"no sidecar for speaker {fx.wav.stem!r} (have: {sorted(sidecars_by_speaker)})"
+        )
+        result = sidecar.result
+
+        # It ran on the transformers backend, not a fallback or a fake.
+        assert result.backend == "parakeet-hf", (
+            f"{fx.wav.name}: expected backend 'parakeet-hf', got {result.backend!r}"
+        )
+
+        # (1) Content — soft word overlap with the reference.
+        reference_words = _word_tokens(fx.reference)
+        transcript_words = _word_tokens(result.text)
+        overlap = reference_words & transcript_words
+        assert overlap, (
+            f"{fx.wav.name}: no ≥ 4-char reference word appears in "
+            f"transcript.\n  reference: {fx.reference!r}\n"
+            f"  transcript: {result.text!r}\n"
+            f"  reference words: {sorted(reference_words)}\n"
+            f"  transcript words: {sorted(transcript_words)}"
+        )
+
+        # (2) Structure — real word-level timestamps, all inside the clip.
+        assert result.segments, f"{fx.wav.name}: Parakeet produced no segments"
+        segs_with_words = [s for s in result.segments if s.words]
+        assert segs_with_words, (
+            f"{fx.wav.name}: no segment carried word-level timestamps "
+            "(Parakeet's headline feature didn't survive the pipeline)"
+        )
+        ceiling = result.duration + 0.5  # one rounding-step of slack at the tail
+        for seg in result.segments:
+            assert 0.0 <= seg.start <= seg.end <= ceiling, (
+                f"{fx.wav.name}: segment time {seg.start}-{seg.end} outside [0, {ceiling}]"
+            )
+            for word in seg.words or ():
+                assert 0.0 <= word.start <= word.end <= ceiling, (
+                    f"{fx.wav.name}: word {word.word!r} time {word.start}-{word.end} outside [0, {ceiling}]"
+                )
+
+    on_disk = json.loads((rec.session_dir / "session-transcript.json").read_text(encoding="utf-8"))
+    assert on_disk["wav_count"] == len(fixtures)
+    assert len(on_disk["plain_text"]) > 20, (
+        f"session transcript suspiciously short: {on_disk['plain_text']!r}"
+    )

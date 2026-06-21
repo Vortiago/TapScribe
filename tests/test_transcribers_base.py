@@ -266,7 +266,7 @@ def test_build_transcription_result_passes_through_non_empty_inputs():
 
 
 def test_build_transcription_result_blanks_target_when_equal_to_source():
-    """Canary's contract: `target_language` is non-empty ONLY when
+    """Translation contract: `target_language` is non-empty ONLY when
     translation actually happened (target_lang != source_lang). When
     they match — plain transcription — the field stays empty so the
     dashboard's translation badge doesn't flash for a no-op."""

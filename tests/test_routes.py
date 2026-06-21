@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from conftest import (  # type: ignore[import-not-found]  # NeMo ships an installed `tests` package — collides with our project's tests/ dir; pytest puts tests/ on sys.path so `from conftest` resolves correctly
+from conftest import (  # type: ignore[import-not-found]  # pytest puts tests/ on sys.path so `from conftest` resolves the project's tests/conftest.py
     TranscriberStub,
     py_cmd,
     repoint_config_files,
@@ -30,8 +30,8 @@ from tapscribe.recorder import ActiveStream, Recorder
 @pytest.fixture(autouse=True)
 def _force_all_probes_installed():
     """/api/models filters out registry entries whose adapter modules
-    aren't importable; in a CI env that hasn't installed nemo /
-    parakeet-mlx / mlx-audio / mlx-voxtral, the catalog assertions in
+    aren't importable; in a CI env that hasn't installed transformers /
+    parakeet-mlx / mlx-voxtral, the catalog assertions in
     this file would all flap. Pretend every probe module is installed
     so the route tests check the JSON shape, not the host's pip state.
     Tests that exercise the filter itself override per-test."""
@@ -90,20 +90,18 @@ def test_api_models_default_context_is_batch(client):
     assert body["context"] == "batch"
     assert isinstance(body["available_backends"], list)
     assert isinstance(body["models"], list)
-    # Batch context includes Parakeet + Canary (the new families).
+    # Batch context includes Parakeet.
     ids = {m["model_id"] for m in body["models"]}
     assert "parakeet-tdt-0.6b-v3" in ids
-    assert "canary-1b-v2" in ids
 
 
-def test_api_models_live_context_excludes_parakeet_and_canary(client):
+def test_api_models_live_context_excludes_parakeet(client):
     r = client.get("/api/models?context=live")
     assert r.status_code == 200
     body = r.json()
     assert body["context"] == "live"
     ids = {m["model_id"] for m in body["models"]}
     assert "parakeet-tdt-0.6b-v3" not in ids
-    assert "canary-1b-v2" not in ids
     # Whisper variants ARE live-eligible.
     assert "tiny.en" in ids
 
@@ -111,17 +109,6 @@ def test_api_models_live_context_excludes_parakeet_and_canary(client):
 def test_api_models_rejects_unknown_context(client):
     r = client.get("/api/models?context=transcode")
     assert r.status_code == 400
-
-
-def test_api_models_emits_select_input_for_canary(client):
-    r = client.get("/api/models")
-    canary = next(m for m in r.json()["models"] if m["model_id"] == "canary-1b-v2")
-    inputs_by_name = {i["name"]: i for i in canary["inputs"]}
-    assert inputs_by_name["source_lang"]["type"] == "select"
-    assert inputs_by_name["target_lang"]["type"] == "select"
-    # English option present with the right value.
-    opts = inputs_by_name["source_lang"]["options"]
-    assert any(o["value"] == "en" and o["label"] == "English" for o in opts)
 
 
 def test_api_models_emits_text_inputs_for_whisper(client):
@@ -183,7 +170,6 @@ def test_api_models_hides_families_whose_adapters_are_not_installed(client):
     assert "nb-whisper-medium" in ids  # nb-whisper rides on faster_whisper
     assert "voxtral-mini" not in ids
     assert "parakeet-tdt-0.6b-v3" not in ids
-    assert "canary-1b-v2" not in ids
 
 
 def test_api_state_carries_backend_preference_and_available_backends(client):
@@ -249,10 +235,10 @@ def test_api_state_includes_inputs_support_flags(client):
 
 
 def test_api_state_inputs_support_hides_when_only_non_supporting_models_installed(client):
-    """If the only installed batch families are Voxtral / Parakeet /
-    Canary (none declare initial_prompt or hotwords), batch_prompt and
-    batch_hotwords are False. Same logic for live: if the only installed
-    live family doesn't declare initial_prompt, live_prompt is False."""
+    """If the only installed batch families are Voxtral / Parakeet (none
+    declare initial_prompt or hotwords), batch_prompt and batch_hotwords
+    are False. Same logic for live: if the only installed live family
+    doesn't declare initial_prompt, live_prompt is False."""
     from tapscribe.transcribers.catalog import set_installed_modules_for_testing
 
     # Pretend only voxtral (mistral_common + mlx_voxtral) is installed.

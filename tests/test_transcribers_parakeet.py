@@ -1,14 +1,14 @@
-"""Tests for ParakeetTranscriber (NeMo / CUDA-CPU path).
+"""Tests for ParakeetTranscriber (Hugging Face `transformers` CUDA/CPU path).
 
-NeMo's `ASRModel.transcribe([paths], timestamps=True)` returns a list
-whose entries carry `.text` and `.timestamp = {"word": [...],
-"segment": [...]}`. We mock the model so the suite doesn't need NeMo
-or the 600 MB Parakeet weights to run.
+The adapter drives the lower-level `AutoModelForTDT.generate(...,
+return_dict_in_generate=True)` + `processor.decode(sequences,
+durations=...)` path (NOT the ASR pipeline, whose `return_timestamps="word"`
+is CTC-only and raises on a TDT transducer). We mock the model + processor
+so the suite needs neither `transformers` nor the 600 MB Parakeet weights.
 
-Why NeMo and not HF transformers: released `transformers` packages as
-of mid-2026 don't carry the `parakeet_tdt` model type mapping; NeMo
-is the official CUDA/CPU path. See `tapscribe/transcribers/parakeet.py`
-docstring for context.
+The end-to-end path (real weights, real audio) is exercised manually and
+guarded structurally by `test_transformers_parakeet_upstream_contract`
+below, which no-ops where `transformers` isn't importable.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from __future__ import annotations
 import types
 import wave
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -24,140 +23,191 @@ import pytest
 from tapscribe.transcribers.base import TranscriptionResult
 
 
-def _one_second_wav(path: Path) -> Path:
+def _wav(path: Path, *, seconds: float = 1.0) -> Path:
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(16000)
-        w.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+        w.writeframes(np.zeros(int(16000 * seconds), dtype=np.int16).tobytes())
     return path
 
 
-def _parakeet_response(text: str, *, segments=None, words=None) -> types.SimpleNamespace:
-    return types.SimpleNamespace(
-        text=text,
-        timestamp={"word": words or [], "segment": segments or []},
-    )
+class _FakeInputs(dict):
+    """Stands in for the processor's BatchFeature: `**`-unpackable into
+    `generate`, and `.to(device, dtype=)` returns itself."""
+
+    def to(self, device, dtype=None):  # noqa: ARG002
+        return self
 
 
-def _fake_parakeet_model(response: types.SimpleNamespace) -> MagicMock:
-    m = MagicMock()
-    m.transcribe.return_value = [response]
-    return m
+class _FakeProcessor:
+    """Returns a fixed per-window token list from `decode`. `feature_extractor.
+    sampling_rate` defaults to the recorder rate so `_assert_*` passes."""
+
+    def __init__(self, window_token_lists, *, sampling_rate: int = 16000):
+        self._windows = window_token_lists
+        self.feature_extractor = types.SimpleNamespace(sampling_rate=sampling_rate)
+        self.call_sampling_rates: list = []
+        self.decode_calls: list[dict] = []
+
+    def __call__(self, arrays, sampling_rate=None):
+        self.call_sampling_rates.append(sampling_rate)
+        return _FakeInputs(input_features="X")
+
+    def decode(self, sequences, durations=None, skip_special_tokens=True):  # noqa: ARG002
+        idx = len(self.decode_calls)
+        self.decode_calls.append({"durations": durations, "skip_special_tokens": skip_special_tokens})
+        toks = self._windows[idx] if idx < len(self._windows) else []
+        text = "".join(t["token"] for t in toks).strip()
+        return ([text], [toks])
 
 
-def test_metadata_properties(tmp_path: Path):
+class _FakeModel:
+    def __init__(self):
+        self.device = "cpu"
+        self.dtype = "float32"
+        self.generate_calls: list[dict] = []
+
+    def generate(self, return_dict_in_generate=False, **kwargs):
+        self.generate_calls.append({"return_dict_in_generate": return_dict_in_generate, **kwargs})
+        return types.SimpleNamespace(sequences=[[1, 2, 3]], durations=[0.1])
+
+
+def _tok(token: str, start: float, end: float) -> dict:
+    return {"token": token, "start": start, "end": end}
+
+
+def _adapter(window_token_lists, *, device="CPU", **kw):
     from tapscribe.transcribers.parakeet import ParakeetTranscriber
 
-    t = ParakeetTranscriber(
+    return ParakeetTranscriber(
         model_name="parakeet-tdt-0.6b-v3",
-        model=_fake_parakeet_model(_parakeet_response("ok")),
-        device="CUDA",
+        model=_FakeModel(),
+        processor=_FakeProcessor(window_token_lists),
+        device=device,
+        **kw,
     )
+
+
+def test_metadata_properties():
+    t = _adapter([[]], device="CUDA")
     assert t.name == "parakeet"
-    assert t.backend == "parakeet-nemo"
+    assert t.backend == "parakeet-hf"
     assert t.device == "CUDA"
     assert t.model_name == "parakeet-tdt-0.6b-v3"
 
 
-def test_transcribe_calls_model_with_timestamps_true(tmp_path: Path):
-    """Parakeet's headline differentiator is real word/segment timestamps,
-    which only emit when `timestamps=True`."""
-    from tapscribe.transcribers.parakeet import ParakeetTranscriber
-
-    fake = _fake_parakeet_model(_parakeet_response("hi"))
-    t = ParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=fake, device="CPU")
-    wav = _one_second_wav(tmp_path / "x.wav")
-    t.transcribe(wav)
-    kwargs = fake.transcribe.call_args.kwargs
-    assert kwargs.get("timestamps") is True
-
-
-def test_transcribe_attaches_words_to_segments_by_range(tmp_path: Path):
-    from tapscribe.transcribers.parakeet import ParakeetTranscriber
-
-    seg_list = [
-        {"start": 0.10, "end": 0.80, "segment": "Hello there."},
-        {"start": 0.90, "end": 1.50, "segment": "How are you?"},
+def test_transcribe_builds_words_and_segments_from_tokens(tmp_path: Path):
+    tokens = [
+        _tok("Hello", 0.10, 0.40),
+        _tok(",", 0.40, 0.40),
+        _tok(" there", 0.45, 0.80),
+        _tok(".", 0.80, 0.80),
+        _tok(" How", 0.90, 1.20),
+        _tok(" are", 1.25, 1.40),
+        _tok(" you", 1.40, 1.50),
+        _tok("?", 1.50, 1.50),
     ]
-    words = [
-        {"start": 0.10, "end": 0.40, "word": "Hello"},
-        {"start": 0.45, "end": 0.80, "word": "there"},
-        {"start": 0.90, "end": 1.20, "word": "How"},
-        {"start": 1.25, "end": 1.50, "word": "are you"},
-    ]
-    fake = _fake_parakeet_model(
-        _parakeet_response("Hello there. How are you?", segments=seg_list, words=words)
-    )
-    t = ParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=fake, device="CUDA")
-    wav = _one_second_wav(tmp_path / "x.wav")
-    r = t.transcribe(wav)
+    t = _adapter([tokens])
+    r = t.transcribe(_wav(tmp_path / "x.wav"))
     assert isinstance(r, TranscriptionResult)
-    assert r.text == "Hello there. How are you?"
-    assert [s.text for s in r.segments] == ["Hello there.", "How are you?"]
+    assert [s.text for s in r.segments] == ["Hello, there.", "How are you?"]
     assert r.segments[0].start == 0.10
     assert r.segments[0].end == 0.80
-    seg0_words = list(r.segments[0].words or ())
-    assert [w.word for w in seg0_words] == ["Hello", "there"]
+    assert [w.word for w in (r.segments[0].words or ())] == ["Hello,", "there."]
+    assert r.text == "Hello, there. How are you?"
 
 
-def test_transcribe_falls_back_to_single_segment_when_no_segment_list(tmp_path: Path):
-    """Very short audio sometimes yields just `text` without segment
-    timestamps; the adapter falls back to one segment covering the WAV."""
-    from tapscribe.transcribers.parakeet import ParakeetTranscriber
+def test_transcribe_uses_lower_level_generate_decode_path(tmp_path: Path):
+    """Word/segment timestamps come from generate(return_dict_in_generate=True)
+    + decode(durations=...) — assert the adapter wires both."""
+    t = _adapter([[_tok("hi", 0.0, 0.1)]])
+    t.transcribe(_wav(tmp_path / "x.wav"))
+    assert t._model.generate_calls[0]["return_dict_in_generate"] is True
+    # decode must be handed the durations the model emitted.
+    assert t._processor.decode_calls[0]["durations"] == [0.1]
+    # processor invoked at the recorder sample rate.
+    assert t._processor.call_sampling_rates == [16000]
 
-    fake = _fake_parakeet_model(_parakeet_response("ok"))
-    t = ParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=fake, device="CPU")
-    wav = _one_second_wav(tmp_path / "x.wav")
-    r = t.transcribe(wav)
-    assert r.text == "ok"
-    assert len(r.segments) == 1
-    assert r.segments[0].start == 0.0
-    assert r.segments[0].end == r.duration
+
+def test_transcribe_caps_generation_length(tmp_path: Path):
+    """`generate` must be given an explicit `max_new_tokens` sized to the
+    window. Without it transformers falls back to a model-agnostic default
+    (~1510) that both warns and can truncate a long window's transcript.
+    The bound scales with audio length, so a longer clip gets a larger cap."""
+    short = _adapter([[_tok("hi", 0.0, 0.1)]])
+    short.transcribe(_wav(tmp_path / "short.wav", seconds=1.0))
+    short_cap = short._model.generate_calls[0]["max_new_tokens"]
+    assert isinstance(short_cap, int) and short_cap > 0
+
+    long = _adapter([[_tok("hi", 0.0, 0.1)]])
+    long.transcribe(_wav(tmp_path / "long.wav", seconds=4.0))
+    long_cap = long._model.generate_calls[0]["max_new_tokens"]
+    assert long_cap > short_cap, "max_new_tokens must scale with the window's audio length"
 
 
 def test_transcribe_records_source_language(tmp_path: Path):
+    t = _adapter([[_tok("bonjour", 0.0, 0.5)]])
+    r = t.transcribe(_wav(tmp_path / "x.wav"), source_lang="fr")
+    assert r.language == "fr"
+    assert r.source_language == "fr"
+    # Parakeet doesn't translate — target stays empty.
+    assert r.target_language == ""
+
+
+def test_transcribe_defaults_language_to_auto(tmp_path: Path):
+    t = _adapter([[_tok("ok", 0.0, 0.2)]])
+    r = t.transcribe(_wav(tmp_path / "x.wav"))
+    assert r.language == "auto"
+
+
+def test_transcribe_echoes_prompt_and_hotwords_audit_only(tmp_path: Path):
+    """Parakeet has no prompt/hotwords slot: accepted, dropped at the model
+    call, echoed on the result for audit parity."""
+    t = _adapter([[_tok("ok", 0.0, 0.2)]])
+    r = t.transcribe(_wav(tmp_path / "x.wav"), initial_prompt="standup", hotwords="Acme")
+    gen_kwargs = t._model.generate_calls[0]
+    assert "initial_prompt" not in gen_kwargs
+    assert "hotwords" not in gen_kwargs
+    assert r.initial_prompt_used == "standup"
+    assert r.hotwords_used == "Acme"
+
+
+def test_transcribe_chunks_long_audio_and_offsets_timestamps(tmp_path: Path):
+    """Two windows (0.5 s chunks, no overlap over a 1 s WAV): the second
+    window's token timestamps must be shifted by its 0.5 s offset."""
+    win0 = [_tok("one", 0.10, 0.30), _tok(".", 0.30, 0.30)]
+    win1 = [_tok("two", 0.10, 0.30), _tok(".", 0.30, 0.30)]
+    t = _adapter([win0, win1], chunk_duration_s=0.5, overlap_duration_s=0.0)
+    r = t.transcribe(_wav(tmp_path / "x.wav", seconds=1.0))
+    assert len(t._model.generate_calls) == 2
+    assert [s.text for s in r.segments] == ["one.", "two."]
+    # window 1's "two." is shifted by the 0.5 s window offset.
+    assert r.segments[1].start == 0.60
+
+
+def test_assert_feature_extractor_sample_rate_mismatch_raises():
     from tapscribe.transcribers.parakeet import ParakeetTranscriber
 
     t = ParakeetTranscriber(
         model_name="parakeet-tdt-0.6b-v3",
-        model=_fake_parakeet_model(_parakeet_response("bonjour")),
-        device="CUDA",
+        model=_FakeModel(),
+        processor=_FakeProcessor([[]], sampling_rate=8000),
+        device="CPU",
     )
-    wav = _one_second_wav(tmp_path / "x.wav")
-    r = t.transcribe(wav, source_lang="fr")
-    assert r.language == "fr"
-    assert r.source_language == "fr"
+    with pytest.raises(RuntimeError, match="sampling_rate"):
+        t._assert_feature_extractor_sample_rate()
 
 
-def test_transcribe_echoes_prompt_and_hotwords_audit_only(tmp_path: Path):
-    """NeMo Parakeet has no prompt/hotwords slot. Same convention as the
-    other Parakeet/Voxtral/Canary adapters: accepted, dropped, echoed
-    on the result for audit parity."""
-    from tapscribe.transcribers.parakeet import ParakeetTranscriber
-
-    fake = _fake_parakeet_model(_parakeet_response("ok"))
-    t = ParakeetTranscriber(model_name="parakeet-tdt-0.6b-v3", model=fake, device="CPU")
-    wav = _one_second_wav(tmp_path / "x.wav")
-    r = t.transcribe(wav, initial_prompt="standup notes", hotwords="Acme")
-    kwargs = fake.transcribe.call_args.kwargs
-    assert "initial_prompt" not in kwargs
-    assert "hotwords" not in kwargs
-    assert r.initial_prompt_used == "standup notes"
-    assert r.hotwords_used == "Acme"
-
-
-def test_load_fails_fast_without_nemo(monkeypatch):
-    """If NeMo isn't installed, raise an actionable RuntimeError, not a
-    deep ImportError chain. We probe the namespace package's ASR
-    sub-collection because the top-level `nemo` namespace can exist
-    without the ASR collection."""
+def test_load_fails_fast_without_transformers(monkeypatch):
+    """No `transformers` installed → an actionable RuntimeError naming the
+    package, not a deep ImportError chain."""
     import importlib.util as importlib_util
 
     real_find_spec = importlib_util.find_spec
 
     def fake_find_spec(name, *args, **kwargs):
-        if name in ("nemo", "nemo.collections", "nemo.collections.asr"):
+        if name == "transformers":
             return None
         return real_find_spec(name, *args, **kwargs)
 
@@ -165,5 +215,28 @@ def test_load_fails_fast_without_nemo(monkeypatch):
 
     from tapscribe.transcribers.parakeet import ParakeetTranscriber
 
-    with pytest.raises(RuntimeError, match="NeMo"):
+    with pytest.raises(RuntimeError, match="transformers"):
         ParakeetTranscriber.load("parakeet-tdt-0.6b-v3", kind="cpu")
+
+
+# ── Upstream-contract smoke test ─────────────────────────────────────
+# Pins the `transformers` symbols + signatures the adapter imports so an
+# upstream rename fails CI on the bump PR instead of in production. No-ops
+# where transformers isn't importable (the Linux CI unit matrix); runs in
+# full where it is.
+
+
+def test_transformers_parakeet_upstream_contract():
+    import inspect
+
+    transformers = pytest.importorskip("transformers")
+
+    for name in ("AutoModelForTDT", "AutoProcessor", "ParakeetForTDT"):
+        assert hasattr(transformers, name), f"transformers.{name} missing — upstream API drift"
+
+    # `processor.decode` must accept the `durations` kwarg the adapter passes.
+    proc_decode = transformers.ParakeetProcessor.decode
+    params = inspect.signature(proc_decode).parameters
+    assert "durations" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()), (
+        "ParakeetProcessor.decode no longer accepts durations="
+    )

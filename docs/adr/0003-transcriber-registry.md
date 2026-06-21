@@ -5,6 +5,11 @@ date: 2026-05-19
 
 # TranscriberRegistry: one declarative table for every model
 
+> **Note (2026-06-21):** the Canary family added here was later removed
+> and Parakeet's CUDA/CPU adapter moved from NeMo to `transformers` —
+> see ADR-0006. The registry design below stands; only the Canary-
+> specific examples are superseded.
+
 ## Context
 
 Pre-refactor, the set of supported models was scattered:

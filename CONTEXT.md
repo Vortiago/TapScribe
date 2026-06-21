@@ -37,22 +37,24 @@ Concrete implementations:
   port.
 - `MlxParakeetTranscriber` — NVIDIA Parakeet TDT 0.6B via
   `parakeet-mlx` (Apple Silicon).
-- `ParakeetTranscriber` — NVIDIA Parakeet TDT 0.6B via the HF
-  transformers `AutoModelForTDT` pipeline (CUDA / CPU).
-- `MlxCanaryTranscriber` — NVIDIA Canary 1B v2 via `mlx-audio` (Apple
-  Silicon). Supports translation + 25 EU langs.
-- `CanaryTranscriber` — NVIDIA Canary 1B v2 via NeMo Toolkit
-  (CUDA / CPU).
+- `ParakeetTranscriber` — NVIDIA Parakeet TDT 0.6B via HF
+  `transformers` (`AutoModelForTDT.generate` + `processor.decode`,
+  CUDA / CPU). Token timestamps are folded into word/segment alignment
+  by `_parakeet_tdt.build_segments_from_tdt_tokens`.
 
 Each Transcriber declares its `device`, `name`, and `backend`. The
 `name` is the family label (`"faster-whisper"`, `"mlx-whisper"`,
-`"voxtral"`, `"parakeet"`, `"canary"`) — the same string lands in
-result JSON under `"transcriber"`. The `backend` field
-(`"faster-whisper"`, `"mlx-whisper"`, `"hf-transformers"`,
-`"mlx-voxtral"`, `"parakeet-mlx"`, `"parakeet-hf"`,
-`"canary-nemo"`) disambiguates which runtime did the work.
-`"canary-mlx"` exists as an adapter but is not wired into the catalog
-(no published mlx-audio Canary weights).
+`"voxtral"`, `"parakeet"`) — the same string lands in result JSON
+under `"transcriber"`. The `backend` field (`"faster-whisper"`,
+`"mlx-whisper"`, `"hf-transformers"`, `"mlx-voxtral"`,
+`"parakeet-mlx"`, `"parakeet-hf"`) disambiguates which runtime did
+the work.
+
+> Canary (NVIDIA Canary 1B v2, the former translation backend) was
+> removed along with the NeMo dependency — see ADR-0006. NeMo's only
+> consumers were Parakeet (now on `transformers`) and Canary; dropping
+> both retired `nemo_toolkit` + `kaldialign` entirely. TapScribe no
+> longer offers speech translation.
 
 Note: there is also a **LiveChannel** (a Protocol — see below) — the
 `whisperlivekit-server` child process the Recorder supervises for
@@ -69,8 +71,8 @@ about. Lives in `tapscribe/transcribers/catalog.py` as the module-level
 
 Each entry (`ModelEntry`) declares:
 - `model_id` — canonical short name (e.g. `parakeet-tdt-0.6b-v3`)
-- `family` — one of `whisper`, `nb-whisper`, `voxtral`, `parakeet`,
-  `canary`. Drives `<optgroup>` labelling in the dashboard.
+- `family` — one of `whisper`, `nb-whisper`, `voxtral`, `parakeet`.
+  Drives `<optgroup>` labelling in the dashboard.
 - `languages` — ISO codes, or `("auto",)` for auto-detecting models
 - `contexts` — frozenset of `"batch"` / `"live"` — gates which
   picker shows the model
@@ -111,7 +113,7 @@ for backends not installed on the server.
 `FamilyChoice.backend` strings (`"cpu"` / `"mlx"` / `"both"`). These
 describe what pyproject extras pip should install *before* TapScribe
 runs — not what the runtime selects at transcribe time. The picker
-treats `"cpu"` as "the torch / faster-whisper / NeMo wheels"
+treats `"cpu"` as "the torch / faster-whisper / transformers wheels"
 (runtime resolves CPU vs CUDA itself), and `"both"` means "install
 both atomic extras so the runtime can switch". After install the
 runtime side takes over with `BackendKind` / `BackendPreference`
@@ -128,11 +130,13 @@ given input ignore the kwarg but echo the value into the result's
 audit fields (`initial_prompt_used`, `hotwords_used`,
 `source_language`).
 
-Two kinds today:
+Two kinds:
 - `TextInput(name, label, kind="text"|"textarea", placeholder,
   description)` — for `initial_prompt` and `hotwords`.
-- `SelectInput(name, label, options, default, description)` —
-  for Canary's `source_lang` and `target_lang` dropdowns.
+- `SelectInput(name, label, options, default, description)` — a
+  dropdown. No shipped model declares one today (Canary's
+  `source_lang`/`target_lang` selects were removed with the family);
+  retained for future use, e.g. an explicit Whisper language pin.
 
 `ModelInput = TextInput | SelectInput` is the union. New input
 kinds are added by extending the union, adding a renderer in
@@ -149,11 +153,11 @@ discriminator value in `to_mapping()`.
 in the unsuffixed `LiveChannel` class.
 
 A follow-up PR will add `ParakeetLiveChannel` (rolling-chunk
-pseudo-streaming on `parakeet-mlx` / NeMo) without touching the
-Recorder. That's the whole point of the seam.
+pseudo-streaming on `parakeet-mlx` / `transformers`) without touching
+the Recorder. That's the whole point of the seam.
 
 The dashboard's live-channel picker reads `/api/models?context=live`,
-which excludes Parakeet/Canary while only true-streaming families
+which excludes Parakeet while only true-streaming families
 (Whisper, NB-Whisper, Voxtral) light up.
 
 Each `LiveChannel` declares a class attribute
@@ -207,9 +211,11 @@ the segments, the joined plain text, the metadata about which transcriber
 
 `source_language` records the language the model was told to expect
 (or auto-detected); `target_language` is non-empty only when a
-translation-capable adapter (Canary today) was asked to translate
-(`source_lang != target_lang`). The dashboard renders a translation
-badge whenever `target_language` is non-empty.
+translation-capable adapter was asked to translate
+(`source_lang != target_lang`). No shipped adapter translates today
+(Canary was removed — see ADR-0006), but the field + the dashboard's
+translation badge are retained for back-compat with any sidecar cached
+from one that did.
 
 Post-processors (currently just `hallucinations.apply`, possibly future
 PII / phrase-replacement steps) consume a `TranscriptionResult` and

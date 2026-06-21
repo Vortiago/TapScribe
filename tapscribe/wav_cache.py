@@ -286,20 +286,20 @@ def cached_transcribe(
     `CachedTranscription`.
 
     Translation-aware: `source_lang` / `target_lang` are forwarded to
-    the Transcriber. For Canary, a cached entry produced for
-    source=en/target=es must not be served when the caller now wants
-    target=fr — so the cache hit also requires matching language pair.
-    Whisper / Voxtral / Parakeet ignore these kwargs, and their cached
-    entries have empty source/target_language, so the match is trivially
-    "both empty" for those backends.
+    the Transcriber and part of the match key. For a translation-capable
+    adapter, a cached entry produced for source=en/target=es must not be
+    served when the caller now wants target=fr. No shipped adapter
+    consumes these today (Whisper / Voxtral / Parakeet ignore them), so
+    their cached entries have empty source/target_language and the match
+    is trivially "both empty".
 
     Prompt-aware: `initial_prompt` and `hotwords` are part of the match
     key too. A cached entry written under `initial_prompt="A"` must
     not be served when the caller now wants `initial_prompt="B"` —
     otherwise editing the session-meta override and re-running would
     silently return the stale transcript. Adapters that don't consume
-    these kwargs (Voxtral / Parakeet / Canary today) record empty
-    strings, so the match is trivially "both empty" there."""
+    these kwargs (Voxtral / Parakeet today) record empty strings, so the
+    match is trivially "both empty" there."""
     backend = transcriber.backend
     model = transcriber.model_name
     size, mtime_ns = _wav_fingerprint(wav_path)

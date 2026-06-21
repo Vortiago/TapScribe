@@ -493,7 +493,7 @@ body::before { display: none; }
 }
 
 /* ====================================================================== */
-/* ENGINE controls — backend chips, model-by-family, Canary langs.         */
+/* ENGINE controls — backend chips, model-by-family, option selects.       */
 /* ====================================================================== */
 .eng { display: grid; gap: 13px; }
 .eng-row { display: flex; flex-direction: column; gap: 6px; }

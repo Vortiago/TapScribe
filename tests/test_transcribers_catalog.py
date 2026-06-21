@@ -34,7 +34,7 @@ def _restore_backends():
 
 def test_default_registry_contains_expected_families():
     families = {e.family for e in REGISTRY.entries()}
-    assert families >= {"whisper", "nb-whisper", "voxtral", "parakeet", "canary"}
+    assert families >= {"whisper", "nb-whisper", "voxtral", "parakeet"}
 
 
 def test_every_default_entry_has_at_least_one_backend_binding():
@@ -43,19 +43,17 @@ def test_every_default_entry_has_at_least_one_backend_binding():
         assert e.supported_backend_kinds(), f"entry {e.model_id} declares zero kinds"
 
 
-def test_for_context_batch_includes_parakeet_and_canary():
+def test_for_context_batch_includes_parakeet():
     batch_ids = {e.model_id for e in REGISTRY.for_context("batch")}
     assert "parakeet-tdt-0.6b-v3" in batch_ids
-    assert "canary-1b-v2" in batch_ids
 
 
-def test_for_context_live_excludes_parakeet_and_canary():
-    """Parakeet/Canary have no true-streaming checkpoint and WhisperLiveKit
-    has no Parakeet/Canary backend — so they're batch-only until a
-    follow-up PR adds pseudo-streaming live channels."""
+def test_for_context_live_excludes_parakeet():
+    """Parakeet has no true-streaming checkpoint and WhisperLiveKit has no
+    Parakeet backend — so it's batch-only until a follow-up PR adds a
+    pseudo-streaming live channel."""
     live_ids = {e.model_id for e in REGISTRY.for_context("live")}
     assert "parakeet-tdt-0.6b-v3" not in live_ids
-    assert "canary-1b-v2" not in live_ids
 
 
 def test_for_context_live_includes_whisper_and_nb_whisper():
@@ -85,16 +83,6 @@ def test_parakeet_declares_no_text_inputs():
     assert pk.inputs == ()
 
 
-def test_canary_declares_source_and_target_language_selects():
-    canary = REGISTRY.require("canary-1b-v2")
-    names = {i.name for i in canary.inputs}
-    assert names == {"source_lang", "target_lang"}
-    for inp in canary.inputs:
-        assert isinstance(inp, SelectInput)
-        assert ("en", "English") in inp.options
-        assert inp.default == "en"
-
-
 def test_nb_whisper_excludes_mlx_binding():
     """NB-Whisper has no public MLX weights, so its only binding is the
     faster-whisper one (which handles cpu + cuda)."""
@@ -106,11 +94,6 @@ def test_nb_whisper_excludes_mlx_binding():
 def test_parakeet_supports_mlx_cuda_and_cpu():
     pk = REGISTRY.require("parakeet-tdt-0.6b-v3")
     assert pk.supported_backend_kinds() == frozenset({"mlx", "cuda", "cpu"})
-
-
-def test_canary_supports_cuda_and_cpu_only():
-    c = REGISTRY.require("canary-1b-v2")
-    assert c.supported_backend_kinds() == frozenset({"cuda", "cpu"})
 
 
 # ── resolve / preference handling ────────────────────────────────────────
@@ -154,9 +137,8 @@ def test_resolve_returns_correct_loader_for_parakeet_on_cuda():
     assert isinstance(rb, ResolvedBinding)
     assert rb.kind == "cuda"
     # The MLX binding's loader is the one for parakeet_mlx; the cuda
-    # binding's loader is _load_parakeet_hf (which routes to NeMo
-    # internally — the underscore-hf suffix is historical and kept for
-    # registry stability).
+    # binding's loader is _load_parakeet_hf (the transformers CUDA/CPU
+    # adapter).
     assert rb.loader.__name__ == "_load_parakeet_hf"
 
 
@@ -211,22 +193,31 @@ def test_resolve_unknown_model_raises_key_error():
 # ── JSON serialisation shape (for /api/models) ───────────────────────────
 
 
-def test_to_mapping_serialises_inputs_with_discriminator():
-    """SelectInput and TextInput both render to a JSON-friendly dict with
-    a `type` field so the UI can dispatch which form widget to render."""
-    canary = REGISTRY.require("canary-1b-v2").to_mapping()
-    by_name = {i["name"]: i for i in canary["inputs"]}
-    assert by_name["source_lang"]["type"] == "select"
-    assert by_name["target_lang"]["type"] == "select"
-    # Options serialise as list-of-dicts.
-    assert {"value": "en", "label": "English"} in by_name["source_lang"]["options"]
-
+def test_to_mapping_serialises_text_inputs_with_discriminator():
+    """TextInput renders to a JSON-friendly dict with a `type` field so the
+    UI can dispatch which form widget to render."""
     whisper = REGISTRY.require("small.en").to_mapping()
     by_name = {i["name"]: i for i in whisper["inputs"]}
     assert by_name["initial_prompt"]["type"] == "text"
     assert by_name["initial_prompt"]["kind"] == "textarea"
     assert by_name["hotwords"]["type"] == "text"
     assert by_name["hotwords"]["kind"] == "text"
+
+
+def test_select_input_serialises_with_discriminator():
+    """No registry model declares a SelectInput today (Canary's source/
+    target selects were removed with the family), but the type is kept for
+    future use — pin its serialisation shape directly."""
+    sel = SelectInput(
+        name="source_lang",
+        label="Source language",
+        options=(("en", "English"), ("de", "German")),
+        default="en",
+    )
+    out = sel.to_mapping()
+    assert out["type"] == "select"
+    assert out["default"] == "en"
+    assert {"value": "en", "label": "English"} in out["options"]
 
 
 def test_to_mapping_emits_sorted_backends_and_contexts():

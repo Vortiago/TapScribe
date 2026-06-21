@@ -2,12 +2,12 @@
 backends to install, persisted across runs.
 
 Called by `start.sh` / `start.ps1` after the venv exists and pip has been
-upgraded. For each model family (Whisper / Voxtral / Parakeet / Canary)
+upgraded. For each model family (Whisper / Voxtral / Parakeet)
 the operator picks:
 
   - whether to install it at all (Space toggle), AND
   - which runtime backend to install:
-      • CPU/CUDA  — torch / faster-whisper / NeMo (auto-uses CUDA when
+      • CPU/CUDA  — torch / faster-whisper / transformers (auto-uses CUDA when
         nvidia-smi reports a device, else CPU). For the faster-whisper
         path specifically, CTranslate2 doesn't bundle cuBLAS/cuDNN, so
         the `cuda-libs` extra (nvidia-cublas-cu12 / nvidia-cudnn-cu12) is
@@ -162,14 +162,6 @@ FAMILIES: tuple[FamilyDef, ...] = (
             BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("parakeet-cpu",)),
             BackendDef(key=BACKEND_MLX, label="MLX", extras=("parakeet-mlx",)),
         ),
-    ),
-    FamilyDef(
-        key="canary",
-        label="Canary (NVIDIA)",
-        description=("NVIDIA Canary 1B v2 — translation + 25 EU langs. Batch only."),
-        size_hint="~2 GB CPU",
-        # NeMo only — there are no published mlx-audio Canary weights.
-        backends=(BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("canary-cpu",)),),
     ),
 )
 
@@ -429,8 +421,8 @@ def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
     # so the Whisper CPU/CUDA path can't drive the GPU without them. Append
     # them iff CUDA was detected AND that path is actually in the install
     # (`whisper-cpu` present). Tied to whisper-cpu specifically: the
-    # Torch-based backends (Voxtral/Parakeet/Canary via NeMo) get CUDA from
-    # Torch's own bundle, and MLX-only selections aren't on CUDA at all.
+    # Torch-based backends (Voxtral / Parakeet via transformers) get CUDA
+    # from Torch's own bundle, and MLX-only selections aren't on CUDA at all.
     if caps.cuda and WHISPER_CPU_EXTRA in seen:
         add(CUDA_RUNTIME_EXTRA)
     return out

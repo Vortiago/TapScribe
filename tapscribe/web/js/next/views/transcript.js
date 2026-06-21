@@ -1,7 +1,7 @@
 // @ts-check
 // Stages · Transcript (SESSION stage 3). The merged transcript for the open
 // session (main/left) + a transcription CONTROL COLUMN (right): the engine
-// selector (backend chips + compact model dropdown + Canary source/target),
+// selector (backend chips + compact model dropdown + any option selects),
 // the transcribe controls (session range from/to + force + a Transcribe
 // action, plus a per-WAV re-transcribe picker), and the per-WAV transcript
 // cache (set-primary).
@@ -200,7 +200,8 @@ export function build(ctx) {
     return files.find((f) => f.name === want) ?? files[0] ?? null;
   };
 
-  /** Read the Canary source/target lang from the engine panel's selects. */
+  /** Read any model-declared option selects (e.g. source/target lang) from
+   * the engine panel. Returns "" for each when the model declares none. */
   const langValues = () => {
     /** @param {string} name */
     const valOf = (name) => /** @type {HTMLSelectElement | null} */ (

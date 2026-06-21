@@ -64,7 +64,7 @@ def test_env_zero_returned_as_set_value(monkeypatch, value):
 
 
 def test_env_float_below_min_falls_back_to_default(monkeypatch, capsys):
-    """A `TAPSCRIBE_CANARY_CHUNK_S=-5` would otherwise reach the
+    """A `TAPSCRIBE_PARAKEET_CHUNK_S=-5` would otherwise reach the
     consumer where `int(-5 * 16000)` followed by `max(1, ...)` clamps
     to 1, producing a pathological one-sample-per-window loop. The
     bound rejects negative values at the boundary instead."""

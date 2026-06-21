@@ -1,7 +1,7 @@
 """Transcribers — the stateful adapters that turn one WAV into text.
 
 A `Transcriber` instance is one loaded model (faster-whisper / mlx-whisper /
-Voxtral / Parakeet / Canary) holding its own model object, model name,
+Voxtral / Parakeet) holding its own model object, model name,
 and device label. The factory `load_transcriber(name, *, backend)`
 consults the `TranscriberRegistry` (see `tapscribe.transcribers.catalog`)
 to pick the right adapter, then caches by `(model_name, resolved_kind)`.
@@ -297,8 +297,8 @@ def load_transcriber(
     module-level singleton.
 
     Heavy adapter modules are imported lazily (via the registry's loader
-    thunks) so booting TapScribe never pulls in PyTorch / MLX / NeMo unless an
-    operator actually picks that backend.
+    thunks) so booting TapScribe never pulls in PyTorch / MLX / transformers
+    unless an operator actually picks that backend.
 
     This is the *acquire* half of the memory lifecycle: it increments the
     key's in-flight count. Long-running callers MUST balance it with

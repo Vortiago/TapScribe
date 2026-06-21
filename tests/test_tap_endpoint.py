@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from conftest import (
-    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path; a `from tests.X import` form collides with NeMo's installed top-level `tests` package
+    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
 )
 from fastapi.testclient import TestClient
 

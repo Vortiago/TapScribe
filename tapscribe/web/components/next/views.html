@@ -109,7 +109,7 @@
 <!-- ===================== SESSION · 3 TRANSCRIPT ===================== -->
 <!-- The merged transcript (main/left) + the transcription control column
      (right): the engine selector (backend chips + compact model dropdown +
-     Canary src/tgt), the transcribe controls (session range + force + per-WAV
+     any model-declared option selects), the transcribe controls (session range + force + per-WAV
      re-transcribe), and the per-WAV transcript cache (set-primary). Built by
      js/next/views/transcript.js, which owns the REAL transcribe wiring. -->
 <template id="tpl-next-view-transcript">
@@ -333,8 +333,8 @@
 </template>
 
 <!-- ===================== ENGINE selector pieces ===================== -->
-<!-- Backend chip-row + model-by-family + (Canary) source/target. Built by
-     js/next/components/engine.js and mounted into [data-slot=engineHost]. -->
+<!-- Backend chip-row + model-by-family + any model-declared option selects.
+     Built by js/next/components/engine.js, mounted into [data-slot=engineHost]. -->
 <template id="tpl-next-eng-row">
   <div class="eng-row">
     <span class="eng-cap" data-slot="cap"></span>

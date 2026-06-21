@@ -19,7 +19,7 @@
 #   1. Find a Python 3.12+
 #   2. Create a venv at ./.venv if missing
 #   3. Launch tools/install_picker.py — interactive checkbox prompt that
-#      asks which model families (Whisper / Voxtral / Parakeet / Canary)
+#      asks which model families (Whisper / Voxtral / Parakeet)
 #      to install. Pre-checks the previous selection from
 #      .tapscribe-install.json so re-runs are one keystroke (Enter).
 #   4. The picker runs `pip install -e ".[…]"` for the chosen extras —
@@ -144,9 +144,9 @@ python -m pip install --quiet --upgrade pip
 
 # --- Install picker ---------------------------------------------------------
 # Hands the install decision to tools/install_picker.py: prompts the
-# operator for which model families (Whisper / Voxtral / Parakeet /
-# Canary) to install, pre-checks the saved selection so re-runs are one
-# keystroke, then runs `pip install -e ".[…]"` for the resolved extras.
+# operator for which model families (Whisper / Voxtral / Parakeet) to
+# install, pre-checks the saved selection so re-runs are one keystroke,
+# then runs `pip install -e ".[…]"` for the resolved extras.
 # `--no-mlx` propagates so the picker also skips the MLX-flavoured
 # extras on Apple Silicon.
 PICKER_ARGS=()
@@ -169,12 +169,13 @@ fi
 # operator picked. Pull the `[vad]` extra so the dependency is satisfied
 # alongside the model install. No-op on re-runs once installed.
 #
-# (No ffmpeg branch here: every MLX backend — mlx-whisper, parakeet-mlx,
-# and mlx-audio Canary — pre-decodes the recorder's WAV via
-# `tapscribe.wav_predecode.load_recorder_wav_as_pcm` and hands the model
-# a numpy array, skipping the ffmpeg-shelling audio loaders the upstream
-# packages would otherwise use. There is no ffmpeg fallback; non-recorder
-# WAVs raise a clear "convert the file" error at request time.)
+# (No ffmpeg branch here: the array-accepting backends — mlx-whisper,
+# parakeet-mlx, and the transformers Parakeet path — pre-decode the
+# recorder's WAV via `tapscribe.wav_predecode.load_recorder_wav_as_pcm`
+# and hand the model a numpy array, skipping the ffmpeg-shelling audio
+# loaders the upstream packages would otherwise use. There is no ffmpeg
+# fallback; non-recorder WAVs raise a clear "convert the file" error at
+# request time.)
 # `find_spec` instead of `import silero_vad` so we don't pay the
 # ~1-2s torch import on every recorder bring-up just to probe
 # whether silero-vad is on the import path. The actual import is

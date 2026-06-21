@@ -700,7 +700,7 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     if gate_kind is not None and gate_kind not in ("tapscribe", "backend"):
         raise HTTPException(400, f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
     if gate_kind == "backend" and not getattr(recorder.live, "supports_native_vad", False):
-        # Stale-dashboard guard: a future Parakeet / Canary live channel
+        # Stale-dashboard guard: a future Parakeet live channel
         # has no native VAD, so "backend" gating would silently leave
         # no gate at all. UI auto-greys this, but old clients won't.
         raise HTTPException(
@@ -803,8 +803,8 @@ async def api_models(context: str = "batch"):
     # `only_installed` filters out families whose adapter packages weren't
     # selected at install time (the picker in tools/install_picker.py only
     # pulls in extras the operator ticks). Without this filter, the
-    # dashboard would advertise Parakeet/Canary even on machines that
-    # skipped the NeMo install — and the operator would only find out by
+    # dashboard would advertise Parakeet even on machines that skipped the
+    # transformers install — and the operator would only find out by
     # clicking and hitting the lazy-import error.
     entries = REGISTRY.for_context(context, only_installed=True)  # type: ignore[arg-type]
     return {
@@ -1405,8 +1405,9 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         # Per-call backend override — falls back to the Recorder's
         # preference when the body didn't carry one.
         backend=(body.get("backend") or "").strip() or recorder.backend,
-        # Canary's per-call language fields ride alongside prompt/hotwords.
-        # Empty → adapter falls back to its own default.
+        # Per-call language fields (for any model that declares source/target
+        # selects) ride alongside prompt/hotwords; no shipped model uses them
+        # today. Empty → adapter falls back to its own default.
         source_lang=(body.get("source_lang") or "").strip() or None,
         target_lang=(body.get("target_lang") or "").strip() or None,
     )

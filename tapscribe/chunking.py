@@ -1,10 +1,11 @@
-"""Shared chunking primitives for the MLX adapters.
+"""Shared chunking primitives for the Parakeet adapters.
 
-Both `mlx_parakeet` and `mlx_canary` slice a pre-decoded PCM array into
-overlapping windows so each `model.generate(...)` call stays under the
-backend's per-call budget (Metal GPU buffer cap for Parakeet, the
-upstream `max_tokens` cap for Canary). The integer-math for window
-boundaries is identical between them — this module is where it lives.
+Both `mlx_parakeet` (MLX) and `parakeet` (transformers CUDA/CPU) slice a
+pre-decoded PCM array into overlapping windows so each
+`model.generate(...)` call stays under the backend's per-call budget
+(Metal GPU buffer cap on MLX; activation-tensor memory on torch). The
+integer-math for window boundaries is identical between them — this
+module is where it lives.
 
 The result is intentionally simple — `Window(start_sample, end_sample,
 start_s)` — so adapters can wrap or extend as needed without depending

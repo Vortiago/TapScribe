@@ -216,10 +216,10 @@ export function render(t, meta, { showAudit }) {
   pick(frag, "headerMeta").textContent =
     `${t.wav_count || 0} wavs · ${(t.segments || []).length} seg · took ${fmtMs(t.transcribe_ms)} · model ${t.model || "?"}`;
 
-  // Translation badge: Canary entries set `target_language` to something
-  // non-empty when the operator asked for translation (source != target).
-  // Show a small inline badge so the user can't mistake translated output
-  // for raw transcription.
+  // Translation badge: a translation-capable adapter sets `target_language`
+  // to something non-empty when the operator asked for translation (source
+  // != target). No shipped adapter does today, but the field + badge are
+  // retained so cached sidecars from such a run still render correctly.
   if (t.target_language) {
     const badge = pick(frag, "translateBadge");
     badge.hidden = false;

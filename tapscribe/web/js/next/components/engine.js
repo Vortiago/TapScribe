@@ -1,12 +1,12 @@
 // @ts-check
 // Stages engine selector — a VISIBLE backend-chip row + a COMPACT model
-// dropdown + (for Canary) source/target language selects. Used in two places:
+// dropdown + any model-declared option <select>s. Used in two places:
 //   - Settings (the global batch DEFAULT engine), and
 //   - Transcript (the engine for the open session, drives its transcribe jobs).
 // Mirrors the data flow of the classic dashboard's session-detail engine
 // controls (backend chips from `available_backends`, a model <select> grouped
-// by family with <optgroup> from /api/models, Canary's source_lang/target_lang
-// from the model's declared `inputs`). The model list used to be a tall
+// by family with <optgroup> from /api/models, plus any SelectInputs the model
+// declares in its `inputs`). The model list used to be a tall
 // model-by-family grid; we ship few models, so it's now a single dropdown that
 // matches the classic UI's session-detail model <select>.
 
@@ -21,7 +21,6 @@ const FAMILY_LABELS = [
   ["nb-whisper", "NB-Whisper (Norwegian)"],
   ["voxtral", "Voxtral (Mistral)"],
   ["parakeet", "Parakeet (NVIDIA)"],
-  ["canary", "Canary (NVIDIA, translation)"],
 ];
 
 /** @type {Record<string, string>} */
@@ -133,8 +132,8 @@ export function render(host, { state, catalog, onChange }) {
   });
   frag.appendChild(row("Model", sel));
 
-  // ---- Canary translation: source_lang → target_lang (from the model's
-  // declared SelectInputs, exactly like the classic dashboard) ----
+  // ---- Model-declared option selects (any SelectInputs in the model's
+  // `inputs` — generic; no shipped model declares any today) ----
   const entry = models.find((m) => m.model_id === state.model);
   const selects = (entry?.inputs || []).filter(
     /** @returns {x is import('../../types.js').SelectInput} */
@@ -158,7 +157,7 @@ export function render(host, { state, catalog, onChange }) {
       // wires a change handler.
       wrap.appendChild(sf);
     }
-    frag.appendChild(row("Canary translation", wrap));
+    frag.appendChild(row("Options", wrap));
   }
 
   host.replaceChildren(frag);
