@@ -76,21 +76,20 @@ voxtral-cpu = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
 # --- Parakeet TDT 0.6B v3 ---------------------------------------------------
 # Two independent adapters; no shared piece between them.
 parakeet-cpu = [
-    # On Linux/Windows the upstream NeMo line is free to float forward.
-    "nemo_toolkit[asr]>=2.5,<2.8; sys_platform != 'darwin'",
-    # NeMo 2.6+ adds `Requires-Dist: kaldialign<=0.9.1`, but kaldialign
-    # 0.9.1 has no cp313 macOS wheel — only 0.9.2 and 0.9.3 do, and
-    # `kaldialign 0.10.0` (released 2026-05-06) dropped macOS wheels
-    # entirely. The NeMo cap is tighter than ours, so pip resolves to
-    # 0.9.1 on macOS py3.13 and falls back to an sdist build that needs
-    # cmake + a working C++ toolchain and fails (the operator's
-    # "Build kaldialign failed" report). Cap NeMo to 2.5.x on macOS,
-    # which doesn't pin kaldialign at all, then pin kaldialign to the
-    # wheel-available window below. Bump both caps deliberately after
-    # auditing upstream changelogs.
-    "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
+    # Parakeet-TDT via Hugging Face transformers (CUDA / CPU). transformers
+    # v5+ ships native `ParakeetForTDT` / `AutoProcessor`; `librosa` backs
+    # the feature extractor's log-mel. Far lighter than the old NeMo path
+    # (no PyTorch-Lightning / Hydra) and — crucially — carries NO
+    # `kaldialign` transitive pin, so it installs cleanly on every platform.
+    # That retires the whole macOS NeMo<2.6 + kaldialign wheel-window dance.
+    # The adapter relies on `AutoModelForTDT.generate(...,
+    # return_dict_in_generate=True)` + `processor.decode(sequences,
+    # durations=...)` for token timestamps; an importorskip smoke test
+    # (tests/test_transcribers_parakeet.py) guards those symbols, so bump
+    # the upper bound deliberately after auditing the upstream changelog.
+    "transformers>=5.12,<6",
+    "librosa>=0.10",
     "torch>=2.1",
-    "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
 ]
 parakeet-mlx = [
     # Upper bound: `tapscribe.transcribers.mlx_parakeet` relies on
@@ -102,21 +101,6 @@ parakeet-mlx = [
     # needing ffmpeg on PATH. Bump the cap deliberately after auditing
     # the upstream changelog.
     "parakeet-mlx>=0.5,<0.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
-
-# --- Canary 1B v2 -----------------------------------------------------------
-# NeMo for CPU/CUDA only. No MLX extra — there are no published
-# mlx-audio Canary weights on the Hub.
-canary-cpu = [
-    # See the parakeet-cpu block above for the rationale on the macOS
-    # split — same NeMo-transitive kaldialign problem, same fix.
-    # Duplicated rather than hoisted into a shared extra so an operator
-    # who installs only Canary still gets the constraint without
-    # depending on an opaque indirection.
-    "nemo_toolkit[asr]>=2.5,<2.8; sys_platform != 'darwin'",
-    "nemo_toolkit[asr]>=2.5,<2.6; sys_platform == 'darwin'",
-    "torch>=2.1",
-    "kaldialign>=0.9.2,<0.10; sys_platform == 'darwin'",
 ]
 
 # --- CUDA runtime libs (faster-whisper / CTranslate2 GPU path) --------------
@@ -176,14 +160,11 @@ summarize = [
 whisper = ["tapscribe[whisper-live,whisper-cpu,whisper-mlx]"]
 mlx = ["tapscribe[whisper-mlx]"]
 voxtral = ["tapscribe[voxtral-cpu]"]
-# On Apple Silicon, parakeet-mlx is the natural backend (GPU-accelerated,
-# ~2-3× faster, no NeMo / kaldialign dependency). Pulling the CPU/NeMo
-# backend alongside it forces pip to resolve NeMo-2.5.x (capped on macOS
-# in `parakeet-cpu` above) together with parakeet-mlx's transitive
-# huggingface_hub / numpy / librosa floors — the two sub-graphs disagree
-# on macOS arm64 + py3.13 and pip surfaces a confusing
-# "ResolutionImpossible / nemo-toolkit" error. Avoid the coexistence by
-# offering only parakeet-mlx through the alias on Apple Silicon.
+# On Apple Silicon, parakeet-mlx is the natural backend (GPU-accelerated
+# via Metal, ~2-3× faster than torch on CPU). Everywhere else the
+# transformers CUDA/CPU backend (`parakeet-cpu`) applies. Split by platform
+# so a mac install doesn't pull transformers when MLX is the path, and a
+# Linux/Windows box doesn't pull the Apple-only parakeet-mlx wheel.
 # Operators who explicitly want both backends can still pick "Both" in
 # `tools/install_picker.py`, which composes the atomic extras directly.
 parakeet = [
@@ -193,7 +174,6 @@ parakeet = [
     # is expressed via De Morgan: not (A and B) ≡ (¬A or ¬B).
     "tapscribe[parakeet-cpu]; sys_platform != 'darwin' or platform_machine != 'arm64'",
 ]
-canary = ["tapscribe[canary-cpu]"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -257,7 +237,7 @@ filterwarnings = [
     "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
 markers = [
-    "real_audio: end-to-end test that streams real audio fixtures and runs a real Whisper backend. Skipped unless tests/fixtures/audio/ is populated and faster-whisper is installed.",
+    "real_audio: end-to-end test that streams real audio fixtures and runs a real transcription backend (Whisper via faster-whisper, or Parakeet via transformers). Skipped unless tests/fixtures/audio/ is populated and the backend's package is installed.",
     "chaos: race-condition / error-recovery test exercising background tasks, abnormal close paths, or repeated rapid mutations. Opt out with -m 'not chaos'.",
     "browser_e2e: requires Playwright + Chromium (`pip install -e .[dev] && python -m playwright install chromium`). Opt out with -m 'not browser_e2e'.",
     "real_silero: opt out of the autouse silero stub in tests/conftest.py — exercises the real `detect_speech_silero` import path (only set on tests that need it).",

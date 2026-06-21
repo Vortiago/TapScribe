@@ -13,7 +13,7 @@ the real backends import lazily (`mlx_lm.load`/`generate`,
 `llama_cpp.Llama.from_pretrained`/`create_chat_completion`). They no-op on hosts
 where the `[summarize]` extra isn't installed (the whole Linux CI matrix) and
 run in full wherever the package is present — the same convention as
-`test_mlx_audio_canary_upstream_contract`.
+`test_transformers_parakeet_upstream_contract`.
 """
 
 from __future__ import annotations
@@ -367,11 +367,10 @@ def test_build_local_messages_blank_prompt_falls_back_to_default():
 
 # ---------------------------------------------------------------------------
 # Upstream API smoke tests — only run where the [summarize] extra is installed.
-# These catch an upstream rename/restructure (the mlx-audio `Canary`→`Model`
-# class of bug) the moment a dependency bump lands, before an operator hits the
-# regression at request time. The pyproject upper bounds are the primary
-# defence; these are the secondary signal. Mirrors
-# test_mlx_audio_canary_upstream_contract.
+# These catch an upstream rename/restructure (the symbol-rename class of bug)
+# the moment a dependency bump lands, before an operator hits the regression at
+# request time. The pyproject upper bounds are the primary defence; these are
+# the secondary signal. Mirrors test_transformers_parakeet_upstream_contract.
 # ---------------------------------------------------------------------------
 
 

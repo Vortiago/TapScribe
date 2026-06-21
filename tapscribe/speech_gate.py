@@ -18,9 +18,9 @@ Why this exists (vs. relying on WhisperLiveKit's `--vac`):
    last ~300 ms when the gate opens, recovering the leading consonants
    ("c" in "could you") that WlK's VAC was eating.
 
-2. **Backend-agnostic**: future `ParakeetLiveChannel` / `CanaryLive…`
-   etc. don't have built-in VADs. Gating at TapScribe's layer means
-   one code path serves every live backend.
+2. **Backend-agnostic**: a future `ParakeetLiveChannel` etc. won't have
+   a built-in VAD. Gating at TapScribe's layer means one code path
+   serves every live backend.
 
 3. **Operator-tunable from the dashboard**: threshold and timings are
    `LiveConfig` fields that surface in the UI, not buried in a

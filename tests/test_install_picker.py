@@ -276,12 +276,14 @@ def test_familydef_declares_backend():
 
 def test_resolve_extras_preserves_family_order_for_reproducibility():
     sel = Selection()
-    _enable(sel, "canary", BACKEND_CPU)
+    _enable(sel, "voxtral", BACKEND_CPU)
     _enable(sel, "whisper", BACKEND_CPU)
     _enable(sel, "parakeet", BACKEND_CPU)
     extras = install_picker.resolve_extras(sel, _caps())
-    assert extras.index("whisper-live") < extras.index("parakeet-cpu")
-    assert extras.index("parakeet-cpu") < extras.index("canary-cpu")
+    # FAMILIES order (whisper, voxtral, parakeet) is preserved regardless of
+    # the order the operator toggled them in.
+    assert extras.index("whisper-live") < extras.index("voxtral-cpu")
+    assert extras.index("voxtral-cpu") < extras.index("parakeet-cpu")
 
 
 # ── CUDA runtime libs (faster-whisper / CTranslate2 GPU path) ────────
@@ -330,13 +332,13 @@ def test_resolve_extras_no_cuda_libs_for_mlx_only_whisper():
     assert install_picker.CUDA_RUNTIME_EXTRA not in extras_both
 
 
-def test_resolve_extras_no_cuda_libs_for_nemo_only_selection():
-    """Parakeet/Canary (NeMo, Torch-based) get CUDA from Torch's own
+def test_resolve_extras_no_cuda_libs_for_torch_only_selection():
+    """Parakeet (transformers, Torch-based) gets CUDA from Torch's own
     bundle — no whisper-cpu atom in the install means no cuda-libs, even
     on a CUDA box."""
     sel = Selection()
     _enable(sel, "parakeet", BACKEND_CPU)
-    _enable(sel, "canary", BACKEND_CPU)
+    _enable(sel, "voxtral", BACKEND_CPU)
     extras = install_picker.resolve_extras(sel, _caps(cuda=True))
     assert "whisper-cpu" not in extras
     assert install_picker.CUDA_RUNTIME_EXTRA not in extras
@@ -1094,95 +1096,13 @@ def test_pyproject_cpu_extras_do_not_pull_mlx_packages():
     assert not any("mlx" in line for line in cpu), cpu
 
 
-def _requirements_named(lines: list[str], project_name: str) -> list[Requirement]:
-    """All requirements matching `project_name`. The macOS NeMo fix
-    declares the same package twice with different `sys_platform`
-    markers, so callers need to look at the full set."""
-    reqs = [Requirement(line) for line in lines]
-    return [r for r in reqs if r.name == project_name]
-
-
-@pytest.mark.parametrize("extra_name", ["canary-cpu", "parakeet-cpu"])
-def test_pyproject_nemo_extras_pin_macos_to_pre_kaldialign_cap(extra_name):
-    """Regression for the Mac mini "Build kaldialign failed" install
-    failure:
-
-    * `kaldialign 0.10.0` (released 2026-05-06) dropped macOS wheels.
-    * `nemo_toolkit 2.6+` adds `Requires-Dist: kaldialign<=0.9.1`, and
-      kaldialign 0.9.1 has no cp313 macOS wheel — only 0.9.2 and 0.9.3
-      do.
-    * Result: an unconstrained pyproject leaves pip resolving NeMo
-      latest + kaldialign<=0.9.1 on macOS py3.13, then falling back to
-      an sdist build of kaldialign that fails on a stock Mac mini.
-
-    Fix: on macOS, cap NeMo to <2.6 (kaldialign unconstrained there)
-    and pin kaldialign to `>=0.9.2,<0.10` (the wheel-available window).
-    On Linux/Windows neither cap applies and pip stays on the latest
-    NeMo.
-
-    This test pins the shape so a future "cleanup" PR can't strip
-    either half of the fix without understanding why both halves
-    exist."""
-    extras = _atomic_extras(extra_name)
-    nemo_reqs = _requirements_named(extras, "nemo_toolkit")
-    kaldi_reqs = _requirements_named(extras, "kaldialign")
-
-    assert len(nemo_reqs) == 2, (
-        f"{extra_name} must declare nemo_toolkit twice — once for "
-        "sys_platform != 'darwin' (unbounded) and once for == 'darwin' "
-        "(<2.6 to avoid NeMo's kaldialign<=0.9.1 cap). Got: "
-        f"{[str(r) for r in nemo_reqs]}"
-    )
-    # `packaging` normalises marker quoting to double-quotes; pyproject
-    # source can use either, so compare on the normalised form.
-    darwin_nemo = [r for r in nemo_reqs if r.marker and '== "darwin"' in str(r.marker)]
-    nondarwin_nemo = [r for r in nemo_reqs if r.marker and '!= "darwin"' in str(r.marker)]
-    assert darwin_nemo and nondarwin_nemo, (
-        f"{extra_name} → nemo_toolkit markers must be both `== 'darwin'` and "
-        f"`!= 'darwin'`. Got: {[str(r) for r in nemo_reqs]}"
-    )
-    assert Version("2.5.3") in darwin_nemo[0].specifier, (
-        f"{extra_name} darwin nemo specifier {darwin_nemo[0].specifier!r} must "
-        "still admit the last 2.5.x release; that's the one without the "
-        "kaldialign<=0.9.1 cap."
-    )
-    assert Version("2.7.3") not in darwin_nemo[0].specifier, (
-        f"{extra_name} darwin nemo specifier {darwin_nemo[0].specifier!r} admits "
-        "2.7.3, which pins kaldialign<=0.9.1 and re-introduces the macOS sdist "
-        "build path."
-    )
-
-    assert len(kaldi_reqs) == 1 and kaldi_reqs[0].marker is not None, (
-        f"{extra_name} → kaldialign requirement must be present and sys_platform-gated"
-    )
-    spec = kaldi_reqs[0].specifier
-    assert "darwin" in str(kaldi_reqs[0].marker), (
-        f"{extra_name} → kaldialign marker {kaldi_reqs[0].marker!r} dropped the "
-        "macOS gate; Linux/Windows must keep the upstream-NeMo-pinned version."
-    )
-    assert Version("0.9.3") in spec and Version("0.9.2") in spec, (
-        f"{extra_name} → kaldialign specifier {spec!r} excludes the only "
-        "wheel-available versions on macOS arm64 cp313 (0.9.2 and 0.9.3)"
-    )
-    assert Version("0.9.1") not in spec, (
-        f"{extra_name} → kaldialign specifier {spec!r} admits 0.9.1, which has "
-        "no cp313 macOS wheel and forces a source build that fails on a stock "
-        "Mac mini."
-    )
-    assert Version("0.10.0") not in spec, (
-        f"{extra_name} → kaldialign specifier {spec!r} admits 0.10.0, which has no macOS wheel at all."
-    )
-
-
 def test_pyproject_parakeet_alias_is_mlx_only_on_apple_silicon():
-    """Regression for the `tapscribe[parakeet]` install failure on
-    macos-latest + py3.13: pulling `parakeet-cpu` (NeMo 2.5.x via our
-    macOS cap) alongside `parakeet-mlx` causes pip's resolver to flag a
-    transitive conflict between the two sub-graphs. On Apple Silicon
-    parakeet-mlx alone is the right backend (faster, GPU, no NeMo
-    dependency), so the alias gates the CPU atom out via a PEP 508
-    marker. Without this gating, `pip install -e .[parakeet]` on a Mac
-    mini fails with ResolutionImpossible."""
+    """On Apple Silicon, `tapscribe[parakeet]` should resolve to
+    parakeet-mlx alone (GPU via Metal, faster than torch); everywhere else
+    to the transformers `parakeet-cpu` backend. The alias gates the CPU
+    atom out on darwin+arm64 via a PEP 508 marker so a mac install doesn't
+    pull transformers when MLX is the path, and the two backends never
+    coexist in one resolve."""
     parakeet_lines = _atomic_extras("parakeet")
     # Exactly two marker-gated self-references: one Apple-Silicon-only,
     # one everywhere-else.
@@ -1201,19 +1121,14 @@ def test_pyproject_parakeet_alias_is_mlx_only_on_apple_silicon():
     # whole point of the split.
     assert "parakeet-cpu" not in darwin_line, (
         "parakeet alias's Apple-Silicon branch pulled in parakeet-cpu, which "
-        "re-introduces the NeMo + parakeet-mlx resolver conflict. The atom must "
-        f"be MLX-only on darwin+arm64. Got: {darwin_line!r}"
+        "would drag transformers onto a mac where MLX is the path. The atom "
+        f"must be MLX-only on darwin+arm64. Got: {darwin_line!r}"
     )
 
 
 def test_picker_apple_silicon_mlx_only_matches_failing_invocation_atoms():
-    """End-to-end: the failure log was for
-       tapscribe[canary,mlx,parakeet,parakeet-mlx,whisper]
-    so reproduce the post-split equivalent and confirm the picker still
-    resolves it without dragging in the `whisper-cpu` atom when the
-    operator explicitly chose MLX-only on Apple Silicon. Canary has no
-    MLX backend so a Mac-only selection covers just Whisper and
-    Parakeet here."""
+    """End-to-end: an Apple-Silicon MLX-only selection across Whisper +
+    Parakeet must resolve without dragging in the `whisper-cpu` atom."""
     sel = Selection()
     _enable(sel, "whisper", BACKEND_MLX)
     _enable(sel, "parakeet", BACKEND_MLX)

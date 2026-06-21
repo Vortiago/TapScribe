@@ -12,10 +12,10 @@ of the registry for the dashboard.
 Adding a model means adding one `ModelEntry` here. Adding a *family* of
 models means adding the family-level constants (input tuple, language
 list) once and reusing them — see how Whisper, NB-Whisper, Voxtral,
-Parakeet, and Canary each get one small block below.
+and Parakeet each get one small block below.
 
 Loader thunks are lazy: importing `catalog` never imports `faster_whisper`,
-`parakeet_mlx`, `nemo_toolkit`, or any heavy adapter module. The thunk
+`parakeet_mlx`, `transformers`, or any heavy adapter module. The thunk
 imports its adapter only when the operator actually picks that backend.
 """
 
@@ -29,7 +29,6 @@ from .base import (
     BackendKind,
     BackendPreference,
     ModelInput,
-    SelectInput,
     TextInput,
     Transcriber,
 )
@@ -95,7 +94,7 @@ def set_available_backends_for_testing(kinds: frozenset[BackendKind] | None) -> 
 # ---------------------------------------------------------------------------
 # Adapter-module availability — does this install have the right Python
 # packages to run a given binding? Drives the UI filter so the dashboard
-# doesn't advertise Voxtral / Parakeet / Canary on installs where the
+# doesn't advertise Voxtral / Parakeet on installs where the
 # operator told the install picker to skip them.
 # ---------------------------------------------------------------------------
 
@@ -164,7 +163,7 @@ def resolve_backend_preference(preference: BackendPreference) -> BackendKind:
         raise RuntimeError(
             f"backend={preference!r} requested but not available on this machine. "
             f"Available: {sorted(avail)}. Install the matching extra "
-            f"(pip install tapscribe[mlx|parakeet|canary]) or pick a different backend."
+            f"(pip install tapscribe[mlx|parakeet]) or pick a different backend."
         )
     return preference
 
@@ -202,9 +201,10 @@ WHISPER_INPUTS: tuple[ModelInput, ...] = (
 NO_INPUTS: tuple[ModelInput, ...] = ()
 
 
-# Canary's 25 supported languages — used for both source_lang and target_lang
-# SelectInputs. English first so it's the natural default.
-_CANARY_LANG_PAIRS: tuple[tuple[str, str], ...] = (
+# Parakeet's 25 supported languages (parakeet-tdt-0.6b-v3) — English first so
+# it's the natural default. No Norwegian. Declared as the entry-level
+# `languages` set; Parakeet has no source/target split (it doesn't translate).
+_PARAKEET_LANG_PAIRS: tuple[tuple[str, str], ...] = (
     ("en", "English"),
     ("bg", "Bulgarian"),
     ("hr", "Croatian"),
@@ -231,31 +231,7 @@ _CANARY_LANG_PAIRS: tuple[tuple[str, str], ...] = (
     ("sv", "Swedish"),
     ("uk", "Ukrainian"),
 )
-_CANARY_LANG_CODES: tuple[str, ...] = tuple(code for code, _ in _CANARY_LANG_PAIRS)
-
-
-CANARY_INPUTS: tuple[ModelInput, ...] = (
-    SelectInput(
-        name="source_lang",
-        label="Source language",
-        options=_CANARY_LANG_PAIRS,
-        default="en",
-        description="Language of the speech in the WAV. Required — Canary has no auto-detect.",
-    ),
-    SelectInput(
-        name="target_lang",
-        label="Target language",
-        options=_CANARY_LANG_PAIRS,
-        default="en",
-        description="Output language. Equal to source = transcription; "
-        "different = translation (only X↔English is supported by the model).",
-    ),
-)
-
-
-# Parakeet's 25 languages — same set as Canary minus the source/target split,
-# so this is the entry-level `languages` declaration only.
-_PARAKEET_LANG_CODES: tuple[str, ...] = _CANARY_LANG_CODES
+_PARAKEET_LANG_CODES: tuple[str, ...] = tuple(code for code, _ in _PARAKEET_LANG_PAIRS)
 
 
 # ---------------------------------------------------------------------------
@@ -300,18 +276,6 @@ def _load_parakeet_hf(model_id: str, kind: BackendKind) -> Transcriber:
     return ParakeetTranscriber.load(model_id, kind=kind)
 
 
-def _load_canary_mlx(model_id: str, kind: BackendKind) -> Transcriber:  # noqa: ARG001
-    from .mlx_canary import MlxCanaryTranscriber
-
-    return MlxCanaryTranscriber.load(model_id)
-
-
-def _load_canary_nemo(model_id: str, kind: BackendKind) -> Transcriber:
-    from .canary import CanaryTranscriber
-
-    return CanaryTranscriber.load(model_id, kind=kind)
-
-
 # ── Moonshine placeholder loaders (issue #121 — real inference in #122/#123) ──────────
 
 
@@ -334,7 +298,7 @@ def _load_moonshine_onnx(model_id: str, kind: BackendKind) -> Transcriber:  # no
 # ---------------------------------------------------------------------------
 
 
-Family = Literal["whisper", "nb-whisper", "voxtral", "parakeet", "canary", "moonshine"]
+Family = Literal["whisper", "nb-whisper", "voxtral", "parakeet", "moonshine"]
 Context = Literal["batch", "live"]
 
 
@@ -350,7 +314,7 @@ class BackendBinding:
 
     `probe_module` is the top-level package whose presence indicates this
     binding's adapter dependency is installed (e.g. `"faster_whisper"`,
-    `"mlx_whisper"`, `"nemo"`). The registry uses `find_spec(probe_module)`
+    `"mlx_whisper"`, `"transformers"`). The registry uses `find_spec(probe_module)`
     to decide whether the binding is usable on this install — drives
     `ModelEntry.is_installed()` so `/api/models` can hide families the
     operator didn't pick during the install picker.
@@ -592,13 +556,7 @@ _VOXTRAL_BACKENDS: tuple[BackendBinding, ...] = (
 
 _PARAKEET_BACKENDS: tuple[BackendBinding, ...] = (
     BackendBinding(kinds=frozenset({"mlx"}), loader=_load_parakeet_mlx, probe_module="parakeet_mlx"),
-    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_parakeet_hf, probe_module="nemo"),
-)
-
-
-# Canary is NeMo-only: there are no published mlx-audio Canary weights.
-_CANARY_BACKENDS: tuple[BackendBinding, ...] = (
-    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_canary_nemo, probe_module="nemo"),
+    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_parakeet_hf, probe_module="transformers"),
 )
 
 
@@ -700,17 +658,6 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
         contexts=_BATCH_ONLY,
         backends=_PARAKEET_BACKENDS,
         inputs=NO_INPUTS,
-    ),
-    # ── Canary (NVIDIA via mlx-audio OR NeMo) — batch-only, supports translation ──
-    ModelEntry(
-        model_id="canary-1b-v2",
-        family="canary",
-        display_name="canary-1b-v2",
-        description="NVIDIA Canary 1B v2 · 25 EU langs · transcription + X↔English translation",
-        languages=_CANARY_LANG_CODES,
-        contexts=_BATCH_ONLY,
-        backends=_CANARY_BACKENDS,
-        inputs=CANARY_INPUTS,
     ),
     # ── Moonshine (live-only, English) — issue #121; inference lands in #122/#123 ──
     _moonshine("moonshine-tiny", "moonshine-tiny", "Moonshine Tiny · English · ultra-fast live"),

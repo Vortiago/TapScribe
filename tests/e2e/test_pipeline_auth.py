@@ -35,7 +35,7 @@ from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
-from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # NeMo ships an installed `tests` package — explicit sys.path insertion picks up the project's tests/conftest.py
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path insertion picks up the project's tests/conftest.py
     repoint_config_files,
 )
 

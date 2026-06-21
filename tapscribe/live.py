@@ -68,7 +68,7 @@ class LiveChannel(Protocol):
     config: LiveConfig
     # True when the backend has its own native VAD that can be enabled/
     # disabled. WhisperLiveKit does (via --vac / --no-vac), so True.
-    # Future Parakeet / Canary live channels that don't run their own
+    # A future Parakeet live channel that doesn't run its own native
     # VAD will set this False — the dashboard then greys out the
     # "backend" option for gate_kind, since picking it would be a no-op.
     supports_native_vad: bool
@@ -125,8 +125,8 @@ class LiveConfig:
     #   "tapscribe" → TapScribe's own SpeechGate (Silero) sits in front
     #                 of the relay; WlK runs with --no-vac. Recovers
     #                 leading consonants via pre-roll and is backend-
-    #                 agnostic (future Parakeet / Canary live channels
-    #                 plug into the same gate). Default.
+    #                 agnostic (a future Parakeet live channel plugs
+    #                 into the same gate). Default.
     #   "backend"  → defer to the backend's native VAD (--vac on for WlK).
     #                 No pre-roll, no leading-word recovery — kept as an
     #                 escape hatch for A/B comparison and for backends

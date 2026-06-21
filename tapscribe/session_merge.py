@@ -222,10 +222,11 @@ class SessionTranscript:
     suppressed: tuple[SuppressedSessionSegment, ...]
     plain_text: str
     low_confidence_count: int
-    # Translation-aware fields: only Canary populates `target_language`,
-    # and only when the operator picked a target_lang different from
-    # source_lang. The dashboard renders a translation badge whenever
-    # `target_language` is non-empty.
+    # Translation-aware fields: a translation-capable adapter would populate
+    # `target_language` when the operator picked a target_lang different
+    # from source_lang. No shipped adapter does today, but the dashboard
+    # still renders a translation badge whenever `target_language` is
+    # non-empty (e.g. from a sidecar cached by one that did).
     source_language: str = ""
     target_language: str = ""
 
@@ -284,8 +285,8 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     device_label = ""
     model_label = ""
     # First non-empty source_language / target_language seen across the
-    # session's sidecars wins. For a multi-Canary session with mixed
-    # source langs this is an oversimplification, but the per-WAV JSON
+    # session's sidecars wins. For a session with mixed source langs this
+    # is an oversimplification, but the per-WAV JSON
     # still carries the real value — the session-level fields are just
     # the merged-transcript badge hint.
     source_language_label = ""

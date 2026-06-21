@@ -75,12 +75,7 @@ def _stub_loaders_and_backends(monkeypatch):
     monkeypatch.setattr(
         catalog,
         "_load_parakeet_hf",
-        lambda mid, kind: _StubTranscriber("parakeet-nemo", mid, kind),
-    )
-    monkeypatch.setattr(
-        catalog,
-        "_load_canary_nemo",
-        lambda mid, kind: _StubTranscriber("canary-nemo", mid, kind),
+        lambda mid, kind: _StubTranscriber("parakeet-hf", mid, kind),
     )
 
     # The default REGISTRY captures the *original* loader functions
@@ -104,9 +99,7 @@ def _rebuild_registry(monkeypatch):
     Builds straight from the same family bindings the production catalog
     uses, picking up the live function references."""
     from tapscribe.transcribers.catalog import (
-        _CANARY_LANG_CODES,
         _PARAKEET_LANG_CODES,
-        CANARY_INPUTS,
         NO_INPUTS,
         WHISPER_INPUTS,
         BackendBinding,
@@ -127,7 +120,6 @@ def _rebuild_registry(monkeypatch):
         BackendBinding(kinds=frozenset({"mlx"}), loader=catalog._load_parakeet_mlx),
         BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_parakeet_hf),
     )
-    canary_backends = (BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=catalog._load_canary_nemo),)
     both = frozenset({"batch", "live"})
     batch_only = frozenset({"batch"})
     entries = (
@@ -180,16 +172,6 @@ def _rebuild_registry(monkeypatch):
             contexts=batch_only,
             backends=parakeet_backends,
             inputs=NO_INPUTS,
-        ),
-        ModelEntry(
-            model_id="canary-1b-v2",
-            family="canary",
-            display_name="canary-1b-v2",
-            description="",
-            languages=_CANARY_LANG_CODES,
-            contexts=batch_only,
-            backends=canary_backends,
-            inputs=CANARY_INPUTS,
         ),
     )
     fresh = TranscriberRegistry(entries)
@@ -252,14 +234,9 @@ def test_routes_parakeet_to_mlx_when_mlx_preferred():
     assert t.name == "parakeet-mlx"
 
 
-def test_routes_parakeet_to_nemo_when_cuda_preferred():
+def test_routes_parakeet_to_hf_when_cuda_preferred():
     t = _load("parakeet-tdt-0.6b-v3", backend="cuda")
-    assert t.name == "parakeet-nemo"
-
-
-def test_routes_canary_to_nemo_when_cuda():
-    t = _load("canary-1b-v2", backend="cuda")
-    assert t.name == "canary-nemo"
+    assert t.name == "parakeet-hf"
 
 
 def test_caches_per_model_name_resolved_kind_combo():

@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 from conftest import (
-    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # NeMo ships an installed `tests` package — collides with our project's tests/ dir
+    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
 )
 
 from tapscribe.live import LiveConfig

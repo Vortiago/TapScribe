@@ -41,7 +41,7 @@ from tapscribe.tls import ensure_self_signed_cert
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 from conftest import (
-    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # NeMo's installed `tests` package collides with our tests/; explicit sys.path picks up the project's conftest.py
+    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path picks up the project's tests/conftest.py
 )
 
 from .harness import (

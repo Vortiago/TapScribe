@@ -1,7 +1,7 @@
 """Transcriber protocol + result dataclasses + model-input types.
 
 These types form the boundary that every adapter (faster-whisper, mlx,
-Voxtral, Parakeet, Canary) talks across. Frozen dataclasses keep pipeline
+Voxtral, Parakeet) talks across. Frozen dataclasses keep pipeline
 composition honest — `dataclasses.replace` is the only way a
 post-processor like `hallucinations.apply` can extend a result.
 
@@ -116,13 +116,14 @@ class TranscriptionResult:
     `TranscriptionResult` via `dataclasses.replace`.
 
     `language` (the existing field) is the source language as the model
-    saw it — kept for back-compat with cached sidecar JSONs. Adapters
-    that support translation (Canary) also populate `source_language` /
-    `target_language`; everything else leaves them empty.
+    saw it — kept for back-compat with cached sidecar JSONs. A
+    translation-capable adapter would also populate `source_language` /
+    `target_language`; everything else (every shipped adapter today)
+    leaves them empty.
     """
 
     transcriber: str  # echoes Transcriber.name
-    backend: str  # library/framework: "faster-whisper", "mlx-whisper", "parakeet-mlx", "canary-nemo", etc.
+    backend: str  # library/framework: "faster-whisper", "mlx-whisper", "parakeet-mlx", "parakeet-hf", etc.
     device: str  # hardware only: "CPU", "Apple Silicon GPU", "CUDA"
     model: str
     language: str
@@ -134,9 +135,11 @@ class TranscriptionResult:
     hotwords_used: str
     quality_settings: dict[str, Any]
     suppressed_hallucinations: tuple[TranscriptionSegment, ...] = field(default_factory=tuple)
-    # Translation-capable adapters (Canary today) record the source vs
-    # output language explicitly. Empty string = adapter doesn't deal in
-    # translation; `language` carries the only language info.
+    # A translation-capable adapter would record the source vs output
+    # language explicitly. Empty string = adapter doesn't deal in
+    # translation; `language` carries the only language info. No shipped
+    # adapter sets these today (they're retained for back-compat with
+    # sidecars cached from one that did).
     source_language: str = ""
     target_language: str = ""
 
@@ -182,8 +185,9 @@ class SelectInput:
     """A dropdown (closed enum of choices).
 
     `options` is a tuple of `(value, label)` pairs. `default` must be one
-    of the option values. Used today for Canary's `source_lang` /
-    `target_lang`; future use: explicit Whisper language pin.
+    of the option values. No shipped model declares one today (Canary's
+    source/target-lang selects were removed with the family); retained for
+    future use, e.g. an explicit Whisper language pin.
     """
 
     name: str
