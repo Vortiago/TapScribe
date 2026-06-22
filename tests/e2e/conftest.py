@@ -30,6 +30,22 @@ from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explic
 from .harness import RecorderServer
 
 
+@pytest.fixture(autouse=True)
+def _e2e_probes_installed():
+    """Present a fully set-up machine to the e2e server: mark every backend
+    probe installed (mirrors the unit `_force_all_probes_installed`). Without
+    this a backend-less CI box is "first run", so GET / now redirects to /setup
+    and the dashboard tests would break. The /setup smoke is robust either way."""
+    from tapscribe.transcribers.catalog import REGISTRY, set_installed_modules_for_testing
+
+    probes = {b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module}
+    set_installed_modules_for_testing(frozenset(probes))
+    try:
+        yield
+    finally:
+        set_installed_modules_for_testing(None)
+
+
 @dataclass
 class RunningRecorder:
     """Bundle of everything an E2E test usually needs: the running

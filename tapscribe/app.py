@@ -51,6 +51,7 @@ from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
+    RedirectResponse,
     Response,
     StreamingResponse,
 )
@@ -95,7 +96,7 @@ from .sessions import (
     write_session_meta,
 )
 from .setup_install import InstallSelectionError, run_install, sse, validate_selection
-from .setup_state import build_setup_state
+from .setup_state import build_setup_state, is_first_run
 from .strip_silence import plan_strip_regions, read_wav_int16
 from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
 from .summarizers.catalog import _MAX_TOKENS_BOUNDS
@@ -1636,6 +1637,11 @@ SETUP_HTML_PATH = config.WEB_DIR / "setup.html"
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
+    # First run (no transcription backend installed) → send the operator to the
+    # browser setup surface instead of an empty dashboard. A no-op once any
+    # backend is installed; is_first_run() reads the cached catalog probes.
+    if is_first_run():
+        return RedirectResponse("/setup", status_code=307)
     try:
         return HTMLResponse(NEXT_HTML_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:

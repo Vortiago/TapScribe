@@ -2174,6 +2174,20 @@ def test_root_serves_stages_shell(client):
     assert "/next.css" in r.text
 
 
+def test_root_redirects_to_setup_on_first_run(client):
+    """With no transcription backend installed, GET / sends the operator to the
+    browser setup surface instead of an empty dashboard."""
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+
+    set_installed_modules_for_testing(frozenset())  # nothing installed → first run
+    try:
+        r = client.get("/", follow_redirects=False)
+        assert r.status_code == 307
+        assert r.headers["location"] == "/setup"
+    finally:
+        set_installed_modules_for_testing(None)
+
+
 def test_next_route_is_gone(client):
     """/next was the Stages UI's incubation address; it no longer exists."""
     assert client.get("/next").status_code == 404
