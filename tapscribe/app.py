@@ -88,6 +88,7 @@ from .sessions import (
     read_wav_transcript,
     write_session_meta,
 )
+from .setup_state import build_setup_state
 from .strip_silence import plan_strip_regions, read_wav_int16
 from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
 from .summarizers.catalog import _MAX_TOKENS_BOUNDS
@@ -812,6 +813,22 @@ async def api_models(context: str = "batch"):
         "available_backends": sorted(_available_backends_snapshot()),
         "models": [e.to_mapping() for e in entries],
     }
+
+
+@app.get("/api/setup/state")
+async def api_setup_state():
+    """Catalog-driven setup state for the browser first-run / manage-models
+    surface (the "D" pattern). Read-only; install *execution* is separate.
+
+    Response shape:
+      {
+        "first_run": bool,                  # no transcription backend installed yet
+        "available_backends": ["cpu", ...], # what this host can run
+        "families": [ {family, label, size_hint, live, batch,
+                       installed, backends, models}, ... ]
+      }
+    """
+    return build_setup_state()
 
 
 @app.delete("/api/models/cache")

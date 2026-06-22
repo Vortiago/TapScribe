@@ -111,6 +111,22 @@ def test_api_models_rejects_unknown_context(client):
     assert r.status_code == 400
 
 
+def test_api_setup_state_shape(client):
+    r = client.get("/api/setup/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"first_run", "available_backends", "families"}
+    assert isinstance(body["available_backends"], list)
+    assert isinstance(body["families"], list) and body["families"]
+    fam = body["families"][0]
+    assert {"family", "label", "live", "batch", "installed", "backends", "size_hint", "models"} <= set(fam)
+    # Capability flags come from the catalog contexts, independent of host.
+    whisper = next(f for f in body["families"] if f["family"] == "whisper")
+    assert whisper["live"] and whisper["batch"]
+    parakeet = next(f for f in body["families"] if f["family"] == "parakeet")
+    assert parakeet["batch"] and not parakeet["live"]
+
+
 def test_api_models_emits_text_inputs_for_whisper(client):
     r = client.get("/api/models")
     whisper = next(m for m in r.json()["models"] if m["model_id"] == "small.en")
