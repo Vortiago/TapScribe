@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe · Setup</title>
+    <style>
+      /* Self-contained dark "control surface" — the variant-D look, served
+         before the dashboard's stylesheet is guaranteed loadable. */
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        background: radial-gradient(120% 80% at 50% 0%, #13161d 0%, #0c0e13 60%);
+        color: #c5cad6; min-height: 100vh; font-size: 13px;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      .wrap { max-width: 760px; margin: 0 auto; padding: 30px 20px 80px; }
+      .head { display: flex; align-items: center; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid #1e222c; margin-bottom: 18px; }
+      .dot { width: 8px; height: 8px; border-radius: 2px; background: #ffb454; }
+      .brand { font-weight: 700; color: #e7e9ee; font-size: 15px; }
+      .host { margin-left: auto; font-family: ui-monospace, monospace; font-size: 12px; color: #79829a; }
+      h1 { font-size: 21px; color: #e7e9ee; margin: 0 0 4px; letter-spacing: -.01em; }
+      .sub { color: #79829a; margin: 0 0 18px; }
+      .card { background: #11141b; border: 1px solid #1e222c; border-radius: 10px; padding: 18px 20px; }
+      table { width: 100%; border-collapse: collapse; }
+      th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #6b7287; padding: 6px 8px; border-bottom: 1px solid #1e222c; }
+      td { padding: 10px 8px; border-bottom: 1px solid #161a22; vertical-align: middle; }
+      .name { font-weight: 600; color: #e7e9ee; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .blurb { color: #79829a; font-size: 11px; margin-top: 2px; font-family: ui-monospace, monospace; }
+      .chip { font-size: 10px; border-radius: 3px; padding: 1px 6px; border: 1px solid; }
+      .chip-info { color: #7fb0ff; border-color: #2a3a55; background: #131c2b; }
+      .chip-muted { color: #9aa2b4; border-color: #2a2f3a; }
+      .chip-ok { color: #5fd6a6; border-color: #1f4a39; background: #0f231b; }
+      select, .sz { font-family: ui-monospace, monospace; font-size: 12px; }
+      select { background: #161a22; color: #c5cad6; border: 1px solid #262c38; border-radius: 3px; padding: 3px 6px; }
+      .sz { color: #c5cad6; text-align: right; white-space: nowrap; }
+      .cta { margin-top: 18px; }
+      button.go { width: 100%; background: #ffb454; color: #1a1206; border: 0; border-radius: 8px; padding: 13px; font-weight: 700; font-size: 15px; cursor: pointer; }
+      button.go:disabled { opacity: .5; cursor: not-allowed; }
+      .term { background: #07090d; border: 1px solid #1e222c; border-radius: 3px; padding: 10px; margin-top: 14px; height: 220px; overflow: auto; font-size: 11px; line-height: 1.5; color: #8fd6a8; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+      .done { color: #5fd6a6; font-weight: 700; }
+      .err { color: #e87d7d; font-weight: 700; }
+      a.dash { display: inline-block; margin-top: 12px; color: #7fb0ff; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="head">
+        <span class="dot"></span><span class="brand">TapScribe</span>
+        <span class="host" id="host"></span>
+      </div>
+      <h1 id="title">Set up TapScribe</h1>
+      <p class="sub" id="sub">Loading…</p>
+      <div class="card">
+        <div id="picker"></div>
+        <div class="cta"><button class="go" id="install" disabled>Install &amp; launch</button></div>
+        <pre class="term" id="log" hidden></pre>
+        <div id="result"></div>
+      </div>
+    </div>
+    <script type="module" src="/web/js/setup/setup.js"></script>
+  </body>
+</html>

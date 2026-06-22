@@ -1631,6 +1631,7 @@ DASHBOARD_JS_DIR = config.WEB_DIR / "js"
 DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
 NEXT_HTML_PATH = config.WEB_DIR / "next.html"
 NEXT_CSS_PATH = config.WEB_DIR / "next.css"
+SETUP_HTML_PATH = config.WEB_DIR / "setup.html"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1644,6 +1645,18 @@ async def dashboard():
             "<p>Expected at <code>" + str(NEXT_HTML_PATH) + "</code>.</p>"
             "</body></html>"
         )
+
+
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page():
+    """First-run / manage-models setup surface. Reachable any time (it doubles
+    as "manage models"); the bootstrap directs a fresh install here. The page's
+    JS drives GET /api/setup/state + POST /api/setup/install. A separate route
+    (not gating `/`) so the dashboard is never affected by install state."""
+    try:
+        return HTMLResponse(SETUP_HTML_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise HTTPException(404, f"setup.html missing at {SETUP_HTML_PATH}") from None
 
 
 @app.get("/dashboard.css")

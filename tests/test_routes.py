@@ -177,6 +177,14 @@ def test_api_setup_install_refuses_concurrent_runs(client):
         app.state.setup_install_active = False
 
 
+def test_setup_page_is_served(client):
+    r = client.get("/setup")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Set up TapScribe" in r.text  # the page title/heading
+    assert "/web/js/setup/setup.js" in r.text  # boots its module
+
+
 def test_api_models_emits_text_inputs_for_whisper(client):
     r = client.get("/api/models")
     whisper = next(m for m in r.json()["models"] if m["model_id"] == "small.en")
