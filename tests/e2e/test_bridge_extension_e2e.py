@@ -45,7 +45,7 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
 
 import websockets  # noqa: E402
 
-from .harness import playwright_session  # noqa: E402
+from .harness import bridge_chromium_args, playwright_session  # noqa: E402
 
 pytestmark = pytest.mark.browser_e2e
 
@@ -246,30 +246,7 @@ async def loaded_bridge(fake_tap_server: FakeTapServer) -> AsyncIterator[LoadedE
                 ctx = await pw.chromium.launch_persistent_context(
                     user_data_dir=udd,
                     headless=False,  # MV3 extensions don't load in headless mode
-                    args=[
-                        f"--disable-extensions-except={EXT_DIR}",
-                        f"--load-extension={EXT_DIR}",
-                        "--no-sandbox",
-                        # Make AudioContext start running without a gesture
-                        # so the worklet emits frames as soon as it's wired.
-                        "--autoplay-policy=no-user-gesture-required",
-                        # Without these, the oscillator-backed MediaStreamTrack
-                        # the mock-room.js synthesises won't have permission.
-                        "--use-fake-ui-for-media-stream",
-                        "--use-fake-device-for-media-stream",
-                        # Recent Chromium blocks a public https page (the mock
-                        # SpatialChat tab) from opening a ws:// to loopback
-                        # (Private Network Access / insecure content), which
-                        # silently strands EVERY /tap WS — the bridge dials but
-                        # the handshake never lands. In production the operator
-                        # runs on localhost or enables TLS; for the test we relax
-                        # the policy so the content script's /tap reaches the
-                        # in-test server. (The sibling test_bridge_meeting_e2e.py
-                        # fixture already carries these; this one predated them.)
-                        "--allow-running-insecure-content",
-                        "--disable-features=BlockInsecurePrivateNetworkRequests,"
-                        "PrivateNetworkAccessSendPreflights,LocalNetworkAccessChecks",
-                    ],
+                    args=bridge_chromium_args(EXT_DIR),
                 )
             except Exception as e:  # pragma: no cover
                 pytest.skip(f"Chromium not available: {e}")

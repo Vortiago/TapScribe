@@ -63,6 +63,33 @@ async def playwright_session():
         yield pw
 
 
+def bridge_chromium_args(ext_dir: Path) -> list[str]:
+    """Chromium launch args shared by the bridge ``browser_e2e`` fixtures.
+
+    Loads the bridge as an MV3 extension (callers pass ``headless=False`` — MV3
+    doesn't load headless), fakes the media-stream device so the mock room's
+    oscillator track is permitted, autoplays the AudioContext without a user
+    gesture, and relaxes Private Network Access so the ``https`` mock
+    SpatialChat page can open a ``ws://`` to the loopback test server. Without
+    the PNA relax, recent Chromium silently strands every ``/tap`` WS (the dial
+    never completes the handshake — see PR #148); in production the operator
+    runs on ``localhost`` or enables TLS.
+    """
+    return [
+        f"--disable-extensions-except={ext_dir}",
+        f"--load-extension={ext_dir}",
+        "--no-sandbox",
+        "--autoplay-policy=no-user-gesture-required",
+        "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
+        "--allow-running-insecure-content",
+        # One flag, comma-joined value — kept on a single line so it isn't read
+        # as an implicit string-concat (CodeQL py/implicit-string-concatenation-
+        # in-list flags adjacent literals in a list as a likely missing comma).
+        "--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,LocalNetworkAccessChecks",
+    ]
+
+
 def free_port() -> int:
     """Borrow an unused localhost port. There's a tiny race vs the bind
     below; `RecorderServer.start()` retries on collision to absorb it."""
