@@ -222,6 +222,19 @@ async def test_run_install_emits_error_event_when_spawn_fails():
     assert calls == []  # reload must NOT fire when the install never ran
 
 
+async def test_run_install_finishes_with_done_even_if_hot_reload_raises():
+    # A successful install must still terminate with `done` even if the
+    # best-effort hot-reload (on_success) raises — the install itself worked.
+    def boom_reload():
+        raise RuntimeError("probe refresh boom")
+
+    events, _ = await _collect(
+        {"whisper": "cpu"}, lines=[b"installed\n"], returncode=0, on_success=boom_reload
+    )
+    assert [e["phase"] for e in events][-1] == "done"
+    assert any(e["phase"] == "log" and "refresh failed" in e.get("line", "") for e in events)
+
+
 # ── hot-reload primitive ─────────────────────────────────────────────────────
 
 

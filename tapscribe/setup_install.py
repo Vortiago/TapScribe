@@ -80,6 +80,10 @@ def to_picker_state(selection: dict[str, str]) -> dict:
     (``"mlx" | "cuda" | "cpu"`` — the host-valid kind the UI resolved). "cuda"
     and "cpu" both ride the picker's CPU/CUDA (faster-whisper / transformers)
     backend; "mlx" rides the MLX backend. Unknown families are ignored.
+
+    Assumes `selection` has passed `validate_selection`: an unrecognised kind
+    falls through to the CPU backend rather than raising, so callers must
+    validate first (the HTTP endpoint does).
     """
     # Collect the picker backends each picker family needs, then merge.
     per_family: dict[str, set[str]] = {}
@@ -154,22 +158,28 @@ async def run_install(
     spawn = spawn or _create_subprocess
     write_state = write_state or write_picker_state
 
-    write_state(to_picker_state(selection))
     yield {"phase": "start"}
-
     try:
+        write_state(to_picker_state(selection))
         proc = await spawn(picker_install_argv(no_mlx=no_mlx))
         async for raw in proc.stdout:
             line = raw.decode("utf-8", "replace").rstrip("\n")
             yield {"phase": "log", "line": line}
         returncode = await proc.wait()
-    except Exception as exc:  # noqa: BLE001 — headers are already sent, so surface ANY spawn/stream failure as a terminal error event rather than a truncated stream + 500
+    except Exception as exc:  # noqa: BLE001 — headers are already sent, so surface ANY write/spawn/stream failure as a terminal error event rather than a truncated stream + 500
         yield {"phase": "error", "ok": False, "returncode": None, "message": str(exc)}
         return
 
-    if returncode == 0:
-        if on_success is not None:
-            on_success()  # hot-reload probes so the new backend shows up
-        yield {"phase": "done", "ok": True, "returncode": 0}
-    else:
+    if returncode != 0:
         yield {"phase": "error", "ok": False, "returncode": returncode}
+        return
+
+    # Install succeeded. Hot-reload is best-effort — a failure refreshing the
+    # probes must NOT swallow the terminal `done` (the install itself worked);
+    # surface it as a log note and still finish.
+    if on_success is not None:
+        try:
+            on_success()
+        except Exception as exc:  # noqa: BLE001 — install already succeeded; report + continue
+            yield {"phase": "log", "line": f"· note: backend refresh failed ({exc}); a restart may be needed"}
+    yield {"phase": "done", "ok": True, "returncode": 0}

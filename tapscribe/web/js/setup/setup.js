@@ -117,7 +117,9 @@ function selectedFamilies() {
   for (const box of document.querySelectorAll('#picker input[type="checkbox"]')) {
     const cb = /** @type {HTMLInputElement} */ (box);
     const fam = cb.dataset.family;
-    if (cb.checked && fam) out[fam] = chosen.get(fam) || "cpu";
+    const backend = fam && chosen.get(fam);
+    // skip a checked family with no host-valid backend rather than fabricate "cpu"
+    if (cb.checked && fam && backend) out[fam] = backend;
   }
   return out;
 }
