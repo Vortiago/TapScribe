@@ -1,15 +1,28 @@
 """Setup state for the browser-based first-run / manage-models surface.
 
 This is the read-only backbone of the "D" setup pattern (see
-`prototypes/setup/`): a catalog-driven description of which model families
-exist, whether each is installed, what it can do (live vs. batch), and which
-backends this host can actually run. The setup UI renders from THIS rather than
-a hand-maintained list, so it can't drift from what the app supports — the same
-reason `/api/models` reads the catalog.
+`prototypes/setup/`): per model family — is it installed, what can it do (live
+vs. batch), which host-capable backends, which models — derived from the
+transcriber catalog (the authoritative registry, also behind `/api/models`) so
+it can't drift from what the app supports.
 
-Scope: this module only describes *what exists and what's installed*. The
-install *execution* (resolving families to pip extras, running pip, streaming
-progress) is deliberately separate — and lives with the dependency-free
+Families are independent
+------------------------
+Each catalog family is its own row. Families differ in their available models,
+languages, and how transcription / WhisperLiveKit is invoked — that's the whole
+difference between e.g. Whisper and NB-Whisper. Two families MAY share a backend
+package, and that's fine: a family reports installed iff one of ITS OWN backend
+bindings is importable on a host-capable kind, so the shared case falls out
+correctly without any special-casing —
+
+  * Whisper: faster-whisper (CPU/CUDA) **and** mlx-whisper (MLX).
+  * NB-Whisper: faster-whisper (CPU/CUDA) only — no public MLX weights.
+
+So installing Whisper's faster-whisper backend also lights up NB-Whisper; but on
+an Apple-Silicon box that installed Whisper via MLX *only*, NB-Whisper stays
+not-installed (it needs faster-whisper). Model weights download lazily on first
+use. The install-EXECUTION slice (separate) maps a family to its backend extra
+and dedups shared extras; it lives with the dependency-free
 `tools/install_picker.py`, which must not import this package (it runs before
 the package is installed).
 """
@@ -22,16 +35,13 @@ from .transcribers.catalog import (
     available_backends,
 )
 
-# Families surfaced in the setup matrix, in display order, each with a human
-# label and a ROUGH download size hint. Curated (an allowlist, like
-# SUMMARY_MODELS) rather than derived, so unimplemented/experimental families
-# (e.g. moonshine) don't appear until deliberately added. Sizes live here, not
-# in the catalog, because download size is a setup concern, not a per-model
-# runtime fact — and they're approximate (they vary by backend and host), shown
-# to set expectations, not as a contract. These display strings are
-# intentionally independent of tools/install_picker.py's install-family list
-# (which groups by pip extra — Whisper+NB-Whisper share one install — and can't
-# import this package); they are not kept in lockstep.
+# Curated per-family display metadata, in matrix order: (catalog family, label,
+# rough size hint). An allowlist (like SUMMARY_MODELS) so unimplemented families
+# (e.g. moonshine) don't surface until deliberately added. Labels + sizes are
+# setup-facing display data, intentionally independent of
+# tools/install_picker.py's FamilyDef list (which can't import this package).
+# Sizes are approximate (vary by backend/host) — expectation-setting, not a
+# contract.
 FAMILY_META: tuple[tuple[str, str, str], ...] = (
     ("whisper", "Whisper", "~80–150 MB"),
     ("nb-whisper", "NB-Whisper", "~150 MB"),
@@ -49,10 +59,11 @@ def is_first_run(registry: TranscriberRegistry = REGISTRY) -> bool:
     return not any(e.is_installed() for e in registry.entries())
 
 
-def _family_state(registry: TranscriberRegistry, family: str, avail: frozenset[str]) -> dict | None:
+def _family_state(
+    registry: TranscriberRegistry, family: str, label: str, size_hint: str, avail: frozenset[str]
+) -> dict | None:
     # Only `available` entries count — a family of "coming soon" placeholders
-    # (available=False) must not advertise runnable backends or models. None
-    # means "don't surface this family".
+    # must not advertise runnable backends or models. None ⇒ don't surface it.
     entries = [e for e in registry.entries() if e.family == family and e.available]
     if not entries:
         return None
@@ -65,8 +76,6 @@ def _family_state(registry: TranscriberRegistry, family: str, avail: frozenset[s
         kinds |= set(e.supported_backend_kinds())
         installed = installed or e.is_installed()
         models.append(e.model_id)
-    label = next((lbl for key, lbl, _ in FAMILY_META if key == family), family)
-    size_hint = next((sz for key, _, sz in FAMILY_META if key == family), "")
     return {
         "family": family,
         "label": label,
@@ -74,7 +83,7 @@ def _family_state(registry: TranscriberRegistry, family: str, avail: frozenset[s
         "live": "live" in contexts,
         "batch": "batch" in contexts,
         "installed": installed,
-        # Only backends this host can actually run, in display order.
+        # Only THIS family's backends that this host can run, in display order.
         "backends": [k for k in _BACKEND_DISPLAY_ORDER if k in kinds and k in avail],
         "models": models,
     }
@@ -85,14 +94,14 @@ def build_setup_state(registry: TranscriberRegistry = REGISTRY) -> dict:
 
     Returns ``{first_run, available_backends, families}`` where each family is
     ``{family, label, size_hint, live, batch, installed, backends, models}``.
-    Only the curated ``FAMILY_META`` families that exist in the registry are
-    included, in that order.
+    Only curated ``FAMILY_META`` families with at least one available catalog
+    entry are included, in display order.
     """
     avail = frozenset(str(k) for k in available_backends())
     families = [
         state
-        for family, _label, _size in FAMILY_META
-        if (state := _family_state(registry, family, avail)) is not None
+        for family, label, size_hint in FAMILY_META
+        if (state := _family_state(registry, family, label, size_hint, avail)) is not None
     ]
     return {
         "first_run": is_first_run(registry),

@@ -68,12 +68,38 @@ def test_capability_flags_match_catalog_contexts():
     assert _family(state, "voxtral")["batch"] is True
 
 
-def test_nb_whisper_is_a_separate_family():
+def test_whisper_and_nb_whisper_are_independent_families():
     set_available_backends_for_testing(frozenset({"cpu"}))
     set_installed_modules_for_testing(_all_probe_modules())
     keys = [f["family"] for f in build_setup_state()["families"]]
     assert "whisper" in keys
-    assert "nb-whisper" in keys
+    assert "nb-whisper" in keys  # its own row — not folded into whisper
+
+
+def test_nb_whisper_has_no_mlx_backend_even_on_an_mlx_host():
+    # NB-Whisper has no public MLX weights — faster-whisper (CPU/CUDA) only,
+    # unlike Whisper which also has an MLX backend.
+    set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    set_installed_modules_for_testing(_all_probe_modules())
+    state = build_setup_state()
+    assert "mlx" in _family(state, "whisper")["backends"]
+    assert _family(state, "nb-whisper")["backends"] == ["cpu"]
+
+
+def test_nb_whisper_install_state_tracks_its_own_backend():
+    # Proof they're independent: on Apple Silicon, installing Whisper via MLX
+    # ONLY (mlx_whisper present, faster-whisper absent) leaves NB-Whisper — which
+    # needs faster-whisper — not installed.
+    set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    set_installed_modules_for_testing(frozenset({"mlx_whisper"}))
+    state = build_setup_state()
+    assert _family(state, "whisper")["installed"] is True
+    assert _family(state, "nb-whisper")["installed"] is False
+    # Installing the shared faster-whisper backend lights up both.
+    set_installed_modules_for_testing(frozenset({"faster_whisper"}))
+    state = build_setup_state()
+    assert _family(state, "whisper")["installed"] is True
+    assert _family(state, "nb-whisper")["installed"] is True
 
 
 def test_backends_are_filtered_to_host_capable_kinds():
@@ -91,6 +117,7 @@ def test_only_curated_families_surface_no_moonshine():
     keys = {f["family"] for f in build_setup_state()["families"]}
     curated = {k for k, _, _ in FAMILY_META}
     assert keys <= curated
+    assert keys == {"whisper", "nb-whisper", "voxtral", "parakeet"}
     assert "moonshine" not in keys  # live-only, inference not implemented yet
 
 
