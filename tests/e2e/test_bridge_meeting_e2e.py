@@ -44,6 +44,8 @@ if importlib.util.find_spec("faster_whisper") is None:  # pragma: no cover
 
 from playwright.async_api import async_playwright  # noqa: E402
 
+from .harness import bridge_chromium_args  # noqa: E402
+
 pytestmark = [pytest.mark.browser_e2e, pytest.mark.real_audio]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -206,23 +208,7 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
                 ctx = await pw.chromium.launch_persistent_context(
                     user_data_dir=udd,
                     headless=False,  # MV3 extensions don't load headless
-                    args=[
-                        f"--disable-extensions-except={EXT_DIR}",
-                        f"--load-extension={EXT_DIR}",
-                        "--no-sandbox",
-                        "--autoplay-policy=no-user-gesture-required",
-                        "--use-fake-ui-for-media-stream",
-                        "--use-fake-device-for-media-stream",
-                        # Recent Chromium blocks a public https page (the mock
-                        # SpatialChat tab) from opening a ws:// to loopback
-                        # (Private Network Access / insecure content). In
-                        # production the operator runs on localhost or enables
-                        # TLS; for the test we relax the policy so the content
-                        # script's /tap reaches the local Recorder.
-                        "--allow-running-insecure-content",
-                        "--disable-features=BlockInsecurePrivateNetworkRequests,"
-                        "PrivateNetworkAccessSendPreflights,LocalNetworkAccessChecks",
-                    ],
+                    args=bridge_chromium_args(EXT_DIR),
                 )
             except Exception as e:  # pragma: no cover
                 pytest.skip(f"Chromium not available: {e}")

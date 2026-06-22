@@ -17,6 +17,7 @@ import { warmTableShell, createTableShellSync } from "./components/table-shell/t
 import { warmEmptyState, createEmptyStateSync } from "./components/empty-state/empty-state.js";
 import { map as mapPipeline } from "./pipeline-view.js";
 import { meetingView, shouldKeepPolling } from "./popup-presenter.js";
+import { snapshotIsLive, tapStateLabel } from "./taps-view.js";
 import {
   startMeeting as actStart,
   requestEndMeeting as actEnd,
@@ -241,18 +242,17 @@ function renderMixedContentWarning() {
 }
 
 // ---- active taps ----------------------------------------------------------
-
-/** @param {any} c @returns {string} */
-function tapStateLabel(c) {
-  if (c.error) return c.error;
-  if (c.draining) return "draining";
-  if (c.muted) return "muted";
-  return "active";
-}
+// tapStateLabel + the staleness rule (snapshotIsLive) live in taps-view.js so
+// they're unit-testable DOM-free; this shell only renders their verdict.
 
 function tapSig() {
   const st = latestStatus;
   if (!st) return "none";
+  // A snapshot whose writer (the SpatialChat tab's content script) has gone
+  // away renders as the no-tab empty state regardless of its frozen channels;
+  // collapse every stale snapshot to one sig so renderRegion swaps to the
+  // empty state exactly once when liveness flips, then holds.
+  if (!snapshotIsLive(st, Date.now())) return "stale";
   const ctx = st.audioContextState || "";
   if (!st.channels || st.channels.length === 0) return "empty:" + ctx + ":" + !!st.settingsReady;
   return ctx + "|" + st.channels
@@ -273,6 +273,16 @@ function buildTaps() {
     wrap.append(createEmptyStateSync({
       title: "No status from the SpatialChat tab",
       detail: "Open https://app.spatial.chat/* with this extension installed.",
+    }).el);
+    return wrap;
+  }
+  // A stale snapshot is a closed/crashed tab's leftover (content.js stops
+  // refreshing `ts` once the tab goes away — see taps-view.js): show the
+  // no-tab empty state, not its frozen roster of now-departed speakers.
+  if (!snapshotIsLive(st, Date.now())) {
+    wrap.append(createEmptyStateSync({
+      title: "No active SpatialChat tab",
+      detail: "The SpatialChat tab was closed. Open https://app.spatial.chat/* and join a room to resume tapping.",
     }).el);
     return wrap;
   }

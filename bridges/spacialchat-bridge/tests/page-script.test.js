@@ -558,6 +558,82 @@ test("leaving a room (disconnect) does NOT emit room-changed", async () => {
   );
 });
 
+// ---- room-lost teardown ---------------------------------------------------
+// maybeAttach() tears down taps when window.room is connected→gone, NOT only on
+// a terminal "disconnected". SpatialChat can clear window.room when the user
+// leaves a space without flipping the captured Room to "disconnected" (and
+// without firing the "disconnected" event). The captured Room still reads
+// "connected" and its tracks stay live, so reconcile() (which untaps leavers)
+// stops running while no teardown fires — every tap leaks, posting PCM forever.
+
+test("window.room cleared while the old room still reads 'connected' tears down taps", async () => {
+  const track = makeTrack();
+  const pub = makeAudioPublication({ track });
+  const speaker = makeParticipant({ identity: "stuck", name: "Stuck", pubs: [pub] });
+  const env = loadPageScript({ remoteParticipants: [speaker] });
+  await flush();
+  assert.equal(findMessages(env.posted, "tap-start", "stuck").length, 1, "tapped at attach");
+
+  // window.room is gone, but the Room we attached to still reads "connected"
+  // (no disconnected event, no state flip) — the exact leak shape.
+  env.sandbox.window.room = null;
+  assert.equal(env.room.state, "connected", "orphan room still reads connected");
+
+  env.sandbox.__pollFn(); // one 250 ms poll with window.room === null
+  await flush();
+
+  assert.equal(
+    findMessages(env.posted, "tap-stop", "stuck").length, 1,
+    "losing window.room must close the leaked /tap WS — exactly one tap-stop",
+  );
+});
+
+test("window.room replaced by a not-yet-connected instance tears down the old room's taps", async () => {
+  // A room SWAP passes through a window in which the new Room exists but hasn't
+  // reached "connected" yet, while the old one still reads "connected". The old
+  // room's tracks are about to die; don't keep feeding them until the new room
+  // connects — tear them down now (the new room attaches fresh once connected).
+  const track = makeTrack();
+  const pub = makeAudioPublication({ track });
+  const speaker = makeParticipant({ identity: "old-spk", name: "Old", pubs: [pub] });
+  const env = loadPageScript({ remoteParticipants: [speaker] });
+  await flush();
+  assert.equal(findMessages(env.posted, "tap-start", "old-spk").length, 1, "tapped at attach");
+
+  const newRoom = makeRoom();
+  newRoom.state = "connecting"; // a different instance, not connected yet
+  env.sandbox.window.room = newRoom;
+
+  env.sandbox.__pollFn();
+  await flush();
+
+  assert.equal(
+    findMessages(env.posted, "tap-stop", "old-spk").length, 1,
+    "the superseded room's tap is closed instead of leaking",
+  );
+});
+
+test("a 'reconnecting' room is NOT torn down (a transient blip is preserved)", async () => {
+  // LiveKit keeps the SAME Room instance during a reconnect and restores the
+  // same participants; tearing taps down on every blip would churn /tap WSes
+  // and cut active utterances. window.room still points at the attached room.
+  const track = makeTrack();
+  const pub = makeAudioPublication({ track });
+  const speaker = makeParticipant({ identity: "blip", name: "Blip", pubs: [pub] });
+  const env = loadPageScript({ remoteParticipants: [speaker] });
+  await flush();
+  assert.equal(findMessages(env.posted, "tap-start", "blip").length, 1, "tapped at attach");
+
+  env.room.state = "reconnecting"; // same object, transient state
+  env.sandbox.__pollFn();
+  await flush();
+
+  assert.equal(
+    findMessages(env.posted, "tap-stop", "blip").length, 0,
+    "a reconnecting blip must NOT tear down taps",
+  );
+});
+
 // ---- reconcile(): self-healing membership sweep ---------------------------
 // Event-driven tapping is necessary but not sufficient — LiveKit can drop or
 // coalesce trackSubscribed / participantConnected / participantDisconnected

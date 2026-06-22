@@ -45,7 +45,7 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
 
 import websockets  # noqa: E402
 
-from .harness import playwright_session  # noqa: E402
+from .harness import bridge_chromium_args, playwright_session  # noqa: E402
 
 pytestmark = pytest.mark.browser_e2e
 
@@ -246,18 +246,7 @@ async def loaded_bridge(fake_tap_server: FakeTapServer) -> AsyncIterator[LoadedE
                 ctx = await pw.chromium.launch_persistent_context(
                     user_data_dir=udd,
                     headless=False,  # MV3 extensions don't load in headless mode
-                    args=[
-                        f"--disable-extensions-except={EXT_DIR}",
-                        f"--load-extension={EXT_DIR}",
-                        "--no-sandbox",
-                        # Make AudioContext start running without a gesture
-                        # so the worklet emits frames as soon as it's wired.
-                        "--autoplay-policy=no-user-gesture-required",
-                        # Without these, the oscillator-backed MediaStreamTrack
-                        # the mock-room.js synthesises won't have permission.
-                        "--use-fake-ui-for-media-stream",
-                        "--use-fake-device-for-media-stream",
-                    ],
+                    args=bridge_chromium_args(EXT_DIR),
                 )
             except Exception as e:  # pragma: no cover
                 pytest.skip(f"Chromium not available: {e}")
@@ -807,3 +796,114 @@ async def test_mute_drain_reconnect_continues_same_utterance(
     # utterance" signal. A non-clean close here would mean drain
     # buffer was discarded.
     assert drain_conn.close_code == 1000, f"drain WS must close cleanly (1000), got {drain_conn.close_code}"
+
+
+async def test_window_room_cleared_without_disconnect_closes_taps(
+    loaded_bridge: LoadedExtension,
+    fake_tap_server: FakeTapServer,
+):
+    """Closes the page-script maybeAttach() room-lost leak end-to-end.
+
+    SpatialChat clears window.room when the user leaves a space WITHOUT
+    transitioning the captured Room to "disconnected" and without firing
+    the "disconnected" event. The orphan Room still reads "connected" and
+    its track stays live, so before the fix maybeAttach() slipped through
+    both branches: reconcile() (which untaps leavers) stopped running AND
+    no teardown fired — the worklet kept posting PCM forever and the /tap
+    WS leaked against the Recorder (and the popup showed the speaker as a
+    live OPEN/active tap with no SpatialChat window open).
+
+    The vm page-script.test.js pins the teardown by inspecting postMessage
+    payloads; this proves the /tap WS actually closes through the real
+    cross-world channel + a real WS server.
+    """
+    page = loaded_bridge.page
+
+    # Bring up a tapped speaker; frames must be flowing on a live WS.
+    await add_speaker(page, "ghost-id", "Ghost")
+    await wait_for_pill_kind(page, "ok", timeout_ms=5000)
+    await asyncio.sleep(0.3)
+    conn = fake_tap_server.connection_for("ghost-id")
+    assert conn is not None
+    assert not conn.closed, "the /tap WS should be open while the speaker is tapped"
+    assert len(conn.frames) > 0
+
+    # Clear window.room without a disconnected event — the orphan Room still
+    # reads "connected" (the exact leak shape).
+    await page.evaluate("() => window.__tsTest.clearRoomWithoutDisconnect()")
+    assert await page.evaluate("() => window.room === null")
+    assert await page.evaluate("() => window.__tsTest.roomState() === 'connected'"), (
+        "the captured Room must still read 'connected' to reproduce the leak"
+    )
+
+    # page-script polls every 250 ms; the room-lost teardown must close the WS.
+    async def ghost_closed() -> bool:
+        c = fake_tap_server.connection_for("ghost-id")
+        return c is not None and c.closed
+
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while asyncio.get_event_loop().time() < deadline:
+        if await ghost_closed():
+            break
+        await asyncio.sleep(0.1)
+    assert await ghost_closed(), (
+        "clearing window.room (orphan room still 'connected') must close the "
+        "/tap WS — without the maybeAttach room-lost teardown it leaks forever"
+    )
+
+
+async def test_closed_spatialchat_tab_flips_popup_to_no_active_tab(
+    loaded_bridge: LoadedExtension,
+    fake_tap_server: FakeTapServer,
+):
+    """Closes the popup-staleness bug end-to-end (the reported symptom).
+
+    bridgeStatus lives in chrome.storage.local and OUTLIVES the content
+    script that wrote it. When the SpatialChat tab closes, content.js dies
+    (its /tap WS closes, the dashboard empties) but its last snapshot
+    lingers in storage — so the popup kept rendering departed speakers as
+    live OPEN/active taps with no tab open at all.
+
+    content.js refreshes the snapshot's `ts` on a heartbeat while it runs;
+    the popup treats a snapshot older than taps-view.STALE_AFTER_MS as a
+    dead tab. This drives the full transition: a live tap shows in the
+    popup, the SpatialChat tab is closed, and the popup flips to the
+    no-tab empty state (not the frozen roster).
+    """
+    page = loaded_bridge.page
+
+    # A live tap — bridgeStatus now carries Amy's channel with a fresh ts.
+    await add_speaker(page, "amy-id", "Amy")
+    await wait_for_pill_kind(page, "ok", timeout_ms=5000)
+    await asyncio.sleep(0.3)
+
+    popup = await loaded_bridge.open_popup()
+    try:
+        # While the tab is alive the popup shows Amy's row.
+        await popup.wait_for_function(
+            """
+            () => {
+              const e = document.getElementById('tapState');
+              return !!e && /Amy/.test(e.textContent);
+            }
+            """,
+            timeout=5000,
+        )
+
+        # Close the SpatialChat tab: content.js stops refreshing `ts`, so the
+        # leftover snapshot ages past STALE_AFTER_MS and the popup must fall
+        # back to the no-tab empty state instead of the frozen tap rows.
+        await page.close()
+        await popup.wait_for_function(
+            """
+            () => {
+              const e = document.getElementById('tapState');
+              if (!e) return false;
+              const t = e.textContent || '';
+              return /No active SpatialChat tab/.test(t) && !/Amy/.test(t);
+            }
+            """,
+            timeout=12000,
+        )
+    finally:
+        await popup.close()
