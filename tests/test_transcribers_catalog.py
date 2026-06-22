@@ -56,6 +56,20 @@ def test_for_context_live_excludes_parakeet():
     assert "parakeet-tdt-0.6b-v3" not in live_ids
 
 
+def test_for_context_batch_includes_voxtral():
+    batch_ids = {e.model_id for e in REGISTRY.for_context("batch")}
+    assert "voxtral-mini" in batch_ids
+
+
+def test_for_context_live_excludes_voxtral():
+    """Voxtral is batch-only: `build_live_cmd` only spawns whisperlivekit-server
+    with a faster-whisper / mlx-whisper backend (+ the NB-Whisper model-path
+    route) and has no Voxtral backend, so a live selection couldn't launch. The
+    live picker must not offer it until a Voxtral live channel is wired."""
+    live_ids = {e.model_id for e in REGISTRY.for_context("live")}
+    assert "voxtral-mini" not in live_ids
+
+
 def test_for_context_live_includes_whisper_and_nb_whisper():
     live_ids = {e.model_id for e in REGISTRY.for_context("live")}
     assert "tiny.en" in live_ids

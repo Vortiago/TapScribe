@@ -637,14 +637,19 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
     _nb("nb-whisper-small", "nb-whisper-small", "NB-AiLab · Norwegian-tuned · balanced"),
     _nb("nb-whisper-medium", "nb-whisper-medium", "NB-AiLab · Norwegian-tuned · better"),
     _nb("nb-whisper-large", "nb-whisper-large", "NB-AiLab · Norwegian-tuned · slow"),
-    # ── Voxtral (Mistral) — audio LLM, no prompt/hotwords ──
+    # ── Voxtral (Mistral) — audio LLM, no prompt/hotwords; batch-only ──
+    # batch-only because `build_live_cmd` (live.py) only spawns
+    # whisperlivekit-server with `--backend faster-whisper|mlx-whisper` (plus the
+    # NB-Whisper `--model-path` route) — there is no Voxtral backend, so a live
+    # selection could never be launched. Flip back to `_BATCH_AND_LIVE` only once
+    # a Voxtral live channel is actually wired (cf. the planned ParakeetLiveChannel).
     ModelEntry(
         model_id="voxtral-mini",
         family="voxtral",
         display_name="voxtral-mini",
         description="Mistral Voxtral 3B · 8 langs (EN/ES/FR/PT/HI/DE/NL/IT) · no Norwegian",
         languages=("en", "es", "fr", "pt", "hi", "de", "nl", "it"),
-        contexts=_BATCH_AND_LIVE,
+        contexts=_BATCH_ONLY,
         backends=_VOXTRAL_BACKENDS,
         inputs=NO_INPUTS,
     ),
