@@ -531,3 +531,40 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
     )
+
+
+# ── Setup-feature test helpers (shared so the probe + fake-subprocess machinery
+#    isn't copy-pasted across test_routes / test_setup_install / e2e conftest) ──
+
+
+def all_probe_modules() -> frozenset[str]:
+    """Every backend probe module the registry declares — for tests that
+    simulate a fully-installed machine via
+    `catalog.set_installed_modules_for_testing(all_probe_modules())`."""
+    from tapscribe.transcribers.catalog import REGISTRY
+
+    return frozenset(b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module)
+
+
+def fake_install_spawn(lines: list[bytes], returncode: int):
+    """A fake `setup_install._create_subprocess`: returns a coroutine yielding a
+    process whose `.stdout` async-iterates `lines` and whose `wait()` returns
+    `returncode`. Used by the install-streaming tests."""
+
+    async def _stdout():
+        for line in lines:
+            yield line
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.stdout = _stdout()
+            self.returncode: int | None = None
+
+        async def wait(self) -> int:
+            self.returncode = returncode
+            return returncode
+
+    async def spawn(_argv):
+        return _Proc()
+
+    return spawn

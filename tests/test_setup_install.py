@@ -23,6 +23,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 import install_picker  # noqa: E402
 import pytest  # noqa: E402
+from conftest import fake_install_spawn  # type: ignore[import-not-found]  # noqa: E402
 
 from tapscribe.setup_install import (  # noqa: E402
     InstallSelectionError,
@@ -153,33 +154,7 @@ def test_sse_frames_an_event_as_data_block():
     assert json.loads(line[len("data: ") :].strip()) == {"phase": "start"}
 
 
-# ── streaming runner (fake subprocess) ───────────────────────────────────────
-
-
-def _aiter(lines):
-    async def gen():
-        for ln in lines:
-            yield ln
-
-    return gen()
-
-
-class _FakeProc:
-    def __init__(self, lines, returncode):
-        self.stdout = _aiter(lines)
-        self._rc = returncode
-        self.returncode = None
-
-    async def wait(self):
-        self.returncode = self._rc
-        return self._rc
-
-
-def _fake_spawn(lines, returncode):
-    async def spawn(_argv):
-        return _FakeProc(lines, returncode)
-
-    return spawn
+# ── streaming runner (fake subprocess from conftest.fake_install_spawn) ───────
 
 
 async def _collect(selection, *, lines, returncode, on_success=None):
@@ -187,7 +162,7 @@ async def _collect(selection, *, lines, returncode, on_success=None):
     events = []
     async for ev in run_install(
         selection,
-        spawn=_fake_spawn(lines, returncode),
+        spawn=fake_install_spawn(lines, returncode),
         write_state=lambda state, **_: written.update(state),
         on_success=on_success,
     ):

@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 from conftest import (  # type: ignore[import-not-found]  # pytest puts tests/ on sys.path so `from conftest` resolves the project's tests/conftest.py
     TranscriberStub,
+    all_probe_modules,
+    fake_install_spawn,
     py_cmd,
     repoint_config_files,
     seed_merged_transcript,
@@ -35,10 +37,9 @@ def _force_all_probes_installed():
     this file would all flap. Pretend every probe module is installed
     so the route tests check the JSON shape, not the host's pip state.
     Tests that exercise the filter itself override per-test."""
-    from tapscribe.transcribers.catalog import REGISTRY, set_installed_modules_for_testing
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
 
-    probes = {b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module}
-    set_installed_modules_for_testing(frozenset(probes))
+    set_installed_modules_for_testing(all_probe_modules())
     try:
         yield
     finally:
@@ -127,27 +128,8 @@ def test_api_setup_state_shape(client):
     assert parakeet["batch"] and not parakeet["live"]
 
 
-def _fake_install_proc(lines, returncode):
-    async def _stdout():
-        for ln in lines:
-            yield ln
-
-    class _Proc:
-        def __init__(self):
-            self.stdout = _stdout()
-            self.returncode = None
-
-        async def wait(self):
-            self.returncode = returncode
-            return returncode
-
-    return _Proc()
-
-
 def test_api_setup_install_streams_sse(client, monkeypatch):
-    async def fake_spawn(_argv):
-        return _fake_install_proc([b"resolving wheels\n", b"installed faster-whisper\n"], 0)
-
+    fake_spawn = fake_install_spawn([b"resolving wheels\n", b"installed faster-whisper\n"], 0)
     monkeypatch.setattr("tapscribe.setup_install._create_subprocess", fake_spawn)
     monkeypatch.setattr("tapscribe.setup_install.write_picker_state", lambda *a, **k: None)
 

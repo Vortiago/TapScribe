@@ -85,6 +85,13 @@ def available_backends() -> frozenset[BackendKind]:
     return _AVAILABLE_BACKENDS_CACHE
 
 
+def available_backend_strs() -> frozenset[str]:
+    """`available_backends()` as a plain `str` frozenset for JSON serialisers /
+    membership checks (BackendKind is a `str` Literal, so this is a no-op cast).
+    One home for the idiom shared by `/api/models`, `/api/state`, and setup."""
+    return frozenset(str(k) for k in available_backends())
+
+
 def set_available_backends_for_testing(kinds: frozenset[BackendKind] | None) -> None:
     """Override the detected-backends cache. `None` re-enables auto-probe."""
     global _AVAILABLE_BACKENDS_CACHE
@@ -146,7 +153,10 @@ def refresh_backend_probes() -> None:
     importable in this running process), drops the memoised `find_spec` answers,
     and clears the available-backends cache so the next call re-detects (e.g.
     CUDA now that torch is present). Leaves any test override
-    (`_INSTALLED_MODULES_OVERRIDE`) untouched — it's checked before the cache."""
+    (`_INSTALLED_MODULES_OVERRIDE`) untouched — it's checked before the cache.
+
+    Re-enables *detection* of newly-present packages only: a module that already
+    failed to import earlier in this process still needs a restart."""
     import importlib
 
     global _AVAILABLE_BACKENDS_CACHE

@@ -32,7 +32,7 @@ from __future__ import annotations
 from .transcribers.catalog import (
     REGISTRY,
     TranscriberRegistry,
-    available_backends,
+    available_backend_strs,
 )
 
 # Curated per-family display metadata, in matrix order: (catalog family, label,
@@ -48,6 +48,10 @@ FAMILY_META: tuple[tuple[str, str, str], ...] = (
     ("voxtral", "Voxtral (Mistral)", "~2 GB"),
     ("parakeet", "Parakeet (NVIDIA)", "~1.5–2.5 GB"),
 )
+# Display order for backend chips (preferred first). Mirrors the catalog's
+# _AUTO_RESOLUTION_ORDER by intent, but kept a separate local constant — display
+# order and auto-resolution priority are distinct concerns that needn't move
+# together (and the catalog's is private).
 _BACKEND_DISPLAY_ORDER: tuple[str, ...] = ("mlx", "cuda", "cpu")
 
 
@@ -97,7 +101,7 @@ def build_setup_state(registry: TranscriberRegistry = REGISTRY) -> dict:
     Only curated ``FAMILY_META`` families with at least one available catalog
     entry are included, in display order.
     """
-    avail = frozenset(str(k) for k in available_backends())
+    avail = available_backend_strs()
     families = [
         state
         for family, label, size_hint in FAMILY_META

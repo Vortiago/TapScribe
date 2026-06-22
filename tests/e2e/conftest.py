@@ -24,6 +24,7 @@ from tapscribe.recorder import Recorder
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path insertion picks up the project's tests/conftest.py
     FakeWlkThread,
+    all_probe_modules,
     repoint_config_files,
 )
 
@@ -36,10 +37,9 @@ def _e2e_probes_installed():
     probe installed (mirrors the unit `_force_all_probes_installed`). Without
     this a backend-less CI box is "first run", so GET / now redirects to /setup
     and the dashboard tests would break. The /setup smoke is robust either way."""
-    from tapscribe.transcribers.catalog import REGISTRY, set_installed_modules_for_testing
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
 
-    probes = {b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module}
-    set_installed_modules_for_testing(frozenset(probes))
+    set_installed_modules_for_testing(all_probe_modules())
     try:
         yield
     finally:

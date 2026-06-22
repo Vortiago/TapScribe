@@ -165,11 +165,10 @@ async function runInstall() {
     const { value, done } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
-    let sep = buf.indexOf("\n\n");
-    while (sep !== -1) {
-      const frame = buf.slice(0, sep);
-      buf = buf.slice(sep + 2);
-      sep = buf.indexOf("\n\n");
+    let nl;
+    while ((nl = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, nl);
+      buf = buf.slice(nl + 2);
       if (!frame.startsWith("data:")) continue;
       let ev;
       try {

@@ -121,16 +121,10 @@ from .transcribers import evict_idle_now, run_on_model_thread
 from .transcribers.catalog import (
     DEFAULT_BATCH_MODEL,
     REGISTRY,
-    available_backends,
+    available_backend_strs,
     refresh_backend_probes,
 )
 from .wav_cache import set_primary_transcript
-
-
-def _available_backends_snapshot() -> frozenset[str]:
-    """`available_backends()` returns the cached set; expose as plain set
-    of strings for the JSON serialiser."""
-    return frozenset(str(k) for k in available_backends())
 
 
 def _compute_inputs_support() -> dict[str, bool]:
@@ -644,7 +638,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "live_log": list(recorder.live.log)[-30:],
         "live_supports_native_vad": bool(getattr(recorder.live, "supports_native_vad", False)),
         "backend": recorder.backend,
-        "available_backends": sorted(_available_backends_snapshot()),
+        "available_backends": sorted(available_backend_strs()),
         "recording_enabled": recorder.recording_enabled,
         "prompt": {
             "path": str(config.PROMPT_FILE),
@@ -823,7 +817,7 @@ async def api_models(context: str = "batch"):
     entries = REGISTRY.for_context(context, only_installed=True)  # type: ignore[arg-type]
     return {
         "context": context,
-        "available_backends": sorted(_available_backends_snapshot()),
+        "available_backends": sorted(available_backend_strs()),
         "models": [e.to_mapping() for e in entries],
     }
 
