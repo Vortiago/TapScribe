@@ -1146,7 +1146,14 @@
     ).join(";");
   }
 
+  // Liveness heartbeat: refresh the snapshot's `ts` at least this often even
+  // when nothing observable changed, so the popup can tell a quiet-but-live tab
+  // (everyone muted → no fingerprint change) from one whose content script is
+  // gone. The popup's staleness window (taps-view.STALE_AFTER_MS) sits above
+  // this; keep the two in step if either moves.
+  const STATUS_HEARTBEAT_MS = 2000;
   let lastFingerprint = "";
+  let lastPublishTs = 0;
   // Event-driven: called whenever channel state changes so the popup
   // reflects the change within ~50 ms instead of waiting for the periodic
   // tick. chrome.storage.set can reject in odd states (extension
@@ -1158,8 +1165,15 @@
     try {
       const snap = buildStatusSnapshot();
       const fp = snapshotFingerprint(snap);
-      if (fp === lastFingerprint) return;
+      // Skip the write only when nothing observable changed AND we refreshed
+      // `ts` recently. The heartbeat re-stamps an unchanged snapshot so a
+      // live-but-quiet tab keeps its `ts` fresh and the popup doesn't flip it
+      // to the no-tab empty state during a silent stretch. The fingerprint
+      // (which includes per-frame counters) still covers the common active
+      // case, so this isn't a 2 Hz write — only a ~0.5 Hz idle heartbeat.
+      if (fp === lastFingerprint && (snap.ts - lastPublishTs) < STATUS_HEARTBEAT_MS) return;
       lastFingerprint = fp;
+      lastPublishTs = snap.ts;
       chrome.storage.local.set({ bridgeStatus: snap });
     } catch (e) { /* ignore */ }
   }

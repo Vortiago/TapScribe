@@ -21,6 +21,7 @@
     "../pipeline-view.js",
     "../popup-presenter.js",
     "../popup-actions.js",
+    "../taps-view.js",
     "../popup.js",
     "../lib/**/*.js",
     "../components/**/*.js"

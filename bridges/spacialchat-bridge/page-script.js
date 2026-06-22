@@ -449,19 +449,29 @@
       } catch (e) {
         console.error("[tapscribe-bridge/page] reconcile failed:", e);
       }
-    } else if (attachedRoom && attachedRoom.state !== "connected") {
-      // Previously-attached room dropped. Belt-and-braces with the
-      // "disconnected" event handler: if the user leaves the spatial
-      // chat room (or SpatialChat nulls window.room before the event
-      // fires) we still need to close every /tap WS so the recorder
-      // isn't left holding stale streams.
-      //
-      // Only tear down on terminal "disconnected" — "reconnecting"
-      // is transient and LiveKit will restore the same room instance
-      // with the same participants. Tearing down taps then would
-      // churn /tap WSes for every blip.
-      if (attachedRoom.state === "disconnected") {
-        console.log("[tapscribe-bridge/page] room disconnected; cleaning up taps");
+    } else if (attachedRoom) {
+      // window.room is no longer a connected room we can reconcile against.
+      // Belt-and-braces with the "disconnected" event handler: tear our taps
+      // down so the recorder isn't left holding stale streams. We must cover
+      // TWO shapes, not just a terminal "disconnected":
+      //   - the attached room flipped to "disconnected"; or
+      //   - we LOST the room handle entirely — window.room was cleared (null)
+      //     or swapped for a different/not-yet-connected instance — while the
+      //     captured Room may still read "connected". SpatialChat clears
+      //     window.room on leaving a space without a "disconnected" event, and
+      //     that orphan slipped through the old `state !== "connected"` guard:
+      //     reconcile() (which untaps leavers) stopped running AND no teardown
+      //     fired, so live tracks kept posting PCM forever and every /tap WS
+      //     leaked.
+      // The ONE state to preserve is a transient "reconnecting": LiveKit keeps
+      // the SAME instance and restores the same participants, so churning /tap
+      // WSes on every blip (cutting active utterances) is wrong.
+      const lostRoom = !room || room !== attachedRoom;
+      if (attachedRoom.state === "disconnected" ||
+          (lostRoom && attachedRoom.state !== "reconnecting")) {
+        console.log("[tapscribe-bridge/page] room lost (" +
+          (room ? "state=" + (room.state || "?") : "window.room cleared") +
+          "); cleaning up taps");
         cleanupAllTaps();
         attachedRoom = null;
       }

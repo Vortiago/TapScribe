@@ -185,3 +185,48 @@ test("dismissing a failed meeting clears the headline and the card", async ({ pa
   await expect(page.getByRole("button", { name: "Start meeting" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "End meeting" })).toBeDisabled();
 });
+
+// ── Active taps staleness ───────────────────────────────────────────────────
+// bridgeStatus lives in chrome.storage.local and OUTLIVES the content script
+// that wrote it. A closed/crashed SpatialChat tab leaves its last snapshot
+// behind; without a staleness check the popup renders departed speakers as live
+// OPEN/active taps with no tab open at all (the reported bug). content.js
+// refreshes the snapshot's `ts` while it runs (taps-view.snapshotIsLive), so the
+// popup shows channels only for a fresh snapshot and the no-tab empty state for
+// a stale one.
+
+/** A two-speaker "Active taps" snapshot stamped at `ts`. @param {number} ts */
+function tapStatusSnapshot(ts) {
+  return {
+    ts,
+    audioContextState: "running",
+    settingsReady: true,
+    meetingActive: false,
+    meetingSessionId: null,
+    channels: [
+      { identity: "man-id", name: "Maneevannan", muted: false, draining: false, error: null, framesSent: 101305, tapWs: "OPEN" },
+      { identity: "khiem-id", name: "Khiem Nguyen", muted: false, draining: false, error: null, framesSent: 67265, tapWs: "OPEN" },
+    ],
+  };
+}
+
+test("a fresh bridgeStatus renders the per-speaker tap rows", async ({ page }) => {
+  // ts in the (near) future → always within the freshness window for the test's
+  // duration, so the live-tab path is exercised deterministically.
+  await openPopup(page, { store: { bridgeStatus: tapStatusSnapshot(Date.now() + 600_000) } });
+  const taps = page.locator("#tapState");
+  await expect(taps).toContainText("Maneevannan");
+  await expect(taps).toContainText("Khiem Nguyen");
+  await expect(taps).toContainText("OPEN");
+  await expect(taps).toContainText("active");
+});
+
+test("a stale bridgeStatus (closed tab's leftover) shows the no-tab empty state, not live taps", async ({ page }) => {
+  // The reported bug verbatim: no SpatialChat windows open, yet the popup showed
+  // Maneevannan / Khiem as OPEN + active. ts 10 min old ⇒ content.js is gone.
+  await openPopup(page, { store: { bridgeStatus: tapStatusSnapshot(Date.now() - 600_000) } });
+  const taps = page.locator("#tapState");
+  await expect(taps).toContainText("No active SpatialChat tab");
+  await expect(taps).not.toContainText("Maneevannan");
+  await expect(taps).not.toContainText("OPEN");
+});

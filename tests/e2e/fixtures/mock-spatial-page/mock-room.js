@@ -215,6 +215,16 @@
     room.fire("disconnected");
   }
 
+  // Simulate SpatialChat clearing window.room when the user leaves a space
+  // WITHOUT transitioning the captured Room to "disconnected" or firing the
+  // "disconnected" event — the exact shape that leaked taps before the
+  // maybeAttach() room-lost teardown. The old Room object stays state
+  // "connected" and its tracks stay live; only window.room goes away, so
+  // page-script's poll must notice the lost handle and tear taps down.
+  function clearRoomWithoutDisconnect() {
+    window.room = null;
+  }
+
   // Emit a 320-sample int16 PCM frame from the worklet for `identity`.
   // page-script.js attaches onmessage to each tapped participant's
   // worklet node; we re-resolve which node belongs to which identity by
@@ -263,6 +273,7 @@
     unmuteSpeaker: unmuteSpeaker,
     removeSpeaker: removeSpeaker,
     disconnectRoom: disconnectRoom,
+    clearRoomWithoutDisconnect: clearRoomWithoutDisconnect,
     setSidebarUser: setSidebarUser,
     clearSidebarUser: clearSidebarUser,
     emitPcm: emitPcm,
