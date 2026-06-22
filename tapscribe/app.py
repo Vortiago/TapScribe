@@ -47,7 +47,13 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config
@@ -88,6 +94,7 @@ from .sessions import (
     read_wav_transcript,
     write_session_meta,
 )
+from .setup_install import InstallSelectionError, run_install, sse, validate_selection
 from .setup_state import build_setup_state
 from .strip_silence import plan_strip_regions, read_wav_int16
 from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
@@ -110,7 +117,12 @@ from .text import (
     write_summarizer_config,
 )
 from .transcribers import evict_idle_now, run_on_model_thread
-from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY, available_backends
+from .transcribers.catalog import (
+    DEFAULT_BATCH_MODEL,
+    REGISTRY,
+    available_backends,
+    refresh_backend_probes,
+)
 from .wav_cache import set_primary_transcript
 
 
@@ -829,6 +841,42 @@ async def api_setup_state():
       }
     """
     return build_setup_state()
+
+
+@app.post("/api/setup/install")
+async def api_setup_install(request: Request):
+    """Install the selected model families and stream progress as Server-Sent
+    Events. Body: ``{"families": {"<family>": "<mlx|cuda|cpu>", ...}}``.
+
+    Delegates the actual pip work to the dependency-free install picker
+    (`tools/install_picker.py --non-interactive`) against a selection written
+    from the validated request, streaming one SSE `data:` event per output line
+    then a terminal `done`/`error`. On success the backend probes are refreshed
+    so `/api/models` + `/api/setup/state` reflect the new install without a
+    restart. Concurrent installs are refused (409)."""
+    body = await _json_body(request)
+    try:
+        selection = validate_selection(body.get("families", {}))
+    except InstallSelectionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if getattr(request.app.state, "setup_install_active", False):
+        raise HTTPException(409, "an install is already running")
+    # Claim the slot synchronously here — there's no await between the guard
+    # above and this set, so two near-simultaneous requests can't both pass
+    # before the (lazily-started) stream would set it. Cleared in finally.
+    request.app.state.setup_install_active = True
+
+    async def events():
+        try:
+            async for ev in run_install(selection, on_success=refresh_backend_probes):
+                yield sse(ev)
+        finally:
+            request.app.state.setup_install_active = False
+
+    # no-cache + no proxy buffering so events arrive as they're produced
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
 
 
 @app.delete("/api/models/cache")

@@ -137,6 +137,24 @@ def set_installed_modules_for_testing(names: frozenset[str] | None) -> None:
     _FIND_SPEC_CACHE.clear()
 
 
+def refresh_backend_probes() -> None:
+    """Re-probe installed adapters + available backends after an in-app install,
+    so `/api/models` and `/api/setup/state` reflect a freshly pip-installed
+    package WITHOUT a process restart.
+
+    Invalidates Python's import-system caches (so a just-installed module becomes
+    importable in this running process), drops the memoised `find_spec` answers,
+    and clears the available-backends cache so the next call re-detects (e.g.
+    CUDA now that torch is present). Leaves any test override
+    (`_INSTALLED_MODULES_OVERRIDE`) untouched — it's checked before the cache."""
+    import importlib
+
+    global _AVAILABLE_BACKENDS_CACHE
+    importlib.invalidate_caches()
+    _FIND_SPEC_CACHE.clear()
+    _AVAILABLE_BACKENDS_CACHE = None
+
+
 # `auto` resolves to the first kind in this list that's available. MLX first
 # (cheapest, lowest-latency on Apple Silicon), then CUDA, then CPU.
 _AUTO_RESOLUTION_ORDER: tuple[BackendKind, ...] = ("mlx", "cuda", "cpu")

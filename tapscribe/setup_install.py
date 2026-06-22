@@ -26,8 +26,10 @@ so a drift in the picker's model fails the suite rather than shipping.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +48,29 @@ _CATALOG_TO_PICKER: dict[str, str] = {
     "voxtral": "voxtral",
     "parakeet": "parakeet",
 }
+_KNOWN_FAMILIES = frozenset(_CATALOG_TO_PICKER)
+_KNOWN_KINDS = frozenset({"mlx", "cuda", "cpu"})
+
+
+class InstallSelectionError(ValueError):
+    """A setup-install request named an unknown family or backend kind."""
+
+
+def validate_selection(families: object) -> dict[str, str]:
+    """Validate an untrusted request body's family→backend map against the
+    allowlists. Family + kind are the only external input that flows toward the
+    installer; constraining them here keeps a bogus value from reaching the
+    picker / pip (the picker installs from the curated pyproject extras only)."""
+    if not isinstance(families, dict):
+        raise InstallSelectionError("families must be an object of {family: backend}")
+    out: dict[str, str] = {}
+    for family, kind in families.items():
+        if family not in _KNOWN_FAMILIES:
+            raise InstallSelectionError(f"unknown family {family!r}")
+        if kind not in _KNOWN_KINDS:
+            raise InstallSelectionError(f"unknown backend {kind!r} for family {family!r}")
+        out[family] = kind
+    return out
 
 
 def to_picker_state(selection: dict[str, str]) -> dict:
@@ -92,3 +117,59 @@ def picker_install_argv(*, python: str = sys.executable, no_mlx: bool = False) -
     if no_mlx:
         argv.append("--no-mlx")
     return argv
+
+
+def sse(event: dict) -> str:
+    """Frame an event dict as a Server-Sent Events `data:` block."""
+    return f"data: {json.dumps(event)}\n\n"
+
+
+async def _create_subprocess(argv: list[str]):
+    """Default spawn: run argv with stdout+stderr merged into one line stream.
+    Returns an asyncio subprocess whose `.stdout` is an async line iterator and
+    whose `.wait()` yields the return code. Patched out in tests."""
+    return await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+
+async def run_install(
+    selection: dict[str, str],
+    *,
+    no_mlx: bool = False,
+    spawn: Callable[[list[str]], Awaitable] | None = None,
+    write_state: Callable[..., None] | None = None,
+    on_success: Callable[[], None] | None = None,
+) -> AsyncIterator[dict]:
+    """Write the resolved picker selection, run the picker `--non-interactive`,
+    and yield progress events: one ``{"phase":"start"}``, a ``{"phase":"log"}``
+    per output line, then ``{"phase":"done"}`` (returncode 0) or
+    ``{"phase":"error"}``. `on_success` (hot-reload) fires only on success.
+
+    `spawn` / `write_state` are injectable for tests; they default to the real
+    asyncio subprocess and the on-disk picker-state writer at call time.
+    """
+    spawn = spawn or _create_subprocess
+    write_state = write_state or write_picker_state
+
+    write_state(to_picker_state(selection))
+    yield {"phase": "start"}
+
+    try:
+        proc = await spawn(picker_install_argv(no_mlx=no_mlx))
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "replace").rstrip("\n")
+            yield {"phase": "log", "line": line}
+        returncode = await proc.wait()
+    except Exception as exc:  # noqa: BLE001 — headers are already sent, so surface ANY spawn/stream failure as a terminal error event rather than a truncated stream + 500
+        yield {"phase": "error", "ok": False, "returncode": None, "message": str(exc)}
+        return
+
+    if returncode == 0:
+        if on_success is not None:
+            on_success()  # hot-reload probes so the new backend shows up
+        yield {"phase": "done", "ok": True, "returncode": 0}
+    else:
+        yield {"phase": "error", "ok": False, "returncode": returncode}

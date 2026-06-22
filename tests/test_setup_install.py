@@ -11,6 +11,7 @@ extras logic — if the picker's family/backend model changes, these fail.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -21,10 +22,15 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 import install_picker  # noqa: E402
+import pytest  # noqa: E402
 
 from tapscribe.setup_install import (  # noqa: E402
+    InstallSelectionError,
     picker_install_argv,
+    run_install,
+    sse,
     to_picker_state,
+    validate_selection,
     write_picker_state,
 )
 
@@ -110,3 +116,152 @@ def test_write_picker_state_roundtrips_through_picker_load(tmp_path):
     assert sel.choices["whisper"].backend == "mlx"
     assert sel.choices["parakeet"].enabled is True
     assert sel.choices["voxtral"].enabled is False
+
+
+# ── validation ──────────────────────────────────────────────────────────────
+
+
+def test_validate_selection_accepts_known_families_and_kinds():
+    assert validate_selection({"whisper": "mlx", "nb-whisper": "cpu"}) == {
+        "whisper": "mlx",
+        "nb-whisper": "cpu",
+    }
+
+
+def test_validate_selection_rejects_unknown_family():
+    with pytest.raises(InstallSelectionError):
+        validate_selection({"whisper-evil": "cpu"})
+
+
+def test_validate_selection_rejects_unknown_backend():
+    with pytest.raises(InstallSelectionError):
+        validate_selection({"whisper": "tpu"})
+
+
+def test_validate_selection_rejects_non_mapping():
+    with pytest.raises(InstallSelectionError):
+        validate_selection(["whisper"])
+
+
+# ── SSE framing ──────────────────────────────────────────────────────────────
+
+
+def test_sse_frames_an_event_as_data_block():
+    line = sse({"phase": "start"})
+    assert line.startswith("data: ")
+    assert line.endswith("\n\n")
+    assert json.loads(line[len("data: ") :].strip()) == {"phase": "start"}
+
+
+# ── streaming runner (fake subprocess) ───────────────────────────────────────
+
+
+def _aiter(lines):
+    async def gen():
+        for ln in lines:
+            yield ln
+
+    return gen()
+
+
+class _FakeProc:
+    def __init__(self, lines, returncode):
+        self.stdout = _aiter(lines)
+        self._rc = returncode
+        self.returncode = None
+
+    async def wait(self):
+        self.returncode = self._rc
+        return self._rc
+
+
+def _fake_spawn(lines, returncode):
+    async def spawn(_argv):
+        return _FakeProc(lines, returncode)
+
+    return spawn
+
+
+async def _collect(selection, *, lines, returncode, on_success=None):
+    written = {}
+    events = []
+    async for ev in run_install(
+        selection,
+        spawn=_fake_spawn(lines, returncode),
+        write_state=lambda state, **_: written.update(state),
+        on_success=on_success,
+    ):
+        events.append(ev)
+    return events, written
+
+
+async def test_run_install_streams_start_logs_then_done_on_success():
+    calls = []
+    events, written = await _collect(
+        {"whisper": "cpu"},
+        lines=[b"resolving wheels\n", b"installed\n"],
+        returncode=0,
+        on_success=lambda: calls.append("reload"),
+    )
+    phases = [e["phase"] for e in events]
+    assert phases == ["start", "log", "log", "done"]
+    assert [e["line"] for e in events if e["phase"] == "log"] == ["resolving wheels", "installed"]
+    assert events[-1] == {"phase": "done", "ok": True, "returncode": 0}
+    assert calls == ["reload"]  # hot-reload fired exactly once, on success
+    assert written["choices"]["whisper"]["enabled"] is True  # selection was written
+
+
+async def test_run_install_reports_error_and_skips_reload_on_failure():
+    calls = []
+    events, _ = await _collect(
+        {"whisper": "cpu"},
+        lines=[b"resolving\n", b"ERROR: no matching distribution\n"],
+        returncode=1,
+        on_success=lambda: calls.append("reload"),
+    )
+    assert events[-1] == {"phase": "error", "ok": False, "returncode": 1}
+    assert calls == []  # reload must NOT fire on a failed install
+
+
+async def test_run_install_emits_error_event_when_spawn_fails():
+    # Headers are already sent by the time the subprocess is spawned, so a spawn
+    # failure (bad interpreter, OS refuses fork, …) must surface as a terminal
+    # error event — not a truncated stream + 500.
+    calls = []
+
+    async def boom(_argv):
+        raise FileNotFoundError("python missing")
+
+    events = [
+        ev
+        async for ev in run_install(
+            {"whisper": "cpu"},
+            spawn=boom,
+            write_state=lambda *a, **k: None,
+            on_success=lambda: calls.append("reload"),
+        )
+    ]
+    assert events[0] == {"phase": "start"}
+    assert events[-1]["phase"] == "error" and events[-1]["ok"] is False
+    assert "python missing" in events[-1]["message"]
+    assert calls == []  # reload must NOT fire when the install never ran
+
+
+# ── hot-reload primitive ─────────────────────────────────────────────────────
+
+
+def test_refresh_backend_probes_reenables_detection():
+    from tapscribe.transcribers.catalog import (
+        available_backends,
+        refresh_backend_probes,
+        set_available_backends_for_testing,
+    )
+
+    set_available_backends_for_testing(frozenset({"made-up-kind"}))
+    assert available_backends() == frozenset({"made-up-kind"})
+    try:
+        refresh_backend_probes()  # clears caches → next probe re-detects the real host
+        assert "cpu" in available_backends()  # cpu is always present
+        assert "made-up-kind" not in available_backends()
+    finally:
+        set_available_backends_for_testing(None)

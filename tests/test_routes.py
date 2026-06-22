@@ -127,6 +127,56 @@ def test_api_setup_state_shape(client):
     assert parakeet["batch"] and not parakeet["live"]
 
 
+def _fake_install_proc(lines, returncode):
+    async def _stdout():
+        for ln in lines:
+            yield ln
+
+    class _Proc:
+        def __init__(self):
+            self.stdout = _stdout()
+            self.returncode = None
+
+        async def wait(self):
+            self.returncode = returncode
+            return returncode
+
+    return _Proc()
+
+
+def test_api_setup_install_streams_sse(client, monkeypatch):
+    async def fake_spawn(_argv):
+        return _fake_install_proc([b"resolving wheels\n", b"installed faster-whisper\n"], 0)
+
+    monkeypatch.setattr("tapscribe.setup_install._create_subprocess", fake_spawn)
+    monkeypatch.setattr("tapscribe.setup_install.write_picker_state", lambda *a, **k: None)
+
+    r = client.post("/api/setup/install", json={"families": {"whisper": "cpu"}})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    body = r.text
+    assert '"phase": "start"' in body
+    assert '"line": "installed faster-whisper"' in body
+    assert '"phase": "done"' in body
+    assert '"ok": true' in body
+    # the slot is released once the stream completes (so a later install isn't 409'd)
+    assert getattr(app.state, "setup_install_active", False) is False
+
+
+def test_api_setup_install_rejects_unknown_family(client):
+    r = client.post("/api/setup/install", json={"families": {"evil-model": "cpu"}})
+    assert r.status_code == 400
+
+
+def test_api_setup_install_refuses_concurrent_runs(client):
+    app.state.setup_install_active = True
+    try:
+        r = client.post("/api/setup/install", json={"families": {"whisper": "cpu"}})
+        assert r.status_code == 409
+    finally:
+        app.state.setup_install_active = False
+
+
 def test_api_models_emits_text_inputs_for_whisper(client):
     r = client.get("/api/models")
     whisper = next(m for m in r.json()["models"] if m["model_id"] == "small.en")
