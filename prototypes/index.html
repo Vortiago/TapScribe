@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe · prototypes</title>
+    <!-- vanilla-components: tokens first, then the tone mixin, then page styles. -->
+    <link rel="stylesheet" href="_shared/vc/tokens.css" />
+    <link rel="stylesheet" href="_shared/vc/tones.css" />
+    <style>
+      /* Declare the component layer first so our own (unlayered) rules can win. */
+      @layer vanilla-components, app;
+      :root { color-scheme: dark; }
+      html, body { margin: 0; }
+      body { background: var(--bg); color: var(--text); font-family: var(--sans); }
+      .wrap { max-width: 980px; margin: 0 auto; padding: 28px 22px 80px; }
+      .gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 16px; margin-top: 20px; }
+      .card__blurb { color: var(--text-dim); font-size: 14px; line-height: 1.5; margin: 0 0 14px; }
+      .card__links { display: flex; flex-wrap: wrap; gap: 8px; }
+      .card__head { display: flex; align-items: center; gap: 8px; }
+      .lede { color: var(--text-dim); font-size: 14.5px; max-width: 60ch; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div id="header"></div>
+      <p class="lede">
+        Disposable explorations — “show &amp; throw”. Each is a self-contained static mockup;
+        nothing here is wired to the backend. Built on the shared
+        <code>vanilla-components</code> library.
+      </p>
+      <div id="gallery" class="gallery"></div>
+    </div>
+    <script type="module">
+      import { el } from "./_shared/dom.js";
+      import { VC, warmAll } from "./_shared/vc.js";
+      import { PROTOTYPES } from "./_shared/registry.js";
+
+      await warmAll();
+      const headerHost = document.getElementById("header");
+      const galleryHost = document.getElementById("gallery");
+
+      headerHost.append(
+        VC.viewHeader({
+          eyebrow: "TapScribe",
+          title: "Prototypes",
+          sub: "Pick a direction, or steal bits from each.",
+        }).el,
+      );
+
+      for (const p of PROTOTYPES) {
+        const head = el("div", { class: "card__head" },
+          el("strong", {}, p.title),
+          p.tag ? VC.chip({ text: p.tag, tone: "accent" }).el : null,
+        );
+        const links = el("div", { class: "card__links" });
+        p.links.forEach((lnk, i) =>
+          links.append(VC.button({ label: lnk.label, href: lnk.href, variant: i === 0 ? "primary" : "default", size: "sm" }).el),
+        );
+        const body = el("div", {},
+          el("p", { class: "card__blurb" }, p.blurb),
+          links,
+        );
+        galleryHost.append(VC.panel({ head, body }).el);
+      }
+    </script>
+  </body>
+</html>

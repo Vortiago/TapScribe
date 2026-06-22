@@ -1,0 +1,43 @@
+@layer vanilla-components {
+/* Chip — a compact inline pill/badge. Neutral by default; a tone sets one
+   `--tone` custom property and text/fill/border all derive from it via
+   color-mix (the TapScribe `.chip` pattern). Optional leading dot. */
+@scope (.chip) {
+  :scope {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: var(--r-pill);
+    color: var(--text-dim);
+    background: var(--bg-elev);
+    border: 1px solid var(--hairline);
+    white-space: nowrap;
+  }
+
+  .chip-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+
+  /* The `tone-<name>` → `--tone` mapping lives once in tones.css; this rule just
+     derives the chip look from `--tone`. tone-custom's --tone is set inline. The
+     `var(--tone, var(--text-dim))` fallback degrades a named-tone chip to neutral
+     (rather than colourless) if tones.css isn't linked — matching status-dot /
+     alert / segmented-control. */
+  :scope.tone-ok,
+  :scope.tone-warn,
+  :scope.tone-bad,
+  :scope.tone-info,
+  :scope.tone-accent,
+  :scope.tone-custom {
+    color: var(--tone, var(--text-dim));
+    background: color-mix(in srgb, var(--tone, var(--text-dim)) 12%, transparent);
+    border-color: color-mix(in srgb, var(--tone, var(--text-dim)) 32%, transparent);
+  }
+}
+}

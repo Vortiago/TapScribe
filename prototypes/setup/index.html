@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe · setup prototypes</title>
+    <!-- vanilla-components: tokens first, then the tone mixin, then page styles. -->
+    <link rel="stylesheet" href="../_shared/vc/tokens.css" />
+    <link rel="stylesheet" href="../_shared/vc/tones.css" />
+    <link rel="stylesheet" href="setup.css" />
+  </head>
+  <body>
+    <!-- THROWAWAY PROTOTYPE — 3 first-run setup experiences for TapScribe.
+         Not wired to the backend. Machine detection + pip installs are mocked.
+         Switch variants from the floating bar (or ?variant=A|B|C, ←/→ keys). -->
+    <div id="stage" class="stage"><!-- active variant renders here --></div>
+    <div id="switcher" class="sw"><!-- floating switcher renders here --></div>
+    <script type="module" src="src/app.js"></script>
+    <script type="module" src="../_shared/launcher.js"></script>
+  </body>
+</html>
