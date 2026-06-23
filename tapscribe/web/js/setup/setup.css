@@ -1,0 +1,152 @@
+/* Setup-page layout for the vanilla-components surface.
+ *
+ * Component look/colour comes from the vendored vc/ (tokens.css + tones.css +
+ * each component's own @layer vanilla-components CSS). This file only does the
+ * PAGE layout, on the shared tokens. Rules here are intentionally UNLAYERED so
+ * they win over component @layer rules where the page overrides structure (e.g.
+ * the full-width install button). Dark-only: `color-scheme: dark` resolves every
+ * token light-dark() to its dark side.
+ */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-family: var(--sans);
+  font-size: 13px;
+}
+
+.setup {
+  box-sizing: border-box;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--space-l) var(--space-m) 80px;
+}
+
+.setup__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-s);
+  padding-bottom: var(--space-s);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: var(--space-l);
+}
+.brand {
+  font-weight: 700;
+  color: var(--text);
+}
+.brand::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.setup__host {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.setup__title {
+  font-size: 21px;
+  color: var(--text);
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+.setup__sub {
+  color: var(--text-dim);
+  margin: 0 0 var(--space-l);
+}
+
+/* one row per model family: [check] [name + chips / meta] [backend] [size] */
+.fam {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: var(--space-m);
+  align-items: center;
+  padding: var(--space-s) 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.fam__check {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.fam__name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  font-weight: 600;
+  color: var(--text);
+}
+.fam__meta {
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.fam__size {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  text-align: right;
+  white-space: nowrap;
+}
+.fam__none {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.setup__cta {
+  margin-top: var(--space-l);
+}
+/* unlayered → overrides the button component's intrinsic width */
+.setup__cta > * {
+  width: 100%;
+}
+
+.setup__busy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-s);
+  margin-top: var(--space-m);
+  color: var(--text-dim);
+}
+.setup__log {
+  box-sizing: border-box;
+  height: 220px;
+  margin-top: var(--space-m);
+  padding: var(--space-s);
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ok);
+  white-space: pre-wrap;
+}
+.setup__result {
+  margin-top: var(--space-m);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+}
+
+[hidden] {
+  display: none !important;
+}

@@ -1,33 +1,29 @@
 // @ts-check
-// First-run / manage-models setup surface. Reads GET /api/setup/state, lets the
-// operator pick model families + a host-valid backend, then POSTs to
-// /api/setup/install and streams the Server-Sent progress into the log pane.
-// Plain vanilla DOM — served standalone (no dashboard machinery), so it works
-// before any backend is installed. Functional first cut of the centred-console
-// design; can be enriched later.
+// First-run / manage-models setup surface, composed from vanilla-components on
+// the shared tokens (see vc/PROVENANCE.md). Reads GET /api/setup/state, lets the
+// operator pick model families + a host-valid backend, POSTs to
+// /api/setup/install, and streams the Server-Sent progress into the log pane.
+// Served standalone (no dashboard machinery) so it works before any backend is
+// installed.
+import { warmAlert, createAlertSync } from "./vc/components/alert/alert.js";
+import { warmButton, createButtonSync } from "./vc/components/button/button.js";
+import { warmChip, createChipSync } from "./vc/components/chip/chip.js";
+import { warmField, createFieldSync } from "./vc/components/field/field.js";
+import { warmPanel, createPanelSync } from "./vc/components/panel/panel.js";
+import { warmSpinner, createSpinnerSync } from "./vc/components/spinner/spinner.js";
 
 /**
+ * Minimal layout-scaffolding helper (NOT styling — look comes from components +
+ * tokens). Components are built via the create*Sync factories.
  * @param {string} tag
- * @param {Record<string, unknown>} [props]
- * @param {...(Node | string | null | false | Array<Node | string | null | false>)} kids
+ * @param {string | null} cls
+ * @param {...(Node | string)} kids
  * @returns {HTMLElement}
  */
-function el(tag, props = {}, ...kids) {
+function el(tag, cls, ...kids) {
   const node = document.createElement(tag);
-  const any = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (node));
-  for (const [k, v] of Object.entries(props)) {
-    if (v == null || v === false) continue;
-    if (k === "class") node.className = String(v);
-    else if (k === "dataset") Object.assign(node.dataset, v);
-    else if (k.startsWith("on") && typeof v === "function") {
-      node.addEventListener(k.slice(2).toLowerCase(), /** @type {EventListener} */ (v));
-    } else if (k in node) any[k] = v;
-    else node.setAttribute(k, String(v));
-  }
-  for (const kid of kids.flat()) {
-    if (kid == null || kid === false) continue;
-    node.append(typeof kid === "string" ? document.createTextNode(kid) : kid);
-  }
+  if (cls) node.className = cls;
+  for (const kid of kids) node.append(typeof kid === "string" ? document.createTextNode(kid) : kid);
   return node;
 }
 
@@ -40,8 +36,13 @@ function byId(id) {
 
 /** Per-family chosen backend, keyed by family id. */
 const chosen = new Map();
+// Lifetime of the page; passed to components for their event listeners.
+const ac = new AbortController();
 
 async function boot() {
+  // Warm the components once so the row builders can run synchronously.
+  await Promise.all([warmPanel(), warmButton(), warmField(), warmChip(), warmAlert(), warmSpinner()]);
+
   const sub = byId("sub");
   let state;
   try {
@@ -59,63 +60,75 @@ async function boot() {
     ? "Pick the model families to install. Everything runs locally; nothing leaves this machine."
     : "Add or change models. Already-installed families are marked; only new picks download.";
 
-  renderPicker(state.families);
-  const install = /** @type {HTMLButtonElement} */ (byId("install"));
-  install.disabled = false;
-  install.addEventListener("click", () => {
-    void runInstall();
-  });
+  buildCard(state.families);
 }
 
 /** @param {Array<Record<string, any>>} families */
-function renderPicker(families) {
-  const rows = families.map((f) => {
-    // default backend = first host-valid; default-check Whisper / installed.
-    if (f.backends.length) chosen.set(f.family, f.backends[0]);
-    const cap = el("span", { class: f.live ? "chip chip-info" : "chip chip-muted" }, f.live ? "live + batch" : "batch only");
-    const installed = f.installed ? el("span", { class: "chip chip-ok" }, "installed") : null;
-    const check = el("input", {
-      type: "checkbox",
-      checked: f.family === "whisper" || Boolean(f.installed),
-      "aria-label": `install ${f.label}`,
-      dataset: { family: f.family },
-    });
-    const backendSel = el(
-      "select",
-      {
-        "aria-label": `${f.label} backend`,
-        disabled: f.backends.length <= 1,
-        onchange: (/** @type {Event} */ e) => {
-          chosen.set(f.family, /** @type {HTMLSelectElement} */ (e.target).value);
-        },
-      },
-      ...f.backends.map((/** @type {string} */ b) => el("option", { value: b }, b)),
-    );
-    return el(
-      "tr",
-      {},
-      el("td", {}, check),
-      el("td", {}, el("div", { class: "name" }, f.label, cap, installed), el("div", { class: "blurb" }, `${(f.models || []).length} models`)),
-      el("td", {}, f.backends.length ? backendSel : el("span", { class: "blurb" }, "—")),
-      el("td", { class: "sz" }, f.size_hint || ""),
-    );
-  });
-  byId("picker").replaceChildren(
-    el(
-      "table",
-      {},
-      el("thead", {}, el("tr", {}, el("th", {}, ""), el("th", {}, "family"), el("th", {}, "backend"), el("th", { class: "sz" }, "size"))),
-      el("tbody", {}, rows),
-    ),
+function buildCard(families) {
+  const list = el("div", "setup__list");
+  for (const f of families) list.append(familyRow(f));
+
+  const install = createButtonSync(
+    { label: "Install & launch", variant: "primary", disabled: true, onClick: () => void runInstall(install) },
+    ac.signal,
   );
+  const log = el("pre", "setup__log");
+  log.id = "log";
+  log.hidden = true;
+  const result = el("div", "setup__result");
+  result.id = "result";
+
+  const panel = createPanelSync({ body: el("div", null, list, el("div", "setup__cta", install.el), log, result) });
+  byId("card").replaceChildren(panel.el);
+  install.setDisabled(false);
+}
+
+/** @param {Record<string, any>} f @returns {HTMLElement} */
+function familyRow(f) {
+  const check = el("input", "fam__check");
+  const box = /** @type {HTMLInputElement} */ (check);
+  box.type = "checkbox";
+  // default-check Whisper / anything already installed.
+  box.checked = f.family === "whisper" || Boolean(f.installed);
+  box.setAttribute("aria-label", `install ${f.label}`);
+  box.dataset.family = f.family;
+
+  const chips = [createChipSync({ text: f.live ? "live + batch" : "batch only", tone: f.live ? "info" : "neutral" }).el];
+  if (f.installed) chips.push(createChipSync({ text: "installed", tone: "ok" }).el);
+  const name = el("div", "fam__name", f.label, ...chips);
+  const meta = el("div", "fam__meta", `${(f.models || []).length} models`);
+
+  /** @type {Node} */
+  let backend;
+  if (f.backends.length > 1) {
+    chosen.set(f.family, f.backends[0]);
+    backend = createFieldSync(
+      {
+        label: `${f.label} backend`,
+        type: "select",
+        hideLabel: true,
+        value: f.backends[0],
+        options: f.backends.map((/** @type {string} */ b) => ({ value: b, label: b })),
+        onInput: (v) => chosen.set(f.family, v),
+      },
+      ac.signal,
+    ).el;
+  } else if (f.backends.length === 1) {
+    chosen.set(f.family, f.backends[0]);
+    backend = createChipSync({ text: f.backends[0] }).el;
+  } else {
+    backend = el("span", "fam__none", "—");
+  }
+
+  return el("div", "fam", check, el("div", null, name, meta), backend, el("div", "fam__size", f.size_hint || ""));
 }
 
 /** @returns {Record<string, string>} */
 function selectedFamilies() {
   /** @type {Record<string, string>} */
   const out = {};
-  for (const box of document.querySelectorAll('#picker input[type="checkbox"]')) {
-    const cb = /** @type {HTMLInputElement} */ (box);
+  for (const node of document.querySelectorAll(".fam__check")) {
+    const cb = /** @type {HTMLInputElement} */ (node);
     const fam = cb.dataset.family;
     const backend = fam && chosen.get(fam);
     // skip a checked family with no host-valid backend rather than fabricate "cpu"
@@ -124,15 +137,18 @@ function selectedFamilies() {
   return out;
 }
 
-async function runInstall() {
+/** @param {{ setDisabled: (d: boolean) => void }} install */
+async function runInstall(install) {
   const families = selectedFamilies();
   const log = byId("log");
   const result = byId("result");
-  const install = /** @type {HTMLButtonElement} */ (byId("install"));
   result.replaceChildren();
   log.hidden = false;
   log.textContent = "";
-  install.disabled = true;
+  install.setDisabled(true);
+
+  const busy = el("div", "setup__busy", createSpinnerSync({ size: 16 }).el, el("span", null, "Installing…"));
+  result.replaceChildren(busy);
 
   /** @param {string} line */
   const append = (line) => {
@@ -148,14 +164,10 @@ async function runInstall() {
       body: JSON.stringify({ families }),
     });
   } catch (e) {
-    append(`request failed: ${e}`);
-    install.disabled = false;
-    return;
+    return finish(false, install, result, `request failed: ${e}`);
   }
   if (!resp.ok || !resp.body) {
-    append(`install rejected: HTTP ${resp.status}`);
-    install.disabled = false;
-    return;
+    return finish(false, install, result, `install rejected: HTTP ${resp.status}`);
   }
 
   // Parse the SSE stream: events are "data: <json>\n\n".
@@ -186,12 +198,24 @@ async function runInstall() {
       } else if (ev.phase === "error") append(`· error: ${ev.message || "exit " + ev.returncode}`);
     }
   }
+  finish(ok, install, result);
+}
 
+/**
+ * Render the terminal install result.
+ * @param {boolean} ok
+ * @param {{ setDisabled: (d: boolean) => void }} install
+ * @param {HTMLElement} result
+ * @param {string} [logLine]
+ */
+function finish(ok, install, result, logLine) {
+  if (logLine) byId("log").textContent += logLine + "\n";
   if (ok) {
-    result.replaceChildren(el("div", { class: "done" }, "✓ Installed."), el("a", { class: "dash", href: "/" }, "Open the dashboard →"));
+    const open = createButtonSync({ label: "Open the dashboard →", variant: "primary", href: "/" });
+    result.replaceChildren(createAlertSync({ tone: "ok", message: "Installed." }).el, open.el);
   } else {
-    result.replaceChildren(el("div", { class: "err" }, "Install failed — see the log above."));
-    install.disabled = false;
+    result.replaceChildren(createAlertSync({ tone: "bad", message: "Install failed — see the log above." }).el);
+    install.setDisabled(false);
   }
 }
 
