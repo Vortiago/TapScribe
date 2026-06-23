@@ -26,8 +26,8 @@ concurrently — each under its own stable `identity`/`name` — co-located in o
 (idle / streaming / error — event-driven, no idle polling) and Start meeting / Stop
 meeting / Quit, and a **3-tab Settings dialog** — Connection (host / port / TLS /
 tap token + Test connection), **Devices** (capture the mic and/or system audio, each
-with one Name, plus an Advanced expander to pin specific endpoints), and **Level
-gate** (a sensitivity slider + hangover/pre-roll in ms) — all persisted to
+with one Name **and its own sensitivity slider**, plus an Advanced expander to pin
+specific endpoints), and **Level gate** (the shared hangover/pre-roll in ms) — all persisted to
 `%APPDATA%`, with the token protected at rest by Windows DPAPI. Start meeting **resolves** the saved selection against the devices present now
 (follow-default binds to the current default), so a bad token or unreachable Recorder
 fails with a clear, classified message *before* any device opens.
@@ -171,6 +171,11 @@ device is *at Start*, so switching your default output (Bluetooth ↔ speakers) 
 "system audio" working without reconfiguring (see ADR-0005). If no default is
 configured but devices exist, the first device of that kind is used.
 
+Each row also has its **own Sensitivity slider** (per-device tuning — ADR-0007). The
+mic defaults less sensitive (so room noise doesn't open it) and the system loopback
+more sensitive (so the quiet far end is captured). Changing a slider and Saving during
+a live meeting re-tunes **only that device's** pipeline, with no Stop/Start.
+
 **▸ Advanced — pin specific devices…** expands a grid of every concrete endpoint so a
 power user can pin a specific interface (e.g. a particular USB mic) instead of
 following the default, again with its own Name. **Refresh devices** re-enumerates
@@ -184,11 +189,13 @@ with a clear message rather than recording an empty session.
 ### Level gate tab
 
 The Bridge-side gate that turns sound into Utterances (a loopback device has no mute
-event, so the level gate *is* the Mute — see CONTEXT.md). **Sensitivity** (0–100,
-higher opens on quieter sound) maps to the gate's linear RMS threshold; **Hangover**
-(ms) is how long silence must last before an Utterance closes; **Pre-roll** (ms) is
-how much leading audio is replayed when it opens so the first consonants aren't
-clipped.
+event, so the level gate *is* the Mute — see CONTEXT.md). **Sensitivity** is set per
+device on the **Devices** tab (it maps to the gate's linear RMS threshold; higher =
+opens on quieter sound). This tab holds the two knobs shared across every device:
+**Hangover** (ms) is how long silence must last before an Utterance closes, and
+**Pre-roll** (ms) is how much leading audio is replayed when it opens so the first
+consonants aren't clipped. An old settings file's single global tuning migrates into
+each device's default on upgrade (no reset — ADR-0007).
 
 On first run the **Connection** fields are pre-seeded from the legacy `TAPSCRIBE_HOST` /
 `TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` / `TAPSCRIBE_IDENTITY` / `TAPSCRIBE_NAME` /
@@ -216,6 +223,21 @@ source of truth thereafter.
 The `TapClientWebSocketTests` cover the same negotiation + binary-frame
 round-trip (both `--no-auth` and tokened) against an in-process Kestrel `/tap`
 server, so a wire regression is caught in CI without needing a live Recorder.
+
+### Live per-device re-tune demo (#153)
+
+To see per-device sensitivity take effect mid-meeting:
+
+1. **Start meeting** with the far end (system audio) quiet — quiet enough that the
+   system loopback gate doesn't open, so no `system` WAVs appear.
+2. Open **Settings… → Devices**, raise **only** the system-audio Sensitivity, and
+   **Save** (don't Stop). The far end starts being captured immediately, with no
+   Stop/Start, and the mic pipeline is untouched.
+
+This routes by identity through `CaptureOrchestrator.UpdateGates(map)`; the
+`UpdateGates_RoutesEachUpdateToItsOwnPipeline_ByIdentity` /
+`UpdateGates_SkipsAnIdentityWithNoRunningPipeline_WithoutError` /
+`UpdateGates_DoesNotDisturbAnotherPipelinesOpenUtterance` tests pin the routing in CI.
 
 ### Isolation demo (per-bridge sessions)
 

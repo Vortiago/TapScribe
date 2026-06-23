@@ -487,6 +487,17 @@ knobs are the **open threshold** (a linear RMS amplitude), the
 **hangover** (silence-to-close), and the **pre-roll** (leading audio
 replayed when the gate opens so the first consonants aren't clipped).
 
+Tuning is **per device**, not global (ADR-0007): each capture device
+carries its own `GateSettings` (the operator-unit `sensitivity` slider +
+hangover/pre-roll, in `Bridge.Core`), so the system-loopback gate can be
+more sensitive than the mic gate. The per-device tuning rides on the
+device selection, reaches each pipeline's `LevelGate` at Start, and is
+re-tuned live by **identity** (`CaptureOrchestrator.UpdateGates(map)`) on
+Settings → Save — only the changed device's pipeline re-tunes; a device
+with no running pipeline is skipped. The legacy single global gate is kept
+only as a nullable migration input: an old file's one tuning loads as each
+device's default (no reset on upgrade).
+
 Distinct from the Recorder-side **SpeechGate**: that one is Silero-backed
 and its threshold is a speech *probability*; the Level gate is amplitude
 RMS. The two gates live on opposite sides of the `/tap` wire and **never

@@ -127,8 +127,10 @@ internal sealed class TrayContext : ApplicationContext
             var specs = new List<PipelineSpec>();
             for (int i = 0; i < resolution.Resolved.Count; i++)
             {
-                CaptureDevice device = resolution.Resolved[i].Device;
-                TryAddSpec(specs, enumerator, device, perDevice[i], ui);
+                ResolvedDevice resolved = resolution.Resolved[i];
+                // Each pipeline is built with its OWN device's gate (#151): the resolved
+                // selection carries a concrete per-device GateSettings.
+                TryAddSpec(specs, enumerator, resolved.Device, perDevice[i], resolved.Gate.ToGateOptions(), ui);
             }
             if (specs.Count == 0)
                 // Every resolved device failed to OPEN (in use, format unsupported, …).
@@ -143,8 +145,8 @@ internal sealed class TrayContext : ApplicationContext
                     connected.Add(id);
                     ApplyStatus(new TrayStatus.Streaming(connected.Count, total));
                 }, null),
-                onFailed: (id, ex) => ui.Post(_ => ShowBalloon($"{id} stopped", ex.Message), null),
-                settings.ToGateOptions());
+                onFailed: (id, ex) => ui.Post(_ => ShowBalloon($"{id} stopped", ex.Message), null));
+                // No shared gate arg: each spec already carries its own per-device gate.
 
             lock (_gate)
             {
@@ -200,11 +202,12 @@ internal sealed class TrayContext : ApplicationContext
     // cross-platform CaptureOrchestrator can't own it; it owns the symmetric START-failure
     // half — capture.Start throwing inside TapSession.Begin.)
     private void TryAddSpec(List<PipelineSpec> into, WasapiDeviceEnumerator enumerator,
-                            CaptureDevice device, TapConnectionOptions options, SynchronizationContext ui)
+                            CaptureDevice device, TapConnectionOptions options, GateOptions gate,
+                            SynchronizationContext ui)
     {
         try
         {
-            into.Add(new PipelineSpec(enumerator.Open(device), options));
+            into.Add(new PipelineSpec(enumerator.Open(device), options, gate));
         }
         catch (Exception ex) when (
             ex is COMException or NotSupportedException or ArgumentException or InvalidOperationException)
@@ -306,11 +309,12 @@ internal sealed class TrayContext : ApplicationContext
     private void OpenSettings()
     {
         // Editing while a meeting is live is allowed. Connection/device changes apply on
-        // the next Start (those pipelines bound them at Begin); the level-gate knobs,
-        // however, are pushed to the running pipelines below so a sensitivity change
-        // takes effect mid-meeting with no Stop/Start (issue #149). The device list is
-        // supplied as a delegate so the dialog can re-enumerate (Refresh) without owning
-        // the enumerator's lifecycle. Persist on Save so the settings survive restarts.
+        // the next Start (those pipelines bound them at Begin); the per-device level-gate
+        // knobs, however, are pushed to the running pipelines below so a sensitivity change
+        // takes effect mid-meeting with no Stop/Start, re-tuning only the devices whose
+        // tuning changed (issues #149, #153). The device list is supplied as a delegate so
+        // the dialog can re-enumerate (Refresh) without owning the enumerator's lifecycle.
+        // Persist on Save so the settings survive restarts.
         using var form = new SettingsForm(_settings, ListDevices);
         if (form.ShowDialog() != DialogResult.OK)
             return;
@@ -330,13 +334,14 @@ internal sealed class TrayContext : ApplicationContext
         // Re-tune a live meeting in place. Grab the orchestrator under the lock (StartAsync
         // may publish it from a thread-pool continuation), then call out WITHOUT holding
         // the lock — UpdateGates is a quick atomic fan-out and shouldn't run under _gate.
-        // No meeting running -> null -> a no-op, exactly as the AC requires. Applied even
-        // if the disk save above failed, so the in-memory re-tune still reaches the
-        // pipelines for this session.
+        // The per-identity map routes each device's new tuning to its own pipeline; one
+        // whose identity isn't running is skipped. No meeting running -> null -> a no-op,
+        // exactly as the AC requires. Applied even if the disk save above failed, so the
+        // in-memory re-tune still reaches the pipelines for this session.
         CaptureOrchestrator? running;
         lock (_gate)
             running = _orchestrator;
-        running?.UpdateGates(_settings.ToGateOptions());
+        running?.UpdateGates(_settings.ToGateOptionsByIdentity());
     }
 
     private static IReadOnlyList<CaptureDevice> ListDevices()

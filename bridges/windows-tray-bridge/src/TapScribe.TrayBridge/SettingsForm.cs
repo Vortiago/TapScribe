@@ -10,9 +10,12 @@ namespace TapScribe.TrayBridge;
 /// <list type="bullet">
 /// <item><b>Connection</b> — Recorder host/port/TLS/identity/name/token + Test connection.</item>
 /// <item><b>Devices</b> — which devices to tap: the two follow-default rows (mic + system
-/// loopback) plus every concrete endpoint for pinning, each with an editable identity/name.</item>
-/// <item><b>Level gate</b> — the bridge-side gate knobs: a sensitivity slider (mapped to a
-/// linear RMS threshold via <see cref="GateTuning"/>) and hangover / pre-roll in ms.</item>
+/// loopback) plus every concrete endpoint for pinning, each with an editable identity/name
+/// and its own sensitivity slider (per-device tuning, mapped to a linear RMS threshold via
+/// <see cref="GateTuning"/>; ADR-0007).</item>
+/// <item><b>Level gate</b> — the shared bridge-side gate knobs that apply to every device:
+/// hangover (silence-to-close) and pre-roll in ms. Sensitivity is per device on the
+/// Devices tab.</item>
 /// </list>
 /// On Save it returns the edited <see cref="BridgeSettings"/> via <see cref="Result"/>;
 /// the caller persists them. The device list is supplied by a delegate so the dialog
@@ -51,11 +54,21 @@ internal sealed class SettingsForm : Form
     // Carried forward verbatim on Save so an unplugged-device pin isn't silently erased.
     private List<DeviceSelection> _absentPinned = [];
 
-    // Level-gate tab.
-    private readonly TrackBar _sensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 300 };
-    private readonly Label _sensitivityValue = new() { AutoSize = true };
+    // Per-device sensitivity lives on the Devices tab — one slider per device — because a
+    // mic and a system loopback want opposite sensitivity (ADR-0007). Hangover / pre-roll
+    // are shared across devices and stay on the Level-gate tab.
+    private readonly TrackBar _micSensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 240 };
+    private readonly Label _micSensitivityValue = new() { AutoSize = true };
+    private readonly TrackBar _systemSensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 240 };
+    private readonly Label _systemSensitivityValue = new() { AutoSize = true };
+
+    // Level-gate tab — the shared knobs.
     private readonly NumericUpDown _hangover = new() { Minimum = 0, Maximum = 5000, Increment = 50, Width = 90 };
     private readonly NumericUpDown _preRoll = new() { Minimum = 0, Maximum = 2000, Increment = 50, Width = 90 };
+
+    // Flow per present device id (filled by PopulateDevices), so Collect can default a
+    // freshly-pinned device's gate by its kind (mic vs loopback).
+    private readonly Dictionary<string, DeviceFlow> _deviceFlows = new(StringComparer.Ordinal);
 
     public BridgeSettings Result { get; private set; }
 
@@ -70,7 +83,9 @@ internal sealed class SettingsForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(460, 460);
+        // Taller than before: the Devices tab now carries a per-device sensitivity slider
+        // under each device, so the simple pair + the Advanced pin grid both need room.
+        ClientSize = new Size(470, 560);
 
         var tabs = new TabControl
         {
@@ -167,26 +182,29 @@ internal sealed class SettingsForm : Form
         page.Controls.Add(new Label
         {
             Text = "Name labels each source on the dashboard and tags it in the recording "
-                 + "filenames (made filename-safe automatically). Give the two different names.",
+                 + "filenames (made filename-safe automatically). Give the two different "
+                 + "names. Sensitivity is per device — open the loopback more than the mic.",
             Location = new Point(12, 8),
-            Size = new Size(_contentW - 24, 30),
+            Size = new Size(_contentW - 24, 44),
             ForeColor = SystemColors.GrayText,
         });
 
-        _micEnabled.Location = new Point(12, 44);
+        _micEnabled.Location = new Point(12, 56);
         page.Controls.Add(_micEnabled);
-        AddNameRow(page, _micName, 70);
+        AddNameRow(page, _micName, 82);
+        AddSensitivityRow(_micSensitivity, _micSensitivityValue, 108);
 
-        _systemEnabled.Location = new Point(12, 108);
+        _systemEnabled.Location = new Point(12, 174);
         page.Controls.Add(_systemEnabled);
-        AddNameRow(page, _systemName, 134);
+        AddNameRow(page, _systemName, 200);
+        AddSensitivityRow(_systemSensitivity, _systemSensitivityValue, 226);
 
-        _deviceStatus.Location = new Point(12, 168);
+        _deviceStatus.Location = new Point(12, 300);
         _deviceStatus.MaximumSize = new Size(_contentW - 24, 0);
         page.Controls.Add(_deviceStatus);
 
         SetAdvancedToggle(open: false);
-        _advancedToggle.Location = new Point(12, 190);
+        _advancedToggle.Location = new Point(12, 322);
         _advancedToggle.LinkClicked += (_, _) =>
         {
             _advancedPanel.Visible = !_advancedPanel.Visible;
@@ -195,8 +213,8 @@ internal sealed class SettingsForm : Form
         page.Controls.Add(_advancedToggle);
 
         int panelW = _contentW - 24;
-        int panelH = _contentH - 226;
-        _advancedPanel.Location = new Point(12, 216);
+        int panelH = _contentH - 358;
+        _advancedPanel.Location = new Point(12, 348);
         _advancedPanel.Size = new Size(panelW, panelH);
         _advancedPanel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
@@ -247,6 +265,19 @@ internal sealed class SettingsForm : Form
             name.Location = new Point(80, rowY);
             host.Controls.Add(name);
         }
+
+        // One device's sensitivity slider + its live RMS-threshold readout. The slider's
+        // value is seeded by SeedSimpleSelections before this wires the live label.
+        void AddSensitivityRow(TrackBar slider, Label valueLabel, int rowY)
+        {
+            page.Controls.Add(new Label { Text = "Sensitivity", Location = new Point(32, rowY + 12), AutoSize = true });
+            slider.Location = new Point(110, rowY);
+            page.Controls.Add(slider);
+            valueLabel.Location = new Point(112, rowY + 42);
+            page.Controls.Add(valueLabel);
+            slider.ValueChanged += (_, _) => UpdateSensitivityLabel(slider, valueLabel);
+            UpdateSensitivityLabel(slider, valueLabel);
+        }
     }
 
     // The single per-device label: the saved Name, or its identity for a legacy/blank Name.
@@ -272,13 +303,30 @@ internal sealed class SettingsForm : Form
             {
                 _micEnabled.Checked |= tick;
                 _micName.Text = SelectionLabel(mic);
+                _micSensitivity.Value = SensitivityOf(mic, DeviceFlow.Capture);
             }
             else if (selection is DeviceSelection.FollowDefault { Flow: DeviceFlow.Render } system)
             {
                 _systemEnabled.Checked |= tick;
                 _systemName.Text = SelectionLabel(system);
+                _systemSensitivity.Value = SensitivityOf(system, DeviceFlow.Render);
             }
         }
+
+        // The slider value for a selection: its own per-device sensitivity, else the
+        // flow default. The EffectiveDevices pass runs last, so a saved/migrated value
+        // wins over the default-pair fallback.
+        static int SensitivityOf(DeviceSelection selection, DeviceFlow flow) =>
+            Math.Clamp((selection.Gate ?? GateSettings.DefaultForFlow(flow)).Sensitivity, 0, 100);
+    }
+
+    // The hangover / pre-roll the shared Level-gate controls seed from and write back to
+    // every device. After migration all devices share these, so the first effective
+    // device is representative; the flow default covers an empty selection.
+    private GateSettings SharedGate()
+    {
+        DeviceSelection? first = _current.EffectiveDevices.FirstOrDefault();
+        return first?.Gate ?? GateSettings.DefaultForFlow(DeviceFlow.Capture);
     }
 
     private TabPage BuildLevelGateTab()
@@ -289,41 +337,34 @@ internal sealed class SettingsForm : Form
         page.Controls.Add(new Label
         {
             Text = "The bridge opens a recording when the input level crosses the threshold "
-                 + "and closes it after the hangover. Higher sensitivity opens on quieter sound.",
+                 + "and closes it after the hangover. Sensitivity is set per device on the "
+                 + "Devices tab; hangover and pre-roll below apply to every device.",
             Location = new Point(12, y),
-            Size = new Size(_contentW - 24, 34),
+            Size = new Size(_contentW - 24, 44),
             ForeColor = SystemColors.GrayText,
         });
-        y += 44;
+        y += 54;
 
-        page.Controls.Add(new Label { Text = "Sensitivity", Location = new Point(12, y + 4), AutoSize = true });
-        _sensitivity.Location = new Point(110, y);
-        _sensitivity.Value = Math.Clamp(_current.GateSensitivity, 0, 100);
-        _sensitivity.ValueChanged += (_, _) => UpdateSensitivityLabel();
-        page.Controls.Add(_sensitivity);
-        _sensitivityValue.Location = new Point(110, y + 44);
-        page.Controls.Add(_sensitivityValue);
-        UpdateSensitivityLabel();
-        y += 80;
+        GateSettings shared = SharedGate();
 
         page.Controls.Add(new Label { Text = "Hangover (ms)", Location = new Point(12, y + 3), AutoSize = true });
         _hangover.Location = new Point(110, y);
-        _hangover.Value = Math.Clamp(_current.GateHangoverMs, 0, 5000);
+        _hangover.Value = Math.Clamp(shared.HangoverMs, 0, 5000);
         page.Controls.Add(_hangover);
         y += 32;
 
         page.Controls.Add(new Label { Text = "Pre-roll (ms)", Location = new Point(12, y + 3), AutoSize = true });
         _preRoll.Location = new Point(110, y);
-        _preRoll.Value = Math.Clamp(_current.GatePreRollMs, 0, 2000);
+        _preRoll.Value = Math.Clamp(shared.PreRollMs, 0, 2000);
         page.Controls.Add(_preRoll);
 
         return page;
     }
 
-    private void UpdateSensitivityLabel()
+    private static void UpdateSensitivityLabel(TrackBar slider, Label valueLabel)
     {
-        double threshold = GateTuning.SliderToThreshold(_sensitivity.Value);
-        _sensitivityValue.Text = $"{_sensitivity.Value} / 100   (RMS threshold ≈ {threshold:0.000})";
+        double threshold = GateTuning.SliderToThreshold(slider.Value);
+        valueLabel.Text = $"{slider.Value} / 100   (RMS threshold ≈ {threshold:0.000})";
     }
 
     private void PopulateDevices()
@@ -349,8 +390,10 @@ internal sealed class SettingsForm : Form
         foreach (DeviceSelection.Pinned pinned in _current.Devices.OfType<DeviceSelection.Pinned>())
             savedPinned[pinned.DeviceId] = pinned;
 
+        _deviceFlows.Clear();
         foreach (CaptureDevice device in available)
         {
+            _deviceFlows[device.Id] = device.Flow; // so Collect can default a new pin's gate by kind
             string flowLabel = device.Flow == DeviceFlow.Capture ? "mic" : "loopback";
             savedPinned.TryGetValue(device.Id, out DeviceSelection.Pinned? pinned);
             int row = _devices.Rows.Add(
@@ -398,18 +441,25 @@ internal sealed class SettingsForm : Form
     {
         _devices.EndEdit();
 
+        // Hangover / pre-roll are shared across devices (one Level-gate control each);
+        // sensitivity is per device. GateFor stamps a device's own sensitivity onto the
+        // shared hangover / pre-roll.
+        int hangoverMs = (int)_hangover.Value;
+        int preRollMs = (int)_preRoll.Value;
+        GateSettings GateFor(int sensitivity) => new(Math.Clamp(sensitivity, 0, 100), hangoverMs, preRollMs);
+
         // One Name per device, used as both the identity (the Recorder makes it
         // filename-safe) and the display name.
         var selections = new List<DeviceSelection>();
         if (_micEnabled.Checked)
         {
             string mic = _micName.Text.Trim();
-            selections.Add(new DeviceSelection.FollowDefault(DeviceFlow.Capture, mic, mic));
+            selections.Add(new DeviceSelection.FollowDefault(DeviceFlow.Capture, mic, mic, GateFor(_micSensitivity.Value)));
         }
         if (_systemEnabled.Checked)
         {
             string system = _systemName.Text.Trim();
-            selections.Add(new DeviceSelection.FollowDefault(DeviceFlow.Render, system, system));
+            selections.Add(new DeviceSelection.FollowDefault(DeviceFlow.Render, system, system, GateFor(_systemSensitivity.Value)));
         }
 
         foreach (DataGridViewRow row in _devices.Rows)
@@ -417,10 +467,15 @@ internal sealed class SettingsForm : Form
             if (row.Tag is not string deviceId || row.Cells["Tap"].Value is not true)
                 continue;
             string name = (row.Cells["Name"].Value as string ?? "").Trim();
-            selections.Add(new DeviceSelection.Pinned(deviceId, name, name));
+            // A pinned device has no sensitivity slider, so keep its previously-saved
+            // sensitivity (if it was pinned before), else default by the device's kind.
+            int sensitivity = SavedPinnedSensitivity(deviceId)
+                ?? GateSettings.DefaultForFlow(_deviceFlows.GetValueOrDefault(deviceId, DeviceFlow.Capture)).Sensitivity;
+            selections.Add(new DeviceSelection.Pinned(deviceId, name, name, GateFor(sensitivity)));
         }
 
-        // Keep pins whose device is currently absent (no row to collect from).
+        // Keep pins whose device is currently absent (no row to collect from) — carried
+        // forward verbatim, including their own saved gate.
         selections.AddRange(_absentPinned);
 
         return new BridgeSettings
@@ -435,9 +490,18 @@ internal sealed class SettingsForm : Form
             Name = _current.Name,
             Token = _token.Text.Trim(),
             Devices = selections,
-            GateSensitivity = _sensitivity.Value,
-            GateHangoverMs = (int)_hangover.Value,
-            GatePreRollMs = (int)_preRoll.Value,
+            // The legacy global gate fields are left null: tuning is persisted per device
+            // (on each DeviceSelection above), so a saved file never carries a global value.
         };
     }
+
+    // The sensitivity a device was last pinned with, or null if it wasn't pinned before.
+    // Reads EffectiveDevices (not raw Devices) so a pinned device that inherited its gate
+    // from a migrated legacy global value keeps that value on Save rather than silently
+    // resetting to the flow default (ADR-0007's "no reset on upgrade", for pins too).
+    private int? SavedPinnedSensitivity(string deviceId) =>
+        _current.EffectiveDevices
+            .OfType<DeviceSelection.Pinned>()
+            .FirstOrDefault(p => string.Equals(p.DeviceId, deviceId, StringComparison.Ordinal))
+            ?.Gate?.Sensitivity;
 }

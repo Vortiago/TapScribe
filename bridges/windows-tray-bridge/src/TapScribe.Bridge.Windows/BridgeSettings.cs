@@ -33,16 +33,20 @@ public sealed class BridgeSettings
     /// </summary>
     public List<DeviceSelection> Devices { get; set; } = [];
 
-    /// <summary>Level-gate open threshold as the 0–100 sensitivity slider (higher =
-    /// opens on quieter sound). Persisted as the slider, mapped to a linear RMS
-    /// threshold via <see cref="GateTuning"/>.</summary>
-    public int GateSensitivity { get; set; } = GateTuning.ThresholdToSlider(new GateOptions().OpenThreshold);
+    // Legacy GLOBAL level-gate knobs (pre per-device tuning, ADR-0007). Kept only to
+    // migrate an upgrading operator's single tuning into per-device defaults on load —
+    // see LegacyGlobalGate / EffectiveDevices. Nullable + omitted-when-null so a file
+    // written by the per-device UI carries the tuning per device (on each DeviceSelection)
+    // and never re-introduces a global value; an old file's value is read once here and
+    // then absorbed into the devices on the next Save.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? GateSensitivity { get; set; }
 
-    /// <summary>Level-gate hangover (silence-to-close) in milliseconds.</summary>
-    public int GateHangoverMs { get; set; } = (int)new GateOptions().Hangover.TotalMilliseconds;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? GateHangoverMs { get; set; }
 
-    /// <summary>Level-gate pre-roll (audio replayed when the gate opens) in milliseconds.</summary>
-    public int GatePreRollMs { get; set; } = (int)new GateOptions().PreRoll.TotalMilliseconds;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? GatePreRollMs { get; set; }
 
     /// <summary>The tap token at rest: a base64 DPAPI blob, or null for --no-auth.</summary>
     public string? ProtectedToken { get; set; }
@@ -60,10 +64,16 @@ public sealed class BridgeSettings
     /// any, else the default pair — follow-default mic (under the operator's
     /// identity/name) + follow-default system loopback. This is what makes an empty/old
     /// settings file behave like the pre-#106 hardcoded "mic + system" capture.
+    ///
+    /// Each selection is returned with a concrete per-device <see cref="DeviceSelection.Gate"/>
+    /// (<see cref="NormalizeGates"/>): an explicit per-device value if present, else the
+    /// migrated legacy global value, else the per-flow default. So everything downstream
+    /// (resolution, Start, the per-identity live re-tune) sees a tuning per device with no
+    /// nulls to special-case.
     /// </summary>
     [JsonIgnore]
     public IReadOnlyList<DeviceSelection> EffectiveDevices =>
-        Devices.Count > 0 ? Devices : DefaultDevices();
+        NormalizeGates(Devices.Count > 0 ? Devices : DefaultDevices());
 
     /// <summary>
     /// The default device pair when nothing is saved: follow-default mic + follow-default
@@ -86,14 +96,60 @@ public sealed class BridgeSettings
         ];
     }
 
-    /// <summary>Build the Level-gate options from the persisted sensitivity slider +
-    /// hangover/pre-roll knobs.</summary>
-    public GateOptions ToGateOptions() => new()
+    /// <summary>
+    /// The per-device level-gate options keyed by the identity each device streams under —
+    /// the map the tray pushes to <see cref="CaptureOrchestrator.UpdateGates"/> on Settings →
+    /// Save so each running pipeline re-tunes from its own device's tuning (#153). Keyed by
+    /// the same effective identity <see cref="ResolveResult.ToTapOptions"/> stamps (a blank
+    /// per-device identity falls back to the base identity), so the keys line up with the
+    /// orchestrator's session keys. Entries for devices that aren't running (unplugged / not
+    /// in this meeting) are harmless — the orchestrator skips them.
+    /// </summary>
+    public IReadOnlyDictionary<string, GateOptions> ToGateOptionsByIdentity()
     {
-        OpenThreshold = GateTuning.SliderToThreshold(GateSensitivity),
-        Hangover = TimeSpan.FromMilliseconds(GateHangoverMs),
-        PreRoll = TimeSpan.FromMilliseconds(GatePreRollMs),
-    };
+        string fallbackIdentity = ToConnectionOptions().Identity;
+        var map = new Dictionary<string, GateOptions>(StringComparer.Ordinal);
+        foreach (DeviceSelection device in EffectiveDevices)
+        {
+            string identity = string.IsNullOrWhiteSpace(device.Identity) ? fallbackIdentity : device.Identity;
+            map[identity] = EffectiveGate(device).ToGateOptions();
+        }
+        return map;
+    }
+
+    // The concrete gate for a (post-NormalizeGates) selection. The ?? is belt-and-braces:
+    // EffectiveDevices already filled every gate, so this only guards a direct caller.
+    private static GateSettings EffectiveGate(DeviceSelection device) => device.Gate ?? FlowDefault(device);
+
+    private static GateSettings FlowDefault(DeviceSelection device) =>
+        GateSettings.DefaultForFlow(device is DeviceSelection.FollowDefault follow ? follow.Flow : DeviceFlow.Capture);
+
+    // Fill in a concrete per-device gate for any selection that carries none: prefer a
+    // migrated legacy GLOBAL value (so an upgrade doesn't reset an operator's tuning),
+    // else the sensible per-flow default. A selection that already has its own gate is
+    // left untouched.
+    private IReadOnlyList<DeviceSelection> NormalizeGates(IReadOnlyList<DeviceSelection> devices)
+    {
+        GateSettings? legacy = LegacyGlobalGate();
+        return devices
+            .Select(device => device.Gate is not null ? device : device with { Gate = legacy ?? FlowDefault(device) })
+            .ToList();
+    }
+
+    // The pre-per-device global tuning, reconstructed from the legacy fields when an old
+    // file carried any of them; null on a brand-new file and on files written by the
+    // per-device UI (which leaves these null), so a fresh install gets per-flow defaults
+    // rather than a single global value.
+    private GateSettings? LegacyGlobalGate()
+    {
+        if (GateSensitivity is null && GateHangoverMs is null && GatePreRollMs is null)
+            return null;
+        var fallback = new GateOptions();
+        return new GateSettings(
+            GateSensitivity ?? GateTuning.ThresholdToSlider(fallback.OpenThreshold),
+            GateHangoverMs ?? (int)fallback.Hangover.TotalMilliseconds,
+            GatePreRollMs ?? (int)fallback.PreRoll.TotalMilliseconds);
+    }
 
     /// <summary>
     /// Build the connection options for a tap. The per-Utterance <c>utterance_id</c>
