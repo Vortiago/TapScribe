@@ -85,6 +85,13 @@ def available_backends() -> frozenset[BackendKind]:
     return _AVAILABLE_BACKENDS_CACHE
 
 
+def available_backend_strs() -> frozenset[str]:
+    """`available_backends()` as a plain `str` frozenset for JSON serialisers /
+    membership checks (BackendKind is a `str` Literal, so this is a no-op cast).
+    One home for the idiom shared by `/api/models`, `/api/state`, and setup."""
+    return frozenset(str(k) for k in available_backends())
+
+
 def set_available_backends_for_testing(kinds: frozenset[BackendKind] | None) -> None:
     """Override the detected-backends cache. `None` re-enables auto-probe."""
     global _AVAILABLE_BACKENDS_CACHE
@@ -135,6 +142,27 @@ def set_installed_modules_for_testing(names: frozenset[str] | None) -> None:
     # Drop memoised real-probe answers so a test toggling between override
     # and real probing never sees a stale find_spec result.
     _FIND_SPEC_CACHE.clear()
+
+
+def refresh_backend_probes() -> None:
+    """Re-probe installed adapters + available backends after an in-app install,
+    so `/api/models` and `/api/setup/state` reflect a freshly pip-installed
+    package WITHOUT a process restart.
+
+    Invalidates Python's import-system caches (so a just-installed module becomes
+    importable in this running process), drops the memoised `find_spec` answers,
+    and clears the available-backends cache so the next call re-detects (e.g.
+    CUDA now that torch is present). Leaves any test override
+    (`_INSTALLED_MODULES_OVERRIDE`) untouched — it's checked before the cache.
+
+    Re-enables *detection* of newly-present packages only: a module that already
+    failed to import earlier in this process still needs a restart."""
+    import importlib
+
+    global _AVAILABLE_BACKENDS_CACHE
+    importlib.invalidate_caches()
+    _FIND_SPEC_CACHE.clear()
+    _AVAILABLE_BACKENDS_CACHE = None
 
 
 # `auto` resolves to the first kind in this list that's available. MLX first
@@ -637,14 +665,19 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
     _nb("nb-whisper-small", "nb-whisper-small", "NB-AiLab · Norwegian-tuned · balanced"),
     _nb("nb-whisper-medium", "nb-whisper-medium", "NB-AiLab · Norwegian-tuned · better"),
     _nb("nb-whisper-large", "nb-whisper-large", "NB-AiLab · Norwegian-tuned · slow"),
-    # ── Voxtral (Mistral) — audio LLM, no prompt/hotwords ──
+    # ── Voxtral (Mistral) — audio LLM, no prompt/hotwords; batch-only ──
+    # batch-only because `build_live_cmd` (live.py) only spawns
+    # whisperlivekit-server with `--backend faster-whisper|mlx-whisper` (plus the
+    # NB-Whisper `--model-path` route) — there is no Voxtral backend, so a live
+    # selection could never be launched. Flip back to `_BATCH_AND_LIVE` only once
+    # a Voxtral live channel is actually wired (cf. the planned ParakeetLiveChannel).
     ModelEntry(
         model_id="voxtral-mini",
         family="voxtral",
         display_name="voxtral-mini",
         description="Mistral Voxtral 3B · 8 langs (EN/ES/FR/PT/HI/DE/NL/IT) · no Norwegian",
         languages=("en", "es", "fr", "pt", "hi", "de", "nl", "it"),
-        contexts=_BATCH_AND_LIVE,
+        contexts=_BATCH_ONLY,
         backends=_VOXTRAL_BACKENDS,
         inputs=NO_INPUTS,
     ),

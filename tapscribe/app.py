@@ -47,7 +47,14 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config
@@ -88,6 +95,8 @@ from .sessions import (
     read_wav_transcript,
     write_session_meta,
 )
+from .setup_install import InstallSelectionError, run_install, sse, validate_selection
+from .setup_state import build_setup_state, is_first_run
 from .strip_silence import plan_strip_regions, read_wav_int16
 from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
 from .summarizers.catalog import _MAX_TOKENS_BOUNDS
@@ -109,14 +118,13 @@ from .text import (
     write_summarizer_config,
 )
 from .transcribers import evict_idle_now, run_on_model_thread
-from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY, available_backends
+from .transcribers.catalog import (
+    DEFAULT_BATCH_MODEL,
+    REGISTRY,
+    available_backend_strs,
+    refresh_backend_probes,
+)
 from .wav_cache import set_primary_transcript
-
-
-def _available_backends_snapshot() -> frozenset[str]:
-    """`available_backends()` returns the cached set; expose as plain set
-    of strings for the JSON serialiser."""
-    return frozenset(str(k) for k in available_backends())
 
 
 def _compute_inputs_support() -> dict[str, bool]:
@@ -630,7 +638,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "live_log": list(recorder.live.log)[-30:],
         "live_supports_native_vad": bool(getattr(recorder.live, "supports_native_vad", False)),
         "backend": recorder.backend,
-        "available_backends": sorted(_available_backends_snapshot()),
+        "available_backends": sorted(available_backend_strs()),
         "recording_enabled": recorder.recording_enabled,
         "prompt": {
             "path": str(config.PROMPT_FILE),
@@ -809,9 +817,61 @@ async def api_models(context: str = "batch"):
     entries = REGISTRY.for_context(context, only_installed=True)  # type: ignore[arg-type]
     return {
         "context": context,
-        "available_backends": sorted(_available_backends_snapshot()),
+        "available_backends": sorted(available_backend_strs()),
         "models": [e.to_mapping() for e in entries],
     }
+
+
+@app.get("/api/setup/state")
+async def api_setup_state():
+    """Catalog-driven setup state for the browser first-run / manage-models
+    surface. Read-only; install *execution* is separate.
+
+    Response shape:
+      {
+        "first_run": bool,                  # no transcription backend installed yet
+        "available_backends": ["cpu", ...], # what this host can run
+        "families": [ {family, label, size_hint, live, batch,
+                       installed, backends, models}, ... ]
+      }
+    """
+    return build_setup_state()
+
+
+@app.post("/api/setup/install")
+async def api_setup_install(request: Request):
+    """Install the selected model families and stream progress as Server-Sent
+    Events. Body: ``{"families": {"<family>": "<mlx|cuda|cpu>", ...}}``.
+
+    Delegates the actual pip work to the dependency-free install picker
+    (`tools/install_picker.py --non-interactive`) against a selection written
+    from the validated request, streaming one SSE `data:` event per output line
+    then a terminal `done`/`error`. On success the backend probes are refreshed
+    so `/api/models` + `/api/setup/state` reflect the new install without a
+    restart. Concurrent installs are refused (409)."""
+    body = await _json_body(request)
+    try:
+        selection = validate_selection(body.get("families", {}))
+    except InstallSelectionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if getattr(request.app.state, "setup_install_active", False):
+        raise HTTPException(409, "an install is already running")
+    # Claim the slot synchronously here — there's no await between the guard
+    # above and this set, so two near-simultaneous requests can't both pass
+    # before the (lazily-started) stream would set it. Cleared in finally.
+    request.app.state.setup_install_active = True
+
+    async def events():
+        try:
+            async for ev in run_install(selection, on_success=refresh_backend_probes):
+                yield sse(ev)
+        finally:
+            request.app.state.setup_install_active = False
+
+    # no-cache + no proxy buffering so events arrive as they're produced
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
 
 
 @app.delete("/api/models/cache")
@@ -1571,10 +1631,16 @@ DASHBOARD_JS_DIR = config.WEB_DIR / "js"
 DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
 NEXT_HTML_PATH = config.WEB_DIR / "next.html"
 NEXT_CSS_PATH = config.WEB_DIR / "next.css"
+SETUP_HTML_PATH = config.WEB_DIR / "setup.html"
 
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
+    # First run (no transcription backend installed) → send the operator to the
+    # browser setup surface instead of an empty dashboard. A no-op once any
+    # backend is installed; is_first_run() reads the cached catalog probes.
+    if is_first_run():
+        return RedirectResponse("/setup", status_code=307)
     try:
         return HTMLResponse(NEXT_HTML_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -1584,6 +1650,18 @@ async def dashboard():
             "<p>Expected at <code>" + str(NEXT_HTML_PATH) + "</code>.</p>"
             "</body></html>"
         )
+
+
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page():
+    """First-run / manage-models setup surface. Reachable any time (it doubles
+    as "manage models"); the bootstrap directs a fresh install here. The page's
+    JS drives GET /api/setup/state + POST /api/setup/install. A separate route
+    (not gating `/`) so the dashboard is never affected by install state."""
+    try:
+        return HTMLResponse(SETUP_HTML_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise HTTPException(404, f"setup.html missing at {SETUP_HTML_PATH}") from None
 
 
 @app.get("/dashboard.css")

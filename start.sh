@@ -142,23 +142,36 @@ source .venv/bin/activate
 
 python -m pip install --quiet --upgrade pip
 
-# --- Install picker ---------------------------------------------------------
-# Hands the install decision to tools/install_picker.py: prompts the
-# operator for which model families (Whisper / Voxtral / Parakeet) to
-# install, pre-checks the saved selection so re-runs are one keystroke,
-# then runs `pip install -e ".[…]"` for the resolved extras.
-# `--no-mlx` propagates so the picker also skips the MLX-flavoured
-# extras on Apple Silicon.
-PICKER_ARGS=()
-if [ "$NO_MLX" -eq 1 ]; then
-    PICKER_ARGS+=(--no-mlx)
-fi
-if [ "$NON_INTERACTIVE" -eq 1 ]; then
-    PICKER_ARGS+=(--non-interactive)
-fi
-if ! python tools/install_picker.py "${PICKER_ARGS[@]}"; then
-    echo "[start] install picker failed; aborting." >&2
-    exit 1
+# --- Install picker / browser setup -----------------------------------------
+# First run (no saved selection) in interactive mode: skip the terminal picker
+# and let the operator choose model families in the BROWSER — the recorder
+# serves a setup page at /setup, and GET / redirects there until a backend is
+# installed. We just base-install the package here so the recorder can boot.
+#
+# A saved selection (re-run) OR --non-interactive keeps the original CLI path:
+# tools/install_picker.py resolves the chosen model extras and runs pip. So
+# scripted/headless bring-up is unchanged, and so is every run after the first.
+BROWSER_SETUP=0
+if [ ! -f .tapscribe-install.json ] && [ "$NON_INTERACTIVE" -eq 0 ]; then
+    echo "[start] First run — installing the base package; you'll choose models in the browser."
+    if ! python -m pip install -e .; then
+        echo "[start] base 'pip install -e .' failed; aborting." >&2
+        exit 1
+    fi
+    BROWSER_SETUP=1
+else
+    # `--no-mlx` propagates so the picker also skips the MLX-flavoured extras.
+    PICKER_ARGS=()
+    if [ "$NO_MLX" -eq 1 ]; then
+        PICKER_ARGS+=(--no-mlx)
+    fi
+    if [ "$NON_INTERACTIVE" -eq 1 ]; then
+        PICKER_ARGS+=(--non-interactive)
+    fi
+    if ! python tools/install_picker.py "${PICKER_ARGS[@]}"; then
+        echo "[start] install picker failed; aborting." >&2
+        exit 1
+    fi
 fi
 
 # --- Runtime python deps ----------------------------------------------------
@@ -281,6 +294,9 @@ fi
 
 echo "[start] Launching TapScribe (which will spawn whisperlivekit-server as a child)..."
 echo "        Dashboard       http://$HOST:$PORT_REC/"
+if [ "$BROWSER_SETUP" -eq 1 ]; then
+    echo "        Choose models   http://$HOST:$PORT_REC/setup  (open this first — no models installed yet)"
+fi
 echo "        Live channel    $LIVE_LABEL"
 echo "        Backend         $BACKEND_LABEL"
 echo "        Initial model   $MODEL  (lang=$LANG; change from the dashboard or via SX_MODEL=…)"

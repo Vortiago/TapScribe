@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 from conftest import (  # type: ignore[import-not-found]  # pytest puts tests/ on sys.path so `from conftest` resolves the project's tests/conftest.py
     TranscriberStub,
+    all_probe_modules,
+    fake_install_spawn,
     py_cmd,
     repoint_config_files,
     seed_merged_transcript,
@@ -35,10 +37,9 @@ def _force_all_probes_installed():
     this file would all flap. Pretend every probe module is installed
     so the route tests check the JSON shape, not the host's pip state.
     Tests that exercise the filter itself override per-test."""
-    from tapscribe.transcribers.catalog import REGISTRY, set_installed_modules_for_testing
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
 
-    probes = {b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module}
-    set_installed_modules_for_testing(frozenset(probes))
+    set_installed_modules_for_testing(all_probe_modules())
     try:
         yield
     finally:
@@ -109,6 +110,61 @@ def test_api_models_live_context_excludes_parakeet(client):
 def test_api_models_rejects_unknown_context(client):
     r = client.get("/api/models?context=transcode")
     assert r.status_code == 400
+
+
+def test_api_setup_state_shape(client):
+    r = client.get("/api/setup/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"first_run", "available_backends", "families"}
+    assert isinstance(body["available_backends"], list)
+    assert isinstance(body["families"], list) and body["families"]
+    fam = body["families"][0]
+    assert {"family", "label", "live", "batch", "installed", "backends", "size_hint", "models"} <= set(fam)
+    # Capability flags come from the catalog contexts, independent of host.
+    whisper = next(f for f in body["families"] if f["family"] == "whisper")
+    assert whisper["live"] and whisper["batch"]
+    parakeet = next(f for f in body["families"] if f["family"] == "parakeet")
+    assert parakeet["batch"] and not parakeet["live"]
+
+
+def test_api_setup_install_streams_sse(client, monkeypatch):
+    fake_spawn = fake_install_spawn([b"resolving wheels\n", b"installed faster-whisper\n"], 0)
+    monkeypatch.setattr("tapscribe.setup_install._create_subprocess", fake_spawn)
+    monkeypatch.setattr("tapscribe.setup_install.write_picker_state", lambda *a, **k: None)
+
+    r = client.post("/api/setup/install", json={"families": {"whisper": "cpu"}})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    body = r.text
+    assert '"phase": "start"' in body
+    assert '"line": "installed faster-whisper"' in body
+    assert '"phase": "done"' in body
+    assert '"ok": true' in body
+    # the slot is released once the stream completes (so a later install isn't 409'd)
+    assert getattr(app.state, "setup_install_active", False) is False
+
+
+def test_api_setup_install_rejects_unknown_family(client):
+    r = client.post("/api/setup/install", json={"families": {"evil-model": "cpu"}})
+    assert r.status_code == 400
+
+
+def test_api_setup_install_refuses_concurrent_runs(client):
+    app.state.setup_install_active = True
+    try:
+        r = client.post("/api/setup/install", json={"families": {"whisper": "cpu"}})
+        assert r.status_code == 409
+    finally:
+        app.state.setup_install_active = False
+
+
+def test_setup_page_is_served(client):
+    r = client.get("/setup")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Set up TapScribe" in r.text  # the page title/heading
+    assert "/web/js/setup/setup.js" in r.text  # boots its module
 
 
 def test_api_models_emits_text_inputs_for_whisper(client):
@@ -2098,6 +2154,20 @@ def test_root_serves_stages_shell(client):
     # The shell layers next.css on top of the shared design tokens.
     assert "/dashboard.css" in r.text
     assert "/next.css" in r.text
+
+
+def test_root_redirects_to_setup_on_first_run(client):
+    """With no transcription backend installed, GET / sends the operator to the
+    browser setup surface instead of an empty dashboard."""
+    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+
+    set_installed_modules_for_testing(frozenset())  # nothing installed → first run
+    try:
+        r = client.get("/", follow_redirects=False)
+        assert r.status_code == 307
+        assert r.headers["location"] == "/setup"
+    finally:
+        set_installed_modules_for_testing(None)
 
 
 def test_next_route_is_gone(client):
