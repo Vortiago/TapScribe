@@ -272,9 +272,13 @@ export function build(ctx) {
     row.dataset.sid = s.session; // stable per-row hook (e2e + debugging)
     if (s.session === focusedId) row.classList.add("is-focused");
 
-    // Label + raw id sub.
+    // Label + raw id sub. Capture the label element ONCE here: `node` is the
+    // template fragment, which is drained when the row is appended to the DOM,
+    // so re-`pick`ing it later (e.g. from the rename input handler) would throw
+    // "template slot not found" — the bug that silently broke inline rename.
     const label = labelFor(s) || fmtSessionLabel(s.session) || s.session;
-    pick(node, "label").textContent = label;
+    const labelEl = pick(node, "label");
+    labelEl.textContent = label;
     const idEl = pick(node, "id");
     idEl.textContent = s.session;
     idEl.title = s.session;
@@ -315,8 +319,9 @@ export function build(ctx) {
     const renameStatus = pick(node, "renameStatus");
     nameInput.addEventListener("input", () => {
       localLabels.set(s.session, nameInput.value);
-      // keep the row's display label in step with the typed value
-      pick(node, "label").textContent = nameInput.value || fmtSessionLabel(s.session) || s.session;
+      // keep the row's display label in step with the typed value (use the
+      // captured element — `node` is drained once the row is in the DOM)
+      labelEl.textContent = nameInput.value || fmtSessionLabel(s.session) || s.session;
       persistLabel(s.session, renameStatus);
     });
 

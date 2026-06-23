@@ -3740,6 +3740,574 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
             await browser.close()
 
 
+def _seed_named_session(rec, sid: str, *, speaker: str) -> Path:
+    """A non-current on-disk session with one WAV + a merged transcript whose
+    sole speaker is `speaker` — so the People view derives exactly ONE
+    participant keyed by that speaker slug (the WAV's filename slug is made to
+    match the transcript speaker, so files[].speaker_name and the transcript's
+    speakers[] collapse to a single row rather than two)."""
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    # Recorder filename: <iso>_<speakerSlug>_<ident>_<uuid8>.wav. parse_wav_speaker_slug
+    # = parts[1:-2], so a single-token slug round-trips to exactly `speaker`.
+    synth_speech_like_wav(d / f"{sid}_{speaker}_{speaker.lower()}_0000aaaa.wav", seconds=0.4, freq_hz=200.0)
+    (d / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "transcribed_at": "2025-03-01T10:00:00+00:00",
+                "segments": [
+                    {
+                        "speaker": speaker,
+                        "text": f"{speaker} said the quick brown fox.",
+                        "abs_start": "2025-03-01T09:00:00+00:00",
+                    },
+                ],
+                "speakers": [speaker],
+                "speaking_seconds": {speaker: 12.0},
+                "suppressed": [],
+                "suppressed_count": 0,
+                "wav_count": 1,
+                "transcribe_ms": 1000,
+                "model": "tiny.en",
+                "backend": "fake",
+                "device": "cpu",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return d
+
+
+async def _focus_session_view(page, sid: str, view: str) -> None:
+    """Pick `sid` in the spine, then open one of the Stages `view`s for it —
+    the spine-select + gotoView pattern several tests share."""
+    await page.evaluate(
+        """(sid) => {
+            const s = document.querySelector('[data-slot="sessionPick"]');
+            s.value = sid;
+            s.dispatchEvent(new Event('change', { bubbles: true }));
+        }""",
+        sid,
+    )
+    await page.evaluate("(v) => window.gotoView(v)", view)
+
+
+async def test_people_view_names_speaker_and_builds_cross_session_registry(
+    running_recorder: RunningRecorder,
+):
+    """The People view's two real panels, end-to-end and untested until now:
+
+    1. "In this session · names" — the per-session alias editor. Focus a
+       session, type a DISPLAY NAME for a derived speaker; the debounced save
+       PUTs /api/session-meta/{s} { aliases }, the status flips to "saved", and
+       the name round-trips (GET /api/session-meta confirms; a reload re-seeds
+       the field from the saved alias, proving it isn't just optimistic UI).
+    2. "People · across all sessions" — the registry aggregates every session's
+       aliases into one row per distinct name. After naming a speaker in TWO
+       different sessions, the registry lists BOTH people with a real
+       "1 session" count and the identity code mapped to each.
+
+    Pins the save → /api/state → registry round-trip and the alias key the
+    editor writes under (the speaker slug, not the live identity).
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+
+    s_alice = "2025-03-01T10-00-00Z"
+    s_bob = "2025-03-02T10-00-00Z"
+    _seed_named_session(rec, s_alice, speaker="Alice")
+    _seed_named_session(rec, s_bob, speaker="Bob")
+
+    part_input = '#viewRoot [data-slot="partList"] .partrow [data-slot="name"]'
+    part_code = '#viewRoot [data-slot="partList"] .partrow [data-slot="code"]'
+    # JS function body that returns the registry's person-name texts. Kept as a
+    # body (not an arrow) so callers can wrap their own predicate around it
+    # without concatenating two arrow functions (invalid JS).
+    reg_names_js = (
+        "const names = Array.from(document.querySelectorAll("
+        '\'#viewRoot [data-slot="people"] .pregrow [data-slot="name"]\''
+        ")).map((n) => n.textContent);"
+    )
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+
+            await page.wait_for_function(
+                """(ids) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    if (!s) return false;
+                    const have = new Set(Array.from(s.options).map((o) => o.value));
+                    return ids.every((id) => have.has(id));
+                }""",
+                arg=[s_alice, s_bob],
+                timeout=10000,
+            )
+
+            # --- Panel 1: name Alice in her session. ---
+            await _focus_session_view(page, s_alice, "people")
+            await page.locator(part_code).first.wait_for(state="visible", timeout=8000)
+            assert (await page.locator(part_code).first.inner_text()).strip() == "Alice", (
+                "the focused session's sole derived participant is the speaker slug 'Alice'"
+            )
+            await page.locator(part_input).first.fill("Alice Anderson")
+            # Debounced PUT (600ms) — the per-session status span flips to "saved".
+            await page.wait_for_function(
+                f"""() => {{
+                    const el = document.querySelector('[data-status-sess="{s_alice}"]');
+                    return !!el && el.textContent === 'saved';
+                }}""",
+                timeout=8000,
+            )
+
+            # Server-side round-trip: the alias persisted under the speaker key.
+            async with httpx.AsyncClient(base_url=base) as client:
+                meta = (await client.get(f"/api/session-meta/{s_alice}")).json()
+            assert meta.get("aliases", {}).get("Alice") == "Alice Anderson", meta
+
+            # --- Panel 2: the registry now lists Alice Anderson (1 session, id Alice). ---
+            await page.wait_for_function(
+                f"() => {{ {reg_names_js} return names.includes('Alice Anderson'); }}",
+                timeout=8000,
+            )
+            alice_row = page.locator(
+                '#viewRoot [data-slot="people"] .pregrow',
+                has=page.get_by_text("Alice Anderson", exact=True),
+            )
+            assert "1 session" in (await alice_row.locator('[data-slot="count"]').inner_text())
+            assert (await alice_row.locator('[data-slot="ids"]').inner_text()).strip() == "Alice"
+
+            # --- Name Bob in HIS session; the registry aggregates both people. ---
+            await _focus_session_view(page, s_bob, "people")
+            await page.locator(part_input).first.wait_for(state="visible", timeout=8000)
+            await page.locator(part_input).first.fill("Bob Brown")
+            await page.wait_for_function(
+                f"""() => {{
+                    const el = document.querySelector('[data-status-sess="{s_bob}"]');
+                    return !!el && el.textContent === 'saved';
+                }}""",
+                timeout=8000,
+            )
+            await page.wait_for_function(
+                f"() => {{ {reg_names_js} "
+                "return names.includes('Alice Anderson') && names.includes('Bob Brown'); }",
+                timeout=8000,
+            )
+
+            # --- Persistence: a fresh load re-seeds the editor from the saved alias
+            # (not just an in-memory optimistic overlay). ---
+            await page.goto(base, wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(id) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === id);
+                }""",
+                arg=s_alice,
+                timeout=10000,
+            )
+            await _focus_session_view(page, s_alice, "people")
+            await page.wait_for_function(
+                f"""() => {{
+                    const i = document.querySelector('{part_input}');
+                    return !!i && i.value === 'Alice Anderson';
+                }}""",
+                timeout=8000,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_capture_per_session_prompt_and_hotwords_overrides_save_independently(
+    running_recorder: RunningRecorder,
+):
+    """The Capture view's per-session prompt + hotwords override editors, each
+    saving via a partial PUT /api/session-meta/{s} ({prompt} OR {hotwords}),
+    untested until now. Saving the prompt then the hotwords must leave BOTH
+    stored — the partial merge must not let the second save clobber the first
+    (the bug a regressed overwrite-merge would introduce) — and a reload
+    re-seeds both fields from the saved overrides."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+
+    # An on-disk session to attach overrides to (the live current session has no
+    # folder until it records, so session-meta PUTs to it would 404).
+    sid = "2025-06-01T10-00-00Z"
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    synth_speech_like_wav(d / f"{sid}_Erin_erin_0000eeee.wav", seconds=0.4, freq_hz=205.0)
+
+    async def save_and_wait(field: str, save: str, status: str, value: str) -> None:
+        await page.locator(f'#viewRoot [data-slot="{field}"]').fill(value)
+        await page.locator(f'#viewRoot [data-slot="{save}"]').click()
+        await page.wait_for_function(
+            f"""() => document.querySelector('#viewRoot [data-slot="{status}"]')?.textContent === 'saved'""",
+            timeout=8000,
+        )
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sessionPick"]', timeout=10000)
+            await _focus_session_view(page, sid, "capture")
+
+            # The override editors enable once a session is focused.
+            await page.locator('#viewRoot [data-slot="capPrompt"]').wait_for(state="visible", timeout=8000)
+            await page.wait_for_function(
+                """() => {
+                    const t = document.querySelector('#viewRoot [data-slot="capPrompt"]');
+                    return t && !t.disabled;
+                }""",
+                timeout=8000,
+            )
+
+            await save_and_wait("capPrompt", "capPromptSave", "capPromptStatus", "Discuss the Q3 roadmap.")
+            await save_and_wait(
+                "capHotwords", "capHotwordsSave", "capHotwordsStatus", "Acme Inc., Patricia Lin"
+            )
+
+            # Both overrides persisted — the second (hotwords) save did NOT wipe
+            # the first (prompt). Partial-meta merge invariant.
+            async with httpx.AsyncClient(base_url=base) as client:
+                meta = (await client.get(f"/api/session-meta/{sid}")).json()
+            assert meta.get("prompt") == "Discuss the Q3 roadmap.", meta
+            assert meta.get("hotwords") == "Acme Inc., Patricia Lin", meta
+
+            # A fresh load re-seeds both editors from the saved overrides.
+            await page.goto(base, wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sessionPick"]', timeout=10000)
+            await _focus_session_view(page, sid, "capture")
+            await page.wait_for_function(
+                """() => {
+                    const p = document.querySelector('#viewRoot [data-slot="capPrompt"]');
+                    const h = document.querySelector('#viewRoot [data-slot="capHotwords"]');
+                    return p && h && p.value === 'Discuss the Q3 roadmap.'
+                        && h.value === 'Acme Inc., Patricia Lin';
+                }""",
+                timeout=8000,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_sessions_view_inline_label_rename_persists(
+    running_recorder: RunningRecorder,
+):
+    """The Sessions view's inline rename (debounced optimistic PUT
+    /api/session-meta/{s} { label }), untested until now. Typing a label into a
+    row's rename field flips its status to "saved", the row's display label
+    follows immediately, the server stores it (GET /api/session-meta), and a
+    fresh load re-seeds the field from the saved label (not just optimistic
+    state). The partial { label } PUT must not disturb the session's aliases."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+
+    sid = "2025-05-01T10-00-00Z"
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    synth_speech_like_wav(d / f"{sid}_Dana_dana_0000dddd.wav", seconds=0.4, freq_hz=210.0)
+    # Pre-seed an alias so we can prove the partial { label } PUT preserves it.
+    (d / "session-meta.json").write_text(json.dumps({"aliases": {"Dana": "Dana Scully"}}), encoding="utf-8")
+
+    row = f'#viewRoot .sessrow[data-sid="{sid}"]'
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+            await page.locator(row).wait_for(state="visible", timeout=10000)
+
+            await page.locator(f'{row} [data-slot="rename"]').fill("Quarterly Planning")
+            await page.wait_for_function(
+                f"""() => {{
+                    const el = document.querySelector('{row} [data-slot="renameStatus"]');
+                    return !!el && el.textContent === 'saved';
+                }}""",
+                timeout=8000,
+            )
+            # The row's display label follows the typed value.
+            assert (
+                await page.locator(f'{row} [data-slot="label"]').inner_text()
+            ).strip() == "Quarterly Planning"
+
+            # Server stored the label AND preserved the pre-existing alias (partial merge).
+            async with httpx.AsyncClient(base_url=base) as client:
+                meta = (await client.get(f"/api/session-meta/{sid}")).json()
+            assert meta.get("label") == "Quarterly Planning", meta
+            assert meta.get("aliases", {}).get("Dana") == "Dana Scully", (
+                "a partial { label } PUT must not drop existing aliases"
+            )
+
+            # Persistence: a fresh load re-seeds the rename field from the saved label.
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                f"""() => {{
+                    const i = document.querySelector('{row} [data-slot="rename"]');
+                    return !!i && i.value === 'Quarterly Planning';
+                }}""",
+                timeout=10000,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_capture_recording_toggle_and_clear_captions(
+    running_recorder: RunningRecorder,
+):
+    """The Capture view's two action controls, untested at the UI level:
+
+    - the recording pill (● recording / ⏸ paused) → POST /api/recording/toggle.
+      Clicking it flips recorder.recording_enabled (verified through
+      /api/state), and the pill's label + state class follow on the next poll.
+    - the "clear" captions button → DELETE /api/live-transcript. With a live
+      caption seeded into the global deque, the feed shows it (count 1); after
+      Clear the deque is wiped and the feed repaints empty (count 0).
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    current = rec.session_start
+
+    rec.transcripts.append(
+        {
+            "ts": "2026-01-01T00:00:01+00:00",
+            "identity": "live",
+            "name": "Live",
+            "text": "CLEARME caption text",
+            "session": current,
+        }
+    )
+
+    rec_pill = '#viewRoot [data-slot="recPill"]'
+    feed_count = '#viewRoot [data-slot="liveFeedCount"]'
+
+    async def state_recording() -> bool:
+        async with httpx.AsyncClient(base_url=base) as client:
+            return (await client.get("/api/state")).json().get("recording_enabled")
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#capture", wait_until="domcontentloaded")
+
+            # --- Recording pill: starts armed, toggles to paused and back. ---
+            await page.locator(rec_pill).wait_for(state="visible", timeout=8000)
+            await page.wait_for_function(
+                f"""() => {{
+                    const b = document.querySelector('{rec_pill}');
+                    return b && b.classList.contains('is-on') && /recording/.test(b.textContent);
+                }}""",
+                timeout=8000,
+            )
+            assert await state_recording() is True
+
+            await page.locator(rec_pill).click()
+            await page.wait_for_function(
+                f"""() => {{
+                    const b = document.querySelector('{rec_pill}');
+                    return b && b.classList.contains('is-paused') && /paused/.test(b.textContent);
+                }}""",
+                timeout=8000,
+            )
+            assert await state_recording() is False, "toggle must flip recording_enabled off"
+
+            await page.locator(rec_pill).click()
+            await page.wait_for_function(
+                f"""() => document.querySelector('{rec_pill}')?.classList.contains('is-on')""",
+                timeout=8000,
+            )
+            assert await state_recording() is True, "a second toggle must re-arm recording"
+
+            # --- Clear captions: the seeded line shows, then Clear wipes it. ---
+            await page.wait_for_function(
+                f"""() => document.querySelector('{feed_count}')?.textContent === '1'""",
+                timeout=8000,
+            )
+            await page.locator('#viewRoot [data-slot="liveClear"]').click()
+            await page.wait_for_function(
+                f"""() => document.querySelector('{feed_count}')?.textContent === '0'""",
+                timeout=8000,
+            )
+            assert rec.transcripts.snapshot() == [], "clear must wipe the live-caption deque server-side"
+        finally:
+            await browser.close()
+
+
+async def test_recordings_delete_single_wav_removes_row_and_file(
+    running_recorder: RunningRecorder,
+):
+    """The Recordings view's per-WAV delete (🗑 → DELETE /api/wav/{s}/{name}),
+    untested until now. On a NON-current session the row exposes a delete
+    button; clicking it (confirm auto-accepted) removes the row, deletes the
+    file from disk, and leaves the session's OTHER WAV untouched. Also pins the
+    safety wiring: the CURRENT session's rows must NOT offer delete (the server
+    refuses it with 409, so the button is removed there)."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+
+    sid = "2025-04-01T10-00-00Z"
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    keep = f"{sid}_Alice_alice_0000aaaa.wav"
+    drop = f"{sid}_Bob_bob_0000bbbb.wav"
+    synth_speech_like_wav(d / keep, seconds=0.4, freq_hz=200.0)
+    synth_speech_like_wav(d / drop, seconds=0.4, freq_hz=260.0)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            page.on("dialog", lambda dlg: asyncio.create_task(dlg.accept()))
+            await page.goto(base, wait_until="domcontentloaded")
+
+            await page.wait_for_function(
+                """(id) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === id);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+
+            # Focus the archived session; both WAV rows render with a delete button.
+            await _focus_session_view(page, sid, "recordings")
+            for name in (keep, drop):
+                await page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{name}"]').wait_for(
+                    state="visible", timeout=8000
+                )
+            assert (
+                await page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{drop}"] [data-wav-delete]').count()
+                == 1
+            ), "an archived session's WAV row must offer delete"
+
+            # Delete the Bob WAV; its row disappears and the file leaves disk.
+            await page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{drop}"] [data-wav-delete]').click()
+            await page.wait_for_function(
+                """(name) => !document.querySelector(
+                    `#viewRoot .wavlist .wavrow[data-wav="${name}"]`)""",
+                arg=drop,
+                timeout=8000,
+            )
+            assert not (d / drop).exists(), "delete must remove the WAV from disk"
+            assert (d / keep).exists(), "deleting one WAV must not touch its sibling"
+            assert await page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{keep}"]').count() == 1, (
+                "the sibling row must remain"
+            )
+
+            # Safety: the CURRENT (live) session's rows must not offer delete. Seed
+            # a WAV into the current session and focus it.
+            cur = rec.session_start
+            cdir = rec.recordings_dir / cur
+            cdir.mkdir(parents=True, exist_ok=True)
+            cur_wav = f"{cur}_Carol_carol_0000cccc.wav"
+            synth_speech_like_wav(cdir / cur_wav, seconds=0.4, freq_hz=300.0)
+            await _focus_session_view(page, cur, "recordings")
+            await page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{cur_wav}"]').wait_for(
+                state="visible", timeout=8000
+            )
+            assert (
+                await page.locator(
+                    f'#viewRoot .wavlist .wavrow[data-wav="{cur_wav}"] [data-wav-delete]'
+                ).count()
+                == 0
+            ), "the current session's WAV row must not offer delete"
+        finally:
+            await browser.close()
+
+
+async def test_transcript_single_wav_transcribe_marks_row_done(
+    running_recorder: RunningRecorder, fake_transcriber: FakeTranscriber, tmp_path: Path
+):
+    """The Transcript view's per-WAV "transcribe" button (POST /api/transcribe
+    via txOneBtn), untested until now (existing tests cover session-range and
+    the source toggle, never the single-WAV path). Streaming one WAV, the
+    picker shows it with "no tx"; clicking transcribe runs the FakeTranscriber,
+    the row's tag flips to "✓ tx", the button relabels to "re-transcribe", and
+    the per-WAV cached transcript holds the scripted text."""
+    rr = running_recorder
+    wav = synth_speech_like_wav(tmp_path / "alice.wav", seconds=1.0, freq_hz=200.0)
+    await stream_wav_via_tap(
+        ws_base_url=rr.ws_base_url, identity="alice", name="Alice", wav_path=wav, utterance_id="utt-a"
+    )
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=12.0)
+    wav_name = sorted((rr.recorder.recordings_dir / rr.recorder.session_start).glob("*.wav"))[0].name
+
+    tx_tag = '#viewRoot [data-slot="wavList"] .wavrow [data-slot="txTag"]'
+    tx_one = '#viewRoot [data-slot="txOneBtn"]'
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#transcript", wait_until="domcontentloaded")
+
+            await page.locator(tx_tag).first.wait_for(state="visible", timeout=8000)
+            assert (await page.locator(tx_tag).first.inner_text()).strip() == "no tx"
+            # The default selection (files[0]) enables the single-transcribe button.
+            await page.wait_for_function(
+                f"""() => {{ const b = document.querySelector('{tx_one}');
+                    return b && !b.disabled && /transcribe/.test(b.textContent); }}""",
+                timeout=8000,
+            )
+
+            await page.locator(tx_one).click()
+            # The row's tag flips to done and the button relabels to re-transcribe.
+            await page.wait_for_function(
+                f"""() => document.querySelector('{tx_tag}')?.textContent.includes('✓')""",
+                timeout=10000,
+            )
+            await page.wait_for_function(
+                f"""() => /re-transcribe/.test(document.querySelector('{tx_one}')?.textContent || '')""",
+                timeout=8000,
+            )
+            # The transcriber ran against the recorder's own WAV copy (`wav_name`),
+            # not the source we streamed in — assert on that name.
+            assert any(p.name == wav_name for p in fake_transcriber.calls), (
+                f"the single-WAV transcribe must call the transcriber for {wav_name}: {fake_transcriber.calls}"
+            )
+
+            # Server-side: the per-WAV cache holds the scripted text.
+            async with httpx.AsyncClient(base_url=rr.base_url) as client:
+                tx = (await client.get(f"/api/wav/{rr.recorder.session_start}/{wav_name}/transcript")).json()
+            assert ALICE_TEXT in json.dumps(tx), tx
+        finally:
+            await browser.close()
+
+
 async def test_get_by_test_id_is_wired_to_data_slot() -> None:
     """Pin the repo's e2e selector convention.
 
