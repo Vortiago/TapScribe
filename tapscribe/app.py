@@ -1149,10 +1149,15 @@ async def api_session_absorb(
 
 @app.delete("/api/sessions/{session}")
 async def api_session_delete(session: str, recorder: Recorder = Depends(get_recorder)):
-    """Recursively delete a recordings folder. Refuses the CURRENT session."""
+    """Recursively delete a recordings folder. Refuses the CURRENT session and
+    any session with a transcribe/strip job in flight — `rmtree`-ing the folder
+    out from under a running job thread would crash it mid-write (the same guard
+    the sibling /audio and /absorb endpoints enforce)."""
     if session == recorder.session_start:
         raise HTTPException(409, "cannot delete the current session — rotate to a new one first")
     session_dir = resolve_session_dir(session)
+    if recorder.jobs.get(session) is not None:
+        raise HTTPException(409, "a transcribe or strip job is in flight on this session")
     try:
         shutil.rmtree(session_dir)
     except OSError as e:
