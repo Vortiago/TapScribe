@@ -1,10 +1,10 @@
 """Setup state for the browser-based first-run / manage-models surface.
 
-This is the read-only backbone of the "D" setup pattern (see
-`prototypes/setup/`): per model family — is it installed, what can it do (live
-vs. batch), which host-capable backends, which models — derived from the
-transcriber catalog (the authoritative registry, also behind `/api/models`) so
-it can't drift from what the app supports.
+This is the read-only backbone of the browser setup surface (GET /setup): per
+model family — is it installed, what can it do (live vs. batch), which
+host-capable backends, which models — derived from the transcriber catalog (the
+authoritative registry, also behind `/api/models`) so it can't drift from what
+the app supports.
 
 Families are independent
 ------------------------

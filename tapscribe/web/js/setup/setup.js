@@ -3,8 +3,8 @@
 // operator pick model families + a host-valid backend, then POSTs to
 // /api/setup/install and streams the Server-Sent progress into the log pane.
 // Plain vanilla DOM — served standalone (no dashboard machinery), so it works
-// before any backend is installed. The polished centred-console look lives in
-// prototypes/setup (variant D); this is the functional first cut.
+// before any backend is installed. Functional first cut of the centred-console
+// design; can be enriched later.
 
 /**
  * @param {string} tag

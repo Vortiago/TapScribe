@@ -102,7 +102,9 @@ def test_empty_selection_installs_nothing():
 def test_picker_install_argv_runs_the_picker_non_interactively():
     argv = picker_install_argv(python="/venv/bin/python")
     assert argv[0] == "/venv/bin/python"
-    assert argv[1].endswith("tools/install_picker.py")
+    # path-separator agnostic (Windows uses backslashes)
+    assert Path(argv[1]).name == "install_picker.py"
+    assert Path(argv[1]).parent.name == "tools"
     assert "--non-interactive" in argv
     assert "--no-mlx" not in argv
     assert "--no-mlx" in picker_install_argv(python="py", no_mlx=True)
@@ -218,7 +220,7 @@ async def test_run_install_emits_error_event_when_spawn_fails():
     ]
     assert events[0] == {"phase": "start"}
     assert events[-1]["phase"] == "error" and events[-1]["ok"] is False
-    assert "python missing" in events[-1]["message"]
+    assert "python missing" not in events[-1]["message"]  # exception text must NOT leak to the client
     assert calls == []  # reload must NOT fire when the install never ran
 
 

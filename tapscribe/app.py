@@ -825,7 +825,7 @@ async def api_models(context: str = "batch"):
 @app.get("/api/setup/state")
 async def api_setup_state():
     """Catalog-driven setup state for the browser first-run / manage-models
-    surface (the "D" pattern). Read-only; install *execution* is separate.
+    surface. Read-only; install *execution* is separate.
 
     Response shape:
       {

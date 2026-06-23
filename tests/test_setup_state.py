@@ -1,6 +1,6 @@
 """Setup-state builder — the catalog-driven view the browser first-run/manage
-surface (the "D" pattern) renders from. Pure assembly over the transcriber
-registry, so it can't drift from what the app actually supports.
+surface renders from. Pure assembly over the transcriber registry, so it can't
+drift from what the app actually supports.
 
 These tests drive the two probes (installed modules + available backends)
 through the catalog's test hooks so they're deterministic on any host.

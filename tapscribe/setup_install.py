@@ -1,4 +1,4 @@
-"""Install resolver for the browser setup surface (the "D" pattern).
+"""Install resolver for the browser setup surface (GET /setup).
 
 The app does NOT resolve pip extras or run pip itself — it delegates to the
 dependency-free `tools/install_picker.py`, which already encapsulates the messy
@@ -167,7 +167,16 @@ async def run_install(
             yield {"phase": "log", "line": line}
         returncode = await proc.wait()
     except Exception as exc:  # noqa: BLE001 — headers are already sent, so surface ANY write/spawn/stream failure as a terminal error event rather than a truncated stream + 500
-        yield {"phase": "error", "ok": False, "returncode": None, "message": str(exc)}
+        # Log the detail server-side; do NOT stream the exception text to the
+        # client (CodeQL py/stack-trace-exposure). pip's own output, if it ran,
+        # already streamed as `log` events.
+        print(f"[setup-install] install failed: {exc!r}", flush=True)
+        yield {
+            "phase": "error",
+            "ok": False,
+            "returncode": None,
+            "message": "install failed — check the server logs",
+        }
         return
 
     if returncode != 0:
@@ -180,6 +189,7 @@ async def run_install(
     if on_success is not None:
         try:
             on_success()
-        except Exception as exc:  # noqa: BLE001 — install already succeeded; report + continue
-            yield {"phase": "log", "line": f"· note: backend refresh failed ({exc}); a restart may be needed"}
+        except Exception as exc:  # noqa: BLE001 — install already succeeded; log + continue
+            print(f"[setup-install] backend refresh failed: {exc!r}", flush=True)
+            yield {"phase": "log", "line": "· note: backend refresh failed; a restart may be needed"}
     yield {"phase": "done", "ok": True, "returncode": 0}
