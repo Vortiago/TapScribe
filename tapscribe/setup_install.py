@@ -170,7 +170,7 @@ async def run_install(
         # Log the detail server-side; do NOT stream the exception text to the
         # client (CodeQL py/stack-trace-exposure). pip's own output, if it ran,
         # already streamed as `log` events.
-        print(f"[setup-install] install failed: {exc!r}", flush=True)
+        print(f"[tapscribe] setup-install failed: {exc!r}", flush=True)
         yield {
             "phase": "error",
             "ok": False,
@@ -190,6 +190,6 @@ async def run_install(
         try:
             on_success()
         except Exception as exc:  # noqa: BLE001 — install already succeeded; log + continue
-            print(f"[setup-install] backend refresh failed: {exc!r}", flush=True)
+            print(f"[tapscribe] setup-install backend refresh failed: {exc!r}", flush=True)
             yield {"phase": "log", "line": "· note: backend refresh failed; a restart may be needed"}
     yield {"phase": "done", "ok": True, "returncode": 0}

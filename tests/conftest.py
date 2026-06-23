@@ -546,10 +546,12 @@ def all_probe_modules() -> frozenset[str]:
     return frozenset(b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module)
 
 
-def fake_install_spawn(lines: list[bytes], returncode: int):
+def fake_install_spawn(lines: list[bytes], returncode: int, *, on_wait=None):
     """A fake `setup_install._create_subprocess`: returns a coroutine yielding a
     process whose `.stdout` async-iterates `lines` and whose `wait()` returns
-    `returncode`. Used by the install-streaming tests."""
+    `returncode`. Used by the install-streaming tests. `on_wait`, if given, is
+    called inside `wait()` before the returncode is set — e.g. to simulate the
+    install's effect (a backend becoming importable)."""
 
     async def _stdout():
         for line in lines:
@@ -561,6 +563,8 @@ def fake_install_spawn(lines: list[bytes], returncode: int):
             self.returncode: int | None = None
 
         async def wait(self) -> int:
+            if on_wait is not None:
+                on_wait()
             self.returncode = returncode
             return returncode
 

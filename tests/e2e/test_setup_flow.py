@@ -20,6 +20,9 @@ from __future__ import annotations
 import json
 
 import httpx
+from conftest import (
+    fake_install_spawn,  # type: ignore[import-not-found]  # e2e conftest puts tests/ on sys.path
+)
 
 from tapscribe.transcribers.catalog import REGISTRY, set_installed_modules_for_testing
 
@@ -35,30 +38,15 @@ def _probe_modules_for(family: str, kind: str) -> set[str]:
     }
 
 
-def _installing_spawn(installed_before: set[str], family: str, kind: str):
-    """Fake ``_create_subprocess``: stream two log lines, then (on wait) extend
-    the installed-modules override with what installing (family, kind) would
-    add — simulating pip making that backend importable."""
-    installed_after = frozenset(installed_before | _probe_modules_for(family, kind))
-
-    async def _stdout():
-        for line in (b"resolving wheels\n", f"installed {family}\n".encode()):
-            yield line
-
-    class _Proc:
-        def __init__(self) -> None:
-            self.stdout = _stdout()
-            self.returncode: int | None = None
-
-        async def wait(self) -> int:
-            set_installed_modules_for_testing(installed_after)
-            self.returncode = 0
-            return 0
-
-    async def spawn(_argv):
-        return _Proc()
-
-    return spawn
+def _installing_spawn(installed_after: set[str], family: str):
+    """Fake ``_create_subprocess`` (built on the shared `fake_install_spawn`):
+    stream two log lines, then on completion flip the installed-modules override
+    to `installed_after` — simulating pip making the new backend importable."""
+    return fake_install_spawn(
+        [b"resolving wheels\n", f"installed {family}\n".encode()],
+        0,
+        on_wait=lambda: set_installed_modules_for_testing(frozenset(installed_after)),
+    )
 
 
 async def _run_install(client: httpx.AsyncClient, families: dict[str, str]) -> list[dict]:
@@ -85,7 +73,7 @@ async def test_first_run_install_makes_a_model_available(running_recorder, monke
     monkeypatch.setattr("tapscribe.setup_install.write_picker_state", lambda *a, **k: None)
     monkeypatch.setattr(
         "tapscribe.setup_install._create_subprocess",
-        _installing_spawn(set(), "whisper", "cpu"),
+        _installing_spawn(_probe_modules_for("whisper", "cpu"), "whisper"),
     )
 
     async with httpx.AsyncClient(base_url=running_recorder.base_url, timeout=10.0) as client:
@@ -118,7 +106,7 @@ async def test_adding_a_model_after_first_run_makes_it_available(running_recorde
     monkeypatch.setattr("tapscribe.setup_install.write_picker_state", lambda *a, **k: None)
     monkeypatch.setattr(
         "tapscribe.setup_install._create_subprocess",
-        _installing_spawn(set(whisper_mods), "parakeet", "cpu"),
+        _installing_spawn(whisper_mods | _probe_modules_for("parakeet", "cpu"), "parakeet"),
     )
 
     async with httpx.AsyncClient(base_url=running_recorder.base_url, timeout=10.0) as client:
