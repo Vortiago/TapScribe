@@ -40,13 +40,13 @@ const chosen = new Map();
 const ac = new AbortController();
 
 async function boot() {
-  // Warm the components once so the row builders can run synchronously.
-  await Promise.all([warmPanel(), warmButton(), warmField(), warmChip(), warmAlert(), warmSpinner()]);
-
+  // Warm the components (so the row builders run synchronously) and fetch the
+  // state concurrently — independent work, both needed before the first render.
+  const warming = Promise.all([warmPanel(), warmButton(), warmField(), warmChip(), warmAlert(), warmSpinner()]);
   const sub = byId("sub");
   let state;
   try {
-    const r = await fetch("/api/setup/state");
+    const [, r] = await Promise.all([warming, fetch("/api/setup/state")]);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     state = await r.json();
   } catch (e) {
@@ -68,8 +68,9 @@ function buildCard(families) {
   const list = el("div", "setup__list");
   for (const f of families) list.append(familyRow(f));
 
+  // Built synchronously after warm + state, so it can be enabled from the start.
   const install = createButtonSync(
-    { label: "Install & launch", variant: "primary", disabled: true, onClick: () => void runInstall(install) },
+    { label: "Install & launch", variant: "primary", onClick: () => void runInstall(install) },
     ac.signal,
   );
   const log = el("pre", "setup__log");
@@ -80,13 +81,11 @@ function buildCard(families) {
 
   const panel = createPanelSync({ body: el("div", null, list, el("div", "setup__cta", install.el), log, result) });
   byId("card").replaceChildren(panel.el);
-  install.setDisabled(false);
 }
 
 /** @param {Record<string, any>} f @returns {HTMLElement} */
 function familyRow(f) {
-  const check = el("input", "fam__check");
-  const box = /** @type {HTMLInputElement} */ (check);
+  const box = /** @type {HTMLInputElement} */ (el("input", "fam__check"));
   box.type = "checkbox";
   // default-check Whisper / anything already installed.
   box.checked = f.family === "whisper" || Boolean(f.installed);
@@ -98,29 +97,28 @@ function familyRow(f) {
   const name = el("div", "fam__name", f.label, ...chips);
   const meta = el("div", "fam__meta", `${(f.models || []).length} models`);
 
+  // default backend = first host-valid; the select/chip below reflects it.
+  if (f.backends.length) chosen.set(f.family, f.backends[0]);
   /** @type {Node} */
   let backend;
   if (f.backends.length > 1) {
-    chosen.set(f.family, f.backends[0]);
     backend = createFieldSync(
       {
         label: `${f.label} backend`,
         type: "select",
         hideLabel: true,
-        value: f.backends[0],
         options: f.backends.map((/** @type {string} */ b) => ({ value: b, label: b })),
         onInput: (v) => chosen.set(f.family, v),
       },
       ac.signal,
     ).el;
   } else if (f.backends.length === 1) {
-    chosen.set(f.family, f.backends[0]);
     backend = createChipSync({ text: f.backends[0] }).el;
   } else {
     backend = el("span", "fam__none", "—");
   }
 
-  return el("div", "fam", check, el("div", null, name, meta), backend, el("div", "fam__size", f.size_hint || ""));
+  return el("div", "fam", box, el("div", null, name, meta), backend, el("div", "fam__size", f.size_hint || ""));
 }
 
 /** @returns {Record<string, string>} */
@@ -152,7 +150,7 @@ async function runInstall(install) {
 
   /** @param {string} line */
   const append = (line) => {
-    log.textContent = (log.textContent || "") + line + "\n";
+    log.append(line + "\n"); // text-node append — O(n) total, no full-buffer rewrite
     log.scrollTop = log.scrollHeight;
   };
 
@@ -164,10 +162,12 @@ async function runInstall(install) {
       body: JSON.stringify({ families }),
     });
   } catch (e) {
-    return finish(false, install, result, `request failed: ${e}`);
+    append(`request failed: ${e}`);
+    return finish(false, install, result);
   }
   if (!resp.ok || !resp.body) {
-    return finish(false, install, result, `install rejected: HTTP ${resp.status}`);
+    append(`install rejected: HTTP ${resp.status}`);
+    return finish(false, install, result);
   }
 
   // Parse the SSE stream: events are "data: <json>\n\n".
@@ -206,10 +206,8 @@ async function runInstall(install) {
  * @param {boolean} ok
  * @param {{ setDisabled: (d: boolean) => void }} install
  * @param {HTMLElement} result
- * @param {string} [logLine]
  */
-function finish(ok, install, result, logLine) {
-  if (logLine) byId("log").textContent += logLine + "\n";
+function finish(ok, install, result) {
   if (ok) {
     const open = createButtonSync({ label: "Open the dashboard →", variant: "primary", href: "/" });
     result.replaceChildren(createAlertSync({ tone: "ok", message: "Installed." }).el, open.el);
