@@ -9,6 +9,11 @@
  */
 :root {
   color-scheme: dark;
+  /* TapScribe brand amber — matches the dashboard's --next-accent (--warn,
+     #d9aa55). One-token override is the idiomatic way to brand vanilla-components.
+     The primary button pairs --accent (bg) with --bg (near-black) text, so the
+     amber keeps strong contrast. */
+  --accent: #d9aa55;
 }
 
 html,
