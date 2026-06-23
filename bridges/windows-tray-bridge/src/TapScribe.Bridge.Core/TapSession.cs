@@ -83,6 +83,15 @@ public sealed class TapSession : IAsyncDisposable
         new(capture, options, gate ?? new GateOptions(), stream ?? new TapStreamOptions(),
             connectionFactory ?? (static o => new TapClient(o)), onConnected, onFailed);
 
+    /// <summary>
+    /// Re-tune the live <see cref="LevelGate"/> (sensitivity / hangover / pre-roll)
+    /// without tearing the pipeline down. Safe to call from another thread while the
+    /// capture thread drives the gate; an in-flight utterance keeps streaming and the
+    /// new tuning governs every frame from here on. Forwarded straight to the gate,
+    /// which publishes the change atomically.
+    /// </summary>
+    public void UpdateGate(GateOptions gate) => _gate.UpdateTuning(gate);
+
     private void OnData(object? sender, AudioCapturedEventArgs e)
     {
         byte[] pcm = _resampler.Process(e.Data.Span);

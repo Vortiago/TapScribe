@@ -174,4 +174,107 @@ public class LevelGateTests
         Assert.Throws<ArgumentOutOfRangeException>(() => new LevelGate(new GateOptions { Hangover = TimeSpan.FromMilliseconds(-1) }));
         Assert.Throws<ArgumentOutOfRangeException>(() => new LevelGate(new GateOptions { PreRoll = TimeSpan.FromMilliseconds(-1) }));
     }
+
+    [Fact]
+    public void UpdateTuning_RetunesThreshold_ForSubsequentFrames()
+    {
+        // Start deaf: a loud frame (RMS 0.244) sits below the 0.3 open threshold.
+        var gate = new LevelGate(Opts(threshold: 0.3));
+        Assert.Empty(gate.Push(Frame(8000)));
+        Assert.False(gate.IsOpen);
+
+        // Retune sensitive at runtime — no teardown — and the same level now opens.
+        gate.UpdateTuning(Opts(threshold: 0.05));
+
+        GateEvent opened = Assert.Single(gate.Push(Frame(8000)));
+        Assert.Equal(GateEventKind.Opened, opened.Kind);
+        Assert.True(gate.IsOpen);
+    }
+
+    [Fact]
+    public void UpdateTuning_KeepsAnOpenUtteranceIntact_AndAppliesTheNewHangover()
+    {
+        // Open an utterance, then two silent frames — under the old hangover (5 frames)
+        // it stays open.
+        var gate = new LevelGate(Opts(hangoverMs: 100));
+        var opening = PushAll(gate, Frame(8000), Frame(1000), Frame(1000));
+        Assert.Equal(GateEventKind.Opened, opening[0].Kind);
+        Assert.True(gate.IsOpen);
+        Assert.DoesNotContain(opening, e => e.Kind == GateEventKind.Closed);
+
+        // Shorten the hangover mid-utterance: the open utterance is NOT torn down (still
+        // open, no spurious boundary emitted at the update).
+        gate.UpdateTuning(Opts(hangoverMs: 40)); // 2 silent frames now closes
+        Assert.True(gate.IsOpen);
+
+        // Under the OLD hangover this next silent frame (3rd in a row) wouldn't close;
+        // under the NEW 2-frame hangover it does — and it's the SAME utterance, never
+        // re-opened.
+        var closing = PushAll(gate, Frame(1000));
+        Assert.Equal(GateEventKind.Closed, closing[^1].Kind);
+        Assert.False(gate.IsOpen);
+        Assert.DoesNotContain(closing, e => e.Kind == GateEventKind.Opened);
+    }
+
+    [Fact]
+    public void UpdateTuning_AppliesTheNewPreRollWindow()
+    {
+        // Pre-roll starts disabled, then is grown to 3 frames at runtime.
+        var gate = new LevelGate(Opts(preRollMs: 0));
+        gate.UpdateTuning(Opts(preRollMs: 60));
+
+        byte[] q1 = Frame(1001), q2 = Frame(1002), q3 = Frame(1003), loud = Frame(8000);
+        var events = PushAll(gate, q1, q2, q3, loud);
+
+        // The newly-enabled pre-roll replays the three buffered quiet frames, oldest
+        // first, before the triggering frame.
+        Assert.Equal(q1, events[0].Frame);
+        Assert.Equal(Bytes(q1, q2, q3, loud), StreamedFrames(events));
+    }
+
+    [Fact]
+    public void UpdateTuning_RejectsInvalidOptions_LeavingCurrentTuningInPlace()
+    {
+        var gate = new LevelGate(Opts(threshold: 0.05)); // sensitive
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => gate.UpdateTuning(Opts(threshold: 1.0)));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => gate.UpdateTuning(new GateOptions { Hangover = TimeSpan.FromMilliseconds(-1) }));
+
+        // A rejected update is atomic — it never swaps in a partial tuning, so the gate
+        // still opens on the original sensitive threshold (RMS 0.122 >= 0.05).
+        GateEvent opened = Assert.Single(gate.Push(Frame(4000)));
+        Assert.Equal(GateEventKind.Opened, opened.Kind);
+    }
+
+    [Fact]
+    public async Task UpdateTuning_IsSafeConcurrentlyWithPush()
+    {
+        var gate = new LevelGate(Opts());
+        using var cts = new CancellationTokenSource();
+
+        // Hammer UpdateTuning from another thread while Push drives the gate on this one.
+        // The atomic snapshot swap means no torn reads and no exception for any
+        // interleaving; every emitted frame stays well-formed (640 bytes, or empty for a
+        // Closed boundary).
+        Task tuner = Task.Run(() =>
+        {
+            bool sensitive = true;
+            while (!cts.IsCancellationRequested)
+            {
+                gate.UpdateTuning(Opts(threshold: sensitive ? 0.05 : 0.3, hangoverMs: 40));
+                sensitive = !sensitive;
+            }
+        });
+
+        byte[] loud = Frame(8000), quiet = Frame(1000);
+        for (int i = 0; i < 5000; i++)
+            foreach (GateEvent ev in gate.Push(i % 2 == 0 ? loud : quiet))
+                Assert.Equal(
+                    ev.Kind == GateEventKind.Closed ? 0 : TapWire.FrameBytes,
+                    ev.Frame.Length);
+
+        cts.Cancel();
+        await tuner;
+    }
 }

@@ -28,9 +28,12 @@ public sealed record PipelineSpec(IAudioCapture Capture, TapConnectionOptions Op
 /// </summary>
 public sealed class CaptureOrchestrator : IAsyncDisposable
 {
-    private readonly List<TapSession> _sessions;
+    // Running sessions keyed by their pipeline identity — the per-identity channel a
+    // runtime re-tune fans out over (and that the later per-device-tuning slice keys
+    // its updates by). Identities are unique here: StartAll rejects collisions up front.
+    private readonly Dictionary<string, TapSession> _sessions;
 
-    private CaptureOrchestrator(List<TapSession> sessions) => _sessions = sessions;
+    private CaptureOrchestrator(Dictionary<string, TapSession> sessions) => _sessions = sessions;
 
     /// <summary>
     /// Start one pipeline per spec. <paramref name="onConnected"/> /
@@ -64,17 +67,17 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                 $"Duplicate pipeline identity '{duplicate.Key}'. Each device must stream " +
                 "under a distinct identity.", nameof(specs));
 
-        var sessions = new List<TapSession>(specs.Count);
+        var sessions = new Dictionary<string, TapSession>(specs.Count, StringComparer.Ordinal);
         foreach (PipelineSpec spec in specs)
         {
             string identity = spec.Options.Identity;
             try
             {
-                sessions.Add(TapSession.Begin(
+                sessions[identity] = TapSession.Begin(
                     spec.Capture, spec.Options,
                     onConnected: () => onConnected(identity),
                     onFailed: ex => onFailed(identity, ex),
-                    gate, stream, connectionFactory));
+                    gate, stream, connectionFactory);
             }
             catch (Exception ex) when (ex is COMException or InvalidOperationException)
             {
@@ -99,6 +102,25 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     public int PipelineCount => _sessions.Count;
 
     /// <summary>
+    /// Re-tune every running pipeline's <see cref="LevelGate"/> with one new
+    /// <see cref="GateOptions"/> — the live-retune fan-out behind Settings → Save, so a
+    /// sensitivity change takes effect without a Stop/Start. The gate is global for this
+    /// slice (every pipeline gets the same tuning); the per-identity keying is what a
+    /// later per-device-tuning slice routes its updates through. Each
+    /// <see cref="TapSession.UpdateGate"/> publishes the change atomically relative to
+    /// its capture thread, so a running meeting keeps streaming uninterrupted. The
+    /// caller passes operator-validated options (the tray clamps the sliders); each
+    /// pipeline re-validates via <see cref="LevelGate.UpdateTuning"/> and an
+    /// out-of-range value throws.
+    /// </summary>
+    public void UpdateGates(GateOptions gate)
+    {
+        ArgumentNullException.ThrowIfNull(gate);
+        foreach (TapSession session in _sessions.Values)
+            session.UpdateGate(gate);
+    }
+
+    /// <summary>
     /// Tear down every pipeline. Sessions are disposed <em>concurrently</em> — each
     /// <see cref="TapSession.DisposeAsync"/> is already bounded (drains within its
     /// own budget), so fanning them out keeps total teardown ~one budget instead of
@@ -106,5 +128,5 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     /// not stall for N devices' worth of serialized drain give-ups.
     /// </summary>
     public async ValueTask DisposeAsync() =>
-        await Task.WhenAll(_sessions.Select(s => s.DisposeAsync().AsTask())).ConfigureAwait(false);
+        await Task.WhenAll(_sessions.Values.Select(s => s.DisposeAsync().AsTask())).ConfigureAwait(false);
 }

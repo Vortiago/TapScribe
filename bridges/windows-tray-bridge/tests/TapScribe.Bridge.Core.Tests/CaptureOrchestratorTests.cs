@@ -68,6 +68,35 @@ public class CaptureOrchestratorTests
     }
 
     [Fact]
+    public async Task UpdateGates_RetunesEveryRunningPipeline_WithoutRestart()
+    {
+        var transport = new FakeTapTransport();
+        var mic = new FakeAudioCapture(RecorderFormat);
+        var system = new FakeAudioCapture(RecorderFormat);
+        // Start both pipelines deaf (threshold above a loud frame's RMS), then re-tune.
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            [Spec(mic, "mic"), Spec(system, "system")],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            DeafGate(), FastStream(), transport.Create);
+
+        mic.Emit(Loud(20));
+        system.Emit(Loud(20));
+        Assert.Empty(transport.Connections); // the deaf gates let nothing through
+
+        // Fan one new (sensitive) tuning out to every running pipeline, mid-meeting.
+        orchestrator.UpdateGates(FastGate()); // OpenThreshold 0.02
+
+        mic.Emit(Loud(20));
+        system.Emit(Loud(20));
+        await Poll.UntilAsync(
+            () => transport.ConnectionsFor("mic").Count > 0 && transport.ConnectionsFor("system").Count > 0,
+            Wait, "both re-tuned pipelines to stream");
+
+        Assert.True(transport.ConnectionsFor("mic")[0].SentCount > 0);
+        Assert.True(transport.ConnectionsFor("system")[0].SentCount > 0);
+    }
+
+    [Fact]
     public async Task OneDevicesSilence_DoesNotCloseAnotherDevicesUtterance()
     {
         var transport = new FakeTapTransport();

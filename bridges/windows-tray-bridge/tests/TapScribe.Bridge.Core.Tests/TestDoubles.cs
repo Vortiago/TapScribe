@@ -57,6 +57,16 @@ internal static class Fixtures
         PreRoll = TimeSpan.Zero,
     };
 
+    // The opposite of FastGate: an open threshold (0.3) above even a loud frame's RMS
+    // (0.244), so nothing at the test levels opens the gate. The starting point for a
+    // live-retune test that then drops the gate to a sensitive tuning.
+    public static GateOptions DeafGate() => new()
+    {
+        OpenThreshold = 0.3,
+        Hangover = TimeSpan.FromMilliseconds(60),
+        PreRoll = TimeSpan.Zero,
+    };
+
     public static byte[] Pcm(short value, int frames)
     {
         var bytes = new byte[frames * TapWire.FrameBytes];

@@ -41,26 +41,52 @@ public readonly record struct GateEvent(GateEventKind Kind, byte[] Frame)
 /// byte stream into exact 640-byte frames), so the gate's output is already
 /// frame-aligned and the consumer streams each <see cref="GateEvent.Frame"/>
 /// straight to a tap with no further chunking. Pure and synchronous: the output of
-/// N small pushes matches one big push. Not thread-safe: drive it from one thread
-/// (the resampler output of one capture pipeline).
+/// N small pushes matches one big push. Drive <see cref="Push"/> from one thread
+/// (the resampler output of one capture pipeline); the one exception is
+/// <see cref="UpdateTuning"/>, which is safe to call concurrently from another
+/// thread (e.g. the tray's Settings → Save) to re-tune a running gate.
 /// </summary>
 public sealed class LevelGate
 {
     private const double FrameMs = 1000.0 * TapWire.FrameSamples / TapWire.SampleRate; // 20 ms
 
-    private readonly double _openThreshold;
-    private readonly int _preRollFrames;
-    private readonly int _hangoverFrames;
+    /// <summary>The three knobs as one immutable snapshot. Held behind a single
+    /// reference so <see cref="UpdateTuning"/> can swap the whole set atomically: a
+    /// reference assignment is atomic, whereas updating the 64-bit
+    /// <see cref="OpenThreshold"/> field on its own could tear under the capture
+    /// thread reading it in <see cref="Push"/>.</summary>
+    private sealed record Tuning(double OpenThreshold, int PreRollFrames, int HangoverFrames);
+
+    private Tuning _tuning;
 
     private readonly FrameChunker _chunker = new();
-    // Recent below-threshold frames while closed (capacity _preRollFrames), so an
+    // Recent below-threshold frames while closed (capacity Tuning.PreRollFrames), so an
     // open can replay the audio that came just before the threshold crossing.
     private readonly Queue<byte[]> _preRoll = new();
 
     private bool _open;
     private int _silenceFrames; // consecutive below-threshold frames while open
 
-    public LevelGate(GateOptions options)
+    public LevelGate(GateOptions options) => _tuning = BuildTuning(options);
+
+    /// <summary>True while an utterance is open (between an Opened and its Closed).</summary>
+    public bool IsOpen => _open;
+
+    /// <summary>
+    /// Re-tune the gate at runtime (sensitivity / hangover / pre-roll) without tearing
+    /// it down. Safe to call from a different thread while the capture thread drives
+    /// <see cref="Push"/>: the new tuning is validated, then published as one atomic
+    /// reference swap, so a push never sees a torn threshold. An in-flight open
+    /// utterance is not torn down — its open-state and running silence count live
+    /// outside the snapshot and are preserved — so the new tuning governs every frame
+    /// from the next push onward, including the already-accrued silence (shortening the
+    /// hangover mid-utterance can therefore close it on the next silent frame rather
+    /// than only counting silence that starts after the change). Validation matches the
+    /// constructor; an out-of-range value throws and leaves the current tuning in place.
+    /// </summary>
+    public void UpdateTuning(GateOptions options) => Volatile.Write(ref _tuning, BuildTuning(options));
+
+    private static Tuning BuildTuning(GateOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
         if (options.OpenThreshold is < 0 or >= 1 || double.IsNaN(options.OpenThreshold))
@@ -70,15 +96,10 @@ public sealed class LevelGate
         if (options.PreRoll < TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options), "PreRoll must be non-negative.");
 
-        _openThreshold = options.OpenThreshold;
-        _preRollFrames = FramesFor(options.PreRoll);
-        // At least one silent frame must elapse to close, otherwise a 0 ms
-        // hangover would close every utterance on its first frame.
-        _hangoverFrames = Math.Max(1, FramesFor(options.Hangover));
+        // At least one silent frame must elapse to close, otherwise a 0 ms hangover
+        // would close every utterance on its first frame.
+        return new Tuning(options.OpenThreshold, FramesFor(options.PreRoll), Math.Max(1, FramesFor(options.Hangover)));
     }
-
-    /// <summary>True while an utterance is open (between an Opened and its Closed).</summary>
-    public bool IsOpen => _open;
 
     private static int FramesFor(TimeSpan span) => (int)Math.Round(span.TotalMilliseconds / FrameMs);
 
@@ -97,7 +118,10 @@ public sealed class LevelGate
 
     private void ProcessFrame(byte[] frame, List<GateEvent> events)
     {
-        bool active = Rms(frame) >= _openThreshold;
+        // One torn-free snapshot per frame, so a concurrent UpdateTuning either lands
+        // fully before this frame or fully after it — never half-applied within it.
+        Tuning tuning = Volatile.Read(ref _tuning);
+        bool active = Rms(frame) >= tuning.OpenThreshold;
 
         if (!_open)
         {
@@ -119,10 +143,10 @@ public sealed class LevelGate
             else
             {
                 // Still closed: remember this frame as pre-roll, dropping the
-                // oldest beyond the window. With _preRollFrames == 0 this discards
+                // oldest beyond the window. With PreRollFrames == 0 this discards
                 // it immediately (pre-roll disabled).
                 _preRoll.Enqueue(frame);
-                while (_preRoll.Count > _preRollFrames)
+                while (_preRoll.Count > tuning.PreRollFrames)
                     _preRoll.Dequeue();
             }
             return;
@@ -135,7 +159,7 @@ public sealed class LevelGate
         {
             _silenceFrames = 0;
         }
-        else if (++_silenceFrames >= _hangoverFrames)
+        else if (++_silenceFrames >= tuning.HangoverFrames)
         {
             _open = false;
             _silenceFrames = 0;
