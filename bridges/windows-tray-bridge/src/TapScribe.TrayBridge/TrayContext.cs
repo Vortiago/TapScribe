@@ -305,10 +305,12 @@ internal sealed class TrayContext : ApplicationContext
 
     private void OpenSettings()
     {
-        // Editing while a meeting is live is allowed; changes apply on the next Start
-        // (active pipelines captured their options at Begin). The device list is supplied
-        // as a delegate so the dialog can re-enumerate (Refresh) without owning the
-        // enumerator's lifecycle. Persist on Save so the settings survive restarts.
+        // Editing while a meeting is live is allowed. Connection/device changes apply on
+        // the next Start (those pipelines bound them at Begin); the level-gate knobs,
+        // however, are pushed to the running pipelines below so a sensitivity change
+        // takes effect mid-meeting with no Stop/Start (issue #149). The device list is
+        // supplied as a delegate so the dialog can re-enumerate (Refresh) without owning
+        // the enumerator's lifecycle. Persist on Save so the settings survive restarts.
         using var form = new SettingsForm(_settings, ListDevices);
         if (form.ShowDialog() != DialogResult.OK)
             return;
@@ -324,6 +326,17 @@ internal sealed class TrayContext : ApplicationContext
             // for this session and tell the user they won't persist.
             ShowBalloon("Settings not saved", ex.Message);
         }
+
+        // Re-tune a live meeting in place. Grab the orchestrator under the lock (StartAsync
+        // may publish it from a thread-pool continuation), then call out WITHOUT holding
+        // the lock — UpdateGates is a quick atomic fan-out and shouldn't run under _gate.
+        // No meeting running -> null -> a no-op, exactly as the AC requires. Applied even
+        // if the disk save above failed, so the in-memory re-tune still reaches the
+        // pipelines for this session.
+        CaptureOrchestrator? running;
+        lock (_gate)
+            running = _orchestrator;
+        running?.UpdateGates(_settings.ToGateOptions());
     }
 
     private static IReadOnlyList<CaptureDevice> ListDevices()

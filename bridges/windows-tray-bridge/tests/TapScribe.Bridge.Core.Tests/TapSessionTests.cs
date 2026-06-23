@@ -52,6 +52,32 @@ public class TapSessionTests
     }
 
     [Fact]
+    public async Task UpdateGate_RetunesTheLivePipeline_WithoutRestart()
+    {
+        var transport = new FakeTapTransport();
+        var capture = new FakeAudioCapture(RecorderFormat);
+        // Start deaf (threshold above a loud frame's RMS) so this level never opens.
+        var session = TapSession.Begin(capture, new TapConnectionOptions { Identity = "mic" },
+            onConnected: () => { }, onFailed: _ => { }, DeafGate(), FastStream(), transport.Create);
+
+        // The gate runs synchronously on the capture thread, so once Emit returns the
+        // deaf gate has already decided NOT to open — no Utterance, no connection.
+        capture.Emit(Loud(20));
+        Assert.Empty(transport.Connections);
+
+        // Re-tune sensitive mid-meeting (no Stop/Start) and the same level now records.
+        session.UpdateGate(FastGate()); // OpenThreshold 0.02
+        capture.Emit(Loud(20));
+        await Poll.UntilAsync(() => transport.SentCount(0) > 0, Wait, "the re-tuned pipeline to stream");
+
+        await session.DisposeAsync();
+
+        FakeTapConnection conn = Assert.Single(transport.Connections);
+        Assert.Equal("mic", conn.Identity);
+        Assert.True(conn.SentCount > 0);
+    }
+
+    [Fact]
     public async Task Silence_AfterHangover_ClosesUtterance_AndTheNextSpeechOpensAFreshOne()
     {
         var transport = new FakeTapTransport();
