@@ -245,14 +245,14 @@ jobs:
       - name: Build + test bridge-core only
         run: dotnet test bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
 
-  # Dashboard UI E2E with headless Chromium. The synthetic variant
-  # (FakeTranscriber + synthetic WAVs) verifies the active-taps / live
-  # transcripts / merged-session pipeline end-to-end. The
-  # @pytest.mark.real_audio variant streams committed fixtures through a
-  # real faster-whisper — skipped in CI because it pulls a model and
-  # would balloon job time; run locally for the screenshot in README.
+  # Browser UI E2E with headless Chromium: the dashboard (active-taps / live
+  # transcripts / merged-session pipeline via FakeTranscriber + synthetic WAVs)
+  # AND the /setup page smoke (renders the family picker + backend selects with
+  # no console errors). The @pytest.mark.real_audio dashboard variant streams
+  # committed fixtures through a real faster-whisper — skipped in CI because it
+  # pulls a model and would balloon job time; run locally for the README shot.
   playwright:
-    name: dashboard UI E2E (synthetic only)
+    name: browser UI E2E (synthetic only)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -274,10 +274,10 @@ jobs:
       - name: Install Chromium for Playwright
         run: python -m playwright install --with-deps chromium
 
-      - name: Run synthetic dashboard E2E
-        # -m "not real_audio" skips the real-audio variant; -k '' would
-        # match every test, so we rely on the marker filter alone.
-        run: pytest tests/e2e/test_dashboard_ui.py -q -m "not real_audio"
+      - name: Run synthetic browser E2E (dashboard + setup)
+        # -m "not real_audio" skips the dashboard real-audio variant; test_setup_ui
+        # carries no real_audio markers, so all of its smoke + regression run.
+        run: pytest tests/e2e/test_dashboard_ui.py tests/e2e/test_setup_ui.py -q -m "not real_audio"
 
   # Static security smells in the application code — bandit. Separate
   # from CodeQL (which runs in its own workflow) because bandit is cheap
