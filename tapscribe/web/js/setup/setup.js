@@ -107,6 +107,10 @@ function familyRow(f) {
         label: `${f.label} backend`,
         type: "select",
         hideLabel: true,
+        // `value` is required, not redundant: field.js does `control.value = value`,
+        // and an empty value would set selectedIndex=-1 (blank select) even though
+        // option 0 is `backends[0]`.
+        value: f.backends[0],
         options: f.backends.map((/** @type {string} */ b) => ({ value: b, label: b })),
         onInput: (v) => chosen.set(f.family, v),
       },

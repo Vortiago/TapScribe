@@ -51,3 +51,28 @@ async def test_setup_page_renders_families_and_install_button(running_recorder: 
             assert errors == [], f"console/page errors on /setup: {errors}"
         finally:
             await browser.close()
+
+
+async def test_backend_select_defaults_to_first_backend(running_recorder: RunningRecorder):
+    """Regression: a family with >1 host-valid backend renders a backend <select>
+    that DEFAULTS to (and so submits) the first backend, not a blank selection.
+    A dropped field `value` once left the select blank while state held
+    backends[0] — invisible on a single-backend (cpu-only) host like CI."""
+    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+    # Two host-valid kinds → Whisper renders a real dropdown (cuda, cpu).
+    set_available_backends_for_testing(frozenset({"cuda", "cpu"}))
+    try:
+        async with playwright_session() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            try:
+                page = await (await browser.new_context()).new_page()
+                await page.goto(running_recorder.base_url + "/setup", wait_until="domcontentloaded")
+                select = page.get_by_label("Whisper backend", exact=True)
+                await expect(select).to_be_visible(timeout=8000)
+                # the visible selection must be a real backend (first = cuda), not blank
+                await expect(select).to_have_value("cuda")
+            finally:
+                await browser.close()
+    finally:
+        set_available_backends_for_testing(None)
