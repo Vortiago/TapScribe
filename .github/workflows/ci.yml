@@ -173,14 +173,19 @@ jobs:
       - name: Run popup E2E
         run: cd bridges/spacialchat-bridge/e2e && npm test
 
-  # Bridge meeting E2E — the FULL dashboard-free flow with no mocked seams:
-  # the real extension (loaded headed under xvfb) taps real audio over /tap to
-  # a real Recorder, Start/End meeting from the real popup fires the real
-  # end-of-meeting pipeline (strip[silero] → transcribe[faster-whisper] →
-  # summarize[command]), and the popup card shows the real summary. Heavy
-  # (CPU torch + a real transcribe) so it's its own opt-in job.
+  # Bridge browser E2E (headed, under xvfb) — the bridge MV3 extension loaded
+  # in a real headed Chromium. MV3 extensions don't load headless, so both
+  # flavours need a display (xvfb) and share one job:
+  #   * extension E2E: the extension taps a fake /tap server (no real ASR);
+  #   * meeting E2E: the FULL dashboard-free flow with no mocked seams — the
+  #     extension taps real audio over /tap to a real Recorder, Start/End
+  #     meeting from the real popup fires the real end-of-meeting pipeline
+  #     (strip[silero] → transcribe[faster-whisper] → summarize[command]), and
+  #     the popup card shows the real summary.
+  # Heavy (CPU torch + a real transcribe for the meeting flow) so it's its own
+  # job. The extension flavour ran in no CI job before; both run here now.
   bridge-meeting-e2e:
-    name: bridge meeting E2E (full pipeline)
+    name: bridge E2E (extension + meeting)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -202,7 +207,10 @@ jobs:
           python -m playwright install --with-deps chromium
           sudo apt-get update && sudo apt-get install -y xvfb
 
-      - name: Run meeting E2E (headed, under xvfb)
+      - name: Run bridge extension E2E (headed, under xvfb)
+        run: xvfb-run -a pytest tests/e2e/test_bridge_extension_e2e.py -m browser_e2e -q
+
+      - name: Run bridge meeting E2E (headed, under xvfb)
         run: xvfb-run -a pytest tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e -q
 
   # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:

@@ -27,6 +27,11 @@ from . import config
 # scheme later (e.g. signed JWT) without breaking older bridges.
 TAP_SUBPROTOCOL_PREFIX: str = "tapscribe.v1.tap."
 
+# The TAP-BEARER scheme matches every path under TAP_PREFIX/. Pre-joined
+# once at import (the prefix is a constant) since the middleware tests it
+# against every HTTP request path — no per-request concatenation.
+_TAP_PREFIX_SLASH: str = config.TAP_PREFIX + "/"
+
 
 def pick_tap_subprotocol(offered: Iterable[str] | None, expected_token: str) -> str | None:
     """Return the subprotocol the server should echo back, or None when
@@ -66,32 +71,56 @@ def check_tap_bearer(authorization: str | None, expected_token: str) -> bool:
 
 
 async def basic_auth_middleware(request: Request, call_next):
-    """HTTP Basic auth gate. Skips WebSocket upgrades (FastAPI middlewares
-    of this kind don't see WS) and the routes in `AUTH_EXEMPT_ROUTES`.
-    Constant-time comparison so the response time can't be used to guess
-    characters.
+    """The HTTP auth gate: dispatch every request to exactly ONE of three
+    schemes, so they can't drift apart (see CONTEXT.md "HTTP auth gate ·
+    auth schemes" and ADR-0008). Constant-time comparisons throughout so
+    response time can't be used to guess characters.
 
-    The /tap WebSocket has its own auth path (a bearer token in
-    `Sec-WebSocket-Protocol`, validated by `pick_tap_subprotocol` above
-    and called from the WS route handler).
+      * PUBLIC     — exact (method, path) in `config.AUTH_EXEMPT_ROUTES`
+                     (/health, /healthz). No credential.
+      * TAP-BEARER — any path under `config.TAP_PREFIX` (/api/tap): the
+                     Bridge's HTTP control plane. The SAME branch that
+                     routes these past Basic auth also REQUIRES the tap
+                     bearer (`check_tap_bearer`), so a bearer-less
+                     /api/tap/* route is impossible by construction and the
+                     handlers carry no gate of their own.
+      * BASIC      — everything else: dashboard HTTP Basic against
+                     `recorder.auth.value`.
+
+    The /tap WebSocket is a separate path: middlewares of this kind don't
+    see WS upgrades, so it carries the token in `Sec-WebSocket-Protocol`,
+    validated by `pick_tap_subprotocol` from the WS route handler.
     """
     if not config.AUTH_ENABLED:
         return await call_next(request)
-    # CORS preflight: browsers never send Basic-auth credentials on OPTIONS.
-    # If auth blocked preflight, the actual cross-origin POST from the
-    # bridge (spatial.chat → recorder) would never fire. Let
-    # CORSMiddleware handle these unconditionally.
+    # CORS preflight: browsers never send credentials on OPTIONS. If auth
+    # blocked preflight, the actual cross-origin POST from the bridge
+    # (spatial.chat → recorder) would never fire. Let CORSMiddleware handle
+    # these unconditionally.
     if request.method.upper() == "OPTIONS":
         return await call_next(request)
+    # PUBLIC scheme — exact (method, path) match, no credential. Checked
+    # before the recorder fetch so health probes answer during boot.
     if (request.method.upper(), request.url.path) in config.AUTH_EXEMPT_ROUTES:
         return await call_next(request)
-    # Prefix exemptions cover tap-token routes with a path parameter
-    # (/api/tap/sessions/{session}/pipeline), which exact (method, path)
-    # matching can never hit. Every handler under an exempt prefix MUST
-    # carry its own tap-bearer gate — see config.AUTH_EXEMPT_PREFIXES.
-    if request.url.path.startswith(config.AUTH_EXEMPT_PREFIXES):
+
+    # The Recorder holds both secrets; refuse cleanly if it isn't attached
+    # yet (transient boot state) rather than crashing the middleware. Both
+    # the TAP-BEARER and BASIC schemes below read from it.
+    recorder = getattr(request.app.state, "recorder", None)
+    if recorder is None:
+        return JSONResponse({"detail": "Recorder not ready"}, status_code=503)
+
+    # TAP-BEARER scheme — the Bridge's control plane. One predicate: routes
+    # under TAP_PREFIX skip Basic auth AND must carry the tap bearer, so the
+    # two halves of the invariant can never diverge. AUTH_ENABLED is already
+    # true here (the early return above), so no need to re-check it.
+    if request.url.path.startswith(_TAP_PREFIX_SLASH):
+        if not check_tap_bearer(request.headers.get("authorization"), recorder.tap.value):
+            return JSONResponse({"detail": "invalid tap token"}, status_code=401)
         return await call_next(request)
 
+    # BASIC scheme — the dashboard / REST default.
     realm_header = {"WWW-Authenticate": 'Basic realm="TapScribe recorder"'}
     auth_header = request.headers.get("authorization") or ""
     if not auth_header.lower().startswith("basic "):
@@ -103,14 +132,6 @@ async def basic_auth_middleware(request: Request, call_next):
             {"detail": "Malformed Authorization header"}, status_code=401, headers=realm_header
         )
     user, _, pw = decoded.partition(":")
-
-    # Recorder may not be attached yet (e.g. transient state during boot
-    # before app.state.recorder is set). Refuse the request in that case
-    # rather than crashing the middleware.
-    recorder = getattr(request.app.state, "recorder", None)
-    if recorder is None:
-        return JSONResponse({"detail": "Recorder not ready"}, status_code=503)
-
     user_ok = hmac.compare_digest(user, config.AUTH_USER)
     pass_ok = hmac.compare_digest(pw, recorder.auth.value)
     if not (user_ok and pass_ok):

@@ -351,6 +351,40 @@ delete or prune, so a leaked tap token's blast radius stays bounded.
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
 
+## HTTP auth gate · auth schemes
+
+The single FastAPI middleware (`auth.basic_auth_middleware`) that decides,
+for every HTTP request, which of **three auth schemes** applies. It is the
+ONE place the disposition is chosen, so the schemes can't drift apart:
+
+- **Public** — exact `(method, path)` in `config.AUTH_EXEMPT_ROUTES`
+  (`/health`, `/healthz`). No credential.
+- **Tap-bearer** — any path under `config.TAP_PREFIX` (`/api/tap`). The
+  Bridge's HTTP control plane (`/api/tap/new-session`,
+  `/api/tap/sessions/{session}/pipeline`): authenticated by the tap token as
+  `Authorization: Bearer` (`auth.check_tap_bearer`, constant-time), NOT
+  dashboard Basic auth. The SAME middleware branch that routes these
+  requests past Basic also **enforces** the bearer — exempt-from-Basic and
+  requires-bearer are one predicate, so a new `/api/tap/*` route is gated
+  **by construction** (it cannot be added un-gated). Handlers carry no gate
+  of their own.
+- **Basic** — everything else: dashboard HTTP Basic against
+  `recorder.auth.value`.
+
+The `/tap` **WebSocket** is a fourth, separate path: middlewares of this
+kind don't see WS upgrades, so it carries the tap token in
+`Sec-WebSocket-Protocol` and is gated by `auth.pick_tap_subprotocol` from
+the WS route handler (see [Bridge](#bridge)). The two tap mechanisms share
+the `recorder.tap.value` secret but never the transport — so when precision
+matters, say "the tap-bearer scheme" (HTTP) vs. "the `/tap` subprotocol
+gate" (WS), not "tap auth."
+
+The invariant is held structurally, not by review discipline: a
+route-discovery sweep (`tests/test_tap_endpoint.py`) enumerates every
+registered route under `TAP_PREFIX` and asserts each rejects a
+missing/wrong bearer, so the gate holds for future routes without a new
+test. See ADR-0008.
+
 ## Bracketed meeting
 
 A **Start meeting → End meeting** bracket a Bridge wraps around a recording

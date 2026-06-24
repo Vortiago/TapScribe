@@ -44,7 +44,7 @@ if importlib.util.find_spec("faster_whisper") is None:  # pragma: no cover
 
 from playwright.async_api import async_playwright  # noqa: E402
 
-from .harness import bridge_chromium_args  # noqa: E402
+from .harness import launch_bridge_context  # noqa: E402
 
 pytestmark = [pytest.mark.browser_e2e, pytest.mark.real_audio]
 
@@ -204,14 +204,7 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
 
     async with async_playwright() as pw:
         with tempfile.TemporaryDirectory() as udd:
-            try:
-                ctx = await pw.chromium.launch_persistent_context(
-                    user_data_dir=udd,
-                    headless=False,  # MV3 extensions don't load headless
-                    args=bridge_chromium_args(EXT_DIR),
-                )
-            except Exception as e:  # pragma: no cover
-                pytest.skip(f"Chromium not available: {e}")
+            ctx = await launch_bridge_context(pw, EXT_DIR, udd)
 
             try:
                 ext_id = await _discover_extension_id(ctx)
