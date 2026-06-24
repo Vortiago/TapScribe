@@ -1878,14 +1878,35 @@ async def test_dashboard_live_channel_start_stop(
                     return any(r["identity"] == "alice" for r in rows)
 
                 assert await wait_until(_alice_active, timeout=5.0), "tap never went active"
+
+                # The tap going "active" only means its /tap WS is open on the recorder;
+                # the relay's connection to the fake WlK is a separate async step that lags
+                # it. push_committed broadcasts only to relays connected RIGHT NOW (it isn't
+                # buffered/replayed — conftest FakeWlkThread.push_committed), so pushing
+                # before the relay connects silently drops the line. Wait for the connection
+                # first, or the caption never reaches the feed (the flake).
+                assert await wait_until(lambda: len(fake_wlk.connections) >= 1, timeout=5.0), (
+                    "the live relay never connected to the fake WlK"
+                )
                 fake_wlk.push_committed("live caption after start")
                 await stream_task
                 assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
 
-                feed = (await client.get("/api/state")).json()["live_feed"]
-                assert any(
-                    e["identity"] == "alice" and e["text"] == "live caption after start" for e in feed
-                ), feed
+                # The settled line reaches live_feed asynchronously (fake WlK -> relay ->
+                # tail-flush on tap close), on a different path from the tap drain that
+                # streams_drained tracks — so poll for it rather than reading the feed once.
+                # Keep the last feed the poll saw so a timeout reports exactly that, with no
+                # second /api/state fetch that might show a different snapshot.
+                seen_feed: list = []
+
+                async def _caption_in_feed() -> bool:
+                    seen_feed[:] = (await client.get("/api/state")).json()["live_feed"]
+                    return any(
+                        e["identity"] == "alice" and e["text"] == "live caption after start"
+                        for e in seen_feed
+                    )
+
+                assert await wait_until(_caption_in_feed, timeout=5.0), seen_feed
 
             # Click Stop → the channel goes down.
             await page.click("#liveStopBtn")

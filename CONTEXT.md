@@ -157,8 +157,9 @@ pseudo-streaming on `parakeet-mlx` / `transformers`) without touching
 the Recorder. That's the whole point of the seam.
 
 The dashboard's live-channel picker reads `/api/models?context=live`,
-which excludes Parakeet while only true-streaming families
-(Whisper, NB-Whisper, Voxtral) light up.
+which excludes Parakeet and Voxtral (both batch-only — `build_live_cmd`
+has no backend for either) while only the true-streaming Whisper
+families (Whisper, NB-Whisper) light up.
 
 Each `LiveChannel` declares a class attribute
 `supports_native_vad: bool` so the dashboard (and the `/api/live/start`

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TapScribe · Setup</title>
+    <!-- vanilla-components tokens + tone mixin, then the page layout. The
+         components self-load their own CSS on first use. Served standalone so
+         the page works before the dashboard's stylesheet is loadable. -->
+    <link rel="stylesheet" href="/web/js/setup/vc/tokens.css" />
+    <link rel="stylesheet" href="/web/js/setup/vc/tones.css" />
+    <link rel="stylesheet" href="/web/js/setup/setup.css" />
+  </head>
+  <body>
+    <main class="setup">
+      <header class="setup__head">
+        <span class="brand">TapScribe</span>
+        <span class="setup__host" id="host"></span>
+      </header>
+      <h1 class="setup__title" id="title">Set up TapScribe</h1>
+      <p class="setup__sub" id="sub">Loading…</p>
+      <div id="card"></div>
+    </main>
+    <script type="module" src="/web/js/setup/setup.js"></script>
+  </body>
+</html>

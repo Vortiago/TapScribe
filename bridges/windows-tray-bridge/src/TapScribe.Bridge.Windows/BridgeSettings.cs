@@ -23,6 +23,16 @@ public sealed class BridgeSettings
     public string Host { get; set; } = "localhost";
     public int Port { get; set; } = 8001;
     public bool Tls { get; set; }
+
+    /// <summary>
+    /// INSECURE, opt-in testing flag: accept any self-signed / invalid server cert over
+    /// TLS (the <c>curl -k</c> equivalent, for a local Recorder serving a self-signed
+    /// cert). Off by default; only meaningful with <see cref="Tls"/>. Seedable via
+    /// <c>TAPSCRIBE_TLS_ALLOW_SELF_SIGNED=1</c>. See
+    /// <see cref="TapConnectionOptions.AllowSelfSignedCert"/>.
+    /// </summary>
+    public bool AllowSelfSignedCert { get; set; }
+
     public string Identity { get; set; } = "";
     public string Name { get; set; } = "";
 
@@ -160,6 +170,9 @@ public sealed class BridgeSettings
         Host = string.IsNullOrWhiteSpace(Host) ? "localhost" : Host.Trim(),
         Port = Port,
         Tls = Tls,
+        // Carry the opt-in faithfully; the security boundary is the connection site, which
+        // only wires the accept-any validator when Tls && AllowSelfSignedCert.
+        AllowSelfSignedCert = AllowSelfSignedCert,
         Identity = EffectiveIdentity,
         Name = Name,
         Token = Token,
@@ -183,6 +196,7 @@ public sealed class BridgeSettings
             Host = Env("TAPSCRIBE_HOST") ?? "localhost",
             Port = int.TryParse(Env("TAPSCRIBE_PORT"), out int port) ? port : 8001,
             Tls = Env("TAPSCRIBE_TLS") is "1" or "true",
+            AllowSelfSignedCert = Env("TAPSCRIBE_TLS_ALLOW_SELF_SIGNED") is "1" or "true",
             Identity = Env("TAPSCRIBE_IDENTITY") ?? FallbackIdentity(),
             Name = Env("TAPSCRIBE_NAME") ?? "",
             Token = Env("TAPSCRIBE_TAP_TOKEN") ?? "",

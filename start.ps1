@@ -49,20 +49,30 @@ $env:PYTHONUNBUFFERED = "1"
 Write-Host "[start] Upgrading pip…"
 & python -m pip install --upgrade pip
 
-# --- Install picker ---------------------------------------------------------
-# Hands the install decision to tools/install_picker.py: prompts the
-# operator for which model families (Whisper / Voxtral / Parakeet) to
-# install, pre-checks the saved selection so re-runs are one keystroke,
-# then runs `pip install -e ".[…]"` for the resolved extras —
-# skipping pip entirely when the selection and pyproject.toml are
-# unchanged since the last install (no more uninstall/reinstall churn).
-$PickerArgs = @()
-if ($NoMlx)           { $PickerArgs += "--no-mlx" }
-if ($NonInteractive)  { $PickerArgs += "--non-interactive" }
-& python tools\install_picker.py @PickerArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "[start] install picker failed; aborting."
-    exit 1
+# --- Install picker / browser setup -----------------------------------------
+# First run (no saved selection) in interactive mode: skip the terminal picker
+# and let the operator choose model families in the BROWSER — the recorder
+# serves a setup page at /setup, and GET / redirects there until a backend is
+# installed. We just base-install the package here so the recorder can boot.
+# A saved selection (re-run) OR -NonInteractive keeps the original CLI path.
+$BrowserSetup = $false
+if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
+    Write-Host "[start] First run — installing the base package; you'll choose models in the browser."
+    & python -m pip install -e .
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "[start] base 'pip install -e .' failed; aborting."
+        exit 1
+    }
+    $BrowserSetup = $true
+} else {
+    $PickerArgs = @()
+    if ($NoMlx)           { $PickerArgs += "--no-mlx" }
+    if ($NonInteractive)  { $PickerArgs += "--non-interactive" }
+    & python tools\install_picker.py @PickerArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "[start] install picker failed; aborting."
+        exit 1
+    }
 }
 
 # --- Runtime python deps ----------------------------------------------------
@@ -167,6 +177,9 @@ if ($PortWlk) {
 Write-Host ""
 Write-Host "[start] Launching TapScribe…"
 Write-Host "        Dashboard       http://${BindHost}:${PortRec}/"
+if ($BrowserSetup) {
+    Write-Host "        Choose models   http://${BindHost}:${PortRec}/setup  (open this first — no models installed yet)"
+}
 Write-Host "        Live channel    $LiveLabel"
 Write-Host "        (first launch can take 10–30s while torch/transformers import — be patient)"
 Write-Host ""

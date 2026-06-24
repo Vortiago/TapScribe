@@ -143,7 +143,17 @@ Windows DPAPI (CurrentUser scope), so only the same Windows user can read it.
 | Recorder host | `localhost` | Recorder host |
 | Port | `8001` | Recorder port |
 | Use TLS | off | connect over `wss://` (Recorder started with `--tls`) |
+| Allow invalid / self-signed certificate | off | **insecure, testing only** — accept any TLS cert (see below); greyed out unless **Use TLS** is on |
 | Tap token | empty | tap token; **empty = `--no-auth`** (offer no subprotocol) |
+
+> **Allow invalid / self-signed certificate** is the `curl -k` equivalent: when ticked,
+> the Bridge accepts **any** server certificate over TLS — self-signed, expired, or
+> wrong-host — so you can target a Recorder serving a local self-signed cert without
+> first trusting it in the Windows certificate store. It is **off by default**, only
+> selectable when **Use TLS** is on (and forced off when TLS is off), and it **removes
+> MITM protection** — use it for local testing only, never against an untrusted network.
+> It threads through every connection: the `/tap` stream, the session pre-flight, and both
+> halves of **Test connection**. Seedable on first run via `TAPSCRIBE_TLS_ALLOW_SELF_SIGNED=1`.
 
 The **Test connection** button (like the SpatialChat bridge) probes `GET /health`
 for reachability and then opens a throwaway `/tap` handshake to confirm the tap
@@ -198,10 +208,10 @@ consonants aren't clipped. An old settings file's single global tuning migrates 
 each device's default on upgrade (no reset — ADR-0007).
 
 On first run the **Connection** fields are pre-seeded from the legacy `TAPSCRIBE_HOST` /
-`TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` / `TAPSCRIBE_IDENTITY` / `TAPSCRIBE_NAME` /
-`TAPSCRIBE_TAP_TOKEN` environment variables when present, so an existing
-env-based setup migrates automatically. They are optional, and the dialog is the
-source of truth thereafter.
+`TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` / `TAPSCRIBE_TLS_ALLOW_SELF_SIGNED` /
+`TAPSCRIBE_IDENTITY` / `TAPSCRIBE_NAME` / `TAPSCRIBE_TAP_TOKEN` environment variables
+when present, so an existing env-based setup migrates automatically. They are optional,
+and the dialog is the source of truth thereafter.
 
 ## Dev loop / demo (the acceptance check)
 

@@ -18,6 +18,7 @@ public sealed class SettingsDraft
     public string Host { get; set; } = "";
     public int Port { get; set; }
     public bool Tls { get; set; }
+    public bool AllowSelfSignedCert { get; set; }
     public string Token { get; set; } = "";
 
     // The two simple follow-default rows (mic + system loopback).
@@ -63,6 +64,7 @@ public sealed class SettingsDraft
             Host = current.Host,
             Port = current.Port,
             Tls = current.Tls,
+            AllowSelfSignedCert = current.AllowSelfSignedCert,
             Token = current.Token,
             _baseIdentity = current.Identity,
             _baseName = current.Name,
@@ -182,6 +184,7 @@ public sealed class SettingsDraft
             Host = Host.Trim(),
             Port = Port,
             Tls = Tls,
+            AllowSelfSignedCert = AllowSelfSignedCert,
             Identity = _baseIdentity,
             Name = _baseName,
             Token = Token.Trim(),

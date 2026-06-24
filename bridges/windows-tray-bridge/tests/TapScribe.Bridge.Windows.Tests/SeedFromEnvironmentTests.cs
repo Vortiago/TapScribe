@@ -9,7 +9,7 @@ public class SeedFromEnvironmentTests
 {
     private static readonly string[] Keys =
     [
-        "TAPSCRIBE_HOST", "TAPSCRIBE_PORT", "TAPSCRIBE_TLS",
+        "TAPSCRIBE_HOST", "TAPSCRIBE_PORT", "TAPSCRIBE_TLS", "TAPSCRIBE_TLS_ALLOW_SELF_SIGNED",
         "TAPSCRIBE_IDENTITY", "TAPSCRIBE_NAME", "TAPSCRIBE_TAP_TOKEN",
     ];
 
@@ -22,6 +22,7 @@ public class SeedFromEnvironmentTests
                 ["TAPSCRIBE_HOST"] = "rec.example",
                 ["TAPSCRIBE_PORT"] = "9200",
                 ["TAPSCRIBE_TLS"] = "1",
+                ["TAPSCRIBE_TLS_ALLOW_SELF_SIGNED"] = "1",
                 ["TAPSCRIBE_IDENTITY"] = "alice",
                 ["TAPSCRIBE_NAME"] = "Alice B",
             },
@@ -32,6 +33,7 @@ public class SeedFromEnvironmentTests
                 Assert.Equal("rec.example", seeded.Host);
                 Assert.Equal(9200, seeded.Port);
                 Assert.True(seeded.Tls);
+                Assert.True(seeded.AllowSelfSignedCert);
                 Assert.Equal("alice", seeded.Identity);
                 Assert.Equal("Alice B", seeded.Name);
             });
@@ -46,6 +48,7 @@ public class SeedFromEnvironmentTests
                 ["TAPSCRIBE_HOST"] = null,
                 ["TAPSCRIBE_PORT"] = null,
                 ["TAPSCRIBE_TLS"] = null,
+                ["TAPSCRIBE_TLS_ALLOW_SELF_SIGNED"] = null,
                 ["TAPSCRIBE_IDENTITY"] = null,
             },
             () =>
@@ -55,6 +58,7 @@ public class SeedFromEnvironmentTests
                 Assert.Equal("localhost", seeded.Host);
                 Assert.Equal(8001, seeded.Port);
                 Assert.False(seeded.Tls);
+                Assert.False(seeded.AllowSelfSignedCert); // insecure opt-in is off by default
                 Assert.False(string.IsNullOrEmpty(seeded.Identity)); // username / "windows-tray"
             });
     }

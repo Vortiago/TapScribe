@@ -16,6 +16,17 @@ public sealed record TapConnectionOptions
     /// <summary>Use wss:// (the Recorder was started with --tls).</summary>
     public bool Tls { get; init; }
 
+    /// <summary>
+    /// INSECURE, opt-in testing flag: accept <b>any</b> server certificate on the TLS
+    /// connection (expired, wrong-host, untrusted/self-signed root) — the <c>curl -k</c>
+    /// equivalent, for reaching a Recorder serving a local self-signed cert. Off by
+    /// default. Only honoured together with <see cref="Tls"/>: every connection site gates
+    /// the accept-any validator on <c>Tls &amp;&amp; AllowSelfSignedCert</c>, so it is never
+    /// wired up on a normal connection. Removes MITM protection; never use against an
+    /// untrusted network. See <see cref="InsecureTls"/>.
+    /// </summary>
+    public bool AllowSelfSignedCert { get; init; }
+
     /// <summary>Stable per-speaker identifier; the WAV filename slug.</summary>
     public string Identity { get; init; } = "windows-tray";
 
