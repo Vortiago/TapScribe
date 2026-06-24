@@ -393,7 +393,11 @@ internal sealed class SettingsForm : Form
         _draft.HangoverMs = (int)_hangover.Value;
         _draft.PreRollMs = (int)_preRoll.Value;
 
-        var rowsById = _draft.DeviceRows.ToDictionary(r => r.DeviceId, StringComparer.Ordinal);
+        // Indexer (not ToDictionary) so a duplicate device id from the injected enumerator
+        // doesn't throw into the WinForms message loop — last row wins, as it did before.
+        var rowsById = new Dictionary<string, PinnedDeviceRow>(StringComparer.Ordinal);
+        foreach (PinnedDeviceRow draftRow in _draft.DeviceRows)
+            rowsById[draftRow.DeviceId] = draftRow;
         foreach (DataGridViewRow row in _devices.Rows)
         {
             if (row.Tag is string deviceId && rowsById.TryGetValue(deviceId, out PinnedDeviceRow? draftRow))
