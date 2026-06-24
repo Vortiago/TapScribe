@@ -64,8 +64,8 @@ public class MeetingFlowTests
         // ...the pipeline ran exactly once on THIS session, showing progress and ending in the summary.
         Assert.Equal(1, rec.NewSessionCount);
         Assert.Equal(1, rec.TriggerCount(session));
-        Assert.Contains(views, v => v.Phase == "running");
-        Assert.Equal("done", views[^1].Phase);
+        Assert.Contains(views, v => v.Phase == PipelinePhase.Running);
+        Assert.Equal(PipelinePhase.Done, views[^1].Phase);
         Assert.Equal(FakeRecorder.SummaryFor(session), views[^1].SummaryText);
     }
 
@@ -84,12 +84,12 @@ public class MeetingFlowTests
         await controller.EndAsync();
 
         // ending (taps draining) → the four stage lines from the recorder → done.
-        Assert.Equal("ending", views[0].Phase);
-        List<string?> progress = views.Where(v => v.Phase == "running").Select(v => v.Progress).ToList();
+        Assert.Equal(PipelinePhase.Ending, views[0].Phase);
+        List<string?> progress = views.Where(v => v.Phase == PipelinePhase.Running).Select(v => v.Progress).ToList();
         Assert.Equal(
             ["Stripping silence…", "Transcribing 1/2…", "Transcribing 2/2…", "Summarizing…"],
             progress);
-        Assert.Equal("done", views[^1].Phase);
+        Assert.Equal(PipelinePhase.Done, views[^1].Phase);
         Assert.Equal(FakeRecorder.SummaryFor(session), views[^1].SummaryText);
     }
 
@@ -106,7 +106,7 @@ public class MeetingFlowTests
             var controller = new MeetingController(control, session, Immediate, drainAsync: () => Task.CompletedTask);
             controller.Updated += view => { lock (views) views.Add(view); };
             await controller.EndAsync();
-            Assert.Equal("done", views[^1].Phase);
+            Assert.Equal(PipelinePhase.Done, views[^1].Phase);
             return views[^1].SummaryText!;
         }
 
@@ -140,7 +140,7 @@ public class MeetingFlowTests
 
         Assert.Equal(2, rec.TriggerCount(session)); // the prior job + End's attempt, which got the real 409
         Assert.Contains(notices, n => n.Contains("busy", StringComparison.OrdinalIgnoreCase));
-        Assert.Equal("done", views[^1].Phase);
+        Assert.Equal(PipelinePhase.Done, views[^1].Phase);
         Assert.Equal(FakeRecorder.SummaryFor(session), views[^1].SummaryText);
     }
 
@@ -162,7 +162,7 @@ public class MeetingFlowTests
         await controller.ResumeAsync();
 
         Assert.Equal(1, rec.TriggerCount(session)); // resume NEVER re-triggers (a 2nd would 409)
-        Assert.Equal("done", views[^1].Phase);
+        Assert.Equal(PipelinePhase.Done, views[^1].Phase);
         Assert.Equal(FakeRecorder.SummaryFor(session), views[^1].SummaryText);
     }
 
@@ -180,7 +180,7 @@ public class MeetingFlowTests
 
         await controller.EndAsync();
 
-        Assert.Equal("failed", views[^1].Phase);
+        Assert.Equal(PipelinePhase.Failed, views[^1].Phase);
         Assert.Equal("transcribe", views[^1].FailureStage);
         Assert.Contains("No usable audio", views[^1].FailureReason, StringComparison.Ordinal);
     }

@@ -64,7 +64,7 @@ public class MeetingControllerTests
 
         // The finished summary is the terminal view the tray shows.
         PipelineView last = views[^1];
-        Assert.Equal("done", last.Phase);
+        Assert.Equal(PipelinePhase.Done, last.Phase);
         Assert.Equal("decided to ship", last.SummaryText);
     }
 
@@ -87,13 +87,13 @@ public class MeetingControllerTests
         await EndController(server, http, views).EndAsync();
 
         // First, while taps drain, the card shows the pre-trigger "ending" phase.
-        Assert.Equal("ending", views[0].Phase);
+        Assert.Equal(PipelinePhase.Ending, views[0].Phase);
         // Then a live progress line per stage, in order.
-        List<string?> progress = views.Where(v => v.Phase == "running").Select(v => v.Progress).ToList();
+        List<string?> progress = views.Where(v => v.Phase == PipelinePhase.Running).Select(v => v.Progress).ToList();
         Assert.Equal(
             ["Stripping silence…", "Transcribing 1/3…", "Transcribing 3/3…", "Summarizing…"],
             progress);
-        Assert.Equal("done", views[^1].Phase);
+        Assert.Equal(PipelinePhase.Done, views[^1].Phase);
     }
 
     [Fact]
@@ -108,7 +108,7 @@ public class MeetingControllerTests
         await EndController(server, http, views).EndAsync();
 
         PipelineView last = views[^1];
-        Assert.Equal("failed", last.Phase);
+        Assert.Equal(PipelinePhase.Failed, last.Phase);
         Assert.Equal("transcribe", last.FailureStage);
         Assert.Contains("No usable audio", last.FailureReason, StringComparison.Ordinal);
     }
@@ -130,7 +130,7 @@ public class MeetingControllerTests
 
         Assert.Equal(1, server.TriggerCount); // one POST, which got the 409 — not retried
         Assert.Contains(notices, n => n.Contains("busy", StringComparison.OrdinalIgnoreCase));
-        Assert.Equal("done", views[^1].Phase);
+        Assert.Equal(PipelinePhase.Done, views[^1].Phase);
         Assert.Equal("decided to ship", views[^1].SummaryText);
     }
 
@@ -173,7 +173,7 @@ public class MeetingControllerTests
         Assert.Equal(0, server.NewSessionCount);
         Assert.Equal(0, server.TriggerCount); // resume never re-triggers
         Assert.Equal(0, drainCount);          // resume never re-drains
-        Assert.Equal("done", views[^1].Phase);
+        Assert.Equal(PipelinePhase.Done, views[^1].Phase);
         Assert.Equal("decided to ship", views[^1].SummaryText);
     }
 
@@ -188,7 +188,7 @@ public class MeetingControllerTests
 
         await EndController(server, http, views).EndAsync();
 
-        Assert.Equal("done", views[^1].Phase); // the 500 blip didn't abort the loop
+        Assert.Equal(PipelinePhase.Done, views[^1].Phase); // the 500 blip didn't abort the loop
         Assert.True(server.PollCount >= 3);
     }
 }

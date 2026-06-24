@@ -14,7 +14,7 @@ public class PipelineViewTests
     {
         PipelineView view = PipelineView.Map(new PipelinePoll { State = "running", Stage = "strip", Status = "stripping" });
 
-        Assert.Equal("running", view.Phase);
+        Assert.Equal(PipelinePhase.Running, view.Phase);
         Assert.Equal("Stripping silence…", view.Progress);
         Assert.Equal("strip", view.Stage);
         Assert.Null(view.SummaryText);
@@ -67,7 +67,7 @@ public class PipelineViewTests
             Summary = new PipelineSummary { Summary = "decided to ship", Source = "local", Model = "Llama" },
         });
 
-        Assert.Equal("done", view.Phase);
+        Assert.Equal(PipelinePhase.Done, view.Phase);
         Assert.Equal("decided to ship", view.SummaryText);
         Assert.Equal("local", view.Summary?.Source);
         Assert.Equal("Llama", view.Summary?.Model);
@@ -79,7 +79,7 @@ public class PipelineViewTests
     {
         PipelineView view = PipelineView.Map(new PipelinePoll { State = "done", Summary = new PipelineSummary() });
 
-        Assert.Equal("done", view.Phase);
+        Assert.Equal(PipelinePhase.Done, view.Phase);
         Assert.Equal("", view.SummaryText);
     }
 
@@ -94,7 +94,7 @@ public class PipelineViewTests
         PipelineView view = PipelineView.Map(
             new PipelinePoll { State = "failed", Stage = "transcribe", Error = "boom", ErrorKind = kind });
 
-        Assert.Equal("failed", view.Phase);
+        Assert.Equal(PipelinePhase.Failed, view.Phase);
         Assert.Equal("transcribe", view.FailureStage);
         Assert.Contains(fragment, view.FailureReason, StringComparison.Ordinal);
     }
@@ -121,7 +121,7 @@ public class PipelineViewTests
     {
         PipelineView view = PipelineView.Map(new PipelinePoll { State = "idle" }, ending: true);
 
-        Assert.Equal("ending", view.Phase);
+        Assert.Equal(PipelinePhase.Ending, view.Phase);
         Assert.True(view.KeepPolling);
     }
 
@@ -130,15 +130,15 @@ public class PipelineViewTests
     {
         PipelineView view = PipelineView.Map(new PipelinePoll { State = "idle" }, meetingActive: true);
 
-        Assert.Equal("recording", view.Phase);
+        Assert.Equal(PipelinePhase.Recording, view.Phase);
         Assert.False(view.KeepPolling);
     }
 
     [Fact]
     public void IdlePoll_WithNoLocalLifecycle_IsIdle()
     {
-        Assert.Equal("idle", PipelineView.Map(new PipelinePoll { State = "idle" }).Phase);
-        Assert.Equal("idle", PipelineView.Map(null).Phase);
+        Assert.Equal(PipelinePhase.Idle, PipelineView.Map(new PipelinePoll { State = "idle" }).Phase);
+        Assert.Equal(PipelinePhase.Idle, PipelineView.Map(null).Phase);
     }
 
     [Fact]

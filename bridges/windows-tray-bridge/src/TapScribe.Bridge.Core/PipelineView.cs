@@ -1,5 +1,20 @@
 namespace TapScribe.Bridge.Core;
 
+/// <summary>The meeting card's lifecycle phase. <see cref="Running"/>/<see cref="Done"/>/
+/// <see cref="Failed"/> are derived from the Recorder's poll state; <see cref="Ending"/>/
+/// <see cref="Recording"/>/<see cref="Idle"/> are the tray's local pre- and post-pipeline
+/// lifecycle the poll can't express. An enum (not a string) so the Core↔shell seam — the
+/// <c>RenderPipeline</c> switch — can't silently mis-handle a typo'd phase.</summary>
+public enum PipelinePhase
+{
+    Idle,
+    Recording,
+    Ending,
+    Running,
+    Done,
+    Failed,
+}
+
 /// <summary>
 /// The view-model the tray's meeting card renders, built purely from a
 /// <see cref="PipelinePoll"/> by <see cref="Map"/> — the C# analogue of the
@@ -15,7 +30,7 @@ namespace TapScribe.Bridge.Core;
 /// stage + <c>error_kind</c>.
 /// </summary>
 public sealed record PipelineView(
-    string Phase,
+    PipelinePhase Phase,
     string? Progress,
     string? Stage,
     string? CurrentFile,
@@ -27,7 +42,7 @@ public sealed record PipelineView(
     /// <summary>True while the pipeline is still moving — the poll loop keeps going
     /// for <c>running</c> and the local pre-trigger <c>ending</c> phase, and stops on
     /// the terminal <c>done</c>/<c>failed</c> (and uninformative <c>idle</c>).</summary>
-    public bool KeepPolling => Phase is "running" or "ending";
+    public bool KeepPolling => Phase is PipelinePhase.Running or PipelinePhase.Ending;
 
     /// <summary>
     /// Map a raw poll body to the card view-model. <paramref name="meetingActive"/>
@@ -43,27 +58,27 @@ public sealed record PipelineView(
         switch (raw?.State)
         {
             case "running":
-                return Of("running",
+                return Of(PipelinePhase.Running,
                     progress: ProgressLabelFor(raw),
                     stage: NullIfEmpty(raw.Stage),
                     currentFile: NullIfEmpty(raw.CurrentFile));
             case "done":
                 PipelineSummary? summary = raw.Summary;
-                return Of("done", summary: summary, summaryText: summary?.Summary ?? "");
+                return Of(PipelinePhase.Done, summary: summary, summaryText: summary?.Summary ?? "");
             case "failed":
-                return Of("failed",
+                return Of(PipelinePhase.Failed,
                     stage: NullIfEmpty(raw.Stage),
                     failureStage: NullIfEmpty(raw.Stage),
                     failureReason: FailureReasonFor(raw));
             default:
                 // "idle" / missing / unrecognised: fold in the local lifecycle.
                 if (ending)
-                    return Of("ending");
-                return Of(meetingActive ? "recording" : "idle");
+                    return Of(PipelinePhase.Ending);
+                return Of(meetingActive ? PipelinePhase.Recording : PipelinePhase.Idle);
         }
     }
 
-    private static PipelineView Of(string phase, string? progress = null, string? stage = null,
+    private static PipelineView Of(PipelinePhase phase, string? progress = null, string? stage = null,
         string? currentFile = null, PipelineSummary? summary = null, string? summaryText = null,
         string? failureStage = null, string? failureReason = null) =>
         new(phase, progress, stage, currentFile, summary, summaryText, failureStage, failureReason);

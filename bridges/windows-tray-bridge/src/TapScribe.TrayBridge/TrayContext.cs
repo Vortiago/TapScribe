@@ -349,23 +349,23 @@ internal sealed class TrayContext : ApplicationContext
     {
         switch (view.Phase)
         {
-            case "ending":
+            case PipelinePhase.Ending:
                 ApplyStatus(new TrayStatus.Ending());
                 break;
-            case "running":
+            case PipelinePhase.Running:
                 ApplyStatus(new TrayStatus.Processing(view.Progress ?? "Processing…"));
                 break;
-            case "done":
+            case PipelinePhase.Done:
                 ApplyStatus(new TrayStatus.SummaryReady());
                 ShowInfoBalloon("Meeting summary ready", "Your meeting notes are ready.");
                 ShowSummary(view);
                 SetMeetingControls(running: false);
                 break;
-            case "failed":
+            case PipelinePhase.Failed:
                 FailPipeline(view.FailureReason ?? "The end-of-meeting pipeline failed.", view.FailureStage);
                 break;
             default:
-                // idle / recording — a resumed session that has no live pipeline; back to idle.
+                // Idle / Recording — a resumed session that has no live pipeline; back to idle.
                 ResetIdleUi();
                 break;
         }
