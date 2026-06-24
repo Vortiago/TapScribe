@@ -3750,6 +3750,35 @@ async def test_settings_models_card_links_to_setup(running_recorder: RunningReco
             await browser.close()
 
 
+# Shared layout-reachability probe used by the Settings stack guard AND the
+# cross-view sweep below. Returns the granular per-`.work__inner .panel` signals
+# both reason over — is the card clipped (an overflow:hidden box shorter than its
+# content), is it past the fold, does its OWN body scroll, does an ANCESTOR up to
+# the view boundary scroll — and lets each test combine them for its question.
+# Structure-independent: it never names the fix classes (`scroll-stack`/`noshrink`).
+_PANEL_LAYOUT_JS = """() => {
+  const titleOf = p => (p.querySelector('.panel__title')?.textContent || '').trim() || '(untitled panel)';
+  const ancestorScrolls = el => {
+    for (let n = el.parentElement; n; n = n.parentElement) {
+      const oy = getComputedStyle(n).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight + 1) return true;
+      if (n.classList.contains('work__inner')) break;  // view boundary
+    }
+    return false;
+  };
+  return [...document.querySelectorAll('.work__inner .panel')].map(p => {
+    const body = p.querySelector(':scope > .panel__body');
+    return {
+      title: titleOf(p),
+      clipped: p.scrollHeight > p.clientHeight + 1,
+      belowFold: p.getBoundingClientRect().bottom > window.innerHeight + 1,
+      bodyScrolls: !!(body && body.scrollHeight > body.clientHeight + 1),
+      ancestorScrolls: ancestorScrolls(p),
+    };
+  });
+}"""
+
+
 async def test_settings_stack_scrolls_without_clipping_cards(running_recorder: RunningRecorder):
     """Operator report: on the Settings page "things were not taking up the
     space they need and no scrollbars" — cards squished, Save buttons gone.
@@ -3782,57 +3811,30 @@ async def test_settings_stack_scrolls_without_clipping_cards(running_recorder: R
             await page.wait_for_selector('[data-slot="sdSave"]', timeout=6000)
 
             # Measure once the live + batch cards have rendered (one poll tick).
-            # Structure-independent: find the cards under the view body and walk
-            # up each card to its nearest scrollable ancestor (overflow-y auto/
-            # scroll that actually overflows) — whatever element owns the scroll.
-            measure = await page.evaluate(
-                """() => {
-                  const titleOf = p => (p.querySelector('.panel__title')?.textContent || '').trim();
-                  const panels = [...document.querySelectorAll('.work__inner .panel')];
-                  const scrollableAncestor = el => {
-                    for (let n = el.parentElement; n; n = n.parentElement) {
-                      const oy = getComputedStyle(n).overflowY;
-                      if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight + 1)
-                        return true;
-                      if (n.classList.contains('work__inner')) break;  // view boundary
-                    }
-                    return false;
-                  };
-                  const belowFold = panels.filter(
-                    p => p.getBoundingClientRect().bottom > window.innerHeight + 1
-                  );
-                  return {
-                    // overflow:hidden card whose content exceeds its box => clipped.
-                    clipped: panels.filter(p => p.scrollHeight > p.clientHeight + 1).map(titleOf),
-                    // a card past the fold => the scroll scenario is genuinely exercised.
-                    belowFold: belowFold.map(titleOf),
-                    // a below-fold card with NO scroll path => unreachable.
-                    unreachable: belowFold.filter(p => !scrollableAncestor(p)).map(titleOf),
-                    count: panels.length,
-                  };
-                }"""
-            )
-            assert measure["count"] >= 4, (
-                f"expected the 4 settings cards (Models, Live, Summarizer, Batch), saw {measure['count']}"
+            rows = await page.evaluate(_PANEL_LAYOUT_JS)
+            assert len(rows) >= 4, (
+                f"expected the 4 settings cards (Models, Live, Summarizer, Batch), saw {len(rows)}"
             )
             # (1) No card clipped — every control (incl. the Save buttons) renders.
             # This is the primary bug symptom: without the fix the cards squish to
             # fit and overflow:hidden cuts them off, so this fails first and loudly.
-            assert not measure["clipped"], (
-                f"at 1440x{height} these cards are clipped (content cut off): {measure['clipped']}"
-            )
+            clipped = [r["title"] for r in rows if r["clipped"]]
+            assert not clipped, f"at 1440x{height} these cards are clipped (content cut off): {clipped}"
             # Precondition: with the cards at natural height they must overflow this
             # viewport — otherwise (2) passes vacuously without exercising the scroll
             # path. (In the bug state the cards squish to fit, so this stays empty and
             # the clip check above is what fires.)
-            assert measure["belowFold"], (
+            below_fold = [r for r in rows if r["belowFold"]]
+            assert below_fold, (
                 f"at 1440x{height} no card extends past the fold — the test isn't "
                 "exercising overflow; lower the viewport height"
             )
-            # (2) Any card extending past the viewport must have a scroll path.
-            assert not measure["unreachable"], (
+            # (2) Any card extending past the viewport must be reachable by a page
+            # scroll (some ancestor scrolls).
+            unreachable = [r["title"] for r in below_fold if not r["ancestorScrolls"]]
+            assert not unreachable, (
                 f"at 1440x{height} these cards extend below the fold with NO scrollbar — "
-                f"unreachable (the reported bug): {measure['unreachable']}"
+                f"unreachable (the reported bug): {unreachable}"
             )
 
             # The concrete element that vanished: the Summarizer "Save default"
@@ -3892,29 +3894,6 @@ async def test_no_view_clips_content_without_scroll_path(
         )
         assert resp.status_code == 200, resp.text
 
-    # Any overflow:hidden `.panel` whose content exceeds its box (clipped) AND
-    # that has no scroll path — its own body doesn't scroll and no ancestor up to
-    # the view boundary scrolls.
-    measure_js = """() => {
-      const titleOf = p => (p.querySelector('.panel__title')?.textContent || '').trim();
-      const ancestorScrolls = el => {
-        for (let n = el.parentElement; n; n = n.parentElement) {
-          const oy = getComputedStyle(n).overflowY;
-          if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight + 1) return true;
-          if (n.classList.contains('work__inner')) break;
-        }
-        return false;
-      };
-      const bad = [];
-      for (const p of document.querySelectorAll('.work__inner .panel')) {
-        if (p.scrollHeight <= p.clientHeight + 1) continue;  // not clipped
-        const body = p.querySelector(':scope > .panel__body');
-        const bodyScrolls = body && body.scrollHeight > body.clientHeight + 1;
-        if (!bodyScrolls && !ancestorScrolls(p)) bad.push(titleOf(p) || '(untitled panel)');
-      }
-      return bad;
-    }"""
-
     views = ("capture", "recordings", "transcript", "summary", "taps", "sessions", "people", "settings")
     async with playwright_session() as pw:
         try:
@@ -3928,6 +3907,8 @@ async def test_no_view_clips_content_without_scroll_path(
             context = await browser.new_context(viewport={"width": 1400, "height": 600})
             page = await context.new_page()
             await page.goto(base, wait_until="domcontentloaded")
+            # Boot done once the spine has rendered the seeded session (proves
+            # /api/state + the model catalogs the live/batch cards read have landed).
             await page.wait_for_function(
                 f"""() => {{
                   const sel = document.querySelector('[data-slot="sessionPick"]');
@@ -3938,11 +3919,20 @@ async def test_no_view_clips_content_without_scroll_path(
             offenders = {}
             for v in views:
                 await page.evaluate("(x) => window.gotoView(x)", v)
+                # Deterministic per-view settle: wait for the view's panels to
+                # render (every view has ≥1), not a fixed sleep — the catalogs are
+                # already loaded (boot wait above), so the cards lay out at once.
                 await page.wait_for_function(
-                    "() => document.querySelector('#viewRoot')?.childElementCount > 0", timeout=8000
+                    "() => document.querySelectorAll('.work__inner .panel').length > 0", timeout=8000
                 )
-                await page.wait_for_timeout(700)  # let the first poll + async catalogs render
-                bad = await page.evaluate(measure_js)
+                # A clipped panel whose content is reachable neither by its own body
+                # scrolling nor by a page (ancestor) scroll = the bug class.
+                rows = await page.evaluate(_PANEL_LAYOUT_JS)
+                bad = [
+                    r["title"]
+                    for r in rows
+                    if r["clipped"] and not r["bodyScrolls"] and not r["ancestorScrolls"]
+                ]
                 if bad:
                     offenders[v] = bad
             assert not offenders, (
