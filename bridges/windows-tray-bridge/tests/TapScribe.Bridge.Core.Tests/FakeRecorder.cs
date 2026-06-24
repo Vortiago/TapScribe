@@ -24,8 +24,10 @@ namespace TapScribe.Bridge.Core.Tests;
 /// </summary>
 internal sealed class FakeRecorder : IAsyncDisposable
 {
-    /// <summary>The summary text the pipeline resolves to on the terminal poll.</summary>
-    public const string SummaryText = "decided to ship";
+    /// <summary>The summary text the pipeline resolves to on the terminal poll — distinct
+    /// per session, so a test can prove a meeting receives ITS OWN session's summary and
+    /// not another's (the recorder persists one summary per session-summary.json).</summary>
+    public static string SummaryFor(string session) => $"decided to ship — {session}";
 
     private sealed class TapRecord
     {
@@ -201,7 +203,7 @@ internal sealed class FakeRecorder : IAsyncDisposable
             3 => Running(session, "transcribe", "transcribing", 2, 2, "b.wav"),
             4 => Running(session, "summarize", "summarizing"),
             _ => $"{{\"ok\":true,\"session\":\"{session}\",\"state\":\"done\"," +
-                 $"\"summary\":{{\"summary\":\"{SummaryText}\",\"source\":\"local\"}}}}",
+                 $"\"summary\":{{\"summary\":\"{SummaryFor(session)}\",\"source\":\"local\"}}}}",
         };
     }
 

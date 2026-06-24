@@ -66,7 +66,7 @@ public class MeetingFlowTests
         Assert.Equal(1, rec.TriggerCount(session));
         Assert.Contains(views, v => v.Phase == "running");
         Assert.Equal("done", views[^1].Phase);
-        Assert.Equal(FakeRecorder.SummaryText, views[^1].SummaryText);
+        Assert.Equal(FakeRecorder.SummaryFor(session), views[^1].SummaryText);
     }
 
     [Fact]
@@ -90,7 +90,33 @@ public class MeetingFlowTests
             ["Stripping silence…", "Transcribing 1/2…", "Transcribing 2/2…", "Summarizing…"],
             progress);
         Assert.Equal("done", views[^1].Phase);
-        Assert.Equal(FakeRecorder.SummaryText, views[^1].SummaryText);
+        Assert.Equal(FakeRecorder.SummaryFor(session), views[^1].SummaryText);
+    }
+
+    [Fact]
+    public async Task TwoConcurrentMeetings_EachReceivesItsOwnSessionsSummary_NeverCrossed()
+    {
+        await using FakeRecorder rec = await FakeRecorder.StartAsync();
+        using var http = new HttpClient();
+        using ControlClient control = Control(rec, http);
+
+        async Task<string> EndAndReadSummary(string session)
+        {
+            var views = new List<PipelineView>();
+            var controller = new MeetingController(control, session, Immediate, drainAsync: () => Task.CompletedTask);
+            controller.Updated += view => { lock (views) views.Add(view); };
+            await controller.EndAsync();
+            Assert.Equal("done", views[^1].Phase);
+            return views[^1].SummaryText!;
+        }
+
+        // Two meetings ended concurrently against the same Recorder.
+        string[] summaries = await Task.WhenAll(EndAndReadSummary("meet-A"), EndAndReadSummary("meet-B"));
+
+        // Each meeting got the summary persisted for ITS OWN session — not the other's.
+        Assert.Equal(FakeRecorder.SummaryFor("meet-A"), summaries[0]);
+        Assert.Equal(FakeRecorder.SummaryFor("meet-B"), summaries[1]);
+        Assert.NotEqual(summaries[0], summaries[1]);
     }
 
     [Fact]
@@ -115,7 +141,7 @@ public class MeetingFlowTests
         Assert.Equal(2, rec.TriggerCount(session)); // the prior job + End's attempt, which got the real 409
         Assert.Contains(notices, n => n.Contains("busy", StringComparison.OrdinalIgnoreCase));
         Assert.Equal("done", views[^1].Phase);
-        Assert.Equal(FakeRecorder.SummaryText, views[^1].SummaryText);
+        Assert.Equal(FakeRecorder.SummaryFor(session), views[^1].SummaryText);
     }
 
     [Fact]
@@ -137,7 +163,7 @@ public class MeetingFlowTests
 
         Assert.Equal(1, rec.TriggerCount(session)); // resume NEVER re-triggers (a 2nd would 409)
         Assert.Equal("done", views[^1].Phase);
-        Assert.Equal(FakeRecorder.SummaryText, views[^1].SummaryText);
+        Assert.Equal(FakeRecorder.SummaryFor(session), views[^1].SummaryText);
     }
 
     [Fact]
