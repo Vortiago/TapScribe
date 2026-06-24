@@ -74,6 +74,47 @@ public class BridgeSettingsTests
     }
 
     [Fact]
+    public void ToConnectionOptions_CarriesAllowSelfSignedCert()
+    {
+        var settings = new BridgeSettings { Tls = true, AllowSelfSignedCert = true };
+
+        Assert.True(settings.ToConnectionOptions().AllowSelfSignedCert);
+    }
+
+    [Fact]
+    public void AllowSelfSignedCert_DefaultsOff()
+    {
+        Assert.False(new BridgeSettings().AllowSelfSignedCert);
+        Assert.False(new BridgeSettings().ToConnectionOptions().AllowSelfSignedCert);
+    }
+
+    [Fact]
+    public void ToConnectionOptions_WithoutTls_CarriesAllowSelfSignedCertThroughButItIsInert()
+    {
+        // The data layer carries the opt-in faithfully even with TLS off — the security
+        // boundary is the connection site, which only wires the accept-any validator when
+        // Tls && AllowSelfSignedCert (so this combination is harmless: no cert is validated
+        // on a ws:// connection). Pinned so the carry-through stays decoupled from the gate.
+        var settings = new BridgeSettings { Tls = false, AllowSelfSignedCert = true };
+
+        TapConnectionOptions options = settings.ToConnectionOptions();
+
+        Assert.False(options.Tls);
+        Assert.True(options.AllowSelfSignedCert); // present but inert without Tls
+    }
+
+    [Fact]
+    public void AllowSelfSignedCert_RoundTripsThroughJson()
+    {
+        var original = new BridgeSettings { Tls = true, AllowSelfSignedCert = true };
+
+        string json = JsonSerializer.Serialize(original);
+        BridgeSettings restored = JsonSerializer.Deserialize<BridgeSettings>(json)!;
+
+        Assert.True(restored.AllowSelfSignedCert);
+    }
+
+    [Fact]
     public void EffectiveDevices_WhenNoneSaved_DefaultsToFollowDefaultMicAndLoopback()
     {
         // A pre-#106 settings file has no devices key. The effective selection must be

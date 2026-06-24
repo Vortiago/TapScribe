@@ -112,7 +112,9 @@ internal sealed class TrayContext : ApplicationContext
             //    Recorder is unreachable or the token is rejected, it throws here, before any
             //    device is opened, and the catch classifies it into a clear message.
             string sessionId;
-            using (var control = new ControlClient(settings.Host, settings.Port, settings.Tls, settings.Token))
+            using (var control = new ControlClient(
+                settings.Host, settings.Port, settings.Tls, settings.Token,
+                allowSelfSignedCert: settings.AllowSelfSignedCert))
             using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
                 // Bound the round-trip: without a token HttpClient waits its 100 s default,
                 // which would otherwise wedge the tray on "Starting…" against a host that

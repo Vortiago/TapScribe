@@ -90,8 +90,9 @@ public sealed record ResolveResult(
     /// <summary>
     /// Build the per-device <see cref="TapConnectionOptions"/> for a meeting: each
     /// resolved device taps under its own <c>Identity</c>/<c>Name</c> while sharing the
-    /// connection coordinates from <paramref name="baseOptions"/> (host/port/tls/token)
-    /// and routing into the one detached <paramref name="session"/> — so the meeting is
+    /// connection coordinates from <paramref name="baseOptions"/>
+    /// (host/port/tls/allow-self-signed/token) and routing into the one detached
+    /// <paramref name="session"/> — so the meeting is
     /// isolated from anything else on the Recorder (per-bridge Sessions, ADR-0005).
     /// </summary>
     public IReadOnlyList<TapConnectionOptions> ToTapOptions(

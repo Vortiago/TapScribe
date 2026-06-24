@@ -8,7 +8,7 @@ namespace TapScribe.TrayBridge;
 /// <summary>
 /// The modal settings dialog, in three tabs (issue #106):
 /// <list type="bullet">
-/// <item><b>Connection</b> — Recorder host/port/TLS/identity/name/token + Test connection.</item>
+/// <item><b>Connection</b> — Recorder host/port/TLS/allow-self-signed/identity/name/token + Test connection.</item>
 /// <item><b>Devices</b> — which devices to tap: the two follow-default rows (mic + system
 /// loopback) plus every concrete endpoint for pinning, each with an editable identity/name.</item>
 /// <item><b>Level gate</b> — the bridge-side gate knobs: a sensitivity slider (mapped to a
@@ -29,6 +29,13 @@ internal sealed class SettingsForm : Form
     private readonly TextBox _host = new();
     private readonly NumericUpDown _port = new() { Minimum = 1, Maximum = 65535, Width = 90 };
     private readonly CheckBox _tls = new() { Text = "Use TLS (wss://)", AutoSize = true };
+    // Concise on the dialog (an AutoSize checkbox doesn't wrap and the tab is ~436px
+    // wide); the full "accepts any cert / testing only" caveat lives in the README.
+    private readonly CheckBox _allowSelfSigned = new()
+    {
+        Text = "Allow self-signed certificate (insecure)",
+        AutoSize = true,
+    };
     private readonly TextBox _token = new() { UseSystemPasswordChar = true };
     private readonly CheckBox _showToken = new() { Text = "Show token", AutoSize = true };
     private readonly Button _testButton = new() { Text = "Test connection", Width = 120 };
@@ -112,6 +119,12 @@ internal sealed class SettingsForm : Form
         AddRow(page, "Port", _port, ref y, inputWidth);
         _port.Value = Math.Clamp(_current.Port, 1, 65535);
         AddCheck(page, _tls, _current.Tls, ref y, inputX);
+        // Indented under TLS to read as its sub-option. Only meaningful over wss://, so it
+        // is greyed out unless TLS is on and forced off when TLS is turned off — the same
+        // Tls && AllowSelfSignedCert scoping the connection sites enforce, surfaced in the UI.
+        AddCheck(page, _allowSelfSigned, _current.Tls && _current.AllowSelfSignedCert, ref y, inputX + 12);
+        _tls.CheckedChanged += (_, _) => SyncSelfSignedEnabled();
+        SyncSelfSignedEnabled();
         AddRow(page, "Tap token", _token, ref y, inputWidth);
         _token.Text = _current.Token;
         AddCheck(page, _showToken, isChecked: false, ref y, inputX);
@@ -135,6 +148,15 @@ internal sealed class SettingsForm : Form
         _testButton.Click += (_, _) => _ = TestConnectionAsync();
         page.Controls.Add(_testButton);
         return page;
+
+        // "Allow self-signed" only applies over TLS: disable it without TLS and force it
+        // off, so a saved value can never be collected while TLS is off.
+        void SyncSelfSignedEnabled()
+        {
+            _allowSelfSigned.Enabled = _tls.Checked;
+            if (!_tls.Checked)
+                _allowSelfSigned.Checked = false;
+        }
 
         static void AddRow(TabPage host, string label, Control input, ref int rowY, int width)
         {
@@ -428,6 +450,9 @@ internal sealed class SettingsForm : Form
             Host = _host.Text.Trim(),
             Port = (int)_port.Value,
             Tls = _tls.Checked,
+            // Belt-and-suspenders: never persist the insecure opt-in without TLS, even if a
+            // race left the checkbox ticked (it's force-cleared on the TLS toggle above).
+            AllowSelfSignedCert = _tls.Checked && _allowSelfSigned.Checked,
             // The base identity/name are the env-seed / first-run default (they feed
             // DefaultDevices when nothing is saved); the authoritative per-tap identity
             // lives in Devices, so pass these through unchanged rather than re-deriving.
