@@ -54,6 +54,12 @@ Apple Silicon), and launches TapScribe on port 8001 with
 `whisperlivekit-server` as a child on port 8000. Child logs are prefixed
 `[wlk]`. Ctrl+C stops both.
 
+On first run, pick transcription models in the **browser setup screen**: open
+`http://localhost:8001/setup` (`/` redirects there until a model is installed)
+and choose Whisper / Voxtral / Parakeet — the page installs them. `/setup`
+doubles as a "manage models" surface. Headless hosts can pass
+`--non-interactive` to install the saved/default selection without the browser.
+
 Open `http://localhost:8001/`. On first run two secrets are generated and
 printed:
 

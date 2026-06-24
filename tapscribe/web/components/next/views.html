@@ -223,6 +223,25 @@
 <template id="tpl-next-view-settings">
   <div data-slot="head"></div>
 
+  <!-- MODELS — entry point to the browser setup / manage-models page (/setup),
+       a separate full-page app (setup.html), so the button is a plain
+       navigation link rather than an in-dashboard view. Static card: no
+       renderRegion / no per-tick rebuild. The installed-summary line fills once
+       from GET /api/setup/state on build (best-effort). -->
+  <div class="panel panel--accent">
+    <div class="panel__head">
+      <div class="panel__title"><span class="ic">📦</span>Models</div>
+      <div class="panel__hint">install &amp; manage transcription models</div>
+    </div>
+    <div class="panel__body">
+      <div class="dim" style="margin-bottom:9px">Add or change transcription models.</div>
+      <div class="mono dim" data-slot="modelsInstalled" style="margin-bottom:11px">…</div>
+      <a class="act act--sm act--primary" href="/setup">Manage models →</a>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
   <!-- LIVE engine — streaming model + initial prompt. renderRegion-guarded: it
        holds a <select> + <textarea> rebuilt each poll tick. -->
   <div class="panel panel--accent">

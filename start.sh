@@ -8,7 +8,7 @@
 #   bash start.sh --no-auto-live          # boot the recorder without starting the live channel
 #   bash start.sh --no-auth               # disable dashboard auth + /tap token gate (DEV ONLY; insecure on LAN)
 #   bash start.sh --tls                   # serve https:// + wss:// (auto self-signed if no cert provided)
-#   bash start.sh --non-interactive       # skip the install picker prompt; use the saved selection
+#   bash start.sh --non-interactive       # install the saved/default selection in-terminal (no browser)
 #   SX_MODEL=small.en bash start.sh       # initial live model; changeable from the dashboard
 #
 # Dashboard auth: a password is generated on first run, persisted to
@@ -18,16 +18,14 @@
 # It will:
 #   1. Find a Python 3.12+
 #   2. Create a venv at ./.venv if missing
-#   3. Launch tools/install_picker.py — interactive checkbox prompt that
-#      asks which model families (Whisper / Voxtral / Parakeet)
-#      to install. Pre-checks the previous selection from
-#      .tapscribe-install.json so re-runs are one keystroke (Enter).
-#   4. The picker runs `pip install -e ".[…]"` for the chosen extras —
-#      but only when the selection or pyproject.toml actually changed
-#      since the last install. An unchanged re-run skips pip entirely
-#      instead of re-doing the editable package's uninstall/reinstall.
-#      On Apple Silicon the MLX-flavoured extras are added automatically
-#      (mlx-whisper / parakeet-mlx / …) — `--no-mlx` opts out.
+#   3. Pick transcription models in the BROWSER: the recorder serves a setup
+#      page at /setup (GET / redirects there until a model is installed) —
+#      choose Whisper / Voxtral / Parakeet there. First run base-installs the
+#      package only.
+#   4. Re-runs re-apply the saved selection (.tapscribe-install.json) via
+#      `tools/install_picker.py --non-interactive`, running pip only when the
+#      selection or pyproject.toml changed. On Apple Silicon MLX-flavoured
+#      extras are added automatically (`--no-mlx` opts out).
 #   5. Launch the TapScribe recorder (port 8001) — which then spawns
 #      whisperlivekit-server (port 8000) as a child you can stop/start/reconfigure
 #      from the dashboard.
@@ -142,15 +140,15 @@ source .venv/bin/activate
 
 python -m pip install --quiet --upgrade pip
 
-# --- Install picker / browser setup -----------------------------------------
-# First run (no saved selection) in interactive mode: skip the terminal picker
-# and let the operator choose model families in the BROWSER — the recorder
-# serves a setup page at /setup, and GET / redirects there until a backend is
-# installed. We just base-install the package here so the recorder can boot.
-#
-# A saved selection (re-run) OR --non-interactive keeps the original CLI path:
-# tools/install_picker.py resolves the chosen model extras and runs pip. So
-# scripted/headless bring-up is unchanged, and so is every run after the first.
+# --- Model install ----------------------------------------------------------
+# Models are chosen in the BROWSER at /setup (the recorder redirects there until
+# a model is installed). This script only makes the package importable so the
+# recorder can boot:
+#   * First run, interactive: base-install the package; pick models at /setup.
+#   * Re-run, or --non-interactive: re-apply the saved selection via
+#     `install_picker.py --non-interactive` (pip runs only on a changed
+#     selection / pyproject). To pick models in the terminal, run
+#     `python tools/install_picker.py` directly.
 BROWSER_SETUP=0
 if [ ! -f .tapscribe-install.json ] && [ "$NON_INTERACTIVE" -eq 0 ]; then
     echo "[start] First run — installing the base package; you'll choose models in the browser."
@@ -160,13 +158,11 @@ if [ ! -f .tapscribe-install.json ] && [ "$NON_INTERACTIVE" -eq 0 ]; then
     fi
     BROWSER_SETUP=1
 else
+    # Always non-interactive: re-apply the saved selection with no prompt.
     # `--no-mlx` propagates so the picker also skips the MLX-flavoured extras.
-    PICKER_ARGS=()
+    PICKER_ARGS=(--non-interactive)
     if [ "$NO_MLX" -eq 1 ]; then
         PICKER_ARGS+=(--no-mlx)
-    fi
-    if [ "$NON_INTERACTIVE" -eq 1 ]; then
-        PICKER_ARGS+=(--non-interactive)
     fi
     if ! python tools/install_picker.py "${PICKER_ARGS[@]}"; then
         echo "[start] install picker failed; aborting." >&2

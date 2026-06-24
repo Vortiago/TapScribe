@@ -20,7 +20,7 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson, wireConfigSave, wireSave } from "../../api.js";
+import { getJson, putJson, wireConfigSave, wireSave } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header } from "../shell.js";
 import * as configCard from "../../components/config-card.js";
@@ -53,6 +53,20 @@ export function build(ctx) {
     title: "Settings",
     sub: "live & batch engines + prompts — each prompt gates on its own model; sessions can override",
   });
+
+  // ---- Models card: link to the browser setup / manage-models page ----------
+  // /setup is a separate full-page app, so the button itself is a plain
+  // <a href="/setup"> in the template (no JS for navigation). We only fill the
+  // installed-summary line once, best-effort, from the same state /setup reads.
+  const modelsInstalled = pick(frag, "modelsInstalled");
+  getJson("/api/setup/state")
+    .then((/** @type {{ families?: { installed: boolean, label: string }[] }} */ s) => {
+      const installed = (s?.families || []).filter((f) => f.installed).map((f) => f.label);
+      modelsInstalled.textContent = installed.length
+        ? `Installed: ${installed.join(", ")}`
+        : "No models installed yet — open setup to add one.";
+    })
+    .catch(() => { modelsInstalled.textContent = "Couldn't load installed models."; });
 
   // BATCH card hosts (reused engine selector + config-card).
   const engineHost = pick(frag, "engineHost");
