@@ -7,7 +7,7 @@
 #   .\start.ps1 -NoAutoLive              # boot without starting the live channel
 #   .\start.ps1 -NoAuth                  # disable dashboard auth + /tap token gate (DEV ONLY)
 #   .\start.ps1 -Tls                     # serve https:// + wss:// (auto self-signed)
-#   .\start.ps1 -NonInteractive          # skip the install picker prompt; use the saved selection
+#   .\start.ps1 -NonInteractive          # install the saved/default selection in-terminal (no browser)
 
 [CmdletBinding()]
 param(
@@ -49,12 +49,13 @@ $env:PYTHONUNBUFFERED = "1"
 Write-Host "[start] Upgrading pip…"
 & python -m pip install --upgrade pip
 
-# --- Install picker / browser setup -----------------------------------------
-# First run (no saved selection) in interactive mode: skip the terminal picker
-# and let the operator choose model families in the BROWSER — the recorder
-# serves a setup page at /setup, and GET / redirects there until a backend is
-# installed. We just base-install the package here so the recorder can boot.
-# A saved selection (re-run) OR -NonInteractive keeps the original CLI path.
+# --- Model install ----------------------------------------------------------
+# Models are chosen in the BROWSER at /setup (the recorder redirects there until
+# a model is installed). This script only makes the package importable:
+#   * First run, interactive: base-install the package; pick models at /setup.
+#   * Re-run, or -NonInteractive: re-apply the saved selection via
+#     `install_picker.py --non-interactive`. To pick models in the terminal, run
+#     `python tools\install_picker.py` directly.
 $BrowserSetup = $false
 if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
     Write-Host "[start] First run — installing the base package; you'll choose models in the browser."
@@ -65,9 +66,9 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
     }
     $BrowserSetup = $true
 } else {
-    $PickerArgs = @()
-    if ($NoMlx)           { $PickerArgs += "--no-mlx" }
-    if ($NonInteractive)  { $PickerArgs += "--non-interactive" }
+    # Always non-interactive: re-apply the saved selection with no prompt.
+    $PickerArgs = @("--non-interactive")
+    if ($NoMlx) { $PickerArgs += "--no-mlx" }
     & python tools\install_picker.py @PickerArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Error "[start] install picker failed; aborting."
