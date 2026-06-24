@@ -482,7 +482,9 @@ def _files_signature(wavs: list[dict[str, Any]], stripped: dict[str, Any] | None
     not-yet-materialised session)."""
     if not wavs and not stripped:
         return ""
-    h = hashlib.sha1()
+    # A plain content checksum, NOT a security digest — usedforsecurity=False
+    # says so (and satisfies bandit B324, which flags bare sha1 as weak crypto).
+    h = hashlib.sha1(usedforsecurity=False)
 
     def feed(*parts: object) -> None:
         for p in parts:
