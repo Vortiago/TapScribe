@@ -3759,9 +3759,9 @@ async def test_settings_stack_scrolls_without_clipping_cards(running_recorder: R
     a short viewport pushed free space negative and every card shrank below its
     content; `.panel`'s overflow:hidden then clipped the Save buttons while the
     view never overflowed, so NO scrollbar appeared. The fix wraps them in a
-    `.settings-stack` block scroller: cards keep natural height and the stack
+    `.scroll-stack` block scroller: cards keep natural height and the stack
     scrolls. The assertions are deliberately structure-independent (they don't
-    name `.settings-stack`) so they re-fail on the SYMPTOM if a later refactor
+    name `.scroll-stack`) so they re-fail on the SYMPTOM if a later refactor
     reintroduces the clip — (1) no card is clipped, and (2) when the cards
     exceed the viewport some ancestor scroller actually scrolls, so the last
     card's Save button stays reachable. One short height is enough: the cards
@@ -3844,6 +3844,110 @@ async def test_settings_stack_scrolls_without_clipping_cards(running_recorder: R
             box = await save.bounding_box()
             assert box and box["y"] >= 0 and box["y"] + box["height"] <= height + 1, (
                 f"Save button not fully on-screen after scroll (box={box}, viewport h={height})"
+            )
+        finally:
+            await browser.close()
+
+
+async def test_no_view_clips_content_without_scroll_path(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,
+    tmp_path: Path,
+):
+    """Cross-view layout-reachability guard for the Settings/Taps/Capture clip
+    class. A view that stacks natural-height `.panel`s in `.work__inner` (a flex
+    column; every `.panel` is overflow:hidden) shrinks them under negative free
+    space on a short viewport and clips their content with NO scrollbar — the
+    boxes shrink to fit, so the column never overflows and nothing scrolls. This
+    sweeps EVERY /next view at a short height and fails if any `.panel` is
+    clipped (scrollHeight > clientHeight) with no scroll path (neither its own
+    body nor any ancestor scrolls).
+
+    Structure-independent on purpose — it never names `.scroll-stack`/`.noshrink`,
+    so it re-fails on the SYMPTOM if a refactor reintroduces the clip in ANY view
+    (this is what caught Taps + Capture once Settings was fixed). A new stacked
+    view that forgets a scroll owner trips it."""
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    # Seed a session WAV + transcript + two archived sessions so the data-driven
+    # views render real content; the at-risk stacked views (Settings / Taps /
+    # Capture) render their panels regardless.
+    fake_transcriber.text_by_speaker["Alice"] = "Seeded reachability-sweep line. " * 8
+    src = synth_speech_like_wav(tmp_path / "sweep.wav", seconds=0.8, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=ws_base, identity="alice", name="Alice", wav_path=src, utterance_id="utt-reach-1"
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+    for sid in ("2024-05-01T10-00-00Z", "2024-05-02T10-00-00Z"):
+        d = rec.recordings_dir / sid
+        d.mkdir(parents=True)
+        synth_speech_like_wav(d / f"{sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        recorded = sorted(rec.session_dir.glob("*.wav"))
+        resp = await client.post(
+            "/api/transcribe",
+            json={"session": rec.session_start, "name": recorded[0].name, "model": "tiny.en"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    # Any overflow:hidden `.panel` whose content exceeds its box (clipped) AND
+    # that has no scroll path — its own body doesn't scroll and no ancestor up to
+    # the view boundary scrolls.
+    measure_js = """() => {
+      const titleOf = p => (p.querySelector('.panel__title')?.textContent || '').trim();
+      const ancestorScrolls = el => {
+        for (let n = el.parentElement; n; n = n.parentElement) {
+          const oy = getComputedStyle(n).overflowY;
+          if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight + 1) return true;
+          if (n.classList.contains('work__inner')) break;
+        }
+        return false;
+      };
+      const bad = [];
+      for (const p of document.querySelectorAll('.work__inner .panel')) {
+        if (p.scrollHeight <= p.clientHeight + 1) continue;  // not clipped
+        const body = p.querySelector(':scope > .panel__body');
+        const bodyScrolls = body && body.scrollHeight > body.clientHeight + 1;
+        if (!bodyScrolls && !ancestorScrolls(p)) bad.push(titleOf(p) || '(untitled panel)');
+      }
+      return bad;
+    }"""
+
+    views = ("capture", "recordings", "transcript", "summary", "taps", "sessions", "people", "settings")
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            # A short viewport so the stacked at-risk views overflow and would
+            # clip if a scroll owner were missing.
+            context = await browser.new_context(viewport={"width": 1400, "height": 600})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+            await page.wait_for_function(
+                f"""() => {{
+                  const sel = document.querySelector('[data-slot="sessionPick"]');
+                  return sel && Array.from(sel.options).some(o => o.value === {rec.session_start!r});
+                }}""",
+                timeout=10000,
+            )
+            offenders = {}
+            for v in views:
+                await page.evaluate("(x) => window.gotoView(x)", v)
+                await page.wait_for_function(
+                    "() => document.querySelector('#viewRoot')?.childElementCount > 0", timeout=8000
+                )
+                await page.wait_for_timeout(700)  # let the first poll + async catalogs render
+                bad = await page.evaluate(measure_js)
+                if bad:
+                    offenders[v] = bad
+            assert not offenders, (
+                f"at 1400x600 these views clip panel content with NO scroll path "
+                f"(the Settings/Taps/Capture bug class): {offenders}"
             )
         finally:
             await browser.close()

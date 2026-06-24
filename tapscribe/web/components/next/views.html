@@ -68,7 +68,10 @@
 
   <div class="spacer"></div>
 
-  <div class="grid cols-cap">
+  <!-- Secondary row below the captions fillcol. `.noshrink` so it can't be
+       shrink-clipped: when the live-captions fillcol bottoms out the overflow
+       falls to .work__inner's scroll, not to clipping these panels' content. -->
+  <div class="grid cols-cap noshrink">
     <!-- Capture health — derived from active[] / live_info -->
     <div class="panel">
       <div class="panel__head"><div class="panel__title"><span class="ic">📊</span>Capture health</div><div class="panel__hint">right now</div></div>
@@ -225,14 +228,14 @@
 
   <!-- Settings is a scrolling card-STACK, not a fill-one-panel view: several
        editor cards (Models, Live, Summarizer) sit ABOVE the Batch card, so
-       there is no single "fill" region. `.settings-stack` owns the overflow and
+       there is no single "fill" region. `.scroll-stack` owns the overflow and
        lays its cards out in block flow at natural height, so a short viewport
        scrolls the whole stack. (As direct flex children of `.work__inner` the
        cards shrank below their content and `.panel`'s overflow:hidden clipped
        the Save buttons with NO scrollbar — see test_settings_stack_*.) Every
        Settings card MUST live inside this wrapper, never as a direct child of
        `.work__inner`, or the clip returns. -->
-  <div class="settings-stack">
+  <div class="scroll-stack">
     <!-- MODELS — entry point to the browser setup / manage-models page (/setup),
          a separate full-page app (setup.html), so the button is a plain
          navigation link rather than an in-dashboard view. Static card: no
