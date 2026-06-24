@@ -10,9 +10,12 @@ namespace TapScribe.TrayBridge;
 /// <list type="bullet">
 /// <item><b>Connection</b> — Recorder host/port/TLS/allow-self-signed/identity/name/token + Test connection.</item>
 /// <item><b>Devices</b> — which devices to tap: the two follow-default rows (mic + system
-/// loopback) plus every concrete endpoint for pinning, each with an editable identity/name.</item>
-/// <item><b>Level gate</b> — the bridge-side gate knobs: a sensitivity slider (mapped to a
-/// linear RMS threshold via <see cref="GateTuning"/>) and hangover / pre-roll in ms.</item>
+/// loopback) plus every concrete endpoint for pinning, each with an editable identity/name
+/// and its own sensitivity slider (per-device tuning, mapped to a linear RMS threshold via
+/// <see cref="GateTuning"/>; ADR-0007).</item>
+/// <item><b>Level gate</b> — the shared bridge-side gate knobs that apply to every device:
+/// hangover (silence-to-close) and pre-roll in ms. Sensitivity is per device on the
+/// Devices tab.</item>
 /// </list>
 /// On Save it returns the edited <see cref="BridgeSettings"/> via <see cref="Result"/>;
 /// the caller persists them. The device list is supplied by a delegate so the dialog
@@ -21,7 +24,9 @@ namespace TapScribe.TrayBridge;
 internal sealed class SettingsForm : Form
 {
     private readonly Func<IReadOnlyList<CaptureDevice>> _listDevices;
-    private readonly BridgeSettings _current;
+    // All the editing logic lives in this pure, unit-tested view-model; the form is a thin
+    // two-way binding of controls onto it (seeded on build, synced back on Save).
+    private readonly SettingsDraft _draft;
     private readonly int _contentW;
     private readonly int _contentH;
 
@@ -54,13 +59,15 @@ internal sealed class SettingsForm : Form
     private readonly DataGridView _devices = new();
     private readonly Label _deviceStatus = new() { AutoSize = true, ForeColor = Color.Firebrick };
 
-    // Pinned selections whose device isn't present right now, so they have no grid row.
-    // Carried forward verbatim on Save so an unplugged-device pin isn't silently erased.
-    private List<DeviceSelection> _absentPinned = [];
+    // Per-device sensitivity lives on the Devices tab — one slider per device — because a
+    // mic and a system loopback want opposite sensitivity (ADR-0007). Hangover / pre-roll
+    // are shared across devices and stay on the Level-gate tab.
+    private readonly TrackBar _micSensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 240 };
+    private readonly Label _micSensitivityValue = new() { AutoSize = true };
+    private readonly TrackBar _systemSensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 240 };
+    private readonly Label _systemSensitivityValue = new() { AutoSize = true };
 
-    // Level-gate tab.
-    private readonly TrackBar _sensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 300 };
-    private readonly Label _sensitivityValue = new() { AutoSize = true };
+    // Level-gate tab — the shared knobs.
     private readonly NumericUpDown _hangover = new() { Minimum = 0, Maximum = 5000, Increment = 50, Width = 90 };
     private readonly NumericUpDown _preRoll = new() { Minimum = 0, Maximum = 2000, Increment = 50, Width = 90 };
 
@@ -68,8 +75,8 @@ internal sealed class SettingsForm : Form
 
     public SettingsForm(BridgeSettings current, Func<IReadOnlyList<CaptureDevice>> listDevices)
     {
-        _current = current;
         _listDevices = listDevices;
+        _draft = SettingsDraft.Seed(current);
         Result = current;
 
         Text = "TapScribe — Settings";
@@ -77,7 +84,9 @@ internal sealed class SettingsForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(460, 460);
+        // Taller than before: the Devices tab now carries a per-device sensitivity slider
+        // under each device, so the simple pair + the Advanced pin grid both need room.
+        ClientSize = new Size(470, 560);
 
         var tabs = new TabControl
         {
@@ -115,18 +124,18 @@ internal sealed class SettingsForm : Form
         int y = 12;
 
         AddRow(page, "Recorder host", _host, ref y, inputWidth);
-        _host.Text = _current.Host;
+        _host.Text = _draft.Host;
         AddRow(page, "Port", _port, ref y, inputWidth);
-        _port.Value = Math.Clamp(_current.Port, 1, 65535);
-        AddCheck(page, _tls, _current.Tls, ref y, inputX);
+        _port.Value = Math.Clamp(_draft.Port, 1, 65535);
+        AddCheck(page, _tls, _draft.Tls, ref y, inputX);
         // Indented under TLS to read as its sub-option. Only meaningful over wss://, so it
         // is greyed out unless TLS is on and forced off when TLS is turned off — the same
         // Tls && AllowSelfSignedCert scoping the connection sites enforce, surfaced in the UI.
-        AddCheck(page, _allowSelfSigned, _current.Tls && _current.AllowSelfSignedCert, ref y, inputX + 12);
+        AddCheck(page, _allowSelfSigned, _draft.Tls && _draft.AllowSelfSignedCert, ref y, inputX + 12);
         _tls.CheckedChanged += (_, _) => SyncSelfSignedEnabled();
         SyncSelfSignedEnabled();
         AddRow(page, "Tap token", _token, ref y, inputWidth);
-        _token.Text = _current.Token;
+        _token.Text = _draft.Token;
         AddCheck(page, _showToken, isChecked: false, ref y, inputX);
         _showToken.CheckedChanged += (_, _) => _token.UseSystemPasswordChar = !_showToken.Checked;
 
@@ -183,32 +192,41 @@ internal sealed class SettingsForm : Form
 
         // The common case: two checkboxes, each with an identity/name. "Follow default"
         // (these) tracks whatever the current default device is at Start; pinning a
-        // specific endpoint lives behind the Advanced expander below.
-        SeedSimpleSelections();
+        // specific endpoint lives behind the Advanced expander below. Control state is
+        // seeded from the draft (which encodes the saved/migrated/default tuning).
+        _micEnabled.Checked = _draft.MicEnabled;
+        _micName.Text = _draft.MicName;
+        _micSensitivity.Value = Math.Clamp(_draft.MicSensitivity, 0, 100);
+        _systemEnabled.Checked = _draft.SystemEnabled;
+        _systemName.Text = _draft.SystemName;
+        _systemSensitivity.Value = Math.Clamp(_draft.SystemSensitivity, 0, 100);
 
         page.Controls.Add(new Label
         {
             Text = "Name labels each source on the dashboard and tags it in the recording "
-                 + "filenames (made filename-safe automatically). Give the two different names.",
+                 + "filenames (made filename-safe automatically). Give the two different "
+                 + "names. Sensitivity is per device — open the loopback more than the mic.",
             Location = new Point(12, 8),
-            Size = new Size(_contentW - 24, 30),
+            Size = new Size(_contentW - 24, 44),
             ForeColor = SystemColors.GrayText,
         });
 
-        _micEnabled.Location = new Point(12, 44);
+        _micEnabled.Location = new Point(12, 56);
         page.Controls.Add(_micEnabled);
-        AddNameRow(page, _micName, 70);
+        AddNameRow(page, _micName, 82);
+        AddSensitivityRow(_micSensitivity, _micSensitivityValue, 108);
 
-        _systemEnabled.Location = new Point(12, 108);
+        _systemEnabled.Location = new Point(12, 174);
         page.Controls.Add(_systemEnabled);
-        AddNameRow(page, _systemName, 134);
+        AddNameRow(page, _systemName, 200);
+        AddSensitivityRow(_systemSensitivity, _systemSensitivityValue, 226);
 
-        _deviceStatus.Location = new Point(12, 168);
+        _deviceStatus.Location = new Point(12, 300);
         _deviceStatus.MaximumSize = new Size(_contentW - 24, 0);
         page.Controls.Add(_deviceStatus);
 
         SetAdvancedToggle(open: false);
-        _advancedToggle.Location = new Point(12, 190);
+        _advancedToggle.Location = new Point(12, 322);
         _advancedToggle.LinkClicked += (_, _) =>
         {
             _advancedPanel.Visible = !_advancedPanel.Visible;
@@ -217,8 +235,8 @@ internal sealed class SettingsForm : Form
         page.Controls.Add(_advancedToggle);
 
         int panelW = _contentW - 24;
-        int panelH = _contentH - 226;
-        _advancedPanel.Location = new Point(12, 216);
+        int panelH = _contentH - 358;
+        _advancedPanel.Location = new Point(12, 348);
         _advancedPanel.Size = new Size(panelW, panelH);
         _advancedPanel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
@@ -251,7 +269,7 @@ internal sealed class SettingsForm : Form
         page.Controls.Add(_advancedPanel);
 
         // Auto-open Advanced when a pinned device was saved, so it isn't hidden.
-        if (_current.Devices.Any(d => d is DeviceSelection.Pinned))
+        if (_draft.HasSavedPins)
         {
             _advancedPanel.Visible = true;
             SetAdvancedToggle(open: true);
@@ -269,37 +287,18 @@ internal sealed class SettingsForm : Form
             name.Location = new Point(80, rowY);
             host.Controls.Add(name);
         }
-    }
 
-    // The single per-device label: the saved Name, or its identity for a legacy/blank Name.
-    private static string SelectionLabel(DeviceSelection selection) =>
-        string.IsNullOrWhiteSpace(selection.Name) ? selection.Identity : selection.Name;
-
-    /// <summary>Seed the two simple checkboxes + their identity/name from the saved
-    /// selection (or the default pair when nothing is saved — same as EffectiveDevices).</summary>
-    private void SeedSimpleSelections()
-    {
-        // Sensible fallbacks from the shared default pair, so the fields are never blank
-        // even when a box starts unticked (e.g. a pinned-only saved selection).
-        foreach (DeviceSelection selection in _current.DefaultDevices())
-            ApplyToSimpleRow(selection, tick: false);
-
-        // Reflect what's actually saved — this ticks the boxes for saved follow-defaults.
-        foreach (DeviceSelection selection in _current.EffectiveDevices)
-            ApplyToSimpleRow(selection, tick: true);
-
-        void ApplyToSimpleRow(DeviceSelection selection, bool tick)
+        // One device's sensitivity slider + its live RMS-threshold readout. The slider's
+        // value is seeded from the draft above before this wires the live label.
+        void AddSensitivityRow(TrackBar slider, Label valueLabel, int rowY)
         {
-            if (selection is DeviceSelection.FollowDefault { Flow: DeviceFlow.Capture } mic)
-            {
-                _micEnabled.Checked |= tick;
-                _micName.Text = SelectionLabel(mic);
-            }
-            else if (selection is DeviceSelection.FollowDefault { Flow: DeviceFlow.Render } system)
-            {
-                _systemEnabled.Checked |= tick;
-                _systemName.Text = SelectionLabel(system);
-            }
+            page.Controls.Add(new Label { Text = "Sensitivity", Location = new Point(32, rowY + 12), AutoSize = true });
+            slider.Location = new Point(110, rowY);
+            page.Controls.Add(slider);
+            valueLabel.Location = new Point(112, rowY + 42);
+            page.Controls.Add(valueLabel);
+            slider.ValueChanged += (_, _) => UpdateSensitivityLabel(slider, valueLabel);
+            UpdateSensitivityLabel(slider, valueLabel);
         }
     }
 
@@ -311,42 +310,30 @@ internal sealed class SettingsForm : Form
         page.Controls.Add(new Label
         {
             Text = "The bridge opens a recording when the input level crosses the threshold "
-                 + "and closes it after the hangover. Higher sensitivity opens on quieter sound.",
+                 + "and closes it after the hangover. Sensitivity is set per device on the "
+                 + "Devices tab; hangover and pre-roll below apply to every device.",
             Location = new Point(12, y),
-            Size = new Size(_contentW - 24, 34),
+            Size = new Size(_contentW - 24, 44),
             ForeColor = SystemColors.GrayText,
         });
-        y += 44;
-
-        page.Controls.Add(new Label { Text = "Sensitivity", Location = new Point(12, y + 4), AutoSize = true });
-        _sensitivity.Location = new Point(110, y);
-        _sensitivity.Value = Math.Clamp(_current.GateSensitivity, 0, 100);
-        _sensitivity.ValueChanged += (_, _) => UpdateSensitivityLabel();
-        page.Controls.Add(_sensitivity);
-        _sensitivityValue.Location = new Point(110, y + 44);
-        page.Controls.Add(_sensitivityValue);
-        UpdateSensitivityLabel();
-        y += 80;
+        y += 54;
 
         page.Controls.Add(new Label { Text = "Hangover (ms)", Location = new Point(12, y + 3), AutoSize = true });
         _hangover.Location = new Point(110, y);
-        _hangover.Value = Math.Clamp(_current.GateHangoverMs, 0, 5000);
+        _hangover.Value = Math.Clamp(_draft.HangoverMs, 0, 5000);
         page.Controls.Add(_hangover);
         y += 32;
 
         page.Controls.Add(new Label { Text = "Pre-roll (ms)", Location = new Point(12, y + 3), AutoSize = true });
         _preRoll.Location = new Point(110, y);
-        _preRoll.Value = Math.Clamp(_current.GatePreRollMs, 0, 2000);
+        _preRoll.Value = Math.Clamp(_draft.PreRollMs, 0, 2000);
         page.Controls.Add(_preRoll);
 
         return page;
     }
 
-    private void UpdateSensitivityLabel()
-    {
-        double threshold = GateTuning.SliderToThreshold(_sensitivity.Value);
-        _sensitivityValue.Text = $"{_sensitivity.Value} / 100   (RMS threshold ≈ {threshold:0.000})";
-    }
+    private static void UpdateSensitivityLabel(TrackBar slider, Label valueLabel) =>
+        valueLabel.Text = SettingsDraft.SensitivityLabel(slider.Value);
 
     private void PopulateDevices()
     {
@@ -366,29 +353,14 @@ internal sealed class SettingsForm : Form
             _deviceStatus.Text = $"Could not list devices: {ex.Message}";
         }
 
-        // Pre-tick any device the saved selection pinned.
-        var savedPinned = new Dictionary<string, DeviceSelection.Pinned>(StringComparer.Ordinal);
-        foreach (DeviceSelection.Pinned pinned in _current.Devices.OfType<DeviceSelection.Pinned>())
-            savedPinned[pinned.DeviceId] = pinned;
-
-        foreach (CaptureDevice device in available)
+        // The draft computes the pin rows (pre-ticked/named from saved pins) and the
+        // absent-pin carry-forward; the form just renders the rows into the grid.
+        _draft.SetAvailableDevices(available);
+        foreach (PinnedDeviceRow deviceRow in _draft.DeviceRows)
         {
-            string flowLabel = device.Flow == DeviceFlow.Capture ? "mic" : "loopback";
-            savedPinned.TryGetValue(device.Id, out DeviceSelection.Pinned? pinned);
-            int row = _devices.Rows.Add(
-                pinned is not null,
-                $"{device.Name} [{flowLabel}{(device.IsDefault ? ", default" : "")}]",
-                pinned is not null ? SelectionLabel(pinned) : device.Name);
-            _devices.Rows[row].Tag = device.Id;
+            int row = _devices.Rows.Add(deviceRow.Pinned, deviceRow.DisplayLabel, deviceRow.Name);
+            _devices.Rows[row].Tag = deviceRow.DeviceId;
         }
-
-        // A pinned device that isn't present right now has no row and so can't be
-        // collected from the grid; remember it to carry forward verbatim on Save rather
-        // than silently erasing the pin (the device may just be unplugged).
-        var presentIds = new HashSet<string>(available.Select(d => d.Id), StringComparer.Ordinal);
-        _absentPinned = _current.Devices
-            .Where(d => d is DeviceSelection.Pinned p && !presentIds.Contains(p.DeviceId))
-            .ToList();
     }
 
     private async Task TestConnectionAsync()
@@ -416,53 +388,48 @@ internal sealed class SettingsForm : Form
         _testStatus.Text = text;
     }
 
+    // Collect the dialog's current control state into the draft, then let the (pure,
+    // unit-tested) draft assemble the BridgeSettings — all the selection-/gate-building
+    // decisions live there, not here.
     private BridgeSettings Collect()
     {
         _devices.EndEdit();
+        SyncControlsToDraft();
+        return _draft.ToSettings();
+    }
 
-        // One Name per device, used as both the identity (the Recorder makes it
-        // filename-safe) and the display name.
-        var selections = new List<DeviceSelection>();
-        if (_micEnabled.Checked)
-        {
-            string mic = _micName.Text.Trim();
-            selections.Add(new DeviceSelection.FollowDefault(DeviceFlow.Capture, mic, mic));
-        }
-        if (_systemEnabled.Checked)
-        {
-            string system = _systemName.Text.Trim();
-            selections.Add(new DeviceSelection.FollowDefault(DeviceFlow.Render, system, system));
-        }
+    // Copy every editable control value (trimming is the draft's job) and the grid's
+    // in-place pin/name edits back onto the draft before it builds the settings.
+    private void SyncControlsToDraft()
+    {
+        _draft.Host = _host.Text;
+        _draft.Port = (int)_port.Value;
+        _draft.Tls = _tls.Checked;
+        // Belt-and-suspenders: never carry the insecure opt-in without TLS, even if a race
+        // left the checkbox ticked (it's force-cleared on the TLS toggle in BuildConnectionTab).
+        _draft.AllowSelfSignedCert = _tls.Checked && _allowSelfSigned.Checked;
+        _draft.Token = _token.Text;
+        _draft.MicEnabled = _micEnabled.Checked;
+        _draft.MicName = _micName.Text;
+        _draft.MicSensitivity = _micSensitivity.Value;
+        _draft.SystemEnabled = _systemEnabled.Checked;
+        _draft.SystemName = _systemName.Text;
+        _draft.SystemSensitivity = _systemSensitivity.Value;
+        _draft.HangoverMs = (int)_hangover.Value;
+        _draft.PreRollMs = (int)_preRoll.Value;
 
+        // Indexer (not ToDictionary) so a duplicate device id from the injected enumerator
+        // doesn't throw into the WinForms message loop — last row wins, as it did before.
+        var rowsById = new Dictionary<string, PinnedDeviceRow>(StringComparer.Ordinal);
+        foreach (PinnedDeviceRow draftRow in _draft.DeviceRows)
+            rowsById[draftRow.DeviceId] = draftRow;
         foreach (DataGridViewRow row in _devices.Rows)
         {
-            if (row.Tag is not string deviceId || row.Cells["Tap"].Value is not true)
-                continue;
-            string name = (row.Cells["Name"].Value as string ?? "").Trim();
-            selections.Add(new DeviceSelection.Pinned(deviceId, name, name));
+            if (row.Tag is string deviceId && rowsById.TryGetValue(deviceId, out PinnedDeviceRow? draftRow))
+            {
+                draftRow.Pinned = row.Cells["Tap"].Value is true;
+                draftRow.Name = row.Cells["Name"].Value as string ?? "";
+            }
         }
-
-        // Keep pins whose device is currently absent (no row to collect from).
-        selections.AddRange(_absentPinned);
-
-        return new BridgeSettings
-        {
-            Host = _host.Text.Trim(),
-            Port = (int)_port.Value,
-            Tls = _tls.Checked,
-            // Belt-and-suspenders: never persist the insecure opt-in without TLS, even if a
-            // race left the checkbox ticked (it's force-cleared on the TLS toggle above).
-            AllowSelfSignedCert = _tls.Checked && _allowSelfSigned.Checked,
-            // The base identity/name are the env-seed / first-run default (they feed
-            // DefaultDevices when nothing is saved); the authoritative per-tap identity
-            // lives in Devices, so pass these through unchanged rather than re-deriving.
-            Identity = _current.Identity,
-            Name = _current.Name,
-            Token = _token.Text.Trim(),
-            Devices = selections,
-            GateSensitivity = _sensitivity.Value,
-            GateHangoverMs = (int)_hangover.Value,
-            GatePreRollMs = (int)_preRoll.Value,
-        };
     }
 }

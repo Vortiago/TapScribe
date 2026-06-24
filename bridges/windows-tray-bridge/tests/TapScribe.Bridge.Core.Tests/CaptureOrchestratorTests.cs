@@ -17,8 +17,9 @@ public class CaptureOrchestratorTests
 {
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
 
-    private static PipelineSpec Spec(IAudioCapture capture, string identity, string name = "") =>
-        new(capture, new TapConnectionOptions { Identity = identity, Name = name });
+    private static PipelineSpec Spec(
+        IAudioCapture capture, string identity, string name = "", GateOptions? gate = null) =>
+        new(capture, new TapConnectionOptions { Identity = identity, Name = name }, gate);
 
     [Fact]
     public async Task StartAll_WithOneSpec_StreamsUnderItsIdentity()
@@ -68,7 +69,29 @@ public class CaptureOrchestratorTests
     }
 
     [Fact]
-    public async Task UpdateGates_RetunesEveryRunningPipeline_WithoutRestart()
+    public async Task StartAll_BuildsEachPipelinesGate_FromItsOwnSpec()
+    {
+        // Per-device tuning at Start (#151): the mic spec is deaf, the system spec is
+        // sensitive, with no shared fallback gate. The same loud level must open ONLY the
+        // system pipeline — proving each LevelGate is built from its spec's own gate.
+        var transport = new FakeTapTransport();
+        var mic = new FakeAudioCapture(RecorderFormat);
+        var system = new FakeAudioCapture(RecorderFormat);
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            [Spec(mic, "mic", gate: DeafGate()), Spec(system, "system", gate: FastGate())],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            gate: null, FastStream(), transport.Create);
+
+        mic.Emit(Loud(40));
+        system.Emit(Loud(40));
+        await Poll.UntilAsync(() => transport.HasStreamed("system"), Wait, "the sensitive pipeline to stream");
+
+        Assert.True(transport.ConnectionsFor("system")[0].SentCount > 0);
+        Assert.Empty(transport.ConnectionsFor("mic")); // the deaf mic gate let nothing through
+    }
+
+    [Fact]
+    public async Task UpdateGates_RetunesEveryRunningPipeline_WhenEveryIdentityIsInTheMap()
     {
         var transport = new FakeTapTransport();
         var mic = new FakeAudioCapture(RecorderFormat);
@@ -83,17 +106,98 @@ public class CaptureOrchestratorTests
         system.Emit(Loud(20));
         Assert.Empty(transport.Connections); // the deaf gates let nothing through
 
-        // Fan one new (sensitive) tuning out to every running pipeline, mid-meeting.
-        orchestrator.UpdateGates(FastGate()); // OpenThreshold 0.02
+        // Save → push a per-identity map covering every running pipeline, mid-meeting.
+        orchestrator.UpdateGates(new Dictionary<string, GateOptions>
+        {
+            ["mic"] = FastGate(),
+            ["system"] = FastGate(),
+        });
+
+        mic.Emit(Loud(20));
+        system.Emit(Loud(20));
+        await Poll.UntilAsync(
+            () => transport.HasStreamed("mic") && transport.HasStreamed("system"),
+            Wait, "both re-tuned pipelines to stream");
+
+        Assert.True(transport.ConnectionsFor("mic")[0].SentCount > 0);
+        Assert.True(transport.ConnectionsFor("system")[0].SentCount > 0);
+    }
+
+    [Fact]
+    public async Task UpdateGates_RoutesEachUpdateToItsOwnPipeline_ByIdentity()
+    {
+        // The #153 core: a per-device Save re-tunes only the matching pipeline. Both start
+        // deaf; the map makes ONLY "system" sensitive, so only the system pipeline records
+        // — the mic's gate is untouched.
+        var transport = new FakeTapTransport();
+        var mic = new FakeAudioCapture(RecorderFormat);
+        var system = new FakeAudioCapture(RecorderFormat);
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            [Spec(mic, "mic"), Spec(system, "system")],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            DeafGate(), FastStream(), transport.Create);
+
+        orchestrator.UpdateGates(new Dictionary<string, GateOptions> { ["system"] = FastGate() });
+
+        mic.Emit(Loud(20));
+        system.Emit(Loud(20));
+        await Poll.UntilAsync(() => transport.HasStreamed("system"), Wait, "the re-tuned system pipeline to stream");
+
+        Assert.True(transport.ConnectionsFor("system")[0].SentCount > 0);
+        Assert.Empty(transport.ConnectionsFor("mic")); // mic was not in the map -> still deaf
+    }
+
+    [Fact]
+    public async Task UpdateGates_SkipsAnIdentityWithNoRunningPipeline_WithoutError()
+    {
+        // A device that isn't in this meeting (unplugged / not selected) appears in the
+        // map but has no session: it's skipped, never throws, and the present pipelines
+        // still re-tune.
+        var transport = new FakeTapTransport();
+        var mic = new FakeAudioCapture(RecorderFormat);
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            [Spec(mic, "mic")],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            DeafGate(), FastStream(), transport.Create);
+
+        orchestrator.UpdateGates(new Dictionary<string, GateOptions>
+        {
+            ["mic"] = FastGate(),
+            ["unplugged-loopback"] = FastGate(), // no such running pipeline
+        });
+
+        Assert.Equal(1, orchestrator.PipelineCount);
+        mic.Emit(Loud(20));
+        await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the re-tuned mic to stream");
+        Assert.True(transport.ConnectionsFor("mic")[0].SentCount > 0);
+    }
+
+    [Fact]
+    public async Task UpdateGates_DoesNotDisturbAnotherPipelinesOpenUtterance()
+    {
+        // Re-tuning one device mid-meeting must not touch another's gate or its open
+        // utterance. Both open; a map carrying only "mic" must leave "system" streaming
+        // and unclosed.
+        var transport = new FakeTapTransport();
+        var mic = new FakeAudioCapture(RecorderFormat);
+        var system = new FakeAudioCapture(RecorderFormat);
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            [Spec(mic, "mic"), Spec(system, "system")],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            FastGate(), FastStream(), transport.Create);
 
         mic.Emit(Loud(20));
         system.Emit(Loud(20));
         await Poll.UntilAsync(
             () => transport.ConnectionsFor("mic").Count > 0 && transport.ConnectionsFor("system").Count > 0,
-            Wait, "both re-tuned pipelines to stream");
+            Wait, "both utterances to open");
 
-        Assert.True(transport.ConnectionsFor("mic")[0].SentCount > 0);
-        Assert.True(transport.ConnectionsFor("system")[0].SentCount > 0);
+        // Re-tune only the mic. The system utterance is mid-flight and must be unaffected.
+        orchestrator.UpdateGates(new Dictionary<string, GateOptions> { ["mic"] = DeafGate() });
+
+        system.Emit(Loud(20)); // keep the far end talking
+        await Poll.UntilAsync(() => transport.ConnectionsFor("system")[0].SentCount > 1, Wait, "system to keep streaming");
+        Assert.False(transport.ConnectionsFor("system")[0].Closed); // its open utterance was never disturbed
     }
 
     [Fact]
@@ -266,7 +370,7 @@ public class CaptureOrchestratorTests
         system.Emit(Loud(40)); // system opens an utterance whose first connect fails
 
         await Poll.UntilAsync(() => failures.Count > 0, Wait, "the down pipeline to surface a failure");
-        await Poll.UntilAsync(() => transport.ConnectionsFor("mic").Count > 0, Wait, "the up pipeline to stream");
+        await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the up pipeline to stream");
 
         // The failure is attributed to the right device; the other keeps recording.
         (string Identity, Exception Error) failure = Assert.Single(failures);

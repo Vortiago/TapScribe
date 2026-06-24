@@ -165,6 +165,47 @@ public class DeviceSelectionTests
     }
 
     [Fact]
+    public void Resolve_CarriesEachSelectionsGate_ToTheResolvedDevice()
+    {
+        // Per-device tuning rides along the selection through resolution, so the tray can
+        // build each pipeline's LevelGate from its own device's gate (ADR-0007).
+        var micGate = new GateSettings(Sensitivity: 40, HangoverMs: 700, PreRollMs: 200);
+        var systemGate = new GateSettings(Sensitivity: 80, HangoverMs: 900, PreRollMs: 350);
+
+        ResolveResult result = DeviceSelection.Resolve(
+            [
+                new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "Mic", micGate),
+                new DeviceSelection.FollowDefault(DeviceFlow.Render, "system", "System", systemGate),
+            ],
+            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)]);
+
+        Assert.Equal(micGate, Assert.Single(result.Resolved, r => r.Identity == "mic").Gate);
+        Assert.Equal(systemGate, Assert.Single(result.Resolved, r => r.Identity == "system").Gate);
+    }
+
+    [Fact]
+    public void Resolve_FillsTheFlowDefaultGate_WhenTheSelectionCarriesNone()
+    {
+        // A selection with no gate (a pre-per-device file, or a direct caller) must still
+        // resolve to a concrete gate so the pipeline always has one — defaulted by the
+        // RESOLVED device's flow, so a loopback gets the sensitive default even when the
+        // selection was silent.
+        ResolveResult result = DeviceSelection.Resolve(
+            [
+                new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "Mic"),
+                new DeviceSelection.FollowDefault(DeviceFlow.Render, "system", "System"),
+            ],
+            [Mic("builtin", isDefault: true), Speakers("spk", isDefault: true)]);
+
+        Assert.Equal(
+            GateSettings.DefaultForFlow(DeviceFlow.Capture),
+            Assert.Single(result.Resolved, r => r.Identity == "mic").Gate);
+        Assert.Equal(
+            GateSettings.DefaultForFlow(DeviceFlow.Render),
+            Assert.Single(result.Resolved, r => r.Identity == "system").Gate);
+    }
+
+    [Fact]
     public void ToTapOptions_PropagatesAllowSelfSignedCert_FromTheBaseOptions()
     {
         // The insecure self-signed opt-in is a connection coordinate, so it must ride

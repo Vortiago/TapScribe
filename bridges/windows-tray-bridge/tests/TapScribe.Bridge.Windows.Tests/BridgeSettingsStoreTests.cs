@@ -39,18 +39,17 @@ public class BridgeSettingsStoreTests : IDisposable
     }
 
     [Fact]
-    public void SaveThenLoad_RoundTripsDeviceSelectionsAndGateKnobs()
+    public void SaveThenLoad_RoundTripsDeviceSelectionsAndTheirPerDeviceGate()
     {
+        var micGate = new GateSettings(Sensitivity: 45, HangoverMs: 800, PreRollMs: 300);
+        var systemGate = new GateSettings(Sensitivity: 70, HangoverMs: 500, PreRollMs: 250);
         var original = new BridgeSettings
         {
             Devices =
             [
-                new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "My Mic"),
-                new DeviceSelection.Pinned("usb-123", "system", "USB Loopback"),
+                new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "My Mic", micGate),
+                new DeviceSelection.Pinned("usb-123", "system", "USB Loopback", systemGate),
             ],
-            GateSensitivity = 70,
-            GateHangoverMs = 500,
-            GatePreRollMs = 250,
         };
 
         BridgeSettingsStore.Save(original, _path);
@@ -58,19 +57,18 @@ public class BridgeSettingsStoreTests : IDisposable
 
         Assert.Equal(2, loaded.Devices.Count);
 
-        // Polymorphic selections survive the file faithfully (kind + per-case fields).
+        // Polymorphic selections survive the file faithfully (kind + per-case fields +
+        // the per-device gate).
         var follow = Assert.IsType<DeviceSelection.FollowDefault>(loaded.Devices[0]);
         Assert.Equal(DeviceFlow.Capture, follow.Flow);
         Assert.Equal("mic", follow.Identity);
         Assert.Equal("My Mic", follow.Name);
+        Assert.Equal(micGate, follow.Gate);
 
         var pinned = Assert.IsType<DeviceSelection.Pinned>(loaded.Devices[1]);
         Assert.Equal("usb-123", pinned.DeviceId);
         Assert.Equal("system", pinned.Identity);
-
-        Assert.Equal(70, loaded.GateSensitivity);
-        Assert.Equal(500, loaded.GateHangoverMs);
-        Assert.Equal(250, loaded.GatePreRollMs);
+        Assert.Equal(systemGate, pinned.Gate);
     }
 
     [Fact]

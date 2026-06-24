@@ -5,12 +5,15 @@ namespace TapScribe.Bridge.Core;
 
 /// <summary>
 /// One device to tap: a capture source paired with the <see cref="TapConnectionOptions"/>
-/// its frames stream under. Each spec carries its own <c>Identity</c>/<c>Name</c>
-/// (the per-speaker split) while sharing the connection coordinates
-/// (<c>Host</c>/<c>Port</c>/<c>Token</c>/<c>Session</c>). The orchestrator takes
-/// ownership of <see cref="Capture"/> — see <see cref="CaptureOrchestrator.StartAll"/>.
+/// its frames stream under and the per-device <see cref="GateOptions"/> its
+/// <see cref="LevelGate"/> is built from. Each spec carries its own <c>Identity</c>/<c>Name</c>
+/// (the per-speaker split) and its own <see cref="Gate"/> (the per-device tuning, ADR-0007)
+/// while sharing the connection coordinates (<c>Host</c>/<c>Port</c>/<c>Token</c>/<c>Session</c>).
+/// <see cref="Gate"/> is optional: when null the pipeline falls back to the shared gate
+/// passed to <see cref="CaptureOrchestrator.StartAll"/> (and then to the gate defaults). The
+/// orchestrator takes ownership of <see cref="Capture"/>.
 /// </summary>
-public sealed record PipelineSpec(IAudioCapture Capture, TapConnectionOptions Options);
+public sealed record PipelineSpec(IAudioCapture Capture, TapConnectionOptions Options, GateOptions? Gate = null);
 
 /// <summary>
 /// Runs N concurrent per-identity capture pipelines — one <see cref="TapSession"/>
@@ -38,8 +41,11 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     /// <summary>
     /// Start one pipeline per spec. <paramref name="onConnected"/> /
     /// <paramref name="onFailed"/> are tagged with the firing pipeline's identity so
-    /// the shell can show per-device state. <paramref name="connectionFactory"/>
-    /// defaults to a real <see cref="TapClient"/>; tests inject a fake.
+    /// the shell can show per-device state. Each pipeline's <see cref="LevelGate"/> is
+    /// built from its spec's own <see cref="PipelineSpec.Gate"/>, falling back to the
+    /// shared <paramref name="gate"/> when the spec carries none (the per-device tuning
+    /// lives on the spec — ADR-0007). <paramref name="connectionFactory"/> defaults to a
+    /// real <see cref="TapClient"/>; tests inject a fake.
     /// </summary>
     public static CaptureOrchestrator StartAll(
         IReadOnlyList<PipelineSpec> specs,
@@ -77,7 +83,7 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
                     spec.Capture, spec.Options,
                     onConnected: () => onConnected(identity),
                     onFailed: ex => onFailed(identity, ex),
-                    gate, stream, connectionFactory);
+                    spec.Gate ?? gate, stream, connectionFactory);
             }
             catch (Exception ex) when (ex is COMException or InvalidOperationException)
             {
@@ -102,22 +108,25 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     public int PipelineCount => _sessions.Count;
 
     /// <summary>
-    /// Re-tune every running pipeline's <see cref="LevelGate"/> with one new
-    /// <see cref="GateOptions"/> — the live-retune fan-out behind Settings → Save, so a
-    /// sensitivity change takes effect without a Stop/Start. The gate is global for this
-    /// slice (every pipeline gets the same tuning); the per-identity keying is what a
-    /// later per-device-tuning slice routes its updates through. Each
-    /// <see cref="TapSession.UpdateGate"/> publishes the change atomically relative to
-    /// its capture thread, so a running meeting keeps streaming uninterrupted. The
-    /// caller passes operator-validated options (the tray clamps the sliders); each
-    /// pipeline re-validates via <see cref="LevelGate.UpdateTuning"/> and an
-    /// out-of-range value throws.
+    /// Re-tune running pipelines' <see cref="LevelGate"/>s from a per-identity map — the
+    /// live-retune fan-out behind Settings → Save, so a per-device sensitivity change takes
+    /// effect without a Stop/Start. Each entry is routed to the pipeline running under that
+    /// identity (the same key <see cref="StartAll"/> bucketed sessions by); an identity with
+    /// no running pipeline — a device that's unplugged or simply not in this meeting — is
+    /// skipped without error, and a pipeline whose identity is absent from the map keeps its
+    /// current tuning, so re-tuning one device never disturbs another's gate or open
+    /// utterance. Each <see cref="TapSession.UpdateGate"/> publishes the change atomically
+    /// relative to its capture thread, so a running meeting keeps streaming uninterrupted.
+    /// The caller passes operator-validated options (the tray clamps the sliders); each
+    /// pipeline re-validates via <see cref="LevelGate.UpdateTuning"/> and an out-of-range
+    /// value throws.
     /// </summary>
-    public void UpdateGates(GateOptions gate)
+    public void UpdateGates(IReadOnlyDictionary<string, GateOptions> gatesByIdentity)
     {
-        ArgumentNullException.ThrowIfNull(gate);
-        foreach (TapSession session in _sessions.Values)
-            session.UpdateGate(gate);
+        ArgumentNullException.ThrowIfNull(gatesByIdentity);
+        foreach ((string identity, GateOptions gate) in gatesByIdentity)
+            if (_sessions.TryGetValue(identity, out TapSession? session))
+                session.UpdateGate(gate);
     }
 
     /// <summary>

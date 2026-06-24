@@ -184,6 +184,13 @@ internal sealed class FakeTapTransport
             return connIndex < _conns.Count ? _conns[connIndex].SentCount : 0;
     }
 
+    /// <summary>True once some connection under <paramref name="identity"/> has sent at
+    /// least one frame — the race-free "this pipeline is streaming" signal. A connection is
+    /// created (so <see cref="ConnectionsFor"/> is non-empty) BEFORE its pump sends the
+    /// first frame, so polling on connection-count and then reading SentCount can observe a
+    /// transient 0; poll on this instead.</summary>
+    public bool HasStreamed(string identity) => ConnectionsFor(identity).Any(c => c.SentCount > 0);
+
     public ITapConnection Create(TapConnectionOptions options)
     {
         var conn = new FakeTapConnection(this, options);

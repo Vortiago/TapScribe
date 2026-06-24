@@ -4,11 +4,18 @@ namespace TapScribe.Bridge.Core;
 
 /// <summary>
 /// A persisted choice of one device to tap, streaming under an operator-editable
-/// <paramref name="Identity"/> / <paramref name="Name"/>. A selection is either a
-/// <see cref="FollowDefault"/> sentinel (bind to whatever the system default for a
-/// flow is at Start) or a <see cref="Pinned"/> concrete endpoint id. Resolved against
-/// the devices actually present via <see cref="Resolve"/> — see ADR-0005 for why
-/// follow-default beats freezing an endpoint id.
+/// <paramref name="Identity"/> / <paramref name="Name"/> with its own per-device level-gate
+/// <paramref name="Gate"/> (ADR-0007). A selection is either a <see cref="FollowDefault"/>
+/// sentinel (bind to whatever the system default for a flow is at Start) or a
+/// <see cref="Pinned"/> concrete endpoint id. Resolved against the devices actually
+/// present via <see cref="Resolve"/> — see ADR-0005 for why follow-default beats freezing
+/// an endpoint id.
+///
+/// <paramref name="Gate"/> is nullable so a pre-per-device settings file (no <c>gate</c>
+/// key) deserialises with no tuning attached; the gate is then filled in at the boundary
+/// that knows the right default — <see cref="BridgeSettings"/> on load (migrating an old
+/// global value) and <see cref="Resolve"/> as a final flow-keyed fallback — so every
+/// resolved pipeline ends up with a concrete gate.
 ///
 /// The <c>kind</c> discriminator makes the list round-trip through the bridge's JSON
 /// settings file (System.Text.Json polymorphism); the persisted shape is a contract,
@@ -17,17 +24,17 @@ namespace TapScribe.Bridge.Core;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
 [JsonDerivedType(typeof(FollowDefault), "followDefault")]
 [JsonDerivedType(typeof(Pinned), "pinned")]
-public abstract record DeviceSelection(string Identity, string Name)
+public abstract record DeviceSelection(string Identity, string Name, GateSettings? Gate)
 {
     /// <summary>Bind to whatever endpoint is the system default for <paramref name="Flow"/>
     /// at resolution time — survives the operator switching their default mic/output.</summary>
-    public sealed record FollowDefault(DeviceFlow Flow, string Identity, string Name)
-        : DeviceSelection(Identity, Name);
+    public sealed record FollowDefault(DeviceFlow Flow, string Identity, string Name, GateSettings? Gate = null)
+        : DeviceSelection(Identity, Name, Gate);
 
     /// <summary>Bind to one specific endpoint by its stable id, regardless of which
     /// device is default — "tap this USB interface, always".</summary>
-    public sealed record Pinned(string DeviceId, string Identity, string Name)
-        : DeviceSelection(Identity, Name);
+    public sealed record Pinned(string DeviceId, string Identity, string Name, GateSettings? Gate = null)
+        : DeviceSelection(Identity, Name, Gate);
 
     /// <summary>
     /// Resolve saved <paramref name="selections"/> against the devices
@@ -61,7 +68,12 @@ public abstract record DeviceSelection(string Identity, string Name)
             if (device is null)
                 missing.Add(selection);
             else
-                resolved.Add(new ResolvedDevice(device, selection.Identity, selection.Name));
+                // Every resolved pipeline gets a concrete gate: the selection's own tuning,
+                // or — for a selection that carried none — the sensible default for the
+                // RESOLVED device's flow (so a loopback still gets the sensitive default).
+                resolved.Add(new ResolvedDevice(
+                    device, selection.Identity, selection.Name,
+                    selection.Gate ?? GateSettings.DefaultForFlow(device.Flow)));
         }
 
         bool duplicateIdentity = resolved
@@ -76,8 +88,10 @@ public abstract record DeviceSelection(string Identity, string Name)
 }
 
 /// <summary>A selection that resolved to a concrete <see cref="CaptureDevice"/>, carrying
-/// the identity/name it will stream under.</summary>
-public sealed record ResolvedDevice(CaptureDevice Device, string Identity, string Name);
+/// the identity/name it will stream under and the per-device <see cref="GateSettings"/>
+/// its <see cref="LevelGate"/> is built from (always concrete — defaulted by flow when the
+/// selection carried none).</summary>
+public sealed record ResolvedDevice(CaptureDevice Device, string Identity, string Name, GateSettings Gate);
 
 /// <summary>The outcome of <see cref="DeviceSelection.Resolve"/>: the selections that
 /// bound to a present device, the ones that did not, and a <see cref="SelectionVerdict"/>
