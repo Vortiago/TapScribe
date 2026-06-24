@@ -162,10 +162,8 @@ public sealed class SettingsDraft
             selections.Add(new DeviceSelection.FollowDefault(DeviceFlow.Render, system, system, GateFor(SystemSensitivity)));
         }
 
-        foreach (PinnedDeviceRow row in DeviceRows)
+        foreach (PinnedDeviceRow row in DeviceRows.Where(r => r.Pinned))
         {
-            if (!row.Pinned)
-                continue;
             string name = row.Name.Trim();
             // A pinned device has no sensitivity slider, so keep its previously-saved
             // sensitivity (recovered from the NORMALISED saved devices, so a migrated gate
