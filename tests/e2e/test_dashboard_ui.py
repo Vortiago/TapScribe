@@ -3750,6 +3750,105 @@ async def test_settings_models_card_links_to_setup(running_recorder: RunningReco
             await browser.close()
 
 
+async def test_settings_stack_scrolls_without_clipping_cards(running_recorder: RunningRecorder):
+    """Operator report: on the Settings page "things were not taking up the
+    space they need and no scrollbars" — cards squished, Save buttons gone.
+
+    The editor cards (Models, Live, Summarizer, Batch) are taller than a normal
+    laptop viewport. They used to be direct flex children of `.work__inner`, so
+    a short viewport pushed free space negative and every card shrank below its
+    content; `.panel`'s overflow:hidden then clipped the Save buttons while the
+    view never overflowed, so NO scrollbar appeared. The fix wraps them in a
+    `.settings-stack` block scroller: cards keep natural height and the stack
+    scrolls. The assertions are deliberately structure-independent (they don't
+    name `.settings-stack`) so they re-fail on the SYMPTOM if a later refactor
+    reintroduces the clip — (1) no card is clipped, and (2) when the cards
+    exceed the viewport some ancestor scroller actually scrolls, so the last
+    card's Save button stays reachable. One short height is enough: the cards
+    overflow any normal viewport, so the structural assertions don't vary with
+    the exact pixel height (no threshold to sweep)."""
+    rr = running_recorder
+    height = 650
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": height})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sdSave"]', timeout=6000)
+
+            # Measure once the live + batch cards have rendered (one poll tick).
+            # Structure-independent: find the cards under the view body and walk
+            # up each card to its nearest scrollable ancestor (overflow-y auto/
+            # scroll that actually overflows) — whatever element owns the scroll.
+            measure = await page.evaluate(
+                """() => {
+                  const titleOf = p => (p.querySelector('.panel__title')?.textContent || '').trim();
+                  const panels = [...document.querySelectorAll('.work__inner .panel')];
+                  const scrollableAncestor = el => {
+                    for (let n = el.parentElement; n; n = n.parentElement) {
+                      const oy = getComputedStyle(n).overflowY;
+                      if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight + 1)
+                        return true;
+                      if (n.classList.contains('work__inner')) break;  // view boundary
+                    }
+                    return false;
+                  };
+                  const belowFold = panels.filter(
+                    p => p.getBoundingClientRect().bottom > window.innerHeight + 1
+                  );
+                  return {
+                    // overflow:hidden card whose content exceeds its box => clipped.
+                    clipped: panels.filter(p => p.scrollHeight > p.clientHeight + 1).map(titleOf),
+                    // a card past the fold => the scroll scenario is genuinely exercised.
+                    belowFold: belowFold.map(titleOf),
+                    // a below-fold card with NO scroll path => unreachable.
+                    unreachable: belowFold.filter(p => !scrollableAncestor(p)).map(titleOf),
+                    count: panels.length,
+                  };
+                }"""
+            )
+            assert measure["count"] >= 4, (
+                f"expected the 4 settings cards (Models, Live, Summarizer, Batch), saw {measure['count']}"
+            )
+            # (1) No card clipped — every control (incl. the Save buttons) renders.
+            # This is the primary bug symptom: without the fix the cards squish to
+            # fit and overflow:hidden cuts them off, so this fails first and loudly.
+            assert not measure["clipped"], (
+                f"at 1440x{height} these cards are clipped (content cut off): {measure['clipped']}"
+            )
+            # Precondition: with the cards at natural height they must overflow this
+            # viewport — otherwise (2) passes vacuously without exercising the scroll
+            # path. (In the bug state the cards squish to fit, so this stays empty and
+            # the clip check above is what fires.)
+            assert measure["belowFold"], (
+                f"at 1440x{height} no card extends past the fold — the test isn't "
+                "exercising overflow; lower the viewport height"
+            )
+            # (2) Any card extending past the viewport must have a scroll path.
+            assert not measure["unreachable"], (
+                f"at 1440x{height} these cards extend below the fold with NO scrollbar — "
+                f"unreachable (the reported bug): {measure['unreachable']}"
+            )
+
+            # The concrete element that vanished: the Summarizer "Save default"
+            # button must be reachable — scrolling it into view lands it FULLY on
+            # screen. bounding_box() is None for a non-visible element, so this also
+            # subsumes an is_visible() assertion.
+            save = page.get_by_test_id("sdSave")
+            await save.scroll_into_view_if_needed()
+            box = await save.bounding_box()
+            assert box and box["y"] >= 0 and box["y"] + box["height"] <= height + 1, (
+                f"Save button not fully on-screen after scroll (box={box}, viewport h={height})"
+            )
+        finally:
+            await browser.close()
+
+
 async def test_summary_prefills_effective_config_and_saves_session_override(
     running_recorder: RunningRecorder,
 ):

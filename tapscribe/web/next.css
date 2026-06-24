@@ -351,6 +351,16 @@ body::before { display: none; }
 .fillcol { flex: 1 1 auto; min-height: 0; }
 .grid.fillcol { align-items: stretch; }
 
+/* Settings is a scrolling card-STACK, not a fill-one-panel view: two tall
+   editor cards (Live, Summarizer) sit ABOVE the Batch card, so there is no
+   single "fill" region to scroll its own body. The stack consumes the leftover
+   column height and owns the overflow, laying its cards out in block flow at
+   their natural height — so a short viewport scrolls the whole stack instead of
+   shrinking the cards (whose `.panel` overflow:hidden would otherwise clip the
+   Save buttons with no scrollbar). The 4px padding-bottom keeps the last card
+   off the scroll edge. */
+.settings-stack { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 4px; }
+
 /* A panel that fills its flex parent and scrolls its OWN body — the generic
    form of .livecap. The head stays pinned; .panel__body grows + scrolls.
    `flex: 1` lets it consume slack in a flex-column parent (a view body or an

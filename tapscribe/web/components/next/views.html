@@ -223,118 +223,130 @@
 <template id="tpl-next-view-settings">
   <div data-slot="head"></div>
 
-  <!-- MODELS — entry point to the browser setup / manage-models page (/setup),
-       a separate full-page app (setup.html), so the button is a plain
-       navigation link rather than an in-dashboard view. Static card: no
-       renderRegion / no per-tick rebuild. The installed-summary line fills once
-       from GET /api/setup/state on build (best-effort). -->
-  <div class="panel panel--accent">
-    <div class="panel__head">
-      <div class="panel__title"><span class="ic">📦</span>Models</div>
-      <div class="panel__hint">install &amp; manage transcription models</div>
-    </div>
-    <div class="panel__body">
-      <div class="dim" style="margin-bottom:9px">Add or change transcription models.</div>
-      <div class="mono dim" data-slot="modelsInstalled" style="margin-bottom:11px">…</div>
-      <a class="act act--sm act--primary" href="/setup">Manage models →</a>
-    </div>
-  </div>
-
-  <div class="spacer"></div>
-
-  <!-- LIVE engine — streaming model + initial prompt. renderRegion-guarded: it
-       holds a <select> + <textarea> rebuilt each poll tick. -->
-  <div class="panel panel--accent">
-    <div class="panel__head"><div class="panel__title"><span class="ic">📡</span>Live engine</div><div class="panel__hint">streaming · model + initial prompt</div></div>
-    <div class="panel__body"><div class="liveeng" data-slot="liveCardHost"></div></div>
-  </div>
-
-  <div class="spacer"></div>
-
-  <!-- SUMMARIZER default (#84) — the structured global default the Summary
-       view and the end-of-meeting pipeline resolve from (sessions override
-       source + prompt via session-meta). Built ONCE by settings.js and never
-       rebuilt per-tick — every control here is interactive, so there is no
-       renderRegion (and no sig to drift); the per-tick update only writes the
-       override-count hint in place. Persists via PUT /api/summarize/config. -->
-  <div class="panel panel--accent">
-    <div class="panel__head">
-      <div class="panel__title"><span class="ic">🪄</span>Summarizer default</div>
-      <div class="panel__hint mono" data-slot="sdOverrides"></div>
-    </div>
-    <div class="panel__body">
-      <div class="field" style="margin-bottom:11px">
-        <label>source <span class="dim">— sessions can override source + prompt</span></label>
-        <span class="segctl segctl--wide" data-slot="sdSource">
-          <button class="segctl__opt is-on" type="button" data-sd-src="local" aria-pressed="true" title="bundled offline model — runs with no network">🖥️ Local</button>
-          <button class="segctl__opt" type="button" data-sd-src="api" aria-pressed="false" title="OpenAI-compatible / Ollama endpoint">🌐 API</button>
-          <button class="segctl__opt" type="button" data-sd-src="command" aria-pressed="false" title="pipe the transcript to a CLI tool">⌨️ Command</button>
-        </span>
+  <!-- Settings is a scrolling card-STACK, not a fill-one-panel view: several
+       editor cards (Models, Live, Summarizer) sit ABOVE the Batch card, so
+       there is no single "fill" region. `.settings-stack` owns the overflow and
+       lays its cards out in block flow at natural height, so a short viewport
+       scrolls the whole stack. (As direct flex children of `.work__inner` the
+       cards shrank below their content and `.panel`'s overflow:hidden clipped
+       the Save buttons with NO scrollbar — see test_settings_stack_*.) Every
+       Settings card MUST live inside this wrapper, never as a direct child of
+       `.work__inner`, or the clip returns. -->
+  <div class="settings-stack">
+    <!-- MODELS — entry point to the browser setup / manage-models page (/setup),
+         a separate full-page app (setup.html), so the button is a plain
+         navigation link rather than an in-dashboard view. Static card: no
+         renderRegion / no per-tick rebuild. The installed-summary line fills once
+         from GET /api/setup/state on build (best-effort). -->
+    <div class="panel panel--accent">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">📦</span>Models</div>
+        <div class="panel__hint">install &amp; manage transcription models</div>
       </div>
-
-      <!-- Local detail: model + output cap (populated once from
-           GET /api/summarize/models, same as the Summary view). -->
-      <div class="srcdetail" data-slot="sdLocal">
-        <div class="field">
-          <label>model</label>
-          <select class="sel sel--model" data-slot="sdModel" aria-label="Default local summarizer model"></select>
-        </div>
-        <div class="dim mono" data-slot="sdModelNote" style="margin-top:4px"></div>
-        <div class="field" style="margin-top:8px">
-          <label>max output tokens <span class="dim">— summary length cap</span></label>
-          <input class="inp-txt mono" type="number" data-slot="sdMaxTokens" min="16" max="8192" step="64" value="2048" aria-label="Default max output tokens">
-        </div>
-      </div>
-
-      <!-- Command detail: the CLI template (the preset only SEEDS it). -->
-      <div class="srcdetail" data-slot="sdCommand" hidden>
-        <div class="field">
-          <label>preset</label>
-          <select class="sel sel--model" data-slot="sdCmdPreset" aria-label="Default command preset"></select>
-        </div>
-        <div class="dim mono" data-slot="sdCmdPresetNote" style="margin-top:4px"></div>
-        <div class="field" style="margin-top:8px"><label>command template</label><input class="inp-txt mono" type="text" data-slot="sdCmd" value=""></div>
-      </div>
-
-      <!-- API detail (#85): OpenAI-compatible endpoint. The API key is
-           write-only — never serialised back (state/config expose only
-           key_set), never pre-filled, and a blank key on Save preserves the
-           stored one. -->
-      <div class="srcdetail" data-slot="sdApi" hidden>
-        <div class="field">
-          <label>base URL</label>
-          <input class="inp-txt mono" type="text" data-slot="sdApiBase" placeholder="http://localhost:11434/v1" aria-label="Default API base URL">
-        </div>
-        <div class="field" style="margin-top:8px">
-          <label>model</label>
-          <input class="inp-txt mono" type="text" data-slot="sdApiModel" placeholder="qwen3" aria-label="Default API model name">
-        </div>
-        <div class="field" style="margin-top:8px">
-          <label>API key <span class="dim">— write-only · never displayed</span></label>
-          <input class="inp-txt mono" type="password" data-slot="sdApiKey" autocomplete="off" aria-label="Default API key">
-        </div>
-        <div class="dim mono" data-slot="sdApiKeyNote" style="margin-top:4px"></div>
-      </div>
-
-      <div class="field" style="margin-top:11px">
-        <label>prompt</label>
-        <textarea class="ta" rows="3" data-slot="sdPrompt"></textarea>
-      </div>
-
-      <div style="margin-top:10px; display:flex; align-items:center; gap:8px">
-        <button class="act act--sm act--primary" type="button" data-slot="sdSave">💾 Save default</button>
-        <span class="dim mono" data-slot="sdStatus"></span>
+      <div class="panel__body">
+        <div class="dim" style="margin-bottom:9px">Add or change transcription models.</div>
+        <div class="mono dim" data-slot="modelsInstalled" style="margin-bottom:11px">…</div>
+        <a class="act act--sm act--primary" href="/setup">Manage models →</a>
       </div>
     </div>
-  </div>
 
-  <div class="spacer"></div>
+    <div class="spacer"></div>
 
-  <!-- BATCH engine — recordings model + batch prompt + hotwords + hallucination
-       filter (reuses engine.js + config-card.js). Fills the rest of the height. -->
-  <div class="panel panel--primary panel--fill">
-    <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Batch engine</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
-    <div class="panel__body"><div class="eng" data-slot="engineHost"></div><div class="cfg-grid" data-slot="configGrid" style="margin-top:11px"></div></div>
+    <!-- LIVE engine — streaming model + initial prompt. renderRegion-guarded: it
+         holds a <select> + <textarea> rebuilt each poll tick. -->
+    <div class="panel panel--accent">
+      <div class="panel__head"><div class="panel__title"><span class="ic">📡</span>Live engine</div><div class="panel__hint">streaming · model + initial prompt</div></div>
+      <div class="panel__body"><div class="liveeng" data-slot="liveCardHost"></div></div>
+    </div>
+
+    <div class="spacer"></div>
+
+    <!-- SUMMARIZER default (#84) — the structured global default the Summary
+         view and the end-of-meeting pipeline resolve from (sessions override
+         source + prompt via session-meta). Built ONCE by settings.js and never
+         rebuilt per-tick — every control here is interactive, so there is no
+         renderRegion (and no sig to drift); the per-tick update only writes the
+         override-count hint in place. Persists via PUT /api/summarize/config. -->
+    <div class="panel panel--accent">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">🪄</span>Summarizer default</div>
+        <div class="panel__hint mono" data-slot="sdOverrides"></div>
+      </div>
+      <div class="panel__body">
+        <div class="field" style="margin-bottom:11px">
+          <label>source <span class="dim">— sessions can override source + prompt</span></label>
+          <span class="segctl segctl--wide" data-slot="sdSource">
+            <button class="segctl__opt is-on" type="button" data-sd-src="local" aria-pressed="true" title="bundled offline model — runs with no network">🖥️ Local</button>
+            <button class="segctl__opt" type="button" data-sd-src="api" aria-pressed="false" title="OpenAI-compatible / Ollama endpoint">🌐 API</button>
+            <button class="segctl__opt" type="button" data-sd-src="command" aria-pressed="false" title="pipe the transcript to a CLI tool">⌨️ Command</button>
+          </span>
+        </div>
+
+        <!-- Local detail: model + output cap (populated once from
+             GET /api/summarize/models, same as the Summary view). -->
+        <div class="srcdetail" data-slot="sdLocal">
+          <div class="field">
+            <label>model</label>
+            <select class="sel sel--model" data-slot="sdModel" aria-label="Default local summarizer model"></select>
+          </div>
+          <div class="dim mono" data-slot="sdModelNote" style="margin-top:4px"></div>
+          <div class="field" style="margin-top:8px">
+            <label>max output tokens <span class="dim">— summary length cap</span></label>
+            <input class="inp-txt mono" type="number" data-slot="sdMaxTokens" min="16" max="8192" step="64" value="2048" aria-label="Default max output tokens">
+          </div>
+        </div>
+
+        <!-- Command detail: the CLI template (the preset only SEEDS it). -->
+        <div class="srcdetail" data-slot="sdCommand" hidden>
+          <div class="field">
+            <label>preset</label>
+            <select class="sel sel--model" data-slot="sdCmdPreset" aria-label="Default command preset"></select>
+          </div>
+          <div class="dim mono" data-slot="sdCmdPresetNote" style="margin-top:4px"></div>
+          <div class="field" style="margin-top:8px"><label>command template</label><input class="inp-txt mono" type="text" data-slot="sdCmd" value=""></div>
+        </div>
+
+        <!-- API detail (#85): OpenAI-compatible endpoint. The API key is
+             write-only — never serialised back (state/config expose only
+             key_set), never pre-filled, and a blank key on Save preserves the
+             stored one. -->
+        <div class="srcdetail" data-slot="sdApi" hidden>
+          <div class="field">
+            <label>base URL</label>
+            <input class="inp-txt mono" type="text" data-slot="sdApiBase" placeholder="http://localhost:11434/v1" aria-label="Default API base URL">
+          </div>
+          <div class="field" style="margin-top:8px">
+            <label>model</label>
+            <input class="inp-txt mono" type="text" data-slot="sdApiModel" placeholder="qwen3" aria-label="Default API model name">
+          </div>
+          <div class="field" style="margin-top:8px">
+            <label>API key <span class="dim">— write-only · never displayed</span></label>
+            <input class="inp-txt mono" type="password" data-slot="sdApiKey" autocomplete="off" aria-label="Default API key">
+          </div>
+          <div class="dim mono" data-slot="sdApiKeyNote" style="margin-top:4px"></div>
+        </div>
+
+        <div class="field" style="margin-top:11px">
+          <label>prompt</label>
+          <textarea class="ta" rows="3" data-slot="sdPrompt"></textarea>
+        </div>
+
+        <div style="margin-top:10px; display:flex; align-items:center; gap:8px">
+          <button class="act act--sm act--primary" type="button" data-slot="sdSave">💾 Save default</button>
+          <span class="dim mono" data-slot="sdStatus"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+
+    <!-- BATCH engine — recordings model + batch prompt + hotwords + hallucination
+         filter (reuses engine.js + config-card.js). A natural-height card: the
+         stack scrolls as one page, so it does NOT scroll its own body. -->
+    <div class="panel panel--primary">
+      <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Batch engine</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
+      <div class="panel__body"><div class="eng" data-slot="engineHost"></div><div class="cfg-grid" data-slot="configGrid" style="margin-top:11px"></div></div>
+    </div>
   </div>
 </template>
 
