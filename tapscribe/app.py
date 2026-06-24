@@ -88,6 +88,7 @@ from .session_merge import InvalidRange, NoUsableWavs
 from .session_paths import resolve_session_dir, resolve_wav, stripped_dir
 from .sessions import (
     gather_sessions,
+    read_session_files,
     read_session_meta,
     read_session_summary,
     read_session_transcript,
@@ -1250,6 +1251,21 @@ async def api_session_transcript(session: str, recorder: Recorder = Depends(get_
     plain_text / suppressed[] body crosses the wire on open, not every poll.
     The disk read is offloaded with to_thread like the rest of the poll path."""
     return await asyncio.to_thread(read_session_transcript, session)
+
+
+@app.get("/api/sessions/{session}/files")
+async def api_session_files(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """The FULL per-session WAV listing (originals + their stripped region
+    clips), the `files[]` array `/api/state` no longer embeds.
+
+    Lazy companion to `/api/state`, which now carries only `wav_count`,
+    `total_bytes`, `total_duration_s` and a `files_sig`. The dashboard fetches
+    this once per (session, files_sig) when a session is opened and caches it
+    client-side, so a huge session's per-WAV array crosses the wire on open +
+    on change — not on every poll. `resolve_session_dir` (inside
+    `read_session_files`) validates the id against path traversal; the disk walk
+    is offloaded with to_thread like the rest of the poll path."""
+    return await asyncio.to_thread(read_session_files, session)
 
 
 @app.get("/api/sessions/{session}/summary")

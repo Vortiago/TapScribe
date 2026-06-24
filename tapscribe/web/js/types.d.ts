@@ -129,7 +129,18 @@ export interface HallucinationsConfig {
 export interface Session {
   session: string;
   wav_count: number;
-  files: WavFile[];
+  // The per-WAV array is NOT on /api/state anymore (a huge session shipped +
+  // re-parsed O(WAVs) every poll tick). Fetch it lazily via
+  // fetchSessionFiles(session, files_sig) — cached client-side, refetched only
+  // when files_sig changes. Aggregates the listing views need are precomputed:
+  total_bytes: number;        // Σ original WAV sizes — sessions.js total size
+  total_duration_s: number;   // Σ original WAV durations — spine.js card
+  speakers: string[];         // distinct recorded speaker slugs — People view
+  // Deterministic digest of the file listing; flips on any add/remove/
+  // re-record/transcribe/strip change. The lazy-files cache key + invalidation
+  // signal. "" when the session has no folder on disk yet (→ empty list, no
+  // fetch).
+  files_sig: string;
   is_current: boolean;
   earliest_iso: string | null;
   latest_iso: string | null;
@@ -218,6 +229,12 @@ export interface SummaryModelCatalog {
   max_tokens_min: number;     // lower bound for the number input
   max_tokens_max: number;     // upper bound for the number input
   command_presets: CommandPreset[]; // Command-source presets (ride the same fetch)
+}
+
+// GET /api/sessions/{session}/files — the lazy per-session WAV listing the
+// poll no longer embeds. Fetched once per files_sig via fetchSessionFiles.
+export interface SessionFiles {
+  files: WavFile[];
 }
 
 export interface WavFile {

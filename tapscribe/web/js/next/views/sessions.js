@@ -42,15 +42,14 @@ import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
 
 /**
- * Sum of a session's original WAV sizes — the only size signal /api/state
- * carries (per-WAV `size`; there's no session-level total or duration field,
- * so we derive what we can and show "—" when there are no files to sum).
+ * A session's total original-WAV bytes. Precomputed server-side as
+ * `total_bytes` — /api/state no longer ships the per-WAV files[] array (a huge
+ * session re-shipped + re-parsed it every poll), so the listing reads the
+ * aggregate instead of summing files itself.
  * @param {import('../../types.js').Session} s
  */
 function totalBytes(s) {
-  let n = 0;
-  for (const f of (s.files || [])) n += f.size || 0;
-  return n;
+  return s.total_bytes || 0;
 }
 
 /**

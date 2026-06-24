@@ -70,6 +70,8 @@ const _wavTxCache = new Map();
 const _wavPeaksCache = new Map();
 /** @type {Map<string, TxEntry<import('./types.js').WavStripMeta | null>>} */
 const _wavStripMetaCache = new Map();
+/** @type {Map<string, TxEntry<import('./types.js').WavFile[]>>} */
+const _sessionFilesCache = new Map();
 
 // Bound the caches so a long-lived tab that opens hundreds of (id,
 // transcribed_at) pairs over its lifetime doesn't grow unbounded. Map
@@ -193,6 +195,73 @@ export function fetchWavTranscript(session, name, source, transcribedAt) {
 export function peekWavTranscript(session, name, source, transcribedAt) {
   const e = _wavTxCache.get(`${session}/${name}@${source}@${transcribedAt}`);
   return e && e.settled ? e.value : undefined;
+}
+
+// ---- Lazy per-session file listing + client cache ------------------------
+//
+// /api/state no longer embeds each session's per-WAV `files[]` (a huge session
+// re-shipped + re-parsed O(WAVs) every ~0.5s tick). It carries a `files_sig`
+// instead; the full listing is fetched here on demand and cached per
+// (session, files_sig), so it crosses the wire ONCE per change — a new WAV /
+// re-transcribe / strip flips files_sig and busts the key, while an idle poll
+// reuses the cached promise and fires no request.
+
+/**
+ * The full per-session WAV listing (originals + their stripped regions),
+ * cached per (session, filesSig). `filesSig` comes from the slim `files_sig`
+ * field on /api/state. Callers MUST skip the call when files_sig is "" (no
+ * folder on disk yet → the endpoint would 404).
+ * @param {string} session
+ * @param {string} filesSig
+ * @returns {Promise<import('./types.js').WavFile[]>}
+ */
+export function fetchSessionFiles(session, filesSig) {
+  return _getOrFetch(_sessionFilesCache, `${session}@${filesSig}`, () =>
+    fetch(`/api/sessions/${encodeURIComponent(session)}/files`, { cache: "no-store" })
+      .then(_unwrap)
+      .then((r) => /** @type {import('./types.js').SessionFiles} */ (r).files || []),
+  );
+}
+
+/**
+ * Synchronous peek: the resolved file listing for (session, filesSig) if its
+ * fetch already settled, else undefined. Lets a render use the cached list
+ * inline without re-rendering when it's already in hand.
+ * @param {string} session
+ * @param {string} filesSig
+ * @returns {import('./types.js').WavFile[] | undefined}
+ */
+export function peekSessionFiles(session, filesSig) {
+  const e = _sessionFilesCache.get(`${session}@${filesSig}`);
+  return e && e.settled ? e.value : undefined;
+}
+
+/**
+ * Resolve a focused session's WAV listing for a per-tick render, the shape both
+ * the Recordings and Transcript views need: returns the cached array when it's
+ * in hand, `[]` when there's nothing to fetch (empty `filesSig` → no folder /
+ * no WAVs yet), or `null` while a fetch is in flight (→ the caller shows a
+ * loading placeholder). On a cache miss it fires the fetch ONCE (deduped via the
+ * caller's `pending` set across the ticks before it lands) and calls `onLand`
+ * when it settles so the view can drop its render gates + re-render.
+ * @param {string} session
+ * @param {string} filesSig
+ * @param {Set<string>} pending - per-view in-flight (session@filesSig) keys
+ * @param {() => void} onLand - run after the fetch settles (success or failure)
+ * @returns {import('./types.js').WavFile[] | null}
+ */
+export function loadSessionFiles(session, filesSig, pending, onLand) {
+  if (!session || !filesSig) return [];
+  const cached = peekSessionFiles(session, filesSig);
+  if (cached !== undefined) return cached;
+  const k = `${session}@${filesSig}`;
+  if (!pending.has(k)) {
+    pending.add(k);
+    fetchSessionFiles(session, filesSig)
+      .catch(() => { /* transient — the next poll refetches */ })
+      .finally(() => { pending.delete(k); onLand(); });
+  }
+  return null;
 }
 
 // ---- Waveform peaks fetch + client cache ---------------------------------

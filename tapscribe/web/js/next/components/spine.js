@@ -212,9 +212,10 @@ function buildSessInfo(session, metaFor) {
   statusEl.textContent = live ? "● live" : "idle";
   statusEl.classList.add(live ? "is-live" : "is-idle");
 
-  const files = session.files || [];
-  const totalDur = files.reduce((a, f) => a + (f.duration_s || 0), 0);
-  const wn = session.wav_count || files.length;
+  // total_duration_s is precomputed server-side — /api/state no longer ships
+  // the per-WAV files[] array (a huge session re-shipped it every poll).
+  const totalDur = session.total_duration_s || 0;
+  const wn = session.wav_count || 0;
   const tx = session.session_transcript ? "tx ✓" : "no tx";
   pick(card, "stats").textContent = `${wn} WAV${wn === 1 ? "" : "s"} · ${fmtDur(totalDur)} · ${tx}`;
 

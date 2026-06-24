@@ -18,6 +18,7 @@ between the two sources.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import os.path
@@ -421,18 +422,24 @@ def _stripped_summary(
     return {"count": len(regions), "speech_seconds": speech, "stripped_at": stripped_at}
 
 
-def _describe_session(
+def build_session_files(
     sd: Path,
     *,
-    jobs: dict[str, Any],
-    current_session: str,
     visited: set[str] | None = None,
-) -> dict[str, Any]:
-    """Build one entry for the dashboard's session list from `sd`.
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """The per-session WAV listing: each original WAV descriptor with its
+    strip-silence region clips attached as `regions`, plus the directory-level
+    stripped summary (None when there's no stripped/ content).
+
+    Shared by the once-per-second poll (`_describe_session`, for the aggregates
+    + `files_sig`) and the lazy `GET /api/sessions/{s}/files` endpoint
+    (`read_session_files`), so both build the EXACT same per-file shape from the
+    one cached `_describe_wav`. `/api/state` no longer embeds this array — see
+    `_describe_session`.
 
     `visited`, when supplied by `gather_sessions`, accumulates the str(path)
     of every WAV described so the per-WAV cache can be pruned to the on-disk
-    set after the walk. Direct callers (tests) may omit it."""
+    set after the walk. Direct callers (the endpoint, tests) may omit it."""
     originals = sorted(sd.glob("*.wav"))
     if visited is not None:
         visited.update(str(w) for w in originals)
@@ -456,6 +463,69 @@ def _describe_session(
             region_buckets.setdefault(key, []).append(_describe_wav(rw))
     for w in wavs:
         w["regions"] = region_buckets.get(parse_wav_speaker_ident(w["name"]), [])
+    return wavs, _stripped_summary(stripped_root, region_buckets)
+
+
+def _files_signature(wavs: list[dict[str, Any]], stripped: dict[str, Any] | None) -> str:
+    """Deterministic digest of a session's file listing. Flips whenever a WAV
+    (or a stripped region) is added / removed / re-recorded, a transcript is
+    (re)written, or the strip output changes — every field the dashboard's WAV
+    list renders is folded in, so a cached `files[]` can't survive a real
+    change. The dashboard carries this on `/api/state` and refetches the lazy
+    `GET /api/sessions/{s}/files` only when it changes.
+
+    A plain SHA-1 over the inputs (not `id()`/`hash()`) so the same on-disk
+    state yields the same signature across a server restart — a client holding a
+    cached list reconnects without a needless refetch, and never misses one.
+    Returns "" for a session with no files at all, which is the dashboard's cue
+    to render an empty list WITHOUT fetching the listing (the same contract as a
+    not-yet-materialised session)."""
+    if not wavs and not stripped:
+        return ""
+    h = hashlib.sha1()
+
+    def feed(*parts: object) -> None:
+        for p in parts:
+            h.update(str(p).encode("utf-8"))
+            h.update(b"\x1f")
+
+    for w in wavs:
+        tx = w.get("transcript") or {}
+        # The PRIMARY transcript stamp covers re-transcribes; the variant COUNT
+        # covers a non-primary cached variant being added/removed without moving
+        # the primary (the Transcript stage's cache panel lists every variant).
+        feed("w", w["name"], w["size"], tx.get("transcribed_at") or "", len(w.get("transcripts") or []))
+        for r in w.get("regions") or []:
+            rtx = r.get("transcript") or {}
+            feed("r", r["name"], r["size"], rtx.get("transcribed_at") or "", len(r.get("transcripts") or []))
+    if stripped:
+        feed("s", stripped.get("stripped_at") or "", stripped.get("count") or 0)
+    return h.hexdigest()[:16]
+
+
+def read_session_files(session: str) -> dict[str, Any]:
+    """The lazy companion to `/api/state`: the full per-session WAV listing the
+    poll no longer embeds, fetched once per `files_sig` change when a session is
+    opened. `resolve_session_dir` validates the id against path traversal; the
+    descriptors come from the same cached `build_session_files` the poll uses."""
+    session_dir = resolve_session_dir(session)
+    wavs, _stripped = build_session_files(session_dir)
+    return {"files": wavs}
+
+
+def _describe_session(
+    sd: Path,
+    *,
+    jobs: dict[str, Any],
+    current_session: str,
+    visited: set[str] | None = None,
+) -> dict[str, Any]:
+    """Build one entry for the dashboard's session list from `sd`.
+
+    `visited`, when supplied by `gather_sessions`, accumulates the str(path)
+    of every WAV described so the per-WAV cache can be pruned to the on-disk
+    set after the walk. Direct callers (tests) may omit it."""
+    wavs, stripped = build_session_files(sd, visited=visited)
     starts = [parse_wav_start(w["name"]) for w in wavs]
     starts = [s for s in starts if s is not None]
     earliest = min(starts) if starts else None
@@ -463,7 +533,22 @@ def _describe_session(
     return {
         "session": sd.name,
         "wav_count": len(wavs),
-        "files": wavs,
+        # files[] is NOT embedded in /api/state — the poll formerly shipped
+        # EVERY session's full per-WAV array on every ~0.5s tick, which is
+        # O(total WAVs) on the wire + a JSON re-parse client-side. The
+        # dashboard now fetches one session's files[] lazily via
+        # GET /api/sessions/{s}/files, keyed on `files_sig` below. The two
+        # aggregates the listing views need (spine's total duration,
+        # sessions.js's total bytes) are precomputed here so they don't have to
+        # walk files[] just to sum.
+        "total_bytes": sum(w["size"] for w in wavs),
+        "total_duration_s": round(sum(w["duration_s"] for w in wavs), 2),
+        # Distinct recorded speaker slugs (from the WAV filenames) — the People
+        # view's per-session participants, which used to walk files[]. Cheap to
+        # derive here since we already have the descriptors; sorted for a stable
+        # poll signature.
+        "speakers": sorted({w["speaker_name"] for w in wavs if w.get("speaker_name")}),
+        "files_sig": _files_signature(wavs, stripped),
         "is_current": sd.name == current_session,
         "earliest_iso": earliest.isoformat() if earliest else None,
         "latest_iso": latest.isoformat() if latest else None,
@@ -478,7 +563,7 @@ def _describe_session(
         "session_summary": _session_summary_marker(_read_session_json_cached(sd / FILENAME_SUMMARY_JSON)),
         "progress": jobs.get(sd.name),
         "session_meta": read_session_meta(sd.name),
-        "stripped": _stripped_summary(stripped_root, region_buckets),
+        "stripped": stripped,
     }
 
 
@@ -520,7 +605,13 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
             {
                 "session": current_session,
                 "wav_count": 0,
-                "files": [],
+                # No folder on disk yet → no files. An empty files_sig is the
+                # dashboard's cue to render an empty list WITHOUT calling the
+                # lazy files endpoint (which would 404 on the missing folder).
+                "total_bytes": 0,
+                "total_duration_s": 0,
+                "speakers": [],
+                "files_sig": "",
                 "is_current": True,
                 "earliest_iso": None,
                 "latest_iso": None,

@@ -6,19 +6,32 @@
 // Transcription (the engine selector, transcribe controls, and per-WAV cache)
 // moved to the Transcript stage — Recordings is files + silence-stripping only.
 //
-// Mirrors session-detail.js's data flow (the classic dashboard) for the strip
-// pieces but is FRESH /next code — it builds the WAV list / strip controls
-// from /api/state and the same endpoints (POST
+// The strip controls + per-WAV list come from the same endpoints (POST
 // /api/sessions/{s}/strip-silence, DELETE /api/sessions/{s}/stripped). The
 // waveform fetches peaks lazily from /api/wav/{s}/{name}/peaks; the cut
 // overlay on top of it lands in a later slice.
 //
-// Built once for the page; `update(j, session)` re-renders the WAV list /
-// stats / strip-job progress each tick (signature-gated so an in-progress
-// strip slider isn't clobbered).
+// The WAV list itself is built for HUGE sessions (hundreds–thousands of
+// files). Two pieces keep it snappy:
+//   1. The file listing is NOT on /api/state — it's fetched lazily via
+//      fetchSessionFiles(sid, files_sig) and cached, so it crosses the wire
+//      once per change, not every poll. `currentFiles` holds the resolved
+//      list for the focused session.
+//   2. The list is rendered through `reconcileList` (keyed, in-place — never
+//      replaceChildren) and each row carries `content-visibility: auto`
+//      (next.css `.wavrow`), so the browser skips layout/paint of off-screen
+//      rows and a selection / expand / poll tick never rebuilds thousands of
+//      nodes. Selection is an in-place `.is-sel` toggle; the per-row
+//      transcript expand is a native <details> that lazy-fetches its body on
+//      first open.
+//
+// Built once for the page; `update(j, session)` refreshes stats / strip-job
+// progress each tick and reconciles the list only when the file set changes
+// (files_sig / source), deferring while a control is focused or text is being
+// selected inside the list.
 
-import { tpl, pick, selectionInside } from "../../templates.js";
-import { postJson, del, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks, fetchWavStripMeta, peekWavStripMeta, fetchStripPreview } from "../../api.js";
+import { tpl, pick, selectionInside, reconcileList } from "../../templates.js";
+import { postJson, del, loadSessionFiles, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks, fetchWavStripMeta, peekWavStripMeta, fetchStripPreview } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 import { createWaveform } from "../components/waveform.js";
@@ -80,23 +93,28 @@ export function build(ctx) {
   /** Selected original WAV name, per session id (drives the waveform header). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
-  /** WAV rows whose inline transcript is EXPANDED. Keyed by the same
-   * "session/name@source" shape the transcribe/delete dispatch uses so a clip
-   * and its parent original never collide. Lives in view-local state + is
-   * folded into the render signature so the expanded set survives poll ticks. */
+  /** The lazily-fetched WAV listing for the FOCUSED session — the array
+   * /api/state no longer embeds. Refreshed at the top of update() from the
+   * (sid, files_sig)-keyed client cache; [] until the first fetch lands. Every
+   * helper that used to read session.files reads this instead. */
+  /** @type {import('../../types.js').WavFile[]} */
+  let currentFiles = [];
+  /** (sid@files_sig) fetches in flight — dedupes the lazy files fetch across
+   * the ticks before it lands (the api.js cache dedupes the request itself). */
   /** @type {Set<string>} */
-  const expandedKeys = new Set();
-  /** Expand keys we've already scheduled a re-render for after the lazy
-   * fetchWavTranscript lands — dedupes repeated misses across ticks. */
-  /** @type {Set<string>} */
-  const txRerenderPending = new Set();
+  const pendingFiles = new Set();
+  /** Last (sid · source · files_sig) the WAV list was reconciled for — the
+   * list-level gate so reconcileList runs only when the file SET changes, not
+   * every poll tick. NOT advanced on a deferred reconcile (selection/focus
+   * hold) so the held-back render lands once the interaction clears. */
+  let lastListSig = " ";
   /** Last strip-silence response stats, per session id (overlay on s.stripped). */
   /** @type {Map<string, import('../../types.js').StripSilenceResult>} */
   const lastStrip = new Map();
   /** Sessions with a strip POST in flight (the job snapshot also flags this). */
   /** @type {Set<string>} */
   const stripInflight = new Set();
-  let lastSig = " "; // sentinel so the first update always renders the body
+  let lastChromeSig = " "; // sentinel so the first update always paints the chrome
   // Waveform render state. `lastWaveSig` is the canvas's OWN small signature
   // (selected WAV · source · size · load-state) so a per-second strip/transcribe
   // job tick — which churns the body's signature — never rebuilds the O(bins)
@@ -152,13 +170,13 @@ export function build(ctx) {
     el.classList.toggle("is-empty", value === "" || value === "—");
   };
 
-  /** Resolve the selected original WAV for the focused session (first if unset). */
+  /** Resolve the selected original WAV for the focused session (first if
+   * unset). Reads the lazily-fetched `currentFiles`, not session.files (which
+   * /api/state no longer ships). */
   const selectedFor = () => {
-    if (!session) return null;
-    const files = session.files || [];
-    if (!files.length) return null;
+    if (!session || !currentFiles.length) return null;
     const want = selectedWav.get(session.session);
-    return files.find((f) => f.name === want) ?? files[0] ?? null;
+    return currentFiles.find((f) => f.name === want) ?? currentFiles[0] ?? null;
   };
 
   /** Resolve + draw the selected WAV's waveform. Peaks are fetched lazily
@@ -355,7 +373,10 @@ export function build(ctx) {
     } finally {
       stripInflight.delete(sid);
       stripBtn.disabled = false;
-      lastSig = " "; // force a body re-render with the new stripped clips
+      // Force the next tick to repaint chrome + reconcile the list with the new
+      // stripped clips (the new files_sig will refetch the listing).
+      lastChromeSig = " ";
+      lastListSig = " ";
       afterMutate();
     }
   });
@@ -369,42 +390,59 @@ export function build(ctx) {
     lastStrip.delete(sid);
     dropPreview();
     if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
-    lastSig = " ";
+    lastChromeSig = " ";
+    lastListSig = " ";
     afterMutate();
   });
 
-  // ---- Per-WAV transcript expand (inline, lazy) -----------------------------
+  // ---- Per-WAV transcript expand (native <details>, lazy body) --------------
 
-  /** The expand key for a WAV row — same "session/name@source" shape as the
-   * transcribe/delete dispatch so a clip and its parent never collide. */
-  /** @param {string} sid @param {string} name @param {"original"|"stripped"} src */
-  const expandKey = (sid, name, src) => `${sid}/${name}${src === "stripped" ? "@stripped" : ""}`;
+  /** Render the message-only body (no cached transcript / load error) into an
+   * expand host. */
+  /** @param {HTMLElement} host @param {string} msg */
+  const fillExpandMessage = (host, msg) => {
+    const el = document.createElement("div");
+    el.className = "expand-tx-loading dim small";
+    el.textContent = msg;
+    host.replaceChildren(el);
+  };
 
-  /** Resolve the OPEN row's FULL cached transcript from the lazy client cache.
-   * /api/state ships only a slim marker; on a cache miss this fires the fetch
-   * once (keyed on the marker's transcribed_at, so a re-transcribe re-fetches)
-   * and re-renders via afterMutate when it lands. Returns undefined while the
-   * fetch is in flight (→ show the loading placeholder), or the resolved body
-   * (possibly null) once settled. */
+  /** Fill one open <details>'s body with the WAV's FULL cached transcript,
+   * fetched lazily on first open. /api/state ships only a slim marker on each
+   * file row; the body crosses the wire once per (wav, source, transcribed_at)
+   * and is client-cached. Self-contained per row — the api.js cache dedupes the
+   * request across reopens, so there's no global expanded-set / poll-driven
+   * re-render machinery: when the fetch lands we just refill THIS host (if it's
+   * still the one we fired for). */
   /**
-   * @param {string} sid
+   * @param {HTMLElement} host
    * @param {string} name
    * @param {"original"|"stripped"} src
    * @param {import('../../types.js').WavTranscriptMarker} marker
-   * @returns {import('../../types.js').WavTranscript | null | undefined}
+   * @param {string} speakerName
    */
-  const resolveWavTx = (sid, name, src, marker) => {
+  const fillExpand = (host, name, src, marker, speakerName) => {
+    const sid = session?.session || "";
     const stamp = marker.transcribed_at || "";
     const cached = peekWavTranscript(sid, name, src, stamp);
-    if (cached !== undefined) return cached;
-    const key = `${sid}/${name}@${src}@${stamp}`;
-    if (!txRerenderPending.has(key)) {
-      txRerenderPending.add(key);
-      fetchWavTranscript(sid, name, src, stamp)
-        .catch(() => { /* transient failure — the next poll re-attempts */ })
-        .finally(() => { txRerenderPending.delete(key); lastSig = " "; afterMutate(); });
+    if (cached !== undefined) {
+      if (cached) host.replaceChildren(buildExpand(cached, speakerName));
+      else fillExpandMessage(host, "no transcript body on disk");
+      return;
     }
-    return undefined;
+    host.replaceChildren(tpl("tpl-next-txloading"));
+    // Tag the host with the stamp we're fetching so a re-transcribe that
+    // recreates the row (new marker) doesn't get an older body painted in.
+    host.dataset.txStamp = stamp;
+    fetchWavTranscript(sid, name, src, stamp)
+      .then((full) => {
+        if (host.dataset.txStamp !== stamp || !host.isConnected) return;
+        if (full) host.replaceChildren(buildExpand(full, speakerName));
+        else fillExpandMessage(host, "no transcript body on disk");
+      })
+      .catch(() => {
+        if (host.dataset.txStamp === stamp && host.isConnected) fillExpandMessage(host, "could not load transcript");
+      });
   };
 
   /** Build the inline expanded-transcript node for one WAV. Renders a meta
@@ -490,237 +528,195 @@ export function build(ctx) {
       alert(`Delete failed: ${String(e).replace(/^Error:\s*/, "")}`);
       return;
     }
-    expandedKeys.delete(expandKey(sid, name, src));
-    lastSig = " ";
+    // The next /api/state poll carries a new files_sig (the digest drops the
+    // deleted WAV), so currentFiles refetches and the reconcile removes the
+    // row. Force both gates so that lands on the first tick.
+    lastChromeSig = " ";
+    lastListSig = " ";
     afterMutate();
+  };
+
+  /** Trigger a WAV download WITHOUT toggling the row's <details>: a plain
+   * anchor click inside a <summary> both navigates AND toggles, so the row's
+   * download handler preventDefaults the toggle and navigates via this synthetic
+   * (outside-the-summary) anchor instead. */
+  /** @param {string} href */
+  const triggerDownload = (href) => {
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = "";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  /** Reflect the current selection on the originals in place — `.is-sel` drives
+   * the "🌊 viewing" badge + highlight (pure CSS), `aria-pressed` the name
+   * button. No row rebuild, so selecting in a thousands-row list is O(rows) DOM
+   * attribute flips, not a reconcile. */
+  /** @param {string} selName */
+  const applySelection = (selName) => {
+    for (const row of /** @type {NodeListOf<HTMLElement>} */ (wavList.querySelectorAll(".wavrow:not(.is-clip)"))) {
+      const isSel = row.dataset.wav === selName;
+      row.classList.toggle("is-sel", isSel);
+      const selEl = row.querySelector("[data-wav-select]");
+      if (selEl) selEl.setAttribute("aria-pressed", String(isSel));
+    }
   };
 
   // ---- WAV list -------------------------------------------------------------
 
-  /** Wire one row's tx-tag, expand toggle, download link, and delete button —
-   * shared by originals and clips. Appends the expand body after the row when
-   * the row is in `expandedKeys`. */
+  /** One flat row model — an original WAV or an indented stripped clip. The
+   * reconcile key + sig live here so the list updates in place. */
+  /** @typedef {{
+   *   kind: "wav" | "clip",
+   *   file: import('../../types.js').WavFile | import('../../types.js').WavRegion,
+   *   src: "original" | "stripped",
+   *   isCurrent: boolean,
+   * }} RowModel */
+
+  /** Flatten the file listing into reconcile row models: every original, each
+   * followed by its indented stripped region clips when the stripped source is
+   * active (matches the classic layout). */
   /**
-   * @param {DocumentFragment} out
-   * @param {DocumentFragment} node
-   * @param {import('../../types.js').WavFile | import('../../types.js').WavRegion} f
+   * @param {import('../../types.js').WavFile[]} files
    * @param {"original"|"stripped"} src
    * @param {boolean} isCurrent
+   * @returns {RowModel[]}
    */
-  const decorateRow = (out, node, f, src, isCurrent) => {
-    const sid = session?.session || "";
-    const key = expandKey(sid, f.name, src);
-    const open = expandedKeys.has(key);
+  const buildRowModels = (files, src, isCurrent) => {
+    /** @type {RowModel[]} */
+    const models = [];
+    for (const f of files) {
+      models.push({ kind: "wav", file: f, src, isCurrent });
+      if (src === "stripped") {
+        for (const r of f.regions || []) models.push({ kind: "clip", file: r, src: "stripped", isCurrent });
+      }
+    }
+    return models;
+  };
 
-    // Stable per-row hooks (e2e + debugging): the WAV/clip name + source.
-    const rowEl = /** @type {HTMLElement} */ (pick(node, "row"));
-    rowEl.dataset.wav = f.name;
-    rowEl.dataset.src = src;
+  /** Build one WAV-list row as a native <details>: the <summary> is the always-
+   * visible row (name selects the waveform; the rest of the summary toggles
+   * expand), the body lazy-fetches the transcript on first open. Returns the
+   * <details> Element so `reconcileList` can key + reuse it. */
+  /** @param {RowModel} m @returns {HTMLElement} */
+  const buildRow = (m) => {
+    const { kind, file: f, src, isCurrent } = m;
+    const sid = session?.session || "";
+    const isClip = kind === "clip";
+    const node = tpl(isClip ? "tpl-next-wavclip" : "tpl-next-wavrow");
+    const row = /** @type {HTMLDetailsElement} */ (pick(node, "row"));
+    // Stable per-row hooks (e2e + debugging + selection): name · source · kind.
+    row.dataset.wav = f.name;
+    row.dataset.src = src;
+
+    if (isClip) {
+      pick(node, "name").textContent = `↳ ${truncMid(f.name, 36)}`;
+      const r = /** @type {import('../../types.js').WavRegion} */ (f);
+      const span = r.wav_start && r.wav_end ? `${fmtClock(r.wav_start)}–${fmtClock(r.wav_end)}` : "stripped region";
+      pick(node, "sub").textContent = `${span} · ${fmtBytes(f.size)}`;
+    } else {
+      pick(node, "name").textContent = truncMid(f.name, 40);
+      const who = f.speaker_name ? `${f.speaker_name} · ` : "";
+      pick(node, "sub").textContent = `${who}${fmtBytes(f.size)}`;
+    }
+    pick(node, "dur").textContent = fmtDur(f.duration_s);
 
     const tag = pick(node, "txTag");
     if (f.transcript) { tag.textContent = "✓ tx"; tag.className = "wavrow__tx is-done"; }
     else { tag.textContent = "no tx"; tag.className = "wavrow__tx is-none"; }
 
-    // Expand toggle — only meaningful when a cached transcript exists.
-    const expandBtn = /** @type {HTMLButtonElement} */ (node.querySelector("[data-wav-expand]"));
-    expandBtn.textContent = open ? "▾ tx" : "tx";
-    if (!f.transcript) {
-      expandBtn.disabled = true;
-      expandBtn.title = "no cached transcript — transcribe this WAV first";
-    } else {
-      expandBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (open) expandedKeys.delete(key); else expandedKeys.add(key);
-        lastSig = " ";
-        afterMutate();
+    // Originals are the waveform-select target. The name block selects (and
+    // preventDefault cancels the <details> toggle the summary-click would
+    // otherwise fire); "the rest of the row toggles" is the native default.
+    if (!isClip) {
+      const selectEl = /** @type {HTMLElement} */ (node.querySelector("[data-wav-select]"));
+      selectEl.title = "Show this WAV in the waveform above";
+      const select = () => {
+        if (!session) return;
+        const sid2 = session.session;
+        selectedWav.set(sid2, f.name);
+        applySelection(f.name);
+        // paintWaveHeader (not just waveName + drawWaveform) so the clips /
+        // speech / in / kept stat quartet is repainted too — otherwise selecting
+        // away from a WAV that had a live strip preview leaves its stale preview
+        // numbers in the stat row until the next poll tick.
+        paintWaveHeader(selectedFor(), effectiveSource(sid2), session.stripped || null);
+      };
+      selectEl.addEventListener("click", (e) => { e.preventDefault(); select(); });
+      selectEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); }
       });
     }
 
-    // Download — a plain anchor straight to the API (matches classic). Stop the
-    // click bubbling so downloading a row doesn't also re-select it (the row is
-    // a select target now); the expand/delete buttons below do the same.
+    // Download — preventDefault stops the summary toggle; triggerDownload
+    // navigates via a synthetic anchor outside the <summary>.
     const dl = /** @type {HTMLAnchorElement} */ (pick(node, "download"));
     const dlQs = src === "stripped" ? "?source=stripped" : "";
     dl.href = `/api/wav/${encodeURIComponent(sid)}/${encodeURIComponent(f.name)}${dlQs}`;
-    dl.addEventListener("click", (e) => e.stopPropagation());
+    dl.addEventListener("click", (e) => { e.preventDefault(); triggerDownload(dl.href); });
 
     // Delete — the backend refuses the current session (409), so hide it there.
     const delBtn = /** @type {HTMLButtonElement} */ (node.querySelector("[data-wav-delete]"));
     if (isCurrent) {
       delBtn.remove();
     } else {
-      delBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        deleteWav(f.name, src);
-      });
+      delBtn.addEventListener("click", (e) => { e.preventDefault(); deleteWav(f.name, src); });
     }
 
-    out.appendChild(node);
-
-    if (open && f.transcript) {
-      const full = resolveWavTx(sid, f.name, src, f.transcript);
-      if (full) out.appendChild(buildExpand(full, f.speaker_name || ""));
-      else if (full === undefined) out.appendChild(tpl("tpl-next-txloading"));
-      // `full === null` → no transcript body on disk; nothing to show.
-    }
-  };
-
-  /** @param {import('../../types.js').WavFile} f @param {"original"|"stripped"} src @param {boolean} selected @param {boolean} isCurrent */
-  const wavRow = (f, src, selected, isCurrent) => {
-    const out = document.createDocumentFragment();
-    const node = tpl("tpl-next-wavrow");
-    const row = /** @type {HTMLElement} */ (pick(node, "row"));
-    if (selected) row.classList.add("is-sel");
-    pick(node, "name").textContent = truncMid(f.name, 40);
-    const who = f.speaker_name ? `${f.speaker_name} · ` : "";
-    pick(node, "sub").textContent = `${who}${fmtBytes(f.size)}`;
-    pick(node, "dur").textContent = fmtDur(f.duration_s);
-
-    // Select the WAV (drives the waveform hero). The WHOLE row is the click
-    // target — the row carries cursor:pointer, so binding select only to the
-    // name block left the duration / tag / gap looking clickable but inert
-    // (operator report: "doesn't really let me select different files to look
-    // at"). The action controls in .wavrow__r all stopPropagation, so a
-    // tx/⬇/🗑 click never doubles as a selection.
-    const select = () => {
-      if (session) { selectedWav.set(session.session, f.name); lastSig = " "; afterMutate(); }
-    };
-    row.addEventListener("click", select);
-    // The name block stays the single keyboard-focusable button (role=button,
-    // tabindex=0); it reflects selection via aria-pressed and carries the hint.
-    const selectEl = /** @type {HTMLElement} */ (node.querySelector("[data-wav-select]"));
-    selectEl.setAttribute("aria-pressed", String(selected));
-    selectEl.title = "Show this WAV in the waveform above";
-    selectEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); }
+    // Inline transcript — native <details>; the body is filled lazily the first
+    // time the row opens (and on reopen, cheaply, from the client cache).
+    const expandHost = /** @type {HTMLElement} */ (pick(node, "expandBody"));
+    row.addEventListener("toggle", () => {
+      if (!row.open) return;
+      if (!f.transcript) { fillExpandMessage(expandHost, "no cached transcript — transcribe this WAV first"); return; }
+      fillExpand(expandHost, f.name, src, f.transcript, f.speaker_name || "");
     });
-    // The "🌊 viewing" badge on the selected row is a pure CSS consequence of
-    // .is-sel (see next.css) — no per-row JS toggle.
 
-    decorateRow(out, node, f, src, isCurrent);
-
-    // Indented stripped region clips (only when the stripped source is active).
-    if (src === "stripped") {
-      for (const r of (f.regions || [])) {
-        const clip = tpl("tpl-next-wavclip");
-        pick(clip, "name").textContent = `↳ ${truncMid(r.name, 36)}`;
-        const span = r.wav_start && r.wav_end
-          ? `${fmtClock(r.wav_start)}–${fmtClock(r.wav_end)}`
-          : "stripped region";
-        pick(clip, "sub").textContent = `${span} · ${fmtBytes(r.size)}`;
-        pick(clip, "dur").textContent = fmtDur(r.duration_s);
-        decorateRow(out, clip, r, "stripped", isCurrent);
-      }
-    }
-    return out;
+    return row;
   };
+
+  /** Reconcile key for a WAV row. It folds EVERYTHING buildRow renders or binds
+   * (session, name, size, dur, source, current-ness, transcript stamp) EXCEPT
+   * selection (applied in place via applySelection) — a changed key drops the
+   * old row and builds a fresh one (so its listeners close over the right
+   * file), while a truly-unchanged row keeps its key and its open-<details>
+   * state across the moveBefore reconcile. The session id is in the key because
+   * this view is a SINGLE cached instance reused across sessions (main.js keys
+   * it "recordings", not per-session): without it, two sessions whose rows
+   * share every other field could reuse a node carrying the wrong session's
+   * download href / delete / toggle closures. */
+  /** @param {RowModel} m */
+  const rowKey = (m) =>
+    [
+      session?.session || "", m.kind, m.file.name, m.file.size, m.file.duration_s,
+      m.src, m.isCurrent ? 1 : 0, m.file.transcript?.transcribed_at || "", m.file.transcript ? 1 : 0,
+      m.kind === "clip"
+        ? `${/** @type {import('../../types.js').WavRegion} */ (m.file).wav_start || ""}-${/** @type {import('../../types.js').WavRegion} */ (m.file).wav_end || ""}`
+        : m.file.speaker_name || "",
+    ].join("|");
 
   // ---- Per-tick update ------------------------------------------------------
 
+  /** Paint the waveform-header name + redraw the canvas, and the clips / speech
+   * / in / kept stats from the live preview → last strip response → on-disk
+   * stripped summary → placeholders. Shared by the chrome repaint and the
+   * selection-change path so the precedence can't diverge. */
   /**
-   * @param {import('../../types.js').AppState} j
-   * @param {import('../../types.js').Session | null} sess
+   * @param {import('../../types.js').WavFile | null} sel
+   * @param {"original"|"stripped"} src
+   * @param {import('../../types.js').StrippedStats | null} stripped
    */
-  const update = (j, sess) => {
-    latest = j;
-    session = sess;
-    const sid = sess?.session || "";
-    const src = effectiveSource(sid);
-    const files = sess?.files || [];
-    const stripped = sess?.stripped || null;
-    const sel = selectedFor();
-
-    // Signature gate — only rebuild the DOM-heavy body when something the body
-    // depends on actually changed. Skips while a strip slider is focused so an
-    // edit-in-progress isn't wiped. (The knob value labels are updated by their
-    // own input listeners, not here.)
-    const job = sess?.progress || null;
-    // Include each WAV's transcribed_at so a re-transcribe (new stamp) re-renders
-    // the row's tx-tag and busts an open expand. Regions feed the strip toggle.
-    const txSig = files
-      .map((f) => `${f.name}:${f.transcript?.transcribed_at || ""}:${(f.regions || []).length}`)
-      .join("|");
-    // Fold the open session's expanded set into the signature so toggling a row
-    // open/closed re-renders AND the expanded set survives idle poll ticks (it's
-    // part of what the body is gated on). The "loading… → loaded" transition is
-    // handled separately: resolveWavTx resets lastSig in its .finally when the
-    // lazy fetch lands, forcing one more render that swaps the placeholder for
-    // the real lines.
-    const expandedSig = [...expandedKeys].filter((k) => k.startsWith(`${sid}/`)).sort().join(",");
-    const sig = [
-      sid, src, sel?.name || "",
-      stripped ? `${stripped.count}:${stripped.stripped_at}` : "",
-      // job.stage: a pipeline stage flip must repaint even when the counters
-      // happen to match (e.g. strip 0/1 → summarize 0/1).
-      job ? `${job.kind}:${job.stage || ""}:${job.current}/${job.total}:${job.current_file || ""}` : "",
-      stripInflight.has(sid) ? "S" : "",
-      // lastStrip is NOT in the sig: both its mutations (set on a successful
-      // strip, delete on clear) already reset lastSig=" " to force one render,
-      // so stringifying the whole strip response every poll tick was pure waste.
-      (j.current_session || "") === sid ? "CUR" : "",
-      txSig,
-      expandedSig,
-    ].join("§");
-    const focused = /** @type {HTMLElement | null} */ (document.activeElement);
-    // "editing" = any interaction state a rebuild would destroy: a strip knob
-    // mid-drag, or a text selection in the WAV list (an expanded row's inline
-    // transcript is a natural copy target, and a strip/transcribe job ticking
-    // in the background changes the sig under it). Deferring without updating
-    // lastSig means the rebuild lands on the first tick after release.
-    const editing =
-      (!!focused && focused.dataset?.stripKnob != null) || selectionInside(wavList);
-    // Skip the DOM-heavy rebuild when nothing the body depends on changed, or
-    // while a knob is mid-edit. Everything Recordings shows is captured in the
-    // signature (strip-job progress included), so there's no live-only chrome
-    // to repaint on the skip path.
-    if ((sig === lastSig || editing) && sess) return;
-    lastSig = sig;
-
-    // Header
-    header(headHost, {
-      eyebrow: "Session · 2 Recordings",
-      title: "Recordings",
-      sub: sess
-        ? inline(`${files.length} WAV${files.length === 1 ? "" : "s"} in `, strong(metaFor(sess).label || sess.session), " · strip silence, then transcribe")
-        : "no session selected — pick one from the spine",
-      actions: sess && files.length ? buildSourceToggle({
-        active: src,
-        hasStripped: !!stripped,
-        onPick: (which) => {
-          if (!session) return;
-          sourcePick.set(session.session, which);
-          lastSig = " ";
-          afterMutate();
-        },
-      }) : undefined,
-    });
-
-    if (!sess || !files.length) {
-      waveName.textContent = sess ? "no WAVs recorded yet" : "no session selected";
-      for (const v of Object.values(stats)) setStat(v, "—");
-      wavHint.textContent = "0 files";
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = sess
-        ? "No recordings yet. Once taps record into this session, each WAV appears here."
-        : "Pick a session from the spine to manage its recordings.";
-      wavList.replaceChildren(empty);
-      stripBtn.disabled = !sess;
-      clearBtn.disabled = !stripped;
-      jobBar.hidden = true;
-      drawWaveform(null, src);
-      return;
-    }
-
-    // Waveform header (stub) name + stats. Prefer the last strip-silence
-    // response; fall back to the on-disk stripped summary; else placeholders.
+  const paintWaveHeader = (sel, src, stripped) => {
+    const sid = session?.session || "";
     waveName.textContent = sel
       ? `🌊 ${truncMid(sel.name, 40)} · ${fmtDur(sel.duration_s)} · ${src}`
       : "no WAV selected";
     drawWaveform(sel, src);
-    // drawWaveform above already dropped a preview that no longer matches
-    // the shown WAV, so a surviving livePreview is this session's by
-    // construction — the sid check is belt-and-braces.
+    // drawWaveform already dropped a preview that no longer matches the shown
+    // WAV, so a surviving livePreview is this session's by construction.
     const pv = livePreview && livePreview.key.startsWith(`${sid}/`) ? livePreview.p : null;
     const ls = lastStrip.get(sid);
     if (pv) {
@@ -733,30 +729,137 @@ export function build(ctx) {
       setStat(stats.in, "—");
       setStat(stats.kept, "—");
     } else {
-      setStat(stats.clips, "—");
-      setStat(stats.speech, "—");
-      setStat(stats.in, "—");
-      setStat(stats.kept, "—");
+      for (const v of Object.values(stats)) setStat(v, "—");
+    }
+  };
+
+  /**
+   * @param {import('../../types.js').AppState} j
+   * @param {import('../../types.js').Session | null} sess
+   */
+  const update = (j, sess) => {
+    latest = j;
+    session = sess;
+    const sid = sess?.session || "";
+    const src = effectiveSource(sid);
+    const filesSig = sess?.files_sig || "";
+    const stripped = sess?.stripped || null;
+    const job = sess?.progress || null;
+    const isCurrent = (j.current_session || "") === sid;
+
+    // Resolve the focused session's WAV listing — the array /api/state no
+    // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
+    // → a fetch is in flight (show a loading placeholder); `[]` → nothing to
+    // fetch (empty files_sig = no folder / no WAVs yet).
+    const fetched = loadSessionFiles(sid, filesSig, pendingFiles, () => {
+      lastChromeSig = " ";
+      lastListSig = " ";
+      afterMutate();
+    });
+    const filesLoading = fetched === null;
+    currentFiles = fetched || [];
+    const files = currentFiles;
+    const sel = selectedFor();
+
+    // ---- Chrome (header + waveform header + stats + strip buttons) ----------
+    // Gated on a SMALL signature. The WAV list has its own files-set gate and
+    // the job bar repaints in place each tick (render-signature hygiene), so a
+    // per-second strip/transcribe job tick never rebuilds the O(files) list or
+    // churns the chrome. Selection is NOT in the sig — select() repaints the
+    // wave header in place, so picking a WAV never rebuilds the source toggle.
+    const chromeSig = [
+      sid, src, filesSig, filesLoading ? "L" : "",
+      stripped ? `${stripped.count}:${stripped.stripped_at}` : "",
+      stripInflight.has(sid) ? "S" : "",
+      job?.kind === "strip" ? "J" : "",
+      livePreview && livePreview.key.startsWith(`${sid}/`) ? "P" : "",
+      lastStrip.has(sid) ? "R" : "",
+      isCurrent ? "CUR" : "",
+    ].join("§");
+    if (chromeSig !== lastChromeSig) {
+      lastChromeSig = chromeSig;
+      header(headHost, {
+        eyebrow: "Session · 2 Recordings",
+        title: "Recordings",
+        sub: sess
+          ? inline(`${files.length} WAV${files.length === 1 ? "" : "s"} in `, strong(metaFor(sess).label || sess.session), " · strip silence, then transcribe")
+          : "no session selected — pick one from the spine",
+        actions: sess && files.length ? buildSourceToggle({
+          active: src,
+          hasStripped: !!stripped,
+          onPick: (which) => {
+            if (!session) return;
+            sourcePick.set(session.session, which);
+            lastChromeSig = " ";
+            lastListSig = " ";
+            afterMutate();
+          },
+        }) : undefined,
+      });
+
+      if (!sess || (!files.length && !filesLoading)) {
+        waveName.textContent = sess ? "no WAVs recorded yet" : "no session selected";
+        for (const v of Object.values(stats)) setStat(v, "—");
+        wavHint.textContent = "0 files";
+        stripBtn.disabled = !sess;
+        stripBtn.textContent = "✂ strip all";
+        clearBtn.disabled = !stripped;
+        drawWaveform(null, src);
+      } else if (filesLoading) {
+        // files_sig is set but the listing fetch hasn't landed yet.
+        waveName.textContent = "loading…";
+        for (const v of Object.values(stats)) setStat(v, "—");
+        wavHint.textContent = "loading…";
+        stripBtn.disabled = true;
+        stripBtn.textContent = "✂ strip all";
+        clearBtn.disabled = true;
+        drawWaveform(null, src);
+      } else {
+        paintWaveHeader(sel, src, stripped);
+        const stripBusy = stripInflight.has(sid) || job?.kind === "strip";
+        stripBtn.disabled = stripBusy;
+        stripBtn.textContent = stripBusy ? "⟳ stripping…" : "✂ strip all";
+        clearBtn.disabled = !stripped || stripBusy;
+        wavHint.textContent = `${files.length} original${files.length === 1 ? "" : "s"}`;
+      }
     }
 
-    // Strip + clear button states (busy reflects the job snapshot too).
-    const stripBusy = stripInflight.has(sid) || job?.kind === "strip";
-    stripBtn.disabled = stripBusy;
-    stripBtn.textContent = stripBusy ? "⟳ stripping…" : "✂ strip";
-    clearBtn.disabled = !stripped || stripBusy;
-
-    // Job progress bar (one job per session — surfaced here for strip; the
-    // transcribe job is driven from the Transcript stage but shows here too).
+    // ---- Job progress bar (in place, every tick — render-signature hygiene) -
     renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job);
 
-    // WAV list. Delete is refused on the current (recording) session by the
-    // backend (409), so the row hides its delete button there — matching how
-    // the classic per-WAV row dropped delete on the live session.
-    const isCurrent = (j.current_session || "") === sid;
-    wavHint.textContent = `${files.length} original${files.length === 1 ? "" : "s"}`;
-    const listFrag = document.createDocumentFragment();
-    for (const f of files) listFrag.appendChild(wavRow(f, src, f.name === sel?.name, isCurrent));
-    wavList.replaceChildren(listFrag);
+    // ---- WAV list (own gate) ------------------------------------------------
+    // The list owns its host's content: a placeholder when there's nothing to
+    // reconcile, else the keyed reconcile. Each row carries content-visibility
+    // (next.css .wavrow) so the browser skips off-screen layout/paint, and the
+    // reconcile only runs when the file SET changes (files_sig / source) — never
+    // on a poll tick, a job tick, or a selection (selection is applied in
+    // place). It's deferred while a control is focused or text is selected
+    // inside the list (don't advance the gate), so a mid-copy selection is
+    // never clobbered — the held render lands on the first tick after it clears.
+    const listState = !sess ? "none" : filesLoading ? "loading" : files.length ? "rows" : "empty";
+    const listSig = `${sid}§${src}§${filesSig}§${listState}`;
+    if (listState === "rows") {
+      if (listSig !== lastListSig && !selectionInside(wavList)) {
+        // Clear any leftover empty/loading placeholder (a non-reconcile child)
+        // so reconcileList owns the host's children outright.
+        if (!wavList.querySelector(".wavrow")) wavList.replaceChildren();
+        reconcileList(wavList, buildRowModels(files, src, isCurrent), rowKey, buildRow);
+        lastListSig = listSig;
+      }
+      // Keep the selection highlight correct across reconciles + idle ticks.
+      applySelection(sel?.name || "");
+    } else if (listSig !== lastListSig) {
+      lastListSig = listSig;
+      const ph = document.createElement("div");
+      ph.className = listState === "loading" ? "empty dim" : "empty";
+      ph.textContent =
+        listState === "loading"
+          ? "loading recordings…"
+          : listState === "empty"
+            ? "No recordings yet. Once taps record into this session, each WAV appears here."
+            : "Pick a session from the spine to manage its recordings.";
+      wavList.replaceChildren(ph);
+    }
   };
 
   return { node: frag, update };
