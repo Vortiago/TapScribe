@@ -15,7 +15,10 @@ public static class GateTuning
     /// <summary>Least-sensitive end (slider 0): the highest threshold (~-14 dBFS).</summary>
     public const double MaxThreshold = 0.2;
 
-    private static double LogSpan => Math.Log(MaxThreshold / MinThreshold);
+    /// <summary>The width of the threshold range on a log axis — the shared denominator for
+    /// both this slider mapping and the meter's display axis (<see cref="LevelMeterScale"/>),
+    /// so the two ride one axis rather than two copies that merely coincide.</summary>
+    internal static double LogSpan => Math.Log(MaxThreshold / MinThreshold);
 
     /// <summary>The linear RMS threshold for a 0–100 sensitivity (clamped).</summary>
     public static double SliderToThreshold(int sensitivity)

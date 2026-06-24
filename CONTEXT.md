@@ -505,6 +505,21 @@ RMS. The two gates live on opposite sides of the `/tap` wire and **never
 share threshold units** — UI that surfaces the Level gate must not borrow
 SpeechGate's "speech threshold" vocabulary.
 
+### Input-level meter
+
+The Level gate's threshold is invisible while tuning, which is what made
+the quiet-system-audio bug hard to diagnose. The Settings dialog's
+**input-level meter** (per device, #152) closes that gap: a live RMS bar on
+the **same** scale as the gate threshold — `AudioLevel.Rms` is the one
+reading the gate and the meter both use, and `LevelMeterScale` is the shared
+log axis the sensitivity slider rides — with the device's threshold drawn as
+a marker, so "is my voice / the meeting audio above the line?" is answerable
+at a glance. It is **display only**: a second, throwaway shared-mode capture
+(`InputLevelMeter`) that never touches the tap/gate pipeline. Don't conflate
+it with the Recorder-side post-gate **level meter** (under ActiveStream
+above) — opposite side of the `/tap` wire, and this one is a *pre-gate
+tuning aid*, not a readout of what's being recorded.
+
 ## Drain
 
 The flush of trailing PCM that was buffered on the Bridge when mute fired

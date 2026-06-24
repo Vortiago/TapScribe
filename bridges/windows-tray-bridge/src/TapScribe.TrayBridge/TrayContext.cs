@@ -317,7 +317,13 @@ internal sealed class TrayContext : ApplicationContext
         // tuning changed (issues #149, #153). The device list is supplied as a delegate so
         // the dialog can re-enumerate (Refresh) without owning the enumerator's lifecycle.
         // Persist on Save so the settings survive restarts.
-        using var form = new SettingsForm(_settings, ListDevices);
+        //
+        // The dialog's live level meters (#152) open a second, display-only shared-mode
+        // capture per device; this enumerator opens them and outlives those captures (the
+        // form disposes them on close) — the same ownership shape as the meeting path.
+        // Declared before the form so it disposes AFTER it (captures released first).
+        using var meterEnumerator = new WasapiDeviceEnumerator();
+        using var form = new SettingsForm(_settings, ListDevices, meterEnumerator.Open);
         if (form.ShowDialog() != DialogResult.OK)
             return;
 
