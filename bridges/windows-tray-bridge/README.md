@@ -23,8 +23,8 @@ with `utterance_id` **reconnect** across blips, a bounded during-gap buffer, and
 bounded **Drain**, a **multi-pipeline orchestrator** that runs N devices
 concurrently — each under its own stable `identity`/`name` — co-located in one
 **detached session**, a control client, a tray runner with at-a-glance **status**
-(idle / streaming / error — event-driven, no idle polling) and Start meeting / Stop
-meeting / Quit, and a **3-tab Settings dialog** — Connection (host / port / TLS /
+(idle / streaming / processing / error — event-driven, no idle polling) and Start meeting /
+End meeting / Quit, and a **3-tab Settings dialog** — Connection (host / port / TLS /
 tap token + Test connection), **Devices** (capture the mic and/or system audio, each
 with one Name, its own sensitivity slider **and a live input-level meter** for tuning,
 plus an Advanced expander to pin
@@ -33,10 +33,14 @@ specific endpoints), and **Level gate** (the shared hangover/pre-roll in ms) —
 (follow-default binds to the current default), so a bad token or unreachable Recorder
 fails with a clear, classified message *before* any device opens.
 
-**Deferred to a later PRD #99 slice:** the end-of-meeting pipeline trigger with
-progress and summary display (#107). The depth lives in the cross-platform core
-(`CaptureOrchestrator`, `DeviceSelection`, `StatusView`, `GateTuning`) so #107 (and a
-future macOS/Linux shell) builds on it.
+**End meeting** (#107) closes every open tap (gate close + Drain) and then triggers the
+Recorder's [end-of-meeting pipeline](../../CONTEXT.md) (strip → transcribe → summarize),
+polling per-stage progress into the status line and popping the finished summary up in a
+window with copy-to-clipboard — a busy Recorder (409) or a failed stage is surfaced
+clearly. The active session id is persisted to `%APPDATA%`, so a restarted tray resumes
+showing an in-flight pipeline or the finished summary. The depth lives in the
+cross-platform core (`MeetingController`, `PipelineView`, `CaptureOrchestrator`,
+`DeviceSelection`, `StatusView`, `GateTuning`) so a future macOS/Linux shell builds on it.
 
 ## Layout
 
@@ -58,7 +62,7 @@ windows-tray-bridge/
 │   │   ├── ITapConnection.cs            # the connection seam TapStream drives (TapClient is the impl)
 │   │   ├── TapClient.cs                 # one /tap WebSocket (implements ITapConnection)
 │   │   ├── TapStream.cs                 # resilient Utterance: reconnect + gap buffer + Drain (+ TapStreamOptions.cs)
-│   │   ├── ControlClient.cs             # tap-bearer POST /api/tap/new-session; GET /health
+│   │   ├── ControlClient.cs             # tap-bearer POST /api/tap/new-session + pipeline trigger/poll; GET /health
 │   │   ├── ConnectionTester.cs          # "Test connection": /health + tap-token probe
 │   │   ├── TapSession.cs                # pipeline: capture -> resampler -> level gate -> a TapStream per Utterance
 │   │   ├── CaptureDevice.cs             # platform-neutral device descriptor + DeviceFlow (Capture/Render)
@@ -67,17 +71,23 @@ windows-tray-bridge/
 │   │   ├── DeviceSelection.cs           # follow-default/pinned selections -> Resolve() -> verdict + ToTapOptions (ADR-0005)
 │   │   ├── StartFailure.cs              # classify a Start error: TokenRejected / Unreachable / Other
 │   │   ├── StatusView.cs                # TrayStatus -> menu header + icon + tooltip (pure)
+│   │   ├── Pipeline.cs                  # PipelinePoll/PipelineSummary DTOs + PipelineTriggerOutcome
+│   │   ├── PipelineView.cs              # poll body -> meeting-card view-model (pure; #107)
+│   │   ├── MeetingController.cs         # End-meeting flow: drain -> trigger -> poll -> summary (#107)
+│   │   ├── MeetingState.cs              # restart-resume handle (session id) + JSON (pure)
 │   │   └── GateTuning.cs                # sensitivity slider <-> linear RMS threshold
 │   ├── TapScribe.Bridge.Windows/       # net10.0-windows — WASAPI + settings (NAudio + DPAPI)
 │   │   ├── WasapiCaptureBase.cs         # shared WASAPI normalisation + lifecycle (one authority)
 │   │   ├── WasapiAudioCapture.cs        # IAudioCapture over a microphone (default or specific)
 │   │   ├── WasapiLoopbackAudioCapture.cs # IAudioCapture over a render endpoint (system-audio loopback)
 │   │   ├── WasapiDeviceEnumerator.cs    # IAudioDeviceEnumerator over NAudio MMDeviceEnumerator
-│   │   └── BridgeSettings.cs            # %APPDATA% persistence; DPAPI-protected token
+│   │   ├── BridgeSettings.cs            # %APPDATA% persistence; DPAPI-protected token
+│   │   └── MeetingStateStore.cs         # %APPDATA% restart-resume state file (#107)
 │   └── TapScribe.TrayBridge/           # net10.0-windows WinForms tray runner (GUI only)
-│       ├── Program.cs, TrayContext.cs   # NotifyIcon: status header + Start / Stop / Settings / Quit
+│       ├── Program.cs, TrayContext.cs   # NotifyIcon: status header + Start / End / Settings / Quit
 │       ├── TrayIcons.cs                 # the 3 status icons, drawn at runtime (idle/streaming/error)
 │       ├── LevelMeterBar.cs             # the live input-level meter control (paints level + threshold marker)
+│       ├── SummaryForm.cs              # the finished-summary window + copy-to-clipboard (#107)
 │       └── SettingsForm.cs              # 3-tab dialog: Connection / Devices / Level gate
 └── tests/
     ├── TapScribe.Bridge.Core.Tests/     # net10.0 xUnit — cross-platform (most of the suite, incl. CaptureOrchestrator)
@@ -231,14 +241,19 @@ and the dialog is the source of truth thereafter.
 2. `dotnet run --project src/TapScribe.TrayBridge`. A TapScribe icon appears in
    the notification area.
 3. Right-click → **Start meeting**. Play some meeting audio (a video call, a
-   YouTube clip) while you speak, pausing between sentences, then **Stop meeting**.
+   YouTube clip) while you speak, pausing between sentences, then **End meeting**.
 4. **Two** sets of WAVs appear under the Recorder's new **detached** session — one
    under your identity (the microphone) and one under `system` (the loopback) — each
    split into Utterances by the level gate. Both sides of the meeting are recorded as
    separately-attributed speakers in the same session (issue #105's acceptance check).
-   "Start meeting" mints the detached session and starts one pipeline per device;
-   "Stop meeting" drains and closes them all (bounded, concurrently).
-5. To exercise the tokened path: open **Settings…**, paste the token (from the
+   "Start meeting" mints the detached session and starts one pipeline per device.
+5. **End meeting** (issue #107) drains and closes every tap (bounded, concurrently),
+   then triggers the end-of-meeting pipeline on that session. The status line tracks
+   it (Ending… → Stripping silence… → Transcribing n/m… → Summarizing…), and on
+   completion a **summary window** pops up with a **Copy** button plus a notification.
+   The same summary is on the dashboard for that session afterwards. Kill and relaunch
+   the tray mid-pipeline and it resumes showing the progress / summary.
+6. To exercise the tokened path: open **Settings…**, paste the token (from the
    Recorder's boot log / `.tap-token`) into the **Tap token** field, Save, then
    **Start meeting** — against a Recorder started **without** `--no-auth`.
 

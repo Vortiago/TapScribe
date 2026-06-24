@@ -70,6 +70,90 @@ public class ControlClientTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.CreateDetachedSessionAsync());
     }
 
+    [Fact]
+    public async Task TriggerPipeline_PostsToTheSessionPipelinePath_WithBearer_AndNoModelBody()
+    {
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(triggerStatus: 202);
+        using var http = new HttpClient();
+        using var client = new ControlClient("127.0.0.1", server.Port, tls: false, token: "tok-abc", http);
+
+        PipelineTriggerOutcome outcome = await client.TriggerPipelineAsync("meet1");
+
+        Assert.Equal(PipelineTriggerOutcome.Accepted, outcome);
+        Assert.Equal("/api/tap/sessions/meet1/pipeline", server.TriggerPath);
+        Assert.Equal("Bearer tok-abc", server.TriggerAuthorization);
+        // Operator-defaults-only: the trigger must never carry a model/summarizer choice.
+        Assert.DoesNotContain("model", server.TriggerBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TriggerPipeline_ReturnsBusy_OnConflict()
+    {
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(triggerStatus: 409);
+        using var http = new HttpClient();
+        using var client = new ControlClient("127.0.0.1", server.Port, tls: false, token: "tok-abc", http);
+
+        Assert.Equal(PipelineTriggerOutcome.Busy, await client.TriggerPipelineAsync("meet1"));
+    }
+
+    [Fact]
+    public async Task TriggerPipeline_ThrowsOnOtherFailures()
+    {
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(triggerStatus: 500);
+        using var http = new HttpClient();
+        using var client = new ControlClient("127.0.0.1", server.Port, tls: false, token: "tok-abc", http);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.TriggerPipelineAsync("meet1"));
+    }
+
+    [Fact]
+    public async Task PollPipeline_ParsesARunningSnapshot()
+    {
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(
+            pollScript: [(200, "{\"ok\":true,\"state\":\"running\",\"stage\":\"transcribe\",\"status\":\"transcribing\",\"current\":2,\"total\":5,\"current_file\":\"b.wav\"}")]);
+        using var http = new HttpClient();
+        using var client = new ControlClient("127.0.0.1", server.Port, tls: false, token: "tok-abc", http);
+
+        PipelinePoll poll = await client.PollPipelineAsync("meet1");
+
+        Assert.Equal("running", poll.State);
+        Assert.Equal("transcribe", poll.Stage);
+        Assert.Equal(2, poll.Current);
+        Assert.Equal(5, poll.Total);
+        Assert.Equal("b.wav", poll.CurrentFile);
+        Assert.Equal("Bearer tok-abc", server.PollAuthorization);
+    }
+
+    [Fact]
+    public async Task PollPipeline_ParsesADoneSnapshotWithItsSummary()
+    {
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(
+            pollScript: [(200, "{\"ok\":true,\"state\":\"done\",\"summary\":{\"summary\":\"decided to ship\",\"source\":\"local\"}}")]);
+        using var http = new HttpClient();
+        using var client = new ControlClient("127.0.0.1", server.Port, tls: false, token: "tok-abc", http);
+
+        PipelinePoll poll = await client.PollPipelineAsync("meet1");
+
+        Assert.Equal("done", poll.State);
+        Assert.Equal("decided to ship", poll.Summary?.Summary);
+        Assert.Equal("local", poll.Summary?.Source);
+    }
+
+    [Fact]
+    public async Task PollPipeline_ParsesAFailedSnapshot()
+    {
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(
+            pollScript: [(200, "{\"ok\":true,\"state\":\"failed\",\"stage\":\"transcribe\",\"error\":\"boom\",\"error_kind\":\"NoUsableWavs\"}")]);
+        using var http = new HttpClient();
+        using var client = new ControlClient("127.0.0.1", server.Port, tls: false, token: "tok-abc", http);
+
+        PipelinePoll poll = await client.PollPipelineAsync("meet1");
+
+        Assert.Equal("failed", poll.State);
+        Assert.Equal("transcribe", poll.Stage);
+        Assert.Equal("NoUsableWavs", poll.ErrorKind);
+    }
+
     /// <summary>Minimal in-process Recorder-like control endpoint for one request.</summary>
     private sealed class FakeControlServer : IAsyncDisposable
     {

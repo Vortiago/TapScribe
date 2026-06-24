@@ -7,37 +7,46 @@ using TapScribe.Bridge.Windows;
 namespace TapScribe.TrayBridge;
 
 /// <summary>
-/// The tray shell: a NotifyIcon with a status header line, Start meeting / Stop meeting /
+/// The tray shell: a NotifyIcon with a status header line, Start meeting / End meeting /
 /// Settings / Quit. Connection settings, the device selection, and the level-gate knobs
 /// are edited in a tabbed dialog and persisted to %APPDATA% (env vars only seed the
 /// first-run defaults). "Start meeting" resolves the operator's device selection against
 /// the devices present now (<see cref="DeviceSelection.Resolve"/>), mints a detached
 /// session on the Recorder, and runs one capture pipeline per resolved device — all
 /// co-located in that one session so both sides of a meeting are recorded as
-/// separately-attributed speakers. Status (idle / streaming / error) is event-driven:
-/// it reflects the Start pre-flight and the per-device connect/fail callbacks, with no
-/// idle polling. The depth lives in the cross-platform core
-/// (<see cref="CaptureOrchestrator"/>, <see cref="DeviceSelection"/>, <see cref="StatusView"/>).
+/// separately-attributed speakers.
+///
+/// "End meeting" (issue #107) closes every open tap (gate close + Drain) and then fires the
+/// Recorder's end-of-meeting pipeline (strip → transcribe → summarize), polling per-stage
+/// progress into the status line and popping the finished summary up with copy-to-clipboard
+/// — all driven by the cross-platform, tested <see cref="MeetingController"/>; this shell
+/// only renders its emissions. The active session id is persisted
+/// (<see cref="MeetingStateStore"/>) so a restarted tray resumes showing an in-flight
+/// pipeline or the finished summary. The depth lives in the core
+/// (<see cref="CaptureOrchestrator"/>, <see cref="MeetingController"/>,
+/// <see cref="PipelineView"/>, <see cref="StatusView"/>).
 /// </summary>
 internal sealed class TrayContext : ApplicationContext
 {
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1.5);
+
     private readonly NotifyIcon _icon;
     private readonly TrayIcons _icons = new();
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _startItem;
-    private readonly ToolStripMenuItem _stopItem;
+    private readonly ToolStripMenuItem _endItem;
+    private readonly System.Windows.Forms.Timer _resumeTimer;
     private readonly object _gate = new();
     private BridgeSettings _settings = BridgeSettingsStore.Load();
     private CaptureOrchestrator? _orchestrator;
     private WasapiDeviceEnumerator? _enumerator; // outlives the captures it opened; disposed at teardown
+    private string? _sessionId; // the detached session the running meeting taps into
 
     public TrayContext()
     {
         _statusItem = new ToolStripMenuItem("○ Idle") { Enabled = false };
         _startItem = new ToolStripMenuItem("Start meeting", null, (_, _) => Start());
-        // Fire-and-forget (not async void): a teardown fault can't escape onto the UI
-        // thread and crash the tray. DisposeAsync is throw-free anyway.
-        _stopItem = new ToolStripMenuItem("Stop meeting", null, (_, _) => _ = StopAsync()) { Enabled = false };
+        _endItem = new ToolStripMenuItem("End meeting", null, (_, _) => End()) { Enabled = false };
         var settingsItem = new ToolStripMenuItem("Settings…", null, (_, _) => OpenSettings());
         var quitItem = new ToolStripMenuItem("Quit", null, (_, _) => Quit());
 
@@ -45,7 +54,7 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_startItem);
-        menu.Items.Add(_stopItem);
+        menu.Items.Add(_endItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(settingsItem);
         menu.Items.Add(quitItem);
@@ -57,6 +66,13 @@ internal sealed class TrayContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = menu,
         };
+
+        // Resume a pipeline left running by a previous tray session, once the message loop
+        // is pumping (so SynchronizationContext.Current is the WinForms context — capturing
+        // it in the ctor is too early). A one-shot UI-thread timer is the seam for that.
+        _resumeTimer = new System.Windows.Forms.Timer { Interval = 200 };
+        _resumeTimer.Tick += ResumeIfNeeded;
+        _resumeTimer.Enabled = true;
     }
 
     private void Start()
@@ -154,6 +170,7 @@ internal sealed class TrayContext : ApplicationContext
             {
                 _orchestrator = orchestrator;
                 _enumerator = enumerator;
+                _sessionId = sessionId;
             }
             enumerator = null; // ownership transferred; the finally below must not dispose it
 
@@ -226,40 +243,176 @@ internal sealed class TrayContext : ApplicationContext
         _ => selection.Identity,
     };
 
-    private async Task StopAsync()
+    // End meeting (issue #107): close the open taps and run the end-of-meeting pipeline,
+    // showing progress and the finished summary. Detach the running meeting atomically so
+    // Quit/Settings can't race it; if nothing is running there's nothing to end.
+    private void End()
     {
-        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator) = TakeAndResetUi();
-        if (orchestrator is not null)
-            await orchestrator.DisposeAsync();
-        enumerator?.Dispose();
+        SynchronizationContext ui = SynchronizationContext.Current
+            ?? throw new InvalidOperationException("End must run on the WinForms UI thread.");
+
+        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, string? sessionId) = TakeMeeting();
+        if (orchestrator is null || sessionId is null)
+            return;
+
+        BridgeSettings settings;
+        lock (_gate)
+            settings = _settings;
+
+        // Busy guard: both Start and End disabled for the whole pipeline, so a second
+        // End-meeting click can't fire a second pipeline.
+        SetBusyControls();
+        ApplyStatus(new TrayStatus.Ending());
+        _ = EndAsync(settings, sessionId, orchestrator, enumerator, ui);
     }
 
-    private (CaptureOrchestrator?, WasapiDeviceEnumerator?) TakeAndResetUi()
+    private Task EndAsync(BridgeSettings settings, string sessionId,
+        CaptureOrchestrator orchestrator, WasapiDeviceEnumerator? enumerator, SynchronizationContext ui)
     {
-        (CaptureOrchestrator?, WasapiDeviceEnumerator?) taken = Take();
-        ResetIdleUi();
-        return taken;
+        // Persist the session so a tray restart mid-pipeline resumes showing it; cleared
+        // when the flow reaches a terminal state (RunPipelineFlowAsync's finally).
+        MeetingStateStore.Save(new MeetingState { SessionId = sessionId });
+        return RunPipelineFlowAsync(
+            settings, sessionId, ui,
+            run: controller => controller.EndAsync(),
+            // Close every open tap (gate close + Drain) BEFORE the pipeline strips; the
+            // controller awaits this to completion before it triggers the pipeline.
+            drainAsync: async () =>
+            {
+                await orchestrator.DisposeAsync().ConfigureAwait(false);
+                enumerator?.Dispose();
+            });
     }
 
-    // Atomically detach the running meeting's orchestrator + enumerator, leaving both
-    // null. The shared claim/null-out for Stop (which also resets the UI) and Quit
-    // (which tears down without touching the menu, since it's exiting).
-    private (CaptureOrchestrator?, WasapiDeviceEnumerator?) Take()
+    // Build the controller, wire its emissions to the UI thread, run the flow (End or
+    // Resume), and always clear the persisted state when it terminates. The one place the
+    // End and Resume paths share — they differ only in the run delegate and the drain.
+    private async Task RunPipelineFlowAsync(BridgeSettings settings, string sessionId,
+        SynchronizationContext ui, Func<MeetingController, Task> run, Func<Task>? drainAsync)
+    {
+        using var control = new ControlClient(
+            settings.Host, settings.Port, settings.Tls, settings.Token,
+            allowSelfSignedCert: settings.AllowSelfSignedCert);
+        var controller = new MeetingController(
+            control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct), drainAsync: drainAsync);
+        controller.Updated += view => ui.Post(_ => RenderPipeline(view), null);
+        controller.OperatorNotice += message => ui.Post(_ => ShowBalloon("Meeting", message), null);
+
+        try
+        {
+            await run(controller).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (
+            ex is HttpRequestException or OperationCanceledException or InvalidOperationException)
+        {
+            // The Recorder is unreachable / timed out / refused the trigger after the taps
+            // drained: classify it and surface a clear error so the tray doesn't wedge on a
+            // processing state. The filter keeps this off CodeQL's catch-all radar.
+            StartFailure failure = StartFailure.Classify(ex, settings.Host, settings.Port);
+            ui.Post(_ => FailPipeline(failure.Message), null);
+        }
+        finally
+        {
+            MeetingStateStore.Clear();
+        }
+    }
+
+    // Once the message loop is running, resume a pipeline a previous tray session left
+    // behind (the Recorder keeps it going across both restarts). No drain, no re-trigger.
+    private void ResumeIfNeeded(object? sender, EventArgs e)
+    {
+        _resumeTimer.Stop();
+        _resumeTimer.Dispose();
+
+        MeetingState? state = MeetingStateStore.Load();
+        if (state is null)
+            return; // the common case: a fresh launch with no meeting to resume
+
+        SynchronizationContext ui = SynchronizationContext.Current
+            ?? throw new InvalidOperationException("Resume must run on the WinForms UI thread.");
+        BridgeSettings settings;
+        lock (_gate)
+            settings = _settings;
+
+        SetBusyControls();
+        ApplyStatus(new TrayStatus.Processing("Resuming…"));
+        _ = ResumeAsync(settings, state.SessionId, ui);
+    }
+
+    // Resume polls only — no drain, no re-trigger (RunPipelineFlowAsync with a null drain).
+    private Task ResumeAsync(BridgeSettings settings, string sessionId, SynchronizationContext ui) =>
+        RunPipelineFlowAsync(settings, sessionId, ui, run: controller => controller.ResumeAsync(), drainAsync: null);
+
+    // Render a MeetingController emission on the UI thread: the status line tracks the
+    // pipeline phase, and the terminal phases pop the summary / the failure.
+    private void RenderPipeline(PipelineView view)
+    {
+        switch (view.Phase)
+        {
+            case PipelinePhase.Ending:
+                ApplyStatus(new TrayStatus.Ending());
+                break;
+            case PipelinePhase.Running:
+                ApplyStatus(new TrayStatus.Processing(view.Progress ?? "Processing…"));
+                break;
+            case PipelinePhase.Done:
+                ApplyStatus(new TrayStatus.SummaryReady());
+                ShowInfoBalloon("Meeting summary ready", "Your meeting notes are ready.");
+                ShowSummary(view);
+                SetMeetingControls(running: false);
+                break;
+            case PipelinePhase.Failed:
+                FailPipeline(view.FailureReason ?? "The end-of-meeting pipeline failed.", view.FailureStage);
+                break;
+            default:
+                // Idle / Recording — a resumed session that has no live pipeline; back to idle.
+                ResetIdleUi();
+                break;
+        }
+    }
+
+    private void ShowSummary(PipelineView view)
+    {
+        var form = new SummaryForm(view);
+        form.FormClosed += (_, _) => form.Dispose();
+        form.Show();
+    }
+
+    private void FailPipeline(string reason, string? stage = null)
+    {
+        ApplyStatus(new TrayStatus.PipelineFailed(reason));
+        ShowBalloon("Meeting summary failed", stage is null ? reason : $"{stage}: {reason}");
+        SetMeetingControls(running: false);
+    }
+
+    // Atomically detach the running meeting's orchestrator + enumerator + session id,
+    // leaving all three null. Shared by End (which then drains + triggers the pipeline)
+    // and Quit (which tears down without touching the menu, since it's exiting).
+    private (CaptureOrchestrator?, WasapiDeviceEnumerator?, string?) TakeMeeting()
     {
         lock (_gate)
         {
             CaptureOrchestrator? orchestrator = _orchestrator;
             WasapiDeviceEnumerator? enumerator = _enumerator;
+            string? sessionId = _sessionId;
             _orchestrator = null;
             _enumerator = null;
-            return (orchestrator, enumerator);
+            _sessionId = null;
+            return (orchestrator, enumerator, sessionId);
         }
     }
 
     private void SetMeetingControls(bool running)
     {
         _startItem.Enabled = !running;
-        _stopItem.Enabled = running;
+        _endItem.Enabled = running;
+    }
+
+    // Both disabled: a meeting is being ended / a pipeline is in flight.
+    private void SetBusyControls()
+    {
+        _startItem.Enabled = false;
+        _endItem.Enabled = false;
     }
 
     private void ResetIdleUi()
@@ -278,7 +431,7 @@ internal sealed class TrayContext : ApplicationContext
 
     private void Quit()
     {
-        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator) = Take();
+        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, _) = TakeMeeting();
 
         // Tear every pipeline down: the orchestrator drains + closes all of them
         // CONCURRENTLY, each bounded, and DisposeAsync is throw-free — so this blocking
@@ -307,6 +460,9 @@ internal sealed class TrayContext : ApplicationContext
 
     private void ShowBalloon(string title, string message) =>
         _icon.ShowBalloonTip(4000, title, message, ToolTipIcon.Warning);
+
+    private void ShowInfoBalloon(string title, string message) =>
+        _icon.ShowBalloonTip(5000, title, message, ToolTipIcon.Info);
 
     private void OpenSettings()
     {
