@@ -31,11 +31,4 @@
     <ProjectReference Include="..\..\src\TapScribe.Bridge.Core\TapScribe.Bridge.Core.csproj" />
   </ItemGroup>
 
-  <!-- The Windows WinForms E2E project reuses the in-process FakeRecorderServer test double.
-       This project itself stays cross-platform (built directly by the ubuntu core job); the
-       consumer is net10.0-windows and only built by the windows .slnx job. -->
-  <ItemGroup>
-    <InternalsVisibleTo Include="TapScribe.TrayBridge.Tests" />
-  </ItemGroup>
-
 </Project>

@@ -15,7 +15,7 @@ namespace TapScribe.TrayBridge;
 /// "no longer available" failure). It starts in the Loading state so an empty window is
 /// never shown.
 /// </summary>
-internal sealed class MeetingForm : Form
+internal sealed class MeetingForm : Form, IMeetingView
 {
     private readonly TextBox _text = new()
     {
@@ -94,12 +94,4 @@ internal sealed class MeetingForm : Form
         if (!string.IsNullOrEmpty(text))
             Clipboard.SetText(text);
     }
-
-    // --- Test seams (Windows E2E, InternalsVisibleTo TapScribe.TrayBridge.Tests) ----------
-    // MeetingForm has no public surface, so these let the WinForms E2E assert that Render
-    // wires a MeetingFormView onto the REAL controls. Methods (not properties) so the WinForms
-    // WFO1000 designer-serialization analyzer never applies. Never used by the app.
-    internal string CurrentBodyText() => _text.Text;
-    internal string CurrentCaption() => _caption.Text;
-    internal bool CopyEnabled() => _copy.Enabled;
 }

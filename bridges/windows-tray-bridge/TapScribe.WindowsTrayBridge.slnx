@@ -7,6 +7,5 @@
   <Folder Name="/tests/">
     <Project Path="tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj" />
     <Project Path="tests/TapScribe.Bridge.Windows.Tests/TapScribe.Bridge.Windows.Tests.csproj" />
-    <Project Path="tests/TapScribe.TrayBridge.Tests/TapScribe.TrayBridge.Tests.csproj" />
   </Folder>
 </Solution>

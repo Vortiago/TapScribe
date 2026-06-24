@@ -448,9 +448,10 @@ internal sealed class TrayContext : ApplicationContext
             settings.Host, settings.Port, settings.Tls, settings.Token,
             allowSelfSignedCert: settings.AllowSelfSignedCert);
         var controller = new MeetingController(control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct));
-        // The render-marshaling + ride-to-summary lives in MeetingWindowDriver so it's
-        // Windows-E2E-testable against a fake Recorder without this tray shell.
-        await MeetingWindowDriver.DriveAsync(controller, form, ui, cancellationToken).ConfigureAwait(false);
+        // The render-marshaling + ride-to-summary lives in the cross-platform-tested Core
+        // MeetingViewDriver (the form is the IMeetingView); this shell just supplies the
+        // ControlClient, the WinForms SynchronizationContext, and the window.
+        await MeetingViewDriver.DriveAsync(controller, form, ui, cancellationToken).ConfigureAwait(false);
     }
 
     private void FailPipeline(string reason, string? stage = null)
