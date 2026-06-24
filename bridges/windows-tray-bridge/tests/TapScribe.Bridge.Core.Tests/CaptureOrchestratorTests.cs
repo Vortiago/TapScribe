@@ -84,7 +84,7 @@ public class CaptureOrchestratorTests
 
         mic.Emit(Loud(40));
         system.Emit(Loud(40));
-        await Poll.UntilAsync(() => transport.ConnectionsFor("system").Count > 0, Wait, "the sensitive pipeline to open");
+        await Poll.UntilAsync(() => transport.HasStreamed("system"), Wait, "the sensitive pipeline to stream");
 
         Assert.True(transport.ConnectionsFor("system")[0].SentCount > 0);
         Assert.Empty(transport.ConnectionsFor("mic")); // the deaf mic gate let nothing through
@@ -116,7 +116,7 @@ public class CaptureOrchestratorTests
         mic.Emit(Loud(20));
         system.Emit(Loud(20));
         await Poll.UntilAsync(
-            () => transport.ConnectionsFor("mic").Count > 0 && transport.ConnectionsFor("system").Count > 0,
+            () => transport.HasStreamed("mic") && transport.HasStreamed("system"),
             Wait, "both re-tuned pipelines to stream");
 
         Assert.True(transport.ConnectionsFor("mic")[0].SentCount > 0);
@@ -141,7 +141,7 @@ public class CaptureOrchestratorTests
 
         mic.Emit(Loud(20));
         system.Emit(Loud(20));
-        await Poll.UntilAsync(() => transport.ConnectionsFor("system").Count > 0, Wait, "the re-tuned system pipeline to stream");
+        await Poll.UntilAsync(() => transport.HasStreamed("system"), Wait, "the re-tuned system pipeline to stream");
 
         Assert.True(transport.ConnectionsFor("system")[0].SentCount > 0);
         Assert.Empty(transport.ConnectionsFor("mic")); // mic was not in the map -> still deaf
@@ -168,7 +168,7 @@ public class CaptureOrchestratorTests
 
         Assert.Equal(1, orchestrator.PipelineCount);
         mic.Emit(Loud(20));
-        await Poll.UntilAsync(() => transport.ConnectionsFor("mic").Count > 0, Wait, "the re-tuned mic to stream");
+        await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the re-tuned mic to stream");
         Assert.True(transport.ConnectionsFor("mic")[0].SentCount > 0);
     }
 
@@ -370,7 +370,7 @@ public class CaptureOrchestratorTests
         system.Emit(Loud(40)); // system opens an utterance whose first connect fails
 
         await Poll.UntilAsync(() => failures.Count > 0, Wait, "the down pipeline to surface a failure");
-        await Poll.UntilAsync(() => transport.ConnectionsFor("mic").Count > 0, Wait, "the up pipeline to stream");
+        await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the up pipeline to stream");
 
         // The failure is attributed to the right device; the other keeps recording.
         (string Identity, Exception Error) failure = Assert.Single(failures);
