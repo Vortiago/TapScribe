@@ -1895,15 +1895,18 @@ async def test_dashboard_live_channel_start_stop(
                 # The settled line reaches live_feed asynchronously (fake WlK -> relay ->
                 # tail-flush on tap close), on a different path from the tap drain that
                 # streams_drained tracks — so poll for it rather than reading the feed once.
+                # Keep the last feed the poll saw so a timeout reports exactly that, with no
+                # second /api/state fetch that might show a different snapshot.
+                seen_feed: list = []
+
                 async def _caption_in_feed() -> bool:
-                    feed = (await client.get("/api/state")).json()["live_feed"]
+                    seen_feed[:] = (await client.get("/api/state")).json()["live_feed"]
                     return any(
-                        e["identity"] == "alice" and e["text"] == "live caption after start" for e in feed
+                        e["identity"] == "alice" and e["text"] == "live caption after start"
+                        for e in seen_feed
                     )
 
-                assert await wait_until(_caption_in_feed, timeout=5.0), (
-                    await client.get("/api/state")
-                ).json()["live_feed"]
+                assert await wait_until(_caption_in_feed, timeout=5.0), seen_feed
 
             # Click Stop → the channel goes down.
             await page.click("#liveStopBtn")
