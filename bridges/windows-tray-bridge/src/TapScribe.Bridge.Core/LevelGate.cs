@@ -1,5 +1,3 @@
-using System.Buffers.Binary;
-
 namespace TapScribe.Bridge.Core;
 
 /// <summary>The kind of boundary a <see cref="LevelGate"/> emits.</summary>
@@ -121,7 +119,7 @@ public sealed class LevelGate
         // One torn-free snapshot per frame, so a concurrent UpdateTuning either lands
         // fully before this frame or fully after it — never half-applied within it.
         Tuning tuning = Volatile.Read(ref _tuning);
-        bool active = Rms(frame) >= tuning.OpenThreshold;
+        bool active = AudioLevel.Rms(frame) >= tuning.OpenThreshold;
 
         if (!_open)
         {
@@ -165,24 +163,5 @@ public sealed class LevelGate
             _silenceFrames = 0;
             events.Add(GateEvent.Closed);
         }
-    }
-
-    /// <summary>
-    /// RMS of one int16 frame, normalised to [0, 1] (each sample divided by
-    /// 32768). RMS rather than peak so a single click can't open the gate.
-    /// </summary>
-    private static double Rms(ReadOnlySpan<byte> frame)
-    {
-        int samples = frame.Length / 2;
-        if (samples == 0)
-            return 0;
-
-        double sumSquares = 0;
-        for (int i = 0; i < samples; i++)
-        {
-            double v = BinaryPrimitives.ReadInt16LittleEndian(frame.Slice(i * 2, 2)) / 32768.0;
-            sumSquares += v * v;
-        }
-        return Math.Sqrt(sumSquares / samples);
     }
 }

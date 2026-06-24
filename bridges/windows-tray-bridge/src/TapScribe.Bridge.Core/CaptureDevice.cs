@@ -25,4 +25,21 @@ public enum DeviceFlow
 /// <param name="Name">Human-readable device name for the picker (FriendlyName).</param>
 /// <param name="Flow">Capture (mic) or Render (loopback candidate).</param>
 /// <param name="IsDefault">True for the system default endpoint of its flow.</param>
-public sealed record CaptureDevice(string Id, string Name, DeviceFlow Flow, bool IsDefault);
+public sealed record CaptureDevice(string Id, string Name, DeviceFlow Flow, bool IsDefault)
+{
+    /// <summary>
+    /// The follow-default endpoint for <paramref name="flow"/> among
+    /// <paramref name="devices"/>: the flow's default, or — when no default is configured
+    /// (headless / RDP / freshly provisioned boxes report none yet still have active
+    /// endpoints) — the first device of that flow, or <c>null</c> if there is none. The one
+    /// place that rule lives, shared by <see cref="DeviceSelection.Resolve"/> (what a
+    /// meeting taps) and the Settings level meter (what it samples), so the meter always
+    /// rides the exact endpoint the gate it's tuning will.
+    /// </summary>
+    public static CaptureDevice? DefaultFor(IReadOnlyList<CaptureDevice> devices, DeviceFlow flow)
+    {
+        ArgumentNullException.ThrowIfNull(devices);
+        return devices.FirstOrDefault(d => d.Flow == flow && d.IsDefault)
+            ?? devices.FirstOrDefault(d => d.Flow == flow);
+    }
+}

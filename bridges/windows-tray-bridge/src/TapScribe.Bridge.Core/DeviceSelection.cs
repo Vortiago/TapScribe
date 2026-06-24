@@ -54,13 +54,10 @@ public abstract record DeviceSelection(string Identity, string Name, GateSetting
         {
             CaptureDevice? device = selection switch
             {
-                // Prefer the flow's default endpoint, but fall back to the first device of
-                // that flow when no default is configured (headless / RDP / freshly
-                // provisioned boxes report no default yet still have active endpoints) —
-                // so follow-default still records something rather than refusing.
-                FollowDefault followDefault =>
-                    available.FirstOrDefault(d => d.Flow == followDefault.Flow && d.IsDefault)
-                    ?? available.FirstOrDefault(d => d.Flow == followDefault.Flow),
+                // Prefer the flow's default endpoint, falling back to the first of that flow
+                // when none is configured — the one shared rule (CaptureDevice.DefaultFor),
+                // so a meeting taps exactly the endpoint the Settings meter samples.
+                FollowDefault followDefault => CaptureDevice.DefaultFor(available, followDefault.Flow),
                 Pinned pinned => available.FirstOrDefault(
                     d => d.Id == pinned.DeviceId),
                 _ => null,

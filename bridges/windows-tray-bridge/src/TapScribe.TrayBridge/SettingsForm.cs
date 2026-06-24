@@ -24,6 +24,8 @@ namespace TapScribe.TrayBridge;
 internal sealed class SettingsForm : Form
 {
     private readonly Func<IReadOnlyList<CaptureDevice>> _listDevices;
+    // Opens a device as a second, display-only capture for the live level meters (#152).
+    private readonly Func<CaptureDevice, IAudioCapture> _openCapture;
     // All the editing logic lives in this pure, unit-tested view-model; the form is a thin
     // two-way binding of controls onto it (seeded on build, synced back on Save).
     private readonly SettingsDraft _draft;
@@ -67,15 +69,31 @@ internal sealed class SettingsForm : Form
     private readonly TrackBar _systemSensitivity = new() { Minimum = 0, Maximum = 100, TickFrequency = 10, Width = 240 };
     private readonly Label _systemSensitivityValue = new() { AutoSize = true };
 
+    // Live per-device input-level meters (#152): a bar under each sensitivity slider, fed on
+    // a UI-thread timer from a display-only InputLevelMeter so the operator tunes against the
+    // level they actually see. Display only — these never touch the tap/gate pipeline.
+    private readonly LevelMeterBar _micMeter = new();
+    private readonly LevelMeterBar _systemMeter = new();
+    private readonly System.Windows.Forms.Timer _meterTimer = new() { Interval = 50 };
+    private InputLevelMeter? _micLevel;
+    private InputLevelMeter? _systemLevel;
+    // The most recent device enumeration (from PopulateDevices), reused by StartMeters so a
+    // dialog open / Refresh walks the WASAPI device tree once, not twice.
+    private IReadOnlyList<CaptureDevice> _listedDevices = [];
+
     // Level-gate tab — the shared knobs.
     private readonly NumericUpDown _hangover = new() { Minimum = 0, Maximum = 5000, Increment = 50, Width = 90 };
     private readonly NumericUpDown _preRoll = new() { Minimum = 0, Maximum = 2000, Increment = 50, Width = 90 };
 
     public BridgeSettings Result { get; private set; }
 
-    public SettingsForm(BridgeSettings current, Func<IReadOnlyList<CaptureDevice>> listDevices)
+    public SettingsForm(
+        BridgeSettings current,
+        Func<IReadOnlyList<CaptureDevice>> listDevices,
+        Func<CaptureDevice, IAudioCapture> openCapture)
     {
         _listDevices = listDevices;
+        _openCapture = openCapture;
         _draft = SettingsDraft.Seed(current);
         Result = current;
 
@@ -85,8 +103,9 @@ internal sealed class SettingsForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         // Taller than before: the Devices tab now carries a per-device sensitivity slider
-        // under each device, so the simple pair + the Advanced pin grid both need room.
-        ClientSize = new Size(470, 560);
+        // AND a live level meter under each device, so the simple pair + the Advanced pin
+        // grid both need room.
+        ClientSize = new Size(470, 610);
 
         var tabs = new TabControl
         {
@@ -113,6 +132,12 @@ internal sealed class SettingsForm : Form
         Controls.Add(cancel);
         AcceptButton = save;
         CancelButton = cancel;
+
+        // The live meters run only while the dialog is open (#152): start once it's shown,
+        // tear down the instant it closes — sampling stays off the UI thread (it runs on the
+        // capture thread) and stops cleanly on close.
+        Load += (_, _) => StartMeters();
+        FormClosing += (_, _) => StopMeters();
     }
 
     private TabPage BuildConnectionTab()
@@ -214,19 +239,19 @@ internal sealed class SettingsForm : Form
         _micEnabled.Location = new Point(12, 56);
         page.Controls.Add(_micEnabled);
         AddNameRow(page, _micName, 82);
-        AddSensitivityRow(_micSensitivity, _micSensitivityValue, 108);
+        AddSensitivityRow(_micSensitivity, _micSensitivityValue, _micMeter, 108);
 
-        _systemEnabled.Location = new Point(12, 174);
+        _systemEnabled.Location = new Point(12, 198);
         page.Controls.Add(_systemEnabled);
-        AddNameRow(page, _systemName, 200);
-        AddSensitivityRow(_systemSensitivity, _systemSensitivityValue, 226);
+        AddNameRow(page, _systemName, 224);
+        AddSensitivityRow(_systemSensitivity, _systemSensitivityValue, _systemMeter, 250);
 
-        _deviceStatus.Location = new Point(12, 300);
+        _deviceStatus.Location = new Point(12, 342);
         _deviceStatus.MaximumSize = new Size(_contentW - 24, 0);
         page.Controls.Add(_deviceStatus);
 
         SetAdvancedToggle(open: false);
-        _advancedToggle.Location = new Point(12, 322);
+        _advancedToggle.Location = new Point(12, 364);
         _advancedToggle.LinkClicked += (_, _) =>
         {
             _advancedPanel.Visible = !_advancedPanel.Visible;
@@ -235,8 +260,8 @@ internal sealed class SettingsForm : Form
         page.Controls.Add(_advancedToggle);
 
         int panelW = _contentW - 24;
-        int panelH = _contentH - 358;
-        _advancedPanel.Location = new Point(12, 348);
+        int panelH = _contentH - 400;
+        _advancedPanel.Location = new Point(12, 390);
         _advancedPanel.Size = new Size(panelW, panelH);
         _advancedPanel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
@@ -264,7 +289,13 @@ internal sealed class SettingsForm : Form
 
         var refresh = new Button { Text = "Refresh devices", Width = 120, Location = new Point(0, panelH - 28) };
         refresh.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
-        refresh.Click += (_, _) => PopulateDevices();
+        // Re-enumerate the pin grid AND re-point the live meters at the now-current
+        // follow-default endpoints (a just-plugged-in or newly-defaulted device).
+        refresh.Click += (_, _) =>
+        {
+            PopulateDevices();
+            RestartMeters();
+        };
         _advancedPanel.Controls.Add(refresh);
         page.Controls.Add(_advancedPanel);
 
@@ -288,16 +319,30 @@ internal sealed class SettingsForm : Form
             host.Controls.Add(name);
         }
 
-        // One device's sensitivity slider + its live RMS-threshold readout. The slider's
-        // value is seeded from the draft above before this wires the live label.
-        void AddSensitivityRow(TrackBar slider, Label valueLabel, int rowY)
+        // One device's sensitivity slider, its live RMS-threshold readout, and the live
+        // level meter beneath. The slider's value is seeded from the draft above before this
+        // wires the live label and the meter's marker.
+        void AddSensitivityRow(TrackBar slider, Label valueLabel, LevelMeterBar meter, int rowY)
         {
             page.Controls.Add(new Label { Text = "Sensitivity", Location = new Point(32, rowY + 12), AutoSize = true });
             slider.Location = new Point(110, rowY);
             page.Controls.Add(slider);
             valueLabel.Location = new Point(112, rowY + 42);
             page.Controls.Add(valueLabel);
-            slider.ValueChanged += (_, _) => UpdateSensitivityLabel(slider, valueLabel);
+
+            // The meter rides directly under the readout on the same RMS scale as the
+            // threshold it marks: the slider sets the marker (the level the input must clear
+            // to open the gate), and the UI timer pushes the live level into the bar.
+            meter.Location = new Point(112, rowY + 64);
+            meter.Size = new Size(_contentW - 124, 16);
+            meter.Threshold = GateTuning.SliderToThreshold(slider.Value);
+            page.Controls.Add(meter);
+
+            slider.ValueChanged += (_, _) =>
+            {
+                UpdateSensitivityLabel(slider, valueLabel);
+                meter.Threshold = GateTuning.SliderToThreshold(slider.Value);
+            };
             UpdateSensitivityLabel(slider, valueLabel);
         }
     }
@@ -353,6 +398,8 @@ internal sealed class SettingsForm : Form
             _deviceStatus.Text = $"Could not list devices: {ex.Message}";
         }
 
+        _listedDevices = available; // reused by StartMeters; this is the one enumeration
+
         // The draft computes the pin rows (pre-ticked/named from saved pins) and the
         // absent-pin carry-forward; the form just renders the rows into the grid.
         _draft.SetAvailableDevices(available);
@@ -361,6 +408,90 @@ internal sealed class SettingsForm : Form
             int row = _devices.Rows.Add(deviceRow.Pinned, deviceRow.DisplayLabel, deviceRow.Name);
             _devices.Rows[row].Tag = deviceRow.DeviceId;
         }
+    }
+
+    // --- Live input-level meters (#152) ----------------------------------------------
+
+    // Open a display-only meter on the default mic and the default loopback endpoint (the
+    // two follow-default rows), and drive the bars from a UI-thread timer. Works off the
+    // device list PopulateDevices already enumerated. Best-effort: a device that's absent or
+    // won't open just leaves its bar flat — the meter is a tuning aid, never required to edit.
+    private void StartMeters()
+    {
+        _micLevel = TryOpenMeter(CaptureDevice.DefaultFor(_listedDevices, DeviceFlow.Capture));
+        _systemLevel = TryOpenMeter(CaptureDevice.DefaultFor(_listedDevices, DeviceFlow.Render));
+        if (_micLevel is null && _systemLevel is null)
+            return;
+
+        _meterTimer.Tick += OnMeterTick;
+        _meterTimer.Start();
+    }
+
+    // Pull each meter's latest level (a torn-read-safe atomic updated on the capture thread)
+    // into its bar. Cheap and non-blocking — exactly what belongs on a UI timer tick.
+    private void OnMeterTick(object? sender, EventArgs e)
+    {
+        _micMeter.Level = _micLevel?.Level ?? 0;
+        _systemMeter.Level = _systemLevel?.Level ?? 0;
+    }
+
+    private InputLevelMeter? TryOpenMeter(CaptureDevice? device)
+    {
+        if (device is null)
+            return null;
+        IAudioCapture? capture = null;
+        try
+        {
+            capture = _openCapture(device);
+            var meter = new InputLevelMeter(capture);
+            meter.Start();
+            return meter;
+        }
+        catch (Exception ex) when (
+            ex is COMException or NotSupportedException or ArgumentException or InvalidOperationException)
+        {
+            // Device in use / invalidated / unsupported format: leave the bar flat rather
+            // than fail the dialog — the same best-effort open as the meeting capture path.
+            // If Start (or the meter ctor) threw after the capture opened, dispose it so a
+            // failed open never leaks a subscribed WASAPI client (mirrors CaptureOrchestrator).
+            capture?.Dispose();
+            return null;
+        }
+    }
+
+    // Re-open the meters against the devices present now — wired to Refresh devices so that
+    // switching the default mic/output (then refreshing) re-points the bars at the new
+    // follow-default endpoints rather than the ones captured at open.
+    private void RestartMeters()
+    {
+        StopMeters();
+        StartMeters();
+    }
+
+    // Stop and release both meters and the timer. Idempotent: runs on FormClosing and again
+    // from Dispose, and a second call is a no-op (the samplers are nulled out).
+    private void StopMeters()
+    {
+        _meterTimer.Stop();
+        _meterTimer.Tick -= OnMeterTick;
+        _micLevel?.Dispose();
+        _systemLevel?.Dispose();
+        _micLevel = null;
+        _systemLevel = null;
+        // Drop both bars to empty: if a Refresh loses a device, no meter reopens and the
+        // timer won't tick, so without this the bar would stay frozen at its last level.
+        _micMeter.Level = 0;
+        _systemMeter.Level = 0;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            StopMeters(); // backstop for the FormClosing teardown; releases the captures
+            _meterTimer.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     private async Task TestConnectionAsync()

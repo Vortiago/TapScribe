@@ -26,7 +26,8 @@ concurrently — each under its own stable `identity`/`name` — co-located in o
 (idle / streaming / error — event-driven, no idle polling) and Start meeting / Stop
 meeting / Quit, and a **3-tab Settings dialog** — Connection (host / port / TLS /
 tap token + Test connection), **Devices** (capture the mic and/or system audio, each
-with one Name **and its own sensitivity slider**, plus an Advanced expander to pin
+with one Name, its own sensitivity slider **and a live input-level meter** for tuning,
+plus an Advanced expander to pin
 specific endpoints), and **Level gate** (the shared hangover/pre-roll in ms) — all persisted to
 `%APPDATA%`, with the token protected at rest by Windows DPAPI. Start meeting **resolves** the saved selection against the devices present now
 (follow-default binds to the current default), so a bad token or unreachable Recorder
@@ -50,6 +51,9 @@ windows-tray-bridge/
 │   │   ├── Resampler.cs                 # device format -> 16 kHz mono int16
 │   │   ├── FrameChunker.cs              # -> exact 640-byte / 20 ms frames
 │   │   ├── LevelGate.cs                 # Bridge-side Mute: gate Utterances on level + pre-roll (+ GateOptions.cs)
+│   │   ├── AudioLevel.cs                # the RMS reading shared by the gate AND the Settings meter (one scale)
+│   │   ├── InputLevelMeter.cs           # display-only per-device level sampler for the Settings meter (#152)
+│   │   ├── LevelMeterScale.cs           # the meter's display axis: RMS -> [0,1], the slider's own log scale
 │   │   ├── TapConnectionOptions.cs      # URL + subprotocol builders; host normalisation
 │   │   ├── ITapConnection.cs            # the connection seam TapStream drives (TapClient is the impl)
 │   │   ├── TapClient.cs                 # one /tap WebSocket (implements ITapConnection)
@@ -73,6 +77,7 @@ windows-tray-bridge/
 │   └── TapScribe.TrayBridge/           # net10.0-windows WinForms tray runner (GUI only)
 │       ├── Program.cs, TrayContext.cs   # NotifyIcon: status header + Start / Stop / Settings / Quit
 │       ├── TrayIcons.cs                 # the 3 status icons, drawn at runtime (idle/streaming/error)
+│       ├── LevelMeterBar.cs             # the live input-level meter control (paints level + threshold marker)
 │       └── SettingsForm.cs              # 3-tab dialog: Connection / Devices / Level gate
 └── tests/
     ├── TapScribe.Bridge.Core.Tests/     # net10.0 xUnit — cross-platform (most of the suite, incl. CaptureOrchestrator)
@@ -185,6 +190,13 @@ Each row also has its **own Sensitivity slider** (per-device tuning — ADR-0007
 mic defaults less sensitive (so room noise doesn't open it) and the system loopback
 more sensitive (so the quiet far end is captured). Changing a slider and Saving during
 a live meeting re-tunes **only that device's** pipeline, with no Stop/Start.
+
+Under each slider is a **live input-level meter** (#152): a bar that moves with the
+real input, with that device's threshold drawn as a marker on the **same** scale — so
+instead of guessing a threshold and restarting to test it, you talk (mic) or play
+meeting audio (loopback) and nudge Sensitivity until the level sits above the line. It
+samples only while the dialog is open (a second, display-only capture) and never
+changes what's recorded.
 
 **▸ Advanced — pin specific devices…** expands a grid of every concrete endpoint so a
 power user can pin a specific interface (e.g. a particular USB mic) instead of
