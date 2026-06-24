@@ -152,13 +152,15 @@ public class SelfSignedTlsTests
     private sealed class TlsFakeRecorder : IAsyncDisposable
     {
         private readonly WebApplication _app;
+        private readonly X509Certificate2 _cert;
 
         public int Port { get; }
 
-        private TlsFakeRecorder(WebApplication app, int port)
+        private TlsFakeRecorder(WebApplication app, int port, X509Certificate2 cert)
         {
             _app = app;
             Port = port;
+            _cert = cert;
         }
 
         public static async Task<TlsFakeRecorder> StartAsync()
@@ -212,7 +214,7 @@ public class SelfSignedTlsTests
             await app.StartAsync();
             string address = app.Services.GetRequiredService<IServer>()
                 .Features.Get<IServerAddressesFeature>()!.Addresses.First();
-            return new TlsFakeRecorder(app, new Uri(address).Port);
+            return new TlsFakeRecorder(app, new Uri(address).Port, cert);
         }
 
         // A throwaway self-signed cert valid for loopback, generated per server so the test
@@ -237,6 +239,9 @@ public class SelfSignedTlsTests
         {
             await _app.StopAsync();
             await _app.DisposeAsync();
+            // Dispose the cert (and its RSA key handle) only after the server using it has
+            // stopped — an undisposed PKCS#12-imported key is a known Windows-CI flake source.
+            _cert.Dispose();
         }
     }
 }
