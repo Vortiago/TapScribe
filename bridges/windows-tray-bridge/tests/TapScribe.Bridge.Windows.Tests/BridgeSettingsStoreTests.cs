@@ -20,6 +20,7 @@ public class BridgeSettingsStoreTests : IDisposable
             Host = "rec.example",
             Port = 9100,
             Tls = true,
+            AllowSelfSignedCert = true,
             Identity = "alice",
             Name = "Alice B",
             Token = "tok-xyz",
@@ -31,6 +32,7 @@ public class BridgeSettingsStoreTests : IDisposable
         Assert.Equal("rec.example", loaded.Host);
         Assert.Equal(9100, loaded.Port);
         Assert.True(loaded.Tls);
+        Assert.True(loaded.AllowSelfSignedCert); // the insecure opt-in survives %APPDATA%
         Assert.Equal("alice", loaded.Identity);
         Assert.Equal("Alice B", loaded.Name);
         Assert.Equal("tok-xyz", loaded.Token); // DPAPI blob round-trips through the file

@@ -20,7 +20,8 @@ public sealed class ControlClient : IDisposable
     private readonly Uri _baseUri;
     private readonly string _token;
 
-    public ControlClient(string host, int port, bool tls, string token, HttpClient? http = null)
+    public ControlClient(
+        string host, int port, bool tls, string token, HttpClient? http = null, bool allowSelfSignedCert = false)
     {
         // Same host tolerance as the /tap URI: a pasted scheme/port/path can't
         // produce a malformed base URI (see TapConnectionOptions.NormalizeHost).
@@ -32,7 +33,11 @@ public sealed class ControlClient : IDisposable
         }.Uri;
         _token = token;
         _ownsHttp = http is null;
-        _http = http ?? new HttpClient();
+        // Opt-in insecure testing path (issue #147): accept any server cert ONLY when we
+        // own the HttpClient and Tls && AllowSelfSignedCert. An injected HttpClient keeps
+        // its caller's TLS policy — its handler is fixed at construction and not ours to
+        // weaken. See InsecureTls.
+        _http = http ?? (tls && allowSelfSignedCert ? InsecureTls.CreateInsecureHttpClient() : new HttpClient());
     }
 
     /// <summary>

@@ -165,6 +165,22 @@ public class DeviceSelectionTests
     }
 
     [Fact]
+    public void ToTapOptions_PropagatesAllowSelfSignedCert_FromTheBaseOptions()
+    {
+        // The insecure self-signed opt-in is a connection coordinate, so it must ride
+        // through to every per-device tap the same way host/port/tls/token do (the record
+        // `with` copy), or a meeting's taps would silently lose the operator's setting.
+        ResolveResult result = DeviceSelection.Resolve(
+            [new DeviceSelection.FollowDefault(DeviceFlow.Capture, "mic", "My Mic")],
+            [Mic("builtin", isDefault: true)]);
+
+        var baseConn = new TapConnectionOptions { Tls = true, AllowSelfSignedCert = true };
+        TapConnectionOptions opt = Assert.Single(result.ToTapOptions("sess", baseConn));
+
+        Assert.True(opt.AllowSelfSignedCert);
+    }
+
+    [Fact]
     public void ToTapOptions_BlankIdentityAndName_FallBackToTheBaseIdentity()
     {
         ResolveResult result = DeviceSelection.Resolve(

@@ -40,8 +40,10 @@ public static class ConnectionTester
     public static async Task<ConnectionTestResult> TestAsync(
         TapConnectionOptions options, HttpClient? http = null, CancellationToken cancellationToken = default)
     {
-        // 1) Reachability — GET /health (no auth needed).
-        using (var control = new ControlClient(options.Host, options.Port, options.Tls, options.Token, http))
+        // 1) Reachability — GET /health (no auth needed). The self-signed opt-in rides
+        //    through both probe halves so the test mirrors how a meeting will connect.
+        using (var control = new ControlClient(
+            options.Host, options.Port, options.Tls, options.Token, http, options.AllowSelfSignedCert))
         {
             try
             {
@@ -61,6 +63,7 @@ public static class ConnectionTester
             Host = options.Host,
             Port = options.Port,
             Tls = options.Tls,
+            AllowSelfSignedCert = options.AllowSelfSignedCert,
             Token = options.Token,
             Identity = "__probe__",
             Name = "probe",

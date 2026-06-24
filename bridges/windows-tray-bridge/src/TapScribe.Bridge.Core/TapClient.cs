@@ -35,6 +35,15 @@ public sealed class TapClient : ITapConnection
         string? subprotocol = _options.BuildSubprotocol();
         if (subprotocol is not null)
             _ws.Options.AddSubProtocol(subprotocol);
+
+        // Opt-in insecure testing path (issue #147): on a wss:// connection where the
+        // operator ticked "Allow invalid / self-signed certificate", accept any server
+        // cert so a Recorder serving a local self-signed cert is reachable. Scoped to
+        // Tls && AllowSelfSignedCert so the accept-any validator is never wired on a
+        // normal connection; ws:// has no cert to validate. See InsecureTls.
+        if (_options.Tls && _options.AllowSelfSignedCert)
+            _ws.Options.RemoteCertificateValidationCallback = InsecureTls.AcceptAnyServerCertificate;
+
         return _ws.ConnectAsync(_options.BuildTapUri(), cancellationToken);
     }
 
