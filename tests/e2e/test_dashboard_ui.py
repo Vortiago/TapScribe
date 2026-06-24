@@ -3706,6 +3706,50 @@ async def test_settings_summarizer_default_card_saves_and_prefills(running_recor
             await browser.close()
 
 
+async def test_settings_models_card_links_to_setup(running_recorder: RunningRecorder):
+    """The Settings stage is the dashboard's entry point to the browser
+    model-setup page (/setup, a separate full-page app): a 'Manage models'
+    link plus a one-shot installed-summary line filled from GET
+    /api/setup/state. Without this card, /setup is reachable only by typing
+    the URL."""
+    rr = running_recorder
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
+
+            # A plain navigation link to the separate /setup page (not an
+            # in-dashboard view), so it carries an href rather than a click
+            # handler.
+            link = page.get_by_role("link", name="Manage models")
+            await link.wait_for(timeout=6000)
+            assert (await link.get_attribute("href")) == "/setup"
+
+            # The installed-summary line fills once from /api/setup/state — it
+            # must replace the "…" placeholder with either an "Installed: …"
+            # list or the nothing-installed hint, depending on the host.
+            await page.wait_for_function(
+                """() => {
+                  const el = document.querySelector('[data-slot="modelsInstalled"]');
+                  return el && el.textContent && el.textContent !== '…';
+                }""",
+                timeout=8000,
+            )
+            summary = await page.text_content('[data-slot="modelsInstalled"]')
+            assert "Installed:" in (summary or "") or "No models installed" in (summary or ""), (
+                f"unexpected installed-summary text: {summary!r}"
+            )
+        finally:
+            await browser.close()
+
+
 async def test_summary_prefills_effective_config_and_saves_session_override(
     running_recorder: RunningRecorder,
 ):
