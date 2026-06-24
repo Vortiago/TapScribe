@@ -13,6 +13,14 @@ if grep -q '"stop_hook_active":[[:space:]]*true' <<<"$payload"; then
   exit 0
 fi
 
+# Anchor to the repo root so the lint/typecheck targets (tapscribe/, tests/,
+# frontend/) resolve no matter what cwd the harness launches the hook from. A
+# Stop hook invoked from a subdirectory (e.g. a git worktree session) would
+# otherwise fail `ruff check` with "E902 No such file or directory" and block
+# every turn. Fail open if neither anchor is usable — same philosophy as the
+# ruff/tsc skips below.
+cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" || exit 0
+
 if ! command -v ruff >/dev/null 2>&1; then
   exit 0
 fi
