@@ -206,8 +206,10 @@ public sealed class SettingsDraft
     public static string SelectionLabel(DeviceSelection selection) =>
         string.IsNullOrWhiteSpace(selection.Name) ? selection.Identity : selection.Name;
 
+    // The slider value for a selection: its own per-device sensitivity, else the flow
+    // default. No clamp — the slider (Min/Max 0–100) and ToSettings's GateFor both bound it.
     private static int SensitivityOf(DeviceSelection selection, DeviceFlow flow) =>
-        Math.Clamp((selection.Gate ?? GateSettings.DefaultForFlow(flow)).Sensitivity, 0, 100);
+        (selection.Gate ?? GateSettings.DefaultForFlow(flow)).Sensitivity;
 
     /// <summary>The "NN / 100 (RMS threshold ≈ x.xxx)" readout shown next to a sensitivity
     /// slider — pure formatting over <see cref="GateTuning"/>, so the form just renders it.</summary>

@@ -107,19 +107,16 @@ public sealed class BridgeSettings
     /// </summary>
     public IReadOnlyDictionary<string, GateOptions> ToGateOptionsByIdentity()
     {
-        string fallbackIdentity = ToConnectionOptions().Identity;
+        string fallbackIdentity = EffectiveIdentity;
         var map = new Dictionary<string, GateOptions>(StringComparer.Ordinal);
         foreach (DeviceSelection device in EffectiveDevices)
         {
             string identity = string.IsNullOrWhiteSpace(device.Identity) ? fallbackIdentity : device.Identity;
-            map[identity] = EffectiveGate(device).ToGateOptions();
+            // EffectiveDevices ran NormalizeGates, so every gate is filled here.
+            map[identity] = device.Gate!.ToGateOptions();
         }
         return map;
     }
-
-    // The concrete gate for a (post-NormalizeGates) selection. The ?? is belt-and-braces:
-    // EffectiveDevices already filled every gate, so this only guards a direct caller.
-    private static GateSettings EffectiveGate(DeviceSelection device) => device.Gate ?? FlowDefault(device);
 
     private static GateSettings FlowDefault(DeviceSelection device) =>
         GateSettings.DefaultForFlow(device is DeviceSelection.FollowDefault follow ? follow.Flow : DeviceFlow.Capture);
@@ -144,11 +141,14 @@ public sealed class BridgeSettings
     {
         if (GateSensitivity is null && GateHangoverMs is null && GatePreRollMs is null)
             return null;
-        var fallback = new GateOptions();
+        // Any field the old file omitted falls back to the mic default — which IS the
+        // legacy global default expressed in operator units, so GateSettings stays the one
+        // place that knows it.
+        GateSettings d = GateSettings.DefaultForFlow(DeviceFlow.Capture);
         return new GateSettings(
-            GateSensitivity ?? GateTuning.ThresholdToSlider(fallback.OpenThreshold),
-            GateHangoverMs ?? (int)fallback.Hangover.TotalMilliseconds,
-            GatePreRollMs ?? (int)fallback.PreRoll.TotalMilliseconds);
+            GateSensitivity ?? d.Sensitivity,
+            GateHangoverMs ?? d.HangoverMs,
+            GatePreRollMs ?? d.PreRollMs);
     }
 
     /// <summary>
@@ -160,10 +160,16 @@ public sealed class BridgeSettings
         Host = string.IsNullOrWhiteSpace(Host) ? "localhost" : Host.Trim(),
         Port = Port,
         Tls = Tls,
-        Identity = string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim(),
+        Identity = EffectiveIdentity,
         Name = Name,
         Token = Token,
     };
+
+    // The base identity a tap streams under when no per-device identity is set — never
+    // blank. Shared by ToConnectionOptions and the gate-by-identity map so the live re-tune
+    // keys line up with the tap identities, without decrypting the token to read it.
+    private string EffectiveIdentity =>
+        string.IsNullOrWhiteSpace(Identity) ? FallbackIdentity() : Identity.Trim();
 
     /// <summary>
     /// Defaults for a first run with no saved file: seed from the legacy
