@@ -384,23 +384,35 @@ test("a timeoutMs option arms an AbortSignal that the client threads into fetch"
   assert.equal(typeof seenSignal.aborted, "boolean");
 });
 
-test("the client surface exposes no delete or prune call (bounded tap-token blast radius)", () => {
+test("the client surface is exactly the allow-listed members (bounded tap-token blast radius)", () => {
   const { client } = loadClient({});
-  for (const name of Object.keys(client)) {
-    assert.doesNotMatch(
-      name.toLowerCase(),
-      /delete|prune|remove|destroy/,
-      "unexpected destructive method on the control client: " + name,
-    );
-  }
-  for (const expected of [
+  // An explicit allowlist, NOT a name denylist: any member added to the
+  // control client — under ANY name, destructive or not — trips this until it
+  // is consciously listed here. A denylist (matching /delete|prune|…/) would
+  // wave through a destructive capability added under a synonym the tap token
+  // must never be able to invoke. The tap token can create a Session, stream,
+  // trigger/poll its pipeline, rotate, and probe — nothing that deletes or
+  // prunes, which are Basic-auth/dashboard-only.
+  const ALLOWED = [
+    "ControlError",
+    "isTrustworthyHost",
+    "httpBase",
     "createDetachedSession",
     "triggerPipeline",
     "pollPipeline",
     "rotateSession",
     "checkHealth",
     "probeTapToken",
-  ]) {
-    assert.equal(typeof client[expected], "function", expected + " should be on the surface");
+  ];
+  assert.deepEqual(
+    Object.keys(client).sort(),
+    [...ALLOWED].sort(),
+    "control-client surface drifted — a new member must be explicitly allow-listed, and must never be a delete/prune capability",
+  );
+  // The deepEqual pins the key NAMES exactly (so no delete/prune member can
+  // exist); also assert every member is callable — a name present as a
+  // non-function would pass the key-set check but not this.
+  for (const name of ALLOWED) {
+    assert.equal(typeof client[name], "function", name + " should be callable on the surface");
   }
 });

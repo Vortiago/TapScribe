@@ -160,6 +160,36 @@ test("with no meeting active, the streaming pill does not mention a meeting", as
   assert.doesNotMatch(ind.text, /meeting/i, "global capture stays unlabelled");
 });
 
+test("the tab title is tagged `mtg` while capture is bracketed into a meeting Session", async () => {
+  // S18: glancing at the title bar must tell the operator the tab is recording
+  // into a named Session, not the global default. The suffix is built only in
+  // the 2 Hz publish/title tick, so fire it explicitly.
+  const b = createBridge({ settings: { meetingSessionId: "sess-x" } });
+  await ready(b);
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  b.lastSocket().triggerOpen();
+
+  b.publishTick();
+  assert.match(b.title(), /\[tap mtg /, "tab title carries the mtg tag for a bracketed Session");
+});
+
+test("the tab title has no `mtg` tag for global (un-bracketed) capture", async () => {
+  // The negative half of S18: identical capture, no meeting → the title shows
+  // the tap status but NOT the mtg tag, so the tag is a real signal of the
+  // bracket and not always-on.
+  const b = createBridge();
+  await ready(b);
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  b.lastSocket().triggerOpen();
+
+  b.publishTick();
+  const t = b.title();
+  assert.match(t, /\[tap /, "title still shows the tap status");
+  assert.doesNotMatch(t, /\bmtg\b/, "no mtg tag for un-bracketed global capture");
+});
+
 test("a SpatialChat room change performs no session rotation, and the meeting persists", async () => {
   // The legacy auto-rotate is gone: a room change must POST nothing. The
   // active meeting's detached Session persists across the swap (PRD §5).
