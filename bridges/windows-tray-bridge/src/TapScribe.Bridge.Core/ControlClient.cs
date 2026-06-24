@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -51,8 +52,7 @@ public sealed class ControlClient : IDisposable
         {
             Content = new StringContent("{\"detached\": true}", Encoding.UTF8, "application/json"),
         };
-        if (!string.IsNullOrEmpty(_token))
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+        AddBearer(request);
 
         using HttpResponseMessage response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -75,6 +75,67 @@ public sealed class ControlClient : IDisposable
         using HttpResponseMessage response =
             await _http.GetAsync(new Uri(_baseUri, "/health"), cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
+    /// POST /api/tap/sessions/{session}/pipeline to trigger the end-of-meeting
+    /// pipeline (strip → transcribe → summarize). The request body is empty: the
+    /// Recorder ignores it and resolves the batch model + summarizer from
+    /// operator-side config, so a tap-token holder can never pick a model. Returns
+    /// <see cref="PipelineTriggerOutcome.Accepted"/> on 202 or
+    /// <see cref="PipelineTriggerOutcome.Busy"/> on 409 (the session already has a
+    /// job in flight); throws <see cref="HttpRequestException"/> on any other
+    /// non-success status.
+    /// </summary>
+    public async Task<PipelineTriggerOutcome> TriggerPipelineAsync(
+        string sessionId, CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, PipelineUri(sessionId));
+        AddBearer(request);
+
+        using HttpResponseMessage response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        switch (response.StatusCode)
+        {
+            case HttpStatusCode.Accepted:
+                return PipelineTriggerOutcome.Accepted;
+            case HttpStatusCode.Conflict:
+                return PipelineTriggerOutcome.Busy;
+            default:
+                response.EnsureSuccessStatusCode(); // throws on 4xx/5xx other than 409
+                return PipelineTriggerOutcome.Accepted; // any other 2xx: treat as accepted
+        }
+    }
+
+    /// <summary>
+    /// GET /api/tap/sessions/{session}/pipeline and parse the poll body
+    /// (running / done / failed / idle — see <see cref="PipelinePoll"/>). Throws
+    /// <see cref="HttpRequestException"/> on a non-success status so the caller's
+    /// poll loop can treat it as a transient blip and retry.
+    /// </summary>
+    public async Task<PipelinePoll> PollPipelineAsync(
+        string sessionId, CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, PipelineUri(sessionId));
+        AddBearer(request);
+
+        using HttpResponseMessage response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        await using Stream body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        return await JsonSerializer.DeserializeAsync<PipelinePoll>(body, cancellationToken: cancellationToken)
+                   .ConfigureAwait(false)
+               ?? new PipelinePoll();
+    }
+
+    // The session id is server-controlled text; escape it into the path so it can
+    // never break out of the route (keeps CodeQL's C# suite clean too).
+    private Uri PipelineUri(string sessionId) =>
+        new(_baseUri, $"/api/tap/sessions/{Uri.EscapeDataString(sessionId)}/pipeline");
+
+    private void AddBearer(HttpRequestMessage request)
+    {
+        if (!string.IsNullOrEmpty(_token))
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
     }
 
     public void Dispose()

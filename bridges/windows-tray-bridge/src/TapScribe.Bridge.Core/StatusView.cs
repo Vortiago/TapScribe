@@ -18,6 +18,21 @@ public abstract record TrayStatus
     /// <summary>A failure the operator must see — a rejected token, an unreachable
     /// Recorder, or a device that dropped.</summary>
     public sealed record Error(string Reason) : TrayStatus;
+
+    /// <summary>The meeting is ending: open taps are draining toward the pipeline
+    /// trigger (issue #107).</summary>
+    public sealed record Ending : TrayStatus;
+
+    /// <summary>The end-of-meeting pipeline is running; <paramref name="Label"/> is the
+    /// live stage line (e.g. "Transcribing 3/12…").</summary>
+    public sealed record Processing(string Label) : TrayStatus;
+
+    /// <summary>The pipeline finished and the summary is in hand.</summary>
+    public sealed record SummaryReady : TrayStatus;
+
+    /// <summary>The pipeline failed; <paramref name="Reason"/> is the human-readable
+    /// stage error.</summary>
+    public sealed record PipelineFailed(string Reason) : TrayStatus;
 }
 
 /// <summary>Which bundled tray icon to show — the at-a-glance signal.</summary>
@@ -53,6 +68,22 @@ public sealed record StatusView(string Header, TrayIcon Icon, string Tooltip)
                 "○ Starting…",
                 TrayIcon.Idle,
                 "TapScribe — starting…"),
+            TrayStatus.Ending => new StatusView(
+                "● Ending meeting…",
+                TrayIcon.Streaming,
+                "TapScribe — ending meeting…"),
+            TrayStatus.Processing p => new StatusView(
+                $"● {p.Label}",
+                TrayIcon.Streaming,
+                $"TapScribe — {p.Label}"),
+            TrayStatus.SummaryReady => new StatusView(
+                "○ Summary ready",
+                TrayIcon.Idle,
+                "TapScribe — summary ready"),
+            TrayStatus.PipelineFailed f => new StatusView(
+                $"⚠ {f.Reason}",
+                TrayIcon.Error,
+                $"TapScribe — {f.Reason}"),
             _ => new StatusView(
                 "○ Idle",
                 TrayIcon.Idle,

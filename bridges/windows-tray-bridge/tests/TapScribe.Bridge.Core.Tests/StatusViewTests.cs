@@ -47,4 +47,40 @@ public class StatusViewTests
         Assert.Contains("Tap token rejected", view.Header, StringComparison.Ordinal);
         Assert.Contains("Tap token rejected", view.Tooltip, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void For_Ending_ShowsAnActiveIcon_WhileTapsDrain()
+    {
+        StatusView view = StatusView.For(new TrayStatus.Ending());
+
+        Assert.Equal(TrayIcon.Streaming, view.Icon);
+        Assert.False(string.IsNullOrWhiteSpace(view.Header));
+    }
+
+    [Fact]
+    public void For_Processing_SurfacesTheStageLabel_WithAnActiveIcon()
+    {
+        StatusView view = StatusView.For(new TrayStatus.Processing("Transcribing 3/12…"));
+
+        Assert.Equal(TrayIcon.Streaming, view.Icon);
+        Assert.Contains("Transcribing 3/12…", view.Header, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void For_SummaryReady_UsesIdleIcon()
+    {
+        StatusView view = StatusView.For(new TrayStatus.SummaryReady());
+
+        Assert.Equal(TrayIcon.Idle, view.Icon);
+        Assert.False(string.IsNullOrWhiteSpace(view.Header));
+    }
+
+    [Fact]
+    public void For_PipelineFailed_UsesErrorIcon_AndSurfacesTheReason()
+    {
+        StatusView view = StatusView.For(new TrayStatus.PipelineFailed("No usable audio was captured."));
+
+        Assert.Equal(TrayIcon.Error, view.Icon);
+        Assert.Contains("No usable audio was captured.", view.Header, StringComparison.Ordinal);
+    }
 }
