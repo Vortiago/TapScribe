@@ -448,27 +448,9 @@ internal sealed class TrayContext : ApplicationContext
             settings.Host, settings.Port, settings.Tls, settings.Token,
             allowSelfSignedCert: settings.AllowSelfSignedCert);
         var controller = new MeetingController(control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct));
-        // Guard IsDisposed: a poll emission posted just before the window closed must not
-        // touch disposed controls.
-        controller.Updated += view => ui.Post(_ => { if (!form.IsDisposed) form.Render(view); }, null);
-
-        try
-        {
-            await controller.ResumeAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (
-            ex is HttpRequestException or OperationCanceledException or InvalidOperationException)
-        {
-            // The Recorder is unreachable / timed out (or the window was closed mid-poll —
-            // OperationCanceledException, benign). Surface a clear failure in the window rather
-            // than leaving it on "Loading…". The filter keeps this off CodeQL's catch-all radar.
-            if (!cancellationToken.IsCancellationRequested)
-                ui.Post(_ =>
-                {
-                    if (!form.IsDisposed)
-                        form.Render(PipelineView.Unavailable("Couldn't reach the recorder to load this meeting."));
-                }, null);
-        }
+        // The render-marshaling + ride-to-summary lives in MeetingWindowDriver so it's
+        // Windows-E2E-testable against a fake Recorder without this tray shell.
+        await MeetingWindowDriver.DriveAsync(controller, form, ui, cancellationToken).ConfigureAwait(false);
     }
 
     private void FailPipeline(string reason, string? stage = null)

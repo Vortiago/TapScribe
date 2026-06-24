@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- WinForms E2E for the tray shell: drives the REAL MeetingForm window (the per-meeting
+       summary/progress window, #168) on an STA thread — directly for the render projection,
+       and end-to-end through a real MeetingController over loopback HTTP against the in-process
+       FakeRecorderServer (reused from the core test project). net10.0-windows + UseWindowsForms,
+       so it builds and runs ONLY under the windows `dotnet-build` CI job (dotnet test on the
+       .slnx), never the ubuntu core-only job (which targets the core test csproj directly and
+       never sees this project — WinForms is Windows-only). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- Reused FakeRecorderServer is a Kestrel app, so the runtime needs the ASP.NET Core
+       shared framework present (it comes via the core-tests dependency, but pin it here too). -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TapScribe.TrayBridge\TapScribe.TrayBridge.csproj" />
+    <ProjectReference Include="..\TapScribe.Bridge.Core.Tests\TapScribe.Bridge.Core.Tests.csproj" />
+  </ItemGroup>
+
+</Project>
