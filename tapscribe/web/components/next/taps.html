@@ -10,83 +10,94 @@
 <template id="tpl-next-view-taps">
   <div data-slot="head"></div>
 
-  <!-- global recording arm — REAL, POST /api/recording/toggle -->
-  <div class="panel">
-    <div class="panel__body">
-      <div class="row-between">
-        <span class="ovr-lab">Recording <span class="dim">— global arm for every tap (RECORDING_ENABLED)</span></span>
-        <button class="recpill" type="button" data-slot="recPill">● recording</button>
+  <!-- Taps is a scrolling control-STACK (Recording arm · connected taps + gate ·
+       Tap-model), not a fill-one-panel view: the non-fill bookend panels (the
+       Recording arm and the Tap-model card) would shrink under negative free
+       space and clip with NO scrollbar as direct flex children of `.work__inner`.
+       `.scroll-stack` owns the overflow so every card keeps its natural height and
+       a short viewport scrolls the whole stack (mirrors Settings; the connected-
+       taps grid is therefore a plain grid here, not a fillcol/panel--fill). -->
+  <div class="scroll-stack">
+    <!-- global recording arm — REAL, POST /api/recording/toggle -->
+    <div class="panel">
+      <div class="panel__body">
+        <div class="row-between">
+          <span class="ovr-lab">Recording <span class="dim">— global arm for every tap (RECORDING_ENABLED)</span></span>
+          <button class="recpill" type="button" data-slot="recPill">● recording</button>
+        </div>
       </div>
     </div>
-  </div>
 
-  <div class="spacer"></div>
+    <div class="spacer"></div>
 
-  <div class="grid cols-cap fillcol">
-    <!-- PRIMARY: connected taps (reuses active-taps.js). Fills the column
-         height so a short list doesn't strand the panel mid-screen. -->
-    <div class="panel panel--primary panel--fill">
-      <div class="panel__head">
-        <div class="panel__title"><span class="ic">🛰️</span>Connected taps</div>
-        <span class="panel__hint"><span data-slot="activeTapsBadge"></span> · <span class="mono dim"><span data-slot="activeCount">0</span> taps</span></span>
-      </div>
-      <div class="panel__body flush"><div class="taps" data-slot="activeTapsBody"></div></div>
-    </div>
-
-    <!-- ASIDE: the speech-gate LiveConfig (reuses live-channel.js) -->
-    <div class="aside">
-      <div class="panel panel--accent">
+    <!-- connected taps (reuses active-taps.js) + the speech-gate LiveConfig.
+         Natural-height grid inside the scroll-stack — the stack owns the scroll,
+         so neither the grid (no fillcol) nor the taps panel (no panel--fill)
+         scrolls its own body. -->
+    <div class="grid cols-cap">
+      <div class="panel panel--primary">
         <div class="panel__head">
-          <div class="panel__title"><span class="ic">📡</span>Speech gate · LiveConfig</div>
-          <span class="chip" data-slot="liveStateBadge">stopped</span>
+          <div class="panel__title"><span class="ic">🛰️</span>Connected taps</div>
+          <span class="panel__hint"><span data-slot="activeTapsBadge"></span> · <span class="mono dim"><span data-slot="activeCount">0</span> taps</span></span>
         </div>
-        <div class="panel__body">
-          <div class="live-mlx-note dim mono" data-slot="liveMlxNote"></div>
-          <div data-slot="liveChannelBody"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="spacer"></div>
-
-  <!-- ============ NET-NEW Tap model — MOCK, not wired ============ -->
-  <div class="panel">
-    <div class="panel__head">
-      <div class="panel__title"><span class="ic">🧩</span>Tap model · people</div>
-      <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
-    </div>
-    <div class="panel__body">
-      <!-- single vs multi (mock) -->
-      <div class="mockblk">
-        <span class="cfgblk__k">Mode</span>
-        <span class="segctl">
-          <button class="segctl__opt is-on" type="button" disabled>👤 single</button>
-          <button class="segctl__opt segctl__opt--multi" type="button" disabled>👥 multi</button>
-        </span>
+        <div class="panel__body flush"><div class="taps" data-slot="activeTapsBody"></div></div>
       </div>
 
-      <!-- diarized voices → Person (mock) -->
-      <div class="mockblk mockblk--col">
-        <span class="cfgblk__k">Diarized voices → Person</span>
-        <div class="voicemap">
-          <div class="voicerow">
-            <span class="voicerow__v mono">Speaker A</span>
-            <span class="voicerow__bar"><span class="voicerow__fill" style="width:62%"></span></span>
-            <span class="voicerow__pct mono">62%</span>
-            <span class="voicerow__arrow">→</span>
-            <span class="pick"><span class="pick__av">AB</span>mapped Person<span class="pick__chev">⌄</span></span>
+      <!-- ASIDE: the speech-gate LiveConfig (reuses live-channel.js) -->
+      <div class="aside">
+        <div class="panel panel--accent">
+          <div class="panel__head">
+            <div class="panel__title"><span class="ic">📡</span>Speech gate · LiveConfig</div>
+            <span class="chip" data-slot="liveStateBadge">stopped</span>
           </div>
-          <div class="voicerow">
-            <span class="voicerow__v mono">Speaker B</span>
-            <span class="voicerow__bar"><span class="voicerow__fill" style="width:38%"></span></span>
-            <span class="voicerow__pct mono">38%</span>
-            <span class="voicerow__arrow">→</span>
-            <span class="pick pick--unid"><span class="pick__av pick__av--unid">?</span>Unidentified<span class="pick__chev">⌄</span></span>
+          <div class="panel__body">
+            <div class="live-mlx-note dim mono" data-slot="liveMlxNote"></div>
+            <div data-slot="liveChannelBody"></div>
           </div>
         </div>
       </div>
+    </div>
 
+    <div class="spacer"></div>
+
+    <!-- ============ NET-NEW Tap model — MOCK, not wired ============ -->
+    <div class="panel">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">🧩</span>Tap model · people</div>
+        <span class="panel__hint"><span class="mocktag">mock · not wired</span></span>
+      </div>
+      <div class="panel__body">
+        <!-- single vs multi (mock) -->
+        <div class="mockblk">
+          <span class="cfgblk__k">Mode</span>
+          <span class="segctl">
+            <button class="segctl__opt is-on" type="button" disabled>👤 single</button>
+            <button class="segctl__opt segctl__opt--multi" type="button" disabled>👥 multi</button>
+          </span>
+        </div>
+
+        <!-- diarized voices → Person (mock) -->
+        <div class="mockblk mockblk--col">
+          <span class="cfgblk__k">Diarized voices → Person</span>
+          <div class="voicemap">
+            <div class="voicerow">
+              <span class="voicerow__v mono">Speaker A</span>
+              <span class="voicerow__bar"><span class="voicerow__fill" style="width:62%"></span></span>
+              <span class="voicerow__pct mono">62%</span>
+              <span class="voicerow__arrow">→</span>
+              <span class="pick"><span class="pick__av">AB</span>mapped Person<span class="pick__chev">⌄</span></span>
+            </div>
+            <div class="voicerow">
+              <span class="voicerow__v mono">Speaker B</span>
+              <span class="voicerow__bar"><span class="voicerow__fill" style="width:38%"></span></span>
+              <span class="voicerow__pct mono">38%</span>
+              <span class="voicerow__arrow">→</span>
+              <span class="pick pick--unid"><span class="pick__av pick__av--unid">?</span>Unidentified<span class="pick__chev">⌄</span></span>
+            </div>
+          </div>
+        </div>
+
+      </div>
     </div>
   </div>
 </template>

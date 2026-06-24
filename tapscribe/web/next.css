@@ -346,10 +346,31 @@ body::before { display: none; }
 /* A view-level block that should consume the leftover column height and lay
    its own children out vertically. Applied to the PRIMARY grid/panel of each
    view (the merged transcript, the WAV list, the Sessions table, the People
-   lists, the connected-taps grid, the Settings board). Grids that fill keep
-   their row alignment stretched so a tall aside and a flex panel share height. */
+   lists, the Settings board). Grids that fill keep their row alignment stretched
+   so a tall aside and a flex panel share height. */
 .fillcol { flex: 1 1 auto; min-height: 0; }
 .grid.fillcol { align-items: stretch; }
+
+/* `.scroll-stack` — a flex-column container that OWNS its overflow and lays its
+   children out at their NATURAL height. Use for a view that stacks several
+   natural-height `.panel` cards with NO single fill region (Settings, Taps): as
+   direct flex children of `.work__inner` those cards would shrink under negative
+   free space and `.panel`'s overflow:hidden would clip the cut-off content with
+   NO scrollbar (the boxes shrink to exactly fit, so the column never overflows).
+   The stack instead consumes the leftover column height (flex:1 1 auto), can
+   shrink below its content (min-height:0), and owns the scroll — so a short
+   viewport scrolls the whole stack. The 4px padding-bottom keeps the last card
+   off the scroll edge. Contrast `.panel--fill` / `.fillcol`, which own the
+   scroll for ONE region. */
+.scroll-stack { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 4px; }
+
+/* The complement to `.fillcol` for the OTHER shape: a view that DOES have a fill
+   region but also stacks a non-fill block beside it (Capture's bottom health /
+   overrides grid). Mark that block rigid so the fill region — not the clip-prone
+   block — absorbs the squeeze; once the fill region bottoms out, the overflow
+   falls to `.work__inner`'s own scroll instead of shrinking the block below its
+   content and clipping it under overflow:hidden with no scrollbar. */
+.noshrink { flex: none; }
 
 /* A panel that fills its flex parent and scrolls its OWN body — the generic
    form of .livecap. The head stays pinned; .panel__body grows + scrolls.
