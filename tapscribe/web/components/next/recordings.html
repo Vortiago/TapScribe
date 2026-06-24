@@ -50,7 +50,8 @@
         <div class="kfield__rng"><span>-120 dB</span><span>0 dB</span></div>
       </div>
       <div class="knobbar__act">
-        <button class="act act--sm act--primary" type="button" data-slot="stripBtn">✂ strip</button>
+        <button class="act act--sm act--primary" type="button" data-slot="stripBtn"
+                title="Strip silence from every WAV in this session">✂ strip all</button>
         <button class="act act--sm" type="button" data-slot="clearBtn">clear</button>
       </div>
     </div>
@@ -106,46 +107,52 @@
   </span>
 </template>
 
-<!-- one WAV-list row (original). The name/sub block selects the WAV (drives the
-     waveform header); the right cluster carries the tx tag + per-WAV actions
-     (expand transcript / download / delete). The row is a <div> rather than a
-     <button> so the action controls can nest legally; `data-wav-select` is the
-     click target that selects the row. The expandable transcript host is a
-     sibling appended after the row by recordings.js when expanded. -->
+<!-- one WAV-list row (original) — a native <details>. The <summary> IS the
+     always-visible row: the name/sub block (data-wav-select) selects the WAV
+     for the waveform header (recordings.js preventDefaults the toggle on that
+     click), and clicking the rest of the summary toggles the inline transcript
+     open. The transcript body lives in [data-slot=expandBody] inside the
+     <details>, filled lazily on first open. Each row carries
+     `content-visibility: auto` (next.css .wavrow) so the browser skips
+     layout/paint of off-screen rows in a huge list. -->
 <template id="tpl-next-wavrow">
-  <div class="wavrow" data-slot="row">
-    <span class="wavrow__l" data-wav-select role="button" tabindex="0">
-      <span class="wavrow__n mono" data-slot="name"></span>
-      <span class="wavrow__sub mono" data-slot="sub"></span>
-    </span>
-    <span class="wavrow__r">
-      <span class="wavrow__viewing mono">🌊 viewing</span>
-      <span class="wavrow__dur mono" data-slot="dur"></span>
-      <span class="wavrow__tx" data-slot="txTag"></span>
-      <button class="btn tiny ghost" type="button" data-wav-expand title="Expand the cached transcript">tx</button>
-      <a class="btn tiny ghost" download title="Download WAV" data-slot="download">⬇</a>
-      <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this WAV">🗑</button>
-    </span>
-  </div>
+  <details class="wavrow" data-slot="row">
+    <summary class="wavrow__summary">
+      <span class="wavrow__l" data-wav-select role="button" tabindex="0">
+        <span class="wavrow__n mono" data-slot="name"></span>
+        <span class="wavrow__sub mono" data-slot="sub"></span>
+      </span>
+      <span class="wavrow__r">
+        <span class="wavrow__viewing mono">🌊 viewing</span>
+        <span class="wavrow__dur mono" data-slot="dur"></span>
+        <span class="wavrow__tx" data-slot="txTag"></span>
+        <a class="btn tiny ghost" download title="Download WAV" data-slot="download">⬇</a>
+        <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this WAV">🗑</button>
+      </span>
+    </summary>
+    <div class="wavrow__body" data-slot="expandBody"></div>
+  </details>
 </template>
 
-<!-- one indented stripped region clip under its parent original. Shows the
-     clip's span/size/duration + transcript status, plus the same per-clip
-     actions (expand transcript / download stripped clip / delete). -->
+<!-- one indented stripped region clip under its parent original — same native
+     <details> shape (no select/viewing badge; clicking the summary toggles the
+     clip's cached transcript). -->
 <template id="tpl-next-wavclip">
-  <div class="wavrow is-clip" data-slot="row">
-    <span class="wavrow__l">
-      <span class="wavrow__n mono" data-slot="name"></span>
-      <span class="wavrow__sub mono" data-slot="sub"></span>
-    </span>
-    <span class="wavrow__r">
-      <span class="wavrow__dur mono" data-slot="dur"></span>
-      <span class="wavrow__tx" data-slot="txTag"></span>
-      <button class="btn tiny ghost" type="button" data-wav-expand title="Expand the cached transcript">tx</button>
-      <a class="btn tiny ghost" download title="Download stripped clip" data-slot="download">⬇</a>
-      <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this stripped clip">🗑</button>
-    </span>
-  </div>
+  <details class="wavrow is-clip" data-slot="row">
+    <summary class="wavrow__summary">
+      <span class="wavrow__l">
+        <span class="wavrow__n mono" data-slot="name"></span>
+        <span class="wavrow__sub mono" data-slot="sub"></span>
+      </span>
+      <span class="wavrow__r">
+        <span class="wavrow__dur mono" data-slot="dur"></span>
+        <span class="wavrow__tx" data-slot="txTag"></span>
+        <a class="btn tiny ghost" download title="Download stripped clip" data-slot="download">⬇</a>
+        <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this stripped clip">🗑</button>
+      </span>
+    </summary>
+    <div class="wavrow__body" data-slot="expandBody"></div>
+  </details>
 </template>
 
 <!-- ── Per-WAV expanded transcript (inline, lazy) ─────────────────────────

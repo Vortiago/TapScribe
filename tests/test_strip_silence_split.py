@@ -336,7 +336,7 @@ def test_describe_session_attaches_regions_to_origin_wav(tmp_path: Path, monkeyp
     it was split from. Sibling originals with different idents must not
     cross-contaminate."""
     from tapscribe import config
-    from tapscribe.sessions import _describe_session
+    from tapscribe.sessions import build_session_files
 
     monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path)
     session_dir = tmp_path / "session"
@@ -354,9 +354,11 @@ def test_describe_session_attaches_regions_to_origin_wav(tmp_path: Path, monkeyp
     strip_one_wav(orig_a, out_dir, **_common_kwargs())
     strip_one_wav(orig_b, out_dir, **_common_kwargs())
 
-    sess = _describe_session(session_dir, jobs={}, current_session="")
+    # The per-session WAV listing moved off /api/state to the lazy
+    # build_session_files / GET /api/sessions/{s}/files path.
+    wavs, _stripped = build_session_files(session_dir)
 
-    files = {f["name"]: f for f in sess["files"]}
+    files = {f["name"]: f for f in wavs}
     a_regions = files[orig_a.name]["regions"]
     b_regions = files[orig_b.name]["regions"]
     assert len(a_regions) == 3

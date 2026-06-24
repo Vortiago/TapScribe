@@ -1477,10 +1477,12 @@ def test_absorb_refuses_filename_collision(client, recorder_under_test):
     assert (src / "20260101T000000Z__alice__abc.wav").is_file()
 
 
-def test_api_state_files_row_lists_all_cached_transcripts(client, recorder_under_test):
+def test_session_files_row_lists_all_cached_transcripts(client, recorder_under_test):
     """The dashboard's per-WAV picker needs to know what's cached. The
     `transcripts` field on each file row enumerates every (backend, model)
-    sidecar with an `is_primary` flag so the UI can render a switcher."""
+    sidecar with an `is_primary` flag so the UI can render a switcher. The file
+    listing now lives on the lazy GET /api/sessions/{s}/files endpoint (it left
+    /api/state to keep huge sessions off the poll)."""
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
@@ -1503,9 +1505,8 @@ def test_api_state_files_row_lists_all_cached_transcripts(client, recorder_under
     )
     set_primary_transcript(wav, backend="faster-whisper", model="small.en")
 
-    body = client.get("/api/state").json()
-    s = next(s for s in body["sessions"] if s["session"] == "s")
-    row = next(f for f in s["files"] if f["name"] == wav.name)
+    files = client.get("/api/sessions/s/files").json()["files"]
+    row = next(f for f in files if f["name"] == wav.name)
     listing = row.get("transcripts")
     assert listing is not None and len(listing) == 2
     by_key = {(t["backend"], t["model"]): t for t in listing}
@@ -1606,9 +1607,8 @@ def test_stripped_clip_cache_listing_carries_source_so_set_primary_resolves(clie
 
     # The clip surfaces under the original's regions[], and its cache listing
     # reports source="stripped".
-    body = client.get("/api/state").json()
-    s = next(s for s in body["sessions"] if s["session"] == "s")
-    original = next(f for f in s["files"] if f["name"] == "2026-01-01T01-00-00Z__alice__abc.wav")
+    files = client.get("/api/sessions/s/files").json()["files"]
+    original = next(f for f in files if f["name"] == "2026-01-01T01-00-00Z__alice__abc.wav")
     region_row = next(r for r in original["regions"] if r["name"] == region_name)
     assert region_row["transcripts"][0]["source"] == "stripped"
 
@@ -1629,9 +1629,10 @@ def test_stripped_clip_cache_listing_carries_source_so_set_primary_resolves(clie
     assert bad.status_code == 404, bad.text
 
 
-def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recorder_under_test):
+def test_session_files_row_lists_single_entry_for_legacy_sidecar(client, recorder_under_test):
     """A WAV with only a legacy `<wav>.json` sidecar should still surface
-    a one-element `transcripts` list so the UI can render it consistently."""
+    a one-element `transcripts` list so the UI can render it consistently. The
+    listing is the lazy GET /api/sessions/{s}/files endpoint."""
     from tapscribe.wav_cache import cached_transcribe
 
     root = recorder_under_test.recordings_dir
@@ -1645,9 +1646,8 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
         hallucination_rules=[],
     )
 
-    body = client.get("/api/state").json()
-    s = next(s for s in body["sessions"] if s["session"] == "s")
-    row = next(f for f in s["files"] if f["name"] == wav.name)
+    files = client.get("/api/sessions/s/files").json()["files"]
+    row = next(f for f in files if f["name"] == wav.name)
     # Compare the contract fields only — wav_cache.transcripts_listing
     # optionally surfaces `transcribe_ms` when the underlying transcribe
     # call ran for >0 ms (Windows / loaded CI). That's a perf detail,
@@ -1660,6 +1660,93 @@ def test_api_state_files_row_lists_single_entry_for_legacy_sidecar(client, recor
         "model": "small.en",
         "is_primary": True,
     }
+
+
+def _session_row(client, sid):
+    return next(s for s in client.get("/api/state").json()["sessions"] if s["session"] == sid)
+
+
+def test_api_state_omits_files_but_carries_aggregates_and_files_sig(client, recorder_under_test):
+    """/api/state no longer embeds the per-WAV files[] array — a huge session
+    re-shipped + re-parsed it on every ~0.5s poll. It carries the cheap
+    aggregates the listing views need (total_bytes for sessions.js,
+    total_duration_s for the spine card, speakers for People) plus a non-empty
+    files_sig the dashboard uses to invalidate the lazy files cache."""
+    root = recorder_under_test.recordings_dir
+    seed_session(
+        root,
+        "s",
+        [
+            "2026-01-01T01-00-00Z__alice__abc.wav",
+            "2026-01-01T01-05-00Z__bob__def.wav",
+        ],
+    )
+
+    s = _session_row(client, "s")
+    assert "files" not in s, "files[] must not ride /api/state — it's lazy now"
+    assert s["wav_count"] == 2
+    assert s["total_bytes"] > 0
+    assert s["total_duration_s"] > 0
+    # speakers mirrors the per-WAV speaker_name (parse_wav_speaker_slug), the
+    # distinct set People builds its participants from.
+    from tapscribe.text import parse_wav_speaker_slug
+
+    assert sorted(s["speakers"]) == sorted(
+        {
+            parse_wav_speaker_slug("2026-01-01T01-00-00Z__alice__abc.wav"),
+            parse_wav_speaker_slug("2026-01-01T01-05-00Z__bob__def.wav"),
+        }
+    )
+    assert len(s["speakers"]) == 2
+    assert s["files_sig"], "a session with WAVs must carry a non-empty files_sig"
+
+
+def test_api_session_files_returns_the_listing_off_the_poll(client, recorder_under_test):
+    """GET /api/sessions/{s}/files is the lazy companion that returns the full
+    per-WAV listing (the same row shape the poll used to embed)."""
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+
+    body = client.get("/api/sessions/s/files").json()
+    assert [f["name"] for f in body["files"]] == ["2026-01-01T01-00-00Z__alice__abc.wav"]
+    row = body["files"][0]
+    assert {
+        "name",
+        "size",
+        "duration_s",
+        "transcript",
+        "transcripts",
+        "wav_start",
+        "wav_end",
+        "speaker_name",
+        "regions",
+    } <= row.keys()
+
+
+def test_files_sig_flips_when_a_transcript_is_written(client, recorder_under_test):
+    """files_sig must change on a re-transcribe of an EXISTING WAV (the file set
+    + sizes are unchanged) so the dashboard refetches the listing — that's the
+    whole reason it's a digest over the transcript stamps, not just the names."""
+    from tapscribe.wav_cache import cached_transcribe
+
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    wav = sd / "2026-01-01T01-00-00Z__alice__abc.wav"
+
+    sig_before = _session_row(client, "s")["files_sig"]
+    cached_transcribe(
+        wav,
+        TranscriberStub(backend="faster-whisper", model="small.en"),
+        initial_prompt=None,
+        hotwords=None,
+        hallucination_rules=[],
+    )
+    sig_after = _session_row(client, "s")["files_sig"]
+    assert sig_before and sig_after and sig_before != sig_after
+
+
+def test_api_session_files_404_for_unknown_session(client, recorder_under_test):  # noqa: ARG001
+    assert client.get("/api/sessions/does-not-exist/files").status_code == 404
 
 
 def test_api_transcribe_uses_session_meta_prompt_when_set(client, recorder_under_test, monkeypatch):
@@ -2015,14 +2102,14 @@ def test_manual_transcribe_session_409_while_pipeline_running(client, recorder_u
     assert r.status_code == 409, r.text
 
 
-def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_test):
-    """The dashboard reads each WAV's transcript MARKER out of /api/state's
-    `sessions[*].files[*].transcript`. With the lazy-transcript change the
-    field is a slim marker (backend/model/transcribed_at/transcribe_ms/source/
-    segment_count) — NOT the full body — but it must still surface the
-    *primary* (backend, model) so flipping the primary on disk shows up on the
-    next poll. The full text is fetched lazily via the per-WAV transcript
-    endpoint instead, asserted below."""
+def test_session_files_row_surfaces_primary_transcript(client, recorder_under_test):
+    """The dashboard reads each WAV's transcript MARKER out of the lazy
+    GET /api/sessions/{s}/files listing's `files[*].transcript`. With the
+    lazy-transcript change the field is a slim marker (backend/model/
+    transcribed_at/transcribe_ms/source/segment_count) — NOT the full body —
+    but it must still surface the *primary* (backend, model) so flipping the
+    primary on disk shows up on the next fetch. The full text is fetched lazily
+    via the per-WAV transcript endpoint instead, asserted below."""
     from tapscribe.wav_cache import cached_transcribe, set_primary_transcript
 
     root = recorder_under_test.recordings_dir
@@ -2046,9 +2133,8 @@ def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_
 
     # Default primary is the most-recent write (voxtral). The marker carries
     # backend/model but NOT the segment-level text/words.
-    body = client.get("/api/state").json()
-    s = next(s for s in body["sessions"] if s["session"] == "s")
-    file_row = next(f for f in s["files"] if f["name"] == wav.name)
+    files = client.get("/api/sessions/s/files").json()["files"]
+    file_row = next(f for f in files if f["name"] == wav.name)
     assert file_row["transcript"] is not None
     assert file_row["transcript"]["backend"] == "mlx-voxtral"
     assert file_row["transcript"]["model"] == "voxtral-mini"
@@ -2062,9 +2148,8 @@ def test_api_state_files_row_surfaces_primary_transcript(client, recorder_under_
 
     # Flip primary back to whisper; the dashboard sees the change in the marker.
     set_primary_transcript(wav, backend="faster-whisper", model="small.en")
-    body = client.get("/api/state").json()
-    s = next(s for s in body["sessions"] if s["session"] == "s")
-    file_row = next(f for f in s["files"] if f["name"] == wav.name)
+    files = client.get("/api/sessions/s/files").json()["files"]
+    file_row = next(f for f in files if f["name"] == wav.name)
     assert file_row["transcript"]["backend"] == "faster-whisper"
     assert file_row["transcript"]["model"] == "small.en"
     full = client.get(f"/api/wav/s/{wav.name}/transcript").json()

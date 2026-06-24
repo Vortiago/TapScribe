@@ -489,9 +489,11 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
             )
 
             # Expanding the clip renders its inline transcript right below the
-            # row. Its text must be the scripted text the FakeTranscriber
+            # row. The row is a native <details>; clicking its <summary> toggles
+            # it open (a clip has no select target, so the whole summary
+            # toggles). Its text must be the scripted text the FakeTranscriber
             # returned.
-            await page.locator(f"{first_row_sel} [data-wav-expand]").click()
+            await page.locator(f"{first_row_sel} > summary").click()
             await page.wait_for_function(
                 f"""
                 () => {{
@@ -1125,19 +1127,28 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
                 """,
                 timeout=10000,
             )
-            # Pre-warm the per-WAV transcript body cache: expand once (this
-            # may fetch /api/wav/.../transcript), wait for the text, collapse.
-            await page.locator(f"{row_sel} [data-wav-expand]").click()
+            # Pre-warm the per-WAV transcript body cache: open the row once
+            # (the native <details> toggle fires a fetch of
+            # /api/wav/.../transcript), wait for the text, then collapse. The
+            # row is an original, so its name block SELECTS the waveform —
+            # toggle via a neutral part of the summary (the duration) instead.
+            await page.locator(f"{row_sel} .wavrow__dur").click()
             await page.wait_for_function(
                 f"""
-                () => Array.from(document.querySelectorAll('#viewRoot .wavlist .expand-tx'))
-                  .some((el) => el.innerText.includes({scripted!r}))
+                () => {{
+                  const row = document.querySelector('{row_sel}');
+                  return row && row.open &&
+                    Array.from(row.querySelectorAll('.expand-tx'))
+                      .some((el) => el.textContent.includes({scripted!r}));
+                }}
                 """,
                 timeout=5000,
             )
-            await page.locator(f"{row_sel} [data-wav-expand]").click()
+            await page.locator(f"{row_sel} .wavrow__dur").click()
+            # A native <details> keeps its body in the DOM when collapsed (just
+            # hidden) — assert the row is closed, not that the node is gone.
             await page.wait_for_function(
-                """() => document.querySelectorAll('#viewRoot .wavlist .expand-tx').length === 0""",
+                f"""() => {{ const r = document.querySelector('{row_sel}'); return r && !r.open; }}""",
                 timeout=5000,
             )
 
@@ -1149,14 +1160,19 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
 
             await page.route("**/api/state", _kill_state)
 
-            await page.locator(f"{row_sel} [data-wav-expand]").click()
+            await page.locator(f"{row_sel} .wavrow__dur").click()
             # The 1500ms bound is below what any rescuing poll could deliver
-            # (polls are dead) — so a pass means the expand rendered from
-            # cache on click, not from a network round trip.
+            # (polls are dead) — so a pass means the expand re-rendered from the
+            # cached body on click (the toggle is pure DOM; fillExpand reads the
+            # client cache), not from a network round trip.
             await page.wait_for_function(
                 f"""
-                () => Array.from(document.querySelectorAll('#viewRoot .wavlist .expand-tx'))
-                  .some((el) => el.innerText.includes({scripted!r}))
+                () => {{
+                  const row = document.querySelector('{row_sel}');
+                  return row && row.open &&
+                    Array.from(row.querySelectorAll('.expand-tx'))
+                      .some((el) => el.textContent.includes({scripted!r}));
+                }}
                 """,
                 timeout=1500,
             )
@@ -2338,6 +2354,95 @@ async def test_recordings_strip_controls_stay_visible_with_many_wavs(
             await browser.close()
 
 
+async def test_recordings_list_virtualized_rows_survive_select_and_poll(
+    running_recorder: RunningRecorder, tmp_path: Path
+):
+    """The WAV list is virtualized the native way: each .wavrow carries
+    `content-visibility` (CSS skips off-screen layout/paint), and the list is
+    keyed-reconciled — NOT replaceChildren'd — so a selection or an idle poll
+    tick never rebuilds the rows. Structural guards (no timing): (1) rows carry a
+    non-`visible` computed content-visibility; (2) stamping a row's DOM node and
+    then selecting a DIFFERENT row + crossing a poll leaves the stamped node
+    intact (it was reused, not rebuilt). This is what keeps a thousands-row
+    session snappy — a rebuild-per-tick was the jank.
+    """
+    rr = running_recorder
+    n_wavs = 6
+
+    async def _one(i: int):
+        wav = synth_speech_like_wav(tmp_path / f"virt{i}.wav", seconds=0.25, freq_hz=180.0 + i * 12.0)
+        await stream_wav_via_tap(
+            ws_base_url=rr.ws_base_url,
+            identity=f"virt{i}",
+            name=f"Speaker {i}",
+            wav_path=wav,
+            utterance_id=f"virt-utt{i}",
+        )
+
+    await asyncio.gather(*(_one(i) for i in range(n_wavs)))
+    assert await wait_until(lambda: streams_drained(rr.recorder), timeout=15.0)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(rr.base_url + "/#recordings", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                f"() => document.querySelectorAll('#viewRoot .wavlist .wavrow').length >= {n_wavs}",
+                timeout=8000,
+            )
+
+            # (1) Rows opt into content-visibility virtualization.
+            cv = await page.evaluate(
+                """() => {
+                  const row = document.querySelector('#viewRoot .wavlist .wavrow');
+                  return row && getComputedStyle(row).contentVisibility;
+                }"""
+            )
+            assert cv and cv != "visible", f"rows must carry content-visibility (got {cv!r})"
+
+            # Stamp a NON-selected row's DOM node so we can detect a rebuild.
+            sel0 = await page.locator("#viewRoot .wavlist .wavrow.is-sel").get_attribute("data-wav")
+            other = page.locator("#viewRoot .wavlist .wavrow:not(.is-sel)").first
+            target = await other.get_attribute("data-wav")
+            assert target and target != sel0
+            await page.evaluate(
+                """(want) => {
+                  const r = document.querySelector(`#viewRoot .wavlist .wavrow[data-wav="${want}"]`);
+                  r.dataset.stamp = 'keep-me';
+                }""",
+                target,
+            )
+
+            # (2) Select that row by its name, then cross a poll tick. A
+            # replaceChildren would drop the stamp; a keyed reconcile keeps it.
+            await other.locator("[data-wav-select]").click()
+            await page.wait_for_function(
+                """(want) => {
+                  const sel = document.querySelector('#viewRoot .wavlist .wavrow.is-sel');
+                  return sel && sel.getAttribute('data-wav') === want;
+                }""",
+                arg=target,
+                timeout=6000,
+            )
+            await asyncio.sleep(1.2)  # cross at least one 500ms /api/state poll
+            stamped = await page.evaluate(
+                """(want) => {
+                  const r = document.querySelector(`#viewRoot .wavlist .wavrow[data-wav="${want}"]`);
+                  return r && r.dataset.stamp;
+                }""",
+                target,
+            )
+            assert stamped == "keep-me", "selecting + polling rebuilt the row (lost the stamp)"
+        finally:
+            await browser.close()
+
+
 async def test_recordings_waveform_renders_real_canvas_not_mock(
     running_recorder: RunningRecorder, tmp_path: Path
 ):
@@ -2397,17 +2502,16 @@ async def test_recordings_waveform_renders_real_canvas_not_mock(
             await browser.close()
 
 
-async def test_recordings_clicking_anywhere_on_row_selects_its_waveform(
+async def test_recordings_name_selects_waveform_rest_of_row_toggles_expand(
     running_recorder: RunningRecorder, tmp_path: Path
 ):
-    """Operator report: "the Recordings waveform only shows one file and I can't
-    select different files to look at". The whole .wavrow carries
-    cursor:pointer, but selection used to be wired only to the name block, so a
-    click on the duration / tag / gap was silently inert — selection felt
-    broken. Guard: clicking a NON-name part of a row (its .wavrow__dur) selects
-    that WAV — the hero name follows, .is-sel moves, and the "🌊 viewing" badge
-    lands on the clicked row (and only it). The action buttons (⬇/🗑/tx) still
-    stopPropagation, so they never double as a selection.
+    """The row is a native <details>: the NAME block selects the WAV for the
+    waveform (preventDefaulting the toggle), and clicking the REST of the row
+    (e.g. its duration) toggles the inline transcript open instead. Guards both
+    halves of that contract: (1) clicking a row's name moves the selection — the
+    hero name follows, .is-sel moves, the "🌊 viewing" badge lands on it and
+    only it; (2) clicking the duration of a row toggles its <details> WITHOUT
+    moving the selection.
     """
     rr = running_recorder
     for i, who in enumerate(("alice", "bob")):
@@ -2443,11 +2547,8 @@ async def test_recordings_clicking_anywhere_on_row_selects_its_waveform(
             assert target and target != sel0
             wave_before = await page.locator("#viewRoot [data-slot=waveName]").inner_text()
 
-            # Click the DURATION cell — inside the row but NOT the name block and
-            # NOT an action button. Before the fix this did nothing.
-            await other.locator(".wavrow__dur").click()
-
-            # Selection follows the click: .is-sel moves to the target row.
+            # (1) Click the NAME block → selection moves there.
+            await other.locator("[data-wav-select]").click()
             await page.wait_for_function(
                 """(want) => {
                   const sel = document.querySelector('#viewRoot .wavlist .wavrow.is-sel');
@@ -2467,6 +2568,21 @@ async def test_recordings_clicking_anywhere_on_row_selects_its_waveform(
             other_badge = page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{sel0}"] .wavrow__viewing')
             assert await target_badge.is_visible(), "selected row must show the 🌊 viewing badge"
             assert not await other_badge.is_visible(), "non-selected row must hide the badge"
+
+            # (2) Clicking the DURATION of the still-unselected first row toggles
+            # its <details> open and does NOT steal the selection.
+            first_row = page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{sel0}"]')
+            await first_row.locator(".wavrow__dur").click()
+            await page.wait_for_function(
+                """(want) => {
+                  const r = document.querySelector(`#viewRoot .wavlist .wavrow[data-wav="${want}"]`);
+                  return r && r.open;
+                }""",
+                arg=sel0,
+                timeout=4000,
+            )
+            still_sel = await page.locator("#viewRoot .wavlist .wavrow.is-sel").get_attribute("data-wav")
+            assert still_sel == target, "toggling a row's expand must not move the selection"
         finally:
             await browser.close()
 

@@ -861,16 +861,45 @@ body::before { display: none; }
 .wavlist { padding: 2px 0; }
 .panel--fill > .panel__body.flush > .wavlist { flex: 1; min-height: 0; overflow-y: auto; }
 .wavlist .empty { padding: 22px 12px; font-size: 10.5px; }
+/* A WAV row. content-visibility lets the browser skip layout + paint of
+   off-screen rows, so a session with thousands of WAVs stays cheap to hold in
+   the DOM; contain-intrinsic-size's `auto` remembers each row's real height,
+   so an expanded row gets an accurate placeholder after it's first seen. This
+   is the pure-CSS half of the huge-list virtualization (the keyed reconcile in
+   templates.js is the JS half — see recordings.js / transcript.js). The class
+   is shared by two shapes: Recordings' row is a native <details> (summary =
+   the visible row, body = the lazy inline transcript); the Transcript picker's
+   row is a plain <button> (select only). */
 .wavrow {
-  width: 100%; text-align: left; cursor: pointer;
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 7px 11px; background: none; border: 0; border-bottom: 1px solid var(--hairline-2);
-  &:hover { background: var(--bg-2); }
-  &.is-sel { background: color-mix(in srgb, var(--next-accent) 10%, transparent); }
+  border: 0; border-bottom: 1px solid var(--hairline-2); background: none;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 38px;
   &:last-child { border-bottom: 0; }
 }
-.wavrow.is-clip { cursor: default; background: var(--bg-0); padding-left: 22px; }
-.wavrow.is-clip:hover { background: var(--bg-0); }
+/* The Transcript-picker row: a <button class="wavrow"> with no <summary>. */
+button.wavrow {
+  width: 100%; text-align: left; cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 11px;
+  &:hover { background: var(--bg-2); }
+  &.is-sel { background: color-mix(in srgb, var(--next-accent) 10%, transparent); }
+}
+/* The Recordings row's <summary> is the always-visible row: name selects the
+   waveform, the rest toggles the inline transcript. Suppress the native
+   disclosure marker — the whole row is the affordance. */
+.wavrow__summary {
+  width: 100%; cursor: pointer; list-style: none;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 11px;
+  &::-webkit-details-marker { display: none; }
+  &:hover { background: var(--bg-2); }
+}
+.wavrow.is-sel > .wavrow__summary { background: color-mix(in srgb, var(--next-accent) 10%, transparent); }
+.wavrow.is-clip > .wavrow__summary { background: var(--bg-0); padding-left: 22px; }
+.wavrow.is-clip > .wavrow__summary:hover { background: var(--bg-1); }
+/* Inline transcript body, revealed when the <details> is open. */
+.wavrow__body { padding: 0 11px 8px; }
+.wavrow.is-clip > .wavrow__body { padding-left: 22px; }
 .wavrow__l { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .wavrow__n { font-size: 11px; font-weight: 600; color: var(--fg-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wavrow.is-sel .wavrow__n { color: var(--next-accent); }

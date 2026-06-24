@@ -81,7 +81,10 @@ function deriveParticipants(j, s) {
   };
   const t = s.session_transcript;
   if (t && Array.isArray(t.speakers)) for (const sp of t.speakers) add(sp, false);
-  for (const f of (s.files || [])) if (f.speaker_name) add(f.speaker_name, false);
+  // Recorded speaker slugs come from the session-level `speakers` aggregate —
+  // /api/state no longer ships per-WAV files[] (a huge session re-shipped it
+  // every poll); People only ever needed the distinct slugs anyway.
+  for (const sp of (s.speakers || [])) add(sp, false);
   // The recorded speaker keys we already have — a live stream that resolves to
   // one of these must NOT add a second (identity-keyed) row for the same human.
   const recordedKeys = new Set(seen.keys());

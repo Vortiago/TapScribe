@@ -19,8 +19,8 @@
 // clobbered). The engine panel is rebuilt by main on engine state changes
 // (rebuildEngine).
 
-import { tpl, pick, renderRegion, markRegionStale } from "../../templates.js";
-import { postJson, putJson, fetchSessionTranscript, peekSessionTranscript } from "../../api.js";
+import { tpl, pick, renderRegion, markRegionStale, reconcileList, selectionInside } from "../../templates.js";
+import { postJson, putJson, fetchSessionTranscript, peekSessionTranscript, loadSessionFiles } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
@@ -136,11 +136,20 @@ export function build(ctx) {
   // (see test_next_perf_soak.py::test_soak_transcript_heavy). The merged pane's
   // own sig (txSig) is held by `renderRegion(mergedHost, …)`; only the control
   // column keeps a closure sig here.
-  let lastCtlSig = " "; // control column: range/note/WAV picker/cache
+  let lastCtlSig = " "; // control column chrome: toggle/range/note/selected/cache
+  let lastPickerSig = " "; // the per-WAV picker list (its own files-set gate)
   // Keys (session@stamp) we've already scheduled a re-render for after the
   // lazy merged-transcript fetch lands — dedupes repeated misses.
   /** @type {Set<string>} */
   const txRerenderPending = new Set();
+  /** The lazily-fetched WAV listing for the FOCUSED session — the array
+   * /api/state no longer embeds. Refreshed at the top of update() from the
+   * (sid, files_sig) client cache; sourceFiles()/recordingFor read it. */
+  /** @type {import('../../types.js').WavFile[]} */
+  let currentFiles = [];
+  /** (sid@files_sig) lazy-files fetches in flight — dedupes across ticks. */
+  /** @type {Set<string>} */
+  const pendingFiles = new Set();
 
   // ---- Helpers --------------------------------------------------------------
 
@@ -177,12 +186,12 @@ export function build(ctx) {
   };
 
   /** The WAVs the picker + per-WAV transcribe operate on: the originals, or the
-   * flattened silence-stripped region clips when the source toggle is stripped. */
+   * flattened silence-stripped region clips when the source toggle is stripped.
+   * Reads the lazily-fetched `currentFiles`, not session.files (which /api/state
+   * no longer ships). */
   /** @returns {(import('../../types.js').WavFile | import('../../types.js').WavRegion)[]} */
-  const sourceFiles = () => {
-    const files = session?.files || [];
-    return effectiveSource() === "stripped" ? files.flatMap((f) => f.regions || []) : files;
-  };
+  const sourceFiles = () =>
+    effectiveSource() === "stripped" ? currentFiles.flatMap((f) => f.regions || []) : currentFiles;
 
   /** In-flight key for a (name, source) — matches transcribeWav's key shape so
    * the row "⟳ tx" busy state lines up with the optimistic set. */
@@ -368,24 +377,50 @@ export function build(ctx) {
 
   // ---- Per-WAV picker (drives re-transcribe + the cache panel) --------------
 
-  /** @param {import('../../types.js').WavFile | import('../../types.js').WavRegion} f @param {boolean} selected */
-  const wavRow = (f, selected) => {
+  /** @typedef {{ file: import('../../types.js').WavFile | import('../../types.js').WavRegion, src: "original"|"stripped" }} PickRow */
+
+  /** Build one picker row (a <button class="wavrow">). Selection (`.is-sel`) is
+   * NOT set here — it's applied in place by `applyPickerSelection` so picking a
+   * WAV never rebuilds the list. */
+  /** @param {PickRow} m @returns {HTMLElement} */
+  const buildPickRow = (m) => {
+    const f = m.file;
     const node = tpl("tpl-next-txwavrow");
     const btn = /** @type {HTMLButtonElement} */ (node.firstElementChild);
-    if (selected) btn.classList.add("is-sel");
+    btn.dataset.wav = f.name;
     pick(node, "name").textContent = truncMid(f.name, 30);
     const who = f.speaker_name ? `${f.speaker_name} · ` : "";
     pick(node, "sub").textContent = `${who}${fmtBytes(f.size)}`;
     pick(node, "dur").textContent = fmtDur(f.duration_s);
     const tag = pick(node, "txTag");
-    const inflight = txInflight.has(wavKey(f.name, effectiveSource()));
+    const inflight = txInflight.has(wavKey(f.name, m.src));
     if (inflight) { tag.textContent = "⟳ tx"; tag.className = "wavrow__tx is-busy"; }
     else if (f.transcript) { tag.textContent = "✓ tx"; tag.className = "wavrow__tx is-done"; }
     else { tag.textContent = "no tx"; tag.className = "wavrow__tx is-none"; }
     btn.addEventListener("click", () => {
       if (session) { selectedWav.set(session.session, f.name); lastCtlSig = " "; afterMutate(); }
     });
-    return node;
+    return btn;
+  };
+
+  /** Reconcile key for a picker row — folds everything buildPickRow renders
+   * EXCEPT selection (applied in place), including the inflight flag so a
+   * "⟳ tx" busy state recreates that one row. A changed key rebuilds the row;
+   * unchanged rows keep their key (and state) across the moveBefore reconcile. */
+  /** @param {PickRow} m */
+  const pickKey = (m) =>
+    [
+      m.file.name, m.file.size, m.file.duration_s, m.file.speaker_name || "",
+      m.file.transcript?.transcribed_at || "", m.file.transcript ? 1 : 0,
+      txInflight.has(wavKey(m.file.name, m.src)) ? 1 : 0,
+    ].join("|");
+
+  /** Reflect the selected WAV on the picker rows in place. */
+  /** @param {string} selName */
+  const applyPickerSelection = (selName) => {
+    for (const btn of /** @type {NodeListOf<HTMLElement>} */ (wavList.querySelectorAll("button.wavrow"))) {
+      btn.classList.toggle("is-sel", btn.dataset.wav === selName);
+    }
   };
 
   // ---- Transcript cache (REAL — moved from recordings.js) -------------------
@@ -397,7 +432,7 @@ export function build(ctx) {
     // list doesn't change when you flip Original/Stripped; each row's source
     // tag distinguishes them. recordingFor maps a selected region back to its
     // parent original so either selection lands on the same list.
-    const rec = recordingFor(sel, session?.files || []);
+    const rec = recordingFor(sel, currentFiles);
     cacheBody.replaceChildren();
     cacheHint.textContent = rec ? truncMid(rec.name, 30) : "no WAV";
     if (!rec) {
@@ -445,6 +480,18 @@ export function build(ctx) {
     const tx = sess?.session_transcript || null;
     const sid = sess?.session || "";
     const job = sess?.progress || null;
+    const filesSig = sess?.files_sig || "";
+
+    // Resolve the focused session's WAV listing — the array /api/state no
+    // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
+    // → a fetch is in flight; `[]` → nothing to fetch (empty files_sig).
+    const fetched = loadSessionFiles(sid, filesSig, pendingFiles, () => {
+      lastCtlSig = " ";
+      lastPickerSig = " ";
+      afterMutate();
+    });
+    const filesLoading = fetched === null;
+    currentFiles = fetched || [];
 
     // ---- Job progress (one job per session). renderJobBar does in-place writes
     // on prebuilt nodes, EVERY tick — deliberately outside both signature gates.
@@ -518,72 +565,93 @@ export function build(ctx) {
       { sig: txSig },
     );
 
-    // ---- Control column (source toggle/range/note/WAV picker/cache) — own
-    // signature. Skip the DOM-heavy WAV-list / cache rebuild when nothing it
-    // depends on changed, or while a range box is mid-edit (so an in-progress
-    // ISO edit isn't wiped). The source + stripped flag are folded in so an
-    // original↔stripped switch re-renders the picker.
+    // ---- Control-column CHROME (source toggle / range / note / selected-WAV
+    // button / cache) — own signature, selection-inclusive. The per-WAV picker
+    // LIST is split out below with its own files-set gate so a thousands-row
+    // session doesn't replaceChildren on every selection / poll tick. Skip the
+    // chrome rebuild when nothing it depends on changed, or while a range box is
+    // mid-edit (so an in-progress ISO edit isn't wiped).
     const src = effectiveSource();
     const srcFiles = sourceFiles();
     const sel = selectedFor(srcFiles);
-    const wavSig = srcFiles.map((f) => `${f.name}:${f.transcript?.transcribed_at || ""}:${(f.transcripts || []).length}`).join("|");
     const ctlSig = [
       sid,
       src,
       sess?.stripped ? "S" : "",
+      filesLoading ? "L" : "",
       sel?.name || "",
-      [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(","),
-      wavSig,
+      sel ? (txInflight.has(wavKey(sel.name, src)) ? "B" : "") : "",
+      sel?.transcript?.transcribed_at || "",
+      srcFiles.length,
       sess?.earliest_iso || "",
       sess?.latest_iso || "",
     ].join("§");
     const focused = /** @type {HTMLElement | null} */ (document.activeElement);
     const editing = !!focused && (focused === rangeFrom || focused === rangeTo);
-    if (ctlSig === lastCtlSig || editing) return;
-    lastCtlSig = ctlSig;
+    if (!(ctlSig === lastCtlSig || editing)) {
+      lastCtlSig = ctlSig;
 
-    // Source toggle (original / stripped) — drives the range transcribe AND the
-    // per-WAV picker below.
-    srcSwHost.replaceChildren(buildSourceToggle({
-      active: src,
-      hasStripped: !!sess?.stripped,
-      onPick: (which) => {
-        if (!session) return;
-        sourcePick.set(session.session, which);
-        lastCtlSig = " ";
-        afterMutate();
-      },
-    }));
+      // Source toggle (original / stripped) — drives the range transcribe AND
+      // the per-WAV picker below.
+      srcSwHost.replaceChildren(buildSourceToggle({
+        active: src,
+        hasStripped: !!sess?.stripped,
+        onPick: (which) => {
+          if (!session) return;
+          sourcePick.set(session.session, which);
+          lastCtlSig = " ";
+          lastPickerSig = " ";
+          afterMutate();
+        },
+      }));
 
-    // Range placeholders + note
-    if (!rangeFrom.value) rangeFrom.placeholder = sess?.earliest_iso || "ISO";
-    if (!rangeTo.value) rangeTo.placeholder = sess?.latest_iso || "ISO";
-    const srcWord = src === "stripped" ? "stripped clip" : "WAV";
-    txRangeBtn.disabled = !sess || !srcFiles.length;
-    txNote.textContent = sess
-      ? (srcFiles.length ? `transcribes every ${srcWord} in the range` : `no ${srcWord}s to transcribe yet`)
-      : "pick a session first";
+      // Range placeholders + note
+      if (!rangeFrom.value) rangeFrom.placeholder = sess?.earliest_iso || "ISO";
+      if (!rangeTo.value) rangeTo.placeholder = sess?.latest_iso || "ISO";
+      const srcWord = src === "stripped" ? "stripped clip" : "WAV";
+      txRangeBtn.disabled = !sess || !srcFiles.length;
+      txNote.textContent = sess
+        ? (srcFiles.length ? `transcribes every ${srcWord} in the range` : `no ${srcWord}s to transcribe yet`)
+        : "pick a session first";
 
-    // Per-WAV re-transcribe picker + selected-WAV button
-    txSelLabel.textContent = sel ? `Selected: ${truncMid(sel.name, 22)} · ${src}` : "Selected WAV";
-    const oneBusy = !!sel && txInflight.has(wavKey(sel.name, src));
-    txOneBtn.disabled = !sel || oneBusy;
-    txOneBtn.textContent = oneBusy ? "⟳ transcribing" : (sel?.transcript ? "re-transcribe" : "transcribe");
-    if (!srcFiles.length) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = sess
-        ? (src === "stripped" ? "No stripped clips — strip silence in Recordings first." : "No WAVs recorded yet.")
-        : "Pick a session from the spine.";
-      wavList.replaceChildren(empty);
-    } else {
-      const listFrag = document.createDocumentFragment();
-      for (const f of srcFiles) listFrag.appendChild(wavRow(f, f.name === sel?.name));
-      wavList.replaceChildren(listFrag);
+      // Per-WAV re-transcribe selected-WAV button
+      txSelLabel.textContent = sel ? `Selected: ${truncMid(sel.name, 22)} · ${src}` : "Selected WAV";
+      const oneBusy = !!sel && txInflight.has(wavKey(sel.name, src));
+      txOneBtn.disabled = !sel || oneBusy;
+      txOneBtn.textContent = oneBusy ? "⟳ transcribing" : (sel?.transcript ? "re-transcribe" : "transcribe");
+
+      // Transcript cache for the selected WAV/clip
+      renderCache(sel);
     }
 
-    // Transcript cache for the selected WAV/clip
-    renderCache(sel);
+    // ---- Per-WAV picker LIST (own gate) -------------------------------------
+    // Keyed reconcile gated on the file SET + inflight; content-visibility on
+    // the rows (next.css .wavrow) skips off-screen layout/paint; selection is
+    // applied in place. Deferred while a control is focused or text is selected
+    // inside the list (don't advance the gate). The empty / loading placeholder
+    // is gated the same way so it isn't re-set each tick.
+    const inflightSig = [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(",");
+    const pickState = !sess ? "none" : filesLoading ? "loading" : srcFiles.length ? "rows" : "empty";
+    const pickerSig = [pickState, sid, src, filesSig, inflightSig].join("§");
+    if (pickState === "rows") {
+      if (pickerSig !== lastPickerSig && !selectionInside(wavList)) {
+        // Clear any leftover placeholder so reconcileList owns the host.
+        if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren();
+        reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
+        lastPickerSig = pickerSig;
+      }
+      applyPickerSelection(sel?.name || "");
+    } else if (pickerSig !== lastPickerSig) {
+      lastPickerSig = pickerSig;
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = filesLoading
+        ? "loading recordings…"
+        : sess
+          ? (src === "stripped" ? "No stripped clips — strip silence in Recordings first." : "No WAVs recorded yet.")
+          : "Pick a session from the spine.";
+      wavList.replaceChildren(empty);
+    }
   };
 
   return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };
