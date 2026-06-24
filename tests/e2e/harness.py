@@ -16,6 +16,7 @@ regression in the boot wiring fails loudly here.
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import threading
 import time
@@ -27,6 +28,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import numpy as np
+import pytest
 import uvicorn
 import websockets
 
@@ -88,6 +90,32 @@ def bridge_chromium_args(ext_dir: Path) -> list[str]:
         # in-list flags adjacent literals in a list as a likely missing comma).
         "--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,LocalNetworkAccessChecks",
     ]
+
+
+async def launch_bridge_context(pw, ext_dir: Path, user_data_dir: str):
+    """Launch a headed persistent Chromium context with the bridge MV3
+    extension loaded — the shared headed launch for the bridge ``browser_e2e``
+    tests (extension + meeting).
+
+    MV3 extensions don't load headless, so this needs a real display. With no
+    ``DISPLAY`` it SKIPS with an ``xvfb-run`` hint instead of failing with a
+    cryptic 'browser has been closed' error; run these under
+    ``xvfb-run -a python -m pytest ...`` (see CONTRIBUTING.md "Running tests").
+    A launch failure *with* a display present is a real fault and propagates —
+    it is not swallowed as a skip, so a genuinely broken Chromium fails red
+    rather than silently masking a regression.
+    """
+    if not os.environ.get("DISPLAY"):
+        pytest.skip(
+            "headed bridge browser_e2e needs a display — run under xvfb, e.g. "
+            "`xvfb-run -a python -m pytest tests/e2e/test_bridge_extension_e2e.py "
+            "tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e` (see CONTRIBUTING.md)"
+        )
+    return await pw.chromium.launch_persistent_context(
+        user_data_dir=user_data_dir,
+        headless=False,  # MV3 extensions don't load headless
+        args=bridge_chromium_args(ext_dir),
+    )
 
 
 def free_port() -> int:

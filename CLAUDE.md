@@ -234,6 +234,16 @@ green, check what's in the CI matrix you're not running:
   regression — the suite will just print `1 skipped`.
 - The dashboard-UI CI job runs `pytest tests/e2e/test_dashboard_ui.py
   -q -m "not real_audio"`. Run the same locally before pushing.
+- The **headed bridge `browser_e2e`** (`test_bridge_extension_e2e.py` +
+  `test_bridge_meeting_e2e.py`) load the real MV3 extension in a *headed*
+  Chromium, which needs a display — without one they self-skip ("needs a
+  display — run under xvfb"; the skip is honest and does NOT mask a real
+  launch failure when a display IS present). `pytest tests` therefore skips
+  them on a plain box. Run them under a virtual display:
+  `xvfb-run -a python -m pytest tests/e2e/test_bridge_extension_e2e.py
+  tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e -q` (the meeting flow
+  also needs `pip install -e ".[whisper-cpu,vad]"`). CI runs both in the
+  `bridge E2E (extension + meeting)` job.
 
 ### e2e selectors: `data-slot` is the test-id; open Playwright via `playwright_session()`
 

@@ -45,7 +45,7 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
 
 import websockets  # noqa: E402
 
-from .harness import bridge_chromium_args, playwright_session  # noqa: E402
+from .harness import launch_bridge_context, playwright_session  # noqa: E402
 
 pytestmark = pytest.mark.browser_e2e
 
@@ -242,14 +242,7 @@ async def loaded_bridge(fake_tap_server: FakeTapServer) -> AsyncIterator[LoadedE
         # tempfile contextmanager so the user-data-dir is cleaned up
         # even if pytest cancels the test mid-run.
         with tempfile.TemporaryDirectory() as udd:
-            try:
-                ctx = await pw.chromium.launch_persistent_context(
-                    user_data_dir=udd,
-                    headless=False,  # MV3 extensions don't load in headless mode
-                    args=bridge_chromium_args(EXT_DIR),
-                )
-            except Exception as e:  # pragma: no cover
-                pytest.skip(f"Chromium not available: {e}")
+            ctx = await launch_bridge_context(pw, EXT_DIR, udd)
 
             try:
                 ext_id = await _discover_extension_id(ctx)

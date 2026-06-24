@@ -37,6 +37,21 @@ python -m pytest tests -q
 
 Both run on CI for every push and PR — keep them green.
 
+The **headed bridge `browser_e2e`** tests load the real MV3 extension in a
+*headed* Chromium, which needs a display — `python -m pytest tests -q` skips
+them unless one is present (you'll see a `needs a display — run under xvfb`
+skip). Run them under a virtual display:
+
+```bash
+xvfb-run -a python -m pytest \
+  tests/e2e/test_bridge_extension_e2e.py \
+  tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e -q
+```
+
+The meeting flow also needs `pip install -e ".[whisper-cpu,vad]"` for the real
+transcribe. CI runs both under xvfb in the `bridge E2E (extension + meeting)`
+job.
+
 ## Code style
 
 - `ruff` is the only linter. Config is in `pyproject.toml`.
