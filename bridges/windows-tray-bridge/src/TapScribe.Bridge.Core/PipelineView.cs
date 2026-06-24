@@ -78,6 +78,13 @@ public sealed record PipelineView(
         }
     }
 
+    /// <summary>A terminal view for a session the Recorder no longer has — a 404 on poll
+    /// (deleted dir / unknown id), as opposed to a transient blip. Reuses the
+    /// <see cref="PipelinePhase.Failed"/> phase so the renderer needs no new case; the
+    /// poll loop must STOP on it, not self-heal. Surfaced when re-opening a past meeting
+    /// the Recorder has since pruned (#168).</summary>
+    public static PipelineView Unavailable(string reason) => Of(PipelinePhase.Failed, failureReason: reason);
+
     private static PipelineView Of(PipelinePhase phase, string? progress = null, string? stage = null,
         string? currentFile = null, PipelineSummary? summary = null, string? summaryText = null,
         string? failureStage = null, string? failureReason = null) =>

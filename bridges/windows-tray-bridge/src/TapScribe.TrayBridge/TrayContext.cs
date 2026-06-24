@@ -35,18 +35,25 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _startItem;
     private readonly ToolStripMenuItem _endItem;
+    private readonly ToolStripMenuItem _pastMeetingsItem;
     private readonly System.Windows.Forms.Timer _resumeTimer;
     private readonly object _gate = new();
     private BridgeSettings _settings = BridgeSettingsStore.Load();
     private CaptureOrchestrator? _orchestrator;
     private WasapiDeviceEnumerator? _enumerator; // outlives the captures it opened; disposed at teardown
     private string? _sessionId; // the detached session the running meeting taps into
+    private DateTimeOffset _startedAt; // wall-clock start of the running meeting, for Past-meetings history (#168)
 
     public TrayContext()
     {
         _statusItem = new ToolStripMenuItem("○ Idle") { Enabled = false };
         _startItem = new ToolStripMenuItem("Start meeting", null, (_, _) => Start());
         _endItem = new ToolStripMenuItem("End meeting", null, (_, _) => End()) { Enabled = false };
+        // Past meetings (#168): rebuilt from the persisted history each time it opens, so it
+        // reflects meetings ended since it was last shown. Each item opens that meeting's
+        // own window; the submenu never touches the live status line or Start/End controls.
+        _pastMeetingsItem = new ToolStripMenuItem("Past meetings");
+        _pastMeetingsItem.DropDownOpening += (_, _) => RebuildPastMeetingsMenu();
         var settingsItem = new ToolStripMenuItem("Settings…", null, (_, _) => OpenSettings());
         var quitItem = new ToolStripMenuItem("Quit", null, (_, _) => Quit());
 
@@ -55,6 +62,7 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_startItem);
         menu.Items.Add(_endItem);
+        menu.Items.Add(_pastMeetingsItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(settingsItem);
         menu.Items.Add(quitItem);
@@ -171,6 +179,7 @@ internal sealed class TrayContext : ApplicationContext
                 _orchestrator = orchestrator;
                 _enumerator = enumerator;
                 _sessionId = sessionId;
+                _startedAt = DateTimeOffset.Now; // captured for the Past-meetings history at End (#168)
             }
             enumerator = null; // ownership transferred; the finally below must not dispose it
 
@@ -251,7 +260,7 @@ internal sealed class TrayContext : ApplicationContext
         SynchronizationContext ui = SynchronizationContext.Current
             ?? throw new InvalidOperationException("End must run on the WinForms UI thread.");
 
-        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, string? sessionId) = TakeMeeting();
+        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, string? sessionId, DateTimeOffset startedAt) = TakeMeeting();
         if (orchestrator is null || sessionId is null)
             return;
 
@@ -263,15 +272,18 @@ internal sealed class TrayContext : ApplicationContext
         // End-meeting click can't fire a second pipeline.
         SetBusyControls();
         ApplyStatus(new TrayStatus.Ending());
-        _ = EndAsync(settings, sessionId, orchestrator, enumerator, ui);
+        _ = EndAsync(settings, sessionId, startedAt, orchestrator, enumerator, ui);
     }
 
-    private Task EndAsync(BridgeSettings settings, string sessionId,
+    private Task EndAsync(BridgeSettings settings, string sessionId, DateTimeOffset startedAt,
         CaptureOrchestrator orchestrator, WasapiDeviceEnumerator? enumerator, SynchronizationContext ui)
     {
         // Persist the session so a tray restart mid-pipeline resumes showing it; cleared
         // when the flow reaches a terminal state (RunPipelineFlowAsync's finally).
         MeetingStateStore.Save(new MeetingState { SessionId = sessionId });
+        // Record the meeting in the local Past-meetings history (#168), beside the resume
+        // state, at End time — best-effort: a failed history write never breaks the pipeline.
+        MeetingHistoryStore.Append(new MeetingRecord { SessionId = sessionId, StartedAt = startedAt });
         return RunPipelineFlowAsync(
             settings, sessionId, ui,
             run: controller => controller.EndAsync(),
@@ -373,9 +385,90 @@ internal sealed class TrayContext : ApplicationContext
 
     private void ShowSummary(PipelineView view)
     {
-        var form = new SummaryForm(view);
+        var form = new MeetingForm();
         form.FormClosed += (_, _) => form.Dispose();
+        form.Render(view); // opened straight at the finished summary (#107)
         form.Show();
+    }
+
+    // Rebuild the Past-meetings submenu from the persisted history each time it opens (#168):
+    // newest-first, one item per meeting. An empty (or unreadable → empty) history shows a
+    // single disabled placeholder rather than a bare submenu.
+    private void RebuildPastMeetingsMenu()
+    {
+        // Dispose the previous items before rebuilding: DropDownItems.Clear() detaches them but
+        // does NOT dispose, so without this each submenu open leaks the prior menu items (the
+        // tray lives for days). Snapshot first — Dispose() detaches from the collection, which
+        // would mutate it mid-iteration.
+        ToolStripItem[] previous = [.. _pastMeetingsItem.DropDownItems.Cast<ToolStripItem>()];
+        _pastMeetingsItem.DropDownItems.Clear();
+        foreach (ToolStripItem item in previous)
+            item.Dispose();
+
+        MeetingHistory history = MeetingHistoryStore.Load();
+        if (history.Meetings.Count == 0)
+        {
+            _pastMeetingsItem.DropDownItems.Add(new ToolStripMenuItem("(No past meetings)") { Enabled = false });
+            return;
+        }
+        foreach (MeetingRecord record in history.Meetings)
+            _pastMeetingsItem.DropDownItems.Add(
+                new ToolStripMenuItem(record.MenuLabel(), null, (_, _) => OpenPastMeeting(record)));
+    }
+
+    // Open a past meeting (#168) in its OWN window, isolated from the tray status line and the
+    // Start/End controls — re-opening last week's notes must never disturb a live meeting. The
+    // window shows Loading immediately, then a MeetingController.ResumeAsync rides the session
+    // to its summary (or a "no longer available" failure). Read-only: never drains, never
+    // re-triggers — so opening it alongside a live meeting (or its own in-flight End) is safe.
+    private void OpenPastMeeting(MeetingRecord record)
+    {
+        SynchronizationContext ui = SynchronizationContext.Current
+            ?? throw new InvalidOperationException("OpenPastMeeting must run on the WinForms UI thread.");
+        BridgeSettings settings;
+        lock (_gate)
+            settings = _settings;
+
+        var form = new MeetingForm();
+        var cts = new CancellationTokenSource();
+        form.FormClosed += (_, _) =>
+        {
+            cts.Cancel(); // stop the poll loop the instant the user closes the window
+            cts.Dispose();
+            form.Dispose();
+        };
+        form.Show();
+        _ = OpenPastMeetingAsync(settings, record.SessionId, form, ui, cts.Token);
+    }
+
+    private async Task OpenPastMeetingAsync(BridgeSettings settings, string sessionId,
+        MeetingForm form, SynchronizationContext ui, CancellationToken cancellationToken)
+    {
+        using var control = new ControlClient(
+            settings.Host, settings.Port, settings.Tls, settings.Token,
+            allowSelfSignedCert: settings.AllowSelfSignedCert);
+        var controller = new MeetingController(control, sessionId, pollDelay: ct => Task.Delay(PollInterval, ct));
+        // Guard IsDisposed: a poll emission posted just before the window closed must not
+        // touch disposed controls.
+        controller.Updated += view => ui.Post(_ => { if (!form.IsDisposed) form.Render(view); }, null);
+
+        try
+        {
+            await controller.ResumeAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (
+            ex is HttpRequestException or OperationCanceledException or InvalidOperationException)
+        {
+            // The Recorder is unreachable / timed out (or the window was closed mid-poll —
+            // OperationCanceledException, benign). Surface a clear failure in the window rather
+            // than leaving it on "Loading…". The filter keeps this off CodeQL's catch-all radar.
+            if (!cancellationToken.IsCancellationRequested)
+                ui.Post(_ =>
+                {
+                    if (!form.IsDisposed)
+                        form.Render(PipelineView.Unavailable("Couldn't reach the recorder to load this meeting."));
+                }, null);
+        }
     }
 
     private void FailPipeline(string reason, string? stage = null)
@@ -388,17 +481,19 @@ internal sealed class TrayContext : ApplicationContext
     // Atomically detach the running meeting's orchestrator + enumerator + session id,
     // leaving all three null. Shared by End (which then drains + triggers the pipeline)
     // and Quit (which tears down without touching the menu, since it's exiting).
-    private (CaptureOrchestrator?, WasapiDeviceEnumerator?, string?) TakeMeeting()
+    private (CaptureOrchestrator?, WasapiDeviceEnumerator?, string?, DateTimeOffset) TakeMeeting()
     {
         lock (_gate)
         {
             CaptureOrchestrator? orchestrator = _orchestrator;
             WasapiDeviceEnumerator? enumerator = _enumerator;
             string? sessionId = _sessionId;
+            DateTimeOffset startedAt = _startedAt;
             _orchestrator = null;
             _enumerator = null;
             _sessionId = null;
-            return (orchestrator, enumerator, sessionId);
+            _startedAt = default; // cleared with the rest of the meeting state — no active meeting
+            return (orchestrator, enumerator, sessionId, startedAt);
         }
     }
 
@@ -431,7 +526,7 @@ internal sealed class TrayContext : ApplicationContext
 
     private void Quit()
     {
-        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, _) = TakeMeeting();
+        (CaptureOrchestrator? orchestrator, WasapiDeviceEnumerator? enumerator, _, _) = TakeMeeting();
 
         // Tear every pipeline down: the orchestrator drains + closes all of them
         // CONCURRENTLY, each bounded, and DisposeAsync is throw-free — so this blocking

@@ -167,6 +167,45 @@ public class MeetingFlowTests
     }
 
     [Fact]
+    public async Task PastMeetings_RecordTwo_ThenReReadEachOwnSummary_NeverCrossed()
+    {
+        await using FakeRecorder rec = await FakeRecorder.StartAsync();
+        using var http = new HttpClient();
+        using ControlClient control = Control(rec, http);
+
+        // End two meetings; each is appended to the tray's LOCAL history at End time
+        // (the same moment the active-resume state is persisted in the real tray).
+        MeetingHistory history = MeetingHistory.Empty;
+        foreach (string session in new[] { "meet-A", "meet-B" })
+        {
+            var controller = new MeetingController(control, session, Immediate, drainAsync: () => Task.CompletedTask);
+            await controller.EndAsync();
+            history = history.Append(new MeetingRecord { SessionId = session, StartedAt = DateTimeOffset.UnixEpoch });
+        }
+
+        // The Past-meetings list is newest-first.
+        Assert.Equal(["meet-B", "meet-A"], history.Meetings.Select(m => m.SessionId));
+
+        // Re-open each past meeting via the SAME tap-token poll endpoint (no re-trigger):
+        // each rides to ITS OWN session's persisted summary — never the other's.
+        foreach (MeetingRecord record in history.Meetings)
+        {
+            var views = new List<PipelineView>();
+            var reopen = new MeetingController(control, record.SessionId, Immediate);
+            reopen.Updated += views.Add;
+
+            await reopen.ResumeAsync();
+
+            Assert.Equal(PipelinePhase.Done, views[^1].Phase);
+            Assert.Equal(FakeRecorder.SummaryFor(record.SessionId), views[^1].SummaryText);
+        }
+
+        // Re-reads never re-fire a pipeline (a second trigger would 409); only the two Ends did.
+        Assert.Equal(1, rec.TriggerCount("meet-A"));
+        Assert.Equal(1, rec.TriggerCount("meet-B"));
+    }
+
+    [Fact]
     public async Task EndMeeting_AFailingStage_SurfacesItAndStops()
     {
         await using FakeRecorder rec = await FakeRecorder.StartAsync(failTranscribe: true);

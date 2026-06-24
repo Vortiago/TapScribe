@@ -178,6 +178,32 @@ public class MeetingControllerTests
     }
 
     [Fact]
+    public async Task Resume_AGoneSession_404_SurfacesUnavailable_AndStopsPolling()
+    {
+        // Re-opening a past meeting (#168) whose session the Recorder has pruned: the poll
+        // 404s. Unlike a transient blip (5xx / connection refused), a 404 means the Recorder
+        // is UP and disowns the session — terminal, so the loop must STOP, not self-heal.
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(
+            triggerStatus: 202,
+            pollScript: [(404, "{\"detail\":\"session not found\"}")]);
+        using var http = new HttpClient();
+        var views = new List<PipelineView>();
+        using var control = new ControlClient("127.0.0.1", server.Port, tls: false, token: "tok-abc", http);
+        var controller = new MeetingController(control, "meet-gone", Immediate);
+        controller.Updated += views.Add;
+
+        // Safety bound: if the loop wrongly RETRIES the 404 (the pre-fix behaviour), this
+        // cancels it so the test fails fast instead of spinning forever.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        await controller.ResumeAsync(cts.Token);
+
+        Assert.Equal(PipelinePhase.Failed, views[^1].Phase);
+        Assert.Contains("no longer available", views[^1].FailureReason!, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, server.PollCount); // terminal — not retried like a 500 blip
+    }
+
+    [Fact]
     public async Task EndMeeting_ATransientPollFailure_SelfHeals_AndKeepsPolling()
     {
         await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(
