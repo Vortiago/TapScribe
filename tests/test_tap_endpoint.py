@@ -9,6 +9,7 @@ landed in recorder.transcripts.
 
 from __future__ import annotations
 
+import re
 import time
 import wave
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ import pytest
 from conftest import (
     FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
 )
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from tapscribe import config as _config
@@ -94,6 +96,46 @@ def auth_client(recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatc
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Tap-bearer scheme: structural sweep (ADR-0008)
+#
+# Enforcement of the tap bearer lives in the auth middleware, keyed on
+# TAP_PREFIX, so EVERY registered route under it is gated by construction.
+# This sweep discovers those routes from `app.routes`, so a future tap route
+# is covered the moment it's registered — no per-route 401 test to remember.
+# ---------------------------------------------------------------------------
+
+_TAP_ROUTES = sorted(
+    {
+        (
+            next(m for m in sorted(r.methods) if m not in {"HEAD", "OPTIONS"}),
+            re.sub(r"\{[^}]+\}", "x", r.path),  # concrete path-param value
+        )
+        for r in app.routes
+        if isinstance(r, APIRoute) and r.path.startswith(_config.TAP_PREFIX + "/")
+    }
+)
+
+
+def test_tap_route_inventory_is_non_empty() -> None:
+    # Guard the guard: if the filter matched nothing, the parametrised sweep
+    # below would vacuously pass.
+    assert _TAP_ROUTES, "expected at least the new-session + pipeline tap routes"
+
+
+@pytest.mark.parametrize("method,path", _TAP_ROUTES)
+def test_every_registered_tap_route_requires_bearer(auth_client: TestClient, method: str, path: str) -> None:
+    """Every /api/tap/* route rejects a missing AND a wrong bearer, enforced
+    by the auth middleware — so adding an un-gated tap route is impossible."""
+    assert auth_client.request(method, path).status_code == 401
+    assert (
+        auth_client.request(
+            method, path, headers={"Authorization": "Bearer definitely-not-the-token"}
+        ).status_code
+        == 401
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -598,8 +640,8 @@ class TestTapAuth:
 class TestTapNewSession:
     """POST /api/tap/new-session is the bridge's HTTP control verb: rotate the
     session (and prune empties), authenticated by the tap token as a bearer
-    header rather than dashboard Basic auth. The route is exempt from the
-    Basic-auth middleware; the in-handler bearer check is the gate."""
+    header rather than dashboard Basic auth. The auth middleware's TAP-BEARER
+    scheme (config.TAP_PREFIX) is the gate; the handler carries none (ADR-0008)."""
 
     @staticmethod
     def _touch_wav(recorder: Recorder) -> None:
@@ -765,8 +807,8 @@ class TestDetachedNewSession:
 class TestTapPipeline:
     """POST/GET /api/tap/sessions/{session}/pipeline — the end-of-meeting
     pipeline's trigger and poll verbs. Tap-bearer authenticated like
-    /api/tap/new-session (exempt from Basic auth via the /api/tap/ prefix;
-    the in-handler bearer check is the gate). The trigger is fire-and-forget
+    /api/tap/new-session by the auth middleware's TAP-BEARER scheme
+    (config.TAP_PREFIX); the handlers carry no gate (ADR-0008). The trigger is fire-and-forget
     (202) and accepts NO model/summarizer/prompt fields; the poll reports
     stage progress while running, the persisted summary when done, and the
     failing stage's error when failed."""

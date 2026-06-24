@@ -418,8 +418,9 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     """Bridge-initiated session rotation, authenticated by the TAP token
     (`Authorization: Bearer <token>`) — NOT dashboard Basic auth — so a browser
     bridge that holds only the tap token can start a fresh session without the
-    operator switching to the dashboard. Exempt from the Basic-auth middleware
-    (`config.AUTH_EXEMPT_ROUTES`); the bearer check below is the gate.
+    operator switching to the dashboard. Gated by the auth middleware's
+    TAP-BEARER scheme (`config.TAP_PREFIX`), not dashboard Basic auth — the
+    handler carries no bearer check of its own (ADR-0008).
 
     Rotates ONLY — unlike the dashboard's `/api/new-session`, this does NOT
     prune empty sessions. The tap token is a deliberately lower-privilege
@@ -435,11 +436,6 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     into via /tap?session=<id> (per-bridge isolation; see "Detached session"
     in CONTEXT.md). The legacy no-body call keeps the rotate semantics below.
     """
-    if config.AUTH_ENABLED and not auth.check_tap_bearer(
-        req.headers.get("authorization"), recorder.tap.value
-    ):
-        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
-
     # The body is optional (the legacy no-body call = rotate) but, when
     # present, must parse as a JSON object: a malformed {"detached": true}
     # falling through to the legacy branch would silently rotate the GLOBAL
@@ -487,11 +483,11 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
 
 
 @app.post("/api/tap/sessions/{session}/pipeline", status_code=202)
-async def api_tap_pipeline_trigger(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):
+async def api_tap_pipeline_trigger(session: str, recorder: Recorder = Depends(get_recorder)):
     """Bridge-initiated end-of-meeting pipeline: strip → transcribe →
-    summarize the session as ONE session job. Tap-bearer authenticated like
-    /api/tap/new-session (exempt from Basic auth via the /api/tap/ prefix;
-    the bearer check below is the gate).
+    summarize the session as ONE session job. Tap-bearer authenticated by the
+    auth middleware's TAP-BEARER scheme (`config.TAP_PREFIX`); the handler
+    carries no bearer check of its own (ADR-0008).
 
     Fire-and-forget: the job slot is claimed before this returns (so a
     concurrent trigger or manual transcribe gets a deterministic 409 via
@@ -502,29 +498,25 @@ async def api_tap_pipeline_trigger(session: str, req: Request, recorder: Recorde
     the batch model, backend, and summarizer from operator-side configuration
     (`PipelineRequest` carries only the session), so a tap-token holder can
     never choose which model gets loaded or downloaded."""
-    if config.AUTH_ENABLED and not auth.check_tap_bearer(
-        req.headers.get("authorization"), recorder.tap.value
-    ):
-        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
     resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
     await start_pipeline(recorder, PipelineRequest(session=session))
     return {"ok": True, "session": session, "state": "running"}
 
 
 @app.get("/api/tap/sessions/{session}/pipeline")
-async def api_tap_pipeline_poll(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):
-    """Poll the end-of-meeting pipeline: stage progress while running (from
-    the live job snapshot), the persisted summary when done, the failing
-    stage's domain error when failed. `state: "idle"` when this session has
-    no pipeline record and no persisted summary.
+async def api_tap_pipeline_poll(session: str, recorder: Recorder = Depends(get_recorder)):
+    """Poll the end-of-meeting pipeline. Tap-bearer authenticated by the auth
+    middleware's TAP-BEARER scheme (`config.TAP_PREFIX`), like its POST twin;
+    the handler carries no bearer check of its own (ADR-0008).
+
+    Returns stage progress while running (from the live job snapshot), the
+    persisted summary when done, the failing stage's domain error when failed.
+    `state: "idle"` when this session has no pipeline record and no persisted
+    summary.
 
     The done branch reads session-summary.json rather than process memory,
     so a Bridge that polls across a Recorder restart still gets its summary
     (`recorder.pipelines` is in-memory only and rebuilt empty at boot)."""
-    if config.AUTH_ENABLED and not auth.check_tap_bearer(
-        req.headers.get("authorization"), recorder.tap.value
-    ):
-        return JSONResponse({"detail": "invalid tap token"}, status_code=401)
     resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
 
     record = recorder.pipelines.get(session)

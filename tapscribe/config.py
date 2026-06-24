@@ -92,30 +92,27 @@ TAP_TOKEN_FILE: Path = BASE_DIR / ".tap-token"
 TLS_CERT_FILE: Path = BASE_DIR / ".tapscribe-cert.pem"
 TLS_KEY_FILE: Path = BASE_DIR / ".tapscribe-key.pem"
 
-# Method-aware routes that bypass auth. /health and /healthz are for
-# monitors (the latter is the richer probe shape); the live-transcript
-# ingest is exempt because the browser bridge can't easily inject Basic
-# credentials on a fire-and-forget POST. /api/tap/new-session is exempt
-# for the same reason — it carries its OWN gate (a tap-token bearer header
-# validated in the handler), not dashboard Basic auth, so a bridge that
-# holds only the tap token can rotate sessions.
+# PUBLIC scheme — exact (method, path) routes that bypass auth entirely.
+# Health probes for monitors (/healthz is the richer probe shape); no
+# credential. The Bridge's /api/tap/* control plane is NOT listed here —
+# it is the TAP-BEARER scheme (TAP_PREFIX below), enforced by the auth
+# middleware, not exempt from auth.
 AUTH_EXEMPT_ROUTES = frozenset(
     {
         ("GET", "/health"),
         ("GET", "/healthz"),
-        ("POST", "/api/live-transcript"),
-        ("POST", "/api/tap/new-session"),
     }
 )
 
-# Path PREFIXES exempt from Basic auth — for tap-token routes with a path
-# parameter (e.g. /api/tap/sessions/{session}/pipeline), which exact
-# (method, path) matching can never cover. The exemption widens ONLY to
-# routes that carry their OWN gate: every handler under /api/tap/ MUST
-# validate the tap bearer itself (auth.check_tap_bearer), exactly like
-# /api/tap/new-session — a bearer-less /api/tap/* route would be an open
-# door. test_tap_endpoint.py's 401 sweeps are the guard.
-AUTH_EXEMPT_PREFIXES: tuple[str, ...] = ("/api/tap/",)
+# TAP-BEARER scheme — the prefix of the Bridge's HTTP control plane
+# (POST /api/tap/new-session, POST/GET /api/tap/sessions/{session}/pipeline).
+# The auth middleware routes every path under TAP_PREFIX past dashboard Basic
+# auth AND enforces the tap bearer (auth.check_tap_bearer) in ONE predicate,
+# so "exempt from Basic" and "requires the bearer" cannot drift apart — a
+# bearer-less /api/tap/* route is impossible by construction and handlers
+# carry no gate of their own. See CONTEXT.md "HTTP auth gate · auth schemes"
+# and ADR-0008.
+TAP_PREFIX: str = "/api/tap"
 
 # Whether the FastAPI app's lifespan should auto-start the live channel.
 # Flipped off by --no-auto-live.
