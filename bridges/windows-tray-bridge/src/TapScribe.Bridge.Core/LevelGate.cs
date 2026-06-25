@@ -71,6 +71,24 @@ public sealed class LevelGate
     public bool IsOpen => _open;
 
     /// <summary>
+    /// Force the gate back to its just-constructed state — closed, no accrued silence,
+    /// empty pre-roll, no partial frame — without emitting a <see cref="GateEventKind.Closed"/>.
+    /// The pipeline calls this when capture is interrupted out-of-band (the device mutes,
+    /// #159): without it an utterance that was open when the interruption hit would leave
+    /// the gate <see cref="IsOpen"/>, so the first resumed frame would be streamed as a
+    /// continuation (<see cref="GateEventKind.Audio"/>) into a tap that no longer exists
+    /// instead of opening a fresh one. Drive it from the same thread as <see cref="Push"/>;
+    /// the tuning (which a concurrent <see cref="UpdateTuning"/> may swap) is left intact.
+    /// </summary>
+    public void Reset()
+    {
+        _open = false;
+        _silenceFrames = 0;
+        _preRoll.Clear();
+        _chunker.Reset();
+    }
+
+    /// <summary>
     /// Re-tune the gate at runtime (sensitivity / hangover / pre-roll) without tearing
     /// it down. Safe to call from a different thread while the capture thread drives
     /// <see cref="Push"/>: the new tuning is validated, then published as one atomic

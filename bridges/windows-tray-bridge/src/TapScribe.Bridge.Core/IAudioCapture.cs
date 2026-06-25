@@ -28,6 +28,28 @@ public interface IAudioCapture : IDisposable
     /// <summary>Raised on the capture thread with device-format PCM as it arrives.</summary>
     event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
+    /// <summary>
+    /// Whether this endpoint is muted at the OS/device level right now. A muted
+    /// CAPTURE (mic) endpoint still delivers <see cref="DataAvailable"/> frames — a
+    /// residual noise floor, a DC offset, periodic device blips — so the
+    /// <see cref="LevelGate"/> alone cannot tell "muted" from "quiet" and will
+    /// occasionally open a tap on a transient: the recurring "quiet" tap of issue
+    /// #159. Honouring this turns "muted" into a hard gate-closed, independent of
+    /// level. A RENDER (loopback) endpoint has no mute event and reports
+    /// <c>false</c> permanently — there the level gate IS the mute, by design.
+    /// </summary>
+    bool IsMuted { get; }
+
+    /// <summary>
+    /// Raised when <see cref="IsMuted"/> transitions, so the pipeline can close an
+    /// open utterance the instant the mic mutes rather than waiting out the gate's
+    /// hangover on whatever residual the device keeps delivering. The handler reads
+    /// <see cref="IsMuted"/> for the current state (the event carries no payload, so
+    /// the property is the single source of truth). May fire on an arbitrary thread.
+    /// A loopback backend never raises it.
+    /// </summary>
+    event EventHandler? MuteChanged;
+
     /// <summary>Begin capturing. <see cref="DataAvailable"/> fires until <see cref="Stop"/>.</summary>
     void Start();
 

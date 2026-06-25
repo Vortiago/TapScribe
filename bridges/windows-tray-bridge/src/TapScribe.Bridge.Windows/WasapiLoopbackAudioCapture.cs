@@ -17,6 +17,8 @@ public sealed class WasapiLoopbackAudioCapture : WasapiCaptureBase
     /// <summary>Loopback over the default render endpoint (the system default speakers).</summary>
     public WasapiLoopbackAudioCapture() : base(new WasapiLoopbackCapture()) { }
 
-    /// <summary>Loopback over a specific render endpoint (from the enumerator).</summary>
-    public WasapiLoopbackAudioCapture(MMDevice renderDevice) : base(new WasapiLoopbackCapture(renderDevice)) { }
+    /// <summary>Loopback over a specific render endpoint (from the enumerator). The base owns
+    /// the device; mute is NOT observed (a render endpoint has no mute event — the level gate
+    /// stays its only Mute), so <see cref="IsMuted"/> is permanently false here.</summary>
+    public WasapiLoopbackAudioCapture(MMDevice renderDevice) : base(new WasapiLoopbackCapture(renderDevice), renderDevice) { }
 }

@@ -37,6 +37,21 @@ public sealed class TapSession : IAsyncDisposable
     private readonly bool _captureStarted; // set once in the ctor (Start succeeded)
     private bool _disposed;
 
+    // The device's mute state, mirrored from IAudioCapture.MuteChanged. Written on the
+    // capture backend's volume-notification thread, read on the capture (OnData) thread
+    // and under _lock — volatile so neither misses a transition. A muted CAPTURE endpoint
+    // still delivers a residual (noise floor / blips) that crosses the level gate, so
+    // honouring mute is what stops the recurring "quiet" tap of #159; a loopback endpoint
+    // never mutes (IAudioCapture.IsMuted stays false there), so this is permanently false
+    // for it and the level gate remains its only mute.
+    private volatile bool _muted;
+    // Set on the volume thread when a mute arrives, consumed once on the capture thread:
+    // the gate must be reset (the only thread allowed to touch it) so an utterance open at
+    // mute time doesn't leave the gate IsOpen and swallow the first resumed frame. Decoupled
+    // from _muted's edge so the reset still happens even if the capture delivers NO frames
+    // during the muted interval — it lands on the first frame after the mute, whenever that is.
+    private volatile bool _gateResetPending;
+
     private TapSession(IAudioCapture capture, TapConnectionOptions options, GateOptions gate,
                        TapStreamOptions stream, Func<TapConnectionOptions, ITapConnection> connectionFactory,
                        Action onConnected, Action<Exception> onFailed)
@@ -53,7 +68,12 @@ public sealed class TapSession : IAsyncDisposable
         // Capture must run continuously so the gate can hear speech start; unlike
         // the pre-gate tracer bullet there is no WS to wait for. A device-open /
         // Start failure surfaces synchronously to the caller (the tray catches it).
+        // Subscribe BEFORE seeding _muted so a mute toggled during construction can't slip
+        // through the gap between the read and the subscribe — the handler catches it and
+        // the seed then reads the reconciled current state.
         _capture.DataAvailable += OnData;
+        _capture.MuteChanged += OnMuteChanged;
+        _muted = _capture.IsMuted; // seed from the device's current state before any frame
         try
         {
             _capture.Start();
@@ -62,6 +82,7 @@ public sealed class TapSession : IAsyncDisposable
         catch
         {
             _capture.DataAvailable -= OnData;
+            _capture.MuteChanged -= OnMuteChanged;
             throw;
         }
     }
@@ -94,6 +115,23 @@ public sealed class TapSession : IAsyncDisposable
 
     private void OnData(object? sender, AudioCapturedEventArgs e)
     {
+        if (_gateResetPending)
+        {
+            // A mute landed; resync the gate on THIS (the capture) thread — the only thread
+            // allowed to touch it — so an utterance that was open when the mute hit doesn't
+            // leave the gate IsOpen and swallow the first resumed frame as a continuation
+            // into a tap that's already gone. Closing that open tap promptly is OnMuteChanged's
+            // job; this only resyncs the gate, on the first frame after the mute (muted residual
+            // or post-unmute audio — works either way, so a device that stops delivering frames
+            // while muted still resumes cleanly). The Resampler is deliberately NOT reset: its
+            // sub-sample carry-over across a mute is inaudible (mute is a hard cut anyway), and
+            // it only matters for frame ALIGNMENT, which the gate's FrameChunker reset covers.
+            _gate.Reset();
+            _gateResetPending = false;
+        }
+        if (_muted)
+            return; // muted is a hard gate-closed: drop the residual a muted endpoint keeps delivering (#159)
+
         byte[] pcm = _resampler.Process(e.Data.Span);
         if (pcm.Length == 0)
             return;
@@ -120,13 +158,39 @@ public sealed class TapSession : IAsyncDisposable
     {
         lock (_lock)
         {
-            if (_disposed)
+            // Re-check mute under the lock: a frame can clear the gate's open decision on
+            // the capture thread just as OnMuteChanged flips _muted on the volume thread.
+            // Bailing here means no tap is ever born muted, closing that race definitively.
+            if (_disposed || _muted)
                 return;
 
             // A fresh TapStream mints its own utterance_id, so each speech segment
             // is a distinct Utterance / WAV.
             _current = TapStream.Begin(_options, _streamOptions, _onConnected, _onFailed, _connectionFactory);
             _current.Enqueue(firstFrame);
+        }
+    }
+
+    // The device muted or unmuted. On mute, close any open utterance NOW rather than
+    // streaming the residual until the gate's hangover elapses on it — so an in-progress
+    // recording stops the instant the mic mutes — and flag the gate for a resync. The gate
+    // itself is reset on the capture thread (OnData), the only thread that may touch it.
+    // Fires on the capture backend's volume-notification thread; CloseUtterance is
+    // _lock-guarded, so it is safe from here. A no-op on unmute (OnData resumes feeding the
+    // gate; the pending reset, set when the mute arrived, lands on the next frame).
+    private void OnMuteChanged(object? sender, EventArgs e)
+    {
+        if (_capture.IsMuted)
+        {
+            // Publish the pending-reset BEFORE _muted so the capture thread, on seeing muted,
+            // is guaranteed to also see the reset request (volatile release/acquire ordering).
+            _gateResetPending = true;
+            _muted = true;
+            CloseUtterance();
+        }
+        else
+        {
+            _muted = false;
         }
     }
 
@@ -153,6 +217,7 @@ public sealed class TapSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _capture.DataAvailable -= OnData; // stop producing gate events
+        _capture.MuteChanged -= OnMuteChanged;
 
         TapStream? current;
         List<Task> draining;
