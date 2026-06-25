@@ -32,9 +32,10 @@ public static class MeetingViewDriver
     public static async Task DriveAsync(MeetingController controller, IMeetingView view,
         SynchronizationContext ui, CancellationToken cancellationToken)
     {
-        // Guard IsDisposed: a poll emission posted just before the window closed must not
-        // touch disposed controls.
-        controller.Updated += poll => ui.Post(_ => { if (!view.IsDisposed) view.Render(poll); }, null);
+        // Marshal a render to the UI thread, guarding IsDisposed: a poll emission posted just
+        // before the window closed must not touch disposed controls.
+        void RenderSafe(PipelineView? poll) => ui.Post(_ => { if (!view.IsDisposed) view.Render(poll); }, null);
+        controller.Updated += poll => RenderSafe(poll);
 
         try
         {
@@ -47,11 +48,7 @@ public static class MeetingViewDriver
             // OperationCanceledException, benign). Surface a clear failure in the view rather
             // than leaving it on "Loading…". The filter keeps this off CodeQL's catch-all radar.
             if (!cancellationToken.IsCancellationRequested)
-                ui.Post(_ =>
-                {
-                    if (!view.IsDisposed)
-                        view.Render(PipelineView.Unavailable("Couldn't reach the recorder to load this meeting."));
-                }, null);
+                RenderSafe(PipelineView.Unavailable("Couldn't reach the recorder to load this meeting."));
         }
     }
 }

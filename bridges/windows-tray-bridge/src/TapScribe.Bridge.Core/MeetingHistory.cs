@@ -36,12 +36,9 @@ public sealed record MeetingHistory
     public MeetingHistory Append(MeetingRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
-        var next = new List<MeetingRecord>(Meetings.Count + 1) { record };
-        next.AddRange(Meetings.Where(
-            m => !string.Equals(m.SessionId, record.SessionId, StringComparison.Ordinal)));
-        if (next.Count > MaxEntries)
-            next.RemoveRange(MaxEntries, next.Count - MaxEntries);
-        return this with { Meetings = next };
+        IEnumerable<MeetingRecord> withoutDuplicate = Meetings.Where(
+            m => !string.Equals(m.SessionId, record.SessionId, StringComparison.Ordinal));
+        return this with { Meetings = [record, .. withoutDuplicate.Take(MaxEntries - 1)] };
     }
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
