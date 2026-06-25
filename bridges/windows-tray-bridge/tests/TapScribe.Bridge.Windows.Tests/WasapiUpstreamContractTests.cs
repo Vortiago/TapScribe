@@ -61,6 +61,32 @@ public class WasapiUpstreamContractTests
     }
 
     [Fact]
+    public void MMDevice_ExposesEndpointVolume_WithMuteAndNotification()
+    {
+        // The mic mute-awareness path (#159): WasapiCaptureBase reads
+        // MMDevice.AudioEndpointVolume.Mute and subscribes to OnVolumeNotification.
+        // Pin every symbol it binds so an NAudio rename trips here, not at first tap.
+        PropertyInfo? endpointVolume = typeof(MMDevice).GetProperty("AudioEndpointVolume");
+        Assert.NotNull(endpointVolume);
+        Assert.Equal(typeof(AudioEndpointVolume), endpointVolume!.PropertyType);
+
+        PropertyInfo? mute = typeof(AudioEndpointVolume).GetProperty("Mute");
+        Assert.NotNull(mute);
+        Assert.Equal(typeof(bool), mute!.PropertyType);
+
+        EventInfo? notification = typeof(AudioEndpointVolume).GetEvent("OnVolumeNotification");
+        Assert.NotNull(notification);
+        // The delegate carries the muted state we read in the callback.
+        MethodInfo invoke = notification!.EventHandlerType!.GetMethod("Invoke")!;
+        Type dataType = invoke.GetParameters().Single().ParameterType;
+        Assert.Equal(typeof(AudioVolumeNotificationData), dataType);
+
+        PropertyInfo? muted = typeof(AudioVolumeNotificationData).GetProperty("Muted");
+        Assert.NotNull(muted);
+        Assert.Equal(typeof(bool), muted!.PropertyType);
+    }
+
+    [Fact]
     public void EnumValues_ForFlowStateAndRole_Exist()
     {
         // These compile only if the members exist with these names; assert they're

@@ -11,9 +11,13 @@ namespace TapScribe.Bridge.Windows;
 /// </summary>
 public sealed class WasapiAudioCapture : WasapiCaptureBase
 {
-    /// <summary>Capture the default microphone (shared mode).</summary>
+    /// <summary>Capture the default microphone (shared mode). No MMDevice handle is held,
+    /// so this overload can't observe the endpoint mute — the tray always opens a specific
+    /// endpoint via the enumerator, which is the mute-aware path below.</summary>
     public WasapiAudioCapture() : base(new WasapiCapture()) { }
 
-    /// <summary>Capture a specific microphone endpoint (from the enumerator).</summary>
-    public WasapiAudioCapture(MMDevice device) : base(new WasapiCapture(device)) { }
+    /// <summary>Capture a specific microphone endpoint (from the enumerator). The same
+    /// MMDevice is the mute source, so an OS-level mute on this mic stops it being
+    /// recorded (#159) instead of streaming a residual the level gate would tap.</summary>
+    public WasapiAudioCapture(MMDevice device) : base(new WasapiCapture(device), muteSource: device) { }
 }

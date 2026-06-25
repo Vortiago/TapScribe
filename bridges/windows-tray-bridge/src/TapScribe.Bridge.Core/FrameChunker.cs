@@ -43,4 +43,12 @@ public sealed class FrameChunker
 
     /// <summary>Bytes currently buffered awaiting a full frame (0..639).</summary>
     public int PendingBytes => _pending.Length;
+
+    /// <summary>
+    /// Drop the buffered partial frame, so the next <see cref="Push"/> starts
+    /// frame-aligned from scratch. Used when the stream is interrupted (e.g. the device
+    /// mutes mid-utterance, #159) and a pre-interruption partial frame must not be
+    /// stitched onto the resumed audio.
+    /// </summary>
+    public void Reset() => _pending = [];
 }

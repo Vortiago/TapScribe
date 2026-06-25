@@ -512,6 +512,21 @@ none), the **Level gate** (below) synthesises Mute: it opens an utterance
 when the input level crosses its threshold and fires Mute after a silence
 hangover.
 
+A Windows **capture** endpoint (a mic) *does* have a native mute — the
+endpoint's `AudioEndpointVolume.Mute` — and the bridge honours it as a
+**hard gate-closed** (#159): while the mic is muted it produces no taps at
+all, independent of level, and an open utterance closes the instant the
+mic mutes. This is necessary because a muted mic keeps delivering a
+residual (noise floor / DC offset / device blips) that the Level gate
+alone would occasionally tap as a recurring "quiet" utterance. The native
+mute and the Level gate compose: muted is an authoritative override above
+the gate, so the gate stays a pure level function and only governs the
+unmuted stream. A **render** (loopback) endpoint has no such mute, so
+there the Level gate remains the only Mute. The mute capability is
+surfaced through the capture seam itself (`IAudioCapture.IsMuted` /
+`MuteChanged`), so a future macOS/Linux mic backend honours OS mute the
+same way without the bridge core knowing the platform.
+
 ## Level gate
 
 The Bridge-side RMS **level** gate that decides utterance boundaries on

@@ -90,11 +90,25 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
 
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
+    public bool IsMuted { get; private set; }
+    public event EventHandler? MuteChanged;
+
     public void Start() => Started = true;
     public void Stop() => Stopped = true;
     public void Dispose() => Disposed = true;
 
     public void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(pcm));
+
+    /// <summary>Flip the reported mute state and raise <see cref="MuteChanged"/> — the
+    /// synthetic stand-in for the OS muting/unmuting the mic, so a test drives the
+    /// mic-mute path with no real endpoint. A real endpoint still delivers frames while
+    /// muted, so tests <see cref="Emit"/> audio after <c>SetMuted(true)</c> to model the
+    /// residual that the level gate would otherwise tap.</summary>
+    public void SetMuted(bool muted)
+    {
+        IsMuted = muted;
+        MuteChanged?.Invoke(this, EventArgs.Empty);
+    }
 }
 
 /// <summary>A capture whose <see cref="Start"/> throws — a device that fails to open
@@ -107,6 +121,9 @@ internal sealed class ThrowingOnStartCapture(AudioFormat format) : IAudioCapture
 
     // Never raised; empty accessors keep it off the unused-event warning radar.
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable { add { } remove { } }
+
+    public bool IsMuted => false;
+    public event EventHandler? MuteChanged { add { } remove { } }
 
     public void Start() => throw new InvalidOperationException("device open failed");
     public void Stop() { }

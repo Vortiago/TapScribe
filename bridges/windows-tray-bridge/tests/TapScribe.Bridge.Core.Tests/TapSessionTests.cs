@@ -102,6 +102,86 @@ public class TapSessionTests
     }
 
     [Fact]
+    public async Task MutedMic_RecordsNothing_AndUnmuteResumesCapture()
+    {
+        // #159: a muted mic still delivers a residual (noise floor / DC offset / device
+        // blips) that crosses the level gate, opening a recurring "quiet" tap. Honouring
+        // the device mute makes "muted" a hard gate-closed: no tap while muted, capture
+        // resumes on unmute. Asserting on the CONNECTION COUNT after dispose is the
+        // deterministic signal: TapStream connects on a background pump, so a check right
+        // after Emit would race it — but DisposeAsync awaits every pump, so the final
+        // count is stable. The mid-stream Silence is load-bearing for the red signal: it
+        // closes the bug's muted tap so the later unmuted speech opens a SECOND one
+        // (buggy -> 2 connections), whereas honouring mute opens only the unmuted one
+        // (fixed -> 1).
+        var transport = new FakeTapTransport();
+        var capture = new FakeAudioCapture(RecorderFormat);
+        var session = TapSession.Begin(capture, new TapConnectionOptions { Identity = "mic" },
+            onConnected: () => { }, onFailed: _ => { }, FastGate(), FastStream(), transport.Create);
+
+        capture.SetMuted(true);     // mic muted at the OS/endpoint level
+        capture.Emit(Loud(40));     // the residual a muted endpoint keeps delivering — RMS 0.24, over the gate
+        capture.Emit(Silence(10));  // > hangover: would close the bug's muted tap, separating it from the next
+        capture.SetMuted(false);    // unmute
+        capture.Emit(Loud(40));     // resumes — opens exactly one tap
+        await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the unmuted audio to stream");
+
+        await session.DisposeAsync();
+
+        // Only the unmuted speech ever streamed; the muted residual opened no tap.
+        Assert.Single(transport.Connections);
+    }
+
+    [Fact]
+    public async Task MutingMidUtterance_ClosesItPromptly_WithoutWaitingOutTheHangover()
+    {
+        // An open utterance must close the instant the mic mutes, not linger streaming
+        // the residual until the gate's hangover elapses — so mute drives a prompt close
+        // with no silence frames at all.
+        var transport = new FakeTapTransport();
+        var capture = new FakeAudioCapture(RecorderFormat);
+        var session = TapSession.Begin(capture, new TapConnectionOptions { Identity = "mic" },
+            onConnected: () => { }, onFailed: _ => { }, FastGate(), FastStream(), transport.Create);
+
+        capture.Emit(Loud(20)); // opens an utterance
+        await Poll.UntilAsync(() => transport.SentCount(0) > 0, Wait, "the utterance to stream");
+
+        capture.SetMuted(true); // mute mid-utterance — closes it without any silence frames
+        await Poll.UntilAsync(() => transport.Connections[0].Closed, Wait, "the muted utterance to close");
+
+        await session.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task UnmuteResumesCapture_EvenWhenNoFramesArriveWhileMuted()
+    {
+        // The gate resync on mute must NOT depend on a frame arriving during the muted
+        // interval: if the device stops delivering frames while muted, the gate would
+        // otherwise stay open from the pre-mute utterance and swallow the first resumed
+        // frame as a continuation into the already-closed tap — losing the resumed speech.
+        var transport = new FakeTapTransport();
+        var capture = new FakeAudioCapture(RecorderFormat);
+        var session = TapSession.Begin(capture, new TapConnectionOptions { Identity = "mic" },
+            onConnected: () => { }, onFailed: _ => { }, FastGate(), FastStream(), transport.Create);
+
+        capture.Emit(Loud(20)); // utterance 1 opens
+        await Poll.UntilAsync(() => transport.SentCount(0) > 0, Wait, "utterance 1 to stream");
+
+        capture.SetMuted(true); // closes utterance 1; NO frames are emitted while muted
+        await Poll.UntilAsync(() => transport.Connections[0].Closed, Wait, "utterance 1 to close on mute");
+
+        capture.SetMuted(false); // unmute, then resume speech — must open a fresh utterance
+        capture.Emit(Loud(20));
+        await Poll.UntilAsync(() => transport.Connections.Count >= 2 && transport.Connections[1].SentCount > 0,
+            Wait, "resumed speech to open a fresh utterance");
+
+        await session.DisposeAsync();
+
+        Assert.Equal(2, transport.Connections.Count);
+        Assert.NotEqual(transport.Connections[0].UtteranceId, transport.Connections[1].UtteranceId);
+    }
+
+    [Fact]
     public async Task UtteranceFirstConnectFailure_SurfacesViaOnFailed()
     {
         var transport = new FakeTapTransport { Up = false }; // Recorder unreachable / refusing
