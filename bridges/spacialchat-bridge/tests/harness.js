@@ -16,6 +16,9 @@
 //                           chrome.storage.local (the popup's view)
 //   - `clock.tick(ms)`    — advance virtual time and fire any timers
 //                           whose deadlines have arrived
+//   - `publishTick()`     — fire the 2 Hz publish/title interval body once
+//                           (not auto-fired; drives the tab-title suffix)
+//   - `title()`           — the current document.title the script maintains
 //
 // We deliberately do NOT use real timers: every test would have to
 // `await new Promise(r => setTimeout(r, ...))` and the drain timeout
@@ -157,6 +160,9 @@ function makeChromeMock(initialSettings) {
 function createBridge({ settings = {}, location: locationOverride, triggerStatus = 202 } = {}) {
   FakeWebSocket.reset();
   const clock = createClock();
+  // The content script's 2 Hz publish/title interval callback(s), captured at
+  // registration so a test can fire the tick on demand via `publishTick()`.
+  const intervalCbs = [];
   // Records every fetch() the content script makes (the new-session POST).
   const fetchCalls = [];
   const chrome = makeChromeMock({
@@ -246,8 +252,13 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     AbortController,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
-    setInterval: () => 0, // disable the 2 Hz publishStatus tick — tests
-                          // drive state explicitly via post().
+    // The 2 Hz publishStatus/title tick is NOT auto-fired — tests drive state
+    // explicitly via post() for determinism. We capture the callback (rather
+    // than discard it) so a test that specifically needs the tick's side
+    // effects (the tab-title suffix is built ONLY here) can run it on demand
+    // via `publishTick()`. Capturing-but-not-firing keeps every other test
+    // unchanged: the body never runs unless a test asks for it.
+    setInterval: (fn) => { if (typeof fn === "function") intervalCbs.push(fn); return intervalCbs.length; },
     clearInterval: () => {},
     console: { log: () => {}, warn: () => {}, error: () => {} },
   };
@@ -384,6 +395,14 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     requestEndMeeting,
     indicator,
     detachIndicator,
+    // Fire the content script's interval tick(s) on demand (the harness never
+    // auto-fires them). content.js registers one 2 Hz publish/title interval
+    // today and the tab-title suffix is built only inside it, so a title
+    // assertion must call this first; firing every registered body keeps this
+    // correct if a second interval is ever added.
+    publishTick: () => { for (const fn of intervalCbs) fn(); },
+    // The current tab title (document.title) the content script maintains.
+    title: () => sandbox.document.title,
   };
 }
 

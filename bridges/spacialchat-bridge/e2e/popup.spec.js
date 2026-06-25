@@ -107,6 +107,56 @@ test("a finished meeting renders the summary, metadata, and Copy copies it", asy
   expect(copied).toBe("We agreed to ship Friday.");
 });
 
+test("a re-render tick does not clobber a mid-copy selection in the summary", async ({ page }) => {
+  // ADR-0004 interaction-hold, applied by hand in the popup: the summary pane
+  // is rendered ONCE on the transition to done (popup.js `summaryRenderedFor`
+  // gate). A later re-render — e.g. a `meetingEnd` storage tick landing while
+  // the user is mid-copy — must NOT rewrite the summary text node, or the
+  // selection collapses and the copy gesture is lost.
+  await openPopup(page, {
+    store: { meetingSessionId: "2026-06-19T10-00-00Z", meetingActive: false },
+    poll: {
+      ok: true, state: "done",
+      summary: { summary: "We agreed to ship Friday.", model: "qwen3-0.6b", source: "local" },
+    },
+  });
+  await expect(page.locator('[data-slot="summaryText"]')).toHaveText("We agreed to ship Friday.");
+
+  // The user starts copying: select the summary line at the TEXT-NODE level
+  // (character offsets), so that replacing the text node would collapse it —
+  // an element-level selectNodeContents would survive a same-text rewrite and
+  // make this assertion vacuous.
+  await page.evaluate(() => {
+    const el = document.querySelector('[data-slot="summaryText"]');
+    const textNode = el.firstChild;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.textContent.length);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+  expect(await page.evaluate(() => window.getSelection().toString()))
+    .toBe("We agreed to ship Friday.");
+
+  // A storage tick lands mid-copy (content.js publishing the End-handshake
+  // result as the pipeline completes) → the popup re-derives the card on BOTH
+  // the synchronous applyMeeting path AND the async pollCardOnce re-poll it
+  // kicks off. Gate the final assertion on both: the headline proves the sync
+  // render ran, and awaiting the re-poll's response proves the async,
+  // post-await render landed too — so a regression confined to that later
+  // render can't slip past before the selection is read on a slow runner.
+  const rePoll = page.waitForResponse(POLL_RE);
+  await page.evaluate(() => chrome.storage.local.set({ meetingEnd: { phase: "started" } }));
+  await expect(page.locator("#meetingStatus")).toContainText("processing started");
+  await rePoll;
+
+  // The selection still spans the summary → the render-once gate held. Without
+  // it, the summary text node is reassigned and the selection collapses to "".
+  expect(await page.evaluate(() => window.getSelection().toString()))
+    .toBe("We agreed to ship Friday.");
+});
+
 test("a failed pipeline surfaces the stage and a human-readable reason", async ({ page }) => {
   await openPopup(page, {
     store: { meetingSessionId: "s", meetingActive: false },
