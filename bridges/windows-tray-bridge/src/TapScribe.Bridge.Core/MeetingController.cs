@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace TapScribe.Bridge.Core;
 
 /// <summary>
@@ -80,8 +82,17 @@ public sealed class MeetingController
                 PipelinePoll poll = await _control.PollPipelineAsync(_sessionId, cancellationToken).ConfigureAwait(false);
                 view = PipelineView.Map(poll);
             }
-            catch (HttpRequestException)
+            catch (HttpRequestException ex)
             {
+                if (ex.StatusCode == HttpStatusCode.NotFound)
+                {
+                    // The Recorder is UP and disowns this session (deleted dir / unknown id):
+                    // a 404 is terminal, unlike a transient blip — surface it and STOP rather
+                    // than self-healing forever. Reachable when re-opening a past meeting the
+                    // Recorder has since pruned (#168); also stops a vanished End/Resume session.
+                    Updated?.Invoke(PipelineView.Unavailable("This meeting is no longer available on the recorder."));
+                    return;
+                }
                 // A transient poll failure (network blip / Recorder mid-restart): hold the
                 // rendered state and self-heal at the poll cadence rather than aborting.
                 await _pollDelay(cancellationToken).ConfigureAwait(false);
