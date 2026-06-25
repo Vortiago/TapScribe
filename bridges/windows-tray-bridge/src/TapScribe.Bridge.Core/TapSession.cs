@@ -123,7 +123,9 @@ public sealed class TapSession : IAsyncDisposable
             // into a tap that's already gone. Closing that open tap promptly is OnMuteChanged's
             // job; this only resyncs the gate, on the first frame after the mute (muted residual
             // or post-unmute audio — works either way, so a device that stops delivering frames
-            // while muted still resumes cleanly).
+            // while muted still resumes cleanly). The Resampler is deliberately NOT reset: its
+            // sub-sample carry-over across a mute is inaudible (mute is a hard cut anyway), and
+            // it only matters for frame ALIGNMENT, which the gate's FrameChunker reset covers.
             _gate.Reset();
             _gateResetPending = false;
         }

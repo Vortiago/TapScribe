@@ -16,8 +16,8 @@ public sealed class WasapiAudioCapture : WasapiCaptureBase
     /// endpoint via the enumerator, which is the mute-aware path below.</summary>
     public WasapiAudioCapture() : base(new WasapiCapture()) { }
 
-    /// <summary>Capture a specific microphone endpoint (from the enumerator). The same
-    /// MMDevice is the mute source, so an OS-level mute on this mic stops it being
-    /// recorded (#159) instead of streaming a residual the level gate would tap.</summary>
-    public WasapiAudioCapture(MMDevice device) : base(new WasapiCapture(device), muteSource: device) { }
+    /// <summary>Capture a specific microphone endpoint (from the enumerator). The base owns
+    /// the device and observes its endpoint mute, so an OS-level mute on this mic stops it
+    /// being recorded (#159) instead of streaming a residual the level gate would tap.</summary>
+    public WasapiAudioCapture(MMDevice device) : base(new WasapiCapture(device), device, observeMute: true) { }
 }

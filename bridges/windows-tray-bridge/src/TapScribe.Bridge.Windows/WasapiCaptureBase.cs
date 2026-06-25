@@ -13,16 +13,25 @@ namespace TapScribe.Bridge.Windows;
 /// backend (<see cref="WasapiAudioCapture"/>) and the loopback backend
 /// (<see cref="WasapiLoopbackAudioCapture"/>) differ ONLY in which capture they
 /// construct, so this is the single normalisation + lifecycle authority — no
-/// copy-paste between them.
+/// copy-paste between them. It also owns the <see cref="MMDevice"/> a backend was
+/// opened against (the enumerator hands it over and NAudio's capture does not own it),
+/// disposing it — and, for a mic, the endpoint-mute subscription riding on it — on
+/// teardown.
 /// </summary>
 public abstract class WasapiCaptureBase : IAudioCapture
 {
     private readonly WasapiCapture _capture;
 
-    // The endpoint volume we observe for mute, or null when this backend has no mute to
-    // honour (loopback render endpoints, and the default-mic ctor that holds no MMDevice).
-    // Cached so a read on the capture thread never re-enters COM; refreshed from the
-    // endpoint's OnVolumeNotification callback.
+    // The endpoint this backend captures, when opened against a specific one (the enumerator
+    // hands it over and expects the capture to own it — NAudio's WasapiCapture does not), or
+    // null for a default-endpoint ctor where NAudio owns its own internally-resolved device.
+    // Disposed in Dispose; that cascades to dispose the cached AudioEndpointVolume below.
+    private readonly MMDevice? _device;
+
+    // The endpoint volume we observe for mute (a view onto _device), or null when this
+    // backend has no mute to honour (loopback render endpoints, and the default-mic ctor that
+    // holds no MMDevice). Cached so a read on the capture thread never re-enters COM;
+    // refreshed from the endpoint's OnVolumeNotification callback.
     private readonly AudioEndpointVolume? _endpointVolume;
     private volatile bool _muted;
 
@@ -40,22 +49,30 @@ public abstract class WasapiCaptureBase : IAudioCapture
     /// <summary>Wrap an already-constructed WASAPI capture (the subclass picks the
     /// endpoint/mode). The WaveFormat is read eagerly, so an unsupported mix format
     /// surfaces from construction — the caller builds the capture before streaming.
-    /// <paramref name="muteSource"/> is the MMDevice whose endpoint mute is honoured
-    /// (the mic itself); pass null for a loopback endpoint (no mute event) or when no
-    /// MMDevice is held. The endpoint volume is observed for the instance's lifetime and
-    /// released in <see cref="Dispose"/>.</summary>
-    protected WasapiCaptureBase(WasapiCapture capture, MMDevice? muteSource = null)
+    /// <paramref name="device"/> is the specific endpoint this capture was opened against,
+    /// which this instance then OWNS and disposes (the enumerator hands it over; NAudio's
+    /// capture does not take ownership) — pass null for a default-endpoint ctor. When
+    /// <paramref name="observeMute"/> is true (a mic) the device's endpoint mute is honoured
+    /// for the instance's lifetime; a loopback endpoint passes false (it has no mute event),
+    /// so <see cref="IsMuted"/> stays permanently false there.</summary>
+    protected WasapiCaptureBase(WasapiCapture capture, MMDevice? device = null, bool observeMute = false)
     {
         ArgumentNullException.ThrowIfNull(capture);
-        _capture = capture;
+        // Classify the format FIRST: ToAudioFormat throws NotSupportedException for an
+        // unsupported mix format. Doing it before taking ownership of capture/device means a
+        // throw here leaves this instance owning nothing — the caller (which still holds the
+        // capture/device it passed) cleans up, the same as if the WasapiCapture ctor argument
+        // itself had thrown. After this line, ownership has transferred and Dispose frees them.
         Format = ToAudioFormat(capture.WaveFormat);
+        _capture = capture;
+        _device = device;
         _capture.DataAvailable += OnDataAvailable;
 
-        if (muteSource is not null)
+        if (device is not null && observeMute)
         {
             try
             {
-                _endpointVolume = muteSource.AudioEndpointVolume;
+                _endpointVolume = device.AudioEndpointVolume;
                 // Subscribe BEFORE reading the initial Mute so a toggle during construction
                 // isn't lost in the gap; the seed then reads the reconciled current state.
                 _endpointVolume.OnVolumeNotification += OnVolumeNotification;
@@ -123,26 +140,12 @@ public abstract class WasapiCaptureBase : IAudioCapture
     public void Dispose()
     {
         _capture.DataAvailable -= OnDataAvailable;
+        // Detach our handler so a late notification can't fire mid-teardown. This is a pure
+        // managed delegate removal (a field-like event), so it can't enter COM or throw; the
+        // native RegisterControlChangeNotify registration is released when the owning _device
+        // is disposed below (AudioEndpointVolume.Dispose, cascaded from MMDevice.Dispose).
         if (_endpointVolume is not null)
-        {
-            try
-            {
-                _endpointVolume.OnVolumeNotification -= OnVolumeNotification;
-                // Dispose the endpoint-volume COM wrapper too: it owns the native
-                // RegisterControlChangeNotify registration we made, which detaching the
-                // managed handler alone does NOT release. Without this the tray (a
-                // long-lived process opening a fresh capture per meeting / meter refresh)
-                // leaks an endpoint-volume callback every cycle.
-                _endpointVolume.Dispose();
-            }
-            catch (COMException)
-            {
-                // The endpoint was invalidated/removed (unplugged, disabled): unsubscribing
-                // from or releasing its volume callback can throw the same
-                // AUDCLNT_E_DEVICE_INVALIDATED as the capture teardown below. Nothing left to
-                // detach; disposal proceeds.
-            }
-        }
+            _endpointVolume.OnVolumeNotification -= OnVolumeNotification;
         try
         {
             _capture.Dispose();
@@ -151,6 +154,20 @@ public abstract class WasapiCaptureBase : IAudioCapture
         {
             // Same endpoint-invalidation case as Stop(): releasing the WASAPI client for
             // a removed device can throw, but we're disposing anyway.
+        }
+        try
+        {
+            // Dispose the endpoint we own (when opened against a specific device). This
+            // releases the COM endpoint handle AND cascades to dispose its cached
+            // AudioEndpointVolume — releasing the native volume-notification registration.
+            // Without it the tray (a long-lived process opening a fresh capture per meeting /
+            // meter refresh) leaks an endpoint handle and a volume callback every cycle.
+            _device?.Dispose();
+        }
+        catch (COMException)
+        {
+            // Endpoint already invalidated/removed: releasing it can throw the same
+            // AUDCLNT_E_DEVICE_INVALIDATED; we're disposing anyway.
         }
         GC.SuppressFinalize(this);
     }
