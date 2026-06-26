@@ -1,0 +1,177 @@
+"""People Registry — the canonical, cross-session Person model (ADR-0009;
+CONTEXT.md: Person · Identity · Roster · People Registry).
+
+`people.json` at the recordings root is the single source of truth for *names*
+and *groupings* — which Identities are the same human. It is NOT the source of
+the *default* name (the bridge-sent name a Person carries before the operator
+renames them): a blank stored name means "fall back to the roster default",
+resolved by the name layer (`name_resolution.py`) that has roster access. So
+this module is purely grouping + chosen names.
+
+The view (who appears in which sessions, live vs recorded) is derived by
+aggregating the rosters and overlaying this registry — it is not stored here.
+
+Invariant: every Identity belongs to **exactly one** Person. `sync` auto-binds
+each newly-seen Identity to its own Person (blank name); `merge` joins two
+Persons (survivor's name wins); `detach` pulls one Identity back into its own
+Person; `rename` sets the chosen name.
+
+Concurrency mirrors the Roster: every mutator is a synchronous read-modify-write
+the caller follows with `save()`, with no `await` between load and save, so the
+single asyncio event loop can't interleave two mutations. `atomic_write_text`
+adds crash-safety.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+from uuid import uuid4
+
+from . import config
+from .text import atomic_write_text
+
+PEOPLE_JSON = "people.json"
+
+
+def _new_person_id() -> str:
+    # Server-generated, opaque, stable. Never derived from the Identity: a
+    # derived id would collide when the seed Identity is later detached.
+    return "p_" + uuid4().hex
+
+
+def _coerce_people(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict) or not isinstance(data.get("people"), list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_idents: set[str] = set()
+    for row in data["people"]:
+        if not isinstance(row, dict):
+            continue
+        pid = row.get("id")
+        name = row.get("name")
+        idents = row.get("identities")
+        if not isinstance(pid, str) or pid in seen_ids or not isinstance(idents, list):
+            continue
+        # Enforce the one-Identity-one-Person invariant on read too: a hand-
+        # edited or torn file can't smuggle in a duplicate that would make
+        # resolution ambiguous.
+        clean_idents = [i for i in idents if isinstance(i, str) and i and i not in seen_idents]
+        if not clean_idents:
+            continue
+        seen_ids.add(pid)
+        seen_idents.update(clean_idents)
+        out.append({"id": pid, "name": name if isinstance(name, str) else "", "identities": clean_idents})
+    return out
+
+
+class PeopleRegistry:
+    """In-memory view of `people.json` with the auto-bind / rename / merge /
+    detach operations. Load → mutate → `save()`."""
+
+    def __init__(self, people: list[dict[str, Any]]) -> None:
+        self._people = people
+        self._reindex()
+
+    # ---- persistence ------------------------------------------------------
+
+    @classmethod
+    def load(cls) -> PeopleRegistry:
+        path = config.RECORDINGS_DIR / PEOPLE_JSON
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # Missing or torn → empty registry; it is rebuildable from the
+            # rosters via `sync`, so a read failure is never fatal.
+            data = None
+        return cls(_coerce_people(data))
+
+    def save(self) -> None:
+        atomic_write_text(
+            config.RECORDINGS_DIR / PEOPLE_JSON,
+            json.dumps({"people": self._people}, indent=2, ensure_ascii=False),
+        )
+
+    # ---- queries ----------------------------------------------------------
+
+    def as_list(self) -> list[dict[str, Any]]:
+        return self._people
+
+    def get(self, person_id: str) -> dict[str, Any] | None:
+        return next((p for p in self._people if p["id"] == person_id), None)
+
+    def person_for_identity(self, identity: str) -> dict[str, Any] | None:
+        return self._by_identity.get(identity)
+
+    def name_for_identity(self, identity: str) -> str | None:
+        """The operator-chosen name for `identity`, or None when the Person is
+        unknown or still default-named (caller falls back to the roster name)."""
+        p = self._by_identity.get(identity)
+        return p["name"] if p and p["name"] else None
+
+    # ---- mutations --------------------------------------------------------
+
+    def sync(self, identities: object) -> bool:
+        """Auto-bind every Identity in `identities` not already owned by a
+        Person to a fresh blank-named Person. Returns True iff anything was
+        added (so the caller can skip a no-op save on the hot poll path)."""
+        changed = False
+        for identity in identities:
+            if not isinstance(identity, str) or not identity:
+                continue
+            if identity not in self._by_identity:
+                person = {"id": _new_person_id(), "name": "", "identities": [identity]}
+                self._people.append(person)
+                self._by_identity[identity] = person
+                changed = True
+        return changed
+
+    def rename(self, person_id: str, name: str) -> dict[str, Any]:
+        person = self.get(person_id)
+        if person is None:
+            raise KeyError(person_id)
+        person["name"] = name
+        return person
+
+    def merge(self, survivor_id: str, absorbed_id: str) -> dict[str, Any]:
+        if survivor_id == absorbed_id:
+            raise ValueError("cannot merge a Person into itself")
+        survivor = self.get(survivor_id)
+        absorbed = self.get(absorbed_id)
+        if survivor is None:
+            raise KeyError(survivor_id)
+        if absorbed is None:
+            raise KeyError(absorbed_id)
+        for identity in absorbed["identities"]:
+            if identity not in survivor["identities"]:
+                survivor["identities"].append(identity)
+        self._people.remove(absorbed)
+        self._reindex()
+        return survivor
+
+    def detach(self, person_id: str, identity: str) -> dict[str, Any]:
+        """Pull `identity` out of its Person into a fresh blank-named Person
+        (the undo for an over-eager merge). Returns the new Person."""
+        person = self.get(person_id)
+        if person is None:
+            raise KeyError(person_id)
+        if identity not in person["identities"]:
+            raise ValueError(f"{identity!r} is not a member of {person_id!r}")
+        person["identities"].remove(identity)
+        new_person = {"id": _new_person_id(), "name": "", "identities": [identity]}
+        # An emptied Person (detaching its sole Identity) is dropped — it would
+        # own nothing and clutter the registry.
+        if not person["identities"]:
+            self._people.remove(person)
+        self._people.append(new_person)
+        self._reindex()
+        return new_person
+
+    # ---- internals --------------------------------------------------------
+
+    def _reindex(self) -> None:
+        self._by_identity: dict[str, dict[str, Any]] = {}
+        for person in self._people:
+            for identity in person["identities"]:
+                self._by_identity[identity] = person
