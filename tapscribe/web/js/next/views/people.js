@@ -53,11 +53,15 @@ export function build(ctx) {
 
   /** The name to SHOW in the input: local overlay > chosen name > "" (so an
    * unnamed Person shows its default only as the placeholder, inviting a name). */
+  /** The value the input shows absent a local edit: the chosen name, or "" for
+   * an unnamed Person (its default then surfaces as the placeholder). Also the
+   * baseline update() compares the overlay against — one source for the rule. */
+  /** @param {import('../../types.js').Person} p */
+  const serverName = (p) => (p.named ? p.name : "");
   /** @param {import('../../types.js').Person} p */
   const inputValue = (p) => {
     const local = localNames.get(p.id);
-    if (local !== undefined) return local;
-    return p.named ? p.name : "";
+    return local !== undefined ? local : serverName(p);
   };
 
   /** Debounced PUT /api/people/{id} {name}. */
@@ -98,17 +102,19 @@ export function build(ctx) {
     const row = pick(node, "row");
     if (sess && p.sessions.includes(sess.session)) row.classList.add("is-here");
 
-    const display = inputValue(p) || p.name || (p.identities[0] || "?");
     const av = pick(node, "av");
     av.classList.add(spkClass(speakerIndex(p.id)));
-    av.textContent = initials(display);
+    /** Avatar initials = current field text, else the Person's default.
+     * @param {string} v */
+    const avatarText = (v) => initials(v || p.name || p.identities[0] || "?");
+    av.textContent = avatarText(inputValue(p));
 
     const name = /** @type {HTMLInputElement} */ (pick(node, "name"));
     name.value = inputValue(p);
     name.placeholder = p.name || p.identities[0] || "name…";
     name.addEventListener("input", () => {
       localNames.set(p.id, name.value);
-      av.textContent = initials(name.value || p.name || p.identities[0] || "?");
+      av.textContent = avatarText(name.value);
       persist(p.id);
     });
 
@@ -164,7 +170,7 @@ export function build(ctx) {
       if (other.id === p.id) continue;
       const o = document.createElement("option");
       o.value = other.id;
-      o.textContent = other.named ? other.name : (other.name || other.identities[0] || other.id);
+      o.textContent = other.name || other.identities[0] || other.id;
       merge.appendChild(o);
     }
     merge.addEventListener("change", () => {
@@ -210,7 +216,7 @@ export function build(ctx) {
     // Drop a local name overlay once the server has caught up to it — otherwise
     // a stale overlay would mask a later external change to that name.
     for (const p of people) {
-      if (localNames.get(p.id) === (p.named ? p.name : "")) localNames.delete(p.id);
+      if (localNames.get(p.id) === serverName(p)) localNames.delete(p.id);
     }
     const liveN = people.filter((p) => p.live).length;
     hint.textContent = `${people.length} ${people.length === 1 ? "person" : "people"}${liveN ? ` · ${liveN} live` : ""}`;

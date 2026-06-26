@@ -149,15 +149,15 @@ def attach_people(
     return the People view rows. Synchronous (no `await`) so the load → sync →
     save runs atomically under the event loop."""
     registry = PeopleRegistry.load()
-    occ_by_session = {id(s): session_occurrences(s) for s in sessions}
+    occs = [session_occurrences(s) for s in sessions]
     all_idents: set[str] = set(live_identities)
-    for s in sessions:
-        all_idents.update(occ_by_session[id(s)].keys())
+    for occ in occs:
+        all_idents.update(occ)
     if registry.sync(all_idents):
         registry.save()
-    for s in sessions:
+    for s, occ in zip(sessions, occs, strict=True):
         s["names"] = resolve_session_names(
-            roster=occ_by_session[id(s)],
+            roster=occ,
             aliases=(s.get("session_meta") or {}).get("aliases") or {},
             registry=registry,
         )
