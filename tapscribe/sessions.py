@@ -30,6 +30,7 @@ from fastapi import HTTPException
 
 from . import config
 from .audio import wav_duration_s
+from .roster import read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
     FILENAME_META_JSON,
@@ -565,6 +566,12 @@ def _describe_session(
         "session_summary": _session_summary_marker(_read_session_json_cached(sd / FILENAME_SUMMARY_JSON)),
         "progress": jobs.get(sd.name),
         "session_meta": read_session_meta(sd.name),
+        # The per-session Roster (full identity → name/source/slug/wavs). Cheap
+        # read, freshly built each poll like the rest of this dict, and the
+        # input the People Registry + per-session name resolution join on
+        # (name_resolution.attach_people, called by /api/state). Empty {} for a
+        # pre-feature session, which resolves purely via its retained aliases.
+        "roster": read_roster(sd),
         "stripped": stripped,
     }
 
@@ -621,6 +628,7 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
                 "session_summary": None,
                 "progress": None,
                 "session_meta": read_session_meta(current_session),
+                "roster": {},
                 "stripped": None,
             },
         )

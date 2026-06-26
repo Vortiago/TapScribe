@@ -21,6 +21,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import roster
 from .audio import int16_peak_norm, open_recorder_wav
 from .recorder import ActiveStream, Recorder, UtteranceRecord
 from .tap_relay import RelayHandlers, TapRelay
@@ -232,6 +233,21 @@ class TapFanOut:
                 print(f"[tapscribe] /tap open -> {fname}", flush=True)
         else:
             print(f"[tapscribe] /tap open (record off) for {self._identity}", flush=True)
+
+        # Roster the occurrence (ADR-0009): record this FULL identity's presence
+        # so the People Registry can recover it (the WAV filename only carries
+        # the lossy `safe_name(identity)[:10]` slug). Synchronous, no await → the
+        # read-modify-write is atomic under the event loop against concurrent
+        # taps. Guarded so a record-off live tap doesn't materialise an empty
+        # session folder just for a roster; a recording tap already created it.
+        if self._do_record or self._session_dir.exists():
+            roster.record_occurrence(
+                self._session_dir,
+                identity=self._identity,
+                name=self._name,
+                recorded=self._do_record,
+                wav=fname if self._do_record else None,
+            )
 
         self._conn_id = self._utterance_id[:8] + "-" + (safe_name(self._identity)[:10] or "unknown")
         await self._recorder.streams.register(

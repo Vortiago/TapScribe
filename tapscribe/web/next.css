@@ -1088,14 +1088,45 @@ button.wavrow {
    distinct assigned name (avatar · name · N sessions · identity codes). */
 .preg { display: flex; flex-direction: column; gap: 1px; }
 .pregrow {
-  display: grid; grid-template-columns: 17px minmax(0, auto) auto minmax(0, 1fr);
+  display: grid;
+  grid-template-columns: 17px minmax(110px, 1.1fr) auto auto minmax(0, 1.8fr) auto auto;
   gap: 10px; align-items: center;
-  padding: 6px 2px; border-top: 1px solid var(--hairline-2);
+  padding: 6px 4px; border-top: 1px solid var(--hairline-2); border-radius: 6px;
 }
 .pregrow:first-child { border-top: 0; }
-.pregrow__name { font-size: 12.5px; font-weight: 650; color: var(--fg-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Session selection only HIGHLIGHTS the people present in it (ADR-0009 U1) —
+   it never swaps the global list out. */
+.pregrow.is-here { background: color-mix(in srgb, var(--info) 12%, transparent); }
+.pregrow__name {
+  font-size: 12.5px; font-weight: 650; color: var(--fg-0); min-width: 0; width: 100%;
+  background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px 5px;
+}
+.pregrow__name:hover { border-color: var(--hairline-2); }
+.pregrow__name:focus { border-color: var(--info); background: color-mix(in srgb, var(--fg-3) 10%, transparent); outline: none; }
+.pregrow__src { flex: none; }
+.pregrow__src.is-live { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 35%, transparent); background: var(--rec-bg); }
+.pregrow__src.is-recorded { color: var(--fg-3); }
 .pregrow__count { font-size: 9.5px; color: var(--fg-3); white-space: nowrap; flex: none; }
-.pregrow__ids { font-size: 10.5px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+.pregrow__ids { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; overflow: hidden; }
+.pregrow__merge {
+  font-size: 10px; color: var(--fg-2); max-width: 130px;
+  background: color-mix(in srgb, var(--fg-3) 8%, transparent);
+  border: 1px solid var(--hairline-2); border-radius: 5px; padding: 2px 4px;
+}
+.pregrow__status { font-size: 9px; min-width: 40px; text-align: right; white-space: nowrap; }
+/* device-identity token chip + its detach ✕ — inline-flex so the button is a
+   real clickable sibling, not overlapped by the token span. */
+.idchip {
+  display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--fg-2);
+  background: color-mix(in srgb, var(--fg-3) 12%, transparent);
+  border: 1px solid var(--hairline-2); border-radius: 4px; padding: 1px 4px; max-width: 170px;
+}
+.idchip__tok { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.idchip__x {
+  flex: none; cursor: pointer; border: 0; background: transparent; color: var(--fg-3);
+  font-size: 10px; line-height: 1; padding: 0 3px; border-radius: 3px;
+}
+.idchip__x:hover { color: var(--rec); background: color-mix(in srgb, var(--rec) 20%, transparent); }
 
 /* small tag chip — used for input badges + the partrow source badge */
 .next-app .tag {

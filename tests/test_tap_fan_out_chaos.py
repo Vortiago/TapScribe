@@ -121,9 +121,13 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
     with wave.open(str(wavs[0]), "rb") as w:
         assert w.getframerate() == 16000
         assert w.getnframes() == 640
-    # No orphan files (e.g. a .partial / .tmp lingering).
+    # No orphan files (e.g. a .partial / .tmp lingering). The session-roster.json
+    # sidecar (ADR-0009: the tap records each identity's occurrence on open) is
+    # an expected artifact, not an orphan.
+    from tapscribe.session_paths import FILENAME_ROSTER_JSON
+
     siblings = sorted(p.name for p in r.session_dir.iterdir())
-    assert siblings == [wavs[0].name], f"unexpected leftover files: {siblings}"
+    assert siblings == sorted([wavs[0].name, FILENAME_ROSTER_JSON]), f"unexpected leftover files: {siblings}"
     # UtteranceIndex entry kept (non-empty -> resumable within window).
     rec = r.utterances.snapshot()["utt-abnormal-close"]
     assert rec.open is False

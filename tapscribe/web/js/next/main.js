@@ -89,8 +89,12 @@ function evictStaleTranscriptViews() {
 // ---- Helpers ----------------------------------------------------------------
 
 /**
- * Effective per-session meta — reads the server's session_meta directly.
- * (Phase 1 has no optimistic local layer; override saves re-poll via refresh.)
+ * Effective per-session meta. `aliases` is the SERVER-RESOLVED speaker-name map
+ * (`session.names`, ADR-0009): the slug → display name the server already
+ * resolved through per-session Override > Person name > bridge/roster default.
+ * Layering it over the raw `session_meta.aliases` means a global Person rename
+ * propagates to this session's transcript with no client-side join — and an old
+ * rosterless session (empty `names`) still renders via its retained aliases.
  * @param {import('../types.js').Session | null} s
  * @returns {import('../types.js').EffectiveMeta}
  */
@@ -98,7 +102,7 @@ function metaFor(s) {
   const m = (s && s.session_meta) || {};
   return {
     label: m.label || "",
-    aliases: m.aliases || {},
+    aliases: { ...(m.aliases || {}), ...((s && s.names) || {}) },
     prompt: m.prompt || "",
     hotwords: m.hotwords || "",
   };

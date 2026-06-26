@@ -66,12 +66,22 @@ FILENAME_TRANSCRIPT_JSON = "session-transcript.json"
 FILENAME_TRANSCRIPT_TXT = "session-transcript.txt"
 FILENAME_SUMMARY_JSON = "session-summary.json"
 FILENAME_META_JSON = "session-meta.json"
+FILENAME_ROSTER_JSON = "session-roster.json"
 FILENAME_STRIP_META_JSON = "strip-meta.json"
 DIRNAME_STRIPPED = "stripped"
 
 
 def session_meta_path(session: str) -> Path:
     return config.RECORDINGS_DIR / _safe_part(session, "session") / FILENAME_META_JSON
+
+
+def roster_path(session: str) -> Path:
+    """`<RECORDINGS_DIR>/<session>/session-roster.json` after the same
+    two-layer path-safety guard `session_meta_path` inherits — used by the
+    read paths that take a request-supplied `session` id. The tap WRITE path
+    already holds a resolved `session_dir` and composes the filename directly
+    (see `roster.record_occurrence`)."""
+    return config.RECORDINGS_DIR / _safe_part(session, "session") / FILENAME_ROSTER_JSON
 
 
 def stripped_dir(session: str) -> Path:

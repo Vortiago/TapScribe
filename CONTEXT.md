@@ -473,6 +473,46 @@ concurrently and bounded. The devices co-locate in one **detached
 session** (above), so both sides of a meeting land in one folder as
 distinct speakers.
 
+## Person · Identity · Roster · People Registry
+
+The canonical, cross-session naming model (ADR-0009). Distinct concepts that
+are easy to conflate:
+
+- **Identity** — the bridge-stamped token per device/participant, stored
+  **untruncated**. Stable across sessions for our bridges (SpatialChat:
+  `participant.identity` = the account `user.id`, constant across meetings;
+  Windows-tray: per-device; local-test: OS user). The cross-session join key.
+  Note the WAV filename still carries only `safe_name(identity)[:10]`
+  (`parse_wav_speaker_ident`) — *truncated*, so the filename slug is **not** a
+  reliable key; the full Identity comes from the Roster.
+- **Occurrence** — one appearance of an Identity in one session (live or
+  recorded). Its **speaker key** is `identity` today; once diarization (#78)
+  splits one Identity into several voices it becomes `identity#cluster`. Auto
+  recognition only joins stable Identities across sessions — diarized clusters
+  are session-local (Monday's `speaker_0` ≠ Tuesday's) and need manual merge.
+  This leaves the [one-`/tap`-WS-=-one-speaker invariant](#invariants) intact.
+- **Roster** — a per-session, machine-written sidecar (`session-roster.json`)
+  mapping `full identity → { name, source, wav refs }`, written by the tap path
+  at open/close. Separate from the operator-editable `session_meta.json` and
+  from the per-identity `tap_settings` gate record (ADR-0007). It is what makes
+  the full Identity recoverable for recorded occurrences.
+- **Person** — a global entity: one display name + a set of member Identities.
+  Every new Identity **auto-binds** to its own Person (default-named from the
+  bridge `name`), so the registry is never empty. **Merge** combines two
+  Persons (survivor's name wins, Identities join — like `absorb_session`);
+  **detach** pulls one Identity back out as undo.
+- **People Registry** — the single global store (`people.json`, recordings
+  root) and **source of truth** for names. The server resolves
+  `identity → Person → name` when building `/api/state` and the merged
+  transcript, shipping the same name-map shape the frontend already renders, so
+  the [Interaction hold](#interaction-hold) render path is untouched.
+- **Override** — the demoted role of `session_meta.aliases`: a per-session
+  alias that beats the Person's global name *for that session only*.
+
+Resolution precedence (server-side): **Override** › **Person** name (via
+Identity membership) › bridge display name / slug fallback. Rosterless old
+sessions resolve by slug and keep rendering — no regression.
+
 ## Utterance
 
 A continuous speech segment from one speaker, delimited by mute
