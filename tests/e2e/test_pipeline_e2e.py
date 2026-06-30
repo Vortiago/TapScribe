@@ -1061,6 +1061,114 @@ async def test_cover_real_parakeet_generalist_keeps_generalist_on_english_e2e(
     )
 
 
+@pytest.mark.real_audio
+async def test_multiperson_multilingual_meeting_routes_each_language_e2e(
+    running_recorder: RunningRecorder, monkeypatch
+):
+    """The multi-person tray flow end-to-end on REAL models: a 3-speaker da/no/en
+    meeting — the realistic silence-split case, one WAV per utterance — streamed
+    through /tap, covered with a real Whisper generalist + the real NB-Whisper
+    specialist, then asserted utterance-by-utterance:
+
+      - every utterance is transcribed in its OWN language (a reference word
+        survives in the chosen transcript) — i.e. nothing comes out as the wrong
+        language;
+      - the ENGLISH utterance is kept on the GENERALIST, never re-rendered as
+        Norwegian by the specialist. This is the exact regression the real-audio
+        tests caught: a confident nb-whisper transcribing English as Norwegian
+        out-scored correct English on avg_logprob and won the region;
+      - the Norwegian utterance, WHEN the generalist detects it as Norwegian,
+        routes to the NB-Whisper specialist (the selector's job — guarded
+        conditionally on the detection so a small generalist's da/no confusion
+        doesn't flake the test);
+      - the merged transcript carries all three speakers.
+
+    Generalist "base" + specialist nb-whisper-tiny keep it CI-affordable; the
+    fine-grained da/no routing QUALITY is the da/no benchmark's job. Skipped
+    unless faster-whisper is importable, the three committed fixtures are present,
+    and the specialist weights can be fetched.
+    """
+    if importlib.util.find_spec("faster_whisper") is None:
+        pytest.skip("faster_whisper not installed — install with `pip install -e .[whisper-cpu]`")
+    fixtures = {fx.wav.stem: fx for fx in _real_audio_fixtures()}
+    needed = ("solen-da", "marlene-nb", "armstrong-en")
+    if not all(stem in fixtures for stem in needed):
+        pytest.skip(f"multilingual meeting needs all of {needed}")
+
+    # Shrink the specialist + pre-fetch its weights; skip cleanly when offline.
+    from tapscribe.transcribers import catalog
+
+    monkeypatch.setitem(catalog.SPECIALIST_MODELS, "no", "nb-whisper-tiny")
+    try:
+        from tapscribe.nb_whisper import download_nb_whisper_ct2_dir
+
+        await asyncio.to_thread(download_nb_whisper_ct2_dir, "nb-whisper-tiny")
+    except Exception as e:  # noqa: BLE001 — any fetch failure (offline, hub down) → skip, not fail
+        pytest.skip(f"nb-whisper-tiny weights unavailable (offline?): {e}")
+
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    ws_base = running_recorder.ws_base_url
+    # 3 speakers, 3 languages — interleaved like a real bilingual + English meeting.
+    meeting = (("Dane", "solen-da"), ("Nora", "marlene-nb"), ("Ed", "armstrong-en"))
+    for speaker, stem in meeting:
+        await stream_wav_via_tap(
+            ws_base_url=ws_base,
+            identity=speaker,
+            name=stem,
+            wav_path=fixtures[stem].wav,
+            utterance_id=f"utt-{stem}",
+        )
+    assert await wait_until(lambda: streams_drained(rec), timeout=15.0)
+
+    merged = await _run_cover_session(
+        base, rec.session_start, model="base", languages=("da", "no", "en"), timeout=900.0
+    )
+
+    from tapscribe.wav_cache import read_all_cached, read_cached
+
+    wavs = {
+        stem: next(w for w in rec.session_dir.glob("*.wav") if stem.split("-")[0] in w.name)
+        for _speaker, stem in meeting
+    }
+    cover_models = {"base", "nb-whisper-tiny"}
+
+    for stem, wav in wavs.items():
+        ran = {c.result.model for c in read_all_cached(wav)}
+        assert ran == cover_models, f"{stem}: cover did not run both models, got {ran}"
+        primary = read_cached(wav)
+        assert primary is not None, f"{stem}: no primary selected"
+        # The chosen transcript really is in this utterance's language.
+        assert _word_tokens(_reference_for(stem)) & _word_tokens(primary.result.text), (
+            f"{stem}: primary shares no reference word — wrong language? {primary.result.text!r}"
+        )
+
+    # Bug guard: the English utterance must stay on the generalist, never the
+    # Norwegian specialist (which would re-render English as Norwegian).
+    english = read_cached(wavs["armstrong-en"])
+    assert english.result.model == "base", (
+        f"English utterance routed to {english.result.model!r} — a wrong-language specialist "
+        f"must never win an English region: {english.result.text!r}"
+    )
+
+    # Selector guard: when the generalist detects the Norwegian utterance as
+    # Norwegian, it must route to the specialist. Conditional on the detection so
+    # a small generalist's da/no confusion is not what fails the test.
+    nb_generalist = next(c for c in read_all_cached(wavs["marlene-nb"]) if c.result.model == "base")
+    if (nb_generalist.result.language or "").strip().lower() == "no":
+        assert read_cached(wavs["marlene-nb"]).result.model == "nb-whisper-tiny", (
+            "generalist detected Norwegian but the selector kept the generalist instead of routing "
+            "to the nb-whisper specialist"
+        )
+
+    # The merged transcript stitches all three speakers' content.
+    assert merged["wav_count"] == 3
+    for stem in wavs:
+        assert _word_tokens(_reference_for(stem)) & _word_tokens(merged["plain_text"]), (
+            f"{stem} content missing from the merged multilingual transcript"
+        )
+
+
 # ---------------------------------------------------------------------------
 # da/no routing BENCHMARK (ADR-0010). Real audio, real models, raw numbers.
 #
