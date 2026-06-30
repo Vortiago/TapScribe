@@ -6,25 +6,6 @@ using static TapScribe.Bridge.Core.Tests.Fixtures;
 
 namespace TapScribe.Bridge.Core.Tests;
 
-/// <summary>
-/// Full multi-person, multi-language meeting E2E for the tray bridge against the
-/// REAL Python Recorder — not the in-process <see cref="FakeRecorder"/>. The real
-/// production Core clients (<see cref="CaptureOrchestrator"/> + TapClient +
-/// <see cref="ControlClient"/> + <see cref="MeetingController"/>) stream TWO
-/// speakers' real Norwegian + English speech over /tap into a real detached
-/// Session; End fires the real end-of-meeting pipeline (strip →
-/// transcribe[faster-whisper <c>base</c>] → summarize[command]); and the merged
-/// transcript comes out multilingual with a summary. Proves the tray bridge does a
-/// multi-person, multi-language meeting end to end ON LINUX with the Windows-only
-/// WASAPI capture swapped for a fixture-fed <see cref="FakeAudioCapture"/> — the
-/// same seam a future Linux tray's PulseAudio/PipeWire capture would fill.
-///
-/// Skipped via <see cref="RequiresPythonAsrAttribute"/> when faster-whisper (the
-/// real ASR) isn't importable — i.e. the Python recorder stack isn't present. So
-/// <c>dotnet test</c> on a plain box (incl. the dotnet-core-crossplatform CI job,
-/// which has no Python deps) skips it cleanly; it runs where the full stack is
-/// present (the Python CI job's box, or a dev machine).
-/// </summary>
 /// <summary>A <see cref="FactAttribute"/> that skips the test at discovery unless
 /// faster-whisper (the real ASR backend) is importable — i.e. the Python recorder
 /// stack is present. Uses the standard <c>Skip</c> property, which every runner
@@ -62,6 +43,24 @@ internal sealed class RequiresPythonAsrAttribute : FactAttribute
     }
 }
 
+/// <summary>
+/// Full multi-person, multi-language meeting E2E for the tray bridge against the
+/// REAL Python Recorder — not the in-process <see cref="FakeRecorder"/>. The real
+/// production Core clients (<see cref="CaptureOrchestrator"/> + TapClient +
+/// <see cref="ControlClient"/> + <see cref="MeetingController"/>) stream TWO
+/// speakers' real Norwegian + English speech over /tap into a real detached
+/// Session; End fires the real end-of-meeting pipeline (strip →
+/// transcribe[faster-whisper <c>base</c>] → summarize[command]); and the merged
+/// transcript comes out multilingual with a summary. Proves the tray bridge does a
+/// multi-person, multi-language meeting end to end ON LINUX with the Windows-only
+/// WASAPI capture swapped for a fixture-fed <see cref="FakeAudioCapture"/> — the
+/// same seam a future Linux tray's PulseAudio/PipeWire capture would fill.
+///
+/// Skipped via <see cref="RequiresPythonAsrAttribute"/> when faster-whisper (the
+/// real ASR) isn't importable — i.e. the Python recorder stack isn't present, so
+/// the dotnet-core-crossplatform CI job (no Python deps) skips it cleanly; the
+/// dedicated full-stack CI job and dev machines run it.
+/// </summary>
 public class RealRecorderMeetingE2ETests
 {
     private static readonly TimeSpan PipelineBudget = TimeSpan.FromSeconds(180);
@@ -140,13 +139,18 @@ public class RealRecorderMeetingE2ETests
         foreach (JsonElement seg in root.GetProperty("segments").EnumerateArray())
             if (seg.TryGetProperty("speaker", out JsonElement sp) && sp.GetString() is { Length: > 0 } s)
                 speakers.Add(s);
-        string diag = $"wavs={Directory.GetFiles(sessionDir, "*.wav").Length} plain={Trunc(plain)}";
-        Assert.True(speakers.Count >= 2, $"expected >=2 speakers, got [{string.Join(", ", speakers)}]; {diag}");
+        Assert.True(
+            speakers.Count >= 2,
+            $"expected >=2 speakers, got [{string.Join(", ", speakers)}]; plain={Trunc(plain)}");
 
         HashSet<string> hyp = Tokens(plain);
+        // Norwegian-DISTINCTIVE tokens — NOT the reference's language-agnostic proper
+        // nouns (Berlin/Paris/Dietrich survive a wrong-language transcription). These
+        // prove the Norwegian speaker came out AS Norwegian, not Englishised.
+        string[] norwegianMarkers = ["egentlig", "født", "døde", "skuespillerinne"];
         Assert.True(
-            Tokens(File.ReadAllText(Path.Combine(audio, "marlene-nb.reference.txt"))).Overlaps(hyp),
-            $"Norwegian speaker's content missing from the merged transcript: {Trunc(plain)}");
+            norwegianMarkers.Any(hyp.Contains),
+            $"no Norwegian-distinctive word in the transcript — was the Norwegian speaker Englishised? {Trunc(plain)}");
         Assert.True(
             Tokens(File.ReadAllText(Path.Combine(audio, "armstrong-en.reference.txt"))).Overlaps(hyp),
             $"English speaker's content missing from the merged transcript: {Trunc(plain)}");
@@ -224,8 +228,11 @@ public class RealRecorderMeetingE2ETests
 /// Starts the real Python Recorder (<c>python -m tapscribe --no-auth …</c>) in a
 /// temp base dir configured for a fast CPU pipeline (faster-whisper batch model +
 /// a deterministic <c>command</c> summariser), and exposes its port + base dir.
-/// <see cref="TryStartAsync"/> returns null when the stack isn't runnable so the
-/// test can skip instead of fail.
+/// <see cref="TryStartAsync"/> returns null when the recorder won't boot. The
+/// faster-whisper skip is decided earlier, at discovery, by
+/// <see cref="RequiresPythonAsrAttribute"/>; so by the time this runs the ASR stack
+/// is known present, and the caller treats a null as a real FAILURE (a healthy
+/// stack that still can't start the recorder), not a skip.
 /// </summary>
 internal sealed class RealRecorder : IAsyncDisposable
 {
@@ -282,7 +289,7 @@ internal sealed class RealRecorder : IAsyncDisposable
         }
         catch (Exception)
         {
-            // python not found / not launchable → caller skips.
+            // python not found / not launchable → null → caller fails.
             TryDelete(baseDir);
             return null;
         }
@@ -295,7 +302,7 @@ internal sealed class RealRecorder : IAsyncDisposable
         if (await IsHealthyAsync(proc, port, TimeSpan.FromSeconds(40)))
             return new RealRecorder(proc, port, baseDir);
 
-        // tapscribe not importable / faster-whisper absent / never healthy → skip.
+        // recorder imports tapscribe but never becomes healthy → null → caller fails.
         TryKill(proc);
         TryDelete(baseDir);
         return null;

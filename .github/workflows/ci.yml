@@ -207,6 +207,11 @@ jobs:
           python -m playwright install --with-deps chromium
           sudo apt-get update && sudo apt-get install -y xvfb
 
+      - name: Pre-fetch the ASR models (keep downloads out of the meeting test's budget)
+        run: |
+          python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8'); WhisperModel('base', device='cpu', compute_type='int8')"
+          python -c "from tapscribe.nb_whisper import download_nb_whisper_ct2_dir as d; d('nb-whisper-tiny')"
+
       - name: Run bridge extension E2E (headed, under xvfb)
         run: xvfb-run -a pytest tests/e2e/test_bridge_extension_e2e.py -m browser_e2e -q
 

@@ -20,9 +20,12 @@ per clip, so re-runs reproduce.
 
 from __future__ import annotations
 
+import functools
 import os
 
 import numpy as np
+
+from tapscribe.wav_predecode import load_recorder_wav_as_pcm
 
 from . import _fleurs, _metrics
 
@@ -33,8 +36,21 @@ SNRS = [s.strip() for s in os.environ.get("SNRS", "clean,20,10,5").split(",")]
 NOISE_WAV = os.environ.get("NOISE_WAV", "")
 
 
+def _tile_to(clip: np.ndarray, length: int) -> np.ndarray:
+    """Loop `clip` to exactly `length` samples."""
+    return np.tile(clip, int(np.ceil(length / len(clip))))[:length]
+
+
+@functools.cache
+def _babble_pool() -> list:
+    """Every cached FLEURS clip (globbed once) — the talker pool for babble."""
+    return [w for code in _fleurs.CONFIGS for w in sorted((_fleurs.CACHE / code).glob("*.wav"))]
+
+
+@functools.cache
 def _noise_source(length: int, seed: int) -> np.ndarray:
-    """A unit-RMS noise segment of `length` samples.
+    """A unit-RMS noise segment of `length` samples (memoised — the same
+    `(length, seed)` recurs across SNRs for a given clip).
 
     - ``NOISE_WAV`` unset → seeded white Gaussian.
     - ``NOISE_WAV=babble`` → a multi-talker BABBLE bed mixed from several OTHER
@@ -45,19 +61,13 @@ def _noise_source(length: int, seed: int) -> np.ndarray:
     - ``NOISE_WAV=<path>`` → a real noise recording (cafe/room) looped to length.
     """
     if NOISE_WAV == "babble":
-        from tapscribe.wav_predecode import load_recorder_wav_as_pcm
-
-        pool = [w for code in _fleurs.CONFIGS for w in sorted((_fleurs.CACHE / code).glob("*.wav"))]
+        pool = _babble_pool()
         rng = np.random.default_rng(seed)
         seg = np.zeros(length, dtype=np.float32)
         for i in rng.permutation(len(pool))[:4]:
-            clip = load_recorder_wav_as_pcm(pool[i])
-            seg += np.tile(clip, int(np.ceil(length / len(clip))))[:length]
+            seg += _tile_to(load_recorder_wav_as_pcm(pool[i]), length)
     elif NOISE_WAV:
-        from tapscribe.wav_predecode import load_recorder_wav_as_pcm
-
-        base = load_recorder_wav_as_pcm(NOISE_WAV)
-        seg = np.tile(base, int(np.ceil(length / len(base))))[:length]
+        seg = _tile_to(load_recorder_wav_as_pcm(NOISE_WAV), length)
     else:
         seg = np.random.default_rng(seed).standard_normal(length).astype(np.float32)
     rms = float(np.sqrt(np.mean(seg**2))) or 1e-9
@@ -75,13 +85,12 @@ def _add_noise(signal: np.ndarray, snr: str, seed: int) -> np.ndarray:
 def main() -> None:
     from faster_whisper import WhisperModel
 
-    from tapscribe.wav_predecode import load_recorder_wav_as_pcm
-
     gen = WhisperModel(GENERALIST, device="cpu", compute_type="int8")
     kind = f"real noise ({os.path.basename(NOISE_WAV)})" if NOISE_WAV else "white noise"
     print(f"=== noise robustness — {GENERALIST}, {N} clips/lang, {kind}, SNRs={SNRS} ===", flush=True)
     print("(each cell: language-detect accuracy / mean recall)\n", flush=True)
-    print("lang   " + "".join(f"{s + 'dB':>16}" for s in SNRS), flush=True)
+    headers = (s if s == "clean" else f"{s}dB" for s in SNRS)
+    print("lang   " + "".join(f"{h:>16}" for h in headers), flush=True)
     for code, (_, true) in _fleurs.CONFIGS.items():
         clips = _fleurs.fetch(code, n=N)
         signals = [load_recorder_wav_as_pcm(w) for w, _ in clips]

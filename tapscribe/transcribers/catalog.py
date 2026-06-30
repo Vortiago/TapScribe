@@ -289,11 +289,16 @@ def specialist_table_with_env_overrides(base: dict[str, str], environ: Mapping[s
     """A copy of `base` with `TAPSCRIBE_SPECIALIST_<LANG>=<model id>` overrides
     applied — the "operator-tunable" seam the comment above promises (e.g. a fast
     nb-whisper-tiny in a bridge E2E, or a future better Norwegian model, with no code
-    change). Env is operator-controlled (not request input), the same trust level as
-    the TAPSCRIBE_SUMMARIZE_* overrides; the chosen model is still registry-validated
-    by `cover_models` before it loads."""
+    change). Only EXISTING rows are repointed; adding a language is ADR-0010
+    territory, not a knob. Env is operator-controlled (not request input), and the
+    chosen model is still registry-validated by `cover_models` before it loads.
+
+    Read once at import into `SPECIALIST_MODELS` — a launch-time knob, unlike the
+    use-time TAPSCRIBE_SUMMARIZE_* overrides. So an in-process test must
+    `monkeypatch.setitem(SPECIALIST_MODELS, ...)`, NOT `setenv`, to take effect;
+    `setenv` only lands in a fresh process (the bridge E2Es' recorder subprocess)."""
     table = dict(base)
-    for lang in list(table):
+    for lang in base:
         if override := environ.get(f"TAPSCRIBE_SPECIALIST_{lang.upper()}", "").strip():
             table[lang] = override
     return table

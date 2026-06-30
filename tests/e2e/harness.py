@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import socket
 import threading
 import time
@@ -34,6 +35,14 @@ import websockets
 
 from tapscribe.auth import TAP_SUBPROTOCOL_PREFIX
 from tapscribe.recorder import Recorder
+
+_WORD_TOKENS_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def word_tokens(text: str, *, min_len: int = 4) -> set[str]:
+    """≥`min_len`-char lowercased word set — the shared e2e helper for soft
+    reference-overlap assertions (it used to be hand-copied into each test file)."""
+    return {m.group(0).lower() for m in _WORD_TOKENS_RE.finditer(text) if len(m.group(0)) >= min_len}
 
 
 @asynccontextmanager
