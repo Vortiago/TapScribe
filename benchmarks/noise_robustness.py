@@ -34,14 +34,30 @@ NOISE_WAV = os.environ.get("NOISE_WAV", "")
 
 
 def _noise_source(length: int, seed: int) -> np.ndarray:
-    """A unit-RMS noise segment of `length` samples — a real noise WAV looped to
-    fit (if NOISE_WAV is set) else seeded white Gaussian."""
-    if NOISE_WAV:
+    """A unit-RMS noise segment of `length` samples.
+
+    - ``NOISE_WAV`` unset → seeded white Gaussian.
+    - ``NOISE_WAV=babble`` → a multi-talker BABBLE bed mixed from several OTHER
+      cached FLEURS clips: real speech cross-talk, i.e. the actual interference
+      in a multi-person tap (several people talking at once) — the closest
+      achievable "real harder audio" given that ungated spontaneous da/no
+      corpora are gated or script-based.
+    - ``NOISE_WAV=<path>`` → a real noise recording (cafe/room) looped to length.
+    """
+    if NOISE_WAV == "babble":
+        from tapscribe.wav_predecode import load_recorder_wav_as_pcm
+
+        pool = [w for code in _fleurs.CONFIGS for w in sorted((_fleurs.CACHE / code).glob("*.wav"))]
+        rng = np.random.default_rng(seed)
+        seg = np.zeros(length, dtype=np.float32)
+        for i in rng.permutation(len(pool))[:4]:
+            clip = load_recorder_wav_as_pcm(pool[i])
+            seg += np.tile(clip, int(np.ceil(length / len(clip))))[:length]
+    elif NOISE_WAV:
         from tapscribe.wav_predecode import load_recorder_wav_as_pcm
 
         base = load_recorder_wav_as_pcm(NOISE_WAV)
-        reps = int(np.ceil(length / len(base)))
-        seg = np.tile(base, reps)[:length]
+        seg = np.tile(base, int(np.ceil(length / len(base))))[:length]
     else:
         seg = np.random.default_rng(seed).standard_normal(length).astype(np.float32)
     rms = float(np.sqrt(np.mean(seg**2))) or 1e-9
@@ -77,7 +93,12 @@ def main() -> None:
                 _, _, probs = gen.detect_language(yn)
                 pm = dict(probs)
                 det_ok += max(CAND, key=lambda c: pm.get(c, 0.0)) == true
-                text = " ".join(s.text for s in gen.transcribe(yn, language=true)[0])
+                # condition_on_previous_text=False stops noise-induced repetition
+                # loops from running away (they make Whisper decode unboundedly slow
+                # on noisy audio) — also the more realistic setting for short
+                # utterances, and what bounds this sweep to a tractable runtime.
+                segs, _info = gen.transcribe(yn, language=true, condition_on_previous_text=False)
+                text = " ".join(s.text for s in segs)
                 recalls.append(_metrics.recall(ref, text))
             cells.append(f"{det_ok}/{len(clips)} r{np.mean(recalls):.2f}")
         print(f"{true:<6} " + "".join(f"{c:>16}" for c in cells), flush=True)

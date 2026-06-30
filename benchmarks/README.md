@@ -63,9 +63,47 @@ its own language and routed to the right model (Danish/English → generalist,
 Norwegian → nb-whisper), speaker attribution intact, and a faithful per-speaker
 multilingual summary. The realistic per-utterance flow works end-to-end.
 
+### Noise robustness (whisper-small, N=4; cell = detect-accuracy · mean recall)
+
+*Detection — the routing key — is the robust part; recall degrades gracefully.*
+
+White noise:
+
+| lang | clean | 20 dB | 10 dB | 5 dB |
+|---|---|---|---|---|
+| da | 4/4 · 0.55 | 4/4 · 0.55 | 4/4 · 0.53 | 4/4 · 0.40 |
+| no | 4/4 · 0.70 | 4/4 · 0.67 | 4/4 · 0.53 | 4/4 · 0.38 |
+| sv | 4/4 · 0.86 | 4/4 · 0.76 | 4/4 · 0.58 | 4/4 · 0.40 |
+| en | 4/4 · 0.94 | 4/4 · 0.89 | 4/4 · 0.84 | 4/4 · 0.76 |
+
+Babble cross-talk (real multi-talker speech — the multi-person tap interference):
+
+| lang | clean | 20 dB | 10 dB | 5 dB |
+|---|---|---|---|---|
+| da | 4/4 · 0.55 | 4/4 · 0.55 | 4/4 · 0.52 | 4/4 · 0.32 |
+| no | 4/4 · 0.70 | 4/4 · 0.70 | 4/4 · 0.69 | 4/4 · 0.63 |
+| sv | 4/4 · 0.86 | 4/4 · 0.87 | 4/4 · 0.73 | 4/4 · 0.55 |
+| en | 4/4 · 0.94 | 4/4 · 0.89 | 4/4 · 0.85 | 3/4 · 0.76 |
+
+**Language detection survives noise: 16/16 (white) and 15/16 (babble) correct even
+at 5 dB SNR** across the confusable Scandinavian trio + English — so the routing
+foundation holds under harder audio; only transcription recall falls off (sharply
+at 5 dB). whisper-**small** is used for tractable CPU runtime, so these absolute
+recalls are LOWER bounds — production **large-v3-turbo is more robust** (its
+Danish white-noise row: detect 8/8, recall **0.81** clean → **0.66** at 5 dB, vs
+small's 0.55 → 0.40). The full large-v3-turbo table is a deliberate run (it
+decodes noisy audio slowly on CPU).
+
 ## Caveats
 
-FLEURS is clean read speech, so these are best-case numbers — real far-field tray
-audio will be harder. Mixed languages **within one WAV** (two speakers, no
-silence gap) is a rarer edge these don't cover; the honest fix there is
-segmentation/diarization (#78), not the transcribe or summary layer.
+FLEURS is clean read speech, so the routing/recall numbers above are best-case.
+On **genuinely harder _real_ audio**: ungated da/no SPEECH corpora with
+references are scarce — Common Voice's per-language configs aren't parquet-
+exported, NPSC and older Common Voice ship deprecated loading scripts (modern
+`datasets` won't load them), and VoxPopuli has no da/no. So the harder-audio
+story rests on the sweep above — white noise, **babble cross-talk** (real
+multi-talker speech, the actual multi-person interference), and the
+`NOISE_WAV=<path>` hook for any real room/meeting recording the operator supplies.
+Mixed languages **within one WAV** (two speakers, no silence gap) is a rarer edge
+none of these cover; the honest fix there is segmentation/diarization (#78), not
+the transcribe or summary layer.
