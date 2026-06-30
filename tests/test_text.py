@@ -432,3 +432,37 @@ def test_write_summarizer_config_api_key_preserve_on_omit(tmp_config_dir):
         }
     )
     assert stored["api_key"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Candidate languages (config/languages.txt) — the operator's DEFAULT
+# candidate-language set (ADR-0009). Same write-time-validated text-config
+# shape as batch-model.txt: a junk code must never reach the pipeline.
+# ---------------------------------------------------------------------------
+
+
+def test_read_languages_defaults_to_da_no_en_when_unset(tmp_config_dir):
+    # No languages.txt on disk → the bundled catch-all default, so a fresh
+    # install transcribes mixed da/no/en meetings with zero configuration.
+    assert text.read_languages() == ("da", "no", "en")
+
+
+def test_write_languages_round_trips_and_normalises(tmp_config_dir):
+    text.write_languages("da, NO  en\n")
+    # Stored stripped, lowercased, comma-joined; read back as a code tuple.
+    assert (tmp_config_dir / "languages.txt").read_text(encoding="utf-8") == "da,no,en"
+    assert text.read_languages() == ("da", "no", "en")
+
+
+def test_write_languages_rejects_non_catalog_code(tmp_config_dir):
+    with pytest.raises(ValueError):
+        text.write_languages("da, xx")
+    # Rejected wholesale — nothing lands on disk, read falls back to default.
+    assert text.read_languages() == ("da", "no", "en")
+
+
+def test_write_languages_empty_clears_back_to_default(tmp_config_dir):
+    text.write_languages("da")
+    assert text.read_languages() == ("da",)
+    text.write_languages("")
+    assert text.read_languages() == ("da", "no", "en")

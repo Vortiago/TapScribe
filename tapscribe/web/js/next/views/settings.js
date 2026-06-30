@@ -22,6 +22,7 @@
 import { tpl, pick, renderRegion } from "../../templates.js";
 import { getJson, putJson, wireConfigSave, wireSave } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
+import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 import { header } from "../shell.js";
 import * as configCard from "../../components/config-card.js";
 
@@ -39,13 +40,14 @@ const LIVE_FAMILY_LABELS = [
  *   rebuildEngine: (host: Element) => void,
  *   selectedSupport: () => { batch_prompt: boolean, batch_hotwords: boolean } | null,
  *   liveCatalog: import('../../types.js').ModelCatalog,
+ *   languageCatalog: import('../../types.js').LanguageCatalog,
  *   applyLiveModel: (model: string) => void,
  *   afterMutate: () => void,
  * }} ctx
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState) => void, rebuildEngine: () => void }}
  */
 export function build(ctx) {
-  const { rebuildEngine, selectedSupport, liveCatalog, applyLiveModel, afterMutate } = ctx;
+  const { rebuildEngine, selectedSupport, liveCatalog, languageCatalog, applyLiveModel, afterMutate } = ctx;
   const frag = tpl("tpl-next-view-settings");
 
   header(pick(frag, "head"), {
@@ -78,6 +80,23 @@ export function build(ctx) {
   const liveCardHost = pick(frag, "liveCardHost");
 
   rebuildEngine(engineHost);
+
+  // ---- Default candidate languages (ADR-0009) -------------------------------
+  // A multi-select over the static language catalog. Built + filled once;
+  // seeded ONCE from the first poll carrying `languages.default`, then never
+  // re-touched (the summarizer card's interaction-hold discipline), so a poll
+  // can't clobber an in-progress edit. Save persists the global default.
+  const langSel = /** @type {HTMLSelectElement} */ (pick(frag, "langSel"));
+  const langSave = /** @type {HTMLButtonElement} */ (pick(frag, "langSave"));
+  const langStatus = pick(frag, "langStatus");
+  fillLanguageOptions(langSel, languageCatalog);
+  let langSeeded = false;
+  wireSave({
+    btn: langSave,
+    status: langStatus,
+    put: () => putJson("/api/config/languages", { content: selectedLanguages(langSel).join(",") }),
+    onSuccess: () => afterMutate(),
+  });
 
   // ---- Summarizer-default card (#84) ----------------------------------------
   // Built ONCE — every control is interactive, so there is no renderRegion and
@@ -293,6 +312,14 @@ export function build(ctx) {
     if (!sdSeeded && j.summarizer_default) {
       sdSeeded = true;
       sdSeed(j.summarizer_default);
+    }
+
+    // Seed the default-languages multi-select once from the first poll carrying
+    // the saved default (flag flips before the seed so a re-entrant tick can't
+    // double-seed); thereafter it's the operator's to edit, untouched by polls.
+    if (!langSeeded && j.languages) {
+      langSeeded = true;
+      setSelectedLanguages(langSel, j.languages.default || []);
     }
     const n = j.default_override_counts?.summarizer || 0;
     sdOverrides.textContent = n ? `· ${n} session${n === 1 ? "" : "s"} override this` : "";

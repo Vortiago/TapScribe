@@ -49,6 +49,10 @@ let selectedSessionId = null;
 let modelCatalog = { context: "batch", available_backends: [], models: [] };
 /** @type {import('../types.js').ModelCatalog} */
 let liveModelCatalog = { context: "live", available_backends: [], models: [] };
+// Candidate-language catalog (ADR-0009) — the selectable languages for the
+// per-meeting + global pickers. Loaded once at boot alongside the models.
+/** @type {import('../types.js').LanguageCatalog} */
+let languageCatalog = { languages: [], default: [] };
 
 // Engine states: Settings holds the global batch DEFAULT; Transcript holds the
 // engine for the open session AND drives its transcribe jobs (one WAV / session
@@ -101,6 +105,7 @@ function metaFor(s) {
     aliases: m.aliases || {},
     prompt: m.prompt || "",
     hotwords: m.hotwords || "",
+    languages: m.languages || [],
   };
 }
 
@@ -352,6 +357,7 @@ function buildView(view, session) {
   if (view === "capture") {
     const b = captureView.build({
       liveCatalog: liveModelCatalog,
+      languageCatalog,
       metaFor,
       onLiveStart: liveStart,
       onLiveStop: liveStop,
@@ -364,6 +370,7 @@ function buildView(view, session) {
       rebuildEngine: renderDefaultEngine,
       selectedSupport: defaultEngineSupport,
       liveCatalog: liveModelCatalog,
+      languageCatalog,
       applyLiveModel,
       afterMutate: () => { refresh(); },
     });
@@ -567,12 +574,14 @@ await loadTemplates(
 
 async function loadModelCatalogs() {
   try {
-    const [batchRes, liveRes] = await Promise.all([
+    const [batchRes, liveRes, langRes] = await Promise.all([
       fetch("/api/models?context=batch", { cache: "no-store" }),
       fetch("/api/models?context=live", { cache: "no-store" }),
+      fetch("/api/languages", { cache: "no-store" }),
     ]);
     if (batchRes.ok) modelCatalog = await batchRes.json();
     if (liveRes.ok) liveModelCatalog = await liveRes.json();
+    if (langRes.ok) languageCatalog = await langRes.json();
     seedEngineModels();
     // Drop any built views that captured the empty catalog so they rebuild
     // with real models on the next render.

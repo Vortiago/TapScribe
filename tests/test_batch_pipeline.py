@@ -253,6 +253,50 @@ async def test_pipeline_end_to_end_produces_stripped_transcript_and_summary(reco
     assert recorder_under_test.jobs.get("s") is None
 
 
+async def test_pipeline_transcribe_stage_honours_candidate_languages(recorder_under_test, monkeypatch):
+    """ADR-0009: the end-of-meeting pipeline's transcribe stage resolves the
+    operator's candidate-language default and applies it to the generalist —
+    here a singleton default pins it, driving the model with source_lang=that
+    code on every stripped region. Proves the pipeline path (not just
+    transcribe_session) honours the set."""
+    from conftest import TranscriberStub  # type: ignore[import-not-found]
+    from wav_builders import seed_session  # type: ignore[import-not-found]
+
+    from tapscribe.text import write_languages
+
+    write_languages("da")  # the meeting is declared Danish-only → a pin
+    stub = TranscriberStub(backend="fake-be", model="fake-m", text="hej med dig")
+    monkeypatch.setattr(
+        "tapscribe.batch_transcribe.load_transcriber",
+        lambda *a, **kw: stub,  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "tapscribe.batch_pipeline.load_summarizer",
+        lambda **kw: _NoopSummarizer(),  # noqa: ARG005
+    )
+
+    seed_session(recorder_under_test.recordings_dir, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    task = await start_pipeline(recorder_under_test, PipelineRequest(session="s"))
+    await task
+
+    record = recorder_under_test.pipelines.get("s")
+    assert record is not None and record.state == "done", (record.stage, record.error)
+    # Every region the transcribe stage processed was pinned to Danish.
+    assert stub.seen_source_lang, "transcribe stage never ran"
+    assert set(stub.seen_source_lang) == {"da"}, stub.seen_source_lang
+
+
+class _NoopSummarizer:
+    @staticmethod
+    def summarize(text, *, prompt):  # noqa: ARG004
+        class _R:
+            @staticmethod
+            def to_mapping():
+                return {"summary": "ok", "source": "local", "model": "fake-sum", "took_ms": 1}
+
+        return _R()
+
+
 async def test_pipeline_zero_speech_session_fails_at_transcribe_stage(recorder_under_test):
     """REAL strip + transcribe stages: a session whose WAVs contain no speech
     strips to nothing (no stripped/ dir at all), so the chain fails at the

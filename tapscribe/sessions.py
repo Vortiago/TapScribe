@@ -78,6 +78,17 @@ def _coerce_aliases(value: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items() if isinstance(v, str)}
 
 
+def _coerce_languages(value: Any) -> list[str]:
+    """Normalise a stored `languages` value to lowercased ISO codes, in order,
+    dropping non-strings and duplicates. Lenient by design — the write path
+    already validated against the catalog, and the resolution layer
+    (`_effective_candidate_languages`) re-filters, so a hand-edited junk code
+    is harmless here. Anything but a list reads as "no override"."""
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(v.strip().lower() for v in value if isinstance(v, str) and v.strip()))
+
+
 def read_session_meta(session: str) -> dict[str, Any]:
     """Return the per-session metadata dict: operator-editable display
     label, speaker aliases, and per-session batch prompt/hotwords
@@ -89,6 +100,9 @@ def read_session_meta(session: str) -> dict[str, Any]:
     out: dict[str, Any] = {k: data[k] for k in _META_STRING_FIELDS if isinstance(data.get(k), str)}
     if isinstance(data.get("aliases"), dict):
         out["aliases"] = _coerce_aliases(data["aliases"])
+    langs = _coerce_languages(data.get("languages"))
+    if langs:
+        out["languages"] = langs
     return out
 
 
@@ -112,10 +126,22 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
         raise HTTPException(404, "session not found")
     os.makedirs(real_parent, exist_ok=True)
     existing = read_session_meta(session)
-    allowed = {"aliases", *_META_STRING_FIELDS}
+    allowed = {"aliases", "languages", *_META_STRING_FIELDS}
     merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
     sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
     sanitized["aliases"] = _coerce_aliases(merged.get("aliases"))
+    # The per-meeting candidate-language override (ADR-0009) is a list, not a
+    # string field. Validate every code against the catalog at WRITE time (like
+    # the global config/languages writer) so a junk code can't reach the
+    # pipeline's per-region run via this endpoint.
+    languages = _coerce_languages(merged.get("languages"))
+    if languages:
+        from .transcribers.catalog import is_candidate_language
+
+        for code in languages:
+            if not is_candidate_language(code):
+                raise HTTPException(400, f"unknown language code: {code!r} (not in the catalog)")
+        sanitized["languages"] = languages
     for capped_field in ("prompt", "hotwords", "summary_prompt"):
         try:
             validate_config_text(sanitized[capped_field])

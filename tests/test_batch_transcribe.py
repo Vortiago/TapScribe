@@ -526,3 +526,161 @@ def test_transcribe_specific_errors_inherit_base():
 def test_relocated_errors_are_decoupled_from_transcribe_base():
     for cls in (SessionBusy, NoUsableWavs, InvalidRange):
         assert not issubclass(cls, BatchTranscribeError)
+
+
+# ---------------------------------------------------------------------------
+# Candidate-language resolution + apply (ADR-0009). The operator declares a
+# candidate-language *set* per meeting; the batch path turns it into a per-
+# region language for the generalist: a singleton set pins (source_lang); a
+# multi-language set defers to a per-region constrained auto-detect that snaps
+# the detected language to the set. Both transcribe_session and the pipeline's
+# transcribe stage go through transcribe_session_locked, so testing it here
+# covers both entry points.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingStub:
+    """A Transcriber stub that records the `source_lang` each transcribe() call
+    receives, and echoes it into the result like the real adapters do (so the
+    cache's source_language match key behaves realistically). NOT a constrained
+    language detector — used for the plain / pinned paths."""
+
+    name = "fake"
+    device = "test-device"
+
+    def __init__(self, *, backend="fake-be", model="fake-m"):
+        self.backend = backend
+        self.model_name = model
+        self.seen_source_lang: list[str | None] = []
+
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+        from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result
+
+        self.seen_source_lang.append(source_lang)
+        return build_transcription_result(
+            self,
+            text="hi",
+            segments=(TranscriptionSegment(start=0.0, end=1.0, text="hi"),),
+            duration=1.0,
+            language=source_lang or "en",
+            source_lang=source_lang,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+        )
+
+
+class _DetectorStub(_RecordingStub):
+    """Adds the constrained-detection capability. Records the candidate set it
+    was asked to snap to, and returns a fixed winner (so a test can assert the
+    constrained pick flows through to transcribe as the pin)."""
+
+    def __init__(self, *, winner, **kw):
+        super().__init__(**kw)
+        self.winner = winner
+        self.seen_candidates: list[tuple[str, ...]] = []
+
+    def detect_constrained_language(self, path, candidate_languages):  # noqa: ARG002
+        self.seen_candidates.append(tuple(candidate_languages))
+        return self.winner
+
+
+def _session_request(model="fake-m"):
+    return BatchSessionRequest(
+        session="s",
+        source="original",
+        model=model,
+        backend="cpu",
+        from_iso=None,
+        to_iso=None,
+        force=False,
+        source_lang=None,
+        target_lang=None,
+    )
+
+
+async def _run_session(recorder, stub, install_stub_transcriber):
+    install_stub_transcriber(stub)
+    seed_session(recorder.recordings_dir, "s", [WAV_NAME])
+    selection = select_session_wavs(
+        recorder.recordings_dir / "s", from_iso=None, to_iso=None, source="original"
+    )
+    async with recorder.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(_session_request(), selection=selection, job=handle)
+
+
+async def test_singleton_candidate_set_pins_that_language(recorder_under_test, install_stub_transcriber):
+    """A meeting whose candidate set is a single language pins it directly —
+    the transcriber is driven with source_lang=that code, on every backend."""
+    from tapscribe.text import write_languages
+
+    write_languages("da")
+    stub = _RecordingStub()
+    await _run_session(recorder_under_test, stub, install_stub_transcriber)
+    assert stub.seen_source_lang == ["da"]
+
+
+async def test_manual_single_wav_transcribe_ignores_candidate_languages(
+    recorder_under_test, install_stub_transcriber
+):
+    """ADR-0009 scope: the candidate-language policy applies to the batch SESSION
+    path only. A manual single-WAV transcribe stays unchanged — even with a
+    singleton global default set, the transcriber is driven with the request's
+    own source_lang (None here), not the meeting's candidate set."""
+    from tapscribe.text import write_languages
+
+    write_languages("da")
+    stub = _RecordingStub()
+    install_stub_transcriber(stub)
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    await transcribe_one(
+        recorder_under_test,
+        BatchOneRequest(
+            session="s",
+            name=WAV_NAME,
+            source="original",
+            model="fake-m",
+            backend="cpu",
+            source_lang=None,
+            target_lang=None,
+        ),
+    )
+    assert stub.seen_source_lang == [None]
+
+
+async def test_multi_candidate_set_constrains_detection_to_the_set(
+    recorder_under_test, install_stub_transcriber
+):
+    """A multi-language meeting defers to a per-region constrained auto-detect:
+    the cache loop asks the adapter to snap the language to the candidate set,
+    and drives transcribe with that winner — never a language outside the set
+    (no drift to e.g. sv)."""
+    from tapscribe.text import write_languages
+
+    write_languages("da, no")
+    stub = _DetectorStub(winner="no")
+    await _run_session(recorder_under_test, stub, install_stub_transcriber)
+    # The adapter was asked to choose WITHIN exactly the declared set…
+    assert stub.seen_candidates == [("da", "no")]
+    # …and its in-set winner became the pin handed to transcribe.
+    assert stub.seen_source_lang == ["no"]
+
+
+async def test_session_meta_languages_override_beats_global_default(
+    recorder_under_test, install_stub_transcriber
+):
+    """A per-meeting `languages` override takes precedence over the global
+    default — here it narrows the meeting to a single language, which pins."""
+    from tapscribe.sessions import write_session_meta
+    from tapscribe.text import write_languages
+
+    write_languages("da, no")  # global default is multi
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    write_session_meta("s", {"languages": ["en"]})  # this meeting is English-only
+    stub = _RecordingStub()
+    install_stub_transcriber(stub)
+    selection = select_session_wavs(
+        recorder_under_test.recordings_dir / "s", from_iso=None, to_iso=None, source="original"
+    )
+    async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(_session_request(), selection=selection, job=handle)
+    assert stub.seen_source_lang == ["en"]

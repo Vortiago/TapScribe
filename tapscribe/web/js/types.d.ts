@@ -42,6 +42,10 @@ export interface AppState {
   // API-key fields must never appear here). "" / null = unset (built-ins
   // apply). Seeds the Settings card and the Summary view's effective config.
   summarizer_default: SummarizerDefault;
+  // The operator's DEFAULT candidate-language set (ADR-0009). The full
+  // selectable catalog is served once via GET /api/languages; this carries only
+  // the small current value the picker pre-selects.
+  languages: { path: string; default: string[] };
   hallucinations: HallucinationsConfig;
 }
 
@@ -167,6 +171,9 @@ export interface SessionMeta {
   // fields stay global). "" = no override → the global default applies.
   summary_source?: string;
   summary_prompt?: string;
+  // Per-meeting candidate-language override (ADR-0009). Absent/empty = no
+  // override → the global default applies.
+  languages?: string[];
   aliases?: Record<string, string>;
 }
 
@@ -525,6 +532,15 @@ export interface EffectiveMeta {
   aliases: Record<string, string>;
   prompt: string;
   hotwords: string;
+  languages: string[];
+}
+
+// GET /api/languages — the candidate-language catalog (ADR-0009): the full
+// selectable allowlist (code + display name) plus the operator's current
+// global default. Fetched once at boot (like ModelCatalog).
+export interface LanguageCatalog {
+  languages: { code: string; name: string }[];
+  default: string[];
 }
 
 // --- Component ctx objects (passed from main.js into each render() call) ---

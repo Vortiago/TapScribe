@@ -257,6 +257,49 @@ def read_hotwords() -> str:
     return _read_config_text_cached(config.HOTWORDS_FILE)
 
 
+# A candidate-language set is a small comma/space-separated bag of ISO codes.
+_LANG_SPLIT_RE = re.compile(r"[,\s]+")
+
+
+def parse_language_codes(raw: str) -> list[str]:
+    """Split a comma/space-separated language string into lowercased ISO codes,
+    in order, dropping blanks. Shared by the global-config reader/writer and the
+    per-session override validator so both normalise identically."""
+    return [c.strip().lower() for c in _LANG_SPLIT_RE.split(raw or "") if c.strip()]
+
+
+def read_languages() -> tuple[str, ...]:
+    """Return the operator's DEFAULT candidate-language set from languages.txt
+    (ADR-0009) as a code tuple, e.g. ("da", "no", "en"). Non-catalog codes are
+    dropped; an empty or all-invalid file falls back to the bundled catch-all
+    default so the feature works with no configuration."""
+    from .transcribers.catalog import DEFAULT_CANDIDATE_LANGUAGES, is_candidate_language
+
+    codes = parse_language_codes(_read_config_text_cached(config.LANGUAGES_FILE))
+    valid = tuple(dict.fromkeys(c for c in codes if is_candidate_language(c)))
+    return valid or DEFAULT_CANDIDATE_LANGUAGES
+
+
+def write_languages(content: str) -> None:
+    """Persist the default candidate-language set to languages.txt, stored as
+    deduped lowercased comma-joined codes. Empty clears the override (back to
+    the bundled default).
+
+    Like write_batch_model, validation happens at WRITE time: the set feeds the
+    end-of-meeting pipeline's per-region language run with no operator in the
+    loop, so a code outside the catalog must never land on disk (`ValueError`
+    → the config PUT's 400). The catalog import is lazy to keep this module
+    dependency-free for every other caller."""
+    from .transcribers.catalog import is_candidate_language
+
+    codes = parse_language_codes(content)
+    for c in codes:
+        if not is_candidate_language(c):
+            raise ValueError(f"unknown language code: {c!r} (not in the catalog)")
+    deduped = list(dict.fromkeys(codes))
+    _write_text_file_atomic(config.LANGUAGES_FILE, validate_config_text(",".join(deduped)))
+
+
 # Cap pasted prompts/hotwords at 4000 chars. Whisper's init_prompt is
 # capped around 224 tokens (~1k chars), so anything bigger is almost
 # certainly a paste mistake (transcript dump, log) — fail at the API

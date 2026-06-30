@@ -262,6 +262,23 @@ _PARAKEET_LANG_PAIRS: tuple[tuple[str, str], ...] = (
 _PARAKEET_LANG_CODES: tuple[str, ...] = tuple(code for code, _ in _PARAKEET_LANG_PAIRS)
 
 
+# ── Candidate languages (ADR-0009) ──────────────────────────────────────────
+# The operator declares a *candidate-language set* per meeting; the catalog's
+# language vocabulary is the allowlist that set validates against. The bundled
+# default is the catch-all {da, no, en} so a fresh install handles the
+# motivating mixed Danish/Norwegian/English meeting with zero configuration.
+DEFAULT_CANDIDATE_LANGUAGES: tuple[str, ...] = ("da", "no", "en")
+
+# Display names for every concrete language code that appears across the
+# catalog. The Parakeet pairs cover most; nb-whisper contributes Norwegian and
+# Voxtral contributes Hindi. Single source of truth for the picker's labels.
+_LANGUAGE_NAMES: dict[str, str] = {
+    **{code: name for code, name in _PARAKEET_LANG_PAIRS},
+    "no": "Norwegian",
+    "hi": "Hindi",
+}
+
+
 # ---------------------------------------------------------------------------
 # Loader thunks — lazy imports so the heavy adapter modules don't load until
 # the operator actually picks that backend.
@@ -705,3 +722,32 @@ REGISTRY: TranscriberRegistry = TranscriberRegistry(_DEFAULT_ENTRIES)
 # single source the /api/transcribe* routes and the end-of-meeting pipeline
 # all resolve through.
 DEFAULT_BATCH_MODEL: str = "small.en"
+
+
+def candidate_language_codes() -> tuple[str, ...]:
+    """Every concrete language a catalog model declares (the "auto" auto-detect
+    sentinel dropped) — the allowlist a candidate-language set
+    (config/languages.txt or a per-meeting override) validates against, and the
+    option list the dashboard picker offers. Ordered with the default set
+    {da, no, en} first, then the rest alphabetically by display name."""
+    codes: set[str] = set()
+    for entry in REGISTRY.entries():
+        for code in entry.languages:
+            if code != "auto":
+                codes.add(code)
+    primary = [c for c in DEFAULT_CANDIDATE_LANGUAGES if c in codes]
+    rest = sorted((c for c in codes if c not in primary), key=language_display_name)
+    return tuple(primary + rest)
+
+
+def language_display_name(code: str) -> str:
+    """Human-readable label for a language code; falls back to the code itself
+    for anything the catalog declares without a name."""
+    return _LANGUAGE_NAMES.get(code, code)
+
+
+def is_candidate_language(code: str) -> bool:
+    """True iff `code` is a selectable candidate language (in the catalog
+    vocabulary). The single membership check the config + session-meta writers
+    validate against."""
+    return code in candidate_language_codes()

@@ -32,6 +32,7 @@ from typing import Any
 from . import hallucinations as hallucinations_mod
 from .text import parse_iso, parse_wav_speaker_slug, parse_wav_start
 from .transcribers.base import (
+    ConstrainedLanguageDetector,
     Transcriber,
     TranscriptionResult,
     TranscriptionSegment,
@@ -276,6 +277,7 @@ def cached_transcribe(
     hallucination_rules: list[dict[str, Any]],
     source_lang: str | None = None,
     target_lang: str | None = None,
+    candidate_languages: tuple[str, ...] = (),
     force: bool = False,
     source: str = "original",
 ) -> CachedTranscription:
@@ -309,12 +311,20 @@ def cached_transcribe(
             existing is not None
             and existing.wav_size == size
             and existing.wav_mtime_ns == mtime_ns
-            and (existing.result.source_language or "") == (source_lang or "")
             and (existing.result.target_language or "") == (target_lang or "")
             and (existing.result.initial_prompt_used or "") == (initial_prompt or "")
             and (existing.result.hotwords_used or "") == (hotwords or "")
+            and _language_cache_match(existing.result.source_language or "", source_lang, candidate_languages)
         ):
             return existing
+
+    # On a miss, snap a multi-language candidate set to a concrete per-region
+    # language so the chosen language flows through the existing `source_lang`
+    # channel (the cache key + result.source_language). A singleton set or an
+    # explicit pin already arrives as `source_lang`; adapters without
+    # constrained detection leave it None and auto-detect. See ADR-0009.
+    if source_lang is None and candidate_languages and isinstance(transcriber, ConstrainedLanguageDetector):
+        source_lang = transcriber.detect_constrained_language(wav_path, tuple(candidate_languages)) or None
 
     started = datetime.now(UTC)
     raw = transcriber.transcribe(
@@ -345,6 +355,27 @@ def cached_transcribe(
     )
     _write_entry(wav_path, cached, backend=backend, model=model)
     return cached
+
+
+def _language_cache_match(stored: str, source_lang: str | None, candidate_languages: tuple[str, ...]) -> bool:
+    """Does a cached entry's stored source language still satisfy this call's
+    language request? (ADR-0009)
+
+    - explicit pin (incl. a resolved singleton set): the languages must match;
+    - constrained multi-language set: a stored language still WITHIN the current
+      candidate set is valid — widening the set keeps the cache, switching to a
+      disjoint set invalidates it;
+    - neither (legacy / plain auto-detect): both empty, the unchanged behaviour.
+    """
+    if source_lang is not None:
+        return stored == source_lang
+    if candidate_languages:
+        # A pinned-in-set entry is valid; so is an unpinned auto-detect
+        # ("" — the outcome for an adapter without constrained detection, which
+        # re-running would only reproduce). Only a pin OUTSIDE the current set
+        # (the operator switched to a disjoint set) invalidates.
+        return stored == "" or stored in candidate_languages
+    return stored == ""
 
 
 def _wav_fingerprint(wav_path: Path) -> tuple[int, int]:

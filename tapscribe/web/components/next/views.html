@@ -103,6 +103,11 @@
           <textarea class="ta" rows="2" data-slot="capHotwords" data-cfg-key="hotwords-ovr"></textarea>
           <div class="field__row"><button class="act act--sm" type="button" data-slot="capHotwordsSave">save</button><span class="dim mono" data-slot="capHotwordsStatus"></span></div>
         </div>
+        <div class="field">
+          <label for="capLanguagesSel">languages override <span class="dim">(blank → global)</span></label>
+          <select id="capLanguagesSel" class="sel" multiple size="3" aria-label="languages override" data-slot="capLanguages"></select>
+          <div class="field__row"><button class="act act--sm" type="button" data-slot="capLanguagesSave">save</button><span class="dim mono" data-slot="capLanguagesStatus"></span></div>
+        </div>
         <div class="dim mono ovr-note" data-slot="ovrNote"></div>
       </div>
     </div>
@@ -348,7 +353,20 @@
          stack scrolls as one page, so it does NOT scroll its own body. -->
     <div class="panel panel--primary">
       <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Batch engine</div><div class="panel__hint mono" data-slot="configHeaderNote"></div></div>
-      <div class="panel__body"><div class="eng" data-slot="engineHost"></div><div class="cfg-grid" data-slot="configGrid" style="margin-top:11px"></div></div>
+      <div class="panel__body">
+        <div class="eng" data-slot="engineHost"></div>
+        <div class="cfg-grid" data-slot="configGrid" style="margin-top:11px"></div>
+        <!-- Default candidate languages (ADR-0009). Built + seeded ONCE from the
+             first poll, then never re-touched (interaction hold) — so a poll
+             can't clobber an in-progress selection. Save persists the global
+             default via PUT /api/config/languages; sessions override it in
+             Capture. -->
+        <div class="field" data-slot="langField" style="margin-top:13px">
+          <label for="nextDefaultLanguages">default languages <span class="dim">— per-region candidate set; sessions can override</span></label>
+          <select id="nextDefaultLanguages" class="sel" multiple size="5" aria-label="default languages" data-slot="langSel"></select>
+          <div class="field__row"><button class="act act--sm" type="button" data-slot="langSave">save</button><span class="dim mono" data-slot="langStatus"></span></div>
+        </div>
+      </div>
     </div>
   </div>
 </template>

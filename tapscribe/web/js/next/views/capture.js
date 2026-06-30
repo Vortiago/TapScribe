@@ -20,6 +20,7 @@ import { putJson, postJson, del } from "../../api.js";
 import { header, strong, inline } from "../shell.js";
 import * as liveFeed from "../../components/live-feed.js";
 import * as liveChannel from "../../components/live-channel.js";
+import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 
 /** @param {string} s */
 const clip = (s) => (s.length > 60 ? s.slice(0, 60) + "…" : s);
@@ -35,6 +36,7 @@ const setHealth = (el, value) => {
 /**
  * @param {{
  *   liveCatalog: import('../../types.js').ModelCatalog,
+ *   languageCatalog: import('../../types.js').LanguageCatalog,
  *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
  *   onLiveStart: () => void,
  *   onLiveStop: () => void,
@@ -43,7 +45,7 @@ const setHealth = (el, value) => {
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { liveCatalog, metaFor, onLiveStart, onLiveStop, afterMutate } = ctx;
+  const { liveCatalog, languageCatalog, metaFor, onLiveStart, onLiveStop, afterMutate } = ctx;
   const frag = tpl("tpl-next-view-capture");
 
   const headHost = pick(frag, "head");
@@ -71,7 +73,14 @@ export function build(ctx) {
   const hotwordsSave = /** @type {HTMLButtonElement} */ (pick(frag, "capHotwordsSave"));
   const promptStatus = pick(frag, "capPromptStatus");
   const hotwordsStatus = pick(frag, "capHotwordsStatus");
+  const languagesSel = /** @type {HTMLSelectElement} */ (pick(frag, "capLanguages"));
+  const languagesSave = /** @type {HTMLButtonElement} */ (pick(frag, "capLanguagesSave"));
+  const languagesStatus = pick(frag, "capLanguagesStatus");
   const ovrNote = pick(frag, "ovrNote");
+
+  // The candidate-language options are a static catalog — fill once at build
+  // (the per-tick update only re-seeds the SELECTION on a session change).
+  fillLanguageOptions(languagesSel, languageCatalog);
 
   // Latest poll snapshot + focused session, refreshed by update(). The wired
   // handlers below read these so a click always uses the current state.
@@ -121,6 +130,24 @@ export function build(ctx) {
   };
   wireOverride("prompt", promptTa, promptSave, promptStatus);
   wireOverride("hotwords", hotwordsTa, hotwordsSave, hotwordsStatus);
+
+  // Languages override save → PUT /api/session-meta/{id} {languages:[...]}.
+  // An empty selection clears the override (falls back to the global default).
+  // Same shape as wireOverride but the value is the multi-select's codes, not
+  // a textarea string.
+  languagesSave.addEventListener("click", async () => {
+    if (!session) return;
+    const sid = session.session;
+    languagesSave.disabled = true;
+    languagesStatus.textContent = "saving…";
+    try {
+      await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { languages: selectedLanguages(languagesSel) });
+      languagesStatus.textContent = "saved";
+      setTimeout(() => { if (languagesStatus.textContent === "saved") languagesStatus.textContent = ""; }, 1500);
+    } catch (e) {
+      languagesStatus.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+    } finally { languagesSave.disabled = false; afterMutate(); }
+  });
 
   // live-feed has a module-level signature cache; clear it once at build so
   // the first update populates this view's fresh (empty) shell.
@@ -193,9 +220,14 @@ export function build(ctx) {
       const meta = sess ? metaFor(sess) : null;
       promptTa.value = meta?.prompt || "";
       hotwordsTa.value = meta?.hotwords || "";
+      // Seed the candidate-language override from this session's meta (empty =
+      // no override → inherits the global default). Re-seeded only on a session
+      // switch, so a poll never clobbers an in-progress selection edit.
+      setSelectedLanguages(languagesSel, meta?.languages || []);
       const disabled = !sess;
       promptTa.disabled = hotwordsTa.disabled = disabled;
       promptSave.disabled = hotwordsSave.disabled = disabled;
+      languagesSel.disabled = languagesSave.disabled = disabled;
       ovrNote.textContent = sess
         ? "blank → inherits the global Settings default"
         : "no session selected — overrides need a session";

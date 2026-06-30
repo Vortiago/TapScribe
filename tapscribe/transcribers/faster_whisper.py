@@ -70,6 +70,42 @@ class FasterWhisperTranscriber:
             device=device_label,
         )
 
+    def detect_constrained_language(self, path: Path, candidate_languages: tuple[str, ...]) -> str | None:
+        """Snap Whisper's language auto-detection to the meeting's candidate set
+        (ADR-0009): return the highest-probability language WITHIN
+        `candidate_languages`, so a multi-language meeting never drifts to a
+        language the operator didn't declare. None when there's nothing to
+        constrain or this checkpoint can't emit any candidate.
+
+        Runs a cheap detect-only pass (one mel window) over the pre-decoded
+        recorder PCM — the same no-ffmpeg decode path the MLX adapters use —
+        and restricts the argmax to the set. A fixed-language checkpoint
+        (`.en` / `nb-*`) skips the pass entirely and answers from its name
+        hint."""
+        cands = tuple(c for c in candidate_languages if c and c != "auto")
+        if not cands:
+            return None
+        # A fixed-language checkpoint can only ever emit its own language —
+        # don't waste a detect pass, and don't claim a candidate it can't produce.
+        hint = default_language_for(self.model_name)
+        if hint is not None:
+            return hint if hint in cands else None
+
+        from ..wav_predecode import load_recorder_wav_as_pcm
+
+        try:
+            audio = load_recorder_wav_as_pcm(path)
+        except RuntimeError:
+            # A non-recorder WAV (different rate/channels/width) — the cheap
+            # stdlib pre-decode refuses it. `transcribe()` still handles such a
+            # file via faster-whisper's own decoder, so fall back to None
+            # (unconstrained auto-detect, the pre-ADR-0009 behaviour) rather than
+            # failing the whole transcribe just to constrain the language.
+            return None
+        _, _, all_language_probs = self._model.detect_language(audio)
+        prob = {lang: p for lang, p in all_language_probs}
+        return max(cands, key=lambda c: prob.get(c, 0.0))
+
     def transcribe(
         self,
         path: Path,

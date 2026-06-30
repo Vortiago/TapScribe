@@ -419,6 +419,14 @@ body::before { display: none; }
 .grid { display: grid; gap: 11px; align-items: start; }
 .cols-tx { grid-template-columns: minmax(0, 1.9fr) minmax(300px, 0.9fr); }
 .cols-cap { grid-template-columns: minmax(0, 1fr) 340px; }
+/* Capture's primary row (captions | live-channel aside) is a `.fillcol`, so it
+   shrinks to absorb the squeeze when the rigid bottom row (`.noshrink`) grows.
+   But `.fillcol`'s `min-height: 0` lets it collapse BELOW the aside's content —
+   the live-channel form then overflows visibly and the later-painted bottom row
+   covers its Start button. Floor this row at its own content (the aside) so it
+   bottoms out there and the overflow falls to `.work__inner`'s scroll instead
+   (the documented `.noshrink` contract), keeping the aside fully clickable. */
+.grid.cols-cap.fillcol { min-height: min-content; }
 /* Settings board — balanced columns (engine | prompts+rules) that fill the
    workspace width, not the 1.9/0.9 transcript split. The config column is a
    touch wider since it carries the prompt + hotwords editors + the rules. */
