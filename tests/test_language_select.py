@@ -2,9 +2,10 @@
 
 ADR-0010 slice 2: when the cover runs ≥2 models on a region, a pluggable
 `LanguageSelector` picks the winning transcript, which becomes that WAV's
-`_primary` sidecar. The default is acoustic confidence (avg_logprob), valid
-because the v1 pair is same-family Whisper. These tests pin the selection
-LOGIC deterministically; the real-model wiring is proven in the e2e suite.
+`_primary` sidecar. The default is `SpecialistRoutingSelector` (route by the
+generalist's detected language); `AcousticConfidenceSelector` is a non-default
+same-family seam alternative. These tests pin the selection LOGIC
+deterministically; the real-model wiring is proven in the e2e suite.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def _candidate(
     )
 
 
-def test_default_selector_routes_specialists_then_falls_back_to_acoustic():
+def test_default_selector_is_specialist_routing():
     sel = default_language_selector()
     assert isinstance(sel, SpecialistRoutingSelector)
     assert isinstance(sel, LanguageSelector)
@@ -76,22 +77,25 @@ def test_routes_to_the_specialist_for_the_detected_language_over_a_more_confiden
     assert winner.result.model == nb
 
 
-def test_falls_back_to_acoustic_when_detected_language_has_no_specialist():
-    """A Danish region (no Danish specialist) is decided by acoustic confidence —
-    the generalist's confident Danish beats nb-whisper's Norwegianised version."""
+def test_keeps_the_generalist_when_a_more_confident_wrong_language_specialist_runs():
+    """The bug the real-audio tests caught: an English region (detected 'en', no
+    English specialist) where nb-whisper transcribed the audio as Norwegian with
+    HIGHER avg_logprob than the generalist's correct English. The selector must
+    keep the generalist — a specialist may win ONLY a region that IS its language,
+    never out-confidence its way onto English/Danish audio."""
     from tapscribe.transcribers.catalog import SPECIALIST_MODELS
 
     nb = SPECIALIST_MODELS["no"]
-    generalist = _candidate("large-v3-turbo", [(0.0, 5.0, -0.20)], language="da")
-    specialist = _candidate(nb, [(0.0, 5.0, -0.80)], language="no")
+    generalist = _candidate("tiny.en", [(0.0, 5.0, -0.50)], language="en")  # correct English, less confident
+    specialist = _candidate(nb, [(0.0, 5.0, -0.10)], language="no")  # confident Norwegian on English audio
     winner = SpecialistRoutingSelector().select([generalist, specialist])
-    assert winner.result.model == "large-v3-turbo"
+    assert winner.result.model == "tiny.en"
 
 
-def test_specialist_routing_keeps_the_cross_arch_guard_via_acoustic_fallback():
-    """When the detected language has no specialist AND the generalist is unscored
-    (Parakeet/Voxtral), the acoustic fallback's cross-arch guard keeps the
-    generalist rather than handing the region to a scored nb-whisper."""
+def test_specialist_routing_keeps_an_unscored_generalist_on_a_no_specialist_language():
+    """Cross-architecture: an unscored Parakeet/Voxtral generalist on a
+    no-specialist language (English) stays the winner — keeping the generalist
+    (rather than acoustic-comparing) subsumes the cross-arch guard."""
     from tapscribe.transcribers.catalog import SPECIALIST_MODELS
 
     nb = SPECIALIST_MODELS["no"]

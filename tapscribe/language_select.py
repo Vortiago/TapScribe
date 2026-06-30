@@ -5,15 +5,17 @@ its own `(backend, model)` sidecar into the per-WAV cache and a
 `LanguageSelector` picks the winner; the orchestrator points that WAV's
 `_primary` at it and `merge_session` stitches the mixed-language transcript.
 
-The default selector is **acoustic confidence** — the duration-weighted mean of
-each transcript's per-segment `avg_logprob`. It is valid because the v1 cover
-pair (a Whisper generalist + the NB-Whisper Norwegian specialist) is the same
-model family, so their log-probabilities are comparable on the same audio. The
-selector is a deliberate seam: swapping in a **text-LID** selector — which is
-what unlocks a cross-architecture pair like Parakeet + nb-whisper, whose raw
-log-probs are NOT comparable — is a one-line change to `default_language_selector`
-with no pipeline edit. The choice of heuristic is empirical (ADR-0010), which is
-exactly why it lives behind this interface and not as a hardcoded `max`.
+The default selector is **`SpecialistRoutingSelector`** — route each region to
+the model the specialist table names for the language the generalist detected
+there, else keep the generalist; it never compares `avg_logprob` across
+different-language models (a confident nb-whisper rendering English as Norwegian
+would win that comparison). `AcousticConfidenceSelector` (duration-weighted mean
+`avg_logprob`) is retained as a same-family, NON-default seam alternative. The
+selector is a deliberate seam: swapping in a **text-LID** selector — what unlocks
+a cross-architecture pair like Parakeet + nb-whisper, where even the per-region
+language detection is unreliable — is a one-line change to
+`default_language_selector` with no pipeline edit. The choice of heuristic is
+empirical (ADR-0010), which is exactly why it lives behind this interface.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ class LanguageSelector(Protocol):
     the pipeline orders candidates generalist-first and relies on the generalist
     being the tie-break default. `candidate_languages` (the meeting's declared
     set) is carried so a constrained text-LID selector — the ADR-0010 reason this
-    is a seam — is a true drop-in; the default acoustic selector ignores it."""
+    is a seam — is a true drop-in; the routing/acoustic selectors ignore it."""
 
     def select(
         self,
@@ -48,7 +50,8 @@ class LanguageSelector(Protocol):
 
 
 class AcousticConfidenceSelector:
-    """Default selector: highest duration-weighted mean `avg_logprob` wins.
+    """Non-default, same-family selector (a swap-in seam, ADR-0010): highest
+    duration-weighted mean `avg_logprob` wins.
 
     Duration-weighting (rather than a plain segment mean) keeps one tiny
     low-confidence segment from sinking a transcript that is confident across
@@ -100,34 +103,33 @@ def _confidence_score(cached: CachedTranscription) -> float:
 
 class SpecialistRoutingSelector:
     """Default selector: route each region to the model the specialist table
-    names for the language the generalist detected there; fall back to acoustic
-    confidence otherwise.
+    names for the language the generalist detected there; otherwise keep the
+    generalist.
 
-    The specialist table (`catalog.SPECIALIST_MODELS`) is a declaration that a
-    purpose-built model is the BEST one for a language (ADR-0010: "languages
-    where a specialist beats the generalist"). So when the generalist detects a
-    region as such a language — e.g. a Norwegian region — the specialist wins
-    even if the generalist's `avg_logprob` happens to be higher (measured: on a
-    real Norwegian clip nb-whisper scored recall 0.92 / WER 0.08 vs the
-    generalist's 0.77 / 0.12, yet the generalist had the higher confidence). The
-    `da/no` benchmark (`tests/e2e/test_pipeline_e2e.py::test_da_no_routing_benchmark`)
-    is the evidence and the regression guard.
+    The generalist (`candidates[0]`, listed first by the cover) transcribes each
+    region in the language it DETECTED — constrained to the meeting's set — so it
+    is the right-language transcript for that region. A specialist transcribes in
+    its OWN fixed language (nb-whisper is always Norwegian), so it may win ONLY
+    when the region IS that language; otherwise it would render, say, English
+    audio as Norwegian. So: if the detected language has a specialist among the
+    candidates, use it (the table declares it best for that language — measured:
+    nb-whisper-large beats the generalist on Norwegian 19/20); otherwise keep the
+    generalist.
 
-    Where the detected language has no specialist (e.g. Danish, English) or the
-    specialist didn't run, it defers to `AcousticConfidenceSelector` — which also
-    carries the cross-architecture guard (an unscored Parakeet/Voxtral generalist
-    stays the winner rather than losing to a scored nb-whisper). The routing key
-    is `candidates[0]` because the cover lists the generalist first and it is the
-    one that does per-region language detection; the specialists are fixed-language."""
-
-    def __init__(self) -> None:
-        self._acoustic = AcousticConfidenceSelector()
+    Crucially this does NOT acoustic-compare the generalist against a
+    wrong-language specialist: a confident nb-whisper transcribing English as
+    Norwegian would win an `avg_logprob` comparison (the bug the real-audio
+    dashboard/pipeline tests caught). Keeping the generalist also subsumes the
+    cross-architecture guard — an unscored Parakeet/Voxtral generalist on a
+    no-specialist language stays the winner. Cross-architecture *language
+    detection* itself (a Parakeet that can't tell Norwegian apart) is the text-LID
+    selector's job, not this one's (ADR-0010)."""
 
     def select(
         self,
         candidates: Sequence[CachedTranscription],
         *,
-        candidate_languages: tuple[str, ...] = (),
+        candidate_languages: tuple[str, ...] = (),  # noqa: ARG002 — carried for the seam; this selector routes by detected language
     ) -> CachedTranscription:
         if not candidates:
             raise ValueError("select() needs at least one candidate transcript")
@@ -135,13 +137,14 @@ class SpecialistRoutingSelector:
         # the live table, so a test's monkeypatch.setitem is honoured.
         from .transcribers.catalog import SPECIALIST_MODELS
 
-        detected = (candidates[0].result.language or "").strip().lower()
+        generalist = candidates[0]
+        detected = (generalist.result.language or "").strip().lower()
         specialist_model = SPECIALIST_MODELS.get(detected)
         if specialist_model:
             for cand in candidates:
                 if cand.result.model == specialist_model:
                     return cand
-        return self._acoustic.select(candidates, candidate_languages=candidate_languages)
+        return generalist
 
 
 def default_language_selector() -> LanguageSelector:

@@ -967,8 +967,8 @@ async def test_cover_unscored_generalist_keeps_generalist_e2e(running_recorder: 
     nb, en = pair
 
     # An UNSCORED generalist (modelling Parakeet, which can't do Norwegian so it
-    # detects English-ish — no "en" specialist, so routing defers to the acoustic
-    # cross-arch guard) + a confident scored specialist.
+    # detects English-ish — no "en" specialist, so routing keeps the generalist)
+    # + a confident scored specialist.
     generalist = _ConfidenceFake(
         backend="parakeet-hf",
         model="parakeet-tdt-0.6b-v3",
