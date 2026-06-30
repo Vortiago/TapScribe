@@ -529,7 +529,7 @@ def test_relocated_errors_are_decoupled_from_transcribe_base():
 
 
 # ---------------------------------------------------------------------------
-# Candidate-language resolution + apply (ADR-0009). The operator declares a
+# Candidate-language resolution + apply (ADR-0010). The operator declares a
 # candidate-language *set* per meeting; the batch path turns it into a per-
 # region language for the generalist: a singleton set pins (source_lang); a
 # multi-language set defers to a per-region constrained auto-detect that snaps
@@ -597,7 +597,7 @@ async def test_singleton_candidate_set_pins_that_language(recorder_under_test, i
 async def test_manual_single_wav_transcribe_ignores_candidate_languages(
     recorder_under_test, install_stub_transcriber
 ):
-    """ADR-0009 scope: the candidate-language policy applies to the batch SESSION
+    """ADR-0010 scope: the candidate-language policy applies to the batch SESSION
     path only. A manual single-WAV transcribe stays unchanged — even with a
     singleton global default set, the transcriber is driven with the request's
     own source_lang (None here), not the meeting's candidate set."""
@@ -668,7 +668,7 @@ async def test_changing_candidate_set_re_detects_on_non_force_rerun(
     constrained entry is keyed on the language it resolved to, so widening
     {da, no} → {da, no, en} re-runs and re-pins, instead of serving the stale
     {da, no} pick. This is the "fix a mis-detection by adding the language"
-    workflow (ADR-0009) — it would silently no-op if the cache served the old
+    workflow (ADR-0010) — it would silently no-op if the cache served the old
     pick on a non-force re-run."""
     from tapscribe.sessions import write_session_meta
     from tapscribe.text import write_languages

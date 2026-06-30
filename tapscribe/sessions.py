@@ -30,6 +30,7 @@ from fastapi import HTTPException
 
 from . import config
 from .audio import wav_duration_s
+from .roster import read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
     FILENAME_META_JSON,
@@ -130,7 +131,7 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
     sanitized = {k: merged[k] if isinstance(merged.get(k), str) else "" for k in _META_STRING_FIELDS}
     sanitized["aliases"] = _coerce_aliases(merged.get("aliases"))
-    # The per-meeting candidate-language override (ADR-0009) is a list, not a
+    # The per-meeting candidate-language override (ADR-0010) is a list, not a
     # string field. Validate every code against the catalog at WRITE time (like
     # the global config/languages writer) so a junk code can't reach the
     # pipeline's per-region run via this endpoint.
@@ -591,6 +592,12 @@ def _describe_session(
         "session_summary": _session_summary_marker(_read_session_json_cached(sd / FILENAME_SUMMARY_JSON)),
         "progress": jobs.get(sd.name),
         "session_meta": read_session_meta(sd.name),
+        # The per-session Roster (full identity → name/source/slug/wavs). Cheap
+        # read, freshly built each poll like the rest of this dict, and the
+        # input the People Registry + per-session name resolution join on
+        # (name_resolution.attach_people, called by /api/state). Empty {} for a
+        # pre-feature session, which resolves purely via its retained aliases.
+        "roster": read_roster(sd),
         "stripped": stripped,
     }
 
@@ -647,6 +654,7 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
                 "session_summary": None,
                 "progress": None,
                 "session_meta": read_session_meta(current_session),
+                "roster": {},
                 "stripped": None,
             },
         )

@@ -503,7 +503,7 @@ async def test_pipeline_with_real_whisper(running_recorder: RunningRecorder):
 async def test_candidate_languages_control_real_whisper_on_norwegian_audio(
     running_recorder: RunningRecorder,
 ):
-    """ADR-0009 end-to-end with a REAL Whisper backend on the real Norwegian
+    """ADR-0010 end-to-end with a REAL Whisper backend on the real Norwegian
     fixture (`marlene-nb`): the operator's declared candidate-language set,
     carried per-meeting on session-meta, actually controls the model — through
     the real `/api/session-meta` + `/api/transcribe-session` routes, the

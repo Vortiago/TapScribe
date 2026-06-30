@@ -83,7 +83,7 @@ class TranscriberInvocation:
     # auto-detect (a multi-language set with no explicit pin). Empty when the
     # language is already pinned via `source_lang` (an explicit per-job pin or a
     # singleton candidate set). The cache loop snaps it to a concrete per-region
-    # language. See ADR-0009.
+    # language. See ADR-0010.
     candidate_languages: tuple[str, ...]
     hallucination_rules: tuple[dict[str, Any], ...]
 
@@ -143,7 +143,7 @@ def _effective_prompt_hotwords(session: str) -> tuple[str | None, str | None]:
 
 
 def _effective_candidate_languages(session: str) -> tuple[str, ...]:
-    """Resolve the meeting's candidate-language set (ADR-0009): a session-meta
+    """Resolve the meeting's candidate-language set (ADR-0010): a session-meta
     `languages` override (kept to catalog codes) else the global default
     (`read_languages`, itself the bundled {da, no, en} when unset). Always
     returns at least one code."""
@@ -159,7 +159,7 @@ def _effective_candidate_languages(session: str) -> tuple[str, ...]:
 
 def _resolve_languages(session: str, explicit_source_lang: str | None) -> tuple[str | None, tuple[str, ...]]:
     """Map the meeting's candidate set to a `(source_lang, candidate_languages)`
-    pair for the transcriber (ADR-0009):
+    pair for the transcriber (ADR-0010):
 
     - an explicit per-job `source_lang` (the manual transcribe pin) wins, as-is;
     - a singleton candidate set pins via `source_lang` — works on every backend;
@@ -186,7 +186,7 @@ def _build_invocation(
     *policy* (singleton → pin, multi → constrained detect) is resolved by the
     caller via `_resolve_languages` and passed in — only the batch SESSION path
     (transcribe_session + the pipeline) does so; the manual single-WAV path
-    (`transcribe_one`) leaves it empty, unchanged in v1 (ADR-0009 scope)."""
+    (`transcribe_one`) leaves it empty, unchanged in v1 (ADR-0010 scope)."""
     prompt, hotwords = _effective_prompt_hotwords(session)
     return TranscriberInvocation(
         initial_prompt=prompt,
@@ -311,7 +311,7 @@ async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job)
     try:
         # The batch session path (transcribe_session + the end-of-meeting
         # pipeline both reach here) resolves the meeting's candidate-language
-        # policy; the manual single-WAV path does not (ADR-0009 scope).
+        # policy; the manual single-WAV path does not (ADR-0010 scope).
         resolved_source, candidate_languages = _resolve_languages(req.session, req.source_lang)
         inv = _build_invocation(
             req.session,

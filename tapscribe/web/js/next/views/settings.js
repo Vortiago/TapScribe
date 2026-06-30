@@ -81,7 +81,7 @@ export function build(ctx) {
 
   rebuildEngine(engineHost);
 
-  // ---- Default candidate languages (ADR-0009) -------------------------------
+  // ---- Default candidate languages (ADR-0010) -------------------------------
   // A multi-select over the static language catalog. Built + filled once;
   // seeded ONCE from the first poll carrying `languages.default`, then never
   // re-touched (the summarizer card's interaction-hold discipline), so a poll

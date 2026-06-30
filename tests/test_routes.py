@@ -969,7 +969,7 @@ def test_config_languages_put_rejects_non_catalog_code(client):
 
 
 def test_session_meta_round_trips_languages_override(client, recorder_under_test):
-    """ADR-0009: the per-meeting candidate-language set rides in session-meta
+    """ADR-0010: the per-meeting candidate-language set rides in session-meta
     as a list, normalised to lowercased catalog codes, preserving fields the
     caller didn't mention."""
     session_dir = recorder_under_test.recordings_dir / "fakesession"
@@ -2864,3 +2864,91 @@ def test_api_models_batch_excludes_moonshine(client):
     ids = {m["model_id"] for m in r.json()["models"]}
     assert "moonshine-tiny" not in ids
     assert "moonshine-base" not in ids
+
+
+# ---------------------------------------------------------------------------
+# People Registry (ADR-0009) — auto-bind, rename-propagates, merge, detach
+# ---------------------------------------------------------------------------
+
+
+def _seed_occurrence(session: str, *, identity: str, name: str, wav: str) -> None:
+    """Write a roster occurrence into <RECORDINGS_DIR>/<session>/ — the durable
+    record the People Registry auto-binds against."""
+    from tapscribe import roster
+
+    roster.record_occurrence(
+        _config.RECORDINGS_DIR / session, identity=identity, name=name, recorded=True, wav=wav
+    )
+
+
+def test_api_people_auto_binds_lists_and_rename_propagates(client):
+    _seed_occurrence(
+        "20260626T120000Z",
+        identity="alice-9f",
+        name="Alice",
+        wav="2026-06-26T12-00-00Z_Alice_alice9f_aa11bb22.wav",
+    )
+    _seed_occurrence(
+        "20260626T120000Z",
+        identity="system",
+        name="Them",
+        wav="2026-06-26T12-00-01Z_Them_system_cc33dd44.wav",
+    )
+    people = client.get("/api/people").json()["people"]
+    by_name = {p["name"]: p for p in people}
+    assert set(by_name) == {"Alice", "Them"}
+    assert by_name["Alice"]["named"] is False  # auto-bound → default name
+    assert by_name["Alice"]["recorded"] is True
+    assert by_name["Alice"]["session_count"] == 1
+
+    pid = by_name["Alice"]["id"]
+    r = client.put(f"/api/people/{pid}", json={"name": "Alice Havso"})
+    assert r.status_code == 200
+    renamed = next(p for p in r.json()["people"] if p["id"] == pid)
+    assert renamed == {**renamed, "name": "Alice Havso", "named": True}
+
+    # The chosen name propagates to the session's resolved speaker-name map.
+    state = client.get("/api/state").json()
+    assert "people" in state
+    sess = next(s for s in state["sessions"] if s["session"] == "20260626T120000Z")
+    assert sess["names"]["Alice"] == "Alice Havso"
+
+
+def test_api_people_override_beats_person_name(client):
+    _seed_occurrence(
+        "20260626T130000Z",
+        identity="bob-1",
+        name="Bob",
+        wav="2026-06-26T13-00-00Z_Bob_bob1_ee55ff66.wav",
+    )
+    pid = next(p for p in client.get("/api/people").json()["people"])["id"]
+    client.put(f"/api/people/{pid}", json={"name": "Robert"})
+    # A per-session override (session_meta.aliases, slug-keyed) wins for that session.
+    client.put("/api/session-meta/20260626T130000Z", json={"aliases": {"Bob": "Bobby (guest)"}})
+    sess = next(s for s in client.get("/api/state").json()["sessions"] if s["session"] == "20260626T130000Z")
+    assert sess["names"]["Bob"] == "Bobby (guest)"
+
+
+def test_api_people_merge_then_detach(client):
+    _seed_occurrence("s1", identity="alice-laptop", name="Alice", wav="t_Alice_alicelapt_1.wav")
+    _seed_occurrence("s2", identity="alice-office", name="Alice O", wav="t_AliceO_aliceoffi_1.wav")
+    ids = {p["name"]: p["id"] for p in client.get("/api/people").json()["people"]}
+    survivor, absorbed = ids["Alice"], ids["Alice O"]
+
+    merged = client.post("/api/people/merge", json={"survivor": survivor, "absorbed": absorbed})
+    assert merged.status_code == 200
+    rows = merged.json()["people"]
+    assert len(rows) == 1
+    assert set(rows[0]["identities"]) == {"alice-laptop", "alice-office"}
+    assert sorted(rows[0]["sessions"]) == ["s1", "s2"]
+
+    detached = client.post(f"/api/people/{survivor}/detach", json={"identity": "alice-office"})
+    assert detached.status_code == 200
+    assert len(detached.json()["people"]) == 2
+
+
+def test_api_people_mutation_errors(client):
+    assert client.put("/api/people/p_nope", json={"name": "X"}).status_code == 404
+    assert client.post("/api/people/merge", json={"survivor": "only"}).status_code == 400
+    assert client.post("/api/people/merge", json={"survivor": "p_a", "absorbed": "p_b"}).status_code == 404
+    assert client.post("/api/people/p_nope/detach", json={"identity": "x"}).status_code == 404

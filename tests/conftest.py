@@ -441,7 +441,7 @@ class TranscriberStub:
         self._text = text if text is not None else f"text from {backend} {model}"
         self.calls: list[Path] = []
         # Every source_lang the stub was driven with, in call order — lets a test
-        # assert the candidate-language resolution (ADR-0009) reached the model.
+        # assert the candidate-language resolution (ADR-0010) reached the model.
         self.seen_source_lang: list[str | None] = []
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002

@@ -4166,23 +4166,21 @@ async def _focus_session_view(page, sid: str, view: str) -> None:
     await page.evaluate("(v) => window.gotoView(v)", view)
 
 
-async def test_people_view_names_speaker_and_builds_cross_session_registry(
+async def test_people_view_registry_auto_binds_renames_merges_detaches(
     running_recorder: RunningRecorder,
 ):
-    """The People view's two real panels, end-to-end and untested until now:
+    """The People view as the canonical cross-session registry (ADR-0009), end
+    to end:
 
-    1. "In this session · names" — the per-session alias editor. Focus a
-       session, type a DISPLAY NAME for a derived speaker; the debounced save
-       PUTs /api/session-meta/{s} { aliases }, the status flips to "saved", and
-       the name round-trips (GET /api/session-meta confirms; a reload re-seeds
-       the field from the saved alias, proving it isn't just optimistic UI).
-    2. "People · across all sessions" — the registry aggregates every session's
-       aliases into one row per distinct name. After naming a speaker in TWO
-       different sessions, the registry lists BOTH people with a real
-       "1 session" count and the identity code mapped to each.
-
-    Pins the save → /api/state → registry round-trip and the alias key the
-    editor writes under (the speaker slug, not the live identity).
+    1. Auto-bind — every recorded speaker appears in the GLOBAL registry with NO
+       naming step (the "nothing until I save it" complaint is gone): two seeded
+       sessions surface two People keyed on their device identity tokens.
+    2. Rename — typing a name PUTs /api/people/{id}; it persists to people.json
+       (GET /api/people confirms — not just optimistic UI) AND propagates to the
+       session's server-resolved speaker map (`/api/state` session.names).
+    3. Merge — folding one Person into another (the "map them to things" hatch)
+       leaves ONE row owning both identity tokens.
+    4. Detach — pulls an identity back out into its own Person (the undo).
     """
     rec = running_recorder.recorder
     base = running_recorder.base_url
@@ -4192,15 +4190,15 @@ async def test_people_view_names_speaker_and_builds_cross_session_registry(
     _seed_named_session(rec, s_alice, speaker="Alice")
     _seed_named_session(rec, s_bob, speaker="Bob")
 
-    part_input = '#viewRoot [data-slot="partList"] .partrow [data-slot="name"]'
-    part_code = '#viewRoot [data-slot="partList"] .partrow [data-slot="code"]'
-    # JS function body that returns the registry's person-name texts. Kept as a
-    # body (not an arrow) so callers can wrap their own predicate around it
-    # without concatenating two arrow functions (invalid JS).
-    reg_names_js = (
-        "const names = Array.from(document.querySelectorAll("
-        '\'#viewRoot [data-slot="people"] .pregrow [data-slot="name"]\''
-        ")).map((n) => n.textContent);"
+    row = '#viewRoot [data-slot="people"] .pregrow'
+    # JS expression → [{name, ids[]}] for every registry row. `name` reads the
+    # input value, falling back to its placeholder (an unnamed Person shows its
+    # default name only as the placeholder).
+    rows_js = (
+        "Array.from(document.querySelectorAll('" + row + "')).map((r) => ({"
+        "  name: r.querySelector('[data-slot=\"name\"]').value || r.querySelector('[data-slot=\"name\"]').placeholder,"
+        "  ids: Array.from(r.querySelectorAll('[data-slot=\"tok\"]')).map((t) => t.textContent),"
+        "}))"
     )
 
     async with playwright_session() as pw:
@@ -4213,7 +4211,6 @@ async def test_people_view_names_speaker_and_builds_cross_session_registry(
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
             await page.goto(base, wait_until="domcontentloaded")
-
             await page.wait_for_function(
                 """(ids) => {
                     const s = document.querySelector('[data-slot="sessionPick"]');
@@ -4224,74 +4221,61 @@ async def test_people_view_names_speaker_and_builds_cross_session_registry(
                 arg=[s_alice, s_bob],
                 timeout=10000,
             )
+            await page.evaluate("() => window.gotoView('people')")
 
-            # --- Panel 1: name Alice in her session. ---
-            await _focus_session_view(page, s_alice, "people")
-            await page.locator(part_code).first.wait_for(state="visible", timeout=8000)
-            assert (await page.locator(part_code).first.inner_text()).strip() == "Alice", (
-                "the focused session's sole derived participant is the speaker slug 'Alice'"
-            )
-            await page.locator(part_input).first.fill("Alice Anderson")
-            # Debounced PUT (600ms) — the per-session status span flips to "saved".
+            # 1. Auto-bind: BOTH recorded speakers in the GLOBAL list, no naming.
             await page.wait_for_function(
-                f"""() => {{
-                    const el = document.querySelector('[data-status-sess="{s_alice}"]');
-                    return !!el && el.textContent === 'saved';
-                }}""",
+                f"() => {{ const rows = {rows_js}; return rows.length === 2 "
+                "&& rows.some((r) => r.ids.includes('Alice')) "
+                "&& rows.some((r) => r.ids.includes('Bob')); }",
                 timeout=8000,
             )
 
-            # Server-side round-trip: the alias persisted under the speaker key.
+            # 2. Rename Alice's row → persists to people.json + propagates.
+            alice_row = page.locator(row, has=page.locator('[data-slot="tok"]', has_text="Alice"))
+            await alice_row.locator('[data-slot="name"]').fill("Alice Anderson")
+            await alice_row.locator('[data-slot="name"]').blur()
             async with httpx.AsyncClient(base_url=base) as client:
-                meta = (await client.get(f"/api/session-meta/{s_alice}")).json()
-            assert meta.get("aliases", {}).get("Alice") == "Alice Anderson", meta
+                people = []
+                for _ in range(40):
+                    people = (await client.get("/api/people")).json()["people"]
+                    if any(
+                        p["name"] == "Alice Anderson" and p["named"] and p["identities"] == ["Alice"]
+                        for p in people
+                    ):
+                        break
+                    await asyncio.sleep(0.25)
+                else:
+                    raise AssertionError(f"rename did not persist to people.json: {people}")
+                state = (await client.get("/api/state")).json()
+            sess = next(s for s in state["sessions"] if s["session"] == s_alice)
+            assert sess["names"]["Alice"] == "Alice Anderson", sess.get("names")
 
-            # --- Panel 2: the registry now lists Alice Anderson (1 session, id Alice). ---
+            # 3. Merge Bob INTO Alice Anderson → one Person owns both identities.
+            # Wait until the browser has re-polled and rebuilt the merge pickers
+            # with Alice's NEW name before selecting it (the option text tracks
+            # the live registry, not the value typed a moment ago).
             await page.wait_for_function(
-                f"() => {{ {reg_names_js} return names.includes('Alice Anderson'); }}",
+                """() => Array.from(document.querySelectorAll('#viewRoot [data-slot="people"] option'))
+                    .some((o) => o.textContent === 'Alice Anderson')""",
                 timeout=8000,
             )
-            alice_row = page.locator(
-                '#viewRoot [data-slot="people"] .pregrow',
-                has=page.get_by_text("Alice Anderson", exact=True),
-            )
-            assert "1 session" in (await alice_row.locator('[data-slot="count"]').inner_text())
-            assert (await alice_row.locator('[data-slot="ids"]').inner_text()).strip() == "Alice"
-
-            # --- Name Bob in HIS session; the registry aggregates both people. ---
-            await _focus_session_view(page, s_bob, "people")
-            await page.locator(part_input).first.wait_for(state="visible", timeout=8000)
-            await page.locator(part_input).first.fill("Bob Brown")
+            bob_row = page.locator(row, has=page.locator('[data-slot="tok"]', has_text="Bob"))
+            await bob_row.locator('[data-slot="merge"]').select_option(label="Alice Anderson")
             await page.wait_for_function(
-                f"""() => {{
-                    const el = document.querySelector('[data-status-sess="{s_bob}"]');
-                    return !!el && el.textContent === 'saved';
-                }}""",
-                timeout=8000,
-            )
-            await page.wait_for_function(
-                f"() => {{ {reg_names_js} "
-                "return names.includes('Alice Anderson') && names.includes('Bob Brown'); }",
+                f"() => {{ const rows = {rows_js}; return rows.length === 1 "
+                "&& rows[0].ids.includes('Alice') && rows[0].ids.includes('Bob'); }",
                 timeout=8000,
             )
 
-            # --- Persistence: a fresh load re-seeds the editor from the saved alias
-            # (not just an in-memory optimistic overlay). ---
-            await page.goto(base, wait_until="domcontentloaded")
-            await page.wait_for_function(
-                """(id) => {
-                    const s = document.querySelector('[data-slot="sessionPick"]');
-                    return !!s && Array.from(s.options).some((o) => o.value === id);
-                }""",
-                arg=s_alice,
-                timeout=10000,
+            # 4. Detach Bob back out → two People again.
+            await (
+                page.locator(".idchip", has=page.locator('[data-slot="tok"]', has_text="Bob"))
+                .locator('[data-slot="detach"]')
+                .click()
             )
-            await _focus_session_view(page, s_alice, "people")
             await page.wait_for_function(
-                f"""() => {{
-                    const i = document.querySelector('{part_input}');
-                    return !!i && i.value === 'Alice Anderson';
-                }}""",
+                f"() => {{ const rows = {rows_js}; return rows.length === 2; }}",
                 timeout=8000,
             )
         finally:
@@ -4380,7 +4364,7 @@ async def test_capture_per_session_prompt_and_hotwords_overrides_save_independen
 async def test_capture_per_session_languages_override_saves_and_reseeds(
     running_recorder: RunningRecorder,
 ):
-    """The Capture view's per-meeting candidate-language picker (ADR-0009): a
+    """The Capture view's per-meeting candidate-language picker (ADR-0010): a
     multi-select over the catalog languages saving via PUT /api/session-meta/{s}
     {languages}. Selecting da+no and saving persists the override (and preserves
     a pre-existing prompt — partial-merge invariant), and a reload re-seeds the
@@ -4449,7 +4433,7 @@ async def test_capture_per_session_languages_override_saves_and_reseeds(
 async def test_settings_default_languages_picker_saves_global_default(
     running_recorder: RunningRecorder,
 ):
-    """The Settings → Batch engine card's default-languages picker (ADR-0009):
+    """The Settings → Batch engine card's default-languages picker (ADR-0010):
     a multi-select that persists the global candidate-language default via PUT
     /api/config/languages and is reflected back in /api/state."""
     base = running_recorder.base_url

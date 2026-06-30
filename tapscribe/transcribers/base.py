@@ -243,7 +243,7 @@ class Transcriber(Protocol):
 @runtime_checkable
 class ConstrainedLanguageDetector(Protocol):
     """An adapter that can restrict language auto-detection to a candidate set
-    (ADR-0009). The cache loop (`wav_cache.cached_transcribe`) resolves a
+    (ADR-0010). The cache loop (`wav_cache.cached_transcribe`) resolves a
     multi-language candidate set to a concrete per-region pin through this
     BEFORE `transcribe()`, so the chosen language flows through the existing
     `source_lang` channel — the on-disk cache key and the result's
@@ -251,7 +251,7 @@ class ConstrainedLanguageDetector(Protocol):
 
     Adapters that don't implement it (every non-Whisper backend today) fall
     back to unconstrained auto-detect for a multi-language set: the slice-1
-    limitation noted in ADR-0009. `cached_transcribe` feature-detects via
+    limitation noted in ADR-0010. `cached_transcribe` feature-detects via
     `isinstance`, so adding the method to another adapter later opts it in with
     no call-site change."""
 

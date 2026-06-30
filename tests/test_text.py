@@ -436,7 +436,7 @@ def test_write_summarizer_config_api_key_preserve_on_omit(tmp_config_dir):
 
 # ---------------------------------------------------------------------------
 # Candidate languages (config/languages.txt) — the operator's DEFAULT
-# candidate-language set (ADR-0009). Same write-time-validated text-config
+# candidate-language set (ADR-0010). Same write-time-validated text-config
 # shape as batch-model.txt: a junk code must never reach the pipeline.
 # ---------------------------------------------------------------------------
 

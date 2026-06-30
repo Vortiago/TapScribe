@@ -132,7 +132,7 @@ def test_transcribe_handles_none_prompt_and_hotwords(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Constrained language detection (ADR-0009): snap auto-detection to the
+# Constrained language detection (ADR-0010): snap auto-detection to the
 # meeting's candidate set so a multi-language meeting never drifts to a
 # language the operator didn't declare.
 # ---------------------------------------------------------------------------

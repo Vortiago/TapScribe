@@ -1,6 +1,6 @@
 // @ts-check
 // Shared helpers for the candidate-language <select multiple> pickers
-// (ADR-0009). The per-meeting override (Capture) and the global default
+// (ADR-0010). The per-meeting override (Capture) and the global default
 // (Settings) render the same catalog of selectable languages; these three
 // tiny, framework-free helpers populate the options and read/write the
 // selection so the two call sites can't drift in how a code maps to an option.

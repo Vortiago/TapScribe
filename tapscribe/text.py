@@ -270,7 +270,7 @@ def parse_language_codes(raw: str) -> list[str]:
 
 def read_languages() -> tuple[str, ...]:
     """Return the operator's DEFAULT candidate-language set from languages.txt
-    (ADR-0009) as a code tuple, e.g. ("da", "no", "en"). Non-catalog codes are
+    (ADR-0010) as a code tuple, e.g. ("da", "no", "en"). Non-catalog codes are
     dropped; an empty or all-invalid file falls back to the bundled catch-all
     default so the feature works with no configuration."""
     from .transcribers.catalog import DEFAULT_CANDIDATE_LANGUAGES, is_candidate_language

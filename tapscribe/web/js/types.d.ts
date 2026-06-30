@@ -42,11 +42,31 @@ export interface AppState {
   // API-key fields must never appear here). "" / null = unset (built-ins
   // apply). Seeds the Settings card and the Summary view's effective config.
   summarizer_default: SummarizerDefault;
-  // The operator's DEFAULT candidate-language set (ADR-0009). The full
+  // The operator's DEFAULT candidate-language set (ADR-0010). The full
   // selectable catalog is served once via GET /api/languages; this carries only
   // the small current value the picker pre-selects.
   languages: { path: string; default: string[] };
   hallucinations: HallucinationsConfig;
+  // The cross-session People Registry view (ADR-0009): one row per canonical
+  // Person, aggregated server-side from every session's roster + the live
+  // identities. The People view renders these directly; rename/merge/detach
+  // mutate via /api/people.
+  people: Person[];
+}
+
+// One canonical Person row in the cross-session registry (server-built by
+// name_resolution.build_people_view). `name` is the operator-chosen name, or
+// the bridge/roster default when `named` is false. `identities` are the
+// bridge-stamped device tokens this Person owns (>1 only after a merge).
+export interface Person {
+  id: string;                 // opaque server-generated person id ("p_<hex>")
+  name: string;               // display name (chosen if `named`, else default)
+  named: boolean;             // operator has explicitly named this Person
+  identities: string[];       // member device identities (the join key)
+  sessions: string[];         // session ids this Person appears in
+  session_count: number;
+  recorded: boolean;          // has at least one recorded occurrence
+  live: boolean;              // an identity is currently streaming (active)
 }
 
 // The operator's global summarizer default — GET/PUT /api/summarize/config
@@ -159,6 +179,12 @@ export interface Session {
   session_summary: SummaryMarker | null;
   progress: JobStateSnapshot | null;
   session_meta: SessionMeta;
+  // Server-RESOLVED speaker-name map for this session (ADR-0009): slug →
+  // display name, resolved through per-session Override > Person name >
+  // bridge/roster default. metaFor() layers this over session_meta.aliases so a
+  // global rename propagates to the transcript. Absent/empty for an old
+  // rosterless session (which then resolves purely via its retained aliases).
+  names?: Record<string, string>;
   stripped: StrippedStats | null;
 }
 
@@ -171,7 +197,7 @@ export interface SessionMeta {
   // fields stay global). "" = no override → the global default applies.
   summary_source?: string;
   summary_prompt?: string;
-  // Per-meeting candidate-language override (ADR-0009). Absent/empty = no
+  // Per-meeting candidate-language override (ADR-0010). Absent/empty = no
   // override → the global default applies.
   languages?: string[];
   aliases?: Record<string, string>;
@@ -535,7 +561,7 @@ export interface EffectiveMeta {
   languages: string[];
 }
 
-// GET /api/languages — the candidate-language catalog (ADR-0009): the full
+// GET /api/languages — the candidate-language catalog (ADR-0010): the full
 // selectable allowlist (code + display name) plus the operator's current
 // global default. Fetched once at boot (like ModelCatalog).
 export interface LanguageCatalog {

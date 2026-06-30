@@ -254,7 +254,7 @@ async def test_pipeline_end_to_end_produces_stripped_transcript_and_summary(reco
 
 
 async def test_pipeline_transcribe_stage_honours_candidate_languages(recorder_under_test, monkeypatch):
-    """ADR-0009: the end-of-meeting pipeline's transcribe stage resolves the
+    """ADR-0010: the end-of-meeting pipeline's transcribe stage resolves the
     operator's candidate-language default and applies it to the generalist —
     here a singleton default pins it, driving the model with source_lang=that
     code on every stripped region. Proves the pipeline path (not just

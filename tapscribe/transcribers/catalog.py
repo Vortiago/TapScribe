@@ -263,7 +263,7 @@ _PARAKEET_LANG_PAIRS: tuple[tuple[str, str], ...] = (
 _PARAKEET_LANG_CODES: tuple[str, ...] = tuple(code for code, _ in _PARAKEET_LANG_PAIRS)
 
 
-# ── Candidate languages (ADR-0009) ──────────────────────────────────────────
+# ── Candidate languages (ADR-0010) ──────────────────────────────────────────
 # The operator declares a *candidate-language set* per meeting; the catalog's
 # language vocabulary is the allowlist that set validates against. The bundled
 # default is the catch-all {da, no, en} so a fresh install handles the

@@ -72,7 +72,7 @@ class FasterWhisperTranscriber:
 
     def detect_constrained_language(self, path: Path, candidate_languages: tuple[str, ...]) -> str | None:
         """Snap Whisper's language auto-detection to the meeting's candidate set
-        (ADR-0009): return the highest-probability language WITHIN
+        (ADR-0010): return the highest-probability language WITHIN
         `candidate_languages`, so a multi-language meeting never drifts to a
         language the operator didn't declare. None when there's nothing to
         constrain or this checkpoint can't emit any candidate.
@@ -102,7 +102,7 @@ class FasterWhisperTranscriber:
             # format (RuntimeError), an unreadable/corrupt RIFF (wave.Error /
             # EOFError), or an I/O error (OSError). `transcribe()` still handles
             # such a file via faster-whisper's own decoder, so fall back to None
-            # (unconstrained auto-detect, the pre-ADR-0009 behaviour) rather than
+            # (unconstrained auto-detect, the pre-ADR-0010 behaviour) rather than
             # failing the whole transcribe just to constrain the language.
             return None
         _, _, all_language_probs = self._model.detect_language(audio)

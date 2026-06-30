@@ -533,7 +533,7 @@ def test_unknown_model_id_rejected_before_loader():
 
 
 # ---------------------------------------------------------------------------
-# Candidate languages (ADR-0009) — the catalog's language vocabulary is the
+# Candidate languages (ADR-0010) — the catalog's language vocabulary is the
 # allowlist a per-meeting candidate set validates against.
 # ---------------------------------------------------------------------------
 

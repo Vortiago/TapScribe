@@ -315,7 +315,7 @@ def cached_transcribe(
     # transcript chosen under the old set. A singleton set or an explicit pin
     # already arrives as `source_lang`; adapters without constrained detection
     # leave it None and auto-detect. The detect is a cheap one-window pass; the
-    # cache still spares the expensive transcribe on a hit. See ADR-0009.
+    # cache still spares the expensive transcribe on a hit. See ADR-0010.
     if source_lang is None and candidate_languages and isinstance(transcriber, ConstrainedLanguageDetector):
         source_lang = transcriber.detect_constrained_language(wav_path, candidate_languages) or None
 

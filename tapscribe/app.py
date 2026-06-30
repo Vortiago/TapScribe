@@ -76,6 +76,8 @@ from .batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
+from .name_resolution import attach_people
+from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
 from .session_maintenance import (
     absorb_session,
@@ -627,10 +629,21 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
             override_counts["hotwords"] += 1
         if m.get("summary_source") or m.get("summary_prompt"):
             override_counts["summarizer"] += 1
+    # People Registry (ADR-0009): sync the registry against every session's
+    # roster + the live identities (auto-bind), resolve each session's `names`
+    # map in place, and surface the cross-session view rows. Run on the event
+    # loop (not the worker thread that built `blob`) so the registry's
+    # load→sync→save stays serialized with the /api/people mutations — both
+    # touch people.json and both run on the loop, so they can't race. The I/O
+    # is tiny (people.json is small; rosters were already read in the blob) and
+    # save only fires when a brand-new identity first appears.
+    live_identities = {s.identity for s in active_streams}
+    people = attach_people(sessions_list, live_identities=live_identities)
     payload = {
         "current_session": recorder.session_start,
         "active": active,
         "sessions": sessions_list,
+        "people": people,
         "default_override_counts": override_counts,
         "live_feed": recorder.transcripts.snapshot(),
         "live_info": dict(recorder.live.info),
@@ -657,7 +670,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "inputs_support": inputs_support,
         "live_model_default": blob["live_model_default"],
         "batch_model_default": blob["batch_model_default"],
-        # The operator's DEFAULT candidate-language set (ADR-0009). The catalog
+        # The operator's DEFAULT candidate-language set (ADR-0010). The catalog
         # of selectable languages is served once via GET /api/languages; this is
         # the small, dynamic current value the picker pre-selects.
         "languages": {
@@ -830,7 +843,7 @@ async def api_models(context: str = "batch"):
 
 @app.get("/api/languages")
 async def api_languages():
-    """The candidate-language catalog (ADR-0009) for the dashboard picker: the
+    """The candidate-language catalog (ADR-0010) for the dashboard picker: the
     full allowlist of selectable languages with display names, plus the
     operator's current global default. Static apart from the default, so the
     dashboard fetches it once (like /api/models) rather than per poll.
@@ -1263,6 +1276,81 @@ async def api_session_meta_put(session: str, req: Request, recorder: Recorder = 
     resolve_session_dir(session)
     write_session_meta(session, await _json_body(req))
     return {"ok": True, "meta": read_session_meta(session)}
+
+
+# ---------------------------------------------------------------------------
+# People Registry (ADR-0009) — the canonical cross-session Person model. The
+# registry view also rides on /api/state (`people`); these routes are the
+# explicit fetch + the rename / merge / detach mutations. people.json is
+# mutated ONLY here and in the /api/state sync — both on the event loop, so
+# they can't race. A person_id / identity from the body is validated against
+# the loaded registry (KeyError→404) before anything is written; nothing here
+# builds a filesystem path from request input (people.json is a fixed path).
+# ---------------------------------------------------------------------------
+
+
+async def _people_view(recorder: Recorder) -> list[dict[str, Any]]:
+    active_streams = await recorder.streams.snapshot()
+    live_identities = {s.identity for s in active_streams}
+    sessions = await asyncio.to_thread(gather_sessions, current_session=recorder.session_start, jobs={})
+    return attach_people(sessions, live_identities=live_identities)
+
+
+@app.get("/api/people")
+async def api_people_get(recorder: Recorder = Depends(get_recorder)):
+    """The cross-session People view: one row per Person with name, member
+    identities, sessions, recorded/live source. Same shape /api/state ships."""
+    return {"people": await _people_view(recorder)}
+
+
+@app.put("/api/people/{person_id}")
+async def api_people_rename(person_id: str, req: Request, recorder: Recorder = Depends(get_recorder)):
+    body = await _json_body(req)
+    name = body.get("name", "")
+    if not isinstance(name, str):
+        raise HTTPException(400, "name must be a string")
+    registry = PeopleRegistry.load()
+    try:
+        registry.rename(person_id, name.strip())
+    except KeyError:
+        raise HTTPException(404, "person not found") from None
+    registry.save()
+    return {"ok": True, "people": await _people_view(recorder)}
+
+
+@app.post("/api/people/merge")
+async def api_people_merge(req: Request, recorder: Recorder = Depends(get_recorder)):
+    body = await _json_body(req)
+    survivor = body.get("survivor")
+    absorbed = body.get("absorbed")
+    if not isinstance(survivor, str) or not isinstance(absorbed, str) or not survivor or not absorbed:
+        raise HTTPException(400, "survivor and absorbed person ids are required")
+    registry = PeopleRegistry.load()
+    try:
+        registry.merge(survivor, absorbed)
+    except KeyError:
+        raise HTTPException(404, "person not found") from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    registry.save()
+    return {"ok": True, "people": await _people_view(recorder)}
+
+
+@app.post("/api/people/{person_id}/detach")
+async def api_people_detach(person_id: str, req: Request, recorder: Recorder = Depends(get_recorder)):
+    body = await _json_body(req)
+    identity = body.get("identity")
+    if not isinstance(identity, str) or not identity:
+        raise HTTPException(400, "identity is required")
+    registry = PeopleRegistry.load()
+    try:
+        new_person = registry.detach(person_id, identity)
+    except KeyError:
+        raise HTTPException(404, "person not found") from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    registry.save()
+    return {"ok": True, "detached": new_person["id"], "people": await _people_view(recorder)}
 
 
 @app.get("/api/sessions/{session}/transcript")
