@@ -847,7 +847,7 @@ async def _run_cover_session(
 async def test_cover_routes_each_region_to_its_best_model_e2e(running_recorder: RunningRecorder, monkeypatch):
     """Deterministic slice-2 headline through the real stack: a {no, en}
     meeting transcribes EVERY region with both the generalist ("base") and the
-    Norwegian specialist ("nb-whisper-medium"), and the selector points each
+    Norwegian specialist ("nb-whisper-large"), and the selector points each
     region's _primary at the higher-confidence transcript — so the Norwegian
     clip's merged text comes from nb-whisper and the English clip's from the
     generalist, in one `/api/transcribe-session` call. Streams the committed
@@ -865,7 +865,7 @@ async def test_cover_routes_each_region_to_its_best_model_e2e(running_recorder: 
     )
     specialist = _ConfidenceFake(
         backend="faster-whisper",
-        model="nb-whisper-medium",
+        model="nb-whisper-large",
         logprob_by_marker={"marlene": -0.20, "armstrong": -0.80},
     )
     _install_cover_fakes(monkeypatch, generalist=generalist, specialist=specialist)
@@ -878,13 +878,13 @@ async def test_cover_routes_each_region_to_its_best_model_e2e(running_recorder: 
     from tapscribe.wav_cache import read_all_cached, read_cached
 
     # Both cover models ran on EVERY region — two sidecars apiece.
-    assert {c.result.model for c in read_all_cached(marlene)} == {"base", "nb-whisper-medium"}
-    assert {c.result.model for c in read_all_cached(armstrong)} == {"base", "nb-whisper-medium"}
+    assert {c.result.model for c in read_all_cached(marlene)} == {"base", "nb-whisper-large"}
+    assert {c.result.model for c in read_all_cached(armstrong)} == {"base", "nb-whisper-large"}
     # …and _primary points at the per-region winner.
-    assert read_cached(marlene).result.model == "nb-whisper-medium"
+    assert read_cached(marlene).result.model == "nb-whisper-large"
     assert read_cached(armstrong).result.model == "base"
     # The merged transcript stitched the WINNERS, not whichever model ran last.
-    assert "nb-whisper-medium:marlene" in merged["plain_text"]
+    assert "nb-whisper-large:marlene" in merged["plain_text"]
     assert "base:armstrong" in merged["plain_text"]
     assert "base:marlene" not in merged["plain_text"]
     on_disk = json.loads((rec.session_dir / "session-transcript.json").read_text(encoding="utf-8"))
@@ -903,7 +903,7 @@ async def test_cover_real_whisper_plus_nb_specialist_e2e(running_recorder: Runni
     as empirical / the human spot-check, so it is observed, not asserted, here.
 
     Patches the specialist table to nb-whisper-tiny for download speed (the
-    production default nb-whisper-medium is heavier); pre-fetches its weights so
+    production default nb-whisper-large is heavier); pre-fetches its weights so
     the test SKIPS cleanly when offline rather than failing inside the route.
     Skipped unless faster-whisper is importable and the fixtures are present.
     """
@@ -978,7 +978,7 @@ async def test_cover_unscored_generalist_keeps_generalist_e2e(running_recorder: 
     )
     specialist = _ConfidenceFake(
         backend="faster-whisper",
-        model="nb-whisper-medium",
+        model="nb-whisper-large",
         logprob_by_marker={"marlene": -0.20, "armstrong": -0.20},
     )
     _install_cover_fakes(monkeypatch, generalist=generalist, specialist=specialist)
@@ -997,7 +997,7 @@ async def test_cover_unscored_generalist_keeps_generalist_e2e(running_recorder: 
     # …while both transcripts remain cached for a future text-LID selector.
     assert {c.result.model for c in read_all_cached(marlene)} == {
         "parakeet-tdt-0.6b-v3",
-        "nb-whisper-medium",
+        "nb-whisper-large",
     }
 
 
@@ -1082,6 +1082,10 @@ async def test_cover_real_parakeet_generalist_keeps_generalist_on_english_e2e(
 # ---------------------------------------------------------------------------
 
 BENCH_GENERALIST = os.environ.get("TAPSCRIBE_BENCH_GENERALIST", "large-v3-turbo")
+# This routine benchmark verifies the routing MECHANISM on the committed
+# fixtures, so it defaults to the lighter nb-whisper-medium (the production
+# default is nb-whisper-large — see the FLEURS comparison harness). Override with
+# TAPSCRIBE_BENCH_NB to benchmark a specific specialist.
 BENCH_NB = os.environ.get("TAPSCRIBE_BENCH_NB", "nb-whisper-medium")
 # The winning transcript must recover at least this fraction of the reference's
 # ≥4-char content words — i.e. it actually transcribed the region's language,

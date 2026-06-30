@@ -278,10 +278,13 @@ DEFAULT_CANDIDATE_LANGUAGES: tuple[str, ...] = ("da", "no", "en")
 # generalist with the specialists for a meeting's declared languages; the
 # selector (`tapscribe.language_select`) then picks the best transcript per
 # region. This map IS the seam — repoint Norwegian at a different checkpoint, or
-# add a row for another language, with no pipeline change. `nb-whisper-medium`
-# pairs with a `large-v3-turbo`-tier generalist; it is operator-tunable in
-# spirit (a later issue surfaces it), so keep it the single source of truth.
-SPECIALIST_MODELS: dict[str, str] = {"no": "nb-whisper-medium"}
+# add a row for another language, with no pipeline change. `nb-whisper-large` is
+# the default because a 20-clip FLEURS benchmark (vs a `large-v3-turbo`
+# generalist) showed it win-or-tie 19/20 on Norwegian (+0.07 word-recall, ~40%
+# lower WER), whereas `nb-whisper-medium` only TIED the generalist — i.e. medium
+# didn't earn the extra decode, large does. It is operator-tunable in spirit (a
+# later issue surfaces it), so keep it the single source of truth.
+SPECIALIST_MODELS: dict[str, str] = {"no": "nb-whisper-large"}
 
 # Display names for every concrete language code that appears across the
 # catalog. The Parakeet pairs cover most; nb-whisper contributes Norwegian and

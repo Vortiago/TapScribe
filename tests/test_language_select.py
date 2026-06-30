@@ -105,9 +105,9 @@ def test_picks_the_more_confident_transcript():
     """Higher (closer to zero) avg_logprob wins — the specialist here is more
     confident, so it is selected over the generalist."""
     generalist = _candidate("large-v3-turbo", [(0.0, 5.0, -0.80)])
-    specialist = _candidate("nb-whisper-medium", [(0.0, 5.0, -0.20)])
+    specialist = _candidate("nb-whisper-large", [(0.0, 5.0, -0.20)])
     winner = AcousticConfidenceSelector().select([generalist, specialist])
-    assert winner.result.model == "nb-whisper-medium"
+    assert winner.result.model == "nb-whisper-large"
 
 
 def test_generalist_first_wins_a_tie():
@@ -115,7 +115,7 @@ def test_generalist_first_wins_a_tie():
     the FIRST candidate wins. The pipeline passes the generalist first, so the
     generalist is the safe tie-break default (ADR-0010)."""
     generalist = _candidate("large-v3-turbo", [(0.0, 5.0, None)])
-    specialist = _candidate("nb-whisper-medium", [(0.0, 5.0, None)])
+    specialist = _candidate("nb-whisper-large", [(0.0, 5.0, None)])
     winner = AcousticConfidenceSelector().select([generalist, specialist])
     assert winner.result.model == "large-v3-turbo"
 
@@ -128,19 +128,19 @@ def test_score_is_duration_weighted_not_a_plain_segment_mean():
     (specialist mean ≈ -2.6); duration-weighting picks the specialist
     (≈ -0.3), which is the acoustically-better transcript over the clip."""
     generalist = _candidate("large-v3-turbo", [(0.0, 10.0, -0.40)])
-    specialist = _candidate("nb-whisper-medium", [(0.0, 9.8, -0.20), (9.8, 10.0, -5.00)])
+    specialist = _candidate("nb-whisper-large", [(0.0, 9.8, -0.20), (9.8, 10.0, -5.00)])
     winner = AcousticConfidenceSelector().select([generalist, specialist])
-    assert winner.result.model == "nb-whisper-medium"
+    assert winner.result.model == "nb-whisper-large"
 
 
 def test_segment_without_logprob_does_not_sink_an_otherwise_confident_transcript():
     """Segments lacking avg_logprob are skipped, not treated as zero/-inf: a
     transcript with one scored confident segment and one unscored segment is
     still ranked on the score it does have."""
-    scored = _candidate("nb-whisper-medium", [(0.0, 5.0, -0.10), (5.0, 10.0, None)])
+    scored = _candidate("nb-whisper-large", [(0.0, 5.0, -0.10), (5.0, 10.0, None)])
     weak = _candidate("large-v3-turbo", [(0.0, 10.0, -0.90)])
     winner = AcousticConfidenceSelector().select([weak, scored])
-    assert winner.result.model == "nb-whisper-medium"
+    assert winner.result.model == "nb-whisper-large"
 
 
 def test_all_unscored_keeps_the_first_candidate():
@@ -148,7 +148,7 @@ def test_all_unscored_keeps_the_first_candidate():
     first (generalist) candidate is kept. Selection never raises just because
     a backend didn't emit confidences."""
     a = _candidate("large-v3-turbo", [(0.0, 5.0, None)])
-    b = _candidate("nb-whisper-medium", [])
+    b = _candidate("nb-whisper-large", [])
     winner = AcousticConfidenceSelector().select([a, b])
     assert winner.result.model == "large-v3-turbo"
 
@@ -162,7 +162,7 @@ def test_unscored_generalist_is_kept_over_a_scored_specialist():
     comparable, so the generalist (first) is kept; cross-arch routing is the
     text-LID selector's job (ADR-0010)."""
     generalist = _candidate("parakeet-tdt-0.6b-v3", [(0.0, 6.0, None), (6.0, 12.0, None)])
-    specialist = _candidate("nb-whisper-medium", [(0.0, 12.0, -0.30)])
+    specialist = _candidate("nb-whisper-large", [(0.0, 12.0, -0.30)])
     winner = AcousticConfidenceSelector().select([generalist, specialist])
     assert winner.result.model == "parakeet-tdt-0.6b-v3"
 
@@ -172,6 +172,6 @@ def test_select_carries_candidate_languages_for_the_seam():
     constrained text-LID selector is a true drop-in (ADR-0010 'swap with no
     pipeline change'); the default acoustic selector accepts and ignores it."""
     generalist = _candidate("large-v3-turbo", [(0.0, 5.0, -0.50)])
-    specialist = _candidate("nb-whisper-medium", [(0.0, 5.0, -0.10)])
+    specialist = _candidate("nb-whisper-large", [(0.0, 5.0, -0.10)])
     winner = AcousticConfidenceSelector().select([generalist, specialist], candidate_languages=("no", "en"))
-    assert winner.result.model == "nb-whisper-medium"
+    assert winner.result.model == "nb-whisper-large"

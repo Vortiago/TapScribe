@@ -783,7 +783,7 @@ async def test_cover_runs_both_models_and_selector_routes_primary_per_region(
     from tapscribe.text import write_languages
     from tapscribe.wav_cache import read_all_cached, read_cached
 
-    write_languages("no, en")  # cover = {generalist, nb-whisper-medium}
+    write_languages("no, en")  # cover = {generalist, nb-whisper-large}
     # The generalist detects each region's language; that drives routing. The
     # avg_logprob is set so acoustic would mis-route armstrong (gen -0.10 wins)
     # but route marlene to the specialist anyway — the point is that routing
@@ -796,10 +796,10 @@ async def test_cover_runs_both_models_and_selector_routes_primary_per_region(
     )
     specialist = _ConfidenceStub(
         backend="faster-whisper",
-        model="nb-whisper-medium",
+        model="nb-whisper-large",
         logprob_by_marker={"marlene": -0.20, "armstrong": -0.80},
     )
-    _install_by_model(monkeypatch, {"nb-whisper-medium": specialist}, default=generalist)
+    _install_by_model(monkeypatch, {"nb-whisper-large": specialist}, default=generalist)
 
     sd = seed_session(recorder_under_test.recordings_dir, "s", COVER_WAVS)
     selection = select_session_wavs(sd, from_iso=None, to_iso=None, source="original")
@@ -810,13 +810,13 @@ async def test_cover_runs_both_models_and_selector_routes_primary_per_region(
 
     marlene, armstrong = sd / COVER_WAVS[0], sd / COVER_WAVS[1]
     # Both models ran on EVERY region — two sidecars apiece.
-    assert {c.result.model for c in read_all_cached(marlene)} == {"fake-generalist", "nb-whisper-medium"}
-    assert {c.result.model for c in read_all_cached(armstrong)} == {"fake-generalist", "nb-whisper-medium"}
+    assert {c.result.model for c in read_all_cached(marlene)} == {"fake-generalist", "nb-whisper-large"}
+    assert {c.result.model for c in read_all_cached(armstrong)} == {"fake-generalist", "nb-whisper-large"}
     # …and _primary points at the per-region winner.
-    assert read_cached(marlene).result.model == "nb-whisper-medium"
+    assert read_cached(marlene).result.model == "nb-whisper-large"
     assert read_cached(armstrong).result.model == "fake-generalist"
     # merge_session stitched the WINNERS, not whichever model ran last.
-    assert "nb-whisper-medium:marlene" in merged["plain_text"]
+    assert "nb-whisper-large:marlene" in merged["plain_text"]
     assert "fake-generalist:armstrong" in merged["plain_text"]
     assert "fake-generalist:marlene" not in merged["plain_text"]
 
@@ -869,9 +869,9 @@ async def test_selector_is_pluggable_swapping_it_needs_no_pipeline_change(record
         backend="faster-whisper", model="fake-generalist", logprob_by_marker={"marlene": -0.90}
     )
     specialist = _ConfidenceStub(
-        backend="faster-whisper", model="nb-whisper-medium", logprob_by_marker={"marlene": -0.10}
+        backend="faster-whisper", model="nb-whisper-large", logprob_by_marker={"marlene": -0.10}
     )
-    _install_by_model(monkeypatch, {"nb-whisper-medium": specialist}, default=generalist)
+    _install_by_model(monkeypatch, {"nb-whisper-large": specialist}, default=generalist)
 
     seen_langs: list[tuple[str, ...]] = []
 
@@ -910,9 +910,9 @@ async def test_cover_rerun_without_force_keeps_primary_and_skips_retranscribe(
         backend="faster-whisper", model="fake-generalist", logprob_by_marker={"marlene": -0.90}
     )
     specialist = _ConfidenceStub(
-        backend="faster-whisper", model="nb-whisper-medium", logprob_by_marker={"marlene": -0.20}
+        backend="faster-whisper", model="nb-whisper-large", logprob_by_marker={"marlene": -0.20}
     )
-    _install_by_model(monkeypatch, {"nb-whisper-medium": specialist}, default=generalist)
+    _install_by_model(monkeypatch, {"nb-whisper-large": specialist}, default=generalist)
 
     sd = seed_session(recorder_under_test.recordings_dir, "s", [COVER_WAVS[0]])
     selection = select_session_wavs(sd, from_iso=None, to_iso=None, source="original")
@@ -921,7 +921,7 @@ async def test_cover_rerun_without_force_keeps_primary_and_skips_retranscribe(
             _session_request(model="fake-generalist"), selection=selection, job=handle
         )
     calls_after_first = len(generalist.calls) + len(specialist.calls)
-    assert read_cached(sd / COVER_WAVS[0]).result.model == "nb-whisper-medium"
+    assert read_cached(sd / COVER_WAVS[0]).result.model == "nb-whisper-large"
 
     # Second pass, force=False: every (backend, model) sidecar is a cache hit.
     async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
@@ -931,7 +931,7 @@ async def test_cover_rerun_without_force_keeps_primary_and_skips_retranscribe(
     assert len(generalist.calls) + len(specialist.calls) == calls_after_first, (
         "a non-force re-run must not re-transcribe either cover model"
     )
-    assert read_cached(sd / COVER_WAVS[0]).result.model == "nb-whisper-medium"
+    assert read_cached(sd / COVER_WAVS[0]).result.model == "nb-whisper-large"
 
 
 async def test_explicit_source_lang_pin_runs_generalist_only(recorder_under_test, monkeypatch):
@@ -987,12 +987,12 @@ async def test_specialist_loads_with_auto_backend_not_the_generalists(recorder_u
         backend="faster-whisper", model="fake-generalist", logprob_by_marker={"marlene": -0.5}
     )
     specialist = _ConfidenceStub(
-        backend="faster-whisper", model="nb-whisper-medium", logprob_by_marker={"marlene": -0.2}
+        backend="faster-whisper", model="nb-whisper-large", logprob_by_marker={"marlene": -0.2}
     )
 
     def _factory(model_id, *, backend="auto", **kw):  # noqa: ARG001
         seen_backend[model_id] = backend
-        return specialist if model_id == "nb-whisper-medium" else generalist
+        return specialist if model_id == "nb-whisper-large" else generalist
 
     monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", _factory)
 
@@ -1013,4 +1013,4 @@ async def test_specialist_loads_with_auto_backend_not_the_generalists(recorder_u
         await transcribe_session_locked(req, selection=selection, job=handle)
 
     assert seen_backend["fake-generalist"] == "mlx"  # operator's choice honoured for the generalist
-    assert seen_backend["nb-whisper-medium"] == "auto"  # specialist self-routes — no MLX crash
+    assert seen_backend["nb-whisper-large"] == "auto"  # specialist self-routes — no MLX crash

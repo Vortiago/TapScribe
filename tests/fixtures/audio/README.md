@@ -64,9 +64,10 @@ from Wikimedia Commons, downsampled from 11 025 Hz mono OGG/Vorbis to
 - **Licence**: Public domain in the United States as a work of the US
   federal government ("NASA material is not protected by copyright
   unless noted").
-- **Reference transcript**: `"That's one small step for man, one giant
-  leap for mankind."` — the well-known phrase Armstrong utters in the
-  clip.
+- **Reference transcript**: `"I'm going to step off the LM now."` — what
+  Armstrong actually says in the **first ~12 s** of the recording (the
+  famous "one small step for man" line comes *later*, at ~15 s in the
+  source, and is not in this clip).
 
 ### `marlene-nb.wav`
 

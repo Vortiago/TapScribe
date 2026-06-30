@@ -47,8 +47,13 @@ stage. Manual single-WAV transcribe and the live channel are unchanged in v1.
   pipeline.
 - **Specialist table** — a small catalog map `language → purpose-built model`
   for languages where a specialist beats the generalist. v1: `{no →
-  nb-whisper}`. The models run for a candidate set `S` = `{generalist} ∪
-  {specialist[l] for l in S if l in table}`.
+  nb-whisper-large}`. The models run for a candidate set `S` = `{generalist} ∪
+  {specialist[l] for l in S if l in table}`. The default is **nb-whisper-large**,
+  not medium: a 20-clip FLEURS comparison (vs a `large-v3-turbo` generalist)
+  showed nb-large win-or-tie 19/20 on Norwegian (+0.07 word-recall, ~40% lower
+  WER), while nb-**medium** only TIED — i.e. medium didn't earn its extra decode,
+  large does. (Constrained language *detection* itself was 77/77 correct across
+  da/no/sv/en in that run, so the routing foundation is solid regardless.)
 - **Selector** — picks the winning sidecar per region. Default:
   **specialist-routing** — route each region to the model the specialist table
   names for the language the generalist detected there (the table *declares*
@@ -56,17 +61,17 @@ stage. Manual single-WAV transcribe and the live channel are unchanged in v1.
   (avg_logprob) where the detected language has no specialist or the candidates
   are cross-architecture (the acoustic fallback keeps an unscored Parakeet/
   Voxtral generalist rather than losing to a scored nb-whisper). This replaced a
-  pure-acoustic default after the **da/no routing benchmark**
-  (`tests/e2e/test_pipeline_e2e.py::test_da_no_routing_benchmark`, on the
-  committed `solen-da` + `marlene-nb` fixtures) measured that acoustic confidence
-  mis-routed the Norwegian region — the generalist's weaker Norwegian (recall
-  0.77) outscored nb-whisper's better one (0.92) on avg_logprob. Specialist-
-  routing makes the Danish region go to the generalist (best Danish) and the
-  Norwegian region to nb-whisper (best Norwegian), which the benchmark now pins
-  at 100% correct routing. Still swappable for a **text-LID** or **LLM-judge**
-  selector for cross-architecture pairs (where the generalist's per-region
-  language detection is unreliable); the benchmark is the yardstick for any such
-  change and for every future model.
+  pure-acoustic default: the FLEURS comparison showed nb-whisper-large genuinely
+  beats the generalist on Norwegian (19/20), but `avg_logprob` does NOT reliably
+  reflect that across two different checkpoints — so route by the declared
+  specialist (which the table asserts is best for its language) rather than by a
+  cross-model confidence number. Result: the Danish region goes to the generalist
+  (best Danish), the Norwegian region to nb-whisper (best Norwegian). Still
+  swappable for a **text-LID** or **LLM-judge** selector for cross-architecture
+  pairs (where the generalist's per-region language detection is unreliable); the
+  `test_da_no_routing_benchmark` (committed `solen-da` + `marlene-nb`) and the
+  FLEURS comparison harness are the yardsticks for any such change and for every
+  future model.
 
 ## Considered and rejected (for v1)
 
