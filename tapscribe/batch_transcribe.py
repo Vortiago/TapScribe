@@ -193,7 +193,7 @@ def _build_invocation(
         hotwords=hotwords,
         source_lang=source_lang,
         target_lang=target_lang,
-        candidate_languages=tuple(candidate_languages),
+        candidate_languages=candidate_languages,
         hallucination_rules=tuple(hallucinations_mod.parse_rules()),
     )
 

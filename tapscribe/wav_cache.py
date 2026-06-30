@@ -305,26 +305,32 @@ def cached_transcribe(
     backend = transcriber.backend
     model = transcriber.model_name
     size, mtime_ns = _wav_fingerprint(wav_path)
+
+    # Snap a multi-language candidate set to a concrete per-region language
+    # BEFORE the cache check, so the chosen language flows through the existing
+    # `source_lang` channel and becomes part of the match key. Resolving up front
+    # (rather than only on a miss) is what makes the cache correct when the
+    # operator CHANGES the meeting's languages: a different set yields a
+    # different pin → the entry misses → it re-detects, instead of serving a
+    # transcript chosen under the old set. A singleton set or an explicit pin
+    # already arrives as `source_lang`; adapters without constrained detection
+    # leave it None and auto-detect. The detect is a cheap one-window pass; the
+    # cache still spares the expensive transcribe on a hit. See ADR-0009.
+    if source_lang is None and candidate_languages and isinstance(transcriber, ConstrainedLanguageDetector):
+        source_lang = transcriber.detect_constrained_language(wav_path, candidate_languages) or None
+
     if not force:
         existing = _read_entry_for(wav_path, backend=backend, model=model)
         if (
             existing is not None
             and existing.wav_size == size
             and existing.wav_mtime_ns == mtime_ns
+            and (existing.result.source_language or "") == (source_lang or "")
             and (existing.result.target_language or "") == (target_lang or "")
             and (existing.result.initial_prompt_used or "") == (initial_prompt or "")
             and (existing.result.hotwords_used or "") == (hotwords or "")
-            and _language_cache_match(existing.result.source_language or "", source_lang, candidate_languages)
         ):
             return existing
-
-    # On a miss, snap a multi-language candidate set to a concrete per-region
-    # language so the chosen language flows through the existing `source_lang`
-    # channel (the cache key + result.source_language). A singleton set or an
-    # explicit pin already arrives as `source_lang`; adapters without
-    # constrained detection leave it None and auto-detect. See ADR-0009.
-    if source_lang is None and candidate_languages and isinstance(transcriber, ConstrainedLanguageDetector):
-        source_lang = transcriber.detect_constrained_language(wav_path, tuple(candidate_languages)) or None
 
     started = datetime.now(UTC)
     raw = transcriber.transcribe(
@@ -355,27 +361,6 @@ def cached_transcribe(
     )
     _write_entry(wav_path, cached, backend=backend, model=model)
     return cached
-
-
-def _language_cache_match(stored: str, source_lang: str | None, candidate_languages: tuple[str, ...]) -> bool:
-    """Does a cached entry's stored source language still satisfy this call's
-    language request? (ADR-0009)
-
-    - explicit pin (incl. a resolved singleton set): the languages must match;
-    - constrained multi-language set: a stored language still WITHIN the current
-      candidate set is valid — widening the set keeps the cache, switching to a
-      disjoint set invalidates it;
-    - neither (legacy / plain auto-detect): both empty, the unchanged behaviour.
-    """
-    if source_lang is not None:
-        return stored == source_lang
-    if candidate_languages:
-        # A pinned-in-set entry is valid; so is an unpinned auto-detect
-        # ("" — the outcome for an adapter without constrained detection, which
-        # re-running would only reproduce). Only a pin OUTSIDE the current set
-        # (the operator switched to a disjoint set) invalidates.
-        return stored == "" or stored in candidate_languages
-    return stored == ""
 
 
 def _wav_fingerprint(wav_path: Path) -> tuple[int, int]:

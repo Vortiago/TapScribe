@@ -109,18 +109,20 @@ export function build(ctx) {
     finally { liveClear.disabled = false; liveFeed.invalidate(); afterMutate(); }
   });
 
-  // Per-session override saves → PUT /api/session-meta/{id}. Empty value
-  // clears the override (falls back to the global default). Bound once; the
-  // target session id is read from the `session` closure var at click time.
-  /** @param {"prompt"|"hotwords"} key @param {HTMLTextAreaElement} ta @param {HTMLButtonElement} btn @param {HTMLElement} status */
-  const wireOverride = (key, ta, btn, status) => {
+  // Per-session override saves → PUT /api/session-meta/{id}. Empty value clears
+  // the override (falls back to the global default). Bound once; the target
+  // session id is read from the `session` closure var at click time. `getValue`
+  // returns the field's payload — a textarea string for prompt/hotwords, the
+  // selected codes array for languages (write_session_meta accepts both).
+  /** @param {"prompt"|"hotwords"|"languages"} key @param {() => unknown} getValue @param {HTMLButtonElement} btn @param {HTMLElement} status */
+  const wireOverride = (key, getValue, btn, status) => {
     btn.addEventListener("click", async () => {
       if (!session) return;
       const sid = session.session;
       btn.disabled = true;
       status.textContent = "saving…";
       try {
-        await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { [key]: ta.value });
+        await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { [key]: getValue() });
         status.textContent = "saved";
         setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
       } catch (e) {
@@ -128,26 +130,9 @@ export function build(ctx) {
       } finally { btn.disabled = false; afterMutate(); }
     });
   };
-  wireOverride("prompt", promptTa, promptSave, promptStatus);
-  wireOverride("hotwords", hotwordsTa, hotwordsSave, hotwordsStatus);
-
-  // Languages override save → PUT /api/session-meta/{id} {languages:[...]}.
-  // An empty selection clears the override (falls back to the global default).
-  // Same shape as wireOverride but the value is the multi-select's codes, not
-  // a textarea string.
-  languagesSave.addEventListener("click", async () => {
-    if (!session) return;
-    const sid = session.session;
-    languagesSave.disabled = true;
-    languagesStatus.textContent = "saving…";
-    try {
-      await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { languages: selectedLanguages(languagesSel) });
-      languagesStatus.textContent = "saved";
-      setTimeout(() => { if (languagesStatus.textContent === "saved") languagesStatus.textContent = ""; }, 1500);
-    } catch (e) {
-      languagesStatus.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
-    } finally { languagesSave.disabled = false; afterMutate(); }
-  });
+  wireOverride("prompt", () => promptTa.value, promptSave, promptStatus);
+  wireOverride("hotwords", () => hotwordsTa.value, hotwordsSave, hotwordsStatus);
+  wireOverride("languages", () => selectedLanguages(languagesSel), languagesSave, languagesStatus);
 
   // live-feed has a module-level signature cache; clear it once at build so
   // the first update populates this view's fresh (empty) shell.

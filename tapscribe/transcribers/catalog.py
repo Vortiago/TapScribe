@@ -21,6 +21,7 @@ imports its adapter only when the operator actually picks that backend.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
@@ -273,7 +274,7 @@ DEFAULT_CANDIDATE_LANGUAGES: tuple[str, ...] = ("da", "no", "en")
 # catalog. The Parakeet pairs cover most; nb-whisper contributes Norwegian and
 # Voxtral contributes Hindi. Single source of truth for the picker's labels.
 _LANGUAGE_NAMES: dict[str, str] = {
-    **{code: name for code, name in _PARAKEET_LANG_PAIRS},
+    **dict(_PARAKEET_LANG_PAIRS),
     "no": "Norwegian",
     "hi": "Hindi",
 }
@@ -724,12 +725,18 @@ REGISTRY: TranscriberRegistry = TranscriberRegistry(_DEFAULT_ENTRIES)
 DEFAULT_BATCH_MODEL: str = "small.en"
 
 
+@functools.lru_cache(maxsize=1)
 def candidate_language_codes() -> tuple[str, ...]:
     """Every concrete language a catalog model declares (the "auto" auto-detect
     sentinel dropped) — the allowlist a candidate-language set
     (config/languages.txt or a per-meeting override) validates against, and the
     option list the dashboard picker offers. Ordered with the default set
-    {da, no, en} first, then the rest alphabetically by display name."""
+    {da, no, en} first, then the rest alphabetically by display name.
+
+    Memoised: `REGISTRY` is an immutable module-level singleton and the languages
+    are static, so this is a pure constant — computing it once spares the walk +
+    sort on every `is_candidate_language` call (which the validators run per code
+    and the `/api/state` poll reaches via `read_languages`)."""
     codes: set[str] = set()
     for entry in REGISTRY.entries():
         for code in entry.languages:

@@ -539,40 +539,15 @@ def test_relocated_errors_are_decoupled_from_transcribe_base():
 # ---------------------------------------------------------------------------
 
 
-class _RecordingStub:
-    """A Transcriber stub that records the `source_lang` each transcribe() call
-    receives, and echoes it into the result like the real adapters do (so the
-    cache's source_language match key behaves realistically). NOT a constrained
-    language detector — used for the plain / pinned paths."""
-
-    name = "fake"
-    device = "test-device"
-
-    def __init__(self, *, backend="fake-be", model="fake-m"):
-        self.backend = backend
-        self.model_name = model
-        self.seen_source_lang: list[str | None] = []
-
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
-        from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result
-
-        self.seen_source_lang.append(source_lang)
-        return build_transcription_result(
-            self,
-            text="hi",
-            segments=(TranscriptionSegment(start=0.0, end=1.0, text="hi"),),
-            duration=1.0,
-            language=source_lang or "en",
-            source_lang=source_lang,
-            initial_prompt=initial_prompt,
-            hotwords=hotwords,
-        )
-
-
-class _DetectorStub(_RecordingStub):
-    """Adds the constrained-detection capability. Records the candidate set it
-    was asked to snap to, and returns a fixed winner (so a test can assert the
-    constrained pick flows through to transcribe as the pin)."""
+# The shared `TranscriberStub` (conftest) already records `seen_source_lang`
+# and echoes it into the result, so the plain / pinned tests use it directly.
+# Only the constrained-detect capability is new — add it by subclassing, the
+# file's established `_Spy(TranscriberStub)` pattern.
+class _DetectorStub(TranscriberStub):
+    """A `TranscriberStub` that also advertises the constrained-detection
+    capability: records the candidate set it was asked to snap to, and returns a
+    fixed winner (so a test can assert the constrained pick flows through to
+    transcribe as the pin)."""
 
     def __init__(self, *, winner, **kw):
         super().__init__(**kw)
@@ -614,7 +589,7 @@ async def test_singleton_candidate_set_pins_that_language(recorder_under_test, i
     from tapscribe.text import write_languages
 
     write_languages("da")
-    stub = _RecordingStub()
+    stub = TranscriberStub(backend="fake-be", model="fake-m")
     await _run_session(recorder_under_test, stub, install_stub_transcriber)
     assert stub.seen_source_lang == ["da"]
 
@@ -629,7 +604,7 @@ async def test_manual_single_wav_transcribe_ignores_candidate_languages(
     from tapscribe.text import write_languages
 
     write_languages("da")
-    stub = _RecordingStub()
+    stub = TranscriberStub(backend="fake-be", model="fake-m")
     install_stub_transcriber(stub)
     seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
     await transcribe_one(
@@ -676,7 +651,7 @@ async def test_session_meta_languages_override_beats_global_default(
     write_languages("da, no")  # global default is multi
     seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
     write_session_meta("s", {"languages": ["en"]})  # this meeting is English-only
-    stub = _RecordingStub()
+    stub = TranscriberStub(backend="fake-be", model="fake-m")
     install_stub_transcriber(stub)
     selection = select_session_wavs(
         recorder_under_test.recordings_dir / "s", from_iso=None, to_iso=None, source="original"
@@ -684,3 +659,43 @@ async def test_session_meta_languages_override_beats_global_default(
     async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
         await transcribe_session_locked(_session_request(), selection=selection, job=handle)
     assert stub.seen_source_lang == ["en"]
+
+
+async def test_changing_candidate_set_re_detects_on_non_force_rerun(
+    recorder_under_test, install_stub_transcriber
+):
+    """Changing the meeting's candidate set must re-detect even WITHOUT force: a
+    constrained entry is keyed on the language it resolved to, so widening
+    {da, no} → {da, no, en} re-runs and re-pins, instead of serving the stale
+    {da, no} pick. This is the "fix a mis-detection by adding the language"
+    workflow (ADR-0009) — it would silently no-op if the cache served the old
+    pick on a non-force re-run."""
+    from tapscribe.sessions import write_session_meta
+    from tapscribe.text import write_languages
+
+    # A detector that picks the LAST declared language, so a different set
+    # yields a different pin (stands in for the real argmax shifting once a
+    # better-matching candidate is added).
+    class _LastWins(TranscriberStub):
+        def detect_constrained_language(self, path, candidate_languages):  # noqa: ARG002
+            return candidate_languages[-1]
+
+    stub = _LastWins(backend="fake-be", model="fake-m")
+    install_stub_transcriber(stub)
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    selection = select_session_wavs(
+        recorder_under_test.recordings_dir / "s", from_iso=None, to_iso=None, source="original"
+    )
+
+    write_languages("da, no")  # global default {da, no} → last = "no"
+    async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(_session_request(), selection=selection, job=handle)
+    assert stub.seen_source_lang == ["no"]
+
+    # Widen the meeting to {da, no, en}; a NON-force re-run must re-detect to "en".
+    write_session_meta("s", {"languages": ["da", "no", "en"]})
+    async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(_session_request(), selection=selection, job=handle)
+    assert stub.seen_source_lang == ["no", "en"], (
+        "widening the candidate set must re-detect on a non-force re-run, not serve the stale pick"
+    )

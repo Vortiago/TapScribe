@@ -91,14 +91,17 @@ class FasterWhisperTranscriber:
         if hint is not None:
             return hint if hint in cands else None
 
+        import wave
+
         from ..wav_predecode import load_recorder_wav_as_pcm
 
         try:
             audio = load_recorder_wav_as_pcm(path)
-        except RuntimeError:
-            # A non-recorder WAV (different rate/channels/width) — the cheap
-            # stdlib pre-decode refuses it. `transcribe()` still handles such a
-            # file via faster-whisper's own decoder, so fall back to None
+        except (RuntimeError, OSError, wave.Error, EOFError):
+            # The cheap stdlib pre-decode couldn't read the file — a non-recorder
+            # format (RuntimeError), an unreadable/corrupt RIFF (wave.Error /
+            # EOFError), or an I/O error (OSError). `transcribe()` still handles
+            # such a file via faster-whisper's own decoder, so fall back to None
             # (unconstrained auto-detect, the pre-ADR-0009 behaviour) rather than
             # failing the whole transcribe just to constrain the language.
             return None
