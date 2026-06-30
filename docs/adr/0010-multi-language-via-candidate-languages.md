@@ -49,12 +49,24 @@ stage. Manual single-WAV transcribe and the live channel are unchanged in v1.
   for languages where a specialist beats the generalist. v1: `{no →
   nb-whisper}`. The models run for a candidate set `S` = `{generalist} ∪
   {specialist[l] for l in S if l in table}`.
-- **Selector** — picks the winning sidecar per region. Default: **acoustic
-  confidence** (avg_logprob; valid because the v1 pair is same-family Whisper).
-  Swappable for a **text-LID** selector, which is what unlocks a
-  cross-architecture pair like Parakeet + nb-whisper. The choice of selector
-  heuristic is empirical — to be validated on a real da/no recording, which is
-  why it is a seam and not a hardcoded rule.
+- **Selector** — picks the winning sidecar per region. Default:
+  **specialist-routing** — route each region to the model the specialist table
+  names for the language the generalist detected there (the table *declares*
+  which model is best per language), falling back to **acoustic confidence**
+  (avg_logprob) where the detected language has no specialist or the candidates
+  are cross-architecture (the acoustic fallback keeps an unscored Parakeet/
+  Voxtral generalist rather than losing to a scored nb-whisper). This replaced a
+  pure-acoustic default after the **da/no routing benchmark**
+  (`tests/e2e/test_pipeline_e2e.py::test_da_no_routing_benchmark`, on the
+  committed `solen-da` + `marlene-nb` fixtures) measured that acoustic confidence
+  mis-routed the Norwegian region — the generalist's weaker Norwegian (recall
+  0.77) outscored nb-whisper's better one (0.92) on avg_logprob. Specialist-
+  routing makes the Danish region go to the generalist (best Danish) and the
+  Norwegian region to nb-whisper (best Norwegian), which the benchmark now pins
+  at 100% correct routing. Still swappable for a **text-LID** or **LLM-judge**
+  selector for cross-architecture pairs (where the generalist's per-region
+  language detection is unreliable); the benchmark is the yardstick for any such
+  change and for every future model.
 
 ## Considered and rejected (for v1)
 

@@ -14,22 +14,25 @@ from datetime import UTC, datetime
 from tapscribe.language_select import (
     AcousticConfidenceSelector,
     LanguageSelector,
+    SpecialistRoutingSelector,
     default_language_selector,
 )
 from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 from tapscribe.wav_cache import CachedTranscription
 
 
-def _candidate(model: str, segs: list[tuple[float, float, float | None]]) -> CachedTranscription:
-    """A CachedTranscription carrying `model` and the given
-    (start, end, avg_logprob) segments — the only fields the selector reads."""
+def _candidate(
+    model: str, segs: list[tuple[float, float, float | None]], *, language: str = "no"
+) -> CachedTranscription:
+    """A CachedTranscription carrying `model`, the per-region detected `language`,
+    and the given (start, end, avg_logprob) segments — the fields the selectors read."""
     segments = tuple(TranscriptionSegment(start=s, end=e, text="x", avg_logprob=lp) for s, e, lp in segs)
     result = TranscriptionResult(
         transcriber="fake",
         backend="faster-whisper",
         device="CPU",
         model=model,
-        language="no",
+        language=language,
         language_probability=1.0,
         duration=segs[-1][1] if segs else 0.0,
         text="x",
@@ -48,10 +51,54 @@ def _candidate(model: str, segs: list[tuple[float, float, float | None]]) -> Cac
     )
 
 
-def test_default_selector_is_an_acoustic_confidence_language_selector():
+def test_default_selector_routes_specialists_then_falls_back_to_acoustic():
     sel = default_language_selector()
-    assert isinstance(sel, AcousticConfidenceSelector)
+    assert isinstance(sel, SpecialistRoutingSelector)
     assert isinstance(sel, LanguageSelector)
+
+
+# ---------------------------------------------------------------------------
+# SpecialistRoutingSelector (the default): route a region to the model the
+# specialist table names for the generalist's detected language; else acoustic.
+# ---------------------------------------------------------------------------
+
+
+def test_routes_to_the_specialist_for_the_detected_language_over_a_more_confident_generalist():
+    """A region the generalist detected as Norwegian goes to nb-whisper (the "no"
+    specialist) even though the generalist is acoustically MORE confident — the
+    specialist table declares nb-whisper is the best model for Norwegian."""
+    from tapscribe.transcribers.catalog import SPECIALIST_MODELS
+
+    nb = SPECIALIST_MODELS["no"]
+    generalist = _candidate("large-v3-turbo", [(0.0, 5.0, -0.10)], language="no")  # higher confidence
+    specialist = _candidate(nb, [(0.0, 5.0, -0.40)], language="no")  # lower confidence
+    winner = SpecialistRoutingSelector().select([generalist, specialist])
+    assert winner.result.model == nb
+
+
+def test_falls_back_to_acoustic_when_detected_language_has_no_specialist():
+    """A Danish region (no Danish specialist) is decided by acoustic confidence —
+    the generalist's confident Danish beats nb-whisper's Norwegianised version."""
+    from tapscribe.transcribers.catalog import SPECIALIST_MODELS
+
+    nb = SPECIALIST_MODELS["no"]
+    generalist = _candidate("large-v3-turbo", [(0.0, 5.0, -0.20)], language="da")
+    specialist = _candidate(nb, [(0.0, 5.0, -0.80)], language="no")
+    winner = SpecialistRoutingSelector().select([generalist, specialist])
+    assert winner.result.model == "large-v3-turbo"
+
+
+def test_specialist_routing_keeps_the_cross_arch_guard_via_acoustic_fallback():
+    """When the detected language has no specialist AND the generalist is unscored
+    (Parakeet/Voxtral), the acoustic fallback's cross-arch guard keeps the
+    generalist rather than handing the region to a scored nb-whisper."""
+    from tapscribe.transcribers.catalog import SPECIALIST_MODELS
+
+    nb = SPECIALIST_MODELS["no"]
+    generalist = _candidate("parakeet-tdt-0.6b-v3", [(0.0, 6.0, None)], language="en")  # unscored
+    specialist = _candidate(nb, [(0.0, 6.0, -0.30)], language="no")  # scored
+    winner = SpecialistRoutingSelector().select([generalist, specialist])
+    assert winner.result.model == "parakeet-tdt-0.6b-v3"
 
 
 def test_picks_the_more_confident_transcript():

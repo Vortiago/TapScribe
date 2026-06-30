@@ -12,6 +12,25 @@ Whisper models don't make it flake.
 Skipped automatically when `faster-whisper` isn't installed
 (`pip install -e ".[whisper]"`).
 
+## da/no routing benchmark
+
+The Danish (`solen-da`) + Norwegian (`marlene-nb`) pair powers
+`test_da_no_routing_benchmark` — the measurable, repeatable proof that the
+multi-language cover routes the confusable da/no pair correctly (ADR-0010). It
+streams both as one meeting, runs the real cover, and reports per-region,
+per-model **WER + reference word-recall** plus which transcript the selector
+chose, asserting each region's winner is the best transcript for its language.
+Point it at a new model and re-read the numbers:
+
+```sh
+TAPSCRIBE_BENCH_GENERALIST=parakeet-tdt-0.6b-v3 TAPSCRIBE_BENCH_NB=nb-whisper-large \
+  pytest tests/e2e/test_pipeline_e2e.py -k da_no_routing_benchmark -m real_audio -s
+```
+
+Both `-da`/`-nb` references are the **spoken** article text (the narration
+paraphrases the written article slightly, and the spoken-Wikipedia preamble is
+skipped), so WER measures transcription quality against what is actually said.
+
 ## Layout
 
 ```
@@ -20,6 +39,8 @@ tests/fixtures/audio/
 ├── armstrong-en.reference.txt
 ├── marlene-nb.wav              # 15 s, 16 kHz mono int16, CC-BY-SA 4.0
 ├── marlene-nb.reference.txt
+├── solen-da.wav                # 15 s, 16 kHz mono int16, CC-BY-SA 3.0
+├── solen-da.reference.txt
 └── README.md (this file)
 ```
 
@@ -49,10 +70,13 @@ from Wikimedia Commons, downsampled from 11 025 Hz mono OGG/Vorbis to
 
 ### `marlene-nb.wav`
 
-First ~15 seconds of [`No-MARLENEDIETRICH.ogg`](https://commons.wikimedia.org/wiki/File:No-MARLENEDIETRICH.ogg),
+A 15 s window (offset ~9 s, **skipping the spoken-Wikipedia preamble**)
+of [`No-MARLENEDIETRICH.ogg`](https://commons.wikimedia.org/wiki/File:No-MARLENEDIETRICH.ogg),
 a spoken-Wikipedia reading of the Norwegian Wikipedia article on
 Marlene Dietrich, downsampled from 44 100 Hz stereo OGG/Vorbis to
-16 kHz mono int16 WAV.
+16 kHz mono int16 WAV. The reference is the **spoken** article opening
+(the narration paraphrases the written text slightly), so WER/recall
+measure transcription quality against what is actually said.
 
 - **Source**: https://upload.wikimedia.org/wikipedia/commons/0/07/No-MARLENEDIETRICH.ogg
 - **Original work**: Spoken article "Innlest artikkel om Marlene
@@ -62,10 +86,32 @@ Marlene Dietrich, downsampled from 44 100 Hz stereo OGG/Vorbis to
   Attribution-ShareAlike 4.0 International (this snippet is
   redistributed under CC-BY-SA 4.0). Attribution: "Elise Øygaren /
   Wikipedia, CC BY-SA 4.0".
-- **Reference transcript**: the article's opening sentence —
-  `"Marlene Dietrich, egentlig Maria Magdalene Dietrich, født 27.
-  desember 1901 i Berlin, død 6. mai 1992 i Paris, var en tyskfødt
-  amerikansk skuespillerinne og sangerinne."`
+- **Reference transcript**: the spoken article opening —
+  `"Marlene Dietrich, egentlig Maria Magdalena Dietrich, ble født den
+  27. desember 1901 i Berlin og døde 6. mai 1992 i Paris. Hun var en
+  tysk-amerikansk skuespillerinne."`
+
+### `solen-da.wav`
+
+A 15 s window (offset ~29 s, **skipping the spoken-Wikipedia preamble**)
+of [`Da-Solen.ogg`](https://commons.wikimedia.org/wiki/File:Da-Solen.ogg),
+a spoken-Wikipedia reading of the Danish Wikipedia article on the Sun,
+resampled to 16 kHz mono int16 WAV with `librosa`. Paired with the
+Norwegian `marlene-nb.wav`, this is the **Danish + Norwegian** input the
+`da/no` routing benchmark needs — the confusable Bokmål/Danish pair the
+multi-language cover exists to disambiguate.
+
+- **Source**: https://upload.wikimedia.org/wikipedia/commons/2/2e/Da-Solen.ogg
+- **Original work**: Spoken article "Solen" narrated by *Danielle dk*,
+  version of 10 December 2018. Article text from
+  [da.wikipedia.org/wiki/Solen](https://da.wikipedia.org/wiki/Solen).
+- **Licence**: Creative Commons Attribution-ShareAlike 3.0 (this snippet
+  is redistributed under CC-BY-SA 3.0). Attribution: "Danielle dk /
+  Wikipedia, CC BY-SA 3.0".
+- **Reference transcript**: the article's opening, trimmed to the spoken
+  span — `"Solen, latin Sol, græsk Helios, er den stjerne, som sammen med
+  sit planetsystem udgør solsystemet. Jorden og andet stof, herunder
+  andre planeter, asteroider."`
 
 ## Adding more fixtures
 

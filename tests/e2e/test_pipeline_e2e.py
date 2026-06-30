@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import wave
 from dataclasses import dataclass
@@ -729,11 +730,22 @@ class _ConfidenceFake:
 
     name = "fake-whisper"
 
-    def __init__(self, *, backend: str, model: str, logprob_by_marker: dict[str, float], scored: bool = True):
+    def __init__(
+        self,
+        *,
+        backend: str,
+        model: str,
+        logprob_by_marker: dict[str, float],
+        language_by_marker: dict[str, str] | None = None,
+        scored: bool = True,
+    ):
         self.backend = backend
         self.model_name = model
         self.device = "fake-cpu"
         self.logprob_by_marker = logprob_by_marker
+        # The per-region detected language the generalist reports — the
+        # SpecialistRoutingSelector's routing key; defaults to "no".
+        self.language_by_marker = language_by_marker or {}
         self.scored = scored
 
     def transcribe(
@@ -748,8 +760,13 @@ class _ConfidenceFake:
         from tapscribe.audio import wav_duration_s
         from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result
 
-        marker = next((m for m in self.logprob_by_marker if m in path.name), None)
+        # Derive the marker from BOTH maps' keys — an unscored generalist has an
+        # empty logprob map but still needs its per-region language matched.
+        marker = next(
+            (m for m in {*self.logprob_by_marker, *self.language_by_marker} if m in path.name), None
+        )
         logprob = self.logprob_by_marker.get(marker, -1.0) if self.scored else None
+        language = self.language_by_marker.get(marker) or source_lang or "no"
         text = f"{self.model_name}:{marker or 'unknown'}"
         duration = wav_duration_s(path) or 1.0
         return build_transcription_result(
@@ -759,7 +776,7 @@ class _ConfidenceFake:
                 TranscriptionSegment(start=0.0, end=round(duration, 2), text=text, avg_logprob=logprob),
             ),
             duration=round(duration, 2),
-            language=source_lang or "no",
+            language=language,
             language_probability=1.0,
             initial_prompt=initial_prompt,
             hotwords=hotwords,
@@ -841,7 +858,10 @@ async def test_cover_routes_each_region_to_its_best_model_e2e(running_recorder: 
     nb, en = pair
 
     generalist = _ConfidenceFake(
-        backend="faster-whisper", model="base", logprob_by_marker={"marlene": -0.90, "armstrong": -0.10}
+        backend="faster-whisper",
+        model="base",
+        logprob_by_marker={"marlene": -0.90, "armstrong": -0.10},
+        language_by_marker={"marlene": "no", "armstrong": "en"},
     )
     specialist = _ConfidenceFake(
         backend="faster-whisper",
@@ -946,9 +966,15 @@ async def test_cover_unscored_generalist_keeps_generalist_e2e(running_recorder: 
         pytest.skip("cover fixtures (marlene-nb.wav + armstrong-en.wav) absent")
     nb, en = pair
 
-    # An UNSCORED generalist (modelling Parakeet) + a confident scored specialist.
+    # An UNSCORED generalist (modelling Parakeet, which can't do Norwegian so it
+    # detects English-ish — no "en" specialist, so routing defers to the acoustic
+    # cross-arch guard) + a confident scored specialist.
     generalist = _ConfidenceFake(
-        backend="parakeet-hf", model="parakeet-tdt-0.6b-v3", logprob_by_marker={}, scored=False
+        backend="parakeet-hf",
+        model="parakeet-tdt-0.6b-v3",
+        logprob_by_marker={},
+        language_by_marker={"marlene": "en", "armstrong": "en"},
+        scored=False,
     )
     specialist = _ConfidenceFake(
         backend="faster-whisper",
@@ -1032,4 +1058,201 @@ async def test_cover_real_parakeet_generalist_keeps_generalist_on_english_e2e(
     # And it really transcribed English (a reference word survives).
     assert _word_tokens(_reference_for("armstrong-en")) & _word_tokens(primary.result.text), (
         f"Parakeet primary shares no English reference word: {primary.result.text!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# da/no routing BENCHMARK (ADR-0010). Real audio, real models, raw numbers.
+#
+# Streams the Danish (`solen-da`) + Norwegian (`marlene-nb`) fixtures as two
+# regions of one meeting, declares {da, no}, runs the cover with REAL models,
+# and measures — per region, per cover model — word-recall + WER against that
+# region's reference, plus which transcript the selector chose. It then ASSERTS
+# the routing is correct: each region's winner must be Danish-for-Danish /
+# Norwegian-for-Norwegian (the confusable pair this feature exists to separate),
+# not Norwegianised Danish. The PRD bar is 100% correct routing; this is the
+# yardstick that proves it now and for every future model.
+#
+# Models are env-overridable so a new model is one run away:
+#   TAPSCRIBE_BENCH_GENERALIST=parakeet-tdt-0.6b-v3 \
+#   TAPSCRIBE_BENCH_NB=nb-whisper-large \
+#   pytest tests/e2e/test_pipeline_e2e.py -k da_no_routing_benchmark -m real_audio -s
+# Run with `-s` to see the table; it is also written to TAPSCRIBE_BENCH_OUT
+# (default <repo>/.bench-da-no.json) for tracking across model versions.
+# ---------------------------------------------------------------------------
+
+BENCH_GENERALIST = os.environ.get("TAPSCRIBE_BENCH_GENERALIST", "large-v3-turbo")
+BENCH_NB = os.environ.get("TAPSCRIBE_BENCH_NB", "nb-whisper-medium")
+# The winning transcript must recover at least this fraction of the reference's
+# ≥4-char content words — i.e. it actually transcribed the region's language,
+# not a same-spelling neighbour.
+BENCH_MIN_PRIMARY_RECALL = 0.55
+# The selector must pick (essentially) the best-matching candidate for each
+# region — the PRD's 100% bar: the Danish region gets the best Danish transcript
+# and the Norwegian region the best Norwegian one. A small tolerance absorbs
+# float noise / genuine ties; a real mis-route (e.g. picking the generalist's
+# weaker Norwegian over the specialist's) exceeds it and fails.
+BENCH_ROUTING_EPSILON = 0.02
+
+_BENCH_PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _norm_words(text: str) -> list[str]:
+    """Lowercased, punctuation-stripped word list for WER."""
+    return _BENCH_PUNCT.sub("", text.lower()).split()
+
+
+def _wer(reference: str, hypothesis: str) -> float:
+    """Word error rate = word-level edit distance / reference length."""
+    r, h = _norm_words(reference), _norm_words(hypothesis)
+    if not r:
+        return 0.0 if not h else 1.0
+    prev = list(range(len(h) + 1))
+    for i, rw in enumerate(r, 1):
+        cur = [i]
+        for j, hw in enumerate(h, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (rw != hw)))
+        prev = cur
+    return round(prev[-1] / len(r), 3)
+
+
+def _word_recall(reference: str, hypothesis: str) -> float:
+    """Fraction of the reference's ≥4-char content words present in the
+    hypothesis — robust to da/no near-identity (the shared words match either
+    way; the discriminating ones are what move this)."""
+    ref = _word_tokens(reference)
+    if not ref:
+        return 0.0
+    return round(len(ref & _word_tokens(hypothesis)) / len(ref), 3)
+
+
+@pytest.mark.real_audio
+async def test_da_no_routing_benchmark(running_recorder: RunningRecorder, monkeypatch):
+    """Measure + assert correct da/no routing on real Danish + Norwegian audio
+    with real models. Reports raw per-region/per-model numbers and fails if any
+    region's winner is not the best transcript for that region's language."""
+    if importlib.util.find_spec("faster_whisper") is None:
+        pytest.skip("faster_whisper not installed — install with `pip install -e .[whisper-cpu]`")
+    da = next((fx for fx in _real_audio_fixtures() if fx.wav.stem == "solen-da"), None)
+    no = next((fx for fx in _real_audio_fixtures() if fx.wav.stem == "marlene-nb"), None)
+    if da is None or no is None:
+        pytest.skip("da/no benchmark needs both solen-da.wav and marlene-nb.wav fixtures")
+
+    # Route the specialist to the benchmark's nb model + pre-fetch its weights
+    # (skip cleanly offline). The generalist downloads via faster-whisper on use.
+    from tapscribe.transcribers import catalog
+
+    monkeypatch.setitem(catalog.SPECIALIST_MODELS, "no", BENCH_NB)
+    try:
+        from tapscribe.nb_whisper import download_nb_whisper_ct2_dir
+
+        await asyncio.to_thread(download_nb_whisper_ct2_dir, BENCH_NB)
+    except Exception as e:  # noqa: BLE001 — offline / hub down → skip, not fail
+        pytest.skip(f"{BENCH_NB} weights unavailable (offline?): {e}")
+
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    ws_base = running_recorder.ws_base_url
+    for stem, fx in (("solen-da", da), ("marlene-nb", no)):
+        await stream_wav_via_tap(
+            ws_base_url=ws_base, identity=stem, name=stem, wav_path=fx.wav, utterance_id=f"utt-{stem}"
+        )
+    assert await wait_until(lambda: streams_drained(rec), timeout=15.0)
+
+    # One cover run over {da, no} with the real generalist; the catalog adds the
+    # nb specialist because "no" is declared.
+    await _run_cover_session(
+        base, rec.session_start, model=BENCH_GENERALIST, languages=("da", "no"), timeout=900.0
+    )
+
+    from tapscribe.wav_cache import read_all_cached, read_cached
+
+    regions = [
+        ("solen-da", "da", da.reference, next(w for w in rec.session_dir.glob("*.wav") if "solen" in w.name)),
+        (
+            "marlene-nb",
+            "no",
+            no.reference,
+            next(w for w in rec.session_dir.glob("*.wav") if "marlene" in w.name),
+        ),
+    ]
+
+    report: list[dict] = []
+    lines = [
+        "",
+        f"=== da/no routing benchmark — generalist={BENCH_GENERALIST!r} specialist={BENCH_NB!r} ===",
+    ]
+    for stem, lang, ref, wav in regions:
+        primary = read_cached(wav)
+        cands = read_all_cached(wav)
+        cand_rows = []
+        for c in cands:
+            is_primary = (
+                primary is not None
+                and c.result.backend == primary.result.backend
+                and c.result.model == primary.result.model
+            )
+            cand_rows.append(
+                {
+                    "model": c.result.model,
+                    "detected_language": c.result.language,
+                    "recall": _word_recall(ref, c.result.text),
+                    "wer": _wer(ref, c.result.text),
+                    "is_primary": is_primary,
+                    "text": c.result.text,
+                }
+            )
+        cand_rows.sort(key=lambda r: r["recall"], reverse=True)
+        best_recall = max((r["recall"] for r in cand_rows), default=0.0)
+        primary_row = next((r for r in cand_rows if r["is_primary"]), None)
+        primary_recall = primary_row["recall"] if primary_row else 0.0
+        report.append(
+            {
+                "region": stem,
+                "language": lang,
+                "reference": ref,
+                "candidates": cand_rows,
+                "best_recall": best_recall,
+                "primary_recall": primary_recall,
+                "primary_is_best": primary_row is not None and primary_recall >= best_recall - 1e-9,
+            }
+        )
+        lines.append(f"\n[{stem}] declared lang={lang}  reference: {ref!r}")
+        for r in cand_rows:
+            mark = " <- PRIMARY" if r["is_primary"] else ""
+            lines.append(
+                f"   {r['model']:<22} det={r['detected_language']:<3} "
+                f"recall={r['recall']:.2f} wer={r['wer']:.2f}{mark}\n"
+                f"      {r['text']!r}"
+            )
+
+    out_path = Path(
+        os.environ.get("TAPSCRIBE_BENCH_OUT", Path(__file__).resolve().parents[2] / ".bench-da-no.json")
+    )
+    out_path.write_text(
+        json.dumps(
+            {"generalist": BENCH_GENERALIST, "specialist": BENCH_NB, "regions": report},
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    lines.append(f"\n(raw numbers written to {out_path})")
+    print("\n".join(lines))
+
+    # ── The PRD bar: every region's winner is correct for its language ──
+    failures = []
+    for r in report:
+        if r["primary_recall"] < BENCH_MIN_PRIMARY_RECALL:
+            failures.append(
+                f"{r['region']}: winning transcript recall {r['primary_recall']:.2f} < "
+                f"{BENCH_MIN_PRIMARY_RECALL} — the {r['language']} region was not transcribed correctly"
+            )
+        if r["primary_recall"] < r["best_recall"] - BENCH_ROUTING_EPSILON:
+            failures.append(
+                f"{r['region']}: selector picked a worse transcript (recall {r['primary_recall']:.2f}) "
+                f"than the best candidate ({r['best_recall']:.2f}) — mis-routed"
+            )
+    assert not failures, (
+        "da/no routing benchmark FAILED:\n  " + "\n  ".join(failures) + "\n" + "\n".join(lines)
     )

@@ -98,8 +98,55 @@ def _confidence_score(cached: CachedTranscription) -> float:
     return weighted_sum / weight if weight > 0.0 else _NO_CONFIDENCE
 
 
+class SpecialistRoutingSelector:
+    """Default selector: route each region to the model the specialist table
+    names for the language the generalist detected there; fall back to acoustic
+    confidence otherwise.
+
+    The specialist table (`catalog.SPECIALIST_MODELS`) is a declaration that a
+    purpose-built model is the BEST one for a language (ADR-0010: "languages
+    where a specialist beats the generalist"). So when the generalist detects a
+    region as such a language — e.g. a Norwegian region — the specialist wins
+    even if the generalist's `avg_logprob` happens to be higher (measured: on a
+    real Norwegian clip nb-whisper scored recall 0.92 / WER 0.08 vs the
+    generalist's 0.77 / 0.12, yet the generalist had the higher confidence). The
+    `da/no` benchmark (`tests/e2e/test_pipeline_e2e.py::test_da_no_routing_benchmark`)
+    is the evidence and the regression guard.
+
+    Where the detected language has no specialist (e.g. Danish, English) or the
+    specialist didn't run, it defers to `AcousticConfidenceSelector` — which also
+    carries the cross-architecture guard (an unscored Parakeet/Voxtral generalist
+    stays the winner rather than losing to a scored nb-whisper). The routing key
+    is `candidates[0]` because the cover lists the generalist first and it is the
+    one that does per-region language detection; the specialists are fixed-language."""
+
+    def __init__(self) -> None:
+        self._acoustic = AcousticConfidenceSelector()
+
+    def select(
+        self,
+        candidates: Sequence[CachedTranscription],
+        *,
+        candidate_languages: tuple[str, ...] = (),
+    ) -> CachedTranscription:
+        if not candidates:
+            raise ValueError("select() needs at least one candidate transcript")
+        # Local import avoids a module-load cycle (catalog is heavier) and reads
+        # the live table, so a test's monkeypatch.setitem is honoured.
+        from .transcribers.catalog import SPECIALIST_MODELS
+
+        detected = (candidates[0].result.language or "").strip().lower()
+        specialist_model = SPECIALIST_MODELS.get(detected)
+        if specialist_model:
+            for cand in candidates:
+                if cand.result.model == specialist_model:
+                    return cand
+        return self._acoustic.select(candidates, candidate_languages=candidate_languages)
+
+
 def default_language_selector() -> LanguageSelector:
     """The selector the batch pipeline uses. One swap point for the whole
-    feature — repoint this at a text-LID selector to change the strategy
-    everywhere without touching `transcribe_session_locked`."""
-    return AcousticConfidenceSelector()
+    feature — repoint it to swap the strategy everywhere (e.g. a text-LID or
+    LLM-judge selector for cross-architecture pairs) without touching
+    `transcribe_session_locked`."""
+    return SpecialistRoutingSelector()

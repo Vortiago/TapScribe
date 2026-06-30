@@ -727,9 +727,14 @@ class _ConfidenceStub(TranscriberStub):
     per instance → distinct sidecars, the way two real cover models land side
     by side in the cache."""
 
-    def __init__(self, *, logprob_by_marker: dict[str, float], **kw):
+    def __init__(
+        self, *, logprob_by_marker: dict[str, float], language_by_marker: dict[str, str] | None = None, **kw
+    ):
         super().__init__(**kw)
         self.logprob_by_marker = logprob_by_marker
+        # The per-region detected language the generalist reports (the
+        # SpecialistRoutingSelector's routing key); defaults to "no".
+        self.language_by_marker = language_by_marker or {}
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
         from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result
@@ -738,13 +743,14 @@ class _ConfidenceStub(TranscriberStub):
         self.seen_source_lang.append(source_lang)
         marker = next((m for m in self.logprob_by_marker if m in path.name), None)
         logprob = self.logprob_by_marker.get(marker, -1.0)
+        language = self.language_by_marker.get(marker) or source_lang or "no"
         text = f"{self.model_name}:{marker or 'unknown'}"
         return build_transcription_result(
             self,
             text=text,
             segments=(TranscriptionSegment(start=0.0, end=1.0, text=text, avg_logprob=logprob),),
             duration=1.0,
-            language=source_lang or "no",
+            language=language,
             language_probability=1.0,
             source_lang=source_lang,
         )
@@ -778,10 +784,15 @@ async def test_cover_runs_both_models_and_selector_routes_primary_per_region(
     from tapscribe.wav_cache import read_all_cached, read_cached
 
     write_languages("no, en")  # cover = {generalist, nb-whisper-medium}
+    # The generalist detects each region's language; that drives routing. The
+    # avg_logprob is set so acoustic would mis-route armstrong (gen -0.10 wins)
+    # but route marlene to the specialist anyway — the point is that routing
+    # follows the DETECTED language, not the confidence.
     generalist = _ConfidenceStub(
         backend="faster-whisper",
         model="fake-generalist",
         logprob_by_marker={"marlene": -0.90, "armstrong": -0.10},
+        language_by_marker={"marlene": "no", "armstrong": "en"},
     )
     specialist = _ConfidenceStub(
         backend="faster-whisper",
