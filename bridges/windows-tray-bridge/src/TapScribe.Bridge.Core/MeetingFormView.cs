@@ -13,7 +13,10 @@ namespace TapScribe.Bridge.Core;
 /// and is designed to render the live phases (<see cref="PipelinePhase.Recording"/>/
 /// <see cref="PipelinePhase.Ending"/>) so an active-meeting window can reuse it later.
 /// </summary>
-public sealed record MeetingFormView(string Title, string Caption, string Body, bool CanCopy)
+/// <param name="BodyIsMarkdown">True only for the Done summary, whose <paramref name="Body"/>
+/// is rich markdown to render; false for the plain status/failure lines of every other phase
+/// (the shell routes on this so a raw recorder error is never reinterpreted as markdown).</param>
+public sealed record MeetingFormView(string Title, string Caption, string Body, bool CanCopy, bool BodyIsMarkdown = false)
 {
     private const string WindowTitle = "TapScribe — meeting summary";
 
@@ -40,7 +43,8 @@ public sealed record MeetingFormView(string Title, string Caption, string Body, 
     private static MeetingFormView DoneView(PipelineView view)
     {
         string body = view.SummaryText ?? "";
-        return new(WindowTitle, CaptionForSummary(view.Summary), body, CanCopy: !string.IsNullOrEmpty(body));
+        return new(WindowTitle, CaptionForSummary(view.Summary), body,
+            CanCopy: !string.IsNullOrEmpty(body), BodyIsMarkdown: true);
     }
 
     // Where the summary came from, if the Recorder told us — a quiet caption above the text.

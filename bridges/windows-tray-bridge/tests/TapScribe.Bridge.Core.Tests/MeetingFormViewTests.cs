@@ -46,6 +46,27 @@ public class MeetingFormViewTests
     }
 
     [Fact]
+    public void For_Done_MarksBodyAsMarkdown()
+    {
+        PipelineView done = PipelineView.Map(
+            new PipelinePoll { State = "done", Summary = new PipelineSummary { Summary = "## Notes\n- a" } });
+
+        Assert.True(MeetingFormView.For(done).BodyIsMarkdown); // the summary is the only rich-markdown body
+    }
+
+    [Theory]
+    [InlineData(null)] // loading
+    [InlineData("running")]
+    [InlineData("failed")]
+    [InlineData("idle")]
+    public void For_NonDone_BodyIsPlainNotMarkdown(string? state)
+    {
+        PipelineView? view = state is null ? null : PipelineView.Map(new PipelinePoll { State = state });
+
+        Assert.False(MeetingFormView.For(view).BodyIsMarkdown); // status/failure lines render verbatim
+    }
+
+    [Fact]
     public void For_Done_WithModel_CaptionNamesTheModel()
     {
         PipelineView done = PipelineView.Map(new PipelinePoll
