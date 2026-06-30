@@ -22,7 +22,6 @@ import asyncio
 import os
 import shutil
 import tempfile
-import wave
 from pathlib import Path
 
 from . import _fleurs, _metrics
@@ -61,17 +60,17 @@ async def _run() -> None:
 
     sd = C.RECORDINGS_DIR / "meeting"
     sd.mkdir(parents=True)
+    # Fetch each language's clips once (the parquet read is the expensive part),
+    # then lay them out as per-speaker utterances.
+    need: dict[str, int] = {}
+    for _spk, lang, k in MEETING:
+        need[lang] = max(need.get(lang, 0), k + 1)
+    clips = {lang: _fleurs.fetch(lang, n=cnt) for lang, cnt in need.items()}
     refs: dict[str, tuple[str, str, str]] = {}
     for i, (spk, lang, k) in enumerate(MEETING):
-        src, ref = _fleurs.fetch(lang, n=k + 1)[k]
-        with wave.open(str(src), "rb") as w:
-            pcm = w.readframes(w.getnframes())
+        src, ref = clips[lang][k]
         name = f"2026-01-01T10-{i:02d}-00Z__{spk}__{i}.wav"
-        with wave.open(str(sd / name), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(16000)
-            w.writeframes(pcm)
+        shutil.copyfile(src, sd / name)  # src is already in the recorder's wire format
         refs[name] = (spk, lang, ref)
     write_languages("da, no, en")
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import io
 import urllib.request
-import wave
 from pathlib import Path
 
 CACHE = Path.home() / ".cache" / "tapscribe-fleurs"
@@ -32,6 +31,8 @@ def fetch(code: str, *, n: int = 6, min_s: float = 8.0, max_s: float = 18.0) -> 
     import pyarrow.parquet as pq
     import soundfile as sf
 
+    from tapscribe.audio import open_recorder_wav
+
     cfg, _ = CONFIGS[code]
     out = CACHE / code
     out.mkdir(parents=True, exist_ok=True)
@@ -42,28 +43,28 @@ def fetch(code: str, *, n: int = 6, min_s: float = 8.0, max_s: float = 18.0) -> 
     parquet = CACHE / f"{cfg}.parquet"
     if not parquet.exists():
         urllib.request.urlretrieve(_PARQUET.format(cfg=cfg), parquet)  # noqa: S310 — fixed hf.co host
+    # Keep the columns as Arrow and materialise each row's (large) audio blob
+    # only when it passes the cheap duration filter and we still need clips —
+    # `to_pylist()` on the whole audio column would pull the entire split's bytes
+    # into RAM to extract a handful.
     table = pq.read_table(parquet, columns=["id", "audio", "raw_transcription", "num_samples"])
-    ids = table["id"].to_pylist()
-    auds = table["audio"].to_pylist()
-    refs = table["raw_transcription"].to_pylist()
-    nsamps = table["num_samples"].to_pylist()
+    ids, auds, refs, nsamps = (table[c] for c in ("id", "audio", "raw_transcription", "num_samples"))
 
     pairs: list[tuple[Path, str]] = []
     for i in range(len(ids)):
-        if not (min_s <= nsamps[i] / 16000.0 <= max_s):
+        if not (min_s <= nsamps[i].as_py() / 16000.0 <= max_s):
             continue
-        arr, sr = sf.read(io.BytesIO(auds[i]["bytes"]), dtype="float32")
+        arr, sr = sf.read(io.BytesIO(auds[i].as_py()["bytes"]), dtype="float32")
         if sr != 16000 or arr.ndim > 1:
             continue
         pcm = (arr.clip(-1.0, 1.0) * 32767.0).astype("<i2")
-        wav = out / f"{code}-{ids[i]}.wav"
-        with wave.open(str(wav), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(16000)
+        ref = refs[i].as_py()
+        stem = out / f"{code}-{ids[i].as_py()}"
+        wav = stem.with_suffix(".wav")
+        with open_recorder_wav(wav) as w:
             w.writeframes(pcm.tobytes())
-        (out / f"{code}-{ids[i]}.txt").write_text(refs[i], encoding="utf-8")
-        pairs.append((wav, refs[i]))
+        stem.with_suffix(".txt").write_text(ref, encoding="utf-8")
+        pairs.append((wav, ref))
         if len(pairs) >= n:
             break
     return pairs

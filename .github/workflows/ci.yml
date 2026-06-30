@@ -54,7 +54,7 @@ jobs:
           pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx hypothesis ruff cryptography
 
       - name: Lint (ruff)
-        run: ruff check tapscribe tools tests bridges/local-test-bridge
+        run: ruff check tapscribe tools tests benchmarks bridges/local-test-bridge
 
       - name: Run tests
         run: pytest tests -q --cov=tapscribe --cov-report=term-missing

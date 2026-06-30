@@ -19,7 +19,6 @@ HF_HUB_OFFLINE=1 once the model weights are cached locally.
 from __future__ import annotations
 
 import os
-import wave
 
 import numpy as np
 
@@ -31,25 +30,20 @@ SPECIALIST = os.environ.get("SPECIALIST", "nb-whisper-large")
 N = int(os.environ.get("N", "20"))
 
 
-def _read(path) -> np.ndarray:
-    with wave.open(str(path), "rb") as w:
-        return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
-
-
 def main() -> None:
     from faster_whisper import WhisperModel
 
     from tapscribe.transcribers.faster_whisper import FasterWhisperTranscriber
+    from tapscribe.wav_predecode import load_recorder_wav_as_pcm
 
     gen = WhisperModel(GENERALIST, device="cpu", compute_type="int8")
     print(f"=== detect accuracy ({GENERALIST}, constrained to {CAND}) ===", flush=True)
     clips: dict[str, list] = {}
     for code, (_, true) in _fleurs.CONFIGS.items():
-        pairs = _fleurs.fetch(code, n=N)
-        clips[code] = [(w, r, true) for w, r in pairs]
+        clips[code] = _fleurs.fetch(code, n=N)
         ok = 0
-        for wav, _ref, _t in clips[code]:
-            _, _, probs = gen.detect_language(_read(wav))
+        for wav, _ref in clips[code]:
+            _, _, probs = gen.detect_language(load_recorder_wav_as_pcm(wav))
             pm = dict(probs)
             det = max(CAND, key=lambda c: pm.get(c, 0.0))
             ok += det == true
@@ -59,8 +53,8 @@ def main() -> None:
     spec = FasterWhisperTranscriber.load(SPECIALIST)
     print(f"\n=== Norwegian: {GENERALIST} vs {SPECIALIST} (recall / wer) ===", flush=True)
     gr, sr, gw, sw, wins = [], [], [], [], 0
-    for wav, ref, _t in clips["nb"]:
-        y = _read(wav)
+    for wav, ref in clips["nb"]:
+        y = load_recorder_wav_as_pcm(wav)
         gt = " ".join(s.text.strip() for s in gen.transcribe(y, language="no")[0])
         st = " ".join(s.text for s in spec._model.transcribe(y, language="no")[0])
         a, b = _metrics.recall(ref, gt), _metrics.recall(ref, st)
