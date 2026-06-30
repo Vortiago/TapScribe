@@ -28,6 +28,16 @@ the real pipeline (cover → constrained-detect → specialist-routing → merge
 summarised via an OpenAI-compatible endpoint. Env: `OLLAMA_URL`, `SUMMARY_MODEL`,
 `GENERALIST`.
 
+### `python -m benchmarks.noise_robustness`
+**How far do the clean numbers degrade under noise?** FLEURS is clean read
+speech, so routing.py's numbers are best-case. This degrades each clip with
+additive noise at a sweep of SNRs and re-measures, per language, language-detect
+accuracy + generalist recall — so you see where detection and transcription fall
+apart. White noise (seeded, repeatable) by default; point `NOISE_WAV` at a real
+room/babble recording for a realistic far-field proxy. Env: `GENERALIST`, `N`,
+`SNRS`, `NOISE_WAV`. (Slow with large-v3-turbo on CPU — noisy audio decodes
+slowly — so it's a deliberate run; use a smaller `GENERALIST` for a quick shape.)
+
 ## Results (generalist = `large-v3-turbo`, 20 clips/language, FLEURS test)
 
 **Constrained language detection — 77/77 correct** across the confusable
