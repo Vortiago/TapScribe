@@ -68,12 +68,10 @@ public static class SummaryMarkdown
             fence = null;
         }
 
-        // Split on '\n' and drop a trailing '\r' so CRLF and LF parse identically (the web
-        // splits on /\r?\n/).
-        foreach (string raw in (text ?? "").Split('\n'))
+        // Normalise CRLF to LF up front so lines split identically to the web (which splits
+        // on /\r?\n/); a lone '\r' stays literal within a line, as it does there.
+        foreach (string line in (text ?? "").Replace("\r\n", "\n").Split('\n'))
         {
-            string line = raw.EndsWith('\r') ? raw[..^1] : raw;
-
             if (fence is not null)
             {
                 if (line.TrimStart().StartsWith("```", StringComparison.Ordinal))
