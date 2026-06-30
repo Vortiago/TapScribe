@@ -567,3 +567,56 @@ def test_is_candidate_language_matches_membership():
     assert is_candidate_language("da")
     assert not is_candidate_language("auto")
     assert not is_candidate_language("xx")
+
+
+# ---------------------------------------------------------------------------
+# Specialist table + cover (ADR-0010 slice 2). The models that run for a
+# candidate set S are {generalist} ∪ {specialist[l] for l in S if l in table};
+# the generalist leads so it is the tie-break default when the selector can't
+# separate two transcripts.
+# ---------------------------------------------------------------------------
+
+
+def test_norwegian_specialist_is_a_real_nb_whisper_model():
+    from tapscribe.transcribers.catalog import REGISTRY, SPECIALIST_MODELS
+
+    # v1 table: Norwegian routes to an NB-Whisper checkpoint…
+    assert "no" in SPECIALIST_MODELS
+    nb = SPECIALIST_MODELS["no"]
+    # …and it is a loadable catalog entry, not a typo'd id.
+    entry = REGISTRY.get(nb)
+    assert entry is not None and entry.family == "nb-whisper"
+
+
+def test_cover_specialist_free_set_is_generalist_only():
+    """A candidate set with no specialist language collapses to the
+    generalist-only behaviour from slice 1 — exactly one model runs."""
+    from tapscribe.transcribers.catalog import cover_models
+
+    assert cover_models(("da", "en"), generalist="large-v3-turbo") == ("large-v3-turbo",)
+
+
+def test_cover_with_norwegian_adds_the_specialist_after_the_generalist():
+    from tapscribe.transcribers.catalog import SPECIALIST_MODELS, cover_models
+
+    models = cover_models(("da", "no", "en"), generalist="large-v3-turbo")
+    # Generalist leads (the selection tie-break default), then the specialist.
+    assert models == ("large-v3-turbo", SPECIALIST_MODELS["no"])
+
+
+def test_cover_dedupes_when_generalist_is_already_the_specialist():
+    """Operator already running nb-whisper as the generalist + declaring {no}
+    must not load the same model twice."""
+    from tapscribe.transcribers.catalog import SPECIALIST_MODELS, cover_models
+
+    nb = SPECIALIST_MODELS["no"]
+    assert cover_models(("no",), generalist=nb) == (nb,)
+
+
+def test_cover_skips_specialist_missing_from_registry(monkeypatch):
+    """Defensive: a specialist id that isn't a catalog entry is dropped rather
+    than handed to a loader (mirrors the batch-model resolution guard)."""
+    from tapscribe.transcribers import catalog
+
+    monkeypatch.setitem(catalog.SPECIALIST_MODELS, "no", "nb-whisper-does-not-exist")
+    assert catalog.cover_models(("no",), generalist="large-v3-turbo") == ("large-v3-turbo",)

@@ -270,6 +270,19 @@ _PARAKEET_LANG_CODES: tuple[str, ...] = tuple(code for code, _ in _PARAKEET_LANG
 # motivating mixed Danish/Norwegian/English meeting with zero configuration.
 DEFAULT_CANDIDATE_LANGUAGES: tuple[str, ...] = ("da", "no", "en")
 
+# ── Specialist table (ADR-0010 slice 2) ─────────────────────────────────────
+# A `language → purpose-built model` map for languages where a specialist beats
+# the generalist. v1 has one entry: Norwegian routes to NB-Whisper (Whisper
+# finetuned on Norwegian by Nasjonalbiblioteket), which disambiguates the
+# confusable da/no pair the generalist flips on. `cover_models` unions the
+# generalist with the specialists for a meeting's declared languages; the
+# selector (`tapscribe.language_select`) then picks the best transcript per
+# region. This map IS the seam — repoint Norwegian at a different checkpoint, or
+# add a row for another language, with no pipeline change. `nb-whisper-medium`
+# pairs with a `large-v3-turbo`-tier generalist; it is operator-tunable in
+# spirit (a later issue surfaces it), so keep it the single source of truth.
+SPECIALIST_MODELS: dict[str, str] = {"no": "nb-whisper-medium"}
+
 # Display names for every concrete language code that appears across the
 # catalog. The Parakeet pairs cover most; nb-whisper contributes Norwegian and
 # Voxtral contributes Hindi. Single source of truth for the picker's labels.
@@ -758,3 +771,23 @@ def is_candidate_language(code: str) -> bool:
     vocabulary). The single membership check the config + session-meta writers
     validate against."""
     return code in candidate_language_codes()
+
+
+def cover_models(candidate_languages: tuple[str, ...], *, generalist: str) -> tuple[str, ...]:
+    """The set of models that COVER a candidate-language set (ADR-0010 slice 2):
+    `{generalist} ∪ {SPECIALIST_MODELS[l] for l in candidate_languages}`.
+
+    The generalist leads, then each declared language's specialist in the order
+    the language first appears — so the generalist is the tie-break default when
+    the selector can't separate two transcripts. Deduped (a specialist already
+    equal to the generalist, or shared by two declared languages, runs once) and
+    registry-validated (a specialist id absent from the catalog is dropped
+    rather than handed to a loader — the same defensive guard the batch-model
+    resolver applies). A set with no specialist language returns just
+    `(generalist,)`, i.e. the slice-1 generalist-only behaviour."""
+    models: list[str] = [generalist]
+    for lang in candidate_languages:
+        specialist = SPECIALIST_MODELS.get(lang)
+        if specialist and specialist not in models and REGISTRY.get(specialist) is not None:
+            models.append(specialist)
+    return tuple(models)

@@ -25,6 +25,7 @@ from typing import Any, Literal
 from . import config
 from . import hallucinations as hallucinations_mod
 from .audio import wav_duration_s, wav_rms_dbfs
+from .language_select import default_language_selector
 from .recorder import Recorder
 from .session_merge import InvalidRange, NoUsableWavs, merge_session, select_session_wavs
 from .session_paths import (
@@ -36,7 +37,8 @@ from .session_paths import (
 from .sessions import read_session_meta
 from .text import read_hotwords, read_languages, read_prompt
 from .transcribers import load_transcriber, release_transcriber, run_on_model_thread
-from .wav_cache import cached_transcribe, read_primary_payload
+from .transcribers.catalog import cover_models
+from .wav_cache import CachedTranscription, cached_transcribe, read_primary_payload, set_primary_transcript
 
 # ---------------------------------------------------------------------------
 # Domain errors — the route layer maps these to HTTP codes
@@ -157,21 +159,30 @@ def _effective_candidate_languages(session: str) -> tuple[str, ...]:
     return read_languages()
 
 
-def _resolve_languages(session: str, explicit_source_lang: str | None) -> tuple[str | None, tuple[str, ...]]:
-    """Map the meeting's candidate set to a `(source_lang, candidate_languages)`
-    pair for the transcriber (ADR-0010):
+def _resolve_language_plan(
+    session: str, explicit_source_lang: str | None
+) -> tuple[str | None, tuple[str, ...], tuple[str, ...]]:
+    """Resolve the meeting's language policy in ONE session-meta read (ADR-0010),
+    returning `(source_lang_pin, candidate_languages, cover_languages)`:
 
-    - an explicit per-job `source_lang` (the manual transcribe pin) wins, as-is;
-    - a singleton candidate set pins via `source_lang` — works on every backend;
-    - a multi-language set defers to a per-region constrained auto-detect,
-      carried as `candidate_languages` with no pin.
-    """
+    - an explicit per-job `source_lang` (the manual transcribe pin) wins as-is and
+      BYPASSES the candidate-set machinery: it pins the operator's chosen model
+      and covers nothing else (`cover_languages = ()` → generalist only), so the
+      explicit model is honoured rather than overridden by a specialist;
+    - a singleton declared set pins via `source_lang` and covers that one language
+      (a specialist still joins if the language has one, e.g. {no});
+    - a multi-language set defers to a per-region constrained auto-detect
+      (carried as `candidate_languages`) and covers the whole set.
+
+    `cover_languages` is what `cover_models` unions specialists over;
+    `candidate_languages` is the constrained-detect set for the generalist (empty
+    when the language is already pinned)."""
     if explicit_source_lang:
-        return explicit_source_lang, ()
+        return explicit_source_lang, (), ()
     langs = _effective_candidate_languages(session)
     if len(langs) == 1:
-        return langs[0], ()
-    return None, langs
+        return langs[0], (), langs
+    return None, langs, langs
 
 
 def _build_invocation(
@@ -184,7 +195,7 @@ def _build_invocation(
     """Build the per-call envelope: resolve prompt/hotwords (session-meta over
     global) and carry the language fields as given. The candidate-language
     *policy* (singleton → pin, multi → constrained detect) is resolved by the
-    caller via `_resolve_languages` and passed in — only the batch SESSION path
+    caller via `_resolve_language_plan` and passed in — only the batch SESSION path
     (transcribe_session + the pipeline) does so; the manual single-WAV path
     (`transcribe_one`) leaves it empty, unchanged in v1 (ADR-0010 scope)."""
     prompt, hotwords = _effective_prompt_hotwords(session)
@@ -307,47 +318,82 @@ async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job)
     object with `async update(**fields)` — `JobTracker.run`'s handle or
     `JobTracker.handle(session)` for a hand-held claim."""
     session_dir = resolve_session_dir(req.session)
-    transcriber = await run_on_model_thread(load_transcriber, req.model, backend=req.backend)
-    try:
-        # The batch session path (transcribe_session + the end-of-meeting
-        # pipeline both reach here) resolves the meeting's candidate-language
-        # policy; the manual single-WAV path does not (ADR-0010 scope).
-        resolved_source, candidate_languages = _resolve_languages(req.session, req.source_lang)
-        inv = _build_invocation(
-            req.session,
-            source_lang=resolved_source,
-            target_lang=req.target_lang,
-            candidate_languages=candidate_languages,
-        )
 
-        for idx, wav in enumerate(selection.wavs):
-            await job.update(current=idx, current_file=wav.name)
-            await run_on_model_thread(
-                cached_transcribe,
-                wav,
-                transcriber,
-                initial_prompt=inv.initial_prompt,
-                hotwords=inv.hotwords,
-                source_lang=inv.source_lang,
-                target_lang=inv.target_lang,
-                candidate_languages=inv.candidate_languages,
-                hallucination_rules=list(inv.hallucination_rules),
-                force=req.force,
-                source=selection.source,
-            )
+    # The batch session path (transcribe_session + the end-of-meeting pipeline
+    # both reach here) resolves the meeting's language policy in one read — the
+    # generalist pin/detect set AND the languages the cover runs specialists over.
+    # The manual single-WAV path does not (ADR-0010 scope).
+    resolved_source, candidate_languages, cover_languages = _resolve_language_plan(
+        req.session, req.source_lang
+    )
+    inv = _build_invocation(
+        req.session,
+        source_lang=resolved_source,
+        target_lang=req.target_lang,
+        candidate_languages=candidate_languages,
+    )
 
-        transcript = merge_session(selection)
-        merged = transcript.to_dict()
-        if not merged.get("model"):
-            merged["model"] = req.model
+    # Cover (ADR-0010 slice 2): the generalist plus a specialist for any covered
+    # language that has one (v1: no → nb-whisper). `cover_languages` is empty for
+    # an explicit per-job pin → generalist only, honouring the operator's model.
+    models = cover_models(cover_languages, generalist=req.model)
 
-        out_path = session_dir / FILENAME_TRANSCRIPT_JSON
-        out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-        (session_dir / FILENAME_TRANSCRIPT_TXT).write_text(transcript.plain_text, encoding="utf-8")
+    # Transcribe each region with every cover model, one model resident at a time
+    # (low peak memory), collecting this run's results per WAV so the selector
+    # picks among exactly the transcripts we just produced — never a stale
+    # sidecar left from an earlier model the operator has since dropped.
+    per_wav: dict[str, list[CachedTranscription]] = {wav.name: [] for wav in selection.wavs}
+    rules = list(inv.hallucination_rules)
+    total_steps = len(selection.wavs) * len(models)
+    await job.update(total=total_steps)
+    step = 0
+    for model_id in models:
+        # The operator's backend preference is for THEIR chosen generalist; a
+        # system-routed specialist self-resolves its own backend ("auto") so an
+        # MLX-preference generalist doesn't drag nb-whisper (cpu/cuda only, no MLX
+        # binding) into an unsupported-backend crash on Apple Silicon.
+        backend = req.backend if model_id == req.model else "auto"
+        transcriber = await run_on_model_thread(load_transcriber, model_id, backend=backend)
+        try:
+            for wav in selection.wavs:
+                await job.update(current=step, current_file=wav.name)
+                cached = await run_on_model_thread(
+                    cached_transcribe,
+                    wav,
+                    transcriber,
+                    initial_prompt=inv.initial_prompt,
+                    hotwords=inv.hotwords,
+                    source_lang=inv.source_lang,
+                    target_lang=inv.target_lang,
+                    candidate_languages=inv.candidate_languages,
+                    hallucination_rules=rules,
+                    force=req.force,
+                    source=selection.source,
+                )
+                per_wav[wav.name].append(cached)
+                step += 1
+        finally:
+            # Release each model before loading the next (and on any failure) so
+            # the idle-TTL policy can unload it. Offloaded because eviction may
+            # run gc + GPU-cache reclaim.
+            await run_on_model_thread(release_transcriber, transcriber)
 
-        return merged
-    finally:
-        # Release our use of the model on every exit path (success or a
-        # per-WAV failure) so the idle-TTL policy can unload it. Offloaded
-        # because eviction may run gc + GPU-cache reclaim.
-        await run_on_model_thread(release_transcriber, transcriber)
+    # When the cover ran ≥2 models, pick the winning transcript per region and
+    # point _primary at it; merge_session then reads the winners. With a single
+    # model the lone write is already primary — the slice-1 path, untouched.
+    if len(models) > 1:
+        selector = default_language_selector()
+        for wav in selection.wavs:
+            winner = selector.select(per_wav[wav.name], candidate_languages=cover_languages)
+            set_primary_transcript(wav, backend=winner.result.backend, model=winner.result.model)
+
+    transcript = merge_session(selection)
+    merged = transcript.to_dict()
+    if not merged.get("model"):
+        merged["model"] = req.model
+
+    out_path = session_dir / FILENAME_TRANSCRIPT_JSON
+    out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+    (session_dir / FILENAME_TRANSCRIPT_TXT).write_text(transcript.plain_text, encoding="utf-8")
+
+    return merged
