@@ -620,3 +620,18 @@ def test_cover_skips_specialist_missing_from_registry(monkeypatch):
 
     monkeypatch.setitem(catalog.SPECIALIST_MODELS, "no", "nb-whisper-does-not-exist")
     assert catalog.cover_models(("no",), generalist="large-v3-turbo") == ("large-v3-turbo",)
+
+
+def test_specialist_table_env_override_repoints_a_language():
+    """TAPSCRIBE_SPECIALIST_<LANG> repoints a row to a different checkpoint (e.g. a
+    fast nb-whisper-tiny in a bridge E2E) without a code change; the base map is left
+    untouched and blank/missing env values are ignored."""
+    from tapscribe.transcribers.catalog import specialist_table_with_env_overrides
+
+    base = {"no": "nb-whisper-large"}
+    assert specialist_table_with_env_overrides(base, {"TAPSCRIBE_SPECIALIST_NO": "nb-whisper-tiny"}) == {
+        "no": "nb-whisper-tiny"
+    }
+    assert base == {"no": "nb-whisper-large"}, "the base table must not be mutated"
+    assert specialist_table_with_env_overrides(base, {}) == {"no": "nb-whisper-large"}
+    assert specialist_table_with_env_overrides(base, {"TAPSCRIBE_SPECIALIST_NO": "  "}) == {"no": "nb-whisper-large"}

@@ -22,7 +22,8 @@ imports its adapter only when the operator actually picks that backend.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -284,7 +285,21 @@ DEFAULT_CANDIDATE_LANGUAGES: tuple[str, ...] = ("da", "no", "en")
 # lower WER), whereas `nb-whisper-medium` only TIED the generalist — i.e. medium
 # didn't earn the extra decode, large does. It is operator-tunable in spirit (a
 # later issue surfaces it), so keep it the single source of truth.
-SPECIALIST_MODELS: dict[str, str] = {"no": "nb-whisper-large"}
+def specialist_table_with_env_overrides(base: dict[str, str], environ: Mapping[str, str]) -> dict[str, str]:
+    """A copy of `base` with `TAPSCRIBE_SPECIALIST_<LANG>=<model id>` overrides
+    applied — the "operator-tunable" seam the comment above promises (e.g. a fast
+    nb-whisper-tiny in a bridge E2E, or a future better Norwegian model, with no code
+    change). Env is operator-controlled (not request input), the same trust level as
+    the TAPSCRIBE_SUMMARIZE_* overrides; the chosen model is still registry-validated
+    by `cover_models` before it loads."""
+    table = dict(base)
+    for lang in list(table):
+        if override := environ.get(f"TAPSCRIBE_SPECIALIST_{lang.upper()}", "").strip():
+            table[lang] = override
+    return table
+
+
+SPECIALIST_MODELS: dict[str, str] = specialist_table_with_env_overrides({"no": "nb-whisper-large"}, os.environ)
 
 # Display names for every concrete language code that appears across the
 # catalog. The Parakeet pairs cover most; nb-whisper contributes Norwegian and
