@@ -940,6 +940,59 @@ def test_session_meta_rejects_oversize_summary_prompt(client, recorder_under_tes
     assert r.status_code == 400
 
 
+def test_api_languages_serves_catalog_and_default(client):
+    """The picker fetches the selectable language catalog (code + name) plus the
+    operator's current default once."""
+    body = client.get("/api/languages").json()
+    codes = {row["code"] for row in body["languages"]}
+    assert {"da", "no", "en"}.issubset(codes)
+    assert "auto" not in codes
+    names = {row["code"]: row["name"] for row in body["languages"]}
+    assert names["no"] == "Norwegian"
+    assert body["default"] == ["da", "no", "en"]
+
+
+def test_config_languages_put_persists_and_reflects_in_state(client):
+    """PUT /api/config/languages persists the global default and /api/state
+    surfaces it so the picker pre-selects the right chips."""
+    r = client.put("/api/config/languages", json={"content": "da, en"})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/state").json()["languages"]["default"] == ["da", "en"]
+    assert client.get("/api/languages").json()["default"] == ["da", "en"]
+
+
+def test_config_languages_put_rejects_non_catalog_code(client):
+    r = client.put("/api/config/languages", json={"content": "da, xx"})
+    assert r.status_code == 400
+    # Nothing persisted — still the bundled default.
+    assert client.get("/api/state").json()["languages"]["default"] == ["da", "no", "en"]
+
+
+def test_session_meta_round_trips_languages_override(client, recorder_under_test):
+    """ADR-0010: the per-meeting candidate-language set rides in session-meta
+    as a list, normalised to lowercased catalog codes, preserving fields the
+    caller didn't mention."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    client.put("/api/session-meta/fakesession", json={"label": "kickoff"})
+    r = client.put("/api/session-meta/fakesession", json={"languages": ["DA", "no"]})
+    assert r.status_code == 200, r.text
+    meta = client.get("/api/session-meta/fakesession").json()
+    assert meta["languages"] == ["da", "no"]
+    assert meta["label"] == "kickoff"
+
+
+def test_session_meta_rejects_non_catalog_language(client, recorder_under_test):
+    """An override code outside the catalog must never persist (it would feed
+    the pipeline's per-region run with no operator in the loop) — symmetric
+    with the global config/languages writer."""
+    session_dir = recorder_under_test.recordings_dir / "fakesession"
+    session_dir.mkdir()
+    assert client.put("/api/session-meta/fakesession", json={"languages": ["da", "xx"]}).status_code == 400
+    # Nothing persisted.
+    assert "languages" not in client.get("/api/session-meta/fakesession").json()
+
+
 def test_api_state_counts_summarizer_overrides(client, recorder_under_test):
     """The Settings card's '· N sessions override this' footer for the
     summarizer default; surfaced next to the prompt/hotwords counts. The

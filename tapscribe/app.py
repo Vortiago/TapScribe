@@ -108,6 +108,7 @@ from .text import (
     MAX_CONFIG_TEXT_LEN,
     read_batch_model,
     read_hotwords,
+    read_languages,
     read_live_model,
     read_live_prompt,
     read_prompt,
@@ -115,6 +116,7 @@ from .text import (
     summarizer_default_public,
     write_batch_model,
     write_hotwords,
+    write_languages,
     write_live_model,
     write_live_prompt,
     write_prompt,
@@ -125,6 +127,8 @@ from .transcribers.catalog import (
     DEFAULT_BATCH_MODEL,
     REGISTRY,
     available_backend_strs,
+    candidate_language_codes,
+    language_display_name,
     refresh_backend_probes,
 )
 from .wav_cache import set_primary_transcript
@@ -167,6 +171,7 @@ _CONFIG_WRITERS = {
     "live-model": write_live_model,
     "batch-model": write_batch_model,
     "hotwords": write_hotwords,
+    "languages": write_languages,
 }
 
 
@@ -582,6 +587,7 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
         "live_prompt": read_live_prompt(),
         "live_model_default": read_live_model(),
         "batch_model_default": read_batch_model(),
+        "languages_default": list(read_languages()),
         "hotwords": read_hotwords(),
         # Non-secret projection ONLY (`summarizer_default_public` is the #85
         # redaction seam) — the Settings card and Summary view pre-fill from it.
@@ -664,6 +670,13 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "inputs_support": inputs_support,
         "live_model_default": blob["live_model_default"],
         "batch_model_default": blob["batch_model_default"],
+        # The operator's DEFAULT candidate-language set (ADR-0010). The catalog
+        # of selectable languages is served once via GET /api/languages; this is
+        # the small, dynamic current value the picker pre-selects.
+        "languages": {
+            "path": str(config.LANGUAGES_FILE),
+            "default": blob["languages_default"],
+        },
         "summarizer_default": blob["summarizer_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
@@ -825,6 +838,25 @@ async def api_models(context: str = "batch"):
         "context": context,
         "available_backends": sorted(available_backend_strs()),
         "models": [e.to_mapping() for e in entries],
+    }
+
+
+@app.get("/api/languages")
+async def api_languages():
+    """The candidate-language catalog (ADR-0010) for the dashboard picker: the
+    full allowlist of selectable languages with display names, plus the
+    operator's current global default. Static apart from the default, so the
+    dashboard fetches it once (like /api/models) rather than per poll.
+
+    Response shape:
+      {
+        "languages": [ {"code": "da", "name": "Danish"}, ... ],
+        "default":   ["da", "no", "en"]
+      }
+    """
+    return {
+        "languages": [{"code": c, "name": language_display_name(c)} for c in candidate_language_codes()],
+        "default": list(read_languages()),
     }
 
 

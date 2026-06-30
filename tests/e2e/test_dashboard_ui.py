@@ -4361,6 +4361,116 @@ async def test_capture_per_session_prompt_and_hotwords_overrides_save_independen
             await browser.close()
 
 
+async def test_capture_per_session_languages_override_saves_and_reseeds(
+    running_recorder: RunningRecorder,
+):
+    """The Capture view's per-meeting candidate-language picker (ADR-0010): a
+    multi-select over the catalog languages saving via PUT /api/session-meta/{s}
+    {languages}. Selecting da+no and saving persists the override (and preserves
+    a pre-existing prompt — partial-merge invariant), and a reload re-seeds the
+    selection from the saved override."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+
+    sid = "2025-06-02T10-00-00Z"
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    (d / "session-meta.json").write_text(json.dumps({"prompt": "keep me"}), encoding="utf-8")
+    synth_speech_like_wav(d / f"{sid}_Finn_finn_0000ffff.wav", seconds=0.4, freq_hz=215.0)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sessionPick"]', timeout=10000)
+            await _focus_session_view(page, sid, "capture")
+
+            # The picker enables + fills its options once a session is focused.
+            await page.wait_for_function(
+                """() => {
+                    const s = document.querySelector('#viewRoot [data-slot="capLanguages"]');
+                    return s && !s.disabled && s.options.length > 0;
+                }""",
+                timeout=8000,
+            )
+            await page.select_option('#viewRoot [data-slot="capLanguages"]', ["da", "no"])
+            await page.locator('#viewRoot [data-slot="capLanguagesSave"]').click()
+            await page.wait_for_function(
+                """() => document.querySelector('#viewRoot [data-slot="capLanguagesStatus"]')?.textContent === 'saved'""",
+                timeout=8000,
+            )
+
+            # Persisted as a list, and the pre-existing prompt survived the
+            # partial PUT.
+            async with httpx.AsyncClient(base_url=base) as client:
+                meta = (await client.get(f"/api/session-meta/{sid}")).json()
+            assert meta.get("languages") == ["da", "no"], meta
+            assert meta.get("prompt") == "keep me", meta
+
+            # A fresh load re-seeds exactly the saved override.
+            await page.goto(base, wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sessionPick"]', timeout=10000)
+            await _focus_session_view(page, sid, "capture")
+            await page.wait_for_function(
+                """() => {
+                    const s = document.querySelector('#viewRoot [data-slot="capLanguages"]');
+                    if (!s || !s.options.length) return false;
+                    const sel = Array.from(s.selectedOptions).map(o => o.value).sort().join(',');
+                    return sel === 'da,no';
+                }""",
+                timeout=8000,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_settings_default_languages_picker_saves_global_default(
+    running_recorder: RunningRecorder,
+):
+    """The Settings → Batch engine card's default-languages picker (ADR-0010):
+    a multi-select that persists the global candidate-language default via PUT
+    /api/config/languages and is reflected back in /api/state."""
+    base = running_recorder.base_url
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#settings", wait_until="domcontentloaded")
+            await page.wait_for_selector('[data-slot="sessionPick"]', timeout=10000)
+
+            await page.wait_for_function(
+                """() => {
+                    const s = document.querySelector('#viewRoot [data-slot="langSel"]');
+                    return s && s.options.length > 0;
+                }""",
+                timeout=8000,
+            )
+            await page.select_option('#viewRoot [data-slot="langSel"]', ["da", "en"])
+            await page.locator('#viewRoot [data-slot="langSave"]').click()
+            await page.wait_for_function(
+                """() => document.querySelector('#viewRoot [data-slot="langStatus"]')?.textContent === 'saved'""",
+                timeout=8000,
+            )
+
+            async with httpx.AsyncClient(base_url=base) as client:
+                state = (await client.get("/api/state")).json()
+            assert state["languages"]["default"] == ["da", "en"], state["languages"]
+        finally:
+            await browser.close()
+
+
 async def test_sessions_view_inline_label_rename_persists(
     running_recorder: RunningRecorder,
 ):

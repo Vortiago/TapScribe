@@ -224,6 +224,38 @@ return a new one via `dataclasses.replace` — they never mutate in place.
 After `hallucinations.apply` runs, `suppressed_hallucinations` holds the
 dropped segments with their `matched_rule` annotated.
 
+## Candidate languages · language pin
+
+The operator's declaration of **which languages to expect** in a recording —
+distinct from a model's catalog `languages` (what a model *can* transcribe) and
+from `source_language` (what a model was told, or detected, for one WAV). It
+exists because Danish and Norwegian Bokmål are near-identical, so per-WAV
+auto-detect flips between them unpredictably; declaring the expected languages
+removes the guess.
+
+The set is attached **per meeting (Session), not per identity** — the same
+speaker talks Danish in one meeting and English in the next, so language is
+never a persistent property of a person. Within a meeting the set can be
+**refined per tap**: a [single-person tap](#single-person-tap--multi-person-tap)
+is narrowed, a [multi-person tap](#single-person-tap--multi-person-tap) keeps
+the broader set.
+
+One primitive, two behaviours:
+- **Language pin** — a singleton set. Detection is skipped and the language is
+  handed straight to the Transcriber. This is what actually defeats da/no
+  confusion for a single-person tap.
+- **Constrained auto-detect** — a multi-element set. Per-region detection
+  still runs but its result is restricted to the set. Used for a multi-person
+  tap, where no single speaker can be pinned.
+
+Identity-level language is at most a **non-binding pre-fill** of the per-meeting
+assignment, never the source of truth.
+
+The operator-facing knob is the *languages*, not the model: a configurable
+language→model map (a **generalist** = `batch-model.txt`, plus a **specialist
+table** like `{no → nb-whisper}`) and a pluggable per-region **selector** turn
+the set into transcripts. The default set is `{da, no, en}`. See ADR-0010.
+
 ## LiveChannel · ActiveStreams · LiveTranscripts
 
 Three internal dataflows the Recorder maintains. The Bridge only ever
@@ -472,6 +504,32 @@ cross-attribute two devices into one speaker), and tears them all down
 concurrently and bounded. The devices co-locate in one **detached
 session** (above), so both sides of a meeting land in one folder as
 distinct speakers.
+
+## Single-person tap · Multi-person tap
+
+A property of each `/tap`: does the audio on this WS carry **one** human or
+**several**? This is the canonical language-and-attribution axis — it replaces
+the ad-hoc "mic vs. system" / "loopback" framing. Say "multi-person tap," never
+"loopback."
+
+- **Single-person tap** — one human for the whole tap (a SpatialChat
+  per-participant tap; the tray Bridge's microphone = the operator). Its
+  [candidate languages](#candidate-languages--language-pin) can be narrowed to a
+  **pin**, and live-caption attribution is exact.
+- **Multi-person tap** — several humans mixed into one stream (the tray
+  Bridge's system-audio capture — the "them" side of a meeting). No single
+  language to pin, so each region resolves language on its own (constrained
+  auto-detect, or the generalist + Norwegian-specialist selector), and *who*
+  said each part is unknown until **diarization (#78)** lands. The multi-person
+  tap is the single locus where both per-region language selection AND future
+  diarization live; they compose — diarization splits a region by speaker, and
+  language resolves per resulting sub-segment.
+
+This **nuances** the "One `/tap` WS = one speaker at a time" invariant: what a
+WS guarantees is one **attribution identity** (one caption bucket), not
+literally one human. A multi-person tap is one identity that diarization will
+later split into humans; until then its identity (e.g. the tray's `system`) is
+the coarse "me vs. them" bucket CaptureOrchestrator already draws.
 
 ## Person · Identity · Roster · People Registry
 

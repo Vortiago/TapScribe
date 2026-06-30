@@ -58,6 +58,12 @@ BATCH_MODEL_FILE: Path = CONFIG_DIR / "batch-model.txt"
 SUMMARIZER_CONFIG_FILE: Path = CONFIG_DIR / "summarizer.json"
 HOTWORDS_FILE: Path = CONFIG_DIR / "hotwords.txt"
 HALLUCINATIONS_FILE: Path = CONFIG_DIR / "hallucinations.txt"
+# Operator's DEFAULT candidate-language set (ADR-0010) — comma-separated ISO
+# codes (e.g. "da,no,en"). The end-of-meeting pipeline and transcribe_session
+# resolve the per-region language run from it (under any per-session override).
+# Empty/missing = the bundled catch-all default
+# (transcribers.catalog.DEFAULT_CANDIDATE_LANGUAGES).
+LANGUAGES_FILE: Path = CONFIG_DIR / "languages.txt"
 
 # Top-level dirs are created lazily on first use rather than at import
 # time, so unit tests and offline tooling don't litter the worktree

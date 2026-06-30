@@ -526,3 +526,176 @@ def test_transcribe_specific_errors_inherit_base():
 def test_relocated_errors_are_decoupled_from_transcribe_base():
     for cls in (SessionBusy, NoUsableWavs, InvalidRange):
         assert not issubclass(cls, BatchTranscribeError)
+
+
+# ---------------------------------------------------------------------------
+# Candidate-language resolution + apply (ADR-0010). The operator declares a
+# candidate-language *set* per meeting; the batch path turns it into a per-
+# region language for the generalist: a singleton set pins (source_lang); a
+# multi-language set defers to a per-region constrained auto-detect that snaps
+# the detected language to the set. Both transcribe_session and the pipeline's
+# transcribe stage go through transcribe_session_locked, so testing it here
+# covers both entry points.
+# ---------------------------------------------------------------------------
+
+
+# The shared `TranscriberStub` (conftest) already records `seen_source_lang`
+# and echoes it into the result, so the plain / pinned tests use it directly.
+# Only the constrained-detect capability is new — add it by subclassing, the
+# file's established `_Spy(TranscriberStub)` pattern.
+class _DetectorStub(TranscriberStub):
+    """A `TranscriberStub` that also advertises the constrained-detection
+    capability: records the candidate set it was asked to snap to, and returns a
+    fixed winner (so a test can assert the constrained pick flows through to
+    transcribe as the pin)."""
+
+    def __init__(self, *, winner, **kw):
+        super().__init__(**kw)
+        self.winner = winner
+        self.seen_candidates: list[tuple[str, ...]] = []
+
+    def detect_constrained_language(self, path, candidate_languages):  # noqa: ARG002
+        self.seen_candidates.append(tuple(candidate_languages))
+        return self.winner
+
+
+def _session_request(model="fake-m"):
+    return BatchSessionRequest(
+        session="s",
+        source="original",
+        model=model,
+        backend="cpu",
+        from_iso=None,
+        to_iso=None,
+        force=False,
+        source_lang=None,
+        target_lang=None,
+    )
+
+
+async def _run_session(recorder, stub, install_stub_transcriber):
+    install_stub_transcriber(stub)
+    seed_session(recorder.recordings_dir, "s", [WAV_NAME])
+    selection = select_session_wavs(
+        recorder.recordings_dir / "s", from_iso=None, to_iso=None, source="original"
+    )
+    async with recorder.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(_session_request(), selection=selection, job=handle)
+
+
+async def test_singleton_candidate_set_pins_that_language(recorder_under_test, install_stub_transcriber):
+    """A meeting whose candidate set is a single language pins it directly —
+    the transcriber is driven with source_lang=that code, on every backend."""
+    from tapscribe.text import write_languages
+
+    write_languages("da")
+    stub = TranscriberStub(backend="fake-be", model="fake-m")
+    await _run_session(recorder_under_test, stub, install_stub_transcriber)
+    assert stub.seen_source_lang == ["da"]
+
+
+async def test_manual_single_wav_transcribe_ignores_candidate_languages(
+    recorder_under_test, install_stub_transcriber
+):
+    """ADR-0010 scope: the candidate-language policy applies to the batch SESSION
+    path only. A manual single-WAV transcribe stays unchanged — even with a
+    singleton global default set, the transcriber is driven with the request's
+    own source_lang (None here), not the meeting's candidate set."""
+    from tapscribe.text import write_languages
+
+    write_languages("da")
+    stub = TranscriberStub(backend="fake-be", model="fake-m")
+    install_stub_transcriber(stub)
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    await transcribe_one(
+        recorder_under_test,
+        BatchOneRequest(
+            session="s",
+            name=WAV_NAME,
+            source="original",
+            model="fake-m",
+            backend="cpu",
+            source_lang=None,
+            target_lang=None,
+        ),
+    )
+    assert stub.seen_source_lang == [None]
+
+
+async def test_multi_candidate_set_constrains_detection_to_the_set(
+    recorder_under_test, install_stub_transcriber
+):
+    """A multi-language meeting defers to a per-region constrained auto-detect:
+    the cache loop asks the adapter to snap the language to the candidate set,
+    and drives transcribe with that winner — never a language outside the set
+    (no drift to e.g. sv)."""
+    from tapscribe.text import write_languages
+
+    write_languages("da, no")
+    stub = _DetectorStub(winner="no")
+    await _run_session(recorder_under_test, stub, install_stub_transcriber)
+    # The adapter was asked to choose WITHIN exactly the declared set…
+    assert stub.seen_candidates == [("da", "no")]
+    # …and its in-set winner became the pin handed to transcribe.
+    assert stub.seen_source_lang == ["no"]
+
+
+async def test_session_meta_languages_override_beats_global_default(
+    recorder_under_test, install_stub_transcriber
+):
+    """A per-meeting `languages` override takes precedence over the global
+    default — here it narrows the meeting to a single language, which pins."""
+    from tapscribe.sessions import write_session_meta
+    from tapscribe.text import write_languages
+
+    write_languages("da, no")  # global default is multi
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    write_session_meta("s", {"languages": ["en"]})  # this meeting is English-only
+    stub = TranscriberStub(backend="fake-be", model="fake-m")
+    install_stub_transcriber(stub)
+    selection = select_session_wavs(
+        recorder_under_test.recordings_dir / "s", from_iso=None, to_iso=None, source="original"
+    )
+    async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(_session_request(), selection=selection, job=handle)
+    assert stub.seen_source_lang == ["en"]
+
+
+async def test_changing_candidate_set_re_detects_on_non_force_rerun(
+    recorder_under_test, install_stub_transcriber
+):
+    """Changing the meeting's candidate set must re-detect even WITHOUT force: a
+    constrained entry is keyed on the language it resolved to, so widening
+    {da, no} → {da, no, en} re-runs and re-pins, instead of serving the stale
+    {da, no} pick. This is the "fix a mis-detection by adding the language"
+    workflow (ADR-0010) — it would silently no-op if the cache served the old
+    pick on a non-force re-run."""
+    from tapscribe.sessions import write_session_meta
+    from tapscribe.text import write_languages
+
+    # A detector that picks the LAST declared language, so a different set
+    # yields a different pin (stands in for the real argmax shifting once a
+    # better-matching candidate is added).
+    class _LastWins(TranscriberStub):
+        def detect_constrained_language(self, path, candidate_languages):  # noqa: ARG002
+            return candidate_languages[-1]
+
+    stub = _LastWins(backend="fake-be", model="fake-m")
+    install_stub_transcriber(stub)
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    selection = select_session_wavs(
+        recorder_under_test.recordings_dir / "s", from_iso=None, to_iso=None, source="original"
+    )
+
+    write_languages("da, no")  # global default {da, no} → last = "no"
+    async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(_session_request(), selection=selection, job=handle)
+    assert stub.seen_source_lang == ["no"]
+
+    # Widen the meeting to {da, no, en}; a NON-force re-run must re-detect to "en".
+    write_session_meta("s", {"languages": ["da", "no", "en"]})
+    async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(_session_request(), selection=selection, job=handle)
+    assert stub.seen_source_lang == ["no", "en"], (
+        "widening the candidate set must re-detect on a non-force re-run, not serve the stale pick"
+    )

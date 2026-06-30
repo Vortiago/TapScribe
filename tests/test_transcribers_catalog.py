@@ -530,3 +530,40 @@ def test_moonshine_install_probe_gates_is_installed():
 def test_unknown_model_id_rejected_before_loader():
     with pytest.raises((KeyError, RuntimeError)):
         REGISTRY.resolve("not-a-real-moonshine", preference="auto")
+
+
+# ---------------------------------------------------------------------------
+# Candidate languages (ADR-0010) — the catalog's language vocabulary is the
+# allowlist a per-meeting candidate set validates against.
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_language_codes_cover_the_default_set_without_auto():
+    from tapscribe.transcribers.catalog import candidate_language_codes
+
+    codes = candidate_language_codes()
+    # The motivating languages are all selectable…
+    assert {"da", "no", "en"}.issubset(set(codes))
+    # …but the auto-detect sentinel is NOT a language the operator can pick.
+    assert "auto" not in codes
+    # Default set leads the option list (so the picker shows them first).
+    assert codes[:3] == ("da", "no", "en")
+    # No duplicates even though several models declare overlapping languages.
+    assert len(codes) == len(set(codes))
+
+
+def test_norwegian_and_danish_have_distinct_display_names():
+    from tapscribe.transcribers.catalog import language_display_name
+
+    assert language_display_name("no") == "Norwegian"
+    assert language_display_name("da") == "Danish"
+    # Unknown code falls back to itself rather than raising.
+    assert language_display_name("zz") == "zz"
+
+
+def test_is_candidate_language_matches_membership():
+    from tapscribe.transcribers.catalog import is_candidate_language
+
+    assert is_candidate_language("da")
+    assert not is_candidate_language("auto")
+    assert not is_candidate_language("xx")

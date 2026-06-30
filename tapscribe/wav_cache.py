@@ -32,6 +32,7 @@ from typing import Any
 from . import hallucinations as hallucinations_mod
 from .text import parse_iso, parse_wav_speaker_slug, parse_wav_start
 from .transcribers.base import (
+    ConstrainedLanguageDetector,
     Transcriber,
     TranscriptionResult,
     TranscriptionSegment,
@@ -276,6 +277,7 @@ def cached_transcribe(
     hallucination_rules: list[dict[str, Any]],
     source_lang: str | None = None,
     target_lang: str | None = None,
+    candidate_languages: tuple[str, ...] = (),
     force: bool = False,
     source: str = "original",
 ) -> CachedTranscription:
@@ -303,6 +305,20 @@ def cached_transcribe(
     backend = transcriber.backend
     model = transcriber.model_name
     size, mtime_ns = _wav_fingerprint(wav_path)
+
+    # Snap a multi-language candidate set to a concrete per-region language
+    # BEFORE the cache check, so the chosen language flows through the existing
+    # `source_lang` channel and becomes part of the match key. Resolving up front
+    # (rather than only on a miss) is what makes the cache correct when the
+    # operator CHANGES the meeting's languages: a different set yields a
+    # different pin → the entry misses → it re-detects, instead of serving a
+    # transcript chosen under the old set. A singleton set or an explicit pin
+    # already arrives as `source_lang`; adapters without constrained detection
+    # leave it None and auto-detect. The detect is a cheap one-window pass; the
+    # cache still spares the expensive transcribe on a hit. See ADR-0010.
+    if source_lang is None and candidate_languages and isinstance(transcriber, ConstrainedLanguageDetector):
+        source_lang = transcriber.detect_constrained_language(wav_path, candidate_languages) or None
+
     if not force:
         existing = _read_entry_for(wav_path, backend=backend, model=model)
         if (

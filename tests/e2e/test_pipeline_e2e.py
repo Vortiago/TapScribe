@@ -499,6 +499,94 @@ async def test_pipeline_with_real_whisper(running_recorder: RunningRecorder):
     )
 
 
+@pytest.mark.real_audio
+async def test_candidate_languages_control_real_whisper_on_norwegian_audio(
+    running_recorder: RunningRecorder,
+):
+    """ADR-0010 end-to-end with a REAL Whisper backend on the real Norwegian
+    fixture (`marlene-nb`): the operator's declared candidate-language set,
+    carried per-meeting on session-meta, actually controls the model — through
+    the real `/api/session-meta` + `/api/transcribe-session` routes, the
+    resolution layer, and the faster-whisper adapter.
+
+    Two guarantees, both on the confusable da/no pair where Whisper's own
+    auto-detect is unreliable (the bug this feature fixes):
+
+    1. A singleton `{no}` candidate set PINS the per-region run to Norwegian —
+       the per-WAV sidecar's resolved language is exactly `no`, and the text is
+       Norwegian (a reference word survives). If any link in the chain dropped
+       the declared language, base Whisper would be free to mis-detect the clip
+       (it confuses Scandinavian languages outright) and this would fail.
+    2. A `{da, no}` set CONSTRAINS detection to that set — a forced re-run's
+       resolved language stays WITHIN `{da, no}`, never drifting to e.g. `en`
+       or `sv`. (Disambiguating da-vs-no itself is slice 2's nb-whisper job;
+       v1's guarantee is "stays within the declared set".)
+
+    Skipped unless `faster_whisper` is importable and the `marlene-nb` fixture
+    is present (the `real_audio` gate, same as the sibling tests).
+    """
+    if importlib.util.find_spec("faster_whisper") is None:
+        pytest.skip("faster_whisper not installed — install with `pip install -e .[whisper-cpu]`")
+    nb = next((fx for fx in _real_audio_fixtures() if fx.wav.stem == "marlene-nb"), None)
+    if nb is None:
+        pytest.skip("marlene-nb fixture absent — add tests/fixtures/audio/marlene-nb.wav to enable")
+
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    ws_base = running_recorder.ws_base_url
+
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="nb",
+        name="marlene-nb",
+        wav_path=nb.wav,
+        utterance_id="utt-nb",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=10.0)
+    wav = next(rec.session_dir.glob("*.wav"))
+
+    from tapscribe.wav_cache import read_cached
+
+    async with httpx.AsyncClient(base_url=base, timeout=600.0) as client:
+        # (1) Singleton {no} → pin. A multilingual checkpoint ("base", not
+        # "base.en") so the language is genuinely the operator's to set.
+        r = await client.put(f"/api/session-meta/{rec.session_start}", json={"languages": ["no"]})
+        assert r.status_code == 200, r.text
+        r = await client.post(
+            "/api/transcribe-session",
+            json={"session": rec.session_start, "model": "base", "force": True},
+        )
+        assert r.status_code == 200, r.text
+
+        pinned = read_cached(wav)
+        assert pinned is not None, "no sidecar after the {no} run"
+        assert pinned.result.language == "no", (
+            f"declaring {{no}} must pin the per-region run to Norwegian, "
+            f"got language={pinned.result.language!r}"
+        )
+        # It really transcribed Norwegian, not just stamped a language code.
+        assert _word_tokens(nb.reference) & _word_tokens(pinned.result.text), (
+            f"pinned-Norwegian transcript shares no reference word: {pinned.result.text!r}"
+        )
+
+        # (2) {da, no} → constrained auto-detect. Force a fresh run so the
+        # constrained detect actually executes (not a cache hit on (1)).
+        r = await client.put(f"/api/session-meta/{rec.session_start}", json={"languages": ["da", "no"]})
+        assert r.status_code == 200, r.text
+        r = await client.post(
+            "/api/transcribe-session",
+            json={"session": rec.session_start, "model": "base", "force": True},
+        )
+        assert r.status_code == 200, r.text
+
+        constrained = read_cached(wav)
+        assert constrained is not None, "no sidecar after the {da,no} run"
+        assert constrained.result.language in {"da", "no"}, (
+            f"declaring {{da, no}} must keep the result WITHIN the set (no drift "
+            f"to e.g. en/sv), got language={constrained.result.language!r}"
+        )
+
+
 def _english_fixtures() -> list[AudioFixture]:
     """English fixtures only. Parakeet (`parakeet-tdt-0.6b-v3`) covers 25 EU
     languages but NOT Norwegian, so the `-nb` clip would legitimately

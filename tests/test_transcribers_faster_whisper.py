@@ -12,7 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from tapscribe.transcribers.base import TranscriptionResult
+import pytest
+from wav_builders import seed_wav  # type: ignore[import-not-found]
+
+from tapscribe.transcribers.base import ConstrainedLanguageDetector, TranscriptionResult
 from tapscribe.transcribers.faster_whisper import FasterWhisperTranscriber
 
 
@@ -126,3 +129,95 @@ def test_transcribe_handles_none_prompt_and_hotwords(tmp_path: Path):
     result = t.transcribe(tmp_path / "x.wav")  # no prompt, no hotwords
     assert result.initial_prompt_used == ""
     assert result.hotwords_used == ""
+
+
+# ---------------------------------------------------------------------------
+# Constrained language detection (ADR-0010): snap auto-detection to the
+# meeting's candidate set so a multi-language meeting never drifts to a
+# language the operator didn't declare.
+# ---------------------------------------------------------------------------
+
+
+def _detect_model(all_probs):
+    """A model whose detect_language returns the given (lang, prob) list."""
+    m = MagicMock()
+    top = max(all_probs, key=lambda lp: lp[1])
+    m.detect_language.return_value = (top[0], top[1], list(all_probs))
+    return m
+
+
+def test_adapter_is_a_constrained_language_detector():
+    t = FasterWhisperTranscriber(model_name="large-v3", model=MagicMock(), device="CPU")
+    assert isinstance(t, ConstrainedLanguageDetector)
+
+
+def test_detect_constrained_snaps_to_best_in_set_not_global_argmax(tmp_path: Path):
+    """The acoustically-likeliest language overall is Swedish, but it isn't in
+    the candidate set — the pick must be the best WITHIN {da, no}, i.e. Danish,
+    never Swedish."""
+    wav = seed_wav(tmp_path / "region.wav")
+    model = _detect_model([("sv", 0.70), ("da", 0.20), ("no", 0.07), ("en", 0.03)])
+    t = FasterWhisperTranscriber(model_name="large-v3", model=model, device="CPU")
+    assert t.detect_constrained_language(wav, ("da", "no")) == "da"
+
+
+def test_detect_constrained_picks_in_set_winner(tmp_path: Path):
+    wav = seed_wav(tmp_path / "region.wav")
+    model = _detect_model([("no", 0.55), ("da", 0.40), ("en", 0.05)])
+    t = FasterWhisperTranscriber(model_name="large-v3", model=model, device="CPU")
+    assert t.detect_constrained_language(wav, ("da", "no", "en")) == "no"
+
+
+def test_detect_constrained_empty_set_returns_none(tmp_path: Path):
+    wav = seed_wav(tmp_path / "region.wav")
+    model = _detect_model([("en", 0.9)])
+    t = FasterWhisperTranscriber(model_name="large-v3", model=model, device="CPU")
+    assert t.detect_constrained_language(wav, ()) is None
+    # No detection pass wasted when there's nothing to constrain.
+    model.detect_language.assert_not_called()
+
+
+def test_detect_constrained_fixed_language_model_uses_name_hint(tmp_path: Path):
+    """A Norwegian-only checkpoint (nb-*) can only emit Norwegian — answer from
+    the model-name hint without a detect pass, and only when 'no' is actually a
+    candidate."""
+    wav = seed_wav(tmp_path / "region.wav")
+    model = MagicMock()
+    t = FasterWhisperTranscriber(model_name="nb-whisper-small", model=model, device="CPU")
+    assert t.detect_constrained_language(wav, ("da", "no")) == "no"
+    assert t.detect_constrained_language(wav, ("da", "en")) is None
+    model.detect_language.assert_not_called()
+
+
+def test_detect_constrained_falls_back_for_non_recorder_wav(tmp_path: Path):
+    """A non-recorder WAV (e.g. 44.1kHz stereo) can't take the cheap stdlib
+    pre-decode. detect_constrained must fall back to None (unconstrained
+    auto-detect, which transcribe() still handles) instead of raising — a
+    multi-language default must never make a hand-dropped file fail outright."""
+    import wave
+
+    odd = tmp_path / "odd.wav"
+    with wave.open(str(odd), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"\x00\x00\x00\x00" * 100)
+    model = MagicMock()
+    t = FasterWhisperTranscriber(model_name="large-v3", model=model, device="CPU")
+    assert t.detect_constrained_language(odd, ("da", "no")) is None
+    model.detect_language.assert_not_called()
+
+
+def test_faster_whisper_detect_language_upstream_contract():
+    """Smoke-test the upstream symbol the constrained-detect path imports
+    (CLAUDE.md adapter-contract convention): `WhisperModel.detect_language`
+    must exist and accept an `audio` argument, returning the (lang, prob,
+    all_language_probs) triple the adapter unpacks. No-ops where faster-whisper
+    isn't importable; runs in full where it is, so an upstream rename fails CI
+    on the pin bump instead of in production."""
+    import inspect
+
+    fw = pytest.importorskip("faster_whisper")
+    detect = fw.WhisperModel.detect_language
+    params = inspect.signature(detect).parameters
+    assert "audio" in params, params

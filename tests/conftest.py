@@ -440,24 +440,27 @@ class TranscriberStub:
         self.model_name = model
         self._text = text if text is not None else f"text from {backend} {model}"
         self.calls: list[Path] = []
+        # Every source_lang the stub was driven with, in call order — lets a test
+        # assert the candidate-language resolution (ADR-0010) reached the model.
+        self.seen_source_lang: list[str | None] = []
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
-        from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
+        from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result
 
         self.calls.append(path)
-        return TranscriptionResult(
-            transcriber=self.name,
-            backend=self.backend,
-            device=self.device,
-            model=self.model_name,
-            language="en",
-            language_probability=1.0,
-            duration=1.0,
+        self.seen_source_lang.append(source_lang)
+        # Echo source_lang into the result like the real adapters do, so the
+        # cache's source_language match key behaves realistically.
+        return build_transcription_result(
+            self,
             text=self._text,
             segments=(TranscriptionSegment(start=0.0, end=1.0, text=self._text),),
-            initial_prompt_used=initial_prompt or "",
-            hotwords_used=hotwords or "",
-            quality_settings={},
+            duration=1.0,
+            language=source_lang or "en",
+            language_probability=1.0,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+            source_lang=source_lang,
         )
 
 

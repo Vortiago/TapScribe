@@ -240,6 +240,28 @@ class Transcriber(Protocol):
     ) -> TranscriptionResult: ...
 
 
+@runtime_checkable
+class ConstrainedLanguageDetector(Protocol):
+    """An adapter that can restrict language auto-detection to a candidate set
+    (ADR-0010). The cache loop (`wav_cache.cached_transcribe`) resolves a
+    multi-language candidate set to a concrete per-region pin through this
+    BEFORE `transcribe()`, so the chosen language flows through the existing
+    `source_lang` channel — the on-disk cache key and the result's
+    `source_language` both reflect it, no new field to thread.
+
+    Adapters that don't implement it (every non-Whisper backend today) fall
+    back to unconstrained auto-detect for a multi-language set: the slice-1
+    limitation noted in ADR-0010. `cached_transcribe` feature-detects via
+    `isinstance`, so adding the method to another adapter later opts it in with
+    no call-site change."""
+
+    def detect_constrained_language(self, path: Path, candidate_languages: tuple[str, ...]) -> str | None:
+        """Return the most likely language WITHIN `candidate_languages` for the
+        audio at `path`, or None to leave the model's own auto-detect in charge
+        (e.g. when the model can't produce any of the candidates)."""
+        ...
+
+
 def build_transcription_result(
     adapter: Transcriber,
     *,
