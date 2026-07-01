@@ -22,7 +22,8 @@ imports its adapter only when the operator actually picks that backend.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -269,6 +270,41 @@ _PARAKEET_LANG_CODES: tuple[str, ...] = tuple(code for code, _ in _PARAKEET_LANG
 # default is the catch-all {da, no, en} so a fresh install handles the
 # motivating mixed Danish/Norwegian/English meeting with zero configuration.
 DEFAULT_CANDIDATE_LANGUAGES: tuple[str, ...] = ("da", "no", "en")
+
+# ── Specialist table (ADR-0010 slice 2) ─────────────────────────────────────
+# A `language → purpose-built model` map for languages where a specialist beats
+# the generalist. v1 has one entry: Norwegian routes to NB-Whisper (Whisper
+# finetuned on Norwegian by Nasjonalbiblioteket), which disambiguates the
+# confusable da/no pair the generalist flips on. `cover_models` unions the
+# generalist with the specialists for a meeting's declared languages; the
+# selector (`tapscribe.language_select`) then picks the best transcript per
+# region. This map IS the seam — repoint Norwegian at a different checkpoint, or
+# add a row for another language, with no pipeline change. `nb-whisper-large` is
+# the default because a 20-clip FLEURS benchmark (vs a `large-v3-turbo`
+# generalist) showed it win-or-tie 19/20 on Norwegian (+0.07 word-recall, ~40%
+# lower WER), whereas `nb-whisper-medium` only TIED the generalist — i.e. medium
+# didn't earn the extra decode, large does. It is operator-tunable in spirit (a
+# later issue surfaces it), so keep it the single source of truth.
+def specialist_table_with_env_overrides(base: dict[str, str], environ: Mapping[str, str]) -> dict[str, str]:
+    """A copy of `base` with `TAPSCRIBE_SPECIALIST_<LANG>=<model id>` overrides
+    applied — the "operator-tunable" seam the comment above promises (e.g. a fast
+    nb-whisper-tiny in a bridge E2E, or a future better Norwegian model, with no code
+    change). Only EXISTING rows are repointed; adding a language is ADR-0010
+    territory, not a knob. Env is operator-controlled (not request input), and the
+    chosen model is still registry-validated by `cover_models` before it loads.
+
+    Read once at import into `SPECIALIST_MODELS` — a launch-time knob, unlike the
+    use-time TAPSCRIBE_SUMMARIZE_* overrides. So an in-process test must
+    `monkeypatch.setitem(SPECIALIST_MODELS, ...)`, NOT `setenv`, to take effect;
+    `setenv` only lands in a fresh process (the bridge E2Es' recorder subprocess)."""
+    table = dict(base)
+    for lang in base:
+        if override := environ.get(f"TAPSCRIBE_SPECIALIST_{lang.upper()}", "").strip():
+            table[lang] = override
+    return table
+
+
+SPECIALIST_MODELS: dict[str, str] = specialist_table_with_env_overrides({"no": "nb-whisper-large"}, os.environ)
 
 # Display names for every concrete language code that appears across the
 # catalog. The Parakeet pairs cover most; nb-whisper contributes Norwegian and
@@ -758,3 +794,23 @@ def is_candidate_language(code: str) -> bool:
     vocabulary). The single membership check the config + session-meta writers
     validate against."""
     return code in candidate_language_codes()
+
+
+def cover_models(candidate_languages: tuple[str, ...], *, generalist: str) -> tuple[str, ...]:
+    """The set of models that COVER a candidate-language set (ADR-0010 slice 2):
+    `{generalist} ∪ {SPECIALIST_MODELS[l] for l in candidate_languages}`.
+
+    The generalist leads, then each declared language's specialist in the order
+    the language first appears — so the generalist is the tie-break default when
+    the selector can't separate two transcripts. Deduped (a specialist already
+    equal to the generalist, or shared by two declared languages, runs once) and
+    registry-validated (a specialist id absent from the catalog is dropped
+    rather than handed to a loader — the same defensive guard the batch-model
+    resolver applies). A set with no specialist language returns just
+    `(generalist,)`, i.e. the slice-1 generalist-only behaviour."""
+    models: list[str] = [generalist]
+    for lang in candidate_languages:
+        specialist = SPECIALIST_MODELS.get(lang)
+        if specialist and specialist not in models and REGISTRY.get(specialist) is not None:
+            models.append(specialist)
+    return tuple(models)

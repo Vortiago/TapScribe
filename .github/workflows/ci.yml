@@ -54,7 +54,7 @@ jobs:
           pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx hypothesis ruff cryptography
 
       - name: Lint (ruff)
-        run: ruff check tapscribe tools tests bridges/local-test-bridge
+        run: ruff check tapscribe tools tests benchmarks bridges/local-test-bridge
 
       - name: Run tests
         run: pytest tests -q --cov=tapscribe --cov-report=term-missing
@@ -207,6 +207,11 @@ jobs:
           python -m playwright install --with-deps chromium
           sudo apt-get update && sudo apt-get install -y xvfb
 
+      - name: Pre-fetch the ASR models (keep downloads out of the meeting test's budget)
+        run: |
+          python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8'); WhisperModel('base', device='cpu', compute_type='int8')"
+          python -c "from tapscribe.nb_whisper import download_nb_whisper_ct2_dir as d; d('nb-whisper-tiny')"
+
       - name: Run bridge extension E2E (headed, under xvfb)
         run: xvfb-run -a pytest tests/e2e/test_bridge_extension_e2e.py -m browser_e2e -q
 
@@ -252,6 +257,51 @@ jobs:
 
       - name: Build + test bridge-core only
         run: dotnet test bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
+
+  # The cross-platform job above runs the bridge-core tests but SKIPS the
+  # real-Recorder meeting E2E (RealRecorderMeetingE2ETests, via the
+  # RequiresPythonAsr attribute) because it has no Python ASR stack. This job
+  # installs that stack so the E2E actually RUNS: the real Core clients drive a
+  # real Python Recorder over /tap with two fixture-fed speakers (Norwegian +
+  # English) and the real strip -> transcribe -> summarize pipeline — proving the
+  # tray bridge does a multi-person, multi-language meeting end to end on Linux.
+  dotnet-tray-meeting-e2e:
+    name: tray bridge meeting E2E (ubuntu, full stack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install tapscribe runtime + faster-whisper + silero-vad
+        run: |
+          pip install -e ".[whisper-cpu,vad]"
+          # silero-vad pulls torch/torchaudio from PyPI whose native libs can
+          # mismatch; pin the CPU build last so torchaudio's extension loads
+          # (same fix as the bridge-meeting-e2e job).
+          pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Pre-fetch the ASR models (keep downloads out of the test's time budget)
+        run: |
+          python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')"
+          python -c "from tapscribe.nb_whisper import download_nb_whisper_ct2_dir as d; d('nb-whisper-tiny')"
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: bridges/windows-tray-bridge/global.json
+
+      - name: Run the tray-bridge meeting E2E (real Recorder, real ASR)
+        env:
+          TAPSCRIBE_PYTHON: python
+        run: >
+          dotnet test
+          bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj
+          -c Release
+          --filter "FullyQualifiedName~RealRecorderMeetingE2ETests"
 
   # Browser UI E2E with headless Chromium: the dashboard (active-taps / live
   # transcripts / merged-session pipeline via FakeTranscriber + synthetic WAVs)

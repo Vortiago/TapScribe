@@ -52,3 +52,4 @@ Thumbs.db
 # state like recordings/, never committed. (The empty prompt/hotwords text
 # files ARE tracked as starter files; this one is created on first save.)
 config/summarizer.json
+.bench-da-no.json

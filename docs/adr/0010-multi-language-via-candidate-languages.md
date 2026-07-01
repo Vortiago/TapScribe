@@ -47,14 +47,35 @@ stage. Manual single-WAV transcribe and the live channel are unchanged in v1.
   pipeline.
 - **Specialist table** — a small catalog map `language → purpose-built model`
   for languages where a specialist beats the generalist. v1: `{no →
-  nb-whisper}`. The models run for a candidate set `S` = `{generalist} ∪
-  {specialist[l] for l in S if l in table}`.
-- **Selector** — picks the winning sidecar per region. Default: **acoustic
-  confidence** (avg_logprob; valid because the v1 pair is same-family Whisper).
-  Swappable for a **text-LID** selector, which is what unlocks a
-  cross-architecture pair like Parakeet + nb-whisper. The choice of selector
-  heuristic is empirical — to be validated on a real da/no recording, which is
-  why it is a seam and not a hardcoded rule.
+  nb-whisper-large}`. The models run for a candidate set `S` = `{generalist} ∪
+  {specialist[l] for l in S if l in table}`. The default is **nb-whisper-large**,
+  not medium: a 20-clip FLEURS comparison (vs a `large-v3-turbo` generalist)
+  showed nb-large win-or-tie 19/20 on Norwegian (+0.07 word-recall, ~40% lower
+  WER), while nb-**medium** only TIED — i.e. medium didn't earn its extra decode,
+  large does. (Constrained language *detection* itself was 77/77 correct across
+  da/no/sv/en in that run, so the routing foundation is solid regardless.)
+- **Selector** — picks the winning sidecar per region. Default:
+  **specialist-routing** — route each region to the model the specialist table
+  names for the language the generalist detected there (the table *declares*
+  which model is best per language); where the detected language has no
+  specialist, **keep the generalist** (the right-language transcript for that
+  region) — there is NO acoustic fallback. We deliberately do not compare
+  `avg_logprob` across different-language models: it isn't comparable even within
+  the Whisper family (a confident nb-whisper rendering English as Norwegian wins
+  that comparison — the real bug the real-audio tests caught), and the FLEURS
+  comparison showed nb-whisper-large genuinely beats the generalist on Norwegian
+  (19/20) but `avg_logprob` does not reflect that across two checkpoints. So route
+  by the declared specialist, else keep the generalist. Result: the Danish region
+  goes to the generalist (best Danish), the Norwegian region to nb-whisper (best
+  Norwegian); an unscored Parakeet/Voxtral generalist on a no-specialist language
+  also just stays the winner. `AcousticConfidenceSelector` (duration-weighted
+  mean avg_logprob) is retained as a same-family, non-default seam alternative.
+  Still swappable for a **text-LID** or **LLM-judge** selector for
+  cross-architecture pairs (where the generalist's per-region language detection
+  is unreliable); the
+  `test_da_no_routing_benchmark` (committed `solen-da` + `marlene-nb`) and the
+  FLEURS comparison harness are the yardsticks for any such change and for every
+  future model.
 
 ## Considered and rejected (for v1)
 

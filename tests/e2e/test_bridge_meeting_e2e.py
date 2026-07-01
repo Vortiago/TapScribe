@@ -31,7 +31,8 @@ import tempfile
 import time
 import urllib.request
 import wave
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,14 +45,18 @@ if importlib.util.find_spec("faster_whisper") is None:  # pragma: no cover
 
 from playwright.async_api import async_playwright  # noqa: E402
 
-from .harness import launch_bridge_context  # noqa: E402
+from tapscribe.text import build_recorder_wav_name  # noqa: E402
+
+from .harness import launch_bridge_context, word_tokens  # noqa: E402
 
 pytestmark = [pytest.mark.browser_e2e, pytest.mark.real_audio]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 EXT_DIR = REPO_ROOT / "bridges" / "spacialchat-bridge"
 FIXTURE_DIR = REPO_ROOT / "tests" / "e2e" / "fixtures" / "mock-spatial-page"
-SPEECH_WAV = REPO_ROOT / "tests" / "fixtures" / "audio" / "armstrong-en.wav"
+AUDIO_DIR = REPO_ROOT / "tests" / "fixtures" / "audio"
+SPEECH_WAV = AUDIO_DIR / "armstrong-en.wav"
+
 
 # A tiny command summariser: reads the merged transcript on stdin, echoes a
 # notes line. A real summarize stage (the #82 `command` source) with no 5 GB
@@ -84,19 +89,23 @@ def _speech_pcm_b64(seconds: float = 12.0) -> str:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def recorder() -> AsyncIterator[dict[str, Any]]:  # type: ignore[misc]
+def _running_recorder(batch_model: str) -> Iterator[dict[str, Any]]:
     """Start a real Recorder in a temp base dir: --no-auth, faster-whisper
-    tiny.en for batch transcribe, the `command` summariser. Yields {port}."""
+    `batch_model` for batch transcribe, the `command` summariser. Yields
+    {port, base, log}."""
     port = _free_port()
     with tempfile.TemporaryDirectory() as base:
         cfg = Path(base) / "config"
         cfg.mkdir(parents=True)
-        (cfg / "batch-model.txt").write_text("tiny.en\n", encoding="utf-8")
+        (cfg / "batch-model.txt").write_text(f"{batch_model}\n", encoding="utf-8")
         (cfg / "summarizer.json").write_text(
             json.dumps({"source": "command", "command": SUMMARY_CMD}), encoding="utf-8"
         )
-        env = {**os.environ, "TAPSCRIBE_BASE_DIR": base}
+        # The default candidate set {da,no,en} pulls the Norwegian specialist into
+        # the cover; pin the fast nb-whisper-tiny (env, read by the subprocess at
+        # import) so we don't download + CPU-decode the slow production
+        # nb-whisper-large inside the test's pipeline timeout.
+        env = {**os.environ, "TAPSCRIBE_BASE_DIR": base, "TAPSCRIBE_SPECIALIST_NO": "nb-whisper-tiny"}
         log_path = Path(base) / "recorder.log"
         log_fh = open(log_path, "wb")
         proc = subprocess.Popen(
@@ -123,6 +132,19 @@ def recorder() -> AsyncIterator[dict[str, Any]]:  # type: ignore[misc]
             with contextlib.suppress(Exception):
                 proc.wait(timeout=10)
             log_fh.close()
+
+
+@pytest.fixture
+def recorder() -> AsyncIterator[dict[str, Any]]:  # type: ignore[misc]
+    """English-only `tiny.en` recorder for the single-speaker meeting test."""
+    yield from _running_recorder("tiny.en")
+
+
+@pytest.fixture
+def recorder_multilingual() -> AsyncIterator[dict[str, Any]]:  # type: ignore[misc]
+    """Multilingual `base` recorder so a da/no/en meeting transcribes each
+    speaker in their own language (tiny.en would Englishise the Norwegian)."""
+    yield from _running_recorder("base")
 
 
 def _wait_for_health(port: int, proc: subprocess.Popen, *, timeout_s: float) -> None:
@@ -195,6 +217,60 @@ async def _seed_storage(ctx, ext_id: str, values: dict[str, Any]) -> None:
         await popup.close()
 
 
+async def _open_meeting(ctx, recorder, *, fixture_index, fixture_mock, speech_b64):
+    """The shared meeting prologue both tests run: seed the bridge's recorder config,
+    load the speech-backed mock SpatialChat page (real PCM exposed BEFORE the bridge
+    taps, so the track plays real words), open the popup, and Start the meeting (a
+    real detached Session). Returns (page, popup, sess, sess_dir).
+
+    `recorderHost` is "localhost" not 127.0.0.1: the content script runs on the public
+    https://app.spatial.chat page, and Chrome's Private Network Access blocks ws:// to
+    an explicit private IP from there but EXEMPTS the `localhost` name (which resolves
+    to the Recorder's IPv4 loopback bind)."""
+    ext_id = await _discover_extension_id(ctx)
+    await _seed_storage(
+        ctx,
+        ext_id,
+        {"recorderHost": "localhost", "recorderPort": recorder["port"], "tapToken": "", "useTls": False},
+    )
+    page = await ctx.new_page()
+    # add_init_script takes no arg param, so inline the (quote-free) base64 directly.
+    await page.add_init_script(
+        "window.__tsSpeechPcm = (function () {"
+        f"  const b64 = '{speech_b64}';"
+        "  const bin = atob(b64); const bytes = new Uint8Array(bin.length);"
+        "  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);"
+        "  return new Int16Array(bytes.buffer);"
+        "})();"
+    )
+
+    async def route_handler(route, request):
+        if request.url.endswith("mock-room.js"):
+            await route.fulfill(status=200, content_type="application/javascript", body=fixture_mock)
+        else:
+            await route.fulfill(status=200, content_type="text/html", body=fixture_index)
+
+    await page.route("https://app.spatial.chat/**", route_handler)
+    await page.goto("https://app.spatial.chat/test/room")
+    await page.wait_for_function("typeof window.__tsTest === 'object'", timeout=5000)
+
+    popup = await ctx.new_page()
+    await popup.goto(f"chrome-extension://{ext_id}/popup.html")
+    await popup.get_by_role("button", name="Start meeting").click()
+    await popup.wait_for_function(
+        """async () => {
+          const { meetingSessionId } = await chrome.storage.local.get(['meetingSessionId']);
+          return typeof meetingSessionId === 'string' && meetingSessionId.length > 0;
+        }""",
+        timeout=8000,
+    )
+    sess = await popup.evaluate(
+        "async () => (await chrome.storage.local.get(['meetingSessionId'])).meetingSessionId"
+    )
+    sess_dir = Path(recorder["base"]) / "recordings" / sess
+    return page, popup, sess, sess_dir
+
+
 async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
     """Start meeting → tap real speech into a detached Session → End meeting →
     the real pipeline runs → the popup card shows the finished summary."""
@@ -207,68 +283,9 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
             ctx = await launch_bridge_context(pw, EXT_DIR, udd)
 
             try:
-                ext_id = await _discover_extension_id(ctx)
-                await _seed_storage(
-                    ctx,
-                    ext_id,
-                    # The content script runs in the https://app.spatial.chat
-                    # (public, secure) page; Chrome's Private Network Access
-                    # blocks a ws:// to an explicit private IP (127.0.0.1) from
-                    # there, but EXEMPTS the `localhost` name. The Recorder binds
-                    # IPv4 loopback, which `localhost` resolves to.
-                    {
-                        "recorderHost": "localhost",
-                        "recorderPort": recorder["port"],
-                        "tapToken": "",
-                        "useTls": False,
-                    },
+                page, popup, sess, sess_dir = await _open_meeting(
+                    ctx, recorder, fixture_index=fixture_index, fixture_mock=fixture_mock, speech_b64=speech_b64
                 )
-
-                # SpatialChat tab: rebuild the speech PCM into an Int16Array and
-                # expose it BEFORE the bridge taps, so the speaker's track plays
-                # real words. Then load the mock room.
-                page = await ctx.new_page()
-                # add_init_script takes no arg param, so inline the (quote-free)
-                # base64 directly. Runs before the bridge taps, so the speaker's
-                # track is built from real speech.
-                await page.add_init_script(
-                    "window.__tsSpeechPcm = (function () {"
-                    f"  const b64 = '{speech_b64}';"
-                    "  const bin = atob(b64); const bytes = new Uint8Array(bin.length);"
-                    "  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);"
-                    "  return new Int16Array(bytes.buffer);"
-                    "})();"
-                )
-
-                async def route_handler(route, request):
-                    if request.url.endswith("mock-room.js"):
-                        await route.fulfill(
-                            status=200, content_type="application/javascript", body=fixture_mock
-                        )
-                    else:
-                        await route.fulfill(status=200, content_type="text/html", body=fixture_index)
-
-                await page.route("https://app.spatial.chat/**", route_handler)
-                await page.goto("https://app.spatial.chat/test/room")
-                await page.wait_for_function("typeof window.__tsTest === 'object'", timeout=5000)
-
-                # Open the popup and Start the meeting (real detached Session).
-                popup = await ctx.new_page()
-                await popup.goto(f"chrome-extension://{ext_id}/popup.html")
-                await popup.get_by_role("button", name="Start meeting").click()
-                # The content script routes on the stored id — wait for it.
-                await popup.wait_for_function(
-                    """async () => {
-                      const { meetingSessionId } = await chrome.storage.local.get(['meetingSessionId']);
-                      return typeof meetingSessionId === 'string' && meetingSessionId.length > 0;
-                    }""",
-                    timeout=8000,
-                )
-
-                sess = await popup.evaluate(
-                    "async () => (await chrome.storage.local.get(['meetingSessionId'])).meetingSessionId"
-                )
-                sess_dir = Path(recorder["base"]) / "recordings" / sess
 
                 # A speaker is tapped — REAL audio streams over /tap to the real
                 # Recorder, proving the whole capture path (content script →
@@ -315,6 +332,92 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
                 assert text.strip() and "Meeting notes:" in text, f"unexpected summary: {text!r}"
 
                 # Parity: the same summary is persisted on the Recorder.
+                assert (sess_dir / "session-summary.json").exists(), "no persisted summary"
+            finally:
+                with contextlib.suppress(Exception):
+                    await ctx.close()
+
+
+async def test_multi_person_multi_language_meeting_produces_a_summary(recorder_multilingual):
+    """Multi-PERSON, multi-LANGUAGE meeting through the REAL SpatialChat bridge:
+    TWO speakers are tapped (proving multi-channel capture — frames on both),
+    then Norwegian + English speech runs through the real end-of-meeting pipeline
+    (multilingual `base` generalist), producing a merged transcript carrying BOTH
+    speakers' content and a summary in the popup card.
+
+    Same headless-capture seam as the single-speaker test: the tapped audio
+    proves the CAPTURE path, and pristine Norwegian/English fixtures are dropped
+    into the detached Session to drive strip → transcribe → summarize on clean
+    speech (headless Web Audio degrades captured audio below silero-VAD; a real
+    mic doesn't). Per-language ROUTING/selector correctness is the pipeline
+    tests' job (test_pipeline_e2e); here the point is the BRIDGE delivers a
+    multi-person, multi-language meeting end to end."""
+    recorder = recorder_multilingual
+    fixture_index = (FIXTURE_DIR / "index.html").read_text(encoding="utf-8")
+    fixture_mock = (FIXTURE_DIR / "mock-room.js").read_text(encoding="utf-8")
+    speech_b64 = _speech_pcm_b64()
+
+    async with async_playwright() as pw:
+        with tempfile.TemporaryDirectory() as udd:
+            ctx = await launch_bridge_context(pw, EXT_DIR, udd)
+            try:
+                page, popup, sess, sess_dir = await _open_meeting(
+                    ctx, recorder, fixture_index=fixture_index, fixture_mock=fixture_mock, speech_b64=speech_b64
+                )
+
+                # TWO speakers tapped → prove multi-channel capture (frames on both).
+                await page.evaluate("() => window.__tsTest.addRemoteSpeaker('nora-id', 'Nora')")
+                await page.evaluate("() => window.__tsTest.addRemoteSpeaker('ed-id', 'Ed')")
+                await asyncio.sleep(2.5)
+                snap = await popup.evaluate(
+                    "async () => (await chrome.storage.local.get(['bridgeStatus'])).bridgeStatus"
+                )
+                channels = (snap or {}).get("channels", [])
+                streamed = [c for c in channels if c.get("framesSent", 0) > 0]
+                print(f"[e2e] tapped channels: {[(c.get('name'), c.get('framesSent')) for c in channels]}")
+                assert len(streamed) >= 2, f"expected ≥2 tapped channels streaming, got {channels}"
+                await page.evaluate("() => window.__tsTest.muteSpeaker('nora-id')")
+                await page.evaluate("() => window.__tsTest.muteSpeaker('ed-id')")
+                await asyncio.sleep(1.0)
+
+                # Drop two pristine, DIFFERENT-LANGUAGE fixtures as the two speakers'
+                # WAVs (same headless-capture seam as the single-speaker test):
+                # Norwegian (Nora) + English (Ed).
+                start = datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC)
+                (sess_dir / build_recorder_wav_name(start, "Nora", "nora-id")).write_bytes(
+                    (AUDIO_DIR / "marlene-nb.wav").read_bytes()
+                )
+                (sess_dir / build_recorder_wav_name(start.replace(second=20), "Ed", "ed-id")).write_bytes(
+                    (AUDIO_DIR / "armstrong-en.wav").read_bytes()
+                )
+
+                # End the meeting → real pipeline (strip → transcribe[base] → summarize).
+                await popup.get_by_role("button", name="End meeting").click()
+                final = await _await_pipeline(recorder["port"], sess, timeout_s=180)
+                print(f"[e2e] final pipeline state: {json.dumps(final)[:400]}")
+                assert final.get("state") == "done", f"pipeline did not reach done: {final}"
+
+                # Two speakers, both transcribed in their OWN language, in the merge.
+                merged = json.loads((sess_dir / "session-transcript.json").read_text(encoding="utf-8"))
+                plain = merged.get("plain_text", "")
+                hyp = word_tokens(plain)
+                speakers = {s.get("speaker") for s in merged.get("segments", []) if s.get("speaker")}
+                assert len(speakers) >= 2, f"expected ≥2 speakers in the merge, got {speakers}"
+                # Norwegian-DISTINCTIVE words (not the reference's language-agnostic proper
+                # nouns Berlin/Paris/Dietrich) — prove the Norwegian speaker came out AS
+                # Norwegian, not Englishised.
+                assert {"egentlig", "født", "døde", "skuespillerinne"} & hyp, (
+                    f"no Norwegian-distinctive word in transcript — Englishised? {plain[:200]!r}"
+                )
+                assert word_tokens((AUDIO_DIR / "armstrong-en.reference.txt").read_text(encoding="utf-8")) & hyp, (
+                    f"English content missing from transcript: {plain[:200]!r}"
+                )
+
+                # The popup card shows the summary built from the multilingual transcript.
+                summary = popup.locator('[data-slot="summaryText"]')
+                await summary.wait_for(state="visible", timeout=20_000)
+                text = (await summary.text_content()) or ""
+                assert text.strip() and "Meeting notes:" in text, f"unexpected summary: {text!r}"
                 assert (sess_dir / "session-summary.json").exists(), "no persisted summary"
             finally:
                 with contextlib.suppress(Exception):
