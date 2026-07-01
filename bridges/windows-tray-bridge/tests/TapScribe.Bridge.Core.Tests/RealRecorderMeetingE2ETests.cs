@@ -345,8 +345,8 @@ internal sealed class RealRecorder : IAsyncDisposable
         // best effort: Kill(tree) throws SystemException variants (already-exited /
         // Win32) or AggregateException (partial tree-kill failure).
         try { if (!p.HasExited) p.Kill(entireProcessTree: true); }
-        catch (SystemException) { }
-        catch (AggregateException) { }
+        catch (SystemException) { /* already exited / Win32 — nothing left to kill */ }
+        catch (AggregateException) { /* a child outlived the kill — best effort in teardown */ }
         p.Dispose();
     }
 
