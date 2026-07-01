@@ -45,7 +45,7 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
 
 import websockets  # noqa: E402
 
-from .harness import launch_bridge_context, playwright_session  # noqa: E402
+from .harness import launch_bridge_context, playwright_session, wait_until  # noqa: E402
 
 pytestmark = pytest.mark.browser_e2e
 
@@ -515,12 +515,10 @@ async def test_room_disconnect_cleans_up_audio_and_presence_only_taps(
         c = fake_tap_server.connection_for("speaker-id")
         return c is not None and c.closed
 
-    deadline = asyncio.get_event_loop().time() + 5.0
-    while asyncio.get_event_loop().time() < deadline:
-        if await sam_closed():
-            break
-        await asyncio.sleep(0.1)
-    assert await sam_closed(), "Sam's /tap WS must close on room disconnect"
+    # Generous ceiling: the close is correct but the cross-world round-trip
+    # can be slow under a loaded headed browser in CI; wait_until returns the
+    # instant it closes, so a high timeout only buys headroom, never latency.
+    assert await wait_until(sam_closed, timeout=15.0), "Sam's /tap WS must close on room disconnect"
 
     # The popup-side snapshot (bridgeStatus in chrome.storage.local) is
     # the most reliable proxy for "did Lee's row get cleared?" — the
@@ -605,12 +603,7 @@ async def test_pcm_frames_carry_resolved_display_name_after_sidebar_rerender(
     # Frames continue to flow on the same WS (one utterance). Wait for
     # several more frames to land.
     target = len(conn.frames) + 30
-    deadline = asyncio.get_event_loop().time() + 3.0
-    while asyncio.get_event_loop().time() < deadline:
-        if len(conn.frames) >= target:
-            break
-        await asyncio.sleep(0.05)
-    assert len(conn.frames) >= target, (
+    assert await wait_until(lambda: len(conn.frames) >= target, timeout=10.0), (
         f"expected {target} frames after sidebar rerender, got {len(conn.frames)}"
     )
     # Critical assertion: the WS url's name= query param doesn't change
@@ -678,12 +671,9 @@ async def test_popup_token_rotation_triggers_reconnect_with_new_subprotocol(
         conns = [c for c in fake_tap_server.connections if c.identity == "dave-id"]
         return len(conns) >= 2
 
-    deadline = asyncio.get_event_loop().time() + 5.0
-    while asyncio.get_event_loop().time() < deadline:
-        if await has_new_connection():
-            break
-        await asyncio.sleep(0.1)
-    assert await has_new_connection(), "bridge must redial after a tap-token rotation in storage"
+    assert await wait_until(has_new_connection, timeout=15.0), (
+        "bridge must redial after a tap-token rotation in storage"
+    )
 
     second = [c for c in fake_tap_server.connections if c.identity == "dave-id"][-1]
     assert second is not first
@@ -753,12 +743,9 @@ async def test_mute_drain_reconnect_continues_same_utterance(
         conns = [c for c in fake_tap_server.connections if c.identity == "ellie-id"]
         return len(conns) >= 2
 
-    deadline = asyncio.get_event_loop().time() + 5.0
-    while asyncio.get_event_loop().time() < deadline:
-        if await has_drain_connection():
-            break
-        await asyncio.sleep(0.1)
-    assert await has_drain_connection(), "bridge must reconnect during drain so trailing PCM can flush"
+    assert await wait_until(has_drain_connection, timeout=15.0), (
+        "bridge must reconnect during drain so trailing PCM can flush"
+    )
     drain_conn = [c for c in fake_tap_server.connections if c.identity == "ellie-id"][-1]
     assert drain_conn is not first
 
@@ -779,12 +766,9 @@ async def test_mute_drain_reconnect_continues_same_utterance(
         # drain_conn — connection_for returns it.
         return c is drain_conn and c.closed
 
-    deadline = asyncio.get_event_loop().time() + 5.0
-    while asyncio.get_event_loop().time() < deadline:
-        if await drain_closed_cleanly():
-            break
-        await asyncio.sleep(0.1)
-    assert await drain_closed_cleanly(), "drain WS should close cleanly once tail flushed"
+    assert await wait_until(drain_closed_cleanly, timeout=15.0), (
+        "drain WS should close cleanly once tail flushed"
+    )
     # close_code 1000 == clean close; that's the Recorder's "end of
     # utterance" signal. A non-clean close here would mean drain
     # buffer was discarded.
@@ -834,12 +818,7 @@ async def test_window_room_cleared_without_disconnect_closes_taps(
         c = fake_tap_server.connection_for("ghost-id")
         return c is not None and c.closed
 
-    deadline = asyncio.get_event_loop().time() + 5.0
-    while asyncio.get_event_loop().time() < deadline:
-        if await ghost_closed():
-            break
-        await asyncio.sleep(0.1)
-    assert await ghost_closed(), (
+    assert await wait_until(ghost_closed, timeout=15.0), (
         "clearing window.room (orphan room still 'connected') must close the "
         "/tap WS — without the maybeAttach room-lost teardown it leaks forever"
     )

@@ -56,6 +56,13 @@ jobs:
       - name: Lint (ruff)
         run: ruff check tapscribe tools tests benchmarks bridges/local-test-bridge
 
+      - name: Format check (ruff)
+        # Fail the push if any tracked Python is unformatted — same scope as the
+        # lint step above (and as the local stop.sh gate), so `ruff format`
+        # drift can't slip in unnoticed. Fix with `ruff format tapscribe tools
+        # tests benchmarks bridges/local-test-bridge`.
+        run: ruff format --check tapscribe tools tests benchmarks bridges/local-test-bridge
+
       - name: Run tests
         run: pytest tests -q --cov=tapscribe --cov-report=term-missing
 

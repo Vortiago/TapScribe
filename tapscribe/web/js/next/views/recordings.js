@@ -152,8 +152,8 @@ export function build(ctx) {
 
   /** Identity of what the canvas shows — shared by the draw guard and the
    * preview fire/land/pin checks, which must agree byte-for-byte. */
-  /** @param {string} sid @param {string} name @param {string} src @param {number} size */
-  const waveKey = (sid, name, src, size) => `${sid}/${name}@${src}@${size}`;
+  /** @param {string} sid @param {string} name @param {number} size */
+  const waveKey = (sid, name, size) => `${sid}/${name}@original@${size}`;
 
   /** @param {string} sid @returns {"original" | "stripped"} */
   const effectiveSource = (sid) => {
@@ -179,13 +179,18 @@ export function build(ctx) {
     return currentFiles.find((f) => f.name === want) ?? currentFiles[0] ?? null;
   };
 
-  /** Resolve + draw the selected WAV's waveform. Peaks are fetched lazily
-   * (once per WAV+source, client-cached on the file's byte size so the poll
-   * never refetches) and drawn when they land. Guarded by `lastWaveSig` so the
-   * canvas only redraws when the selection / source / load-state actually
-   * changes — not on every body re-render. */
-  /** @param {import('../../types.js').WavFile | null} sel @param {"original"|"stripped"} src */
-  const drawWaveform = (sel, src) => {
+  /** Resolve + draw the selected tap's waveform. The hero ALWAYS shows the
+   * selected ORIGINAL WAV (peaks fetched from the original source) plus the
+   * committed strip-cut overlay when the session is stripped — in BOTH toggle
+   * states, since an original only ever lives in `<session>/` (a stripped clip
+   * has a different name under `stripped/`, so there is no "original name in
+   * stripped/" to fetch). The source toggle switches the list below, not the
+   * hero. Peaks are fetched lazily (once per WAV, client-cached on the file's
+   * byte size so the poll never refetches) and drawn when they land. Guarded by
+   * `lastWaveSig` so the canvas only redraws when the selection / load-state /
+   * committed cut actually changes — not on every body re-render or a toggle. */
+  /** @param {import('../../types.js').WavFile | null} sel */
+  const drawWaveform = (sel) => {
     const sid = session?.session || "";
     if (!sel || !sid) {
       if (livePreview) {
@@ -199,7 +204,7 @@ export function build(ctx) {
       return;
     }
     const fileSig = String(sel.size);
-    const key = waveKey(sid, sel.name, src, sel.size);
+    const key = waveKey(sid, sel.name, sel.size);
     // A live strip-preview belongs to ONE (wav, source, size) — drop it the
     // moment the waveform moves elsewhere so stale spans never overlay a
     // different recording.
@@ -216,14 +221,14 @@ export function build(ctx) {
       state = "error";
       message = failedWave.get(key) || "could not read waveform";
     } else {
-      data = peekWavePeaks(sid, sel.name, src, fileSig);
+      data = peekWavePeaks(sid, sel.name, "original", fileSig);
       if (data !== undefined) {
         state = "ok";
       } else {
         state = "loading";
         if (!pendingWave.has(key)) {
           pendingWave.add(key);
-          fetchWavePeaks(sid, sel.name, src, fileSig)
+          fetchWavePeaks(sid, sel.name, "original", fileSig)
             .then(() => { failedWave.delete(key); })
             .catch((e) => { failedWave.set(key, String(e).replace(/^Error:\s*/, "")); })
             .finally(() => {
@@ -234,22 +239,23 @@ export function build(ctx) {
               // reset just the wave sig so this redraw isn't skipped — no
               // full body rebuild and no extra /api/state poll.
               lastWaveSig = " ";
-              drawWaveform(selectedFor(), session ? effectiveSource(session.session) : "original");
+              drawWaveform(selectedFor());
             });
         }
       }
     }
 
-    // Committed strip cut (#90): only the ORIGINAL's waveform carries the
-    // overlay (the stripped source IS the cut result). Resolved lazily from
-    // /strip-meta, cached on the stripped_at stamp so a re-strip refetches;
-    // spans come from the persisted sidecar — never reconstructed from
-    // region filenames.
+    // Committed strip cut (#90): the hero always carries the overlay when the
+    // session is stripped — it IS the "entire sound of the tap, kept vs
+    // stripped, in one line" view, shown in both toggle states (the toggle
+    // only switches the list below). Resolved lazily from /strip-meta, cached
+    // on the stripped_at stamp so a re-strip refetches; spans come from the
+    // persisted sidecar — never reconstructed from region filenames.
     const stripped = session?.stripped || null;
-    const cutStamp = src === "original" && stripped ? stripped.stripped_at || "" : "";
+    const cutStamp = stripped ? stripped.stripped_at || "" : "";
     /** @type {import('../../types.js').CutSpan[] | null} */
     let cut = null;
-    if (src === "original" && stripped) {
+    if (stripped) {
       const mkey = `${sid}/${sel.name}@${cutStamp}`;
       const meta = peekWavStripMeta(sid, sel.name, cutStamp);
       if (meta !== undefined) {
@@ -263,7 +269,7 @@ export function build(ctx) {
             // Same redraw-only contract as the peaks fetch above: reset just
             // the wave sig and re-resolve the current selection.
             lastWaveSig = " ";
-            drawWaveform(selectedFor(), session ? effectiveSource(session.session) : "original");
+            drawWaveform(selectedFor());
           });
       }
     }
@@ -311,7 +317,7 @@ export function build(ctx) {
     const sel = selectedFor();
     if (!sel || effectiveSource(sid) !== "original") return;
     const token = ++previewToken;
-    const key = waveKey(sid, sel.name, "original", sel.size);
+    const key = waveKey(sid, sel.name, sel.size);
     fetchStripPreview(sid, sel.name, { ...knobs })
       .then((p) => {
         if (token !== previewToken) return; // superseded by a newer drag
@@ -321,7 +327,7 @@ export function build(ctx) {
         // only reconcile it up to a poll later).
         const cur = selectedFor();
         if (!session || !cur || effectiveSource(session.session) !== "original") return;
-        if (waveKey(session.session, cur.name, "original", cur.size) !== key) return;
+        if (waveKey(session.session, cur.name, cur.size) !== key) return;
         livePreview = { key, p };
         waveform.setPreview({ spans: p.spans, speech_floor_db: p.knobs.speech_floor_db });
         paintPreviewStats(p);
@@ -334,11 +340,17 @@ export function build(ctx) {
     previewTimer = setTimeout(() => { previewTimer = null; firePreview(); }, PREVIEW_DEBOUNCE_MS);
   };
 
-  /** Drop the live preview entirely — overlay, stats, AND any debounce still
-   * pending, so a drag scheduled just before a ✂ strip / clear doesn't
-   * re-create the preview ~300ms after it was deliberately dropped. */
+  /** Drop the live preview entirely — overlay, stats, the debounce still
+   * pending, AND any in-flight fetch, so a drag scheduled (or a request
+   * already in the air) just before a ✂ strip / clear / source-toggle can't
+   * re-create the preview ~300ms later. Bumping `previewToken` supersedes an
+   * in-flight `firePreview` fetch (its `.then` bails on a token mismatch) —
+   * without it, a preview requested before the drop lands afterwards (e.g.
+   * dropped on a toggle to stripped, then the fetch resolves back in the
+   * original view). */
   const dropPreview = () => {
     if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+    previewToken++;
     livePreview = null;
     waveform.setPreview(null);
   };
@@ -577,20 +589,25 @@ export function build(ctx) {
    * }} RowModel */
 
   /** Flatten the file listing into reconcile row models: every original, each
-   * followed by its indented stripped region clips when the stripped source is
-   * active (matches the classic layout). */
+   * followed by its indented stripped region clips when the stripped view is
+   * active (matches the classic layout). `view` decides whether the clips are
+   * appended; it is NOT the originals' own source — an original tap-WAV always
+   * lives in `<session>/`, so its row is ALWAYS the "original" source (its
+   * download / delete / expand target the original, never
+   * `<session>/stripped/<originalName>`, which never exists). Only the region
+   * CLIPS are the stripped source. */
   /**
    * @param {import('../../types.js').WavFile[]} files
-   * @param {"original"|"stripped"} src
+   * @param {"original"|"stripped"} view
    * @param {boolean} isCurrent
    * @returns {RowModel[]}
    */
-  const buildRowModels = (files, src, isCurrent) => {
+  const buildRowModels = (files, view, isCurrent) => {
     /** @type {RowModel[]} */
     const models = [];
     for (const f of files) {
-      models.push({ kind: "wav", file: f, src, isCurrent });
-      if (src === "stripped") {
+      models.push({ kind: "wav", file: f, src: "original", isCurrent });
+      if (view === "stripped") {
         for (const r of f.regions || []) models.push({ kind: "clip", file: r, src: "stripped", isCurrent });
       }
     }
@@ -643,7 +660,7 @@ export function build(ctx) {
         // speech / in / kept stat quartet is repainted too — otherwise selecting
         // away from a WAV that had a live strip preview leaves its stale preview
         // numbers in the stat row until the next poll tick.
-        paintWaveHeader(selectedFor(), effectiveSource(sid2), session.stripped || null);
+        paintWaveHeader(selectedFor(), session.stripped || null);
       };
       selectEl.addEventListener("click", (e) => { e.preventDefault(); select(); });
       selectEl.addEventListener("keydown", (e) => {
@@ -706,15 +723,16 @@ export function build(ctx) {
    * selection-change path so the precedence can't diverge. */
   /**
    * @param {import('../../types.js').WavFile | null} sel
-   * @param {"original"|"stripped"} src
    * @param {import('../../types.js').StrippedStats | null} stripped
    */
-  const paintWaveHeader = (sel, src, stripped) => {
+  const paintWaveHeader = (sel, stripped) => {
     const sid = session?.session || "";
+    // The hero always shows the original tap; a "· ✂ cut" hint flags that the
+    // committed strip overlay is on it (kept vs stripped), not the toggle state.
     waveName.textContent = sel
-      ? `🌊 ${truncMid(sel.name, 40)} · ${fmtDur(sel.duration_s)} · ${src}`
+      ? `🌊 ${truncMid(sel.name, 40)} · ${fmtDur(sel.duration_s)}${stripped ? " · ✂ cut" : ""}`
       : "no WAV selected";
-    drawWaveform(sel, src);
+    drawWaveform(sel);
     // drawWaveform already dropped a preview that no longer matches the shown
     // WAV, so a surviving livePreview is this session's by construction.
     const pv = livePreview && livePreview.key.startsWith(`${sid}/`) ? livePreview.p : null;
@@ -790,6 +808,12 @@ export function build(ctx) {
           onPick: (which) => {
             if (!session) return;
             sourcePick.set(session.session, which);
+            // The live strip-preview is an original-view tuning artifact; a
+            // source switch must clear it. The waveKey is source-independent
+            // (the hero is always the original tap), so a lingering preview
+            // would otherwise survive the toggle and overlay the stripped
+            // view's committed cut instead of being dropped.
+            dropPreview();
             lastChromeSig = " ";
             lastListSig = " ";
             afterMutate();
@@ -804,7 +828,7 @@ export function build(ctx) {
         stripBtn.disabled = !sess;
         stripBtn.textContent = "✂ strip all";
         clearBtn.disabled = !stripped;
-        drawWaveform(null, src);
+        drawWaveform(null);
       } else if (filesLoading) {
         // files_sig is set but the listing fetch hasn't landed yet.
         waveName.textContent = "loading…";
@@ -813,9 +837,9 @@ export function build(ctx) {
         stripBtn.disabled = true;
         stripBtn.textContent = "✂ strip all";
         clearBtn.disabled = true;
-        drawWaveform(null, src);
+        drawWaveform(null);
       } else {
-        paintWaveHeader(sel, src, stripped);
+        paintWaveHeader(sel, stripped);
         const stripBusy = stripInflight.has(sid) || job?.kind === "strip";
         stripBtn.disabled = stripBusy;
         stripBtn.textContent = stripBusy ? "⟳ stripping…" : "✂ strip all";
