@@ -17,15 +17,26 @@ namespace TapScribe.TrayBridge;
 /// </summary>
 internal sealed class MeetingForm : Form, IMeetingView
 {
-    private readonly TextBox _text = new()
+    // A RichTextBox (not a plain TextBox) so the summary's markdown renders with real
+    // headings / bullets / bold / monospace runs instead of literal `##`/`**` markup. The
+    // structure decisions live in Core's SummaryMarkdown; SummaryRichText paints them here.
+    private readonly RichTextBox _text = new()
     {
-        Multiline = true,
         ReadOnly = true,
-        ScrollBars = ScrollBars.Vertical,
+        ScrollBars = RichTextBoxScrollBars.Vertical,
         Dock = DockStyle.Fill,
         BorderStyle = BorderStyle.FixedSingle,
         Font = new System.Drawing.Font("Segoe UI", 10f),
+        BackColor = System.Drawing.SystemColors.Window, // read as a document, not a greyed field
+        DetectUrls = false,                             // keep URLs literal, like the web renderer
     };
+
+    // The raw markdown behind the rendered view, kept so Copy yields the clean source
+    // (RichTextBox.Text would hand back the rendered text with the markup stripped) and so
+    // the re-render guard can skip an unchanged body. Paired with _renderedAsMarkdown so the
+    // guard re-renders if the SAME text ever switches between markdown and plain.
+    private string _rawBody = "";
+    private bool _renderedAsMarkdown;
 
     private readonly Label _caption = new()
     {
@@ -44,7 +55,7 @@ internal sealed class MeetingForm : Form, IMeetingView
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
 
-        _copy.Click += (_, _) => Copy(_text.Text);
+        _copy.Click += (_, _) => Copy(_rawBody);
         var close = new Button { Text = "Close", Width = 90, Height = 28, DialogResult = DialogResult.OK };
         var buttons = new FlowLayoutPanel
         {
@@ -84,7 +95,17 @@ internal sealed class MeetingForm : Form, IMeetingView
     {
         Text = v.Title;
         _caption.Text = v.Caption;
-        _text.Text = v.Body;
+        // Re-render only when the body actually changes — Apply runs on every poll tick, so a
+        // run of identical "Processing…" / "Transcribing 2/3…" bodies shouldn't re-parse and
+        // rebuild the box. The Done summary's markdown renders rich; plain status/failure
+        // lines render verbatim, so a raw recorder error can't be reinterpreted as markdown.
+        if (v.Body != _rawBody || v.BodyIsMarkdown != _renderedAsMarkdown)
+        {
+            _rawBody = v.Body;
+            _renderedAsMarkdown = v.BodyIsMarkdown;
+            SummaryRichText.Render(
+                _text, v.BodyIsMarkdown ? SummaryMarkdown.Parse(v.Body) : SummaryMarkdown.Plain(v.Body));
+        }
         _copy.Enabled = v.CanCopy;
     }
 
