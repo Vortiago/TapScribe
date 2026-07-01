@@ -36,7 +36,7 @@ internal sealed class RequiresPythonAsrAttribute : FactAttribute
             using Process? p = Process.Start(psi);
             return p is not null && p.WaitForExit(15_000) && p.ExitCode == 0;
         }
-        catch (Exception)
+        catch (SystemException)
         {
             return false;
         }
@@ -69,9 +69,9 @@ public class RealRecorderMeetingE2ETests
     public async Task MultiPersonMultiLanguageMeeting_RealPipeline_ProducesAMultilingualTranscriptAndSummary()
     {
         string repoRoot = FindRepoRoot();
-        string audio = Path.Combine(repoRoot, "tests", "fixtures", "audio");
-        string norwegianWav = Path.Combine(audio, "marlene-nb.wav");
-        string englishWav = Path.Combine(audio, "armstrong-en.wav");
+        string audio = Path.Join(repoRoot, "tests", "fixtures", "audio");
+        string norwegianWav = Path.Join(audio, "marlene-nb.wav");
+        string englishWav = Path.Join(audio, "armstrong-en.wav");
         Assert.True(
             File.Exists(norwegianWav) && File.Exists(englishWav),
             "da/no/en fixtures absent — see tests/fixtures/audio/README.md");
@@ -128,17 +128,18 @@ public class RealRecorderMeetingE2ETests
         Assert.True(last.Phase == PipelinePhase.Done, $"pipeline did not reach Done: {last.Phase} / {last.FailureReason}");
 
         // The merged transcript carries BOTH speakers and BOTH languages.
-        string sessionDir = Path.Combine(rec.BaseDir, "recordings", session);
-        string transcriptPath = Path.Combine(sessionDir, "session-transcript.json");
+        string sessionDir = Path.Join(rec.BaseDir, "recordings", session);
+        string transcriptPath = Path.Join(sessionDir, "session-transcript.json");
         Assert.True(File.Exists(transcriptPath), "no merged transcript was written");
         using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(transcriptPath));
         JsonElement root = doc.RootElement;
         string plain = root.GetProperty("plain_text").GetString() ?? "";
 
-        var speakers = new HashSet<string>(StringComparer.Ordinal);
-        foreach (JsonElement seg in root.GetProperty("segments").EnumerateArray())
-            if (seg.TryGetProperty("speaker", out JsonElement sp) && sp.GetString() is { Length: > 0 } s)
-                speakers.Add(s);
+        HashSet<string> speakers = root.GetProperty("segments").EnumerateArray()
+            .Select(seg => seg.TryGetProperty("speaker", out JsonElement sp) ? sp.GetString() : null)
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s!)
+            .ToHashSet(StringComparer.Ordinal);
         Assert.True(
             speakers.Count >= 2,
             $"expected >=2 speakers, got [{string.Join(", ", speakers)}]; plain={Trunc(plain)}");
@@ -152,12 +153,12 @@ public class RealRecorderMeetingE2ETests
             norwegianMarkers.Any(hyp.Contains),
             $"no Norwegian-distinctive word in the transcript — was the Norwegian speaker Englishised? {Trunc(plain)}");
         Assert.True(
-            Tokens(File.ReadAllText(Path.Combine(audio, "armstrong-en.reference.txt"))).Overlaps(hyp),
+            Tokens(File.ReadAllText(Path.Join(audio, "armstrong-en.reference.txt"))).Overlaps(hyp),
             $"English speaker's content missing from the merged transcript: {Trunc(plain)}");
 
         // The summary was produced + persisted from the multilingual transcript.
         Assert.False(string.IsNullOrWhiteSpace(last.SummaryText), "End produced no summary text");
-        Assert.True(File.Exists(Path.Combine(sessionDir, "session-summary.json")), "no persisted summary");
+        Assert.True(File.Exists(Path.Join(sessionDir, "session-summary.json")), "no persisted summary");
     }
 
     private static TapConnectionOptions Tap(int port, string identity, string session) => new()
@@ -172,15 +173,10 @@ public class RealRecorderMeetingE2ETests
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    private static HashSet<string> Tokens(string text)
-    {
-        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string raw in text.Split([' ', '\n', '\r', '\t', '.', ',', ':', ';', '!', '?', '"', '\''],
-                     StringSplitOptions.RemoveEmptyEntries))
-            if (raw.Length >= 4)
-                set.Add(raw);
-        return set;
-    }
+    private static HashSet<string> Tokens(string text) =>
+        text.Split([' ', '\n', '\r', '\t', '.', ',', ':', ';', '!', '?', '"', '\''], StringSplitOptions.RemoveEmptyEntries)
+            .Where(raw => raw.Length >= 4)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static string Trunc(string s) => s.Length <= 200 ? s : s[..200];
 
@@ -217,8 +213,8 @@ public class RealRecorderMeetingE2ETests
     private static string FindRepoRoot()
     {
         for (DirectoryInfo? d = new(AppContext.BaseDirectory); d is not null; d = d.Parent)
-            if (Directory.Exists(Path.Combine(d.FullName, "tapscribe"))
-                && Directory.Exists(Path.Combine(d.FullName, "bridges")))
+            if (Directory.Exists(Path.Join(d.FullName, "tapscribe"))
+                && Directory.Exists(Path.Join(d.FullName, "bridges")))
                 return d.FullName;
         throw new DirectoryNotFoundException("could not locate the TapScribe repo root from the test assembly");
     }
@@ -253,16 +249,16 @@ internal sealed class RealRecorder : IAsyncDisposable
     {
         string python = Environment.GetEnvironmentVariable("TAPSCRIBE_PYTHON") ?? "python3";
         int port = FreePort();
-        string baseDir = Path.Combine(Path.GetTempPath(), "tapscribe-tray-e2e-" + Guid.NewGuid().ToString("N"));
-        string cfg = Path.Combine(baseDir, "config");
+        string baseDir = Path.Join(Path.GetTempPath(), "tapscribe-tray-e2e-" + Guid.NewGuid().ToString("N"));
+        string cfg = Path.Join(baseDir, "config");
         Directory.CreateDirectory(cfg);
-        File.WriteAllText(Path.Combine(cfg, "batch-model.txt"), batchModel + "\n");
+        File.WriteAllText(Path.Join(cfg, "batch-model.txt"), batchModel + "\n");
         // A deterministic command summariser: echo a notes line from the merged
         // transcript on stdin — no multi-GB LLM, so this stays a fast CI step.
         string summaryCmd =
             $"{python} -c \"import sys; t=sys.stdin.read().strip(); print('Meeting notes: ' + (t[:200] if t else 'no speech'))\"";
         File.WriteAllText(
-            Path.Combine(cfg, "summarizer.json"),
+            Path.Join(cfg, "summarizer.json"),
             JsonSerializer.Serialize(new { source = "command", command = summaryCmd }));
 
         var psi = new ProcessStartInfo(python)
@@ -287,7 +283,7 @@ internal sealed class RealRecorder : IAsyncDisposable
         {
             proc = Process.Start(psi);
         }
-        catch (Exception)
+        catch (SystemException)
         {
             // python not found / not launchable → null → caller fails.
             TryDelete(baseDir);
@@ -322,9 +318,13 @@ internal sealed class RealRecorder : IAsyncDisposable
                 if (r.IsSuccessStatusCode)
                     return true;
             }
-            catch
+            catch (HttpRequestException)
             {
-                // not up yet — keep polling until the deadline.
+                // connection refused while the recorder boots — keep polling.
+            }
+            catch (TaskCanceledException)
+            {
+                // request timed out (1 s) — keep polling until the deadline.
             }
             await Task.Delay(300);
         }
@@ -342,13 +342,17 @@ internal sealed class RealRecorder : IAsyncDisposable
 
     private static void TryKill(Process p)
     {
-        try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { /* best effort */ }
+        // best effort: Kill(tree) throws SystemException variants (already-exited /
+        // Win32) or AggregateException (partial tree-kill failure).
+        try { if (!p.HasExited) p.Kill(entireProcessTree: true); }
+        catch (SystemException) { }
+        catch (AggregateException) { }
         p.Dispose();
     }
 
     private static void TryDelete(string dir)
     {
-        try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        try { Directory.Delete(dir, recursive: true); } catch (SystemException) { /* best effort */ }
     }
 
     public ValueTask DisposeAsync()
