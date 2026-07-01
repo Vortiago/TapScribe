@@ -59,6 +59,41 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
 ALICE_TEXT = "The quick brown fox jumps over the lazy dog."
 BOB_TEXT = "Hello operator, this is a transcription pipeline check."
 
+# The recordings hero's committed-cut hook: the JSON cut spans the canvas is
+# currently drawing, or null while the overlay isn't up yet. Shared by every
+# recordings-waveform test so the `#viewRoot .wave-canvas` / `data-cut-spans`
+# selector lives in one place.
+OVERLAY_JS = """
+() => {
+  const c = document.querySelector('#viewRoot .wave-canvas');
+  return (c && c.dataset.cutSpans) ? c.dataset.cutSpans : null;
+}
+"""
+
+# The hero's LIVE strip-preview hook (#89) — the would-be cut spans while a knob
+# is being dragged, or null when no preview is up. Sibling of OVERLAY_JS.
+PREVIEW_JS = """
+() => {
+  const c = document.querySelector('#viewRoot .wave-canvas');
+  return (c && c.dataset.previewSpans) ? c.dataset.previewSpans : null;
+}
+"""
+
+
+def set_knob_js(key: str, value: int) -> str:
+    """A JS thunk that sets a strip-knob range input to `value` and fires its
+    `input` event, so the debounced strip-preview recomputes."""
+    return f"""
+    () => {{
+      const k = document.querySelector('#viewRoot [data-strip-knob="{key}"]');
+      if (!k) return false;
+      k.value = "{value}";
+      k.dispatchEvent(new Event("input", {{ bubbles: true }}));
+      return true;
+    }}
+    """
+
+
 # Screenshots committed to the repo so the README can embed them and a
 # reviewer can eyeball what the test actually saw.
 SHOTS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "dashboard-shots"
@@ -522,8 +557,9 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
     """After ✂ strip, the selected original's waveform draws the committed
     cut — the EXACT {start_s, end_s} spans the strip response returned,
     surfaced on the canvas's data-cut-spans hook. Pins four paths: the
-    cold-load resolve from persisted strip-meta, the negative control (no
-    overlay on the stripped source), the LIVE swap when a re-strip lands
+    cold-load resolve from persisted strip-meta, that the overlay PERSISTS
+    across the source toggle (the hero always shows the original tap + cut,
+    in both original AND stripped views), the LIVE swap when a re-strip lands
     while the page is open (the /api/state stripped_at stamp busts the
     client cache — no reload), and a final reload proving the LATEST cut
     survives with nothing in memory. The #90 acceptance guard."""
@@ -556,14 +592,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
     expected_spans = rows[0]["region_spans"]
     assert len(expected_spans) == 3, f"the 3-burst source should commit 3 spans, got {expected_spans}"
 
-    # The canvas's committed-cut hook: the JSON spans it is currently drawing,
-    # or null while the overlay isn't up yet.
-    overlay_js = """
-    () => {
-      const c = document.querySelector('#viewRoot .wave-canvas');
-      return (c && c.dataset.cutSpans) ? c.dataset.cutSpans : null;
-    }
-    """
+    overlay_js = OVERLAY_JS
 
     async with playwright_session() as pw:
         try:
@@ -590,13 +619,25 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
 
             await _shot(page, "09-committed-cut-overlay.png")
 
-            # Negative control: the overlay belongs to the ORIGINAL source
-            # only (the stripped waveform IS the cut result) — toggling away
-            # must drop it, toggling back must restore it.
+            # The hero always shows the original tap + committed cut — the
+            # "entire sound, kept vs stripped, in one line" view. The source
+            # toggle only switches the LIST below, so toggling to "stripped"
+            # must KEEP the overlay (and never 404 the waveform); toggling
+            # back keeps it too. (The pre-#N behaviour dropped it here, which
+            # left the stripped view trying to fetch the original name from
+            # stripped/ → 404.)
             await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            # The clip sub-rows confirm the stripped VIEW is active…
             await page.wait_for_function(
-                """() => !document.querySelector('#viewRoot .wave-canvas')?.dataset.cutSpans""",
+                """() => document.querySelectorAll('#viewRoot .wavlist .wavrow.is-clip').length === 3""",
                 timeout=5000,
+            )
+            # …while the hero keeps the original's committed overlay, no error.
+            assert json.loads(await page.evaluate(overlay_js)) == expected_spans, (
+                "toggling to stripped must keep the original tap's cut overlay"
+            )
+            assert await page.locator("#viewRoot .wave-msg").is_hidden(), (
+                "the stripped view must not surface a waveform error (the 404 bug)"
             )
             await page.locator('#viewRoot .srcsw__opt[data-src="original"]').click()
             await page.wait_for_function(overlay_js, timeout=5000)
@@ -636,6 +677,236 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
             await browser.close()
 
 
+async def test_recordings_stripped_toggle_hero_shows_original_overlay_not_404(
+    running_recorder: RunningRecorder,
+    tmp_path: Path,
+):
+    """Regression for the reported bug: clicking the "stripped" source toggle
+    404'd the hero waveform. An original tap-WAV lives ONLY in <session>/;
+    strip-silence writes region clips under stripped/ with NEW names, so
+    /api/wav/{s}/{originalName}/peaks?source=stripped never resolves. The hero
+    must ALWAYS render the original tap + committed cut overlay (peaks from the
+    original source) in both toggle states — the toggle only switches the list
+    below. Asserts: after toggling to stripped the canvas keeps the cut
+    overlay, shows no error, and NO /api/wav call went out against the stripped
+    source for an original name (nor did any /api/wav call 404)."""
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    src_wav = _build_speech_silence_wav(tmp_path / "alice-multi.wav")
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src_wav,
+        utterance_id="utt-hero-404",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            f"/api/sessions/{rec.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["files_written"] == 1
+
+    overlay_js = OVERLAY_JS
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            # Capture every /api/wav response so a resurfaced stripped-source
+            # peaks fetch (the bug) or any 404 shows up as a hard assertion.
+            wav_responses: list[tuple[str, int]] = []
+            page.on(
+                "response",
+                lambda r: wav_responses.append((r.url, r.status)) if "/api/wav/" in r.url else None,
+            )
+
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+
+            # Original is auto-selected; its committed overlay lands once the
+            # peaks + strip-meta fetches settle (original source — the only one
+            # that exists for this name).
+            await page.wait_for_function(overlay_js, timeout=10000)
+
+            # Toggle to the stripped VIEW — clip rows appear below…
+            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wavlist .wavrow.is-clip').length === 3""",
+                timeout=10000,
+            )
+
+            # …and the hero KEEPS the original tap + overlay, with no error.
+            assert await page.evaluate(overlay_js) is not None, (
+                "the hero overlay must survive the stripped toggle (not 404)"
+            )
+            assert await page.locator("#viewRoot .wave-msg").is_hidden(), (
+                "the stripped view must not show a waveform error message"
+            )
+            canvas_w = await page.locator("#viewRoot .wave-canvas").evaluate("c => c.width")
+            assert canvas_w > 0, "the hero canvas must be painted, not blank"
+
+            # Load-bearing regression assertion: no /api/wav call 404'd, and the
+            # hero never asked for a stripped-source peaks fetch (an original
+            # name doesn't exist under stripped/, which is what 404'd).
+            bad = [
+                (u, s) for (u, s) in wav_responses if s == 404 or ("source=stripped" in u and "/peaks" in u)
+            ]
+            assert not bad, f"stripped toggle triggered bad /api/wav requests: {bad}"
+        finally:
+            await browser.close()
+
+
+async def test_recordings_stripped_view_original_row_targets_original_source(
+    running_recorder: RunningRecorder,
+    tmp_path: Path,
+):
+    """In the stripped VIEW the original tap-WAV row still targets the ORIGINAL
+    source — its own download / delete / expand resolve under <session>/, never
+    <session>/stripped/<originalName> (which never exists → 404). Only the
+    indented region CLIP rows are the stripped source. Guards buildRowModels."""
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    src_wav = _build_speech_silence_wav(tmp_path / "alice-multi.wav")
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src_wav,
+        utterance_id="utt-orig-src",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+    original_name = sorted(rec.session_dir.glob("*.wav"))[0].name
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            f"/api/sessions/{rec.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["files_written"] == 1
+    region_wavs = sorted((rec.session_dir / "stripped").glob("*.wav"))
+    assert len(region_wavs) == 3
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+
+            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wavlist .wavrow.is-clip').length === 3""",
+                timeout=10000,
+            )
+
+            # The ORIGINAL row is source=original even in the stripped view…
+            orig_row = f'#viewRoot .wavlist .wavrow[data-wav="{original_name}"]:not(.is-clip)'
+            await page.locator(orig_row).wait_for(state="visible", timeout=3000)
+            assert await page.get_attribute(orig_row, "data-src") == "original"
+            orig_href = await page.get_attribute(f'{orig_row} [data-slot="download"]', "href")
+            assert orig_href and "source=stripped" not in orig_href, (
+                f"the original row must download the original, not stripped: {orig_href}"
+            )
+            assert "/api/wav/" in orig_href and original_name in orig_href
+
+            # …while each region CLIP row is source=stripped.
+            for r in region_wavs:
+                clip_row = f'.wavrow.is-clip[data-wav="{r.name}"][data-src="stripped"]'
+                await page.locator(clip_row).wait_for(state="visible", timeout=3000)
+                clip_href = await page.get_attribute(f'{clip_row} [data-slot="download"]', "href")
+                assert clip_href and "source=stripped" in clip_href, (
+                    f"the clip row must download from stripped: {clip_href}"
+                )
+        finally:
+            await browser.close()
+
+
+async def test_recordings_strip_preview_dropped_when_source_toggled(
+    running_recorder: RunningRecorder,
+    tmp_path: Path,
+):
+    """A live strip-preview is an ORIGINAL-view tuning artifact: toggling the
+    source to "stripped" must DROP it, so the stale preview overlay never hides
+    the stripped view's committed cut. The hero's waveKey is source-independent
+    (it always shows the original tap), so without an explicit drop the preview
+    would survive the toggle — this pins that drop."""
+    from .test_pipeline_strip_silence import _build_speech_silence_wav
+
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    src_wav = _build_speech_silence_wav(tmp_path / "alice-multi.wav")
+    await stream_wav_via_tap(
+        ws_base_url=ws_base,
+        identity="alice",
+        name="Alice",
+        wav_path=src_wav,
+        utterance_id="utt-preview-toggle",
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
+        resp = await client.post(
+            f"/api/sessions/{rec.session_start}/strip-silence",
+            json={"min_silence_ms": 400, "pad_ms": 50, "speech_floor_db": -40.0},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["files_written"] == 1
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+
+            # Original view: wait for the committed overlay, then drag a knob to
+            # raise a live preview on top of it.
+            await page.wait_for_function(OVERLAY_JS, timeout=10000)
+            assert await page.evaluate(set_knob_js("pad_ms", 150))
+            await page.wait_for_function(PREVIEW_JS, timeout=10000)
+
+            # Toggle to the stripped view — the preview must be dropped…
+            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.wait_for_function(
+                """() => !document.querySelector('#viewRoot .wave-canvas')?.dataset.previewSpans""",
+                timeout=5000,
+            )
+            # …leaving the committed cut as what the hero actually shows.
+            assert await page.evaluate(OVERLAY_JS) is not None, (
+                "the committed cut must be visible once the stale preview is dropped"
+            )
+        finally:
+            await browser.close()
+
+
 async def test_recordings_strip_preview_tracks_knobs_and_matches_commit(
     running_recorder: RunningRecorder,
     tmp_path: Path,
@@ -661,23 +932,7 @@ async def test_recordings_strip_preview_tracks_knobs_and_matches_commit(
     )
     assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
 
-    preview_js = """
-    () => {
-      const c = document.querySelector('#viewRoot .wave-canvas');
-      return (c && c.dataset.previewSpans) ? c.dataset.previewSpans : null;
-    }
-    """
-
-    def set_knob_js(key: str, value: int) -> str:
-        return f"""
-        () => {{
-          const k = document.querySelector('#viewRoot [data-strip-knob="{key}"]');
-          if (!k) return false;
-          k.value = "{value}";
-          k.dispatchEvent(new Event("input", {{ bubbles: true }}));
-          return true;
-        }}
-        """
+    preview_js = PREVIEW_JS
 
     async with playwright_session() as pw:
         try:

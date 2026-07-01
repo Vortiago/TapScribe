@@ -1323,6 +1323,26 @@ def test_wav_peaks_default_bins_and_stripped_source(client, recorder_under_test)
     assert len(r.json()["peaks"]) == 800  # the route's default bins
 
 
+def test_wav_peaks_original_name_under_stripped_is_404(client, recorder_under_test):
+    """The Recordings hero fetches peaks for an original tap-WAV from the
+    ORIGINAL source, never the stripped one: an original only lives in
+    <session>/, and strip-silence writes region clips under stripped/ with NEW
+    names, so the original's name never exists under stripped/. This 404 is
+    CORRECT — it's WHY the hero pins its source to "original" (the reported
+    "stripped → 404 on the wav display" bug was the UI asking for exactly
+    this path)."""
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    # A real stripped/ dir exists — with a region clip under a DIFFERENT name.
+    (sd / "stripped").mkdir()
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    # The ORIGINAL name is not in stripped/ → 404 for source=stripped.
+    assert client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/peaks?source=stripped").status_code == 404
+    # …while the original source resolves fine — this is what the hero uses.
+    r = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/peaks")
+    assert r.status_code == 200, r.text
+
+
 def test_wav_peaks_rejects_bad_input(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
