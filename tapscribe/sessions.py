@@ -209,17 +209,25 @@ def read_wav_transcript(session: str, name: str, source: str = "original") -> di
     return read_primary_payload(wav_path)
 
 
+def _valid_strip_meta(meta: Any) -> dict[str, Any] | None:
+    """The v2 sidecar shape gate ({"files": {...}}): shared by the direct
+    reader and its poll-path cached variant so both enforce the one contract."""
+    if not isinstance(meta, dict) or not isinstance(meta.get("files"), dict):
+        return None
+    return meta
+
+
 def read_strip_meta(stripped: Path) -> dict[str, Any] | None:
     """Parse `<stripped>/strip-meta.json` if present and shaped like the v2
     sidecar ({"files": {...}}). None on missing/unparseable/legacy content —
     every consumer (the per-WAV committed-cut read below, the maintenance
     prune/absorb ops) treats a bad sidecar as absent rather than failing.
     The ONE reader for the sidecar's shape contract;
-    `_read_json_or_none` re-checks containment before opening it."""
-    meta = _read_json_or_none(stripped / FILENAME_STRIP_META_JSON)
-    if not isinstance(meta, dict) or not isinstance(meta.get("files"), dict):
-        return None
-    return meta
+    `_read_json_or_none` re-checks containment before opening it.
+
+    Un-cached: these callers run off the hot path. The once-per-second session
+    listing reads the same sidecar through `_read_strip_meta_cached`."""
+    return _valid_strip_meta(_read_json_or_none(stripped / FILENAME_STRIP_META_JSON))
 
 
 def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
@@ -299,7 +307,9 @@ def _read_json_or_none(path: Path) -> Any:
 # str(path) -> (cache_key, descriptor). The key is (wav mtime_ns, wav size,
 # transcript-sidecar signature); see wav_cache.cache_signature.
 _WAV_DESC_CACHE: dict[str, tuple[tuple, dict[str, Any]]] = {}
-# str(path) -> ((mtime_ns, size) | None, parsed-json). For session-transcript.json.
+# str(path) -> ((mtime_ns, size) | None, parsed-json). For the per-session JSON
+# sidecars the poll re-reads: session-transcript.json, session-summary.json, and
+# stripped/strip-meta.json.
 _SESSION_JSON_CACHE: dict[str, tuple[tuple | None, Any]] = {}
 
 
@@ -328,6 +338,16 @@ def _read_session_json_cached(path: Path) -> Any:
     data = _read_json_or_none(path)
     _SESSION_JSON_CACHE[pathkey] = (sig, data)
     return data
+
+
+def _read_strip_meta_cached(stripped: Path) -> dict[str, Any] | None:
+    """`read_strip_meta` memoised on (mtime_ns, size), for the once-per-second
+    session listing (`build_session_files` runs every tick per session), so an
+    un-cached re-parse of a static strip-meta.json is pure poll-path waste.
+    Shares `_SESSION_JSON_CACHE` with the other sidecars; a re-strip rewrites the
+    file (new signature) and invalidates. `gather_sessions` keeps the path in the
+    prune set so the entry survives across ticks."""
+    return _valid_strip_meta(_read_session_json_cached(stripped / FILENAME_STRIP_META_JSON))
 
 
 def _session_transcript_marker(data: Any) -> dict[str, Any] | None:
@@ -472,24 +492,65 @@ def build_session_files(
         visited.update(str(w) for w in originals)
     wavs = [_describe_wav(w) for w in originals]
 
-    # Bucket region WAVs from stripped/ by (speaker_slug, ident) so each
-    # original WAV's row can render the N regions it was split into as
-    # sub-rows. strip_one_wav mints region names via build_recorder_wav_name(
-    # origin_start + offset, original_speaker_slug, original_ident, fresh
-    # uuid8), so the (speaker, ident) pair survives the split and identifies
-    # the source unambiguously. Regions from legacy stripped/ folders
-    # (pre-split refactor) bucket against their originals the same way —
-    # those filenames preserved the same convention.
+    # Attach each original WAV's strip-silence region clips as sub-rows.
+    #
+    # The committed cut in stripped/strip-meta.json (schema v2) names the exact
+    # clip files produced from each ORIGINAL (`files[<orig>].spans[].name`),
+    # which is the only unambiguous original->region mapping. `strip_one_wav`
+    # mints every region name via build_recorder_wav_name(origin_start + offset,
+    # speaker, ident, fresh uuid8), so the (speaker, ident) pair is preserved but
+    # is NOT unique per original: one participant who reconnects mid-session has
+    # several originals sharing a single (speaker, ident), differing only by
+    # timestamp and uuid. Bucketing by that pair alone would attach EVERY region
+    # of EVERY same-ident original to each row, so a short recording renders as
+    # dozens of clips, many longer than the file itself. So prefer the sidecar,
+    # and fall back to (speaker, ident) bucketing for clips it does not name
+    # (legacy stripped/ folders that predate the sidecar) or whose owning
+    # original was deleted without a region cascade (`delete_session_wav` leaves
+    # stripped/ intact): that keeps an orphaned clip visible under a surviving
+    # same-participant sibling instead of vanishing.
     region_buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    regions_by_original: dict[str, list[dict[str, Any]]] = {}
+    owner_by_clip: dict[str, str] = {}
+    original_names = {w["name"] for w in wavs}
     stripped_root = sd / DIRNAME_STRIPPED
     if stripped_root.is_dir():
+        # Which original each region clip was cut from, per the committed cut.
+        meta = _read_strip_meta_cached(stripped_root)
+        if meta is not None:
+            for orig_name, entry in meta["files"].items():
+                if isinstance(entry, dict):
+                    for span in entry.get("spans") or []:
+                        # A shape-valid sidecar can still carry a non-dict span
+                        # (hand-edited or partially written); skip it rather than
+                        # let span.get() crash the once-per-second poll.
+                        if isinstance(span, dict) and isinstance(span.get("name"), str):
+                            owner_by_clip[span["name"]] = orig_name
+        # Sorted glob keeps region rows in filename (chronological) order.
         for rw in sorted(stripped_root.glob("*.wav")):
             if visited is not None:
                 visited.add(str(rw))
-            key = parse_wav_speaker_ident(rw.name)
-            region_buckets.setdefault(key, []).append(_describe_wav(rw))
+            desc = _describe_wav(rw)
+            region_buckets.setdefault(parse_wav_speaker_ident(rw.name), []).append(desc)
+            # Attach by owner only when that original still exists; a clip whose
+            # owner was deleted falls through to the (speaker, ident) fallback.
+            owner = owner_by_clip.get(rw.name)
+            if owner in original_names:
+                regions_by_original.setdefault(owner, []).append(desc)
     for w in wavs:
-        w["regions"] = region_buckets.get(parse_wav_speaker_ident(w["name"]), [])
+        # A row shows the clips the sidecar attributes to it, plus any
+        # same-(speaker, ident) clip with no still-present owner (a legacy clip
+        # the sidecar never named, or one orphaned by a deleted original). The
+        # two sets are disjoint (an owned clip's owner is present, so it never
+        # matches the fallback test), so a clip with a present owner shows under
+        # that owner alone; only genuinely unattributable clips fall back to the
+        # bucket. Sorted so rows stay in filename (chronological) order.
+        key = parse_wav_speaker_ident(w["name"])
+        owned = regions_by_original.get(w["name"], [])
+        orphaned = [
+            r for r in region_buckets.get(key, []) if owner_by_clip.get(r["name"]) not in original_names
+        ]
+        w["regions"] = sorted(owned + orphaned, key=lambda r: r["name"])
     return wavs, _stripped_summary(stripped_root, region_buckets)
 
 
@@ -624,6 +685,7 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
         seen_names.add(sd.name)
         visited_session_jsons.add(str(sd / FILENAME_TRANSCRIPT_JSON))
         visited_session_jsons.add(str(sd / FILENAME_SUMMARY_JSON))
+        visited_session_jsons.add(str(sd / DIRNAME_STRIPPED / FILENAME_STRIP_META_JSON))
         out.append(_describe_session(sd, jobs=jobs, current_session=current_session, visited=visited_wavs))
 
     # Prune the poll caches down to what this walk actually saw so deleted

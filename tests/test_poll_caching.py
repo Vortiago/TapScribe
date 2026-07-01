@@ -8,6 +8,7 @@ invalidate-on-change paths.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -179,3 +180,71 @@ def test_config_text_cache_invalidates_on_write(tmp_path: Path, monkeypatch: pyt
     assert text.read_prompt() == "first"  # served from cache
     f.write_text("second", encoding="utf-8")  # different (mtime, size)
     assert text.read_prompt() == "second"
+
+
+# ---------------------------------------------------------------------------
+# strip-meta.json cache (sessions._read_strip_meta_cached, shared _SESSION_JSON_CACHE)
+# ---------------------------------------------------------------------------
+
+
+def _write_strip_meta(stripped: Path, clip_names: list[str]) -> None:
+    spans = [{"name": c, "start_s": 0.0, "end_s": 1.0} for c in clip_names]
+    stripped.mkdir(parents=True, exist_ok=True)
+    (stripped / "strip-meta.json").write_text(
+        json.dumps({"files": {"a.wav": {"spans": spans}}}),
+        encoding="utf-8",
+    )
+
+
+def test_strip_meta_cache_hits_then_invalidates_on_rewrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The poll reads strip-meta.json every tick, so it must serve from cache
+    while the file is unchanged and re-parse when a re-strip rewrites it."""
+    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path)
+    calls = {"n": 0}
+    real = sessions._read_json_or_none
+
+    def _spy(p):
+        calls["n"] += 1
+        return real(p)
+
+    monkeypatch.setattr(sessions, "_read_json_or_none", _spy)
+
+    stripped = tmp_path / "session" / "stripped"
+    _write_strip_meta(stripped, ["clip1.wav"])
+
+    m1 = sessions._read_strip_meta_cached(stripped)
+    m2 = sessions._read_strip_meta_cached(stripped)
+    assert calls["n"] == 1  # second read served from cache, no re-parse
+    assert m1 == m2
+    assert [sp["name"] for sp in m1["files"]["a.wav"]["spans"]] == ["clip1.wav"]
+
+    _write_strip_meta(stripped, ["clip1.wav", "clip2.wav"])  # re-strip → (mtime, size) moves
+    m3 = sessions._read_strip_meta_cached(stripped)
+    assert calls["n"] == 2  # invalidated → re-parsed
+    assert [sp["name"] for sp in m3["files"]["a.wav"]["spans"]] == ["clip1.wav", "clip2.wav"]
+
+
+def test_strip_meta_cache_survives_gather_sessions_prune(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`gather_sessions` prunes _SESSION_JSON_CACHE to the paths it walked. The
+    strip-meta path must be in that keep-set (else the entry is evicted every
+    tick, defeating the cache), so a second walk over an unchanged sidecar does
+    NOT re-parse it."""
+    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    seed_wav(session_dir / "20260101T010000Z__alice__abc.wav")
+    _write_strip_meta(session_dir / "stripped", ["clip1.wav"])
+
+    calls = {"n": 0}
+    real = sessions._read_json_or_none
+
+    def _spy(p):
+        if str(p).endswith("strip-meta.json"):
+            calls["n"] += 1
+        return real(p)
+
+    monkeypatch.setattr(sessions, "_read_json_or_none", _spy)
+
+    sessions.gather_sessions(current_session="session")
+    sessions.gather_sessions(current_session="session")
+    assert calls["n"] == 1  # parsed on the first walk, served from cache on the second

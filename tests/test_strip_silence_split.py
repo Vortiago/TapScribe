@@ -380,3 +380,124 @@ def test_describe_session_attaches_regions_to_origin_wav(tmp_path: Path, monkeyp
         "wav_end",
         "speaker_name",
     } <= sample.keys()
+
+
+async def test_regions_do_not_bleed_across_same_participant_originals(tmp_path: Path, monkeypatch):
+    """One participant with MORE THAN ONE original in a session (the recorder
+    mints a fresh WAV every time that participant's /tap reopens: reconnect,
+    rejoin, mic toggle) shares one `(speaker_slug, ident)` across all of them;
+    only the timestamp + trailing uuid differ. Bucketing regions by that pair
+    alone attaches every region of every same-ident original to each row, so a
+    short recording appears split into dozens of clips, many longer than the
+    file itself. The committed strip-meta.json records the true
+    original->region mapping; the listing must honour it so each original shows
+    only the clips actually cut from it."""
+    from tapscribe import config
+    from tapscribe.batch_strip import StripSessionRequest, strip_session_locked
+    from tapscribe.sessions import build_session_files
+
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    start_a = datetime(2026, 6, 23, 10, 0, 54, tzinfo=UTC)
+    start_b = datetime(2026, 6, 23, 10, 12, 30, tzinfo=UTC)
+    orig_a = session_dir / _wav_name(start_a, speaker="Atle", ident="a1a75652")
+    orig_b = session_dir / _wav_name(start_b, speaker="Atle", ident="a1a75652")
+    _write_wav(orig_a, _make_speech_silence([1.0, 1.0, 1.0], [1.0, 1.0]))  # 3 regions
+    _write_wav(orig_b, _make_speech_silence([1.0, 1.0], [1.0]))  # 2 regions
+
+    # Real strip run → writes stripped/*.wav AND stripped/strip-meta.json.
+    await strip_session_locked(
+        StripSessionRequest(session="session", min_silence_ms=400, pad_ms=50, speech_floor_db=-40.0),
+        originals=sorted(session_dir.glob("*.wav")),
+    )
+
+    wavs, _stripped = build_session_files(session_dir)
+    files = {f["name"]: f for f in wavs}
+    a_regions = files[orig_a.name]["regions"]
+    b_regions = files[orig_b.name]["regions"]
+
+    # Each original shows ONLY its own regions, not the union of all 5.
+    assert len(a_regions) == 3
+    assert len(b_regions) == 2
+    a_names = {r["name"] for r in a_regions}
+    b_names = {r["name"] for r in b_regions}
+    assert a_names.isdisjoint(b_names)
+
+
+def test_legacy_stripped_folder_without_sidecar_falls_back_to_speaker_ident(tmp_path: Path):
+    """A legacy stripped/ folder that predates strip-meta.json has no committed
+    cut to consult, so region attachment falls back to (speaker_slug, ident)
+    bucketing. For two same-participant originals that's genuinely unresolvable
+    (the mapping was never recorded), so BOTH rows show the union of all
+    regions. This is the documented, expected lossy behaviour (a re-strip writes
+    the sidecar and repairs it); pin it so a refactor can't change it silently."""
+    from tapscribe.sessions import build_session_files
+
+    session_dir = tmp_path / "session"
+    out_dir = session_dir / "stripped"
+    session_dir.mkdir()
+    out_dir.mkdir()
+
+    start_a = datetime(2026, 6, 23, 10, 0, 54, tzinfo=UTC)
+    start_b = datetime(2026, 6, 23, 10, 12, 30, tzinfo=UTC)
+    orig_a = session_dir / _wav_name(start_a, speaker="Atle", ident="a1a75652")
+    orig_b = session_dir / _wav_name(start_b, speaker="Atle", ident="a1a75652")
+    _write_wav(orig_a, _make_speech_silence([1.0, 1.0, 1.0], [1.0, 1.0]))  # 3 regions
+    _write_wav(orig_b, _make_speech_silence([1.0, 1.0], [1.0]))  # 2 regions
+
+    # strip_one_wav writes region clips but NOT strip-meta.json (the legacy shape).
+    strip_one_wav(orig_a, out_dir, **_common_kwargs())
+    strip_one_wav(orig_b, out_dir, **_common_kwargs())
+    assert not (out_dir / "strip-meta.json").exists()
+
+    wavs, _stripped = build_session_files(session_dir)
+    files = {f["name"]: f for f in wavs}
+
+    # No sidecar → both originals bucket to the same (speaker, ident) → union of 5.
+    assert len(files[orig_a.name]["regions"]) == 5
+    assert len(files[orig_b.name]["regions"]) == 5
+
+
+async def test_deleting_one_original_keeps_its_clips_visible_under_the_sibling(tmp_path: Path, monkeypatch):
+    """`delete_session_wav` removes an original WAV without cascading to its
+    stripped clips (the sidecar + clips stay on disk). Those clips are now
+    orphaned: their owning original is gone. Attaching strictly by the sidecar
+    owner would make them vanish from every row while the stripped summary still
+    counts them, so a clip whose owner is absent falls back to (speaker, ident)
+    bucketing and shows under the surviving same-participant sibling. The summary
+    count and the sum of visible region rows must stay in agreement."""
+    from tapscribe import config
+    from tapscribe.batch_strip import StripSessionRequest, strip_session_locked
+    from tapscribe.sessions import build_session_files
+
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    start_a = datetime(2026, 6, 23, 10, 0, 54, tzinfo=UTC)
+    start_b = datetime(2026, 6, 23, 10, 12, 30, tzinfo=UTC)
+    orig_a = session_dir / _wav_name(start_a, speaker="Atle", ident="a1a75652")
+    orig_b = session_dir / _wav_name(start_b, speaker="Atle", ident="a1a75652")
+    _write_wav(orig_a, _make_speech_silence([1.0, 1.0, 1.0], [1.0, 1.0]))  # 3 regions
+    _write_wav(orig_b, _make_speech_silence([1.0, 1.0], [1.0]))  # 2 regions
+
+    await strip_session_locked(
+        StripSessionRequest(session="session", min_silence_ms=400, pad_ms=50, speech_floor_db=-40.0),
+        originals=sorted(session_dir.glob("*.wav")),
+    )
+
+    # Delete orig_a but leave its stripped clips + the sidecar entry in place.
+    orig_a.unlink()
+
+    wavs, stripped = build_session_files(session_dir)
+    files = {f["name"]: f for f in wavs}
+
+    # orig_a is gone from the listing; its 3 orphaned clips do not vanish, they
+    # show under the surviving sibling alongside orig_b's own 2.
+    assert orig_a.name not in files
+    assert len(files[orig_b.name]["regions"]) == 5
+    # Directory summary and the visible rows agree: all 5 clips accounted for.
+    assert stripped is not None
+    assert stripped["count"] == 5
