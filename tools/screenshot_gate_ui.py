@@ -165,9 +165,7 @@ async def main() -> None:
     base_url = f"http://127.0.0.1:{port}"
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True, executable_path=CHROMIUM_PATH
-        )
+        browser = await pw.chromium.launch(headless=True, executable_path=CHROMIUM_PATH)
         try:
             ctx = await browser.new_context(viewport={"width": 1500, "height": 1000})
             page = await ctx.new_page()
@@ -215,9 +213,7 @@ async def main() -> None:
             if live_card is None:
                 live_card = await page.query_selector("#liveGateKindSelect")
             assert live_card is not None
-            await live_card.screenshot(
-                path=str(SHOTS_DIR / "02-live-channel-gate-controls.png")
-            )
+            await live_card.screenshot(path=str(SHOTS_DIR / "02-live-channel-gate-controls.png"))
 
             # 3) Active-taps card crop — shows all three status-line
             #    states stacked: ⟳ <text> (Alice), ⟳ listening… (Bob),
@@ -238,9 +234,7 @@ async def main() -> None:
             if taps_card_el is None:
                 taps_card_el = await page.query_selector(".stream-row-wrap")
             assert taps_card_el is not None
-            await taps_card_el.screenshot(
-                path=str(SHOTS_DIR / "03-tap-rows-three-status-states.png")
-            )
+            await taps_card_el.screenshot(path=str(SHOTS_DIR / "03-tap-rows-three-status-states.png"))
 
             # 4) Flip the gate selector to "backend" to show the
             #    inactive-but-tunable state for the screenshots.

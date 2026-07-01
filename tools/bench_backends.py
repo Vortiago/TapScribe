@@ -29,16 +29,16 @@ from pathlib import Path
 import numpy as np
 
 MLX_REPO_MAP = {
-    "tiny":           "mlx-community/whisper-tiny-mlx",
-    "tiny.en":        "mlx-community/whisper-tiny.en-mlx",
-    "base":           "mlx-community/whisper-base-mlx",
-    "base.en":        "mlx-community/whisper-base.en-mlx",
-    "small":          "mlx-community/whisper-small-mlx",
-    "small.en":       "mlx-community/whisper-small.en-mlx",
-    "medium":         "mlx-community/whisper-medium-mlx",
-    "medium.en":      "mlx-community/whisper-medium.en-mlx",
-    "large-v2":       "mlx-community/whisper-large-v2-mlx",
-    "large-v3":       "mlx-community/whisper-large-v3-mlx",
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "tiny.en": "mlx-community/whisper-tiny.en-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "base.en": "mlx-community/whisper-base.en-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "small.en": "mlx-community/whisper-small.en-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "medium.en": "mlx-community/whisper-medium.en-mlx",
+    "large-v2": "mlx-community/whisper-large-v2-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
 
@@ -53,6 +53,7 @@ def _load_wav_float32(wav_path: Path):
     None when the format doesn't match (caller falls back to passing the
     path string so mlx-whisper's own ffmpeg-based loader can try)."""
     import wave as _wave
+
     try:
         with _wave.open(str(wav_path), "rb") as w:
             if w.getframerate() != 16000 or w.getnchannels() != 1 or w.getsampwidth() != 2:
@@ -71,8 +72,11 @@ def _audio_for_mlx(wav_path: Path):
     audio = _load_wav_float32(wav_path)
     if audio is not None:
         return audio
-    print(f"[bench] {wav_path.name} is not 16kHz mono int16; deferring to "
-          "mlx-whisper's ffmpeg loader. Install ffmpeg if this fails.", flush=True)
+    print(
+        f"[bench] {wav_path.name} is not 16kHz mono int16; deferring to "
+        "mlx-whisper's ffmpeg loader. Install ffmpeg if this fails.",
+        flush=True,
+    )
     return str(wav_path)
 
 
@@ -99,11 +103,13 @@ def _silero_strip_to_float32(wav_path: Path):
     ts = get_speech_timestamps(audio_t, model, sampling_rate=16000)
     if not ts:
         return audio
-    parts = [audio[t["start"]:t["end"]] for t in ts]
+    parts = [audio[t["start"] : t["end"]] for t in ts]
     out = np.concatenate(parts)
     total = len(audio) / 16000.0
     kept = len(out) / 16000.0
-    print(f"[bench] silero pre-strip: kept {kept:.1f}s of {total:.1f}s ({100*kept/total:.0f}%)", flush=True)
+    print(
+        f"[bench] silero pre-strip: kept {kept:.1f}s of {total:.1f}s ({100 * kept / total:.0f}%)", flush=True
+    )
     return out
 
 
@@ -185,19 +191,31 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("wav", type=Path, help="WAV file to transcribe")
-    parser.add_argument("--model", default="small.en",
-                        help="Model name for faster-whisper (also used to derive MLX repo). Default: small.en")
-    parser.add_argument("--mlx-model", default=None,
-                        help="Override MLX HF repo (e.g. mlx-community/whisper-large-v3-turbo)")
-    parser.add_argument("--language", default=None,
-                        help="Force language code (e.g. en, no). Default: auto-detect")
-    parser.add_argument("--compute-type", default="int8",
-                        help="faster-whisper compute_type (int8, int8_float16, float16, float32). Default: int8")
-    parser.add_argument("--backends", default="faster,mlx",
-                        help="Comma-separated backends to run: faster, mlx. Default: both")
-    parser.add_argument("--vad", action="store_true",
-                        help="Skip silent regions: faster-whisper uses built-in vad_filter, "
-                             "mlx-whisper gets silero-pre-stripped audio (requires pip install silero-vad)")
+    parser.add_argument(
+        "--model",
+        default="small.en",
+        help="Model name for faster-whisper (also used to derive MLX repo). Default: small.en",
+    )
+    parser.add_argument(
+        "--mlx-model", default=None, help="Override MLX HF repo (e.g. mlx-community/whisper-large-v3-turbo)"
+    )
+    parser.add_argument(
+        "--language", default=None, help="Force language code (e.g. en, no). Default: auto-detect"
+    )
+    parser.add_argument(
+        "--compute-type",
+        default="int8",
+        help="faster-whisper compute_type (int8, int8_float16, float16, float32). Default: int8",
+    )
+    parser.add_argument(
+        "--backends", default="faster,mlx", help="Comma-separated backends to run: faster, mlx. Default: both"
+    )
+    parser.add_argument(
+        "--vad",
+        action="store_true",
+        help="Skip silent regions: faster-whisper uses built-in vad_filter, "
+        "mlx-whisper gets silero-pre-stripped audio (requires pip install silero-vad)",
+    )
     args = parser.parse_args()
 
     if not args.wav.exists():
@@ -218,7 +236,11 @@ def main():
     if "faster" in backends:
         try:
             results["faster-whisper"] = bench_faster_whisper(
-                args.wav, args.model, args.language, args.compute_type, args.vad,
+                args.wav,
+                args.model,
+                args.language,
+                args.compute_type,
+                args.vad,
             )
         except Exception as e:
             print(f"[faster-whisper] FAILED: {e}", flush=True)
@@ -227,8 +249,11 @@ def main():
     if "mlx" in backends:
         mlx_repo = args.mlx_model or MLX_REPO_MAP.get(args.model)
         if not mlx_repo:
-            print(f"[mlx-whisper] no MLX repo mapping for model '{args.model}'. "
-                  f"Pass --mlx-model <hf-repo> to override.", flush=True)
+            print(
+                f"[mlx-whisper] no MLX repo mapping for model '{args.model}'. "
+                f"Pass --mlx-model <hf-repo> to override.",
+                flush=True,
+            )
         else:
             try:
                 results["mlx-whisper"] = bench_mlx_whisper(args.wav, mlx_repo, args.language, args.vad)
@@ -242,7 +267,7 @@ def main():
     for name, r in results.items():
         if r is None:
             continue
-        load = f"{r['load_s']:.2f}s" if r['load_s'] is not None else "(in cold)"
+        load = f"{r['load_s']:.2f}s" if r["load_s"] is not None else "(in cold)"
         rtf = r["warm_s"] / duration if duration > 0 else float("nan")
         print(f"{name:20} {load:>10} {r['cold_s']:>11.2f}s {r['warm_s']:>11.2f}s {rtf:>11.3f}x")
     print("=" * 78)

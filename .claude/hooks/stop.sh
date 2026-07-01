@@ -25,7 +25,12 @@ if ! command -v ruff >/dev/null 2>&1; then
   exit 0
 fi
 
-if ! ruff_out=$(ruff check tapscribe tests 2>&1); then
+# Same scope CI lints/format-checks (ci.yml) so the local gate and CI can't
+# disagree — a format-drift caught here is exactly what CI would reject.
+RUFF_SCOPE="tapscribe tools tests benchmarks bridges/local-test-bridge"
+
+# shellcheck disable=SC2086  # RUFF_SCOPE is intentionally word-split into paths
+if ! ruff_out=$(ruff check $RUFF_SCOPE 2>&1); then
   {
     echo "ruff check failed — fix the issues below before ending the turn:"
     echo
@@ -34,9 +39,10 @@ if ! ruff_out=$(ruff check tapscribe tests 2>&1); then
   exit 2
 fi
 
-if ! fmt_out=$(ruff format --check tapscribe tests 2>&1); then
+# shellcheck disable=SC2086  # RUFF_SCOPE is intentionally word-split into paths
+if ! fmt_out=$(ruff format --check $RUFF_SCOPE 2>&1); then
   {
-    echo "ruff format --check found unformatted files — run \`ruff format tapscribe tests\` and re-stage:"
+    echo "ruff format --check found unformatted files — run \`ruff format $RUFF_SCOPE\` and re-stage:"
     echo
     echo "$fmt_out"
   } >&2

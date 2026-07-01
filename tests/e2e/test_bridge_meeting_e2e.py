@@ -284,7 +284,11 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
 
             try:
                 page, popup, sess, sess_dir = await _open_meeting(
-                    ctx, recorder, fixture_index=fixture_index, fixture_mock=fixture_mock, speech_b64=speech_b64
+                    ctx,
+                    recorder,
+                    fixture_index=fixture_index,
+                    fixture_mock=fixture_mock,
+                    speech_b64=speech_b64,
                 )
 
                 # A speaker is tapped — REAL audio streams over /tap to the real
@@ -362,7 +366,11 @@ async def test_multi_person_multi_language_meeting_produces_a_summary(recorder_m
             ctx = await launch_bridge_context(pw, EXT_DIR, udd)
             try:
                 page, popup, sess, sess_dir = await _open_meeting(
-                    ctx, recorder, fixture_index=fixture_index, fixture_mock=fixture_mock, speech_b64=speech_b64
+                    ctx,
+                    recorder,
+                    fixture_index=fixture_index,
+                    fixture_mock=fixture_mock,
+                    speech_b64=speech_b64,
                 )
 
                 # TWO speakers tapped → prove multi-channel capture (frames on both).
@@ -409,9 +417,9 @@ async def test_multi_person_multi_language_meeting_produces_a_summary(recorder_m
                 assert {"egentlig", "født", "døde", "skuespillerinne"} & hyp, (
                     f"no Norwegian-distinctive word in transcript — Englishised? {plain[:200]!r}"
                 )
-                assert word_tokens((AUDIO_DIR / "armstrong-en.reference.txt").read_text(encoding="utf-8")) & hyp, (
-                    f"English content missing from transcript: {plain[:200]!r}"
-                )
+                assert (
+                    word_tokens((AUDIO_DIR / "armstrong-en.reference.txt").read_text(encoding="utf-8")) & hyp
+                ), f"English content missing from transcript: {plain[:200]!r}"
 
                 # The popup card shows the summary built from the multilingual transcript.
                 summary = popup.locator('[data-slot="summaryText"]')

@@ -104,7 +104,9 @@ async def test_full_meeting_flow_strip_transcribe_summarize_e2e(
         merged = r.json()
         assert merged["source"] == "stripped"
         for speaker, word in DISTINCTIVE.items():
-            assert word in merged["plain_text"], f"{speaker}'s content ({word!r}) missing from merged transcript"
+            assert word in merged["plain_text"], (
+                f"{speaker}'s content ({word!r}) missing from merged transcript"
+            )
 
         # 3) summarize the merged transcript
         r = await client.post(f"/api/sessions/{rec.session_start}/summarize", json={})

@@ -634,4 +634,6 @@ def test_specialist_table_env_override_repoints_a_language():
     }
     assert base == {"no": "nb-whisper-large"}, "the base table must not be mutated"
     assert specialist_table_with_env_overrides(base, {}) == {"no": "nb-whisper-large"}
-    assert specialist_table_with_env_overrides(base, {"TAPSCRIBE_SPECIALIST_NO": "  "}) == {"no": "nb-whisper-large"}
+    assert specialist_table_with_env_overrides(base, {"TAPSCRIBE_SPECIALIST_NO": "  "}) == {
+        "no": "nb-whisper-large"
+    }
