@@ -340,11 +340,17 @@ export function build(ctx) {
     previewTimer = setTimeout(() => { previewTimer = null; firePreview(); }, PREVIEW_DEBOUNCE_MS);
   };
 
-  /** Drop the live preview entirely — overlay, stats, AND any debounce still
-   * pending, so a drag scheduled just before a ✂ strip / clear doesn't
-   * re-create the preview ~300ms after it was deliberately dropped. */
+  /** Drop the live preview entirely — overlay, stats, the debounce still
+   * pending, AND any in-flight fetch, so a drag scheduled (or a request
+   * already in the air) just before a ✂ strip / clear / source-toggle can't
+   * re-create the preview ~300ms later. Bumping `previewToken` supersedes an
+   * in-flight `firePreview` fetch (its `.then` bails on a token mismatch) —
+   * without it, a preview requested before the drop lands afterwards (e.g.
+   * dropped on a toggle to stripped, then the fetch resolves back in the
+   * original view). */
   const dropPreview = () => {
     if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+    previewToken++;
     livePreview = null;
     waveform.setPreview(null);
   };

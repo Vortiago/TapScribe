@@ -633,6 +633,9 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
                 timeout=5000,
             )
             # …while the hero keeps the original's committed overlay, no error.
+            # Wait for the overlay hook before parsing so a transient null can't
+            # turn a real mismatch into a json.loads(None) TypeError.
+            await page.wait_for_function(overlay_js, timeout=5000)
             assert json.loads(await page.evaluate(overlay_js)) == expected_spans, (
                 "toggling to stripped must keep the original tap's cut overlay"
             )
