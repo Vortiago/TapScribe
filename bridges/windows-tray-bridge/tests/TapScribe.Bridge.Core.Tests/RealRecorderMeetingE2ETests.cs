@@ -295,6 +295,16 @@ internal sealed class RealRecorder : IAsyncDisposable
             return null;
         }
 
+        // Drain both redirected pipes so the chatty recorder (uvicorn access logs on
+        // every 500 ms poll + tqdm model-download progress) never blocks on a full
+        // OS pipe buffer mid-meeting — the classic RedirectStandardOutput-without-a-
+        // reader deadlock. The Python fixture drains to a file for the same reason;
+        // here we discard (the assertion messages carry the transcript/WAV diag).
+        proc.OutputDataReceived += static (_, _) => { };
+        proc.ErrorDataReceived += static (_, _) => { };
+        proc.BeginOutputReadLine();
+        proc.BeginErrorReadLine();
+
         if (await IsHealthyAsync(proc, port, TimeSpan.FromSeconds(40)))
             return new RealRecorder(proc, port, baseDir);
 
@@ -322,9 +332,11 @@ internal sealed class RealRecorder : IAsyncDisposable
             {
                 // connection refused while the recorder boots — keep polling.
             }
-            catch (TaskCanceledException)
+            catch (SystemException)
             {
-                // request timed out (1 s) — keep polling until the deadline.
+                // request timed out (TaskCanceledException) or any other transient
+                // framework failure while booting — keep polling to the deadline
+                // rather than throwing (which would leak proc + temp dir).
             }
             await Task.Delay(300);
         }

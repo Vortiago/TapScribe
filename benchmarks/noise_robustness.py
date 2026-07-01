@@ -91,14 +91,20 @@ def main() -> None:
     print("(each cell: language-detect accuracy / mean recall)\n", flush=True)
     headers = (s if s == "clean" else f"{s}dB" for s in SNRS)
     print("lang   " + "".join(f"{h:>16}" for h in headers), flush=True)
-    for code, (_, true) in _fleurs.CONFIGS.items():
+    # Fetch every language up front so the babble talker-pool (globbed lazily on
+    # first use) draws from ALL languages, not just whichever row ran first.
+    for code in _fleurs.CONFIGS:
+        _fleurs.fetch(code, n=N)
+    for lang_ord, (code, (_, true)) in enumerate(_fleurs.CONFIGS.items()):
         clips = _fleurs.fetch(code, n=N)
         signals = [load_recorder_wav_as_pcm(w) for w, _ in clips]
         cells = []
         for snr in SNRS:
             det_ok, recalls = 0, []
             for idx, ((_wav, ref), y) in enumerate(zip(clips, signals, strict=True)):
-                yn = _add_noise(y, snr, seed=idx)
+                # Seed unique per (language, clip) so the memoised noise bed isn't
+                # shared between same-length clips of different languages.
+                yn = _add_noise(y, snr, seed=lang_ord * 10_000 + idx)
                 _, _, probs = gen.detect_language(yn)
                 pm = dict(probs)
                 det_ok += max(CAND, key=lambda c: pm.get(c, 0.0)) == true
