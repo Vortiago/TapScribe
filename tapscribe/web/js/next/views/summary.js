@@ -31,7 +31,7 @@
 // pane).
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
-import { postJson, putJson, wireSave, fetchSessionSummary, peekSessionSummary } from "../../api.js";
+import { postJson, putJson, wireSave, sessionSummary } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
 
@@ -140,12 +140,12 @@ export function build(ctx) {
   const resolveStored = (marker, sid) => {
     if (!marker || !marker.summarized_at || !sid) return null;
     const stamp = marker.summarized_at;
-    const cached = peekSessionSummary(sid, stamp);
+    const cached = sessionSummary.peek(sid, stamp);
     if (cached !== undefined) return cached;
     const key = `${sid}@${stamp}`;
     if (!sumPending.has(key)) {
       sumPending.add(key);
-      fetchSessionSummary(sid, stamp)
+      sessionSummary.fetch(sid, stamp)
         .catch(() => {})
         .finally(() => {
           sumPending.delete(key);
