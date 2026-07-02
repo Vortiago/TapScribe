@@ -103,6 +103,25 @@ def test_command_summarizer_timeout_raises_failed():
     assert "timed out" in str(ei.value)
 
 
+def test_command_summarizer_runs_in_isolated_empty_cwd(tmp_path, monkeypatch):
+    """The child runs in a throwaway EMPTY directory, never the recorder's cwd.
+    An agentic CLI (Claude Code, OpenCode) discovers project config by walking
+    up from its working directory; running from a TapScribe checkout made
+    `claude -p` adopt this repo's ruff Stop hook, whose blocked-lint reply — not
+    a meeting summary — got saved. Regression for that bug: the probe reports
+    its cwd + a directory listing; both must show a fresh, empty, non-recorder
+    directory even when the process cwd is a populated checkout."""
+    monkeypatch.chdir(tmp_path)
+    # A stand-in for the project markers (.claude/, CLAUDE.md) an agentic CLI
+    # would latch onto — the child must NOT see it in its working directory.
+    (tmp_path / "CLAUDE.md").write_text("marker", encoding="utf-8")
+    probe = py_cmd("import os, sys; sys.stdout.write(os.getcwd() + '|' + repr(sorted(os.listdir('.'))))")
+    result = CommandSummarizer(probe).summarize("transcript", prompt="")
+    child_cwd, listing = result.summary.split("|", 1)
+    assert child_cwd != str(tmp_path)  # not the recorder's cwd
+    assert listing == "[]"  # a fresh, empty directory — no project to attach to
+
+
 def test_command_summarizer_missing_executable_raises_unavailable():
     with pytest.raises(SummarizerUnavailable):
         CommandSummarizer("definitely-not-a-real-binary-xyzzy").summarize("x", prompt="")
