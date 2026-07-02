@@ -155,7 +155,7 @@ export interface Session {
   wav_count: number;
   // The per-WAV array is NOT on /api/state anymore (a huge session shipped +
   // re-parsed O(WAVs) every poll tick). Fetch it lazily via
-  // fetchSessionFiles(session, files_sig) — cached client-side, refetched only
+  // sessionFiles.fetch(session, files_sig) — cached client-side, refetched only
   // when files_sig changes. Aggregates the listing views need are precomputed:
   total_bytes: number;        // Σ original WAV sizes — sessions.js total size
   total_duration_s: number;   // Σ original WAV durations — spine.js card
@@ -170,11 +170,11 @@ export interface Session {
   latest_iso: string | null;
   // SLIM marker only — /api/state no longer embeds the full merged
   // transcript. The full body (segments[]/plain_text/suppressed[]) is fetched
-  // lazily via fetchSessionTranscript(session, transcribed_at), cached
+  // lazily via sessionTranscript.fetch(session, transcribed_at), cached
   // client-side. A marker change (new transcribed_at) is the re-fetch signal.
   session_transcript: MergedTranscriptMarker | null;
   // SLIM marker only — the full persisted summary is fetched lazily via
-  // fetchSessionSummary(session, summarized_at). A marker change (new
+  // sessionSummary.fetch(session, summarized_at). A marker change (new
   // summarized_at) is the re-fetch signal. Null when never summarized.
   session_summary: SummaryMarker | null;
   progress: JobStateSnapshot | null;
@@ -265,7 +265,7 @@ export interface SummaryModelCatalog {
 }
 
 // GET /api/sessions/{session}/files — the lazy per-session WAV listing the
-// poll no longer embeds. Fetched once per files_sig via fetchSessionFiles.
+// poll no longer embeds. Fetched once per files_sig via sessionFiles.fetch.
 export interface SessionFiles {
   files: WavFile[];
 }
@@ -296,7 +296,7 @@ export interface WavRegion {
 
 // SLIM per-WAV transcript marker embedded in /api/state — just the fields a
 // listing reads without rendering (has-tx, "took Xms", the set-primary
-// compare key). The full body is fetched lazily via fetchWavTranscript.
+// compare key). The full body is fetched lazily via wavTranscript.fetch.
 export interface WavTranscriptMarker {
   transcribed_at?: string; // ISO 8601
   transcribe_ms?: number;
@@ -322,7 +322,7 @@ export interface WavTranscriptVariant {
 }
 
 // Full cached per-WAV transcript (the primary model's result) — the lazy
-// fetchWavTranscript result, rendered by buildExpandTx.
+// wavTranscript.fetch result, rendered by buildExpandTx.
 export interface WavTranscript {
   transcribed_at: string; // ISO 8601
   transcribe_ms: number;
@@ -393,7 +393,7 @@ export interface StripPreview {
 // `MergedTranscriptMarker` is the SLIM shape /api/state embeds per session —
 // just the fields a listing reads without rendering (counts, speakers, the
 // re-fetch stamp). The full `MergedTranscript` (segments[]/plain_text/…) is
-// the /api/transcribe-session response AND the lazy fetchSessionTranscript
+// the /api/transcribe-session response AND the lazy sessionTranscript.fetch
 // result that the merged-transcript renderer consumes.
 // ---------------------------------------------------------------------------
 
@@ -406,7 +406,7 @@ export interface MergedTranscriptMarker {
 
 // `SummaryMarker` is the SLIM shape /api/state embeds per session — the
 // re-fetch stamp plus which source/engine produced the summary. The full
-// `PersistedSummary` body is fetched lazily via fetchSessionSummary.
+// `PersistedSummary` body is fetched lazily via sessionSummary.fetch.
 export interface SummaryMarker {
   summarized_at: string | null; // ISO 8601 — null only on malformed on-disk JSON
   source: string;

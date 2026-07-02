@@ -1,7 +1,7 @@
 // @ts-check
 // Isolated canvas waveform renderer for the Recordings hero.
 //
-// Hand it server-computed peaks (api.fetchWavePeaks → normalised [0,1]
+// Hand it server-computed peaks (api.wavePeaks.fetch → normalised [0,1]
 // amplitudes) and it paints a mirrored bar waveform onto its own <canvas>
 // plus a mm:ss time axis, redrawing on container resize. It knows NOTHING
 // about /api/state, the poll, or fetching — the view owns the data flow and

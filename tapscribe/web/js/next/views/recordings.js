@@ -14,7 +14,7 @@
 // The WAV list itself is built for HUGE sessions (hundreds–thousands of
 // files). Two pieces keep it snappy:
 //   1. The file listing is NOT on /api/state — it's fetched lazily via
-//      fetchSessionFiles(sid, files_sig) and cached, so it crosses the wire
+//      sessionFiles.fetch(sid, files_sig) and cached, so it crosses the wire
 //      once per change, not every poll. `currentFiles` holds the resolved
 //      list for the focused session.
 //   2. The list is rendered through `reconcileList` (keyed, in-place — never
@@ -31,7 +31,7 @@
 // selected inside the list.
 
 import { tpl, pick, selectionInside, reconcileList } from "../../templates.js";
-import { postJson, del, loadSessionFiles, fetchWavTranscript, peekWavTranscript, fetchWavePeaks, peekWavePeaks, fetchWavStripMeta, peekWavStripMeta, fetchStripPreview } from "../../api.js";
+import { postJson, del, loadSessionFiles, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 import { createWaveform } from "../components/waveform.js";
@@ -221,14 +221,14 @@ export function build(ctx) {
       state = "error";
       message = failedWave.get(key) || "could not read waveform";
     } else {
-      data = peekWavePeaks(sid, sel.name, "original", fileSig);
+      data = wavePeaks.peek(sid, sel.name, "original", fileSig);
       if (data !== undefined) {
         state = "ok";
       } else {
         state = "loading";
         if (!pendingWave.has(key)) {
           pendingWave.add(key);
-          fetchWavePeaks(sid, sel.name, "original", fileSig)
+          wavePeaks.fetch(sid, sel.name, "original", fileSig)
             .then(() => { failedWave.delete(key); })
             .catch((e) => { failedWave.set(key, String(e).replace(/^Error:\s*/, "")); })
             .finally(() => {
@@ -257,12 +257,12 @@ export function build(ctx) {
     let cut = null;
     if (stripped) {
       const mkey = `${sid}/${sel.name}@${cutStamp}`;
-      const meta = peekWavStripMeta(sid, sel.name, cutStamp);
+      const meta = wavStripMeta.peek(sid, sel.name, cutStamp);
       if (meta !== undefined) {
         cut = meta && meta.spans && meta.spans.length ? meta.spans : null;
       } else if (!pendingCutMeta.has(mkey) && !failedCutMeta.has(mkey)) {
         pendingCutMeta.add(mkey);
-        fetchWavStripMeta(sid, sel.name, cutStamp)
+        wavStripMeta.fetch(sid, sel.name, cutStamp)
           .catch(() => { failedCutMeta.add(mkey); })
           .finally(() => {
             pendingCutMeta.delete(mkey);
@@ -436,7 +436,7 @@ export function build(ctx) {
   const fillExpand = (host, name, src, marker, speakerName) => {
     const sid = session?.session || "";
     const stamp = marker.transcribed_at || "";
-    const cached = peekWavTranscript(sid, name, src, stamp);
+    const cached = wavTranscript.peek(sid, name, src, stamp);
     if (cached !== undefined) {
       if (cached) host.replaceChildren(buildExpand(cached, speakerName));
       else fillExpandMessage(host, "no transcript body on disk");
@@ -446,7 +446,7 @@ export function build(ctx) {
     // Tag the host with the stamp we're fetching so a re-transcribe that
     // recreates the row (new marker) doesn't get an older body painted in.
     host.dataset.txStamp = stamp;
-    fetchWavTranscript(sid, name, src, stamp)
+    wavTranscript.fetch(sid, name, src, stamp)
       .then((full) => {
         if (host.dataset.txStamp !== stamp || !host.isConnected) return;
         if (full) host.replaceChildren(buildExpand(full, speakerName));

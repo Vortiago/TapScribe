@@ -20,7 +20,7 @@
 // (rebuildEngine).
 
 import { tpl, pick, renderRegion, markRegionStale, reconcileList, selectionInside } from "../../templates.js";
-import { postJson, putJson, fetchSessionTranscript, peekSessionTranscript, loadSessionFiles } from "../../api.js";
+import { postJson, putJson, sessionTranscript, loadSessionFiles } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
@@ -165,12 +165,12 @@ export function build(ctx) {
   const resolveMerged = (marker, sid) => {
     if (!marker || !marker.transcribed_at || !sid) return null;
     const stamp = marker.transcribed_at;
-    const cached = peekSessionTranscript(sid, stamp);
+    const cached = sessionTranscript.peek(sid, stamp);
     if (cached !== undefined) return cached;
     const key = `${sid}@${stamp}`;
     if (!txRerenderPending.has(key)) {
       txRerenderPending.add(key);
-      fetchSessionTranscript(sid, stamp)
+      sessionTranscript.fetch(sid, stamp)
         .catch(() => { /* transient failure — next poll retries */ })
         .finally(() => { txRerenderPending.delete(key); markRegionStale(mergedHost); afterMutate(); });
     }

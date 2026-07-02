@@ -60,19 +60,6 @@ export async function fetchState() {
  * @typedef {{ promise: Promise<T>, settled: boolean, value: T | undefined }} TxEntry
  */
 
-/** @type {Map<string, TxEntry<import('./types.js').MergedTranscript | null>>} */
-const _sessionTxCache = new Map();
-/** @type {Map<string, TxEntry<import('./types.js').PersistedSummary | null>>} */
-const _sessionSummaryCache = new Map();
-/** @type {Map<string, TxEntry<import('./types.js').WavTranscript | null>>} */
-const _wavTxCache = new Map();
-/** @type {Map<string, TxEntry<import('./types.js').WavePeaks>>} */
-const _wavPeaksCache = new Map();
-/** @type {Map<string, TxEntry<import('./types.js').WavStripMeta | null>>} */
-const _wavStripMetaCache = new Map();
-/** @type {Map<string, TxEntry<import('./types.js').WavFile[]>>} */
-const _sessionFilesCache = new Map();
-
 // Bound the caches so a long-lived tab that opens hundreds of (id,
 // transcribed_at) pairs over its lifetime doesn't grow unbounded. Map
 // preserves insertion order, so dropping `keys().next()` evicts the oldest.
@@ -87,115 +74,93 @@ function _capCache(cache) {
 }
 
 /**
- * Shared get-or-fetch with a settled-value side-channel. On miss, fires
- * `make()` once, stores the entry, and records the resolved value on the same
- * entry so a synchronous peek can read it without touching the Promise. A
- * rejection evicts the key so a later call retries.
+ * One lazily-fetched, signature-keyed resource: a bounded cache Map plus a
+ * get-or-fetch and a synchronous peek that share the same key function, so
+ * the two can never drift apart. `fetch` fires `load()` once per key and
+ * records the resolved value on the entry so `peek` can read it without
+ * touching the Promise (a render uses the cached value inline without
+ * re-rendering when it's already in hand). A rejection evicts the key so a
+ * later call retries.
+ * @template {unknown[]} A
  * @template T
- * @param {Map<string, TxEntry<T>>} cache
- * @param {string} key
- * @param {() => Promise<T>} make
- * @returns {Promise<T>}
+ * @param {(...args: A) => string} keyOf
+ * @param {(...args: A) => Promise<T>} load
  */
-function _getOrFetch(cache, key, make) {
-  const hit = cache.get(key);
-  if (hit) return hit.promise;
-  /** @type {TxEntry<T>} */
-  const entry = { promise: Promise.resolve(/** @type {T} */ (undefined)), settled: false, value: undefined };
-  entry.promise = make()
-    .then((v) => { entry.settled = true; entry.value = v; return v; })
-    .catch((e) => { cache.delete(key); throw e; });
-  cache.set(key, entry);
-  _capCache(cache);
-  return entry.promise;
+function _resource(keyOf, load) {
+  /** @type {Map<string, TxEntry<T>>} */
+  const cache = new Map();
+  return {
+    /** @param {A} args @returns {Promise<T>} */
+    fetch(...args) {
+      const key = keyOf(...args);
+      const hit = cache.get(key);
+      if (hit) return hit.promise;
+      /** @type {TxEntry<T>} */
+      const entry = { promise: Promise.resolve(/** @type {T} */ (undefined)), settled: false, value: undefined };
+      entry.promise = load(...args)
+        .then((v) => { entry.settled = true; entry.value = v; return v; })
+        .catch((e) => { cache.delete(key); throw e; });
+      cache.set(key, entry);
+      _capCache(cache);
+      return entry.promise;
+    },
+    /** @param {A} args @returns {T | undefined} */
+    peek(...args) {
+      const e = cache.get(keyOf(...args));
+      return e && e.settled ? e.value : undefined;
+    },
+  };
 }
 
 /**
  * Full merged session transcript, cached per (session, transcribedAt).
  * `transcribedAt` comes from the slim marker on /api/state; passing it means a
  * re-transcribe (new stamp) invalidates the cache while an idle poll reuses
- * the cached promise and fires no request. Returns null when there's no
- * merged transcript.
- * @param {string} session
- * @param {string} transcribedAt
- * @returns {Promise<import('./types.js').MergedTranscript | null>}
+ * the cached promise and fires no request. Resolves null when there's no
+ * merged transcript. `.fetch(session, transcribedAt)` / `.peek(...)` — peek
+ * returns the resolved value if the fetch already settled, else undefined.
  */
-export function fetchSessionTranscript(session, transcribedAt) {
-  return _getOrFetch(_sessionTxCache, `${session}@${transcribedAt}`, () =>
-    fetch(`/api/sessions/${encodeURIComponent(session)}/transcript`, { cache: "no-store" }).then(_unwrap),
-  );
-}
-
-/**
- * Synchronous peek: the resolved merged transcript for (session,
- * transcribedAt) if its fetch already settled, else undefined. Lets a render
- * use the cached value inline without re-rendering when it's already in hand.
- * @param {string} session
- * @param {string} transcribedAt
- * @returns {import('./types.js').MergedTranscript | null | undefined}
- */
-export function peekSessionTranscript(session, transcribedAt) {
-  const e = _sessionTxCache.get(`${session}@${transcribedAt}`);
-  return e && e.settled ? e.value : undefined;
-}
+export const sessionTranscript = _resource(
+  (/** @type {string} */ session, /** @type {string} */ transcribedAt) => `${session}@${transcribedAt}`,
+  (session) =>
+    /** @type {Promise<import('./types.js').MergedTranscript | null>} */ (
+      fetch(`/api/sessions/${encodeURIComponent(session)}/transcript`, { cache: "no-store" }).then(_unwrap)
+    ),
+);
 
 /**
  * Full persisted session summary, cached per (session, summarizedAt).
- * `summarizedAt` comes from the slim marker on /api/state; passing it means a
- * re-generate (new stamp) invalidates the cache while an idle poll reuses the
- * cached promise and fires no request. Returns null when the session has no
- * persisted summary.
- * @param {string} session
- * @param {string} summarizedAt
- * @returns {Promise<import('./types.js').PersistedSummary | null>}
+ * `summarizedAt` comes from the slim marker on /api/state; a re-generate (new
+ * stamp) invalidates, an idle poll reuses the cached promise. Resolves null
+ * when the session has no persisted summary.
  */
-export function fetchSessionSummary(session, summarizedAt) {
-  return _getOrFetch(_sessionSummaryCache, `${session}@${summarizedAt}`, () =>
-    fetch(`/api/sessions/${encodeURIComponent(session)}/summary`, { cache: "no-store" }).then(_unwrap),
-  );
-}
-
-/**
- * Synchronous peek: the resolved summary for (session, summarizedAt) if its
- * fetch already settled, else undefined.
- * @param {string} session
- * @param {string} summarizedAt
- * @returns {import('./types.js').PersistedSummary | null | undefined}
- */
-export function peekSessionSummary(session, summarizedAt) {
-  const e = _sessionSummaryCache.get(`${session}@${summarizedAt}`);
-  return e && e.settled ? e.value : undefined;
-}
+export const sessionSummary = _resource(
+  (/** @type {string} */ session, /** @type {string} */ summarizedAt) => `${session}@${summarizedAt}`,
+  (session) =>
+    /** @type {Promise<import('./types.js').PersistedSummary | null>} */ (
+      fetch(`/api/sessions/${encodeURIComponent(session)}/summary`, { cache: "no-store" }).then(_unwrap)
+    ),
+);
 
 /**
  * Full per-WAV transcript, cached per (session, name, source, transcribedAt).
- * Returns null when the WAV has no cached transcript.
- * @param {string} session
- * @param {string} name
- * @param {"original" | "stripped"} source
- * @param {string} transcribedAt
- * @returns {Promise<import('./types.js').WavTranscript | null>}
+ * Resolves null when the WAV has no cached transcript.
  */
-export function fetchWavTranscript(session, name, source, transcribedAt) {
-  const qs = source === "stripped" ? "?source=stripped" : "";
-  const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/transcript${qs}`;
-  return _getOrFetch(_wavTxCache, `${session}/${name}@${source}@${transcribedAt}`, () =>
-    fetch(url, { cache: "no-store" }).then(_unwrap),
-  );
-}
-
-/**
- * Synchronous peek for a per-WAV transcript — see `peekSessionTranscript`.
- * @param {string} session
- * @param {string} name
- * @param {"original" | "stripped"} source
- * @param {string} transcribedAt
- * @returns {import('./types.js').WavTranscript | null | undefined}
- */
-export function peekWavTranscript(session, name, source, transcribedAt) {
-  const e = _wavTxCache.get(`${session}/${name}@${source}@${transcribedAt}`);
-  return e && e.settled ? e.value : undefined;
-}
+export const wavTranscript = _resource(
+  (
+    /** @type {string} */ session,
+    /** @type {string} */ name,
+    /** @type {"original" | "stripped"} */ source,
+    /** @type {string} */ transcribedAt,
+  ) => `${session}/${name}@${source}@${transcribedAt}`,
+  (session, name, source) => {
+    const qs = source === "stripped" ? "?source=stripped" : "";
+    const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/transcript${qs}`;
+    return /** @type {Promise<import('./types.js').WavTranscript | null>} */ (
+      fetch(url, { cache: "no-store" }).then(_unwrap)
+    );
+  },
+);
 
 // ---- Lazy per-session file listing + client cache ------------------------
 //
@@ -211,30 +176,14 @@ export function peekWavTranscript(session, name, source, transcribedAt) {
  * cached per (session, filesSig). `filesSig` comes from the slim `files_sig`
  * field on /api/state. Callers MUST skip the call when files_sig is "" (no
  * folder on disk yet → the endpoint would 404).
- * @param {string} session
- * @param {string} filesSig
- * @returns {Promise<import('./types.js').WavFile[]>}
  */
-export function fetchSessionFiles(session, filesSig) {
-  return _getOrFetch(_sessionFilesCache, `${session}@${filesSig}`, () =>
+export const sessionFiles = _resource(
+  (/** @type {string} */ session, /** @type {string} */ filesSig) => `${session}@${filesSig}`,
+  (session) =>
     fetch(`/api/sessions/${encodeURIComponent(session)}/files`, { cache: "no-store" })
       .then(_unwrap)
       .then((r) => /** @type {import('./types.js').SessionFiles} */ (r).files || []),
-  );
-}
-
-/**
- * Synchronous peek: the resolved file listing for (session, filesSig) if its
- * fetch already settled, else undefined. Lets a render use the cached list
- * inline without re-rendering when it's already in hand.
- * @param {string} session
- * @param {string} filesSig
- * @returns {import('./types.js').WavFile[] | undefined}
- */
-export function peekSessionFiles(session, filesSig) {
-  const e = _sessionFilesCache.get(`${session}@${filesSig}`);
-  return e && e.settled ? e.value : undefined;
-}
+);
 
 /**
  * Resolve a focused session's WAV listing for a per-tick render, the shape both
@@ -252,12 +201,12 @@ export function peekSessionFiles(session, filesSig) {
  */
 export function loadSessionFiles(session, filesSig, pending, onLand) {
   if (!session || !filesSig) return [];
-  const cached = peekSessionFiles(session, filesSig);
+  const cached = sessionFiles.peek(session, filesSig);
   if (cached !== undefined) return cached;
   const k = `${session}@${filesSig}`;
   if (!pending.has(k)) {
     pending.add(k);
-    fetchSessionFiles(session, filesSig)
+    sessionFiles.fetch(session, filesSig)
       .catch(() => { /* transient — the next poll refetches */ })
       .finally(() => { pending.delete(k); onLand(); });
   }
@@ -278,79 +227,41 @@ export function loadSessionFiles(session, filesSig, pending, onLand) {
 export const WAVE_PEAK_BINS = 800;
 
 /**
- * @param {string} session
- * @param {string} name
- * @param {"original" | "stripped"} source
- * @param {string} sig
- */
-const _peaksKey = (session, name, source, sig) => `${session}/${name}@${source}@${sig}`;
-
-/**
  * Server-computed waveform peaks for one WAV, cached per (session, name,
- * source, sig). Returns the fixed-size downsample; rejects (and evicts the
- * key, so a later call retries) when the WAV can't be read as peaks.
- * @param {string} session
- * @param {string} name
- * @param {"original" | "stripped"} source
- * @param {string} sig
- * @returns {Promise<import('./types.js').WavePeaks>}
+ * source, sig) — sig is the WAV's byte size. Resolves the fixed-size
+ * downsample; rejects (and evicts the key, so a later call retries) when the
+ * WAV can't be read as peaks.
  */
-export function fetchWavePeaks(session, name, source, sig) {
-  const qs = new URLSearchParams({ bins: String(WAVE_PEAK_BINS) });
-  if (source === "stripped") qs.set("source", "stripped");
-  const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/peaks?${qs}`;
-  return _getOrFetch(_wavPeaksCache, _peaksKey(session, name, source, sig), () =>
-    fetch(url, { cache: "no-store" }).then(_unwrap),
-  );
-}
-
-/**
- * Synchronous peek — the resolved peaks for (session, name, source, sig) if
- * the fetch already settled, else undefined. See `peekWavTranscript`.
- * @param {string} session
- * @param {string} name
- * @param {"original" | "stripped"} source
- * @param {string} sig
- * @returns {import('./types.js').WavePeaks | undefined}
- */
-export function peekWavePeaks(session, name, source, sig) {
-  const e = _wavPeaksCache.get(_peaksKey(session, name, source, sig));
-  return e && e.settled ? e.value : undefined;
-}
-
-/**
- * @param {string} session
- * @param {string} name
- * @param {string} sig
- */
-const _stripMetaKey = (session, name, sig) => `${session}/${name}@${sig}`;
+export const wavePeaks = _resource(
+  (
+    /** @type {string} */ session,
+    /** @type {string} */ name,
+    /** @type {"original" | "stripped"} */ source,
+    /** @type {string} */ sig,
+  ) => `${session}/${name}@${source}@${sig}`,
+  (session, name, source) => {
+    const qs = new URLSearchParams({ bins: String(WAVE_PEAK_BINS) });
+    if (source === "stripped") qs.set("source", "stripped");
+    const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/peaks?${qs}`;
+    return /** @type {Promise<import('./types.js').WavePeaks>} */ (
+      fetch(url, { cache: "no-store" }).then(_unwrap)
+    );
+  },
+);
 
 /**
  * The committed strip-silence cut for one ORIGINAL wav, cached per (session,
  * name, sig) — callers pass the session's stripped_at stamp as sig so a
  * re-strip busts the key. Resolves null when the wav has no committed cut.
- * @param {string} session
- * @param {string} name
- * @param {string} sig
- * @returns {Promise<import('./types.js').WavStripMeta | null>}
  */
-export function fetchWavStripMeta(session, name, sig) {
-  const url = `/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-meta`;
-  return _getOrFetch(_wavStripMetaCache, _stripMetaKey(session, name, sig), () => getJson(url));
-}
-
-/**
- * Synchronous peek — the resolved strip-meta for (session, name, sig) if the
- * fetch already settled, else undefined. See `peekWavTranscript`.
- * @param {string} session
- * @param {string} name
- * @param {string} sig
- * @returns {import('./types.js').WavStripMeta | null | undefined}
- */
-export function peekWavStripMeta(session, name, sig) {
-  const e = _wavStripMetaCache.get(_stripMetaKey(session, name, sig));
-  return e && e.settled ? e.value : undefined;
-}
+export const wavStripMeta = _resource(
+  (/** @type {string} */ session, /** @type {string} */ name, /** @type {string} */ sig) =>
+    `${session}/${name}@${sig}`,
+  (session, name) =>
+    /** @type {Promise<import('./types.js').WavStripMeta | null>} */ (
+      getJson(`/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-meta`)
+    ),
+);
 
 /**
  * What ✂ strip WOULD cut for one WAV at the given knobs — the live
