@@ -22,43 +22,27 @@ API contract:
 
 Chunking & ffmpeg-free path
 ---------------------------
-`parakeet-mlx`'s own `model.transcribe(path)` shells out to ffmpeg
-to load the audio AND chunks long inputs internally to fit the
-encoder's per-call activation budget. The adapter does both itself:
-
-1. Pre-decode the recorder's WAV (16 kHz mono 16-bit) into a numpy
-   float32 array via `load_recorder_wav_as_pcm`.
-2. Split into overlapping windows (`chunk_duration_s` /
-   `overlap_duration_s`) and call `model.generate(mel)` per window
-   via `parakeet_mlx.audio.get_logmel`. Per-window timestamps are
-   shifted by the window's offset so the merged result stays
-   session-relative.
-3. Stitch the per-window `AlignedResult.sentences` with overlap
-   dedup: drop sentences in window N+1 whose start lies before the
-   overlap midpoint (those were already transcribed by window N).
-
-There is no ffmpeg fallback. Non-recorder WAVs (mismatched sample
-rate / channels / sample width) raise a clear error at pre-decode
-time — the operator gets an actionable message instead of a
-silent ffmpeg dependency.
+`parakeet-mlx`'s own `model.transcribe(path)` shells out to ffmpeg to
+load the audio AND chunks long inputs internally to fit the encoder's
+per-call activation budget. The shared chunked skeleton
+(`_chunked.ChunkedTranscriber`: pre-decode → overlapping windows →
+per-window model call → overlap-midpoint stitch) does both instead; this
+adapter implements only the per-window `model.generate(mel)` call via
+`parakeet_mlx.audio.get_logmel`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import RECORDER_SAMPLE_RATE
-from ..chunking import Window, chunk_windows
-from ..config import env_float
-from ..wav_predecode import load_recorder_wav_as_pcm
+from ..chunking import Window
+from ._chunked import ChunkedTranscriber
 from .base import (
-    TranscriptionResult,
     TranscriptionSegment,
     Word,
     _lookup,
-    build_transcription_result,
 )
 
 # Default repo on Hugging Face — `from_pretrained` resolves the catalog
@@ -67,21 +51,6 @@ from .base import (
 _MODEL_REPO_TABLE: dict[str, str] = {
     "parakeet-tdt-0.6b-v3": "mlx-community/parakeet-tdt-0.6b-v3",
 }
-
-# Chunking defaults — 120 s windows with 15 s overlap matches the
-# parakeet-mlx authors' own `transcribe()` tuning and fits comfortably
-# under a base M1 mini's ~14 GB max-buffer Metal cap. Operator-tunable
-# via env, hoisted to module constants so typos surface as NameError.
-_DEFAULT_CHUNK_DURATION_S = 120.0
-_DEFAULT_OVERLAP_DURATION_S = 15.0
-
-ENV_CHUNK_S = "TAPSCRIBE_PARAKEET_CHUNK_S"
-ENV_OVERLAP_S = "TAPSCRIBE_PARAKEET_OVERLAP_S"
-
-# Operator-knob bounds. Out-of-range env values are rejected by
-# `env_float` (logged + default used).
-_CHUNK_S_BOUNDS = (1.0, 600.0)
-_OVERLAP_S_BOUNDS = (0.0, 60.0)
 
 
 def _resolve_repo(model_name: str) -> str:
@@ -123,36 +92,7 @@ def _sentence_to_segment(sentence: Any, *, offset_s: float) -> TranscriptionSegm
     )
 
 
-def _stitch_sentences(
-    per_window: list[tuple[Window, list[TranscriptionSegment]]],
-    *,
-    overlap_s: float,
-) -> tuple[TranscriptionSegment, ...]:
-    """Merge per-window sentence lists into one session-spanning tuple.
-
-    For every adjacent pair (N, N+1) the overlap region is
-    `[window_{N+1}.start, window_{N+1}.start + overlap_s)`. Sentences
-    in window N+1 whose `start` falls before the overlap midpoint were
-    already transcribed (and likely identical) in window N — they get
-    dropped. Above the midpoint, window N+1's sentence wins. This is
-    the same crude-but-effective dedup parakeet-mlx uses upstream; if a
-    sentence straddles the seam we double-count it. Word-level dedup
-    would need confidence scores we don't currently have.
-    """
-    if not per_window:
-        return ()
-    out: list[TranscriptionSegment] = list(per_window[0][1])
-    for prev_idx in range(len(per_window) - 1):
-        nxt_window, nxt_sentences = per_window[prev_idx + 1]
-        midpoint_s = nxt_window.start_s + overlap_s / 2.0
-        for seg in nxt_sentences:
-            if seg.start < midpoint_s:
-                continue
-            out.append(seg)
-    return tuple(out)
-
-
-class MlxParakeetTranscriber:
+class MlxParakeetTranscriber(ChunkedTranscriber):
     """Parakeet model loaded via `parakeet_mlx`, satisfying the
     `Transcriber` Protocol.
 
@@ -181,29 +121,13 @@ class MlxParakeetTranscriber:
         stub so the chunked transcribe path can be exercised without
         parakeet-mlx installed.
         """
-        self.model_name = model_name
+        super().__init__(
+            model_name=model_name,
+            chunk_duration_s=chunk_duration_s,
+            overlap_duration_s=overlap_duration_s,
+        )
         self._model = model
         self._mel_fn = mel_fn
-        self.chunk_duration_s = (
-            chunk_duration_s
-            if chunk_duration_s is not None
-            else env_float(
-                ENV_CHUNK_S,
-                _DEFAULT_CHUNK_DURATION_S,
-                min_value=_CHUNK_S_BOUNDS[0],
-                max_value=_CHUNK_S_BOUNDS[1],
-            )
-        )
-        self.overlap_duration_s = (
-            overlap_duration_s
-            if overlap_duration_s is not None
-            else env_float(
-                ENV_OVERLAP_S,
-                _DEFAULT_OVERLAP_DURATION_S,
-                min_value=_OVERLAP_S_BOUNDS[0],
-                max_value=_OVERLAP_S_BOUNDS[1],
-            )
-        )
 
     @classmethod
     def load(cls, model_name: str) -> MlxParakeetTranscriber:
@@ -280,62 +204,16 @@ class MlxParakeetTranscriber:
                 "model whose preprocessor matches the recorder rate."
             )
 
-    def transcribe(
-        self,
-        path: Path,
-        *,
-        initial_prompt: str | None = None,
-        hotwords: str | None = None,
-        source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — Parakeet doesn't translate
-    ) -> TranscriptionResult:
+    def _transcribe_window(self, chunk_pcm: Any, window: Window) -> list[TranscriptionSegment]:
         mel_fn = self._resolve_mel_fn()
         preproc = self._model.preprocessor_config
-
-        # Pre-decode skips parakeet-mlx's `load_audio()` which shells
-        # out to ffmpeg. `load_recorder_wav_as_pcm` raises on unusual
-        # WAV formats — that's the operator's signal to convert the
-        # file rather than have the adapter silently depend on ffmpeg.
-        pcm = load_recorder_wav_as_pcm(path)
-        windows = chunk_windows(
-            int(pcm.shape[0]),
-            chunk_s=self.chunk_duration_s,
-            overlap_s=self.overlap_duration_s,
-        )
-
-        per_window: list[tuple[Window, list[TranscriptionSegment]]] = []
-        for window in windows:
-            chunk_pcm = pcm[window.start_sample : window.end_sample]
-            mel = mel_fn(chunk_pcm, preproc)
-            results = self._model.generate(mel)
-            if not results:
-                # parakeet-mlx's documented contract is non-empty; treat
-                # the empty list as "this window had no speech" rather
-                # than crashing the whole transcribe.
-                per_window.append((window, []))
-                continue
-            aligned = results[0]
-            sentences = _lookup(aligned, "sentences", None) or []
-            segs = [_sentence_to_segment(s, offset_s=window.start_s) for s in sentences]
-            per_window.append((window, segs))
-
-        segments = _stitch_sentences(per_window, overlap_s=self.overlap_duration_s)
-        text = " ".join(s.text for s in segments if s.text).strip()
-        duration = pcm.shape[0] / RECORDER_SAMPLE_RATE
-
-        # Parakeet doesn't echo a detected language; record the hint
-        # the operator pinned, or "auto" when they didn't.
-        return build_transcription_result(
-            self,
-            text=text,
-            segments=segments,
-            duration=duration,
-            language=source_lang or "auto",
-            initial_prompt=initial_prompt,
-            hotwords=hotwords,
-            source_lang=source_lang,
-            quality_settings={
-                "chunk_duration_s": self.chunk_duration_s,
-                "overlap_duration_s": self.overlap_duration_s,
-            },
-        )
+        mel = mel_fn(chunk_pcm, preproc)
+        results = self._model.generate(mel)
+        if not results:
+            # parakeet-mlx's documented contract is non-empty; treat
+            # the empty list as "this window had no speech" rather
+            # than crashing the whole transcribe.
+            return []
+        aligned = results[0]
+        sentences = _lookup(aligned, "sentences", None) or []
+        return [_sentence_to_segment(s, offset_s=window.start_s) for s in sentences]
