@@ -9,7 +9,9 @@ subprocess (cross-platform), so no model or endpoint is touched.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from conftest import py_cmd, seed_merged_transcript  # type: ignore[import-not-found]
@@ -29,6 +31,27 @@ from tapscribe.summarizers import DEFAULT_SUMMARY_PROMPT, SummarizerFailed, load
 # stdin → stdout: the summary is the merged transcript text echoed back, so we
 # can assert the orchestrator handed the right text to the summarizer.
 _CAT = py_cmd("import sys; sys.stdout.write(sys.stdin.read())")
+# argv[-1] → stdout: the summary is the PROMPT positional echoed back — the
+# channel the known-people hint rides on — so we can assert which names the
+# orchestrator resolved and injected.
+_ECHO_PROMPT = py_cmd("import sys; sys.stdout.write(sys.argv[-1])")
+
+
+def _seed_people(
+    recordings_dir: Path, session: str, *, identity: str, slug: str, person_name: str, others=()
+) -> None:
+    """Give `session` a roster entry (identity ↔ lossy slug) and a People
+    Registry that names that identity — plus optional `others` the registry
+    learned from previous meetings. Mirrors what the tap path + People editor
+    write, so `known_names_for_session` runs the same roster→Person join the
+    dashboard does over these sidecars."""
+    (recordings_dir / session / "session-roster.json").write_text(
+        json.dumps({identity: {"name": slug, "source": "recorded", "slug": slug, "wavs": [f"{slug}.wav"]}}),
+        encoding="utf-8",
+    )
+    people = [{"id": "p1", "name": person_name, "identities": [identity]}]
+    people += [{"id": f"p{i}", "name": n, "identities": [f"other-{i}"]} for i, n in enumerate(others, 2)]
+    (recordings_dir / "people.json").write_text(json.dumps({"people": people}), encoding="utf-8")
 
 
 async def test_summarize_session_returns_summary_and_releases_slot(recorder_under_test):
@@ -135,6 +158,51 @@ async def test_summarize_session_releases_slot_on_summarizer_failure(recorder_un
             SummarizeSessionRequest(session="s", source="command", command=failing, prompt=""),
         )
     assert recorder_under_test.jobs.get("s") is None
+
+
+# ---------------------------------------------------------------------------
+# Known-people hint: the summarize path resolves this session's participants
+# (via roster + registry) plus other known names and injects them so the model
+# can correct the transcript's lossy speaker slugs + ASR-mangled spoken names.
+# ---------------------------------------------------------------------------
+
+
+async def test_summarize_injects_known_people_names(recorder_under_test):
+    """The transcript only carries the lossy 'Alice' slug, but the summarizer is
+    handed the canonical 'Alice Havso' AND 'Bob Distant' (learned from a previous
+    meeting) — resolved from the roster + People Registry, not the transcript."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="[09:00:00] Alice: we shipped")
+    _seed_people(
+        recorder_under_test.recordings_dir,
+        "s",
+        identity="alice-full-identity",
+        slug="Alice",
+        person_name="Alice Havso",
+        others=["Bob Distant"],
+    )
+
+    out = await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_ECHO_PROMPT, prompt="Summarize"),
+    )
+
+    assert "Alice Havso" in out["summary"]  # participant, canonical spelling
+    assert "Bob Distant" in out["summary"]  # a name from a previous meeting
+    assert "Summarize" in out["summary"]  # the operator instruction rides along
+    # The hint is model-input only — the persisted prompt stays the operator's.
+    assert out["prompt"] == "Summarize"
+    assert "Alice Havso" not in out["prompt"]
+
+
+async def test_summarize_without_known_people_injects_no_names(recorder_under_test):
+    """No roster / registry → the hint is empty and the summarizer sees only the
+    operator prompt — byte-for-byte the pre-feature behaviour."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s", plain_text="body")
+    out = await summarize_session(
+        recorder_under_test,
+        SummarizeSessionRequest(session="s", source="command", command=_ECHO_PROMPT, prompt="Summarize"),
+    )
+    assert out["summary"] == "Summarize"
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,12 @@ Resolution precedence: per-session Override (session_meta.aliases) > Person name
 
 from __future__ import annotations
 
-from tapscribe.name_resolution import build_people_view, resolve_session_names, session_occurrences
+from tapscribe.name_resolution import (
+    build_people_view,
+    known_names,
+    resolve_session_names,
+    session_occurrences,
+)
 from tapscribe.people import PeopleRegistry
 
 
@@ -139,3 +144,89 @@ def test_view_sorted_by_session_count_desc_then_name() -> None:
     reg.sync(["a", "b"])
     rows = build_people_view(sessions=sessions, registry=reg, live_identities=set())
     assert rows[0]["identities"] == ["a"]  # 2 sessions, first
+
+
+# ---- known_names (the summarizer's known-people hint input) -----------------
+
+
+def test_known_names_lists_participants_first_then_registry() -> None:
+    # Alice is in THIS session (resolved to her canonical registry name); Bob is
+    # a name the registry learned from a different meeting and isn't present here.
+    roster = {"alice-1": _entry("Alice", slug="Alice")}
+    reg = _reg(
+        [
+            {"id": "p1", "name": "Alice Havso", "identities": ["alice-1"]},
+            {"id": "p2", "name": "Bob Distant", "identities": ["bob-x"]},
+        ]
+    )
+    assert known_names(roster=roster, aliases={}, registry=reg) == ["Alice Havso", "Bob Distant"]
+
+
+def test_known_names_resolves_the_lossy_slug_to_the_canonical_name() -> None:
+    # The transcript only carries the slug 'Alice'; the hint must surface the
+    # canonical 'Alice Havso' so the model can correct it.
+    roster = {"alice-1": _entry("Alice", slug="Alice")}
+    reg = _reg([{"id": "p1", "name": "Alice Havso", "identities": ["alice-1"]}])
+    assert known_names(roster=roster, aliases={}, registry=reg) == ["Alice Havso"]
+
+
+def test_known_names_dedupes_case_insensitively() -> None:
+    roster = {"alice-1": _entry("Alice", slug="Alice")}
+    reg = _reg(
+        [
+            {"id": "p1", "name": "Alice Havso", "identities": ["alice-1"]},
+            {"id": "p2", "name": "alice havso", "identities": ["dup-x"]},
+        ]
+    )
+    # The participant spelling leads and the case-variant duplicate is dropped.
+    assert known_names(roster=roster, aliases={}, registry=reg) == ["Alice Havso"]
+
+
+def test_known_names_drops_unnamed_registry_people() -> None:
+    # An auto-bound, still-unnamed Person contributes no hint (a blank name is
+    # useless as a spelling correction).
+    reg = _reg([{"id": "p1", "name": "", "identities": ["ghost-1"]}])
+    assert known_names(roster={}, aliases={}, registry=reg) == []
+
+
+def test_known_names_honours_per_session_alias_override() -> None:
+    roster = {"alice-1": _entry("Alice", slug="Alice")}
+    reg = _reg([{"id": "p1", "name": "Alice Havso", "identities": ["alice-1"]}])
+    names = known_names(roster=roster, aliases={"Alice": "Guest A"}, registry=reg)
+    assert names[0] == "Guest A"  # the override wins, same precedence as the dashboard
+
+
+def test_known_names_caps_registry_tail_keeping_participants() -> None:
+    roster = {"alice-1": _entry("Alice", slug="Alice")}
+    people = [{"id": "p1", "name": "Alice Havso", "identities": ["alice-1"]}]
+    people += [{"id": f"p{i}", "name": f"Person {i}", "identities": [f"id-{i}"]} for i in range(2, 20)]
+    names = known_names(roster=roster, aliases={}, registry=_reg(people), limit=3)
+    assert len(names) == 3
+    assert names[0] == "Alice Havso"  # the participant leads the list and is never trimmed
+
+
+def test_known_names_never_trims_participants_even_over_cap() -> None:
+    # Four participants in THIS session with a cap of 2: every participant must
+    # survive (the cap bounds only the registry tail), and no registry-only name
+    # gets in ahead of a participant.
+    roster = {f"id-{c}": _entry(c, slug=c) for c in ("Ann", "Bob", "Cy", "Dee")}
+    people = [
+        {"id": f"p{c}", "name": f"{c} Full", "identities": [f"id-{c}"]} for c in ("Ann", "Bob", "Cy", "Dee")
+    ]
+    people.append({"id": "pZ", "name": "Zoe Tail", "identities": ["zoe-x"]})  # registry-only
+    names = known_names(roster=roster, aliases={}, registry=_reg(people), limit=2)
+    assert set(names) == {"Ann Full", "Bob Full", "Cy Full", "Dee Full"}
+    assert "Zoe Tail" not in names  # tail trimmed; participants (over the cap) are not
+
+
+def test_known_names_sorts_participants_for_reproducible_output() -> None:
+    # resolve_session_names returns a hash-ordered set; known_names sorts the
+    # participants so the hint (and its trimmed tail) is stable run-to-run.
+    roster = {"id-z": _entry("Zoe", slug="Zoe"), "id-a": _entry("Ann", slug="Ann")}
+    reg = _reg(
+        [
+            {"id": "p1", "name": "Zoe Z", "identities": ["id-z"]},
+            {"id": "p2", "name": "Ann A", "identities": ["id-a"]},
+        ]
+    )
+    assert known_names(roster=roster, aliases={}, registry=reg) == ["Ann A", "Zoe Z"]

@@ -30,6 +30,8 @@ from fastapi import HTTPException
 
 from . import config
 from .audio import wav_duration_s
+from .name_resolution import known_names
+from .people import PeopleRegistry
 from .roster import read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
@@ -157,6 +159,38 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     atomic_write_text(
         Path(real_parent) / FILENAME_META_JSON,
         json.dumps(sanitized, indent=2, ensure_ascii=False),
+    )
+
+
+def known_names_for_session(session: str) -> list[str]:
+    """The known-people display names to hint a summarize of `session` (the
+    `tapscribe.summarizers.build_names_hint` input): this session's participants
+    first, then people the People Registry has learned across previous meetings.
+
+    The I/O wrapper around the pure `name_resolution.known_names` — reads the
+    session's roster + alias overrides + the registry, the same roster→Person
+    join `resolve_session_names` runs at `/api/state` build time. (It does not
+    replay the dashboard's ADR-0009 F1 slug backfill for old rosterless
+    recordings — that needs the WAV-derived speaker list `attach_people` has on
+    hand and this cold path does not; a named Person still surfaces via the
+    registry tail, only its participants-first priority is lost.)
+
+    Best-effort: names are a quality boost, not a correctness requirement, so a
+    missing session dir (a concurrent delete after the transcript read) degrades
+    to no hint — the pre-feature behaviour — rather than failing the summarize.
+    The underlying reads already swallow torn/missing sidecars (`read_roster` /
+    `read_session_meta` → `{}`, `PeopleRegistry.load` → empty)."""
+    try:
+        session_dir = resolve_session_dir(session)
+    except HTTPException:
+        # The only raiser here: the session dir vanished between the merged-
+        # transcript read and now. No names to inject; the summarize proceeds
+        # unhinted rather than 404-ing on an optional enrichment.
+        return []
+    return known_names(
+        roster=read_roster(session_dir),
+        aliases=read_session_meta(session).get("aliases") or {},
+        registry=PeopleRegistry.load(),
     )
 
 

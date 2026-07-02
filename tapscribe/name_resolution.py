@@ -28,6 +28,13 @@ from typing import Any
 
 from .people import PeopleRegistry
 
+# Cap on the known-people hint injected into a summarize (see `known_names`). A
+# large registry would bloat the prompt and dilute the signal; this bounds the
+# registry TAIL only — this session's own participants are always included (a
+# meeting with more than this many named speakers is not expected, and its
+# transcript dwarfs the hint anyway).
+DEFAULT_KNOWN_NAMES_LIMIT = 60
+
 
 def session_occurrences(session: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Every Identity occurrence in a session, as `{identity: entry}`.
@@ -81,6 +88,51 @@ def resolve_session_names(
         if default:
             names[key] = default
     return names
+
+
+def known_names(
+    *,
+    roster: dict[str, dict[str, Any]],
+    aliases: dict[str, str],
+    registry: PeopleRegistry,
+    limit: int = DEFAULT_KNOWN_NAMES_LIMIT,
+) -> list[str]:
+    """The ordered, deduped display names to hint a summarizer against
+    mis-transcribed names (the `tapscribe.summarizers.build_names_hint` input).
+
+    This session's resolved participant names come FIRST — they're the highest
+    signal, mapping the transcript's lossy speaker slugs to canonical names — and
+    are ALWAYS included; then the `limit` budget is filled with OTHER named
+    Persons the registry has learned across previous meetings (useful for people
+    *mentioned* but not present), so the cap only ever trims that tail. Case-
+    insensitive dedup; blank names dropped. Participants are sorted so the hint is
+    reproducible run-to-run (`resolve_session_names` returns a hash-ordered set,
+    which would otherwise make the trimmed tail and dedup winner non-deterministic).
+
+    Pure: the caller supplies the session's roster + aliases + the loaded
+    registry — the same inputs `resolve_session_names` takes — so this is unit-
+    testable without disk. `known_names_for_session` in `sessions` is the I/O
+    wrapper that reads those inputs for a session id."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        name = (name or "").strip()
+        key = name.casefold()
+        if name and key not in seen:
+            seen.add(key)
+            out.append(name)
+
+    # Participants first, always included, deterministically ordered.
+    for name in sorted(resolve_session_names(roster=roster, aliases=aliases, registry=registry).values()):
+        _add(name)
+    # Fill the remaining budget with the registry tail; the cap trims only here.
+    for person in registry.as_list():
+        if limit and len(out) >= limit:
+            break
+        if person.get("name"):
+            _add(person["name"])
+    return out
 
 
 def _default_name(identities: list[str], roster_names: dict[str, str]) -> str:

@@ -23,7 +23,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .recorder import Recorder
-from .sessions import read_session_meta, read_session_transcript, write_session_summary
+from .sessions import (
+    known_names_for_session,
+    read_session_meta,
+    read_session_transcript,
+    write_session_summary,
+)
 from .summarizers import DEFAULT_SUMMARY_PROMPT, SummarizerError, load_summarizer
 from .text import read_summarizer_config
 
@@ -134,7 +139,14 @@ async def summarize_session_locked(
     `kind="pipeline"` claim. Returns the persisted dict (result mapping +
     `summarized_at` + the source transcript's `transcribed_at`)."""
     text = (merged or {}).get("plain_text") or ""
-    result = await asyncio.to_thread(summarizer.summarize, text, prompt=req.prompt)
+    # Hint the summarizer with the known-people names (this session's participants
+    # first, then people the registry learned across previous meetings) so it can
+    # map the transcript's lossy speaker slugs + ASR-mangled spoken names back to
+    # the canonical spellings. Best-effort: a read failure degrades to no hint.
+    # Both callers reach the summarizer through here (the /summarize route AND the
+    # end-of-meeting pipeline), so wiring it in the locked core covers both.
+    names = await asyncio.to_thread(known_names_for_session, req.session)
+    result = await asyncio.to_thread(summarizer.summarize, text, prompt=req.prompt, names=names)
     # Persist next to the merged transcript (#83) — only after a successful
     # run, so a failed re-generate can't clobber the stored summary. The
     # `summarized_at` stamp is the slim listing marker's re-fetch signal.

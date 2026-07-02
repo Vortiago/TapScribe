@@ -27,6 +27,12 @@ from tapscribe.summarizers import (
     SummaryResult,
     load_summarizer,
 )
+from tapscribe.summarizers.base import (
+    DEFAULT_SUMMARY_PROMPT,
+    build_names_hint,
+    fold_hint,
+    resolve_prompt,
+)
 from tapscribe.summarizers.command import build_command_argv
 
 # Echoes "<last argv>|<stdin>" so one command proves BOTH the prompt-as-argv and
@@ -198,3 +204,78 @@ def test_build_command_argv_separates_prompt_with_double_dash_after_variadic_fla
 def test_build_command_argv_empty_template_raises_unavailable():
     with pytest.raises(SummarizerUnavailable):
         build_command_argv("   ", "prompt")
+
+
+# ---------------------------------------------------------------------------
+# Known-people hint — the ONE renderer (base.build_names_hint) folded into every
+# adapter's instruction, plus the command adapter's argv injection. The hint is
+# model-input only: the persisted SummaryResult.prompt stays the operator's.
+# ---------------------------------------------------------------------------
+
+
+def test_build_names_hint_renders_a_bulleted_reference_block():
+    hint = build_names_hint(["Alice Havso", "Bob Smith"])
+    assert "- Alice Havso" in hint
+    assert "- Bob Smith" in hint
+    # Framed as a spelling reference, NOT an attendance claim, so a listed name
+    # that never appears can't be hallucinated into the summary as a speaker.
+    assert "attendance list" in hint.lower()
+
+
+def test_build_names_hint_empty_when_no_usable_names():
+    assert build_names_hint([]) == ""
+    assert build_names_hint(["", "   "]) == ""  # blank-only → empty, not a stray header
+
+
+def test_resolve_prompt_applies_default_fallback():
+    assert resolve_prompt("Summarize it") == "Summarize it"
+    assert resolve_prompt("  Summarize it  ") == "Summarize it"  # stripped
+    assert resolve_prompt("") == DEFAULT_SUMMARY_PROMPT  # blank → the default
+    assert resolve_prompt("   ") == DEFAULT_SUMMARY_PROMPT
+
+
+def test_fold_hint_composes_base_and_hint():
+    # No names → base unchanged (byte-for-byte the pre-feature instruction).
+    assert fold_hint("Summarize", []) == "Summarize"
+    # Names + base → base, blank line, then the rendered block.
+    folded = fold_hint("Summarize", ["Alice Havso"])
+    assert folded.startswith("Summarize\n\n")
+    assert "- Alice Havso" in folded
+    # Names + empty base → the hint alone (no leading blank line).
+    hint_only = fold_hint("", ["Alice Havso"])
+    assert hint_only.startswith("Known people")
+    assert "- Alice Havso" in hint_only
+    # A whitespace-only base (the command source folds a RAW, unresolved prompt)
+    # counts as empty — the hint alone, not a stray leading blank line.
+    assert fold_hint("   ", ["Alice Havso"]).startswith("Known people")
+
+
+def test_command_summarizer_injects_names_into_the_prompt_argv():
+    s = CommandSummarizer(_ECHO_BOTH)
+    result = s.summarize("the transcript", prompt="Summarize", names=["Alice Havso", "Bob Smith"])
+    argv_prompt, stdin = result.summary.split("|", 1)
+    # The hint rides in the prompt positional (argv), alongside the operator prompt…
+    assert "Alice Havso" in argv_prompt
+    assert "Bob Smith" in argv_prompt
+    assert "Summarize" in argv_prompt
+    # …the transcript stays clean on stdin (unchanged by the hint)…
+    assert stdin == "the transcript"
+    # …and the PERSISTED prompt is the operator's, never the augmented argv.
+    assert result.prompt == "Summarize"
+    assert "Alice Havso" not in result.prompt
+
+
+def test_command_summarizer_no_names_is_byte_for_byte_pre_feature():
+    s = CommandSummarizer(_ECHO_BOTH)
+    result = s.summarize("body", prompt="Summarize")
+    assert result.summary == "Summarize|body"
+
+
+def test_command_summarizer_names_with_blank_prompt_sends_only_the_hint():
+    """An empty operator prompt + names must still pass the hint (the operator's
+    CLI keeps its own default instruction), not a stray leading blank line."""
+    s = CommandSummarizer(_ECHO_BOTH)
+    result = s.summarize("body", prompt="", names=["Carol Nguyen"])
+    argv_prompt, _ = result.summary.split("|", 1)
+    assert argv_prompt.startswith("Known people")
+    assert "Carol Nguyen" in argv_prompt

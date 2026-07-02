@@ -205,3 +205,32 @@ class TestApiSummarizerDefaultTransport:
         with pytest.raises(SummarizerFailed, match="non-http"):
             s.summarize("t", prompt="p")
         assert called is False
+
+
+class TestApiSummarizerNames:
+    """The known-people hint is folded into the user message (guidance, above the
+    transcript); a nameless call leaves the message untouched, and the persisted
+    SummaryResult.prompt stays the operator's original prompt."""
+
+    def test_names_folded_into_user_message(self):
+        rec: list[tuple] = []
+        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=_make_stub(rec))
+        s.summarize("transcript text", prompt="Summarize", names=["Alice Havso", "Bob Smith"])
+        content = rec[0][2]["messages"][1]["content"]
+        assert "Alice Havso" in content
+        assert "Bob Smith" in content
+        assert "Summarize" in content
+        assert "transcript text" in content
+
+    def test_no_names_leaves_user_message_unchanged(self):
+        rec: list[tuple] = []
+        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=_make_stub(rec))
+        s.summarize("t", prompt="Summarize")
+        assert "Known people" not in rec[0][2]["messages"][1]["content"]
+
+    def test_persists_operator_prompt_not_the_hint(self):
+        rec: list[tuple] = []
+        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=_make_stub(rec))
+        res = s.summarize("t", prompt="Summarize", names=["Alice Havso"])
+        assert res.prompt == "Summarize"
+        assert "Alice Havso" not in res.prompt
