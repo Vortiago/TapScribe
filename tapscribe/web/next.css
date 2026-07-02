@@ -6,7 +6,7 @@
    --magenta + --mono/--sans. The one warm accent is --warn (amber), doing the
    "where am I / what's live" work; --rec is the live pulse.
 
-   Aesthetic rules (from prototypes/stages): minimal radius (<=3px), no pills,
+   Aesthetic rules (the Stages design): minimal radius (<=3px), no pills,
    1px hairline separators, tight padding, dense rows, monospace for all data.
    ========================================================================= */
 
@@ -643,7 +643,7 @@ body::before { display: none; }
    Stages shell (live-channel model/lang/gate form, config-card prompt/
    hotwords textareas, session-detail range inputs). dashboard.css styles
    .input/.select/.textarea with a softer `--bg-0` fill + a 1px box-shadow
-   focus glow; the Stages aesthetic (prototypes/stages: .field input/.sel)
+   focus glow; the Stages aesthetic (.field input/.sel)
    is a flatter cell on the `--bg-2` elevation, hairline border, 3px radius,
    monospace, and a border-only focus (no glow ring). Scope strictly to
    `.next-app` so the classic dashboard keeps its own look.
