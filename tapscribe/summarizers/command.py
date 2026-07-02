@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 
 from .. import config
@@ -107,13 +108,32 @@ class CommandSummarizer:
         argv = build_command_argv(self.command, prompt)
         started = datetime.now(UTC)
         try:
-            proc = subprocess.run(
-                argv,
-                input=transcript.encode("utf-8"),
-                capture_output=True,
-                timeout=self._timeout_s,
-                check=False,
-            )
+            # Run in a throwaway EMPTY directory, never the recorder's cwd. An
+            # agentic CLI (Claude Code, OpenCode) discovers *project* config by
+            # walking up from its working directory — settings, hooks,
+            # CLAUDE.md/AGENTS.md. The recorder is normally launched from a
+            # TapScribe checkout, so summarizing from that cwd made `claude -p`
+            # adopt this repo's Stop hook (the ruff lint gate): the hook blocked
+            # on an unrelated unformatted file, fed the lint failure back, and
+            # with tool use disabled the model's REPLY about the lint error —
+            # not a meeting summary — is what landed on stdout and got saved.
+            # A fresh temp dir has no project to attach to, so the tool sees
+            # only the transcript on stdin and the prompt on argv. This is the
+            # tool-agnostic layer (it protects OpenCode too); the Claude preset
+            # adds `--setting-sources user` on top so project/local settings
+            # never load even if the tool were reached from inside a checkout by
+            # some other path — see catalog.COMMAND_PRESETS. (run() has already
+            # killed + reaped the child before any except fires, so the dir
+            # cleans up cleanly even on timeout.)
+            with tempfile.TemporaryDirectory(prefix="tapscribe-summarize-") as isolated_cwd:
+                proc = subprocess.run(
+                    argv,
+                    input=transcript.encode("utf-8"),
+                    capture_output=True,
+                    timeout=self._timeout_s,
+                    check=False,
+                    cwd=isolated_cwd,
+                )
         except FileNotFoundError as e:
             # The configured executable isn't on PATH — operator misconfig, not
             # a transient failure. Surface as Unavailable (→ 400) so the message
