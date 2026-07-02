@@ -1269,7 +1269,7 @@ def test_delete_wav_rejects_bad_input(client, recorder_under_test):
     # an HTTP call inside `assert` would vanish under `python -O`.
     r = client.delete("/api/wav/s/session-meta.json")
     assert r.status_code == 404
-    # Unknown source → 400 (whitelisted before any filesystem touch).
+    # Unknown source → 400 (resolve_source_dir rejects it at the path seam).
     r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav?source=bogus")
     assert r.status_code == 400
     # Missing WAV → 404.
@@ -1346,7 +1346,7 @@ def test_wav_peaks_original_name_under_stripped_is_404(client, recorder_under_te
 def test_wav_peaks_rejects_bad_input(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
-    # Unknown source → 400, whitelisted before any filesystem touch.
+    # Unknown source → 400, rejected by resolve_source_dir at the path seam.
     r = client.get("/api/wav/s/20260101T000000Z__alice__abc.wav/peaks?source=bogus")
     assert r.status_code == 400
     # Missing WAV → 404 via resolve_wav.
@@ -1517,7 +1517,7 @@ def test_strip_preview_shares_strip_knob_bounds_and_sanitiser(client, recorder_u
     assert client.get(f"{base}?min_silence_ms=50").status_code == 400
     assert client.get(f"{base}?pad_ms=9999").status_code == 400
     assert client.get(f"{base}?speech_floor_db=5").status_code == 400
-    # Unknown source → 400, whitelisted before any filesystem touch.
+    # Unknown source → 400, rejected by resolve_source_dir at the path seam.
     assert client.get(f"{base}?source=bogus").status_code == 400
     # Missing WAV → 404 via resolve_wav.
     assert client.get("/api/wav/s/20260101T999999Z__nope__zzz.wav/strip-preview").status_code == 404
