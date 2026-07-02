@@ -2594,9 +2594,14 @@ def test_api_summarize_models_lists_command_presets(client):
     for p in presets:
         assert {"key", "label", "template", "note"} <= set(p)
         assert p["label"] and p["template"]
-    # The Claude preset ships hardened: tool use disabled in print mode.
+    # The Claude preset ships hardened: tool use disabled in print mode, and
+    # project/local settings ignored so it can't adopt the cwd repo's Stop
+    # hook (the "summary is the lint-hook reply" bug). `user` — never `--bare`,
+    # which would break OAuth/keychain auth.
     assert by_key["claude"]["template"].startswith("claude ")
     assert "--tools" in by_key["claude"]["template"]
+    assert "--setting-sources user" in by_key["claude"]["template"]
+    assert "--bare" not in by_key["claude"]["template"]
     assert by_key["opencode"]["template"].startswith("opencode ")
 
 

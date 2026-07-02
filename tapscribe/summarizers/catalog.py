@@ -234,19 +234,33 @@ class CommandPreset:
 COMMAND_PRESETS: tuple[CommandPreset, ...] = (
     CommandPreset(
         key="claude",
-        #   --tools ""            disables tool use (the hardening; see note).
-        #   --output-format text  pins plain-text output (the default, but
-        #                         explicit so a future default change can't
-        #                         start injecting JSON into the summary pane).
-        # We deliberately do NOT use `--bare`: it skips the OAuth/keychain
-        # credential read and demands ANTHROPIC_API_KEY in the recorder's env,
-        # so for the common subscription-login operator it exits "Not logged
-        # in" → non-zero → SummarizerFailed → 502 Bad Gateway.
+        #   --tools ""              disables tool use (the hardening; see note).
+        #   --output-format text    pins plain-text output (the default, but
+        #                           explicit so a future default change can't
+        #                           start injecting JSON into the summary pane).
+        #   --setting-sources user  loads ONLY user settings — never a project
+        #                           or local .claude/settings.json. That's what
+        #                           stops the summarize from adopting the cwd
+        #                           repo's Stop hook (e.g. TapScribe's own ruff
+        #                           lint gate): without it the hook blocks on an
+        #                           unrelated lint failure and — tools disabled —
+        #                           the model's REPLY about the lint error lands
+        #                           on stdout instead of a summary. Belt-and-
+        #                           braces with the isolated temp cwd
+        #                           CommandSummarizer runs in: the cwd stops
+        #                           config *discovery*, this stops project/local
+        #                           settings loading even if the tool is ever run
+        #                           from inside a checkout by some other path.
+        # We deliberately do NOT use `--bare` (which would ALSO skip hooks): it
+        # skips the OAuth/keychain credential read and demands ANTHROPIC_API_KEY
+        # in the recorder's env, so for the common subscription-login operator it
+        # exits "Not logged in" → non-zero → SummarizerFailed → 502 Bad Gateway.
+        # `--setting-sources user` drops project hooks WITHOUT touching auth.
         # The appended prompt is shielded from `--tools`'s variadic greediness
         # by the `--` that build_command_argv inserts — not by flag ordering.
         label="Claude Code",
-        template='claude -p --tools "" --output-format text',
-        note="tools disabled — a prompt-injected transcript can't read files or fetch URLs",
+        template='claude -p --tools "" --output-format text --setting-sources user',
+        note="tools disabled + project settings/hooks ignored — a prompt-injected transcript can't read files or fetch URLs",
     ),
     CommandPreset(
         key="opencode",

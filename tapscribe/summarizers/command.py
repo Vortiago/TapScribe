@@ -118,9 +118,13 @@ class CommandSummarizer:
             # with tool use disabled the model's REPLY about the lint error —
             # not a meeting summary — is what landed on stdout and got saved.
             # A fresh temp dir has no project to attach to, so the tool sees
-            # only the transcript on stdin and the prompt on argv. (run() has
-            # already killed + reaped the child before any except fires, so the
-            # dir cleans up cleanly even on timeout.)
+            # only the transcript on stdin and the prompt on argv. This is the
+            # tool-agnostic layer (it protects OpenCode too); the Claude preset
+            # adds `--setting-sources user` on top so project/local settings
+            # never load even if the tool were reached from inside a checkout by
+            # some other path — see catalog.COMMAND_PRESETS. (run() has already
+            # killed + reaped the child before any except fires, so the dir
+            # cleans up cleanly even on timeout.)
             with tempfile.TemporaryDirectory(prefix="tapscribe-summarize-") as isolated_cwd:
                 proc = subprocess.run(
                     argv,
