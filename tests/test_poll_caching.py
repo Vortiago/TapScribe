@@ -167,7 +167,7 @@ def test_is_module_available_memoises_and_clears_on_override():
 
 
 # ---------------------------------------------------------------------------
-# config-text cache (read_prompt / read_live_prompt / read_hotwords)
+# config-text cache (read_config: prompt / live-prompt / hotwords)
 # ---------------------------------------------------------------------------
 
 
@@ -176,10 +176,10 @@ def test_config_text_cache_invalidates_on_write(tmp_path: Path, monkeypatch: pyt
     f.write_text("first", encoding="utf-8")
     monkeypatch.setattr(_config, "PROMPT_FILE", f)
 
-    assert text.read_prompt() == "first"
-    assert text.read_prompt() == "first"  # served from cache
+    assert text.read_config("prompt") == "first"
+    assert text.read_config("prompt") == "first"  # served from cache
     f.write_text("second", encoding="utf-8")  # different (mtime, size)
-    assert text.read_prompt() == "second"
+    assert text.read_config("prompt") == "second"
 
 
 # ---------------------------------------------------------------------------

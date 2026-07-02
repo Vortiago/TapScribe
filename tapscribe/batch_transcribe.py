@@ -35,7 +35,7 @@ from .session_paths import (
     resolve_wav,
 )
 from .sessions import read_session_meta
-from .text import read_hotwords, read_languages, read_prompt
+from .text import read_config, read_languages
 from .transcribers import load_transcriber, release_transcriber, run_on_model_thread
 from .transcribers.catalog import cover_models
 from .wav_cache import CachedTranscription, cached_transcribe, read_primary_payload, set_primary_transcript
@@ -139,8 +139,8 @@ def _effective_prompt_hotwords(session: str) -> tuple[str | None, str | None]:
     Workaround is to clear the global; a future sentinel value could
     express it explicitly without touching the global."""
     meta = read_session_meta(session)
-    prompt = (meta.get("prompt") or "").strip() or (read_prompt() or "").strip()
-    hotwords = (meta.get("hotwords") or "").strip() or (read_hotwords() or "").strip()
+    prompt = (meta.get("prompt") or "").strip() or (read_config("prompt") or "").strip()
+    hotwords = (meta.get("hotwords") or "").strip() or (read_config("hotwords") or "").strip()
     return (prompt or None), (hotwords or None)
 
 

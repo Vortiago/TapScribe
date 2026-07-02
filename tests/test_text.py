@@ -116,33 +116,33 @@ def test_build_recorder_wav_name_rejects_non_utc_offset():
 
 
 def test_read_prompt_returns_empty_when_missing(tmp_config_dir):
-    assert text.read_prompt() == ""
+    assert text.read_config("prompt") == ""
 
 
 def test_read_prompt_returns_file_contents(tmp_config_dir):
     (tmp_config_dir / "prompt.txt").write_text("hello world", encoding="utf-8")
-    assert text.read_prompt() == "hello world"
+    assert text.read_config("prompt") == "hello world"
 
 
 def test_read_hotwords_strips_whitespace(tmp_config_dir):
     (tmp_config_dir / "hotwords.txt").write_text("\n  Acme, Patricia  \n", encoding="utf-8")
-    assert text.read_hotwords() == "Acme, Patricia"
+    assert text.read_config("hotwords") == "Acme, Patricia"
 
 
 # ---------------------------------------------------------------------------
-# read_live_prompt — independent from read_prompt; empty live-prompt.txt
+# read_config("live-prompt") — independent from "prompt"; empty live-prompt.txt
 # does NOT fall back to prompt.txt (the dashboard exposes the two as two
 # separate editors, so silently merging them would mislead operators).
 # ---------------------------------------------------------------------------
 
 
 def test_read_live_prompt_returns_empty_when_missing(tmp_config_dir):
-    assert text.read_live_prompt() == ""
+    assert text.read_config("live-prompt") == ""
 
 
 def test_read_live_prompt_returns_file_contents(tmp_config_dir):
     (tmp_config_dir / "live-prompt.txt").write_text("standup notes", encoding="utf-8")
-    assert text.read_live_prompt() == "standup notes"
+    assert text.read_config("live-prompt") == "standup notes"
 
 
 def test_read_live_prompt_does_not_fall_back_to_prompt_file(tmp_config_dir):
@@ -150,7 +150,7 @@ def test_read_live_prompt_does_not_fall_back_to_prompt_file(tmp_config_dir):
     live-prompt.txt resolves to empty. Operators set live and batch
     explicitly."""
     (tmp_config_dir / "prompt.txt").write_text("batch context", encoding="utf-8")
-    assert text.read_live_prompt() == ""
+    assert text.read_config("live-prompt") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -161,40 +161,40 @@ def test_read_live_prompt_does_not_fall_back_to_prompt_file(tmp_config_dir):
 
 
 def test_write_prompt_creates_and_reads_back(tmp_config_dir):
-    text.write_prompt("weekly planning · roadmap")
+    text.write_config("prompt", "weekly planning · roadmap")
     assert (tmp_config_dir / "prompt.txt").read_text(encoding="utf-8") == "weekly planning · roadmap"
-    assert text.read_prompt() == "weekly planning · roadmap"
+    assert text.read_config("prompt") == "weekly planning · roadmap"
 
 
 def test_write_prompt_overwrites_existing(tmp_config_dir):
     (tmp_config_dir / "prompt.txt").write_text("old", encoding="utf-8")
-    text.write_prompt("new")
-    assert text.read_prompt() == "new"
+    text.write_config("prompt", "new")
+    assert text.read_config("prompt") == "new"
 
 
 def test_write_prompt_normalises_crlf_to_lf(tmp_config_dir):
-    text.write_prompt("line one\r\nline two\r\n")
+    text.write_config("prompt", "line one\r\nline two\r\n")
     on_disk = (tmp_config_dir / "prompt.txt").read_text(encoding="utf-8")
     assert "\r" not in on_disk
     assert on_disk.rstrip() == "line one\nline two"
 
 
 def test_write_live_prompt_creates_and_reads_back(tmp_config_dir):
-    text.write_live_prompt("standup")
+    text.write_config("live-prompt", "standup")
     assert (tmp_config_dir / "live-prompt.txt").read_text(encoding="utf-8") == "standup"
-    assert text.read_live_prompt() == "standup"
+    assert text.read_config("live-prompt") == "standup"
 
 
 def test_write_hotwords_creates_and_reads_back(tmp_config_dir):
-    text.write_hotwords("Acme, Patricia Lin")
+    text.write_config("hotwords", "Acme, Patricia Lin")
     assert (tmp_config_dir / "hotwords.txt").read_text(encoding="utf-8") == "Acme, Patricia Lin"
-    assert text.read_hotwords() == "Acme, Patricia Lin"
+    assert text.read_config("hotwords") == "Acme, Patricia Lin"
 
 
 def test_write_prompt_empty_string_clears_file(tmp_config_dir):
     (tmp_config_dir / "prompt.txt").write_text("existing", encoding="utf-8")
-    text.write_prompt("")
-    assert text.read_prompt() == ""
+    text.write_config("prompt", "")
+    assert text.read_config("prompt") == ""
 
 
 def test_write_prompt_rejects_oversize(tmp_config_dir):
@@ -204,40 +204,40 @@ def test_write_prompt_rejects_oversize(tmp_config_dir):
     fail loudly at the boundary instead of silently truncated downstream."""
     too_big = "x" * 5000
     with pytest.raises(ValueError):
-        text.write_prompt(too_big)
+        text.write_config("prompt", too_big)
 
 
 def test_write_batch_model_accepts_catalog_id_and_reads_back(tmp_config_dir):
-    text.write_batch_model("  small.en \n")
+    text.write_config("batch-model", "  small.en \n")
     assert (tmp_config_dir / "batch-model.txt").read_text(encoding="utf-8") == "small.en"
-    assert text.read_batch_model() == "small.en"
+    assert text.read_config("batch-model") == "small.en"
 
 
 def test_write_batch_model_rejects_unknown_model_id(tmp_config_dir):
-    """Unlike write_live_model (where an unknown id surfaces loudly at
+    """Unlike the "live-model" key (where an unknown id surfaces loudly at
     /api/live/start), the batch default feeds the end-of-meeting pipeline's
     model loader with no operator in the loop — validate at WRITE time so a
     bad id never lands on disk in the first place."""
     with pytest.raises(ValueError):
-        text.write_batch_model("evil/repo")
-    assert text.read_batch_model() == ""
+        text.write_config("batch-model", "evil/repo")
+    assert text.read_config("batch-model") == ""
 
 
 def test_write_batch_model_empty_clears_back_to_default(tmp_config_dir):
-    text.write_batch_model("small.en")
-    text.write_batch_model("")
-    assert text.read_batch_model() == ""
+    text.write_config("batch-model", "small.en")
+    text.write_config("batch-model", "")
+    assert text.read_config("batch-model") == ""
 
 
 def test_read_batch_model_empty_when_unset(tmp_config_dir):
-    assert text.read_batch_model() == ""
+    assert text.read_config("batch-model") == ""
 
 
 # ---------------------------------------------------------------------------
 # Summarizer default (config/summarizer.json) — the structured operator
 # default (#84): source + prompt + per-source fields. Unlike the text
 # configs this is one JSON object; the writer validates at WRITE time
-# (write_batch_model's rationale: the value feeds the end-of-meeting
+# (_check_batch_model's rationale: the value feeds the end-of-meeting
 # pipeline's summarizer with no operator in the loop).
 # ---------------------------------------------------------------------------
 

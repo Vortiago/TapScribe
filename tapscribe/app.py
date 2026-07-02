@@ -31,8 +31,10 @@ import logging
 import math
 import shutil
 import wave
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from functools import partial
 from typing import Any
 from uuid import uuid4
 
@@ -105,21 +107,14 @@ from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_
 from .summarizers.catalog import _MAX_TOKENS_BOUNDS
 from .tap_fan_out import TapFanOut
 from .text import (
+    CONFIG_KEYS,
     MAX_CONFIG_TEXT_LEN,
-    read_batch_model,
-    read_hotwords,
+    read_config,
     read_languages,
-    read_live_model,
-    read_live_prompt,
-    read_prompt,
     read_summarizer_config,
     summarizer_default_public,
-    write_batch_model,
-    write_hotwords,
+    write_config,
     write_languages,
-    write_live_model,
-    write_live_prompt,
-    write_prompt,
     write_summarizer_config,
 )
 from .transcribers import evict_idle_now, run_on_model_thread
@@ -164,13 +159,10 @@ def _compute_inputs_support() -> dict[str, bool]:
 
 
 # Map of config key (URL segment) → writer. Keeps the PUT handler one
-# branch deep and makes the supported keys easy to grep for.
-_CONFIG_WRITERS = {
-    "prompt": write_prompt,
-    "live-prompt": write_live_prompt,
-    "live-model": write_live_model,
-    "batch-model": write_batch_model,
-    "hotwords": write_hotwords,
+# branch deep. The plain text-file keys ride text.CONFIG_KEYS/write_config;
+# languages.txt keeps its own richer writer (catalog-validated code set).
+_CONFIG_WRITERS: dict[str, Callable[[str], None]] = {
+    **{key: partial(write_config, key) for key in CONFIG_KEYS},
     "languages": write_languages,
 }
 
@@ -583,12 +575,12 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
     serialise the operator's click POSTs behind the poll."""
     return {
         "sessions": gather_sessions(current_session=current_session, jobs=jobs_snapshot),
-        "prompt": read_prompt(),
-        "live_prompt": read_live_prompt(),
-        "live_model_default": read_live_model(),
-        "batch_model_default": read_batch_model(),
+        "prompt": read_config("prompt"),
+        "live_prompt": read_config("live-prompt"),
+        "live_model_default": read_config("live-model"),
+        "batch_model_default": read_config("batch-model"),
         "languages_default": list(read_languages()),
-        "hotwords": read_hotwords(),
+        "hotwords": read_config("hotwords"),
         # Non-secret projection ONLY (`summarizer_default_public` is the #85
         # redaction seam) — the Settings card and Summary view pre-fill from it.
         "summarizer_default": summarizer_default_public(read_summarizer_config()),
