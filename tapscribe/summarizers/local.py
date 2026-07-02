@@ -18,16 +18,17 @@ THIS module.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
 from . import catalog
 from .base import (
-    DEFAULT_SUMMARY_PROMPT,
     SummarizerError,
     SummarizerFailed,
     SummarizerUnavailable,
     SummaryResult,
+    fold_hint,
+    resolve_prompt,
 )
 
 # A backend's per-(transcript, prompt) text generator. The real ones (built
@@ -75,8 +76,7 @@ def _build_local_messages(transcript: str, prompt: str) -> list[dict[str, str]]:
     `system` role) keeps Gemma's chat template happy and is portable across both
     backends. A blank prompt falls back to `DEFAULT_SUMMARY_PROMPT`, the same
     string the view seeds and the command source defaults to."""
-    instruction = (prompt or "").strip() or DEFAULT_SUMMARY_PROMPT
-    content = f"{_LOCAL_SYSTEM}\n\n{instruction}\n\n--- TRANSCRIPT ---\n{transcript}"
+    content = f"{_LOCAL_SYSTEM}\n\n{resolve_prompt(prompt)}\n\n--- TRANSCRIPT ---\n{transcript}"
     return [{"role": "user", "content": content}]
 
 
@@ -179,10 +179,17 @@ class LocalSummarizer:
                     )
                 )
 
-    def summarize(self, transcript: str, *, prompt: str) -> SummaryResult:
+    def summarize(self, transcript: str, *, prompt: str, names: Sequence[str] = ()) -> SummaryResult:
         generate = self._generate_fn or self._build_generate_fn()
         started = datetime.now(UTC)
-        summary = (generate(transcript, prompt) or "").strip()
+        # The `generate` seam owns the chat-template wrapping (it holds the
+        # tokenizer), so the known-people hint has to travel INSIDE the prompt it
+        # receives — `_build_local_messages` re-resolves the DEFAULT idempotently,
+        # so folding the hint onto the already-resolved instruction here is
+        # equivalent downstream. `SummaryResult` below persists the ORIGINAL
+        # operator `prompt`, not this augmented one.
+        instruction = fold_hint(resolve_prompt(prompt), names)
+        summary = (generate(transcript, instruction) or "").strip()
         took_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
         if not summary:
             # Exit-0-but-blank is a useless summary — same contract as the

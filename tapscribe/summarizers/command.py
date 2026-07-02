@@ -27,10 +27,11 @@ from __future__ import annotations
 import shlex
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from .. import config
-from .base import SummarizerFailed, SummarizerUnavailable, SummaryResult
+from .base import SummarizerFailed, SummarizerUnavailable, SummaryResult, fold_hint
 
 # Operator knob for the per-summarize subprocess timeout, hoisted to a module
 # constant so the dashboard wiring + docs have one source of truth — same
@@ -101,11 +102,20 @@ class CommandSummarizer:
         self.command = (command or "").strip()
         self._timeout_s = _default_timeout_s() if timeout_s is None else timeout_s
 
-    def summarize(self, transcript: str, *, prompt: str) -> SummaryResult:
+    def summarize(self, transcript: str, *, prompt: str, names: Sequence[str] = ()) -> SummaryResult:
         # List-form argv only (the operator template parsed by shlex + the
         # prompt as a trailing positional). Never interpolated into a shell
         # string — see the class docstring.
-        argv = build_command_argv(self.command, prompt)
+        #
+        # The known-people hint rides in the prompt positional (guidance belongs
+        # with the instruction, not smuggled into the transcript on stdin); the
+        # tool sees "<operator prompt>\n\n<hint>". The list is short, so ARG_MAX
+        # isn't a concern (unlike the transcript, which stays on stdin). `fold_hint`
+        # with the RAW prompt as base keeps the command source's no-DEFAULT policy:
+        # an empty prompt with names sends just the hint (the CLI owns its own
+        # default instruction). `SummaryResult.prompt` below persists the ORIGINAL
+        # operator prompt, never the augmented one.
+        argv = build_command_argv(self.command, fold_hint(prompt, names))
         started = datetime.now(UTC)
         try:
             # Run in a throwaway EMPTY directory, never the recorder's cwd. An

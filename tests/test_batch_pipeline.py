@@ -230,7 +230,7 @@ async def test_pipeline_end_to_end_produces_stripped_transcript_and_summary(reco
 
     class _FakeSummarizer:
         @staticmethod
-        def summarize(text, *, prompt):  # noqa: ARG004
+        def summarize(text, *, prompt, names=()):  # noqa: ARG004
             assert "meeting words" in text  # the transcribe stage's output reached us
             return _FakeResult()
 
@@ -288,7 +288,7 @@ async def test_pipeline_transcribe_stage_honours_candidate_languages(recorder_un
 
 class _NoopSummarizer:
     @staticmethod
-    def summarize(text, *, prompt):  # noqa: ARG004
+    def summarize(text, *, prompt, names=()):  # noqa: ARG004
         class _R:
             @staticmethod
             def to_mapping():
@@ -341,8 +341,9 @@ async def _run_summarize_stage_capturing(recorder, monkeypatch, session="s"):
 
     class _FakeSummarizer:
         @staticmethod
-        def summarize(text, *, prompt):  # noqa: ARG004
+        def summarize(text, *, prompt, names=()):  # noqa: ARG004
             seen["prompt"] = prompt
+            seen["names"] = list(names)
             return _FakeResult()
 
     def _fake_load(**kw):

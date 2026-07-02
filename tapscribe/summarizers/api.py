@@ -15,7 +15,7 @@ tests drive the adapter with no real network."""
 from __future__ import annotations
 
 import json as _json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any
@@ -23,11 +23,12 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from .base import (
-    DEFAULT_SUMMARY_PROMPT,
     SummarizerError,
     SummarizerFailed,
     SummarizerUnavailable,
     SummaryResult,
+    fold_hint,
+    resolve_prompt,
 )
 
 # Type alias for the HTTP POST seam. Production builds a urllib-based default;
@@ -96,8 +97,12 @@ class ApiSummarizer:
         # matches the 3-arg ApiPostFn shape an injected stub uses.
         self._post_fn: ApiPostFn = post_fn or partial(_http_post_json, timeout_s=self._timeout_s)
 
-    def summarize(self, transcript: str, *, prompt: str) -> SummaryResult:
-        instruction = (prompt or "").strip() or DEFAULT_SUMMARY_PROMPT
+    def summarize(self, transcript: str, *, prompt: str, names: Sequence[str] = ()) -> SummaryResult:
+        # The known-people hint folds into the instruction (guidance, above the
+        # transcript); a nameless call leaves the resolved prompt unchanged. The
+        # persisted `SummaryResult.prompt` stays the operator's original prompt,
+        # not this augmented instruction.
+        instruction = fold_hint(resolve_prompt(prompt), names)
         messages = [
             {
                 "role": "system",

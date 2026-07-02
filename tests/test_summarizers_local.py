@@ -406,3 +406,60 @@ def test_llama_cpp_upstream_contract():
     assert hasattr(Llama, "create_chat_completion"), (
         "Llama.create_chat_completion is the generate entry point the adapter calls"
     )
+
+
+# ---------------------------------------------------------------------------
+# Known-people hint (name-correction). The hint travels INSIDE the prompt the
+# generate seam receives (it owns the chat-template wrapping); a nameless call
+# passes the prompt untouched, and the persisted result keeps the operator prompt.
+# ---------------------------------------------------------------------------
+
+
+def test_local_summarizer_injects_names_into_the_generate_prompt(reset_available_backends):
+    seen: dict[str, str] = {}
+
+    def spy(transcript: str, prompt: str) -> str:
+        seen["prompt"] = prompt
+        return "ok"
+
+    LocalSummarizer(backend="gguf", generate_fn=spy).summarize(
+        "t", prompt="Summarize", names=["Alice Havso", "Bob Smith"]
+    )
+    assert "Alice Havso" in seen["prompt"]
+    assert "Bob Smith" in seen["prompt"]
+    assert "Summarize" in seen["prompt"]  # the operator instruction survives alongside the hint
+
+
+def test_local_summarizer_no_names_leaves_instruction_hint_free(reset_available_backends):
+    """With no names the generate seam receives the resolved operator prompt with
+    no hint appended — the model input is byte-for-byte the pre-feature text."""
+    seen: dict[str, str] = {}
+
+    def spy(transcript: str, prompt: str) -> str:
+        seen["prompt"] = prompt
+        return "ok"
+
+    LocalSummarizer(backend="gguf", generate_fn=spy).summarize("t", prompt="Summarize")
+    assert seen["prompt"] == "Summarize"
+
+
+def test_local_summarizer_blank_prompt_with_names_keeps_default_instruction(reset_available_backends):
+    """An empty operator prompt + names must still carry the summarize instruction
+    (the DEFAULT), not collapse to the hint alone."""
+    seen: dict[str, str] = {}
+
+    def spy(transcript: str, prompt: str) -> str:
+        seen["prompt"] = prompt
+        return "ok"
+
+    LocalSummarizer(backend="gguf", generate_fn=spy).summarize("t", prompt="", names=["Carol Nguyen"])
+    assert DEFAULT_SUMMARY_PROMPT in seen["prompt"]
+    assert "Carol Nguyen" in seen["prompt"]
+
+
+def test_local_summarizer_persists_operator_prompt_not_the_hint(reset_available_backends):
+    res = LocalSummarizer(backend="gguf", generate_fn=lambda t, p: "ok").summarize(
+        "t", prompt="Summarize", names=["Alice Havso"]
+    )
+    assert res.prompt == "Summarize"
+    assert "Alice Havso" not in res.prompt
