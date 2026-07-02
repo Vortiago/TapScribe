@@ -271,6 +271,7 @@ _PARAKEET_LANG_CODES: tuple[str, ...] = tuple(code for code, _ in _PARAKEET_LANG
 # motivating mixed Danish/Norwegian/English meeting with zero configuration.
 DEFAULT_CANDIDATE_LANGUAGES: tuple[str, ...] = ("da", "no", "en")
 
+
 # ── Specialist table (ADR-0010 slice 2) ─────────────────────────────────────
 # A `language → purpose-built model` map for languages where a specialist beats
 # the generalist. v1 has one entry: Norwegian routes to NB-Whisper (Whisper
@@ -304,7 +305,9 @@ def specialist_table_with_env_overrides(base: dict[str, str], environ: Mapping[s
     return table
 
 
-SPECIALIST_MODELS: dict[str, str] = specialist_table_with_env_overrides({"no": "nb-whisper-large"}, os.environ)
+SPECIALIST_MODELS: dict[str, str] = specialist_table_with_env_overrides(
+    {"no": "nb-whisper-large"}, os.environ
+)
 
 # Display names for every concrete language code that appears across the
 # catalog. The Parakeet pairs cover most; nb-whisper contributes Norwegian and
