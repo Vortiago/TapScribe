@@ -48,7 +48,7 @@ from .session_merge import InvalidRange, NoUsableWavs, select_session_wavs
 from .session_paths import resolve_session_dir
 from .sessions import read_session_transcript
 from .summarizers import load_summarizer
-from .text import read_batch_model
+from .text import read_config
 from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY
 
 
@@ -70,7 +70,7 @@ def _resolve_batch_model() -> str:
     """The operator's configured default batch model, validated against the
     catalog — a stale/out-of-band edit of batch-model.txt must not reach a
     model loader. Falls back to the bundled default."""
-    configured = read_batch_model()
+    configured = read_config("batch-model")
     if configured:
         if REGISTRY.get(configured) is not None:
             return configured

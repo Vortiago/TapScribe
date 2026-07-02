@@ -183,7 +183,7 @@ async def test_pipeline_resolves_model_from_batch_model_config_else_default(
 ):
     """The transcribe stage's model comes from the operator's batch-model
     config — validated against the catalog — never from the request."""
-    monkeypatch.setattr("tapscribe.batch_pipeline.read_batch_model", lambda: configured)
+    monkeypatch.setattr("tapscribe.batch_pipeline.read_config", lambda key: configured)
     seen: dict = {}
 
     async def _strip(req, *, job):  # noqa: ARG001

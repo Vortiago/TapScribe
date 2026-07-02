@@ -10,6 +10,8 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -89,44 +91,70 @@ def _read_config_text_cached(path: Path) -> str:
     return value
 
 
-def read_prompt() -> str:
-    """Return the Whisper `initial_prompt` from prompt.txt. Re-read whenever
-    the file changes (stat-signature cache) so edits take effect without
-    restarting the recorder."""
-    return _read_config_text_cached(config.PROMPT_FILE)
+def _check_batch_model(model_id: str) -> None:
+    """WRITE-time check for the "batch-model" key: the batch default feeds
+    the end-of-meeting pipeline's model loader with no operator in the loop,
+    so an unknown id must never land on disk (`ValueError` → the config PUT's
+    400). Empty clears the override (back to the bundled default). The
+    catalog import is lazy to keep this module free of the transcribers
+    dependency for every other caller.
+
+    Deliberately NOT applied to "live-model": there an unknown id surfaces
+    as a clear error at /api/live/start time, not silently."""
+    if model_id:
+        from .transcribers.catalog import REGISTRY
+
+        if REGISTRY.get(model_id) is None:
+            raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
 
 
-def read_live_prompt() -> str:
-    """Return the WhisperLiveKit `--init-prompt` from live-prompt.txt.
+@dataclass(frozen=True)
+class _ConfigSpec:
+    """One editable config text file. `attr` names the config-module Path
+    (resolved at call time, so tests can repoint the paths); `strip` marks
+    single-token values (model ids), stored and returned stripped; `check`
+    runs at WRITE time after the shared oversize cap."""
 
-    Independent from `read_prompt()` — an empty live-prompt.txt does NOT
-    fall back to prompt.txt, since the dashboard exposes the two as two
-    separate editors and operators are expected to set each explicitly
-    (live and batch typically run different cadences and sometimes
-    different model families)."""
-    return _read_config_text_cached(config.LIVE_PROMPT_FILE)
-
-
-def read_live_model() -> str:
-    """Return the operator's DEFAULT live-channel model id from live-model.txt
-    (a single model_id, e.g. "tiny.en"), stripped. Empty when unset.
-
-    Separate from the running channel's model (`live_info.model`): the
-    dashboard's Live engine card persists the default here, and the live
-    channel only adopts it on (re)start — so the UI can flag "restart to
-    apply" while the two differ."""
-    return _read_config_text_cached(config.LIVE_MODEL_FILE).strip()
+    attr: str
+    strip: bool = False
+    check: Callable[[str], None] | None = None
 
 
-def read_batch_model() -> str:
-    """Return the operator's DEFAULT batch model id from batch-model.txt
-    (a single model_id, e.g. "small.en"), stripped. Empty when unset.
+# The editable config files behind read_config / write_config, keyed by the
+# same key the dashboard PUTs to /api/config/{key}. The richer shapes
+# (languages.txt's catalog-validated set, summarizer.json) keep their own
+# accessors below — this table is only the plain text files.
+CONFIG_KEYS: dict[str, _ConfigSpec] = {
+    # Whisper `initial_prompt` for batch runs (prompt.txt).
+    "prompt": _ConfigSpec("PROMPT_FILE"),
+    # WhisperLiveKit `--init-prompt` (live-prompt.txt). Independent from
+    # "prompt" — an empty live-prompt does NOT fall back to prompt.txt; the
+    # dashboard exposes two separate editors and operators set each
+    # explicitly (live and batch typically run different cadences and
+    # sometimes different model families).
+    "live-prompt": _ConfigSpec("LIVE_PROMPT_FILE"),
+    # Operator's DEFAULT live-channel model id (live-model.txt). Separate
+    # from the running channel's model (`live_info.model`): the live channel
+    # only adopts it on (re)start, so the UI can flag "restart to apply"
+    # while the two differ.
+    "live-model": _ConfigSpec("LIVE_MODEL_FILE", strip=True),
+    # The live-model's batch twin (batch-model.txt): the end-of-meeting
+    # pipeline resolves its transcribe stage from it — the tap trigger
+    # carries no model field by design (operator defaults only).
+    "batch-model": _ConfigSpec("BATCH_MODEL_FILE", strip=True, check=_check_batch_model),
+    # faster-whisper `hotwords` (hotwords.txt) — comma- or space-separated
+    # proper nouns / tricky vocabulary.
+    "hotwords": _ConfigSpec("HOTWORDS_FILE"),
+}
 
-    The live-model's batch twin: the dashboard's Default engine card
-    persists the default here, and the end-of-meeting pipeline resolves its
-    transcribe stage from it — the tap trigger carries no model field by
-    design (operator defaults only)."""
-    return _read_config_text_cached(config.BATCH_MODEL_FILE).strip()
+
+def read_config(key: str) -> str:
+    """Return the current value of an editable config file (see CONFIG_KEYS).
+    Re-read whenever the file changes (stat-signature cache) so edits take
+    effect without restarting the recorder; empty when unset."""
+    spec = CONFIG_KEYS[key]
+    value = _read_config_text_cached(getattr(config, spec.attr))
+    return value.strip() if spec.strip else value
 
 
 def read_summarizer_config() -> dict:
@@ -185,7 +213,7 @@ def write_summarizer_config(cfg: dict) -> dict:
     update; omitting it preserves the stored value). Returns the normalised
     stored dict.
 
-    Like `write_batch_model`, validation happens at WRITE time — the value
+    Like the "batch-model" config key, validation happens at WRITE time — the value
     feeds the end-of-meeting pipeline's summarizer with no operator in the
     loop, and a model id arriving from the dashboard is external input that
     must never reach a Hub download (`ValueError` → the PUT's 400):
@@ -198,7 +226,7 @@ def write_summarizer_config(cfg: dict) -> dict:
     - `max_tokens`: None (env default) or an int within the catalog bounds.
     - `api_key`: write-only; omit to preserve, empty string to clear.
 
-    The catalog import is lazy (write_batch_model's pattern) so this module
+    The catalog import is lazy (_check_batch_model's pattern) so this module
     stays free of the summarizers dependency for every other caller."""
     source = str(cfg.get("source") or "").strip()
     if source not in SUMMARY_SOURCES:
@@ -251,12 +279,6 @@ def write_summarizer_config(cfg: dict) -> dict:
     return stored
 
 
-def read_hotwords() -> str:
-    """Return the faster-whisper `hotwords` string from hotwords.txt — a
-    comma- or space-separated list of proper nouns / tricky vocabulary."""
-    return _read_config_text_cached(config.HOTWORDS_FILE)
-
-
 # A candidate-language set is a small comma/space-separated bag of ISO codes.
 _LANG_SPLIT_RE = re.compile(r"[,\s]+")
 
@@ -285,7 +307,7 @@ def write_languages(content: str) -> None:
     deduped lowercased comma-joined codes. Empty clears the override (back to
     the bundled default).
 
-    Like write_batch_model, validation happens at WRITE time: the set feeds the
+    Like the "batch-model" config key, validation happens at WRITE time: the set feeds the
     end-of-meeting pipeline's per-region language run with no operator in the
     loop, so a code outside the catalog must never land on disk (`ValueError`
     → the config PUT's 400). The catalog import is lazy to keep this module
@@ -355,47 +377,17 @@ def validate_config_text(content: str) -> str:
     return content
 
 
-def write_prompt(content: str) -> None:
-    """Persist the batch initial prompt to prompt.txt. Atomic; oversize input rejected."""
-    _write_text_file_atomic(config.PROMPT_FILE, validate_config_text(content))
-
-
-def write_live_prompt(content: str) -> None:
-    """Persist the live-channel init prompt to live-prompt.txt. Atomic;
-    oversize input rejected."""
-    _write_text_file_atomic(config.LIVE_PROMPT_FILE, validate_config_text(content))
-
-
-def write_live_model(content: str) -> None:
-    """Persist the default live-channel model id to live-model.txt. Stored
-    stripped (it's a single model_id token, not free text). Atomic; oversize
-    input rejected. The value isn't validated against the registry here — an
-    unknown id surfaces as a clear error at /api/live/start time, not silently."""
-    _write_text_file_atomic(config.LIVE_MODEL_FILE, validate_config_text(content.strip()))
-
-
-def write_batch_model(content: str) -> None:
-    """Persist the default batch model id to batch-model.txt. Stored stripped
-    (a single model_id token). Atomic; oversize input rejected.
-
-    Unlike `write_live_model`, the value IS validated against the transcriber
-    catalog here: the batch default feeds the end-of-meeting pipeline's model
-    loader with no operator in the loop, so an unknown id must never land on
-    disk (`ValueError` → the config PUT's 400). Empty clears the override
-    (back to the bundled default). The catalog import is lazy to keep this
-    module free of the transcribers dependency for every other caller."""
-    model_id = content.strip()
-    if model_id:
-        from .transcribers.catalog import REGISTRY
-
-        if REGISTRY.get(model_id) is None:
-            raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
-    _write_text_file_atomic(config.BATCH_MODEL_FILE, validate_config_text(model_id))
-
-
-def write_hotwords(content: str) -> None:
-    """Persist the hotwords list to hotwords.txt. Atomic; oversize input rejected."""
-    _write_text_file_atomic(config.HOTWORDS_FILE, validate_config_text(content))
+def write_config(key: str, content: str) -> None:
+    """Validate + persist one editable config file (see CONFIG_KEYS). Atomic
+    via tempfile + os.replace; oversize input rejected (MAX_CONFIG_TEXT_LEN);
+    single-token keys stored stripped; the per-key WRITE-time `check` runs
+    before anything lands on disk (see `_check_batch_model`)."""
+    spec = CONFIG_KEYS[key]
+    if spec.strip:
+        content = content.strip()
+    if spec.check is not None:
+        spec.check(content)
+    _write_text_file_atomic(getattr(config, spec.attr), validate_config_text(content))
 
 
 def normalise_for_exact(text: str) -> str:

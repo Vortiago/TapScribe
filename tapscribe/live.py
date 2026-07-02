@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from .nb_whisper import download_nb_whisper_ct2_dir
-from .text import read_live_prompt
+from .text import read_config
 
 
 def resolve_live_init_prompt() -> str | None:
@@ -42,7 +42,7 @@ def resolve_live_init_prompt() -> str | None:
 
     Wraps the read in a tiny helper so the substitution is testable
     without spinning up a subprocess."""
-    return read_live_prompt() or None
+    return read_config("live-prompt") or None
 
 
 @runtime_checkable
