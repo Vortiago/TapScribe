@@ -1414,8 +1414,6 @@ async def api_wav_transcript(session: str, name: str, source: str = "original"):
     it per (session, name, source, transcribed_at). Mirrors `get_wav`'s
     path-safety (resolve_wav validates session/name/source) and offloads the
     disk read with to_thread."""
-    if source not in ("original", "stripped"):
-        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
     return await asyncio.to_thread(read_wav_transcript, session, name, source)
 
 
@@ -1443,8 +1441,6 @@ async def api_wav_strip_preview(
     strip route's knob bounds (out-of-range → 400) and get_wav's
     path-sanitiser; omitted knobs fall back to StripSessionRequest's
     defaults, mirroring the strip route's only-forward-explicit contract."""
-    if source not in ("original", "stripped"):
-        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
     overrides = _parse_strip_knob_overrides(min_silence_ms, pad_ms, speech_floor_db)
     knobs = StripSessionRequest(session=session, **overrides)
     path = resolve_wav(session, name, source)
@@ -1503,11 +1499,9 @@ async def api_wav_peaks(
     """Server-computed waveform peaks for one WAV — a fixed-size downsample
     (the foundation the later cut overlay draws on). Mirrors get_wav's
     path-safety (resolve_wav validates session/name/source under
-    RECORDINGS_DIR), whitelists `source`, clamps `bins` to a sane band, and
-    offloads the O(samples) read off the event loop. The payload is `bins`
-    floats regardless of recording length."""
-    if source not in ("original", "stripped"):
-        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    RECORDINGS_DIR — including rejecting an unknown `source`), clamps `bins`
+    to a sane band, and offloads the O(samples) read off the event loop. The
+    payload is `bins` floats regardless of recording length."""
     bins = max(_PEAKS_BINS_MIN, min(_PEAKS_BINS_MAX, bins))
     path = resolve_wav(session, name, source)
     try:
@@ -1532,11 +1526,9 @@ async def api_wav_delete(
     """Delete one WAV + its transcript-cache sidecars. source=stripped
     targets a region under <session>/stripped/. No region cascade — see
     `delete_session_wav`. Refuses the CURRENT session and any session with
-    a transcribe/strip job in flight."""
-    # Whitelist the query param before it flows into resolve_wav — CodeQL
-    # treats query params as untrusted (mirrors the source checks elsewhere).
-    if source not in ("original", "stripped"):
-        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
+    a transcribe/strip job in flight. An unknown `source` is rejected (400)
+    by `resolve_source_dir` — the path seam owns that check; `source` itself
+    is never a path component (only compared against the two literals)."""
     if session == recorder.session_start:
         raise HTTPException(409, "cannot delete WAVs from the current session — rotate to a new one first")
     resolve_session_dir(session)
@@ -1588,8 +1580,6 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
     if not session or not name:
         raise HTTPException(400, "session and name are required")
     source = body.get("source") or "original"
-    if source not in ("original", "stripped"):
-        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
     request = BatchOneRequest(
         session=session,
         name=name,
@@ -1619,8 +1609,6 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     if not session:
         raise HTTPException(400, "session is required")
     source = body.get("source") or "original"
-    if source not in ("original", "stripped"):
-        raise HTTPException(400, f"source must be 'original' or 'stripped', got {source!r}")
     request = BatchSessionRequest(
         session=session,
         source=source,
