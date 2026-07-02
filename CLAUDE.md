@@ -119,7 +119,10 @@ array and hands it directly to the model's array-accepting entry point:
 The pre-decode trick lives in its own module
 (`tapscribe/wav_predecode.py`) so the next contributor poking at
 "where do we skip ffmpeg" finds it on the first grep. The chunking
-loops live next to their adapter and share the same shape.
+skeleton (pre-decode → windows → per-window model call →
+overlap-midpoint stitch) lives ONCE in
+`transcribers/_chunked.ChunkedTranscriber`; each Parakeet adapter
+implements only `_transcribe_window`.
 
 There is **no path-based fallback**. Non-recorder WAVs (different
 sample rate / channel layout / sample width) raise a clear
@@ -130,9 +133,9 @@ fallback would defeat the whole point and is rejected at review.
 
 The chunk-size knobs are env-tunable (`TAPSCRIBE_PARAKEET_CHUNK_S`,
 `TAPSCRIBE_PARAKEET_OVERLAP_S` — shared by both Parakeet adapters); env
-names are exported as module constants from each adapter
-(`ENV_CHUNK_S`, `ENV_OVERLAP_S`) so the dashboard wiring — when it
-lands — has one source of truth. Every operator-tunable setting
+names are module constants in `transcribers/_chunked.py` (`ENV_CHUNK_S`,
+`ENV_OVERLAP_S`) so the dashboard wiring — when it lands — has one
+source of truth. Every operator-tunable setting
 belongs in the dashboard eventually; see the strip-silence knobs in
 `web/components/next/recordings.html` for the pattern when adding
 these.
