@@ -14,7 +14,7 @@
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
 import { fetchState, postJson, putJson } from "../api.js";
-import { loadTemplates, pick } from "../templates.js";
+import { loadTemplates, pick, consumeDeferredRender } from "../templates.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import * as spine from "./components/spine.js";
 import * as engine from "./components/engine.js";
@@ -515,8 +515,17 @@ function viewFromHash() {
 
 // ---- Tick -------------------------------------------------------------------
 
+// Dev/test-only counter: how many times renderAll has actually run. Exposed
+// on window so an e2e test can prove idle 304 ticks stop re-running the whole
+// spine/view sig pipeline (issue #245) — same convention as templates.js's
+// __TAPSCRIBE_SIG_DRIFT / __TAPSCRIBE_SIG_AUDIT dev hooks. Never read by
+// production code.
+let renderAllCount = 0;
+
 /** @param {import('../types.js').AppState} j */
 function renderAll(j) {
+  renderAllCount++;
+  /** @type {any} */ (window).__TAPSCRIBE_RENDER_ALL_COUNT = renderAllCount;
   const sessions = j.sessions || [];
   const session = resolveSession(sessions, selectedSessionId);
   // Keep selectedSessionId honest so the spine select reflects the resolved
@@ -534,7 +543,20 @@ function renderAll(j) {
 async function tick() {
   try {
     const j = await fetchState();
+    // fetchState() reuses the SAME object on a 304 (api.js). When the poll
+    // is a genuine no-op, skip the whole renderAll pass — the spine's
+    // O(sessions) signature, the active view's own signature, and the
+    // active-taps rail all get recomputed for nothing otherwise (issue
+    // #245). consumeDeferredRender() is read (and cleared) unconditionally,
+    // BEFORE the render, so a render a guard deferred last pass gets one
+    // retry this pass regardless of branch — leaving it set across a
+    // real-change tick would strand a stale "retry owed" past the point the
+    // interaction actually cleared. If it's still blocked, the guard
+    // re-marks it for the pass after.
+    const unchanged = j === lastJson;
     lastJson = j;
+    const wasDeferred = consumeDeferredRender();
+    if (unchanged && !wasDeferred) return;
     renderAll(j);
   } catch (e) {
     const spineEl = $("spine");

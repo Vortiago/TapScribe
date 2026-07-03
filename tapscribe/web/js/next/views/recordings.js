@@ -30,7 +30,7 @@
 // (files_sig / source), deferring while a control is focused or text is being
 // selected inside the list.
 
-import { tpl, pick, selectionInside, reconcileList } from "../../templates.js";
+import { tpl, pick, selectionInside, reconcileList, markDeferredRender } from "../../templates.js";
 import { postJson, del, loadSessionFiles, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
@@ -863,12 +863,19 @@ export function build(ctx) {
     const listState = !sess ? "none" : filesLoading ? "loading" : files.length ? "rows" : "empty";
     const listSig = `${sid}§${src}§${filesSig}§${listState}`;
     if (listState === "rows") {
-      if (listSig !== lastListSig && !selectionInside(wavList)) {
-        // Clear any leftover empty/loading placeholder (a non-reconcile child)
-        // so reconcileList owns the host's children outright.
-        if (!wavList.querySelector(".wavrow")) wavList.replaceChildren();
-        reconcileList(wavList, buildRowModels(files, src, isCurrent), rowKey, buildRow);
-        lastListSig = listSig;
+      if (listSig !== lastListSig) {
+        if (selectionInside(wavList)) {
+          // A poll can go quiet (304) while this stays deferred — mark it so
+          // main.js keeps retrying instead of stranding the update once the
+          // selection clears (issue #245).
+          markDeferredRender();
+        } else {
+          // Clear any leftover empty/loading placeholder (a non-reconcile child)
+          // so reconcileList owns the host's children outright.
+          if (!wavList.querySelector(".wavrow")) wavList.replaceChildren();
+          reconcileList(wavList, buildRowModels(files, src, isCurrent), rowKey, buildRow);
+          lastListSig = listSig;
+        }
       }
       // Keep the selection highlight correct across reconciles + idle ticks.
       applySelection(sel?.name || "");

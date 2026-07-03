@@ -19,7 +19,7 @@
 // clobbered). The engine panel is rebuilt by main on engine state changes
 // (rebuildEngine).
 
-import { tpl, pick, renderRegion, markRegionStale, reconcileList, selectionInside } from "../../templates.js";
+import { tpl, pick, renderRegion, markRegionStale, reconcileList, selectionInside, markDeferredRender } from "../../templates.js";
 import { postJson, putJson, sessionTranscript, loadSessionFiles } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -651,11 +651,18 @@ export function build(ctx) {
     const pickState = !sess ? "none" : filesLoading ? "loading" : srcFiles.length ? "rows" : "empty";
     const pickerSig = [pickState, sid, src, filesSig, inflightSig].join("§");
     if (pickState === "rows") {
-      if (pickerSig !== lastPickerSig && !selectionInside(wavList)) {
-        // Clear any leftover placeholder so reconcileList owns the host.
-        if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren();
-        reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
-        lastPickerSig = pickerSig;
+      if (pickerSig !== lastPickerSig) {
+        if (selectionInside(wavList)) {
+          // A poll can go quiet (304) while this stays deferred — mark it so
+          // main.js keeps retrying instead of stranding the update once the
+          // selection clears (issue #245).
+          markDeferredRender();
+        } else {
+          // Clear any leftover placeholder so reconcileList owns the host.
+          if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren();
+          reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
+          lastPickerSig = pickerSig;
+        }
       }
       applyPickerSelection(sel?.name || "");
     } else if (pickerSig !== lastPickerSig) {
