@@ -333,6 +333,37 @@ for _exc_type in _DOMAIN_ERROR_STATUS:
     app.add_exception_handler(_exc_type, _domain_error_handler)
 
 
+def _refuse_current_or_busy(
+    recorder: Recorder,
+    *sessions: str,
+    action: str,
+    current: str | None = None,
+    hint: str = "",
+) -> None:
+    """The two-guard pre-flight the destructive session/WAV routes need:
+    refuse the CURRENT session — before the caller's `resolve_session_dir`,
+    since the live session's directory may not be materialised on disk yet
+    (rotate_session creates it lazily) — then refuse if any of `sessions`
+    has a transcribe/strip job in flight.
+
+    `current` names which of `sessions` must not be the live session;
+    defaults to the sole session when exactly one is given. Multi-session
+    callers (absorb) must pass it explicitly — absorb's target MAY be the
+    live session, only its source may not. `action` fills the current-
+    session message's verb phrase ("delete", "absorb", …); `hint` appends
+    extra guidance (absorb's rotate-then-absorb tip)."""
+    if current is None:
+        if len(sessions) != 1:
+            raise ValueError("current= is required when checking more than one session")
+        current = sessions[0]
+    if current == recorder.session_start:
+        msg = f"cannot {action} the current session — rotate to a new one first"
+        raise HTTPException(409, f"{msg}, {hint}" if hint else msg)
+    if any(recorder.jobs.get(s) is not None for s in sessions):
+        noun = "this session" if len(sessions) == 1 else "one of these sessions"
+        raise HTTPException(409, f"a transcribe or strip job is in flight on {noun}")
+
+
 # ---------------------------------------------------------------------------
 # Health + simple listings
 # ---------------------------------------------------------------------------
@@ -1190,11 +1221,8 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
     transcript-cache sidecars) to reclaim disk. KEEPS the merged
     session-transcript + session-meta. Refuses the CURRENT session and any
     session with a transcribe/strip job in flight."""
-    if session == recorder.session_start:
-        raise HTTPException(409, "cannot delete audio from the current session — rotate to a new one first")
+    _refuse_current_or_busy(recorder, session, action="delete audio from")
     resolve_session_dir(session)
-    if recorder.jobs.get(session) is not None:
-        raise HTTPException(409, "a transcribe or strip job is in flight on this session")
     # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
     # ~1 Hz /api/state poll stays responsive — same as strip-silence.
     summary = await asyncio.to_thread(delete_session_audio, session)
@@ -1229,17 +1257,16 @@ async def api_session_absorb(
         raise HTTPException(400, "source session id required")
     if source == target:
         raise HTTPException(400, "cannot absorb a session into itself")
-    if source == recorder.session_start:
-        raise HTTPException(
-            409,
-            "cannot absorb the current session — rotate to a new one first, "
-            "then absorb the now-previous folder into the target",
-        )
-    # Both sides must exist before we even look at jobs.
+    _refuse_current_or_busy(
+        recorder,
+        target,
+        source,
+        current=source,
+        action="absorb",
+        hint="then absorb the now-previous folder into the target",
+    )
     resolve_session_dir(target)
     resolve_session_dir(source)
-    if recorder.jobs.get(target) is not None or recorder.jobs.get(source) is not None:
-        raise HTTPException(409, "a transcribe or strip job is in flight on one of these sessions")
 
     summary = absorb_session(target, source)
     print(
@@ -1257,11 +1284,8 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     any session with a transcribe/strip job in flight — `rmtree`-ing the folder
     out from under a running job thread would crash it mid-write (the same guard
     the sibling /audio and /absorb endpoints enforce)."""
-    if session == recorder.session_start:
-        raise HTTPException(409, "cannot delete the current session — rotate to a new one first")
+    _refuse_current_or_busy(recorder, session, action="delete")
     session_dir = resolve_session_dir(session)
-    if recorder.jobs.get(session) is not None:
-        raise HTTPException(409, "a transcribe or strip job is in flight on this session")
     try:
         shutil.rmtree(session_dir)
     except OSError as e:
@@ -1535,11 +1559,8 @@ async def api_wav_delete(
     a transcribe/strip job in flight. An unknown `source` is rejected (400)
     by `resolve_source_dir` — the path seam owns that check; `source` itself
     is never a path component (only compared against the two literals)."""
-    if session == recorder.session_start:
-        raise HTTPException(409, "cannot delete WAVs from the current session — rotate to a new one first")
+    _refuse_current_or_busy(recorder, session, action="delete WAVs from")
     resolve_session_dir(session)
-    if recorder.jobs.get(session) is not None:
-        raise HTTPException(409, "a transcribe or strip job is in flight on this session")
     summary = await asyncio.to_thread(delete_session_wav, session, name, source)
     print(
         f"[tapscribe] deleted wav {name} ({source}) from session {session}: "

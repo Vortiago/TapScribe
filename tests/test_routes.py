@@ -1250,6 +1250,160 @@ def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_te
     assert (sd / "stripped" / "20260101T000000Z__alice__reg.wav").is_file()
 
 
+def test_delete_wav_refuses_current_session(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    cur = recorder_under_test.session_start
+    sd = seed_session(root, cur, ["20260101T000000Z__alice__abc.wav"])
+    r = client.delete(f"/api/wav/{cur}/20260101T000000Z__alice__abc.wav")
+    assert r.status_code == 409
+    assert "current session" in r.json()["detail"]
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # untouched
+
+
+def test_delete_wav_refuses_inflight_job(client, recorder_under_test):
+    from tapscribe.recorder import JobState
+
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+
+    import anyio.from_thread
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.jobs.claim,
+            JobState(
+                session="s",
+                kind="strip",
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+                status="running",
+            ),
+        )
+
+    r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav")
+    assert r.status_code == 409
+    assert "in flight" in r.json()["detail"]
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # untouched
+
+
+@pytest.mark.parametrize(
+    "make_request",
+    [
+        lambda client, cur: client.delete(f"/api/sessions/{cur}/audio"),
+        lambda client, cur: client.delete(f"/api/sessions/{cur}"),
+        lambda client, cur: client.delete(f"/api/wav/{cur}/x.wav"),
+        lambda client, cur: client.post("/api/sessions/tgt/absorb", json={"source": cur}),
+    ],
+    ids=["audio-delete", "session-delete", "wav-delete", "absorb-source"],
+)
+def test_current_session_refused_before_dir_materialised(client, recorder_under_test, make_request):
+    """The current-session guard must fire before resolve_session_dir's 404 —
+    rotate_session lazily materialises the live session's folder, so a fresh
+    current session with no directory on disk yet must still 409 (not 404)
+    on every destructive route that refuses it."""
+    cur = recorder_under_test.session_start
+    assert not (recorder_under_test.recordings_dir / cur).exists()
+    r = make_request(client, cur)
+    assert r.status_code == 409, r.text
+    assert "current session" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# _refuse_current_or_busy — the shared pre-flight guard the 4 destructive
+# session/WAV routes above delegate to (issue #256). Driven directly against
+# a real Recorder (no HTTP) so each guard combination is pinned independent
+# of any one route's wiring.
+# ---------------------------------------------------------------------------
+
+
+def test_refuse_current_or_busy_allows_when_neither_current_nor_busy(recorder_under_test):
+    from tapscribe.app import _refuse_current_or_busy
+
+    _refuse_current_or_busy(recorder_under_test, "s", action="delete")  # must not raise
+
+
+def test_refuse_current_or_busy_refuses_current_session(recorder_under_test):
+    from fastapi import HTTPException
+
+    from tapscribe.app import _refuse_current_or_busy
+
+    cur = recorder_under_test.session_start
+    with pytest.raises(HTTPException) as exc_info:
+        _refuse_current_or_busy(recorder_under_test, cur, action="delete")
+    assert exc_info.value.status_code == 409
+    assert "cannot delete the current session" in exc_info.value.detail
+
+
+def test_refuse_current_or_busy_appends_hint_after_current_session_message(recorder_under_test):
+    from fastapi import HTTPException
+
+    from tapscribe.app import _refuse_current_or_busy
+
+    cur = recorder_under_test.session_start
+    with pytest.raises(HTTPException) as exc_info:
+        _refuse_current_or_busy(
+            recorder_under_test, "tgt", cur, current=cur, action="absorb", hint="do the other thing instead"
+        )
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == (
+        "cannot absorb the current session — rotate to a new one first, do the other thing instead"
+    )
+
+
+async def test_refuse_current_or_busy_refuses_single_session_job_in_flight(recorder_under_test):
+    from fastapi import HTTPException
+
+    from tapscribe.app import _refuse_current_or_busy
+    from tapscribe.recorder import JobState
+
+    await recorder_under_test.jobs.claim(
+        JobState(session="s", kind="strip", current=0, total=1, started_at=datetime.now(UTC))
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _refuse_current_or_busy(recorder_under_test, "s", action="delete")
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "a transcribe or strip job is in flight on this session"
+
+
+async def test_refuse_current_or_busy_ors_job_check_across_multiple_sessions(recorder_under_test):
+    from fastapi import HTTPException
+
+    from tapscribe.app import _refuse_current_or_busy
+    from tapscribe.recorder import JobState
+
+    # Only "src" is busy; "tgt" is clean. Neither is the current session.
+    # The busy check must still refuse because it applies to EITHER session.
+    await recorder_under_test.jobs.claim(
+        JobState(session="src", kind="transcribe", current=0, total=1, started_at=datetime.now(UTC))
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _refuse_current_or_busy(recorder_under_test, "tgt", "src", current="src", action="absorb")
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "a transcribe or strip job is in flight on one of these sessions"
+
+
+def test_refuse_current_or_busy_target_may_be_current_source_may_not(recorder_under_test):
+    """The absorb asymmetry: passing `current=source` means the TARGET being
+    the live session is fine — only the explicitly-named `current` session
+    is refused."""
+    from tapscribe.app import _refuse_current_or_busy
+
+    cur = recorder_under_test.session_start
+    # target == current, source != current, neither busy → must not raise.
+    _refuse_current_or_busy(recorder_under_test, cur, "src", current="src", action="absorb")
+
+
+def test_refuse_current_or_busy_requires_explicit_current_for_multi_session(recorder_under_test):
+    """A future multi-session caller that forgets `current=` must fail loudly
+    (a programming error) rather than silently skip the current-session
+    guard — the exact drift risk issue #256 exists to close."""
+    from tapscribe.app import _refuse_current_or_busy
+
+    with pytest.raises(ValueError):
+        _refuse_current_or_busy(recorder_under_test, "tgt", "src", action="absorb")
+
+
 def test_delete_wav_stripped_region_only(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
@@ -2291,6 +2445,35 @@ def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
         )
     r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
     assert r.status_code == 409
+
+
+def test_absorb_refuses_busy_source_even_when_target_missing(client, recorder_under_test):
+    """`_refuse_current_or_busy` checks both sessions' jobs before either
+    `resolve_session_dir` call, so a busy source now wins 409 over a missing
+    target's 404 — a deliberate, benign flip from the pre-refactor ordering
+    (both outcomes refuse the request; only the status code differs) for
+    this one nonsensical combination."""
+    import anyio.from_thread
+
+    from tapscribe.recorder import JobState
+
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "src", [])
+    # "tgt" is deliberately never seeded.
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder_under_test.jobs.claim,
+            JobState(
+                session="src",
+                kind="transcribe",
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+            ),
+        )
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 409
+    assert "in flight" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
