@@ -10,10 +10,10 @@ from __future__ import annotations
 import io
 import json
 import sys
-import tomllib
 from pathlib import Path
 
 import pytest
+from conftest import atomic_extras
 from packaging.requirements import Requirement
 from packaging.version import Version
 
@@ -32,8 +32,6 @@ from install_picker import (  # noqa: E402
     MachineCaps,
     Selection,
 )
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _caps(*, mlx: bool = False, cuda: bool = False) -> MachineCaps:
@@ -362,7 +360,7 @@ def test_pyproject_declares_cuda_libs_extra_gated_off_macos():
     """The `cuda-libs` extra must exist and keep its non-darwin marker so
     a macOS install (no CUDA there) skips the wheels instead of failing
     to resolve them."""
-    lines = _atomic_extras(install_picker.CUDA_RUNTIME_EXTRA)
+    lines = atomic_extras(install_picker.CUDA_RUNTIME_EXTRA)
     for pkg in ("nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
         req = _requirement_for(lines, pkg)
         assert req.marker is not None, f"{pkg} in cuda-libs must stay sys_platform-gated"
@@ -1034,14 +1032,6 @@ def test_drive_picker_pre_positions_cursor_on_first_enabled_row():
 # ── pyproject extras: pip resolution regression ─────────────────────
 
 
-def _atomic_extras(extra_name: str) -> list[str]:
-    """Pull one `[project.optional-dependencies]` entry out of pyproject."""
-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    extras = data["project"]["optional-dependencies"]
-    assert extra_name in extras, f"no `{extra_name}` extra in pyproject.toml"
-    return list(extras[extra_name])
-
-
 def _requirement_for(lines: list[str], project_name: str) -> Requirement:
     for line in lines:
         req = Requirement(line)
@@ -1058,7 +1048,7 @@ def test_pyproject_whisper_mlx_admits_a_real_release():
     Silicon install that resolved the extra failed with "No matching
     distribution found". Guard against re-introducing an unsatisfiable
     floor."""
-    req = _requirement_for(_atomic_extras("whisper-mlx"), "mlx-whisper")
+    req = _requirement_for(atomic_extras("whisper-mlx"), "mlx-whisper")
     pypi_published = ["0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.4.1", "0.4.2", "0.4.3"]
     satisfying = [v for v in pypi_published if Version(v) in req.specifier]
     assert satisfying, (
@@ -1080,7 +1070,7 @@ def test_pyproject_mlx_extras_stay_platform_gated(extra_name, pkg):
     """The MLX-only atomic extras must keep their Darwin/arm64 env marker
     so pip on Linux/Windows/Intel-Mac skips them instead of erroring out
     on wheels that don't exist for those platforms."""
-    req = _requirement_for(_atomic_extras(extra_name), pkg)
+    req = _requirement_for(atomic_extras(extra_name), pkg)
     assert req.marker is not None, f"{extra_name} → {pkg} must stay sys_platform-gated"
     marker = str(req.marker)
     assert "darwin" in marker and "arm64" in marker, (
@@ -1092,7 +1082,7 @@ def test_pyproject_cpu_extras_do_not_pull_mlx_packages():
     """The whole point of splitting `whisper` into atoms: a Linux CI box
     that installs `.[whisper-cpu]` must NOT see mlx-whisper in the
     resolved set."""
-    cpu = _atomic_extras("whisper-cpu")
+    cpu = atomic_extras("whisper-cpu")
     assert not any("mlx" in line for line in cpu), cpu
 
 
@@ -1103,7 +1093,7 @@ def test_pyproject_parakeet_alias_is_mlx_only_on_apple_silicon():
     atom out on darwin+arm64 via a PEP 508 marker so a mac install doesn't
     pull transformers when MLX is the path, and the two backends never
     coexist in one resolve."""
-    parakeet_lines = _atomic_extras("parakeet")
+    parakeet_lines = atomic_extras("parakeet")
     # Exactly two marker-gated self-references: one Apple-Silicon-only,
     # one everywhere-else.
     assert len(parakeet_lines) == 2, (

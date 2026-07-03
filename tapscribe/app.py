@@ -104,7 +104,7 @@ from .setup_install import InstallSelectionError, run_install, sse, validate_sel
 from .setup_state import build_setup_state, is_first_run
 from .strip_silence import plan_strip_regions, read_wav_int16
 from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
-from .summarizers.catalog import _MAX_TOKENS_BOUNDS
+from .summarizers.catalog import MAX_TOKENS_BOUNDS
 from .tap_fan_out import TapFanOut
 from .text import (
     CONFIG_KEYS,
@@ -1143,7 +1143,7 @@ async def api_session_summarize(
     # (gate / strip-silence) — a clear 400 for out-of-range, None when omitted.
     # The adapter also clamps as a final safety net for non-route callers.
     max_tokens = _parse_bounded_int(
-        body.get("max_tokens"), "max_tokens", lo=_MAX_TOKENS_BOUNDS[0], hi=_MAX_TOKENS_BOUNDS[1]
+        body.get("max_tokens"), "max_tokens", lo=MAX_TOKENS_BOUNDS[0], hi=MAX_TOKENS_BOUNDS[1]
     )
     if max_tokens is not None:
         overrides["max_tokens"] = max_tokens

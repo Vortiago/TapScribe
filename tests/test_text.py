@@ -296,7 +296,7 @@ def test_write_summarizer_config_rejects_unknown_and_unwired_sources(tmp_config_
 def test_write_summarizer_config_rejects_non_catalog_model(tmp_config_dir, monkeypatch):
     from tapscribe.summarizers import catalog
 
-    monkeypatch.setattr(catalog, "_resolve_local_backend", lambda: "gguf")
+    monkeypatch.setattr(catalog, "resolve_local_backend", lambda: "gguf")
     with pytest.raises(ValueError):
         text.write_summarizer_config({"model": "evil/not-in-catalog"})
     assert text.read_summarizer_config()["model"] == ""
@@ -306,7 +306,7 @@ def test_write_summarizer_config_accepts_catalog_and_env_override_model(tmp_conf
     from tapscribe.summarizers import catalog
     from tapscribe.summarizers.catalog import ENV_LOCAL_GGUF_MODEL, LOCAL_GGUF_MODEL
 
-    monkeypatch.setattr(catalog, "_resolve_local_backend", lambda: "gguf")
+    monkeypatch.setattr(catalog, "resolve_local_backend", lambda: "gguf")
     assert text.write_summarizer_config({"model": LOCAL_GGUF_MODEL})["model"] == LOCAL_GGUF_MODEL
     # The operator's env override is operator-controlled, not external input.
     monkeypatch.setenv(ENV_LOCAL_GGUF_MODEL, "me/custom-gguf")

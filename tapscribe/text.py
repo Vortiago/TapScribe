@@ -220,7 +220,7 @@ def write_summarizer_config(cfg: dict) -> dict:
 
     - `source`: "" (no default) | "local" | "command" | "api".
     - `model`: "" (catalog default) or a member of the local backend's
-      catalog allowlist / env-override model (`_is_allowed_local_model`).
+      catalog allowlist / env-override model (`is_allowed_local_model`).
     - `prompt` / `command` / `base_url`: free text under the MAX_CONFIG_TEXT_LEN
       cap. `base_url` must start with http:// or https:// if non-empty.
     - `max_tokens`: None (env default) or an int within the catalog bounds.
@@ -238,21 +238,21 @@ def write_summarizer_config(cfg: dict) -> dict:
     model = str(cfg.get("model") or "").strip()
     if model:
         from .summarizers.catalog import (
-            _is_allowed_local_model,
-            _resolve_local_backend,
-            _unknown_model_message,
+            is_allowed_local_model,
+            resolve_local_backend,
+            unknown_model_message,
         )
 
-        backend = _resolve_local_backend()
-        if not _is_allowed_local_model(backend, model):
-            raise ValueError(_unknown_model_message(backend, model))
+        backend = resolve_local_backend()
+        if not is_allowed_local_model(backend, model):
+            raise ValueError(unknown_model_message(backend, model))
     max_tokens = cfg.get("max_tokens")
     if max_tokens is not None:
         if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
             raise ValueError(f"max_tokens must be an integer, got {max_tokens!r}")
-        from .summarizers.catalog import _MAX_TOKENS_BOUNDS
+        from .summarizers.catalog import MAX_TOKENS_BOUNDS
 
-        lo, hi = _MAX_TOKENS_BOUNDS
+        lo, hi = MAX_TOKENS_BOUNDS
         if not (lo <= max_tokens <= hi):
             raise ValueError(f"max_tokens must be within {lo}–{hi}, got {max_tokens}")
     # base_url: validate text cap, then scheme guard.

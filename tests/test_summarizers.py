@@ -17,7 +17,7 @@ The two channels under test:
 from __future__ import annotations
 
 import pytest
-from conftest import py_cmd  # type: ignore[import-not-found]
+from conftest import make_api_post_stub, py_cmd  # type: ignore[import-not-found]
 
 from tapscribe.summarizers import (
     ApiSummarizer,
@@ -29,11 +29,14 @@ from tapscribe.summarizers import (
 )
 from tapscribe.summarizers.base import (
     DEFAULT_SUMMARY_PROMPT,
+    SUMMARY_SYSTEM_FRAMING,
+    build_model_input,
     build_names_hint,
     fold_hint,
     resolve_prompt,
 )
 from tapscribe.summarizers.command import build_command_argv
+from tapscribe.summarizers.local import _build_local_messages
 
 # Echoes "<last argv>|<stdin>" so one command proves BOTH the prompt-as-argv and
 # the transcript-on-stdin contracts at once. The adapter appends the prompt as
@@ -248,6 +251,28 @@ def test_fold_hint_composes_base_and_hint():
     # A whitespace-only base (the command source folds a RAW, unresolved prompt)
     # counts as empty — the hint alone, not a stray leading blank line.
     assert fold_hint("   ", ["Alice Havso"]).startswith("Known people")
+
+
+def test_summary_system_framing_and_build_model_input():
+    """base.py owns the system-framing string + the transcript-join
+    convention (#261) — local.py and api.py compose from these rather than
+    each spelling their own copy."""
+    assert "meeting-summarisation assistant" in SUMMARY_SYSTEM_FRAMING
+    assert build_model_input("INSTR", "TRANSCRIPT") == "INSTR\n\n--- TRANSCRIPT ---\nTRANSCRIPT"
+
+
+def test_local_and_api_share_the_same_system_framing_no_drift():
+    """Pin against the #261 drift: both adapters must compose from base's ONE
+    constant, not their own copy that can silently diverge."""
+    msgs = _build_local_messages("T", "")
+    assert SUMMARY_SYSTEM_FRAMING in msgs[0]["content"]
+
+    rec: list[tuple] = []
+    ApiSummarizer(base_url="http://x/v1", model="m", post_fn=make_api_post_stub(rec)).summarize(
+        "T", prompt="p"
+    )
+    _, _, body = rec[0]
+    assert body["messages"][0]["content"] == SUMMARY_SYSTEM_FRAMING
 
 
 def test_command_summarizer_injects_names_into_the_prompt_argv():

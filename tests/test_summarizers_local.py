@@ -36,9 +36,31 @@ from tapscribe.summarizers import (
 
 # Internal helpers live in their submodules; import them from where they're
 # defined (the package __init__ re-exports only the public interface).
-from tapscribe.summarizers.catalog import _MAX_TOKENS_BOUNDS, _clamp_max_tokens
+from tapscribe.summarizers.catalog import MAX_TOKENS_BOUNDS, clamp_max_tokens
 from tapscribe.summarizers.local import _build_local_messages
 from tapscribe.transcribers.catalog import set_available_backends_for_testing
+
+
+def test_catalog_cross_module_names_are_public():
+    """These 10 names are consumed by local.py (9 of them) and text.py (3,
+    including the security allowlist) across the module/package boundary
+    (#262) — underscore-private was a false signal that they were safe to
+    change without checking outside catalog.py."""
+    from tapscribe.summarizers import catalog
+
+    for name in (
+        "BACKENDS",
+        "resolve_local_backend",
+        "env_model_default",
+        "is_allowed_local_model",
+        "unknown_model_message",
+        "default_max_tokens",
+        "clamp_max_tokens",
+        "backend_module_available",
+        "default_gguf_ctx",
+        "MAX_TOKENS_BOUNDS",
+    ):
+        assert hasattr(catalog, name), f"catalog.{name} should be public"
 
 
 @pytest.fixture
@@ -54,14 +76,14 @@ def extra_present(monkeypatch):
     """Pretend the `[summarize]` backend module IS importable, so a no-generate_fn
     construction doesn't fail the fast dependency probe. Deterministic regardless
     of whether this dev box happens to have mlx_lm / llama_cpp installed."""
-    monkeypatch.setattr("tapscribe.summarizers.catalog._backend_module_available", lambda backend: True)
+    monkeypatch.setattr("tapscribe.summarizers.catalog.backend_module_available", lambda backend: True)
 
 
 @pytest.fixture
 def extra_missing(monkeypatch):
     """Pretend the `[summarize]` backend module is NOT importable — the fresh-box
     case the runtime-deps step is meant to fix, and the 'degrade clearly' path."""
-    monkeypatch.setattr("tapscribe.summarizers.catalog._backend_module_available", lambda backend: False)
+    monkeypatch.setattr("tapscribe.summarizers.catalog.backend_module_available", lambda backend: False)
 
 
 # ---------------------------------------------------------------------------
@@ -137,28 +159,28 @@ def test_summary_model_catalog_shape_and_default(reset_available_backends):
     assert [m["repo_id"] for m in cat["models"] if m["is_default"]] == [LOCAL_GGUF_MODEL]
     assert {"repo_id", "label", "approx_gb", "context_tokens", "note", "is_default"} <= set(cat["models"][0])
     # The output-cap knob the dashboard's number input seeds + bounds.
-    assert cat["max_tokens_min"] == _MAX_TOKENS_BOUNDS[0]
-    assert cat["max_tokens_max"] == _MAX_TOKENS_BOUNDS[1]
-    assert _MAX_TOKENS_BOUNDS[0] <= cat["max_tokens_default"] <= _MAX_TOKENS_BOUNDS[1]
+    assert cat["max_tokens_min"] == MAX_TOKENS_BOUNDS[0]
+    assert cat["max_tokens_max"] == MAX_TOKENS_BOUNDS[1]
+    assert MAX_TOKENS_BOUNDS[0] <= cat["max_tokens_default"] <= MAX_TOKENS_BOUNDS[1]
 
 
 def test_clamp_max_tokens_bounds():
-    lo, hi = _MAX_TOKENS_BOUNDS
-    assert _clamp_max_tokens(hi + 100_000) == hi  # runaway decode capped
-    assert _clamp_max_tokens(0) == lo  # zero/negative floored
-    assert _clamp_max_tokens(lo + 1) == lo + 1  # in-range passes through
+    lo, hi = MAX_TOKENS_BOUNDS
+    assert clamp_max_tokens(hi + 100_000) == hi  # runaway decode capped
+    assert clamp_max_tokens(0) == lo  # zero/negative floored
+    assert clamp_max_tokens(lo + 1) == lo + 1  # in-range passes through
 
 
 def test_local_summarizer_clamps_caller_max_tokens(reset_available_backends):
     """A UI-supplied output cap is clamped to the env knob's bounds, so a typo in
     the number input can't ask for a runaway (or zero-length) decode."""
-    hi = _MAX_TOKENS_BOUNDS[1]
+    hi = MAX_TOKENS_BOUNDS[1]
     s = LocalSummarizer(backend="gguf", max_tokens=hi + 50_000, generate_fn=lambda t, p: "ok")
     assert s._max_tokens == hi
 
 
 def test_load_summarizer_local_threads_and_clamps_max_tokens(reset_available_backends, extra_present):
-    hi = _MAX_TOKENS_BOUNDS[1]
+    hi = MAX_TOKENS_BOUNDS[1]
     s = load_summarizer(source="local", max_tokens=hi + 1)
     assert isinstance(s, LocalSummarizer)
     assert s._max_tokens == hi

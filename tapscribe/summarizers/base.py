@@ -64,6 +64,24 @@ def build_names_hint(names: Sequence[str]) -> str:
     )
 
 
+# The system framing every adapter that talks to a chat-completions-style model
+# (local, api) prepends to the operator's instruction — folded into local's
+# single user turn (Gemma's chat template rejects a system role) or api's real
+# system message. ONE owner so the two sources can't drift on the wording.
+SUMMARY_SYSTEM_FRAMING = (
+    "You are a meeting-summarisation assistant. Read the transcript and produce a clear, "
+    "well-structured summary. Output only the summary."
+)
+
+
+def build_model_input(instruction: str, transcript: str) -> str:
+    """Join an instruction with the transcript via the ONE `--- TRANSCRIPT ---`
+    separator convention, shared by every adapter that folds the transcript
+    into the model input — the join half of the drift #261 fixed (the framing
+    string above is the other half)."""
+    return f"{instruction}\n\n--- TRANSCRIPT ---\n{transcript}"
+
+
 def fold_hint(base: str, names: Sequence[str]) -> str:
     """Compose a model instruction from a `base` instruction and the known-people
     hint for `names` — the ONE owner of the hint-join convention so the three
