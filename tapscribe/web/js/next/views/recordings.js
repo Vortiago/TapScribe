@@ -30,7 +30,7 @@
 // (files_sig / source), deferring while a control is focused or text is being
 // selected inside the list.
 
-import { tpl, pick, selectionInside, reconcileList } from "../../templates.js";
+import { tpl, pick, reconcileList, deferIfSelectionInside } from "../../templates.js";
 import { postJson, del, loadSessionFiles, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
@@ -857,13 +857,14 @@ export function build(ctx) {
     // (next.css .wavrow) so the browser skips off-screen layout/paint, and the
     // reconcile only runs when the file SET changes (files_sig / source) — never
     // on a poll tick, a job tick, or a selection (selection is applied in
-    // place). It's deferred while a control is focused or text is selected
-    // inside the list (don't advance the gate), so a mid-copy selection is
-    // never clobbered — the held render lands on the first tick after it clears.
+    // place). It's deferred while text is selected inside the list (don't
+    // advance the gate) — deferIfSelectionInside also marks the deferred-render
+    // flag, so main.js retries even if the poll goes quiet (304s) before the
+    // selection clears (issue #245).
     const listState = !sess ? "none" : filesLoading ? "loading" : files.length ? "rows" : "empty";
     const listSig = `${sid}§${src}§${filesSig}§${listState}`;
     if (listState === "rows") {
-      if (listSig !== lastListSig && !selectionInside(wavList)) {
+      if (listSig !== lastListSig && !deferIfSelectionInside(wavList)) {
         // Clear any leftover empty/loading placeholder (a non-reconcile child)
         // so reconcileList owns the host's children outright.
         if (!wavList.querySelector(".wavrow")) wavList.replaceChildren();

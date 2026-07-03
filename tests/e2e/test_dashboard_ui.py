@@ -1863,6 +1863,192 @@ async def test_dashboard_idle_polling_does_not_churn_dom(running_recorder: Runni
             await browser.close()
 
 
+# JS init script shared by the two tests below: wraps window.fetch to count
+# /api/state hits AND, separately, how many of those responses actually came
+# back 304 — the discriminator that proves the server (not just the DOM) went
+# genuinely quiet, so a flat renderAllCount across that window means the fix
+# is skipping real no-op ticks rather than getting lucky with a JSON payload
+# that happens to render identically.
+_COUNT_STATE_304S_JS = """
+window.__statePolls = 0;
+window.__state304s = 0;
+const _fetch = window.fetch;
+window.fetch = (...args) => {
+  const u = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+  const isState = u.includes('/api/state');
+  if (isState) window.__statePolls++;
+  const p = _fetch.apply(window, args);
+  if (isState) p.then((r) => { if (r.status === 304) window.__state304s++; }).catch(() => {});
+  return p;
+};
+"""
+
+
+async def test_next_idle_304_ticks_skip_render_all(running_recorder: RunningRecorder):
+    """api.js's fetchState() reuses the same cached state OBJECT on a 304
+    (issue #245). Pre-fix, main.js's tick() called renderAll() on every poll
+    regardless of that identity — recomputing the spine's O(sessions)
+    signature (metaFor spreads + per-session alias-key joins), the Sessions
+    view's listSig, and the People view's sig from scratch every ~500ms even
+    when nothing on the server changed. An always-open, otherwise-idle
+    operator tab paid that cost forever for no observable benefit.
+
+    Guard: seed two archived, non-live sessions (no active taps — a live tap's
+    changing level/lag would make the server's ETag legitimately differ every
+    poll and the state would never 304, which would make this test vacuous).
+    Confirm real 304s are landing (not just unchanged-looking JSON), snapshot
+    window.__TAPSCRIBE_RENDER_ALL_COUNT, cross several more confirmed 304s,
+    and assert the count did not move.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+
+    for sid in ("2025-03-01T10-00-00Z", "2025-03-02T10-00-00Z"):
+        d = rec.recordings_dir / sid
+        d.mkdir(parents=True)
+        synth_speech_like_wav(d / f"{sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+
+            # Boot done once both seeded sessions render as rows.
+            await page.wait_for_function(
+                "() => document.querySelectorAll('[data-sid]').length >= 2",
+                timeout=10000,
+            )
+
+            # Let a few REAL 304s land before the baseline — this settles any
+            # boot-time / model-catalog-load renders and proves the server has
+            # actually gone quiet, not merely that nothing looks different.
+            await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
+            polls_baseline = await page.evaluate("() => window.__state304s")
+            render_count_0 = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT")
+
+            # Cross several more purely-idle, confirmed-304 polls.
+            await page.wait_for_function(
+                "(base) => window.__state304s >= base + 3",
+                arg=polls_baseline,
+                timeout=10000,
+            )
+            render_count_1 = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT")
+
+            assert render_count_1 == render_count_0, (
+                f"renderAll ran {render_count_1 - render_count_0} extra time(s) across "
+                "purely-304 idle polls — tick() must skip renderAll entirely when "
+                "fetchState() returns the identical cached object and no render is "
+                "deferred (issue #245)"
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_next_deferred_render_lands_after_focus_clears_across_304_ticks(
+    running_recorder: RunningRecorder,
+):
+    """Companion to the idle-304 skip above: the skip must not strand a render
+    that renderRegion deferred to protect operator interaction state (ADR-0004
+    'Interaction hold'). If a poll changes the Sessions list's signature while
+    a row's rename <input> is focused, renderRegion defers the swap without
+    advancing its own signature gate — that's existing, unaffected behaviour.
+    What issue #245's fix must preserve: once the operator blurs the input,
+    the deferred update must still land even if EVERY poll since the deferral
+    was a plain 304 (nothing server-side changed further) — main.js must keep
+    retrying on a deferred render regardless of the state object's identity.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid_a = "2025-03-03T10-00-00Z"
+    sid_b = "2025-03-04T10-00-00Z"
+    for sid in (sid_a, sid_b):
+        d = rec.recordings_dir / sid
+        d.mkdir(parents=True)
+        synth_speech_like_wav(d / f"{sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+
+            await page.wait_for_function(
+                "() => document.querySelectorAll('[data-sid]').length >= 2",
+                timeout=10000,
+            )
+
+            # Focus session A's inline rename input — renderRegion's focus
+            # guard now covers the WHOLE sessions list host, including B's row.
+            a_rename = f'[data-sid="{sid_a}"] [data-slot="rename"]'
+            await page.click(a_rename)
+            assert await page.evaluate(
+                "(sel) => document.activeElement === document.querySelector(sel)", a_rename
+            )
+
+            # Mutate session B on disk: land a merged transcript, flipping its
+            # tx-status cell from "not run" to "merged · N seg" server-side.
+            (rec.recordings_dir / sid_b / "session-transcript.json").write_text(
+                json.dumps(
+                    {
+                        "transcribed_at": "2025-03-04T11:00:00+00:00",
+                        "segments": [{"speaker": "Alice", "text": "hello", "abs_start": sid_b}],
+                        "speakers": ["Alice"],
+                        "speaking_seconds": {"Alice": 1.0},
+                        "suppressed": [],
+                        "suppressed_count": 0,
+                        "wav_count": 1,
+                        "transcribe_ms": 10,
+                        "model": "tiny.en",
+                        "backend": "fake",
+                        "device": "cpu",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            b_tx = f'[data-sid="{sid_b}"] [data-slot="tx"]'
+            # Cross a few polls: the change is pending but blocked by A's focus.
+            await page.wait_for_timeout(1500)
+            assert (
+                await page.evaluate("(sel) => document.querySelector(sel)?.textContent", b_tx) == "not run"
+            ), (
+                "B's row updated while A's rename input was focused — renderRegion's "
+                "focus guard should have deferred the swap"
+            )
+            assert await page.evaluate(
+                "(sel) => document.activeElement === document.querySelector(sel)", a_rename
+            ), "focus was clobbered by a deferred render attempt"
+
+            # Let the state settle: no further mutations, so every poll from
+            # here on is a plain 304 — exactly the window issue #245 optimizes.
+            await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
+
+            # Release the interaction hold. The deferred update must land.
+            await page.evaluate("(sel) => document.querySelector(sel).blur()", a_rename)
+            await page.wait_for_function(
+                "(sel) => document.querySelector(sel)?.textContent?.startsWith('merged')",
+                arg=b_tx,
+                timeout=5000,
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
 # ---------------------------------------------------------------------------
 # Performance guard: state churn must not rebuild stable /next regions.
 # ---------------------------------------------------------------------------

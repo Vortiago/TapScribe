@@ -93,6 +93,35 @@ export function mount(host, frag) {
 /** @type {WeakMap<Element, string>} */
 const _regionSig = new WeakMap();
 
+// A per-tick render can be DEFERRED (skipped without advancing its signature
+// gate) to protect operator interaction state — ADR-0004 "Interaction hold".
+// main.js's tick() short-circuits its whole renderAll pass when /api/state's
+// fetchState() returns the identical cached object (a 304), since there is
+// nothing new to show — but a fetch going quiet does NOT mean an interaction
+// hold has cleared. Without this flag, a render deferred while a control was
+// focused would never get retried once the server stopped changing, stranding
+// it even after the operator released focus/the selection. Every gate that
+// defers a render for that reason marks this — renderRegion below, and
+// deferIfSelectionInside (also below) for the bespoke gates that can't route
+// through renderRegion (recordings.js/transcript.js/active-taps.js/
+// live-feed.js); main.js consumes it right before a retry so a render that
+// lands this pass doesn't force another retry next tick.
+let _deferredRender = false;
+
+/** Mark that a render was skipped to protect operator interaction state and
+ * must be retried once it ends. */
+export function markDeferredRender() {
+  _deferredRender = true;
+}
+
+/** Read and clear the deferred-render flag in one step, so a caller can tell
+ * whether a retry is owed without racing a render that sets it again. */
+export function consumeDeferredRender() {
+  const had = _deferredRender;
+  _deferredRender = false;
+  return had;
+}
+
 // Dev/test only. Re-runs `build` into a detached probe and compares to what the
 // region currently shows; a mismatch means `sig` is missing a dependency the
 // render reads, so the region would silently go stale. Records to
@@ -145,6 +174,20 @@ export function selectionInside(host) {
 }
 
 /**
+ * `selectionInside(host)` plus marking the deferred-render flag in one step —
+ * the shape every per-tick gate that can't route through renderRegion needs
+ * (recordings.js/transcript.js's WAV lists, active-taps.js, live-feed.js), so
+ * a future bespoke gate has one call to make, not two to remember. Returns
+ * true when the render must be held back.
+ * @param {Element} host
+ */
+export function deferIfSelectionInside(host) {
+  if (!selectionInside(host)) return false;
+  markDeferredRender();
+  return true;
+}
+
+/**
  * Render `build()`'s output into `host` WITHOUT clobbering live interaction.
  * The dashboard re-renders every poll; replacing a node that holds an open
  * <select>, a focused input, or a mid-edit textarea would snap it shut — and
@@ -167,8 +210,11 @@ export function selectionInside(host) {
 export function renderRegion(host, build, opts = {}) {
   if (!opts.force) {
     const active = document.activeElement;
-    if (active && active !== document.body && host.contains(active) && _isInteractive(active)) return;
-    if (selectionInside(host)) return;
+    const focused = !!active && active !== document.body && host.contains(active) && _isInteractive(active);
+    if (focused || selectionInside(host)) {
+      markDeferredRender();
+      return;
+    }
     if (opts.sig != null && _regionSig.get(host) === opts.sig) {
       if (globalThis.__TAPSCRIBE_SIG_AUDIT) _auditSigCoversOutput(host, build, opts.sig);
       return;

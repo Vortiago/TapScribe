@@ -18,7 +18,7 @@
 //     meeting. A clean shifted-prefix appends only the new tail; anything else
 //     falls back to a full rebuild. Appending also preserves text selection.
 
-import { tpl, mount, pick, selectionInside } from "../templates.js";
+import { tpl, mount, pick, deferIfSelectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtClock } from "../formatters.js";
 
@@ -236,8 +236,10 @@ export function render(j, { countEl, shell, autoscrollEl, sessionId, isCurrent }
   // continuation grows the tail sentence (key change → no clean shift →
   // full replaceChildren) and a saturated deque drops head rows — both
   // dissolve the selection. Placed BEFORE lastSig/forceNext are consumed so
-  // the deferred update retries on the next tick after release.
-  if (selectionInside(body)) return;
+  // the deferred update retries on the next tick after release
+  // (deferIfSelectionInside also marks the deferred-render flag, so main.js
+  // retries even if the poll goes quiet — 304s — in between; issue #245).
+  if (deferIfSelectionInside(body)) return;
 
   // Coalesce fragments → one row per sentence; the count reflects what's drawn.
   const groups = groupFeed(feed);

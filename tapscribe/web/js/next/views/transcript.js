@@ -19,7 +19,7 @@
 // clobbered). The engine panel is rebuilt by main on engine state changes
 // (rebuildEngine).
 
-import { tpl, pick, renderRegion, markRegionStale, reconcileList, selectionInside } from "../../templates.js";
+import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside } from "../../templates.js";
 import { postJson, putJson, sessionTranscript, loadSessionFiles } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -644,14 +644,16 @@ export function build(ctx) {
     // ---- Per-WAV picker LIST (own gate) -------------------------------------
     // Keyed reconcile gated on the file SET + inflight; content-visibility on
     // the rows (next.css .wavrow) skips off-screen layout/paint; selection is
-    // applied in place. Deferred while a control is focused or text is selected
-    // inside the list (don't advance the gate). The empty / loading placeholder
-    // is gated the same way so it isn't re-set each tick.
+    // applied in place. Deferred while text is selected inside the list (don't
+    // advance the gate) — deferIfSelectionInside also marks the deferred-render
+    // flag, so main.js retries even if the poll goes quiet (304s) before the
+    // selection clears (issue #245). The empty / loading placeholder is gated
+    // the same way so it isn't re-set each tick.
     const inflightSig = [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(",");
     const pickState = !sess ? "none" : filesLoading ? "loading" : srcFiles.length ? "rows" : "empty";
     const pickerSig = [pickState, sid, src, filesSig, inflightSig].join("§");
     if (pickState === "rows") {
-      if (pickerSig !== lastPickerSig && !selectionInside(wavList)) {
+      if (pickerSig !== lastPickerSig && !deferIfSelectionInside(wavList)) {
         // Clear any leftover placeholder so reconcileList owns the host.
         if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren();
         reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
