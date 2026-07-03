@@ -472,15 +472,7 @@ def test_resume_transfers_ownership_to_the_resuming_connection(tmp_path: Path):
     idx = UtteranceIndex()
     wav = tmp_path / "u1.wav"
     wav.write_bytes(b"RIFF")  # try_resume checks the file still exists
-    a = UtteranceRecord(
-        utterance_id="u1",
-        identity="alice",
-        name="Alice",
-        filename="u1.wav",
-        path=wav,
-        started_at=datetime.now(UTC),
-        owner="conn-a",
-    )
+    a = _utt_record("u1", owner="conn-a", session_dir=tmp_path)  # path == wav
     idx.register_new(a)
     idx.release("u1", owner="conn-a", bytes_received=100, kept=True)
     # A reconnect resumes the same utterance_id; the resuming connection takes

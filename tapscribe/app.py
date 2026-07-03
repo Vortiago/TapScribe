@@ -600,9 +600,8 @@ def _build_state_blob(
 async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
-    # WAVs a recording tap is actively writing: their on-disk size grows every
-    # tick, so keep it out of files_sig (see gather_sessions / _files_signature)
-    # to avoid a per-tick files/peaks refetch during capture.
+    # Filenames of recording taps — forwarded so a growing open WAV stays out
+    # of files_sig (rationale in _build_state_blob / _files_signature).
     open_wavs = {s.filename for s in active_streams if s.record and s.filename}
     blob = await asyncio.to_thread(_build_state_blob, recorder.session_start, jobs_snapshot, open_wavs)
     prompt = blob["prompt"]
