@@ -59,15 +59,54 @@ job.
 - Tests for new pure helpers; the test suite is deliberately scoped to
   things that don't require a model to load.
 
-## Adding a model backend
+## Adding a model
 
-Add a new adapter module under `tapscribe/transcribers/` exposing a class
-that satisfies the `Transcriber` Protocol (see
-`tapscribe/transcribers/base.py`): `name`, `device`, `model_name`, and
-`transcribe(path, *, initial_prompt, hotwords) -> TranscriptionResult`.
-Wire a dispatch branch into `_build_transcriber` in
-`tapscribe/transcribers/__init__.py`. The factory caches per
-`(model_name, use_mlx)` automatically.
+Models are declared in the `TranscriberRegistry` — the single source of
+truth in `tapscribe/transcribers/catalog.py` (ADR-0003). There is no
+hand-written dispatch to touch: the factory `load_transcriber(model_name,
+*, backend)` resolves everything from the registry.
+
+Adding a model that fits an existing family (e.g. another Whisper size)
+is **one new `ModelEntry`** in `_DEFAULT_ENTRIES`:
+
+```python
+ModelEntry(
+    model_id="voxtral-mini",          # canonical short name (the API/config value)
+    family="voxtral",                 # drives the dashboard <optgroup>
+    display_name="voxtral-mini",
+    description="Mistral Voxtral 3B · 8 langs · no Norwegian",
+    languages=("en", "es", "fr", ...),  # ISO codes, or ("auto",) for auto-detect
+    contexts=_BATCH_ONLY,             # "batch" / "live" — gates which picker shows it
+    backends=_VOXTRAL_BACKENDS,       # a shared bindings tuple (below)
+    inputs=NO_INPUTS,                 # per-model form fields the dashboard renders
+),
+```
+
+Adding a whole new **family** additionally needs an adapter and its
+bindings, both reusable across every model in the family:
+
+1. Write the adapter loader under `tapscribe/transcribers/` — a class
+   satisfying the `Transcriber` Protocol (`tapscribe/transcribers/base.py`):
+   `name`, `device`, `model_name`, `backend`, and
+   `transcribe(path, *, initial_prompt, hotwords, source_lang, target_lang)
+   -> TranscriptionResult`.
+2. Add one `BackendBinding` per hardware kind it serves — each pairs a
+   `kinds` set (`{"cpu", "cuda"}`, `{"mlx"}`, …) with a `loader(model_id,
+   kind)` thunk and a `probe_module` (the top-level import that signals the
+   dependency is installed, so `/api/models` can hide unavailable families):
+
+   ```python
+   _PARAKEET_BACKENDS = (
+       BackendBinding(kinds=frozenset({"mlx"}), loader=_load_parakeet_mlx, probe_module="parakeet_mlx"),
+       BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_parakeet_hf, probe_module="transformers"),
+   )
+   ```
+
+`resolve()` walks an entry's `backends` in order and picks the first
+binding whose `kinds` contains the resolved `BackendKind`; the factory
+caches per `(model_id, backend)`. See `docs/adr/0003-transcriber-registry.md`
+for the rationale, and pin any version-volatile upstream symbol with an
+`importorskip`-gated smoke test (see the convention in `CLAUDE.md`).
 
 ## Reporting issues
 

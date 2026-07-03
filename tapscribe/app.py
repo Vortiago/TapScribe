@@ -367,9 +367,13 @@ async def healthz(recorder: Recorder = Depends(get_recorder)):
 @app.get("/sessions")
 async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
     """Legacy simple listing."""
+    active_streams = await recorder.streams.snapshot()
     return gather_sessions(
         current_session=recorder.session_start,
         jobs={k: asdict(v) for k, v in recorder.jobs.snapshot().items()},
+        # Same open-WAV masking as /api/state so files_sig stays consistent
+        # across the two endpoints during a recording.
+        open_wavs={s.filename for s in active_streams if s.record and s.filename},
     )
 
 
@@ -567,14 +571,21 @@ async def api_tap_pipeline_poll(session: str, recorder: Recorder = Depends(get_r
 # ---------------------------------------------------------------------------
 
 
-def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> dict[str, Any]:
+def _build_state_blob(
+    current_session: str, jobs_snapshot: dict[str, Any], open_wavs: set[str]
+) -> dict[str, Any]:
     """The blocking, disk-bound half of /api/state: walk every session +
     WAV (gather_sessions) and read the editable config files. Pulled into
     one function so api_state can run it on a worker thread — left inline
     it would block the single event loop for the duration of the walk and
-    serialise the operator's click POSTs behind the poll."""
+    serialise the operator's click POSTs behind the poll.
+
+    `open_wavs` (filenames of currently-recording taps) is forwarded so a
+    growing in-progress WAV's size stays out of each session's files_sig —
+    otherwise capture would flip the signature ~2 Hz and drive a per-tick
+    files/peaks refetch."""
     return {
-        "sessions": gather_sessions(current_session=current_session, jobs=jobs_snapshot),
+        "sessions": gather_sessions(current_session=current_session, jobs=jobs_snapshot, open_wavs=open_wavs),
         "prompt": read_config("prompt"),
         "live_prompt": read_config("live-prompt"),
         "live_model_default": read_config("live-model"),
@@ -593,7 +604,10 @@ def _build_state_blob(current_session: str, jobs_snapshot: dict[str, Any]) -> di
 async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
-    blob = await asyncio.to_thread(_build_state_blob, recorder.session_start, jobs_snapshot)
+    # Filenames of recording taps — forwarded so a growing open WAV stays out
+    # of files_sig (rationale in _build_state_blob / _files_signature).
+    open_wavs = {s.filename for s in active_streams if s.record and s.filename}
+    blob = await asyncio.to_thread(_build_state_blob, recorder.session_start, jobs_snapshot, open_wavs)
     prompt = blob["prompt"]
     live_prompt = blob["live_prompt"]
     hotwords = blob["hotwords"]

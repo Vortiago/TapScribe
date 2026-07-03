@@ -66,6 +66,34 @@ def test_describe_wav_caches_until_wav_changes(tmp_path: Path, monkeypatch: pyte
     assert d3["duration_s"] != d1["duration_s"]
 
 
+def test_files_sig_ignores_the_growing_size_of_an_open_wav(tmp_path: Path):
+    """During capture a recording WAV's on-disk size grows every ~0.5s tick.
+    If that size fed files_sig, the dashboard would refetch GET /files (and the
+    peaks endpoint) ~2 Hz for the whole meeting. An OPEN wav's size must not
+    move the signature; the finalized size — once the tap closes and the wav
+    leaves the open set — is what flips it, exactly once."""
+    sd = tmp_path / "20260101T010000Z"
+    sd.mkdir()
+    wav = seed_wav(sd / "20260101T010000Z__alice__abc.wav")
+    name = wav.name
+
+    sig_open = sessions._describe_session(sd, jobs={}, current_session=sd.name, open_wavs={name})["files_sig"]
+
+    # The tap keeps recording: the WAV grows on disk.
+    seed_wav(wav, seconds=3.0)
+    sig_open_grown = sessions._describe_session(sd, jobs={}, current_session=sd.name, open_wavs={name})[
+        "files_sig"
+    ]
+    assert sig_open_grown == sig_open, "an open WAV's growing size must not flip files_sig"
+
+    # Once the utterance closes (wav leaves the open set) its final size IS
+    # folded in, so the dashboard refetches the listing exactly once.
+    sig_closed = sessions._describe_session(sd, jobs={}, current_session=sd.name, open_wavs=set())[
+        "files_sig"
+    ]
+    assert sig_closed != sig_open, "a closed WAV's final size must flip files_sig once"
+
+
 def test_describe_wav_regions_mutation_does_not_pollute_cache(tmp_path: Path):
     w = seed_wav(tmp_path / "20260101T010000Z__alice__abc.wav")
     d1 = sessions._describe_wav(w)

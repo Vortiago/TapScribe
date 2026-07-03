@@ -174,8 +174,8 @@ async def test_pipeline_record_overwritten_on_next_trigger(recorder_under_test, 
     ("configured", "expected"),
     [
         ("tiny.en", "tiny.en"),  # operator default, catalog-listed → used
-        ("", "small.en"),  # unset → bundled default
-        ("evil/repo", "small.en"),  # not in the catalog → never reaches a loader
+        ("", "large-v3-turbo"),  # unset → bundled default (multilingual, ADR-0010)
+        ("evil/repo", "large-v3-turbo"),  # not in the catalog → never reaches a loader
     ],
 )
 async def test_pipeline_resolves_model_from_batch_model_config_else_default(

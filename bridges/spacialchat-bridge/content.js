@@ -672,8 +672,10 @@
 
   // Begin the End-meeting teardown. Idempotent: a stale/duplicate request
   // (or one with no active meeting) is a no-op. Closes every open channel
-  // through the existing Drain-on-mute path — muting each first so no fresh
-  // utterance starts mid-teardown — then waits for the close-all barrier.
+  // through the existing Drain-on-mute path — fresh utterances mid-teardown
+  // are blocked by the endingSessionId gate in the "pcm" handler, so we do
+  // NOT force-mute here (that would corrupt the platform mute mirror
+  // finishEndMeeting preserves) — then waits for the close-all barrier.
   function endMeeting() {
     if (!meetingSessionId || endingSessionId) return;
     endingSessionId = meetingSessionId;
@@ -681,7 +683,13 @@
     console.log("[tapscribe-bridge] end meeting " + endingSessionId +
       "; draining " + channels.size + " channel(s)");
     for (const [identity, ch] of channels) {
-      ch.muted = true; // stop the PCM path starting a new utterance mid-teardown
+      // Don't force ch.muted here: it mirrors the platform's TRUE mute state,
+      // and finishEndMeeting preserves that mirror so a still-muted speaker
+      // stays gated after End (forcing it true would also gate a speaker who
+      // is still talking). New utterances mid-teardown are already blocked by
+      // the endingSessionId gate in the "pcm" handler, and the reconnect ladder
+      // gates on utteranceId/draining — not on ch.muted — so the drain still
+      // finishes.
       endUtterance(identity, ch, "meeting ended");
     }
     publishStatus();
@@ -711,9 +719,24 @@
   function finishEndMeeting() {
     const sessionId = endingSessionId;
     endingSessionId = null;
-    // The meeting's taps are all closed; drop them so a later speaker starts
-    // a fresh channel routed to the global Session.
-    channels.clear();
+    // The meeting's taps are all closed. Reset each channel to a fresh,
+    // meeting-less state so a later speaker starts a new utterance routed to
+    // the global Session — but PRESERVE each channel's true mute state (and
+    // name). A speaker muted at End keeps emitting worklet PCM; the old
+    // channels.clear() dropped that mute, so the silence sailed past the pcm
+    // gate and opened a ghost tap into the global Session. A departed speaker
+    // (tap-stop → stopped) is dropped so a rejoin starts clean.
+    for (const [identity, ch] of channels) {
+      if (ch.stopped) {
+        channels.delete(identity);
+        continue;
+      }
+      resetUtteranceState(ch); // clears utteranceId/sessionId(→global)/buffer/timers
+      ch.framesSent = 0;
+      ch.bytesSent = 0;
+      ch.error = null;
+      // ch.muted (true platform state) and ch.name are deliberately preserved.
+    }
     // Routing falls back to the global Session now: clear the IN-MEMORY id so
     // new utterances carry no session param. But KEEP the stored
     // meetingSessionId — it's the popup card's durable poll target (it polls

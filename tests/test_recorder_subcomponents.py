@@ -21,6 +21,8 @@ from tapscribe.recorder import (
     LiveTranscripts,
     SecretFile,
     SessionBusy,
+    UtteranceIndex,
+    UtteranceRecord,
 )
 
 # ---------------------------------------------------------------------------
@@ -398,3 +400,85 @@ def test_secret_file_rotate_generates_new_distinct_value(tmp_path: Path, label: 
     s.rotate()
     assert s.value != original
     assert f.read_text(encoding="utf-8").strip() == s.value
+
+
+# ---------------------------------------------------------------------------
+# UtteranceIndex — ownership under overlapping same-utterance_id connections
+# ---------------------------------------------------------------------------
+#
+# The bridge keeps utterance_id stable across reconnects, so two /tap WSes can
+# briefly carry the SAME utterance_id — e.g. a fast reconnect fires before the
+# server has seen the old WS close. Each open tap is one owner; the index must
+# keep the two owners' records from clobbering each other, or the zombie's
+# close corrupts the live successor (stomped byte count, deleted stream row,
+# and — via a later resume — a truncated WAV still being written).
+
+
+def _utt_record(uid, *, owner, identity="alice", session_dir=Path("/s"), bytes_received=0):
+    return UtteranceRecord(
+        utterance_id=uid,
+        identity=identity,
+        name="Alice",
+        filename=f"{uid}.wav",
+        path=session_dir / f"{uid}.wav",
+        started_at=datetime.now(UTC),
+        bytes_received=bytes_received,
+        owner=owner,
+    )
+
+
+def test_register_new_refuses_to_clobber_an_open_record_from_another_owner():
+    idx = UtteranceIndex()
+    a = _utt_record("u1", owner="conn-a")
+    assert idx.register_new(a) is True
+    # A second tap opens the SAME utterance_id while A is still open. It must
+    # not evict A's record from the index.
+    b = _utt_record("u1", owner="conn-b")
+    assert idx.register_new(b) is False
+    assert idx.snapshot()["u1"] is a
+
+
+def test_foreign_release_does_not_touch_a_live_record():
+    idx = UtteranceIndex()
+    a = _utt_record("u1", owner="conn-a", bytes_received=0)
+    idx.register_new(a)
+    # B overlapped (and was refused, so it is un-indexed) then closes first.
+    # B's release must NOT stomp A's still-open record.
+    idx.release("u1", owner="conn-b", bytes_received=999, kept=True)
+    still = idx.snapshot()["u1"]
+    assert still is a
+    assert still.open is True
+    assert still.bytes_received == 0
+    # A's own release then closes A correctly.
+    idx.release("u1", owner="conn-a", bytes_received=512, kept=True)
+    closed = idx.snapshot()["u1"]
+    assert closed.open is False
+    assert closed.bytes_received == 512
+
+
+def test_foreign_empty_release_does_not_pop_a_live_record():
+    idx = UtteranceIndex()
+    a = _utt_record("u1", owner="conn-a")
+    idx.register_new(a)
+    # A foreign not-kept release (empty WAV on the other connection) must not
+    # pop A's entry out from under it.
+    idx.release("u1", owner="conn-b", bytes_received=0, kept=False)
+    assert "u1" in idx.snapshot()
+    idx.release("u1", owner="conn-a", bytes_received=0, kept=False)
+    assert "u1" not in idx.snapshot()
+
+
+def test_resume_transfers_ownership_to_the_resuming_connection(tmp_path: Path):
+    idx = UtteranceIndex()
+    wav = tmp_path / "u1.wav"
+    wav.write_bytes(b"RIFF")  # try_resume checks the file still exists
+    a = _utt_record("u1", owner="conn-a", session_dir=tmp_path)  # path == wav
+    idx.register_new(a)
+    idx.release("u1", owner="conn-a", bytes_received=100, kept=True)
+    # A reconnect resumes the same utterance_id; the resuming connection takes
+    # ownership so a stale reference from conn-a can no longer mutate it.
+    resumed = idx.try_resume("u1", identity="alice", session_dir=tmp_path, owner="conn-b")
+    assert resumed is a
+    assert resumed.owner == "conn-b"
+    idx.release("u1", owner="conn-a", bytes_received=7, kept=True)  # stale, ignored
+    assert idx.snapshot()["u1"].bytes_received == 100

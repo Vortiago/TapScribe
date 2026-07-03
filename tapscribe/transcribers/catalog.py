@@ -761,7 +761,14 @@ REGISTRY: TranscriberRegistry = TranscriberRegistry(_DEFAULT_ENTRIES)
 # the request body nor the operator's batch-model.txt default names one. The
 # single source the /api/transcribe* routes and the end-of-meeting pipeline
 # all resolve through.
-DEFAULT_BATCH_MODEL: str = "small.en"
+#
+# Multilingual by design (ADR-0010): the default SpecialistRoutingSelector
+# routes by the generalist's DETECTED language, so an English-only default
+# would always report "en" and the Norwegian specialist would never fire —
+# da AND no would both silently fall back to English on a zero-config install.
+# `large-v3-turbo` is the generalist ADR-0010 names; its weights download on
+# the first transcribe (not at install).
+DEFAULT_BATCH_MODEL: str = "large-v3-turbo"
 
 
 @functools.lru_cache(maxsize=1)

@@ -12,6 +12,7 @@ import pytest
 
 from tapscribe.transcribers.base import SelectInput, TextInput
 from tapscribe.transcribers.catalog import (
+    DEFAULT_BATCH_MODEL,
     REGISTRY,
     BackendBinding,
     ModelEntry,
@@ -21,6 +22,21 @@ from tapscribe.transcribers.catalog import (
     set_available_backends_for_testing,
     set_installed_modules_for_testing,
 )
+
+
+def test_default_batch_model_is_multilingual():
+    """ADR-0010: the fresh-install generalist must be multilingual. The default
+    SpecialistRoutingSelector routes by the generalist's DETECTED language, so
+    an English-only default always reports "en" and the Norwegian specialist
+    never fires — da AND no would both silently fall back to English,
+    contradicting the zero-config da/no/en promise. Assert the default can
+    auto-detect language rather than pinning a specific model id."""
+    entry = REGISTRY.get(DEFAULT_BATCH_MODEL)
+    assert entry is not None, "the bundled default must be a real catalog model"
+    assert entry.languages == ("auto",), (
+        f"default batch model {DEFAULT_BATCH_MODEL!r} must auto-detect language "
+        f"(multilingual), got languages={entry.languages}"
+    )
 
 
 @pytest.fixture(autouse=True)

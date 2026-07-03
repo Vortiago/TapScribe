@@ -588,7 +588,9 @@ def build_session_files(
     return wavs, _stripped_summary(stripped_root, region_buckets)
 
 
-def _files_signature(wavs: list[dict[str, Any]], stripped: dict[str, Any] | None) -> str:
+def _files_signature(
+    wavs: list[dict[str, Any]], stripped: dict[str, Any] | None, open_wavs: set[str] | None = None
+) -> str:
     """Deterministic digest of a session's file listing. Flips whenever a WAV
     (or a stripped region) is added / removed / re-recorded, a transcript is
     (re)written, or the strip output changes — every field the dashboard's WAV
@@ -601,9 +603,18 @@ def _files_signature(wavs: list[dict[str, Any]], stripped: dict[str, Any] | None
     cached list reconnects without a needless refetch, and never misses one.
     Returns "" for a session with no files at all, which is the dashboard's cue
     to render an empty list WITHOUT fetching the listing (the same contract as a
-    not-yet-materialised session)."""
+    not-yet-materialised session).
+
+    `open_wavs` is the set of WAV filenames a tap is actively writing right now.
+    A recording WAV's on-disk size grows every poll tick, so folding it in would
+    flip this signature ~2 Hz for the whole meeting and make the dashboard
+    refetch GET /files (and the peaks endpoint) on every tick. For an open WAV we
+    substitute a stable placeholder for its size; the finalized size folds in
+    once the tap closes and the WAV leaves the open set — flipping the signature
+    exactly once. Mirrors the spine's deliberate duration-exclusion."""
     if not wavs and not stripped:
         return ""
+    open_wavs = open_wavs or set()
     # A plain content checksum, NOT a security digest — usedforsecurity=False
     # says so (and satisfies bandit B324, which flags bare sha1 as weak crypto).
     h = hashlib.sha1(usedforsecurity=False)
@@ -618,7 +629,8 @@ def _files_signature(wavs: list[dict[str, Any]], stripped: dict[str, Any] | None
         # The PRIMARY transcript stamp covers re-transcribes; the variant COUNT
         # covers a non-primary cached variant being added/removed without moving
         # the primary (the Transcript stage's cache panel lists every variant).
-        feed("w", w["name"], w["size"], tx.get("transcribed_at") or "", len(w.get("transcripts") or []))
+        size = "OPEN" if w["name"] in open_wavs else w["size"]
+        feed("w", w["name"], size, tx.get("transcribed_at") or "", len(w.get("transcripts") or []))
         for r in w.get("regions") or []:
             rtx = r.get("transcript") or {}
             feed("r", r["name"], r["size"], rtx.get("transcribed_at") or "", len(r.get("transcripts") or []))
@@ -643,12 +655,17 @@ def _describe_session(
     jobs: dict[str, Any],
     current_session: str,
     visited: set[str] | None = None,
+    open_wavs: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build one entry for the dashboard's session list from `sd`.
 
     `visited`, when supplied by `gather_sessions`, accumulates the str(path)
     of every WAV described so the per-WAV cache can be pruned to the on-disk
-    set after the walk. Direct callers (tests) may omit it."""
+    set after the walk. Direct callers (tests) may omit it.
+
+    `open_wavs` is the set of WAV filenames a tap is currently recording; their
+    growing size is kept out of `files_sig` so capture doesn't drive a per-tick
+    files refetch (see `_files_signature`)."""
     wavs, stripped = build_session_files(sd, visited=visited)
     starts = [parse_wav_start(w["name"]) for w in wavs]
     starts = [s for s in starts if s is not None]
@@ -672,7 +689,7 @@ def _describe_session(
         # derive here since we already have the descriptors; sorted for a stable
         # poll signature.
         "speakers": sorted({w["speaker_name"] for w in wavs if w.get("speaker_name")}),
-        "files_sig": _files_signature(wavs, stripped),
+        "files_sig": _files_signature(wavs, stripped, open_wavs),
         "is_current": sd.name == current_session,
         "earliest_iso": earliest.isoformat() if earliest else None,
         "latest_iso": latest.isoformat() if latest else None,
@@ -697,7 +714,12 @@ def _describe_session(
     }
 
 
-def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def gather_sessions(
+    *,
+    current_session: str,
+    jobs: dict[str, Any] | None = None,
+    open_wavs: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Walk RECORDINGS_DIR and produce the dashboard's session list.
 
     `current_session` is the running Recorder's session ID — used to flag
@@ -707,6 +729,10 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
     `jobs` is an optional dict of session_id → job_state-dict produced by
     `recorder.jobs.snapshot()`. When present, the matching entries on each
     session get a `progress` field.
+
+    `open_wavs` is the set of WAV filenames currently being recorded; their
+    growing size is excluded from each session's `files_sig` so an in-progress
+    utterance doesn't drive a per-tick files refetch (see `_files_signature`).
     """
     jobs = jobs or {}
     out: list[dict[str, Any]] = []
@@ -720,7 +746,15 @@ def gather_sessions(*, current_session: str, jobs: dict[str, Any] | None = None)
         visited_session_jsons.add(str(sd / FILENAME_TRANSCRIPT_JSON))
         visited_session_jsons.add(str(sd / FILENAME_SUMMARY_JSON))
         visited_session_jsons.add(str(sd / DIRNAME_STRIPPED / FILENAME_STRIP_META_JSON))
-        out.append(_describe_session(sd, jobs=jobs, current_session=current_session, visited=visited_wavs))
+        out.append(
+            _describe_session(
+                sd,
+                jobs=jobs,
+                current_session=current_session,
+                visited=visited_wavs,
+                open_wavs=open_wavs,
+            )
+        )
 
     # Prune the poll caches down to what this walk actually saw so deleted
     # sessions/WAVs don't pin descriptors for the process lifetime.

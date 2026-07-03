@@ -170,7 +170,8 @@ sequenceDiagram
 
 | Model | Backend | Languages | Notes |
 |---|---|---|---|
-| `tiny.en` / `small.en` / `medium.en` | mlx-whisper (AS) / faster-whisper | English | `small.en` is the default. |
+| `tiny.en` / `small.en` / `medium.en` | mlx-whisper (AS) / faster-whisper | English | Fast English-only models. |
+| `large-v3-turbo` | mlx-whisper (AS) / faster-whisper | Multilingual | The default generalist (ADR-0010) — multilingual so da/no auto-detect works. |
 | `large-v3` | mlx-whisper (AS) / faster-whisper | Multilingual | MLX or CUDA; CPU is slow. |
 | `nb-whisper-medium` / `nb-whisper-large` | faster-whisper on CT2 weights | Norwegian | Pulled from `NbAiLab/nb-whisper-*/ct2/`. No MLX. |
 | `voxtral-mini` | HF transformers | EN/ES/FR/PT/HI/DE/NL/IT | First load downloads ~6 GB. Best on CUDA. |
