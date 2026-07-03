@@ -2,7 +2,7 @@
 // Active taps panel — one row per live audio source the recorder is
 // currently receiving bytes from.
 
-import { tpl, mount, pick, selectionInside, markDeferredRender } from "../templates.js";
+import { tpl, mount, pick, deferIfSelectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
 
@@ -123,13 +123,10 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
   // rewrites textContent unconditionally each tick, and assigning textContent
   // replaces the text node — dissolving a selection even when the value is
   // unchanged. Same interaction-state rule as renderRegion's guards; updates
-  // resume on the first tick after the selection clears. main.js's poll can go
-  // quiet (304) while this stays deferred, so mark it — otherwise the update
-  // would be stranded once the selection clears (issue #245).
-  if (selectionInside(bodyEl)) {
-    markDeferredRender();
-    return;
-  }
+  // resume on the first tick after the selection clears (deferIfSelectionInside
+  // also marks the deferred-render flag, so main.js retries even if the poll
+  // goes quiet — 304s — in between; issue #245).
+  if (deferIfSelectionInside(bodyEl)) return;
 
   let st = _state.get(bodyEl);
   if (!st) {

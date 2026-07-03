@@ -101,10 +101,11 @@ const _regionSig = new WeakMap();
 // hold has cleared. Without this flag, a render deferred while a control was
 // focused would never get retried once the server stopped changing, stranding
 // it even after the operator released focus/the selection. Every gate that
-// defers a render for that reason (renderRegion below, plus the bespoke
-// selectionInside(...) gates in recordings.js/transcript.js/active-taps.js/
-// live-feed.js) marks this; main.js consumes it right before a retry so a
-// render that lands this pass doesn't force another retry next tick.
+// defers a render for that reason marks this — renderRegion below, and
+// deferIfSelectionInside (also below) for the bespoke gates that can't route
+// through renderRegion (recordings.js/transcript.js/active-taps.js/
+// live-feed.js); main.js consumes it right before a retry so a render that
+// lands this pass doesn't force another retry next tick.
 let _deferredRender = false;
 
 /** Mark that a render was skipped to protect operator interaction state and
@@ -173,6 +174,20 @@ export function selectionInside(host) {
 }
 
 /**
+ * `selectionInside(host)` plus marking the deferred-render flag in one step —
+ * the shape every per-tick gate that can't route through renderRegion needs
+ * (recordings.js/transcript.js's WAV lists, active-taps.js, live-feed.js), so
+ * a future bespoke gate has one call to make, not two to remember. Returns
+ * true when the render must be held back.
+ * @param {Element} host
+ */
+export function deferIfSelectionInside(host) {
+  if (!selectionInside(host)) return false;
+  markDeferredRender();
+  return true;
+}
+
+/**
  * Render `build()`'s output into `host` WITHOUT clobbering live interaction.
  * The dashboard re-renders every poll; replacing a node that holds an open
  * <select>, a focused input, or a mid-edit textarea would snap it shut — and
@@ -195,11 +210,8 @@ export function selectionInside(host) {
 export function renderRegion(host, build, opts = {}) {
   if (!opts.force) {
     const active = document.activeElement;
-    if (active && active !== document.body && host.contains(active) && _isInteractive(active)) {
-      markDeferredRender();
-      return;
-    }
-    if (selectionInside(host)) {
+    const focused = !!active && active !== document.body && host.contains(active) && _isInteractive(active);
+    if (focused || selectionInside(host)) {
       markDeferredRender();
       return;
     }
