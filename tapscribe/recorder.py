@@ -427,6 +427,12 @@ class UtteranceRecord:
     bytes_received: int = 0
     open: bool = False
     last_close: datetime | None = None
+    # The /tap connection that currently owns this record — a fresh token per
+    # TapFanOut. The bridge keeps utterance_id stable across reconnects, so two
+    # live taps can briefly share one id (a fast reconnect before the old WS is
+    # seen closed); ownership is what stops the zombie's close from mutating the
+    # live successor's record. A resume transfers ownership to the resumer.
+    owner: str = ""
 
 
 class UtteranceIndex:
@@ -445,7 +451,9 @@ class UtteranceIndex:
     def __init__(self) -> None:
         self._by_id: dict[str, UtteranceRecord] = {}
 
-    def try_resume(self, utterance_id: str, *, identity: str, session_dir: Path) -> UtteranceRecord | None:
+    def try_resume(
+        self, utterance_id: str, *, identity: str, session_dir: Path, owner: str
+    ) -> UtteranceRecord | None:
         """Return the existing record marked open=True if resumable, else
         None. Caller is expected to reopen the WAV for append.
 
@@ -457,6 +465,10 @@ class UtteranceIndex:
         session) is dropped from the index and reported as not-resumable —
         appending across a session boundary would put the resumed audio in
         a session nobody is looking at.
+
+        `owner` is the resuming connection's token; on a successful resume it
+        becomes the record's owner, so a stale reference from the connection
+        that originally created the record can no longer `release` it.
         """
         self._prune_expired()
         rec = self._by_id.get(utterance_id)
@@ -472,16 +484,33 @@ class UtteranceIndex:
             self._by_id.pop(utterance_id, None)
             return None
         rec.open = True
+        rec.owner = owner
         return rec
 
-    def register_new(self, rec: UtteranceRecord) -> None:
+    def register_new(self, rec: UtteranceRecord) -> bool:
+        """Index a fresh record, returning True on success. Returns False —
+        leaving the incumbent untouched — when a *different* owner already
+        holds this utterance_id open (overlapping taps carrying a duplicate
+        id). Clobbering the incumbent would make its later `release` stomp
+        this record and could let a resume truncate a WAV still being written,
+        so the loser stays un-indexed: it records to its own WAV but is simply
+        not resumable under the shared id.
+        """
         self._prune_expired()
+        existing = self._by_id.get(rec.utterance_id)
+        if existing is not None and existing.open and existing.owner != rec.owner:
+            return False
         rec.open = True
         self._by_id[rec.utterance_id] = rec
+        return True
 
-    def release(self, utterance_id: str, *, bytes_received: int, kept: bool) -> None:
+    def release(self, utterance_id: str, *, owner: str, bytes_received: int, kept: bool) -> None:
+        """Close (kept) or drop (not kept) this connection's record. A no-op
+        when the indexed record is owned by a different connection or is
+        already gone — so a zombie tap's close can never mutate the live
+        successor that shares its utterance_id."""
         rec = self._by_id.get(utterance_id)
-        if rec is None:
+        if rec is None or rec.owner != owner:
             return
         if not kept:
             self._by_id.pop(utterance_id, None)

@@ -490,6 +490,46 @@ async def test_concurrent_streams_have_independent_level_meters(recorder: Record
             assert snap["alice"].level < snap["bob"].level
 
 
+async def test_overlapping_same_utterance_id_taps_do_not_clobber_each_other(
+    recorder: Recorder,
+):
+    """Two /tap WSes can briefly carry the SAME utterance_id (a reconnect
+    firing before the server has seen the old WS close). They must each get
+    their own ActiveStream row, and closing the first must not remove the
+    second's row or freeze its byte counter — the pre-fix behaviour, where
+    both shared one conn_id/index record, deleted the live successor's row
+    and stomped its state when the zombie closed."""
+    a = await TapFanOut.open(
+        recorder, identity="alice", name="Alice",
+        utterance_id="utt-dup", do_record=True, do_live=False,
+    )
+    b = await TapFanOut.open(
+        recorder, identity="alice", name="Alice",
+        utterance_id="utt-dup", do_record=True, do_live=False,
+    )
+    await a.write_frame(PCM_FRAME)
+    await b.write_frame(PCM_FRAME)
+
+    # Two live taps → two independent rows, even though they share the id.
+    assert len(await recorder.streams.snapshot()) == 2
+
+    # The zombie (a) closes while b is still streaming.
+    await a.__aexit__(None, None, None)
+
+    snap = await recorder.streams.snapshot()
+    assert len(snap) == 1, "closing the zombie must leave the live tap's row intact"
+    surviving = snap[0]
+    assert surviving.identity == "alice"
+    before = surviving.bytes_received
+
+    # b's counter must still advance — it wasn't frozen by a's close.
+    await b.write_frame(PCM_FRAME)
+    after = (await recorder.streams.snapshot())[0].bytes_received
+    assert after > before, "the surviving tap's byte counter must keep advancing"
+
+    await b.__aexit__(None, None, None)
+
+
 async def test_level_starts_fresh_on_resume_but_bytes_received_persists(
     recorder: Recorder,
 ):

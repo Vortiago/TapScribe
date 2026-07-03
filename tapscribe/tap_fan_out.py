@@ -20,6 +20,7 @@ import wave
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from . import roster
 from .audio import int16_peak_norm, open_recorder_wav
@@ -56,6 +57,12 @@ class TapFanOut:
         self._identity = identity
         self._name = name
         self._utterance_id = utterance_id
+        # A fresh per-connection token. Two /tap WSes can briefly share one
+        # utterance_id (a reconnect firing before the old WS is seen closed),
+        # so the UtteranceIndex record and the ActiveStream row are keyed by
+        # this owner — not by utterance_id alone — to keep concurrent taps
+        # from clobbering each other's state.
+        self._owner: str = uuid4().hex
         self._do_record = do_record
         self._do_live = do_live
         # Session affiliation — snapshotted at construction (WS open), like
@@ -184,6 +191,7 @@ class TapFanOut:
                 self._utterance_id,
                 identity=self._identity,
                 session_dir=self._session_dir,
+                owner=self._owner,
             )
             if resumed is not None:
                 # Bridge reconnected within the resume window with the
@@ -226,11 +234,23 @@ class TapFanOut:
                     filename=fname,
                     path=fpath,
                     started_at=started_at,
+                    owner=self._owner,
                 )
-                self._recorder.utterances.register_new(record)
+                indexed = self._recorder.utterances.register_new(record)
+                if not indexed:
+                    # Another live tap already holds this utterance_id open (a
+                    # duplicate-id overlap). We keep recording to our own WAV
+                    # but stay out of the resume index so neither tap corrupts
+                    # the other's record.
+                    print(
+                        f"[tapscribe] /tap open -> {fname} "
+                        f"(utterance_id {self._utterance_id[:8]} already live; not resumable)",
+                        flush=True,
+                    )
+                else:
+                    print(f"[tapscribe] /tap open -> {fname}", flush=True)
                 self._wf = open_recorder_wav(fpath)
                 self._record = record
-                print(f"[tapscribe] /tap open -> {fname}", flush=True)
         else:
             print(f"[tapscribe] /tap open (record off) for {self._identity}", flush=True)
 
@@ -249,7 +269,16 @@ class TapFanOut:
                 wav=fname if self._do_record else None,
             )
 
-        self._conn_id = self._utterance_id[:8] + "-" + (safe_name(self._identity)[:10] or "unknown")
+        # Include the per-connection owner token so two taps sharing one
+        # utterance_id (+ identity) get DISTINCT ActiveStream rows — otherwise
+        # one tap's close would remove the other's row and freeze its counters.
+        self._conn_id = (
+            self._utterance_id[:8]
+            + "-"
+            + (safe_name(self._identity)[:10] or "unknown")
+            + "-"
+            + self._owner[:6]
+        )
         await self._recorder.streams.register(
             ActiveStream(
                 conn_id=self._conn_id,
@@ -344,6 +373,7 @@ class TapFanOut:
                 )
             self._recorder.utterances.release(
                 self._utterance_id,
+                owner=self._owner,
                 bytes_received=self._bytes_received,
                 kept=kept,
             )
