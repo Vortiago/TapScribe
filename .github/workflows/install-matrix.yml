@@ -115,11 +115,11 @@ jobs:
         # pwsh).
         shell: bash
         run: |
+          extra_args=()
           if [ "${{ matrix.family }}" = "summarize" ] && [ "${{ matrix.os }}" != "macos-latest" ]; then
-            python -m pip install -e ".[summarize]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-          else
-            python -m pip install -e ".[${{ matrix.family }}]"
+            extra_args+=(--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu)
           fi
+          python -m pip install -e ".[${{ matrix.family }}]" "${extra_args[@]}"
 
       - name: Verify package import
         run: python -c "import tapscribe; print(tapscribe.__name__, 'OK')"

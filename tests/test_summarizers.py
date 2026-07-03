@@ -263,20 +263,18 @@ def test_summary_system_framing_and_build_model_input():
 def test_local_and_api_share_the_same_system_framing_no_drift():
     """Pin against the #261 drift: both adapters must compose from base's ONE
     constant, not their own copy that can silently diverge."""
+    from test_summarizers_api import _make_stub
+
     from tapscribe.summarizers import base
     from tapscribe.summarizers.local import _build_local_messages
 
     msgs = _build_local_messages("T", "")
     assert base.SUMMARY_SYSTEM_FRAMING in msgs[0]["content"]
 
-    rec: list[dict] = []
-    ApiSummarizer(
-        base_url="http://x/v1",
-        model="m",
-        post_fn=lambda url, headers, body: rec.append(body)
-        or {"choices": [{"message": {"content": "s"}}]},
-    ).summarize("T", prompt="p")
-    assert rec[0]["messages"][0]["content"] == base.SUMMARY_SYSTEM_FRAMING
+    rec: list[tuple] = []
+    ApiSummarizer(base_url="http://x/v1", model="m", post_fn=_make_stub(rec)).summarize("T", prompt="p")
+    _, _, body = rec[0]
+    assert body["messages"][0]["content"] == base.SUMMARY_SYSTEM_FRAMING
 
 
 def test_command_summarizer_injects_names_into_the_prompt_argv():
