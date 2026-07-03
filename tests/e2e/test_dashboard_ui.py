@@ -2491,7 +2491,9 @@ async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_reco
             await browser.close()
 
 
-def _write_merged_transcript(session_dir: Path, *, segments: int, transcribed_at: str, text_prefix: str) -> None:
+def _write_merged_transcript(
+    session_dir: Path, *, segments: int, transcribed_at: str, text_prefix: str
+) -> None:
     """(Over)write a session's merged transcript with `segments` lines stamped
     `transcribed_at` — a re-transcribe bumps the stamp, which the dashboard
     refetches. `text_prefix` distinguishes one merge's lines from another's."""
