@@ -204,7 +204,10 @@ jobs:
 
       - name: Install runtime + test harness + faster-whisper + silero-vad
         run: |
-          pip install -e ".[whisper-cpu,vad]" playwright pytest pytest-asyncio
+          # httpx is the real-audio pipeline E2E's HTTP client (websockets is a
+          # core dep already); the rest of that test reads the committed WAV
+          # fixtures via stdlib wave, so no soundfile/scipy needed at runtime.
+          pip install -e ".[whisper-cpu,vad]" playwright pytest pytest-asyncio httpx
           # silero-vad pulls torch/torchaudio from PyPI whose native libs can
           # mismatch; pin the CPU build last so torchaudio's extension loads.
           pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cpu
@@ -224,6 +227,19 @@ jobs:
 
       - name: Run bridge meeting E2E (headed, under xvfb)
         run: xvfb-run -a pytest tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e -q
+
+      # This job is the ONLY place an ASR package (faster-whisper) is installed
+      # AND the models it needs are pre-fetched, so it is where the transcription
+      # safety net actually runs. Elsewhere these self-skip (no backend), so a
+      # real transcription-path regression would ship green. Not a browser test →
+      # no xvfb. The transformers/MLX real_audio cases self-skip here (deps
+      # absent); gating them needs a transformers-installed job (tracked
+      # separately).
+      - name: Run real-audio transcription pipeline E2E (faster-whisper + NB-Whisper)
+        run: pytest tests/e2e/test_pipeline_e2e.py -m real_audio -q
+
+      - name: Run the faster-whisper upstream-contract smoke (real package)
+        run: pytest tests/test_transcribers_faster_whisper.py -k upstream_contract -q
 
   # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:
   # a cross-platform bridge-core class library, a Windows WASAPI capture
