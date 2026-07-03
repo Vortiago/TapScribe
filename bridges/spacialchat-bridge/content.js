@@ -672,8 +672,10 @@
 
   // Begin the End-meeting teardown. Idempotent: a stale/duplicate request
   // (or one with no active meeting) is a no-op. Closes every open channel
-  // through the existing Drain-on-mute path — muting each first so no fresh
-  // utterance starts mid-teardown — then waits for the close-all barrier.
+  // through the existing Drain-on-mute path — fresh utterances mid-teardown
+  // are blocked by the endingSessionId gate in the "pcm" handler, so we do
+  // NOT force-mute here (that would corrupt the platform mute mirror
+  // finishEndMeeting preserves) — then waits for the close-all barrier.
   function endMeeting() {
     if (!meetingSessionId || endingSessionId) return;
     endingSessionId = meetingSessionId;

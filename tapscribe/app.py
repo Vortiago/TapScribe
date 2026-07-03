@@ -367,9 +367,13 @@ async def healthz(recorder: Recorder = Depends(get_recorder)):
 @app.get("/sessions")
 async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
     """Legacy simple listing."""
+    active_streams = await recorder.streams.snapshot()
     return gather_sessions(
         current_session=recorder.session_start,
         jobs={k: asdict(v) for k, v in recorder.jobs.snapshot().items()},
+        # Same open-WAV masking as /api/state so files_sig stays consistent
+        # across the two endpoints during a recording.
+        open_wavs={s.filename for s in active_streams if s.record and s.filename},
     )
 
 
