@@ -2491,6 +2491,112 @@ async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_reco
             await browser.close()
 
 
+def _write_merged_transcript(session_dir: Path, *, segments: int, transcribed_at: str, text_prefix: str) -> None:
+    """(Over)write a session's merged transcript with `segments` lines stamped
+    `transcribed_at` — a re-transcribe bumps the stamp, which the dashboard
+    refetches. `text_prefix` distinguishes one merge's lines from another's."""
+    (session_dir / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "transcribed_at": transcribed_at,
+                "segments": [
+                    {
+                        "speaker": "Alice",
+                        "text": f"{text_prefix} {i}: the quick brown fox jumps over the lazy dog.",
+                        "abs_start": f"2025-02-01T09:{i // 60:02d}:{i % 60:02d}+00:00",
+                    }
+                    for i in range(segments)
+                ],
+                "speakers": ["Alice"],
+                "speaking_seconds": {"Alice": 480.0},
+                "suppressed": [],
+                "suppressed_count": 0,
+                "wav_count": 1,
+                "transcribe_ms": 1000,
+                "model": "tiny.en",
+                "backend": "fake",
+                "device": "cpu",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+async def test_next_retranscribe_does_not_blank_merged_pane(running_recorder: RunningRecorder):
+    """Re-transcribing a session bumps the merged transcript's transcribed_at,
+    which refetches the merged body. The pane must hold the PREVIOUS merged
+    transcript in place during the refetch (stale-while-revalidate), never
+    blanking to a "loading transcript…" placeholder — wiping the transcript the
+    operator is reading is the same blink as the WAV-list bug, on the same page."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-01T09-00-00Z"
+    _seed_merged_session(rec, sid, segments=120)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "transcript")
+
+            # The original merged body is on screen.
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll('{_MERGED_FIRST_LINE}').length >= 120""",
+                timeout=15000,
+            )
+
+            # Watch the pane for a "loading transcript…" blank across the refetch.
+            await page.evaluate(
+                """() => {
+                    const host = document.querySelector('#viewRoot [data-slot="mergedHost"]');
+                    window.__sawLoading = false;
+                    const obs = new MutationObserver(() => {
+                        if ((host.textContent || '').includes('loading transcript')) window.__sawLoading = true;
+                    });
+                    obs.observe(host, { childList: true, subtree: true, characterData: true });
+                }"""
+            )
+
+            # Re-transcribe: a new transcribed_at + a distinct body.
+            _write_merged_transcript(
+                rec.recordings_dir / sid,
+                segments=130,
+                transcribed_at="2025-02-01T11:00:00+00:00",
+                text_prefix="Bravo",
+            )
+
+            # The fresh body lands (a "Bravo" line appears)…
+            await page.wait_for_function(
+                f"""() => Array.from(document.querySelectorAll('{_MERGED_FIRST_LINE}'))
+                    .some((d) => (d.textContent || '').includes('Bravo'))""",
+                timeout=15000,
+            )
+            # …and the pane never blanked to the loading placeholder on the way.
+            saw_loading = await page.evaluate("() => window.__sawLoading")
+            assert not saw_loading, (
+                "the merged transcript pane blanked to 'loading transcript…' during a "
+                "re-transcribe refetch — hold the previous body (stale-while-revalidate) "
+                "so the pane refreshes in place instead of wiping what's on screen."
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
 async def test_meeting_pipeline_job_renders_stage_labelled_bar(running_recorder: RunningRecorder):
     """A bridge-triggered end-of-meeting pipeline surfaces as a NORMAL session
     job (issue #102's dashboard acceptance criterion): the shared job bar must
