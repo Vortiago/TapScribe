@@ -2429,7 +2429,7 @@ def test_summarize_local_without_extra_returns_400(client, recorder_under_test, 
     this box happens to have mlx_lm / llama_cpp installed."""
     import tapscribe.summarizers.catalog as summarizers_catalog
 
-    monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: False)
+    monkeypatch.setattr(summarizers_catalog, "backend_module_available", lambda backend: False)
     seed_merged_transcript(recorder_under_test.recordings_dir, "s")
     r = client.post("/api/sessions/s/summarize", json={"source": "local"})
     assert r.status_code == 400, r.text
@@ -2446,7 +2446,7 @@ def test_summarize_local_model_load_failure_returns_400(client, recorder_under_t
     from tapscribe.transcribers.catalog import set_available_backends_for_testing
 
     set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
-    monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: True)
+    monkeypatch.setattr(summarizers_catalog, "backend_module_available", lambda backend: True)
 
     def boom(model_repo, gguf_file, *, max_tokens, n_ctx):
         raise ValueError("Received 126 parameters not in model: language_model...")
@@ -2624,7 +2624,7 @@ def test_api_summarize_models_reflects_env_override(client, recorder_under_test,
         # 2. POSTing that override model is NOT rejected as an unknown model — it
         # passes the allowlist and reaches the missing-extra probe instead
         # (llama_cpp isn't importable on CI), proving the override was let through.
-        monkeypatch.setattr(summarizers_catalog, "_backend_module_available", lambda backend: False)
+        monkeypatch.setattr(summarizers_catalog, "backend_module_available", lambda backend: False)
         seed_merged_transcript(recorder_under_test.recordings_dir, "s")
         r = client.post(
             "/api/sessions/s/summarize",

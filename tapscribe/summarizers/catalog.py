@@ -10,7 +10,7 @@ table, not a multi-backend registry.
 The catalog DOUBLES as the security allowlist: a model id arriving in a POST
 body is untrusted (CodeQL treats a request body as external input), so only
 catalog members — plus the operator's env override / the bundled default — may
-reach `mlx_lm.load` / a Hub download (see `_is_allowed_local_model`).
+reach `mlx_lm.load` / a Hub download (see `is_allowed_local_model`).
 """
 
 from __future__ import annotations
@@ -285,7 +285,7 @@ ENV_LOCAL_GGUF_FILE = "TAPSCRIBE_SUMMARIZE_GGUF_FILE"
 # distill) and Qwen3's thinking mode, which spend tokens on internal traces.
 ENV_MAX_TOKENS = "TAPSCRIBE_SUMMARIZE_MAX_TOKENS"
 _DEFAULT_MAX_TOKENS = 2048
-_MAX_TOKENS_BOUNDS = (16, 8192)
+MAX_TOKENS_BOUNDS = (16, 8192)
 # GGUF context window. Long meetings need a wide window; the default fits a
 # typical session, env-tunable for very long ones (bounded by host RAM).
 ENV_GGUF_CTX = "TAPSCRIBE_SUMMARIZE_GGUF_CTX"
@@ -306,62 +306,62 @@ class _LocalBackend:
     env_model: str  # env var that overrides default_model
 
 
-_BACKENDS: dict[str, _LocalBackend] = {
+BACKENDS: dict[str, _LocalBackend] = {
     "mlx": _LocalBackend(module="mlx_lm", default_model=LOCAL_MLX_MODEL, env_model=ENV_LOCAL_MLX_MODEL),
     "gguf": _LocalBackend(module="llama_cpp", default_model=LOCAL_GGUF_MODEL, env_model=ENV_LOCAL_GGUF_MODEL),
 }
 
 
-def _default_max_tokens() -> int:
+def default_max_tokens() -> int:
     """Current generation cap, re-read per call so an operator can retune
     `TAPSCRIBE_SUMMARIZE_MAX_TOKENS` without a restart."""
     return config.env_int(
-        ENV_MAX_TOKENS, _DEFAULT_MAX_TOKENS, min_value=_MAX_TOKENS_BOUNDS[0], max_value=_MAX_TOKENS_BOUNDS[1]
+        ENV_MAX_TOKENS, _DEFAULT_MAX_TOKENS, min_value=MAX_TOKENS_BOUNDS[0], max_value=MAX_TOKENS_BOUNDS[1]
     )
 
 
-def _clamp_max_tokens(value: int) -> int:
+def clamp_max_tokens(value: int) -> int:
     """Clamp a caller-supplied output cap to the same bounds the env knob uses,
     so a UI-entered max_tokens can't ask for a runaway decode (or zero). ONE
     source of truth for the bounds — the dashboard's number input advertises the
     same min/max via `summary_model_catalog`."""
-    lo, hi = _MAX_TOKENS_BOUNDS
+    lo, hi = MAX_TOKENS_BOUNDS
     return max(lo, min(hi, value))
 
 
-def _default_gguf_ctx() -> int:
-    """Current GGUF context window, re-read per call (see `_default_max_tokens`)."""
+def default_gguf_ctx() -> int:
+    """Current GGUF context window, re-read per call (see `default_max_tokens`)."""
     return config.env_int(
         ENV_GGUF_CTX, _DEFAULT_GGUF_CTX, min_value=_GGUF_CTX_BOUNDS[0], max_value=_GGUF_CTX_BOUNDS[1]
     )
 
 
-def _env_model_default(backend: str) -> str:
+def env_model_default(backend: str) -> str:
     """The default model repo for `backend`, with an env override
     (`TAPSCRIBE_SUMMARIZE_{MLX,GGUF}_MODEL`) so an operator can swap the bundled
     model without a code change."""
-    b = _BACKENDS[backend]
+    b = BACKENDS[backend]
     return os.environ.get(b.env_model) or b.default_model
 
 
-def _is_allowed_local_model(backend: str, model: str) -> bool:
+def is_allowed_local_model(backend: str, model: str) -> bool:
     """True iff `model` may be loaded for `backend`. A model id arriving from the
     dashboard is untrusted (CodeQL treats a request body as external input), so
     only catalog members are honoured — a stray repo id can't flow into
     `mlx_lm.load` / a Hub download. The operator's env override and the bundled
-    default (both surfaced by `_env_model_default`) are always allowed; they're
+    default (both surfaced by `env_model_default`) are always allowed; they're
     operator-controlled, not external input."""
-    if model == _env_model_default(backend):
+    if model == env_model_default(backend):
         return True
     return any(m.repo_id == model for m in SUMMARY_MODELS.get(backend, ()))
 
 
-def _unknown_model_message(backend: str, model: str) -> str:
+def unknown_model_message(backend: str, model: str) -> str:
     """The operator-facing error when a requested local model isn't in the
     backend's catalog allowlist. Names the rejected repo + the override env var
     so the operator either picks a listed model or sets the env knob for a
     one-off custom repo — same remediation shape as the load-failure message."""
-    b = _BACKENDS[backend]
+    b = BACKENDS[backend]
     listed = ", ".join(m.repo_id for m in SUMMARY_MODELS.get(backend, ())) or "(none)"
     return (
         f"the local summarizer model {model!r} isn't a known {backend} model. "
@@ -373,11 +373,11 @@ def summary_model_catalog(backend: str | None = None) -> dict[str, Any]:
     """The selectable local-summarizer models for `backend` (default: the one
     this machine routes to), plus which repo is the active default. Drives the
     dashboard's `GET /api/summarize/models` picker — ONE source of truth with the
-    `_is_allowed_local_model` allowlist the local source validates against."""
-    b = (backend or _resolve_local_backend()).strip().lower()
-    if b not in _BACKENDS:
+    `is_allowed_local_model` allowlist the local source validates against."""
+    b = (backend or resolve_local_backend()).strip().lower()
+    if b not in BACKENDS:
         raise SummarizerUnavailable(f"unknown local summarizer backend: {b!r}")
-    default = _env_model_default(b)
+    default = env_model_default(b)
     return {
         "backend": b,
         "default": default,
@@ -385,25 +385,25 @@ def summary_model_catalog(backend: str | None = None) -> dict[str, Any]:
         # The OUTPUT-length knob the dashboard's number input seeds + bounds. The
         # input window isn't a knob (MLX uses the model's native window; GGUF's is
         # the separate TAPSCRIBE_SUMMARIZE_GGUF_CTX), so only max_tokens is here.
-        "max_tokens_default": _default_max_tokens(),
-        "max_tokens_min": _MAX_TOKENS_BOUNDS[0],
-        "max_tokens_max": _MAX_TOKENS_BOUNDS[1],
+        "max_tokens_default": default_max_tokens(),
+        "max_tokens_min": MAX_TOKENS_BOUNDS[0],
+        "max_tokens_max": MAX_TOKENS_BOUNDS[1],
         # Command-source presets ride along so the view needs ONE catalog
         # fetch. NOT an allowlist — see the CommandPreset block above.
         "command_presets": [p.to_mapping() for p in COMMAND_PRESETS],
     }
 
 
-def _backend_module_available(backend: str) -> bool:
+def backend_module_available(backend: str) -> bool:
     """True iff the python package powering `backend` is importable — a cheap
     `find_spec` probe (no heavy import, no torch/Metal init). A module-level
     function so a test can force it without touching the real environment, the
     same shape as the transcriber catalog's `_is_module_available`."""
-    b = _BACKENDS.get(backend)
+    b = BACKENDS.get(backend)
     return b is not None and importlib.util.find_spec(b.module) is not None
 
 
-def _resolve_local_backend() -> str:
+def resolve_local_backend() -> str:
     """Pick the backend for this machine, reusing the transcriber catalog's
     hardware probe so 'is this an Apple-Silicon MLX box' has ONE source of truth
     (no shadow detection). MLX on Apple Silicon; the GGUF/CPU path everywhere

@@ -63,7 +63,7 @@ jobs:
         # for transitive deps (e.g. kaldialign) sometimes covers one
         # without the other.
         python-version: ["3.12", "3.13"]
-        family: [whisper, voxtral, parakeet, canary]
+        family: [whisper, voxtral, parakeet, summarize]
     steps:
       - uses: actions/checkout@v7
 
@@ -105,7 +105,21 @@ jobs:
         run: python tools/install_picker.py --dry-run --non-interactive
 
       - name: Install tapscribe + ${{ matrix.family }} extra
-        run: python -m pip install -e ".[${{ matrix.family }}]"
+        # `summarize` on non-macOS pulls llama-cpp-python, which builds from
+        # source by default (needs cmake + a C++ toolchain — see the "Verify
+        # cmake on PATH" step above). Mirror start.sh / start.ps1's own
+        # SUMMARIZE_PIP_ARGS logic and pass the maintainer's prebuilt
+        # CPU-wheel index so this job matches what an operator's bring-up
+        # actually runs, not a naive install. `shell: bash` so the same
+        # conditional runs on the Windows runner too (default shell there is
+        # pwsh).
+        shell: bash
+        run: |
+          if [ "${{ matrix.family }}" = "summarize" ] && [ "${{ matrix.os }}" != "macos-latest" ]; then
+            python -m pip install -e ".[summarize]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          else
+            python -m pip install -e ".[${{ matrix.family }}]"
+          fi
 
       - name: Verify package import
         run: python -c "import tapscribe; print(tapscribe.__name__, 'OK')"

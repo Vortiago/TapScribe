@@ -23,10 +23,12 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from .base import (
+    SUMMARY_SYSTEM_FRAMING,
     SummarizerError,
     SummarizerFailed,
     SummarizerUnavailable,
     SummaryResult,
+    build_model_input,
     fold_hint,
     resolve_prompt,
 )
@@ -104,17 +106,8 @@ class ApiSummarizer:
         # not this augmented instruction.
         instruction = fold_hint(resolve_prompt(prompt), names)
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a meeting-summarisation assistant. Read the transcript and "
-                    "produce a clear, well-structured summary. Output only the summary."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"{instruction}\n\n--- TRANSCRIPT ---\n{transcript}",
-            },
+            {"role": "system", "content": SUMMARY_SYSTEM_FRAMING},
+            {"role": "user", "content": build_model_input(instruction, transcript)},
         ]
 
         url = self._base_url.rstrip("/") + "/chat/completions"

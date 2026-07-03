@@ -3,7 +3,7 @@
 Routed at construction: an MLX backend (`mlx_lm`) on Apple Silicon, a GGUF/CPU
 backend (`llama_cpp`) everywhere else — the same split as the transcriber
 backends, resolved through the same `available_backends()` probe (see
-`catalog._resolve_local_backend`). The heavy backend is lazy-imported and the
+`catalog.resolve_local_backend`). The heavy backend is lazy-imported and the
 model loaded on the first `summarize()`, so importing tapscribe never pulls MLX
 / llama.cpp in.
 
@@ -23,10 +23,12 @@ from datetime import UTC, datetime
 
 from . import catalog
 from .base import (
+    SUMMARY_SYSTEM_FRAMING,
     SummarizerError,
     SummarizerFailed,
     SummarizerUnavailable,
     SummaryResult,
+    build_model_input,
     fold_hint,
     resolve_prompt,
 )
@@ -35,14 +37,6 @@ from .base import (
 # lazily below) hold a loaded model; tests inject a pure function instead — the
 # same testability seam as the MLX adapters' `transcribe_fn`.
 LocalGenerateFn = Callable[[str, str], str]
-
-# Folded into the single user turn rather than a `system` message: Gemma's chat
-# template raises on a system role, and one user turn is portable across every
-# instruct model AND both backends.
-_LOCAL_SYSTEM = (
-    "You are a meeting-summarisation assistant. Read the transcript and produce a clear, "
-    "well-structured summary. Output only the summary."
-)
 
 
 def _missing_extra_message(why: str) -> str:
@@ -61,7 +55,7 @@ def _model_load_failed_message(backend: str, model_repo: str, why: object) -> st
     weight/arch skew, a corrupt/incompatible Hub download, or an OOM. Names the
     failed repo and the override env var so the operator can swap to a model that
     loads (or update the extra) instead of staring at a raw 500."""
-    b = catalog._BACKENDS[backend]
+    b = catalog.BACKENDS[backend]
     return (
         f"the local summarizer couldn't load the {backend} model {model_repo!r} ({why}). "
         f"This is usually a mismatch between the model and the installed {b.module} — set "
@@ -76,8 +70,8 @@ def _build_local_messages(transcript: str, prompt: str) -> list[dict[str, str]]:
     `system` role) keeps Gemma's chat template happy and is portable across both
     backends. A blank prompt falls back to `DEFAULT_SUMMARY_PROMPT`, the same
     string the view seeds and the command source defaults to."""
-    content = f"{_LOCAL_SYSTEM}\n\n{resolve_prompt(prompt)}\n\n--- TRANSCRIPT ---\n{transcript}"
-    return [{"role": "user", "content": content}]
+    instruction = f"{SUMMARY_SYSTEM_FRAMING}\n\n{resolve_prompt(prompt)}"
+    return [{"role": "user", "content": build_model_input(instruction, transcript)}]
 
 
 def _build_mlx_generate(model_repo: str, max_tokens: int) -> LocalGenerateFn:
@@ -149,15 +143,15 @@ class LocalSummarizer:
         max_tokens: int | None = None,
         generate_fn: LocalGenerateFn | None = None,
     ) -> None:
-        self._backend = (backend or catalog._resolve_local_backend()).strip().lower()
-        if self._backend not in catalog._BACKENDS:
+        self._backend = (backend or catalog.resolve_local_backend()).strip().lower()
+        if self._backend not in catalog.BACKENDS:
             raise SummarizerUnavailable(f"unknown local summarizer backend: {self._backend!r}")
-        self.model = model or catalog._env_model_default(self._backend)
+        self.model = model or catalog.env_model_default(self._backend)
         self._gguf_file = gguf_file or (
             os.environ.get(catalog.ENV_LOCAL_GGUF_FILE) or catalog.LOCAL_GGUF_FILE
         )
         self._max_tokens = (
-            catalog._default_max_tokens() if max_tokens is None else catalog._clamp_max_tokens(max_tokens)
+            catalog.default_max_tokens() if max_tokens is None else catalog.clamp_max_tokens(max_tokens)
         )
         self._generate_fn = generate_fn
         # An injected generate_fn is the unit-test seam: it drives the adapter
@@ -168,14 +162,14 @@ class LocalSummarizer:
             # Reject an unknown (untrusted) model BEFORE the disk read + slot
             # claim, so a bad pick from the dashboard fails fast as a clear 400 —
             # and a stray repo id never reaches `mlx_lm.load` / a Hub download.
-            if not catalog._is_allowed_local_model(self._backend, self.model):
-                raise SummarizerUnavailable(catalog._unknown_model_message(self._backend, self.model))
+            if not catalog.is_allowed_local_model(self._backend, self.model):
+                raise SummarizerUnavailable(catalog.unknown_model_message(self._backend, self.model))
             # Fail fast + clear when we'd actually need the extra but it's absent.
             # `find_spec` only — no heavy import here.
-            if not catalog._backend_module_available(self._backend):
+            if not catalog.backend_module_available(self._backend):
                 raise SummarizerUnavailable(
                     _missing_extra_message(
-                        f"the {catalog._BACKENDS[self._backend].module!r} package isn't importable"
+                        f"the {catalog.BACKENDS[self._backend].module!r} package isn't importable"
                     )
                 )
 
@@ -217,12 +211,12 @@ class LocalSummarizer:
             if self._backend == "mlx":
                 return _build_mlx_generate(self.model, self._max_tokens)
             return _build_gguf_generate(
-                self.model, self._gguf_file, max_tokens=self._max_tokens, n_ctx=catalog._default_gguf_ctx()
+                self.model, self._gguf_file, max_tokens=self._max_tokens, n_ctx=catalog.default_gguf_ctx()
             )
         except ImportError as e:
             raise SummarizerUnavailable(
                 _missing_extra_message(
-                    f"couldn't import the {catalog._BACKENDS[self._backend].module!r} backend ({e})"
+                    f"couldn't import the {catalog.BACKENDS[self._backend].module!r} backend ({e})"
                 )
             ) from e
         except SummarizerError:

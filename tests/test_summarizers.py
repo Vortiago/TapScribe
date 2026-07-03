@@ -250,6 +250,35 @@ def test_fold_hint_composes_base_and_hint():
     assert fold_hint("   ", ["Alice Havso"]).startswith("Known people")
 
 
+def test_summary_system_framing_and_build_model_input():
+    """base.py owns the system-framing string + the transcript-join
+    convention (#261) — local.py and api.py compose from these rather than
+    each spelling their own copy."""
+    from tapscribe.summarizers import base
+
+    assert "meeting-summarisation assistant" in base.SUMMARY_SYSTEM_FRAMING
+    assert base.build_model_input("INSTR", "TRANSCRIPT") == "INSTR\n\n--- TRANSCRIPT ---\nTRANSCRIPT"
+
+
+def test_local_and_api_share_the_same_system_framing_no_drift():
+    """Pin against the #261 drift: both adapters must compose from base's ONE
+    constant, not their own copy that can silently diverge."""
+    from tapscribe.summarizers import base
+    from tapscribe.summarizers.local import _build_local_messages
+
+    msgs = _build_local_messages("T", "")
+    assert base.SUMMARY_SYSTEM_FRAMING in msgs[0]["content"]
+
+    rec: list[dict] = []
+    ApiSummarizer(
+        base_url="http://x/v1",
+        model="m",
+        post_fn=lambda url, headers, body: rec.append(body)
+        or {"choices": [{"message": {"content": "s"}}]},
+    ).summarize("T", prompt="p")
+    assert rec[0]["messages"][0]["content"] == base.SUMMARY_SYSTEM_FRAMING
+
+
 def test_command_summarizer_injects_names_into_the_prompt_argv():
     s = CommandSummarizer(_ECHO_BOTH)
     result = s.summarize("the transcript", prompt="Summarize", names=["Alice Havso", "Bob Smith"])
