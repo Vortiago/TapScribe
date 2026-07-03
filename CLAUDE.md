@@ -237,7 +237,7 @@ introduced and how to avoid them:
   `model`) is untrusted input that flows into `mlx_lm.load` /
   `Llama.from_pretrained` — i.e. a network fetch keyed on attacker-
   controllable text. `tapscribe.summarizers.SUMMARY_MODELS` is the ONE
-  curated catalog AND the allowlist: `_is_allowed_local_model` rejects
+  curated catalog AND the allowlist: `is_allowed_local_model` rejects
   anything not listed (the operator's `TAPSCRIBE_SUMMARIZE_*_MODEL` env
   override and the bundled default are the only exceptions — operator-
   controlled, not external input). Add a model = add a `SummaryModel`

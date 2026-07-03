@@ -210,7 +210,7 @@ fi
 # picker, which covers transcription model extras only.)
 #
 # Probe the module the extra installs ON THIS PLATFORM (mirrors
-# LocalSummarizer's `_resolve_local_backend`): mlx_lm on Apple Silicon, else
+# LocalSummarizer's `resolve_local_backend`): mlx_lm on Apple Silicon, else
 # llama_cpp. find_spec, not import, to skip the heavy backend import on bring-up.
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
     SUMMARIZE_PROBE="mlx_lm"

@@ -973,7 +973,7 @@ Package layout:
   (MLX on Apple Silicon, GGUF/CPU elsewhere), lazy-imported on first
   `summarize()`.
 - `catalog` — the source-neutral model catalog (`SUMMARY_MODELS`), the
-  allowlist (`_is_allowed_local_model`), per-machine hardware routing, and the
+  allowlist (`is_allowed_local_model`), per-machine hardware routing, and the
   operator knobs. Serialised by `GET /api/summarize/models`; the catalog is
   ALSO the security allowlist (an untrusted request-body model id only reaches
   `mlx_lm.load` / a Hub download if it's listed). `ApiSummarizer`'s model list

@@ -78,11 +78,13 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Verify cmake on PATH (cross-OS)
-        # NeMo's transitive `kaldialign` builds a C++ extension via
-        # cmake. All three runner images currently ship cmake, but
-        # surfacing the version up-front means a future image change
-        # that drops it fails here with a legible message rather than
-        # 100 lines into a pip build log.
+        # llama-cpp-python (the `summarize` family's non-macOS backend) falls
+        # back to a from-source build — needing cmake + a C++ toolchain — if
+        # the prebuilt-wheel index below doesn't have a match for this
+        # OS/Python combo. All three runner images currently ship cmake, but
+        # surfacing the version up-front means a future image change that
+        # drops it fails here with a legible message rather than 100 lines
+        # into a pip build log.
         shell: bash
         run: |
           if ! command -v cmake >/dev/null; then

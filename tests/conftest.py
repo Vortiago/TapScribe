@@ -15,7 +15,8 @@ import shlex
 import socket
 import sys
 import threading
-from collections.abc import Iterator
+import tomllib
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -480,6 +481,20 @@ def py_cmd(script: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
 
 
+def make_api_post_stub(rec: list[tuple]) -> Callable[[str, dict, dict], dict]:
+    """An `ApiSummarizer` `post_fn` stub: records each `(url, headers, body)`
+    call in `rec` and returns a canned chat-completions response. Shared by
+    the direct `ApiSummarizer` request-shape tests and the local/api
+    no-drift regression test — both need to capture what `ApiSummarizer`
+    actually sent without a real network call."""
+
+    def stub(url: str, headers: dict[str, str], body: dict) -> dict:
+        rec.append((url, headers, body))
+        return {"choices": [{"message": {"content": "SUMMARY TEXT"}}]}
+
+    return stub
+
+
 def seed_merged_transcript(
     recordings_dir: Path, session: str, *, plain_text: str = "Alice: hi. We shipped."
 ) -> Path:
@@ -575,3 +590,20 @@ def fake_install_spawn(lines: list[bytes], returncode: int, *, on_wait=None):
         return _Proc()
 
     return spawn
+
+
+# ---------------------------------------------------------------------------
+# pyproject extras lookup (shared by test_install_picker.py + test_install_matrix.py)
+# ---------------------------------------------------------------------------
+
+
+def atomic_extras(extra_name: str) -> list[str]:
+    """Pull one `[project.optional-dependencies]` entry out of pyproject,
+    asserting it exists. Shared by the install-picker's per-backend pip
+    resolution tests and install-matrix.yml's family-axis meta-test — both
+    need "does this extra exist in pyproject.toml", so it lives here rather
+    than in either test file alone."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    extras = data["project"]["optional-dependencies"]
+    assert extra_name in extras, f"no `{extra_name}` extra in pyproject.toml"
+    return list(extras[extra_name])

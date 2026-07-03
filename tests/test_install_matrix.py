@@ -11,10 +11,10 @@ No `pyyaml`: the workflow file is parsed with a plain regex rather than a
 real YAML parser because `pyyaml` is NOT in the `tests` CI job's install
 list (`.github/workflows/ci.yml`'s `Install runtime + test dependencies`
 step) — it's only pulled in transitively by the `dev`/bandit extra, which
-that job doesn't install. The pyproject.toml lookup reuses
-`test_install_picker._atomic_extras`, which already owns "does this extra
-exist in `[project.optional-dependencies]`" for the same reason (a picker
-family whose extra was silently removed).
+that job doesn't install. The pyproject.toml lookup reuses conftest's
+`atomic_extras`, which already owns "does this extra exist in
+`[project.optional-dependencies]`" for the same reason (a picker family
+whose extra was silently removed).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from test_install_picker import _atomic_extras  # reuse the extras lookup, don't re-derive it
+from conftest import atomic_extras
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_MATRIX_YML = REPO_ROOT / ".github" / "workflows" / "install-matrix.yml"
@@ -36,7 +36,7 @@ def test_install_matrix_families_are_valid_pyproject_extras():
     assert families, "install-matrix.yml's family axis is empty"
 
     for family in families:
-        # `_atomic_extras` asserts the extra exists in pyproject.toml's
+        # `atomic_extras` asserts the extra exists in pyproject.toml's
         # optional-dependencies and names it on failure — the exact check a
         # family whose extra was silently removed (#263: `canary`) needs.
-        _atomic_extras(family)
+        atomic_extras(family)

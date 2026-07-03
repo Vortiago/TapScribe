@@ -6,6 +6,7 @@ transport errors via SummarizerFailed, and the Authorization header on/off behav
 from __future__ import annotations
 
 import pytest
+from conftest import make_api_post_stub
 
 from tapscribe.summarizers.api import ApiSummarizer
 from tapscribe.summarizers.base import (
@@ -14,16 +15,6 @@ from tapscribe.summarizers.base import (
     SummarizerUnavailable,
     SummaryResult,
 )
-
-
-def _make_stub(rec: list[tuple]) -> dict:
-    """Return a canned response; records the call in `rec`."""
-
-    def stub(url: str, headers: dict[str, str], body: dict) -> dict:
-        rec.append((url, headers, body))
-        return {"choices": [{"message": {"content": "SUMMARY TEXT"}}]}
-
-    return stub
 
 
 class TestApiSummarizerConstruction:
@@ -37,19 +28,19 @@ class TestApiSummarizerConstruction:
 class TestApiSummarizerRequestShape:
     def test_url_ends_with_chat_completions(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://h:11434/v1", model="qwen", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://h:11434/v1", model="qwen", post_fn=make_api_post_stub(rec))
         s.summarize("hello world", prompt="sum it up")
         assert rec[0][0] == "http://h:11434/v1/chat/completions"
 
     def test_url_strips_trailing_slash(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://h:11434/v1/", model="m", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://h:11434/v1/", model="m", post_fn=make_api_post_stub(rec))
         s.summarize("t", prompt="p")
         assert rec[0][0] == "http://h:11434/v1/chat/completions"
 
     def test_body_carries_model_and_messages(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="qwen", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="qwen", post_fn=make_api_post_stub(rec))
         s.summarize("transcript text", prompt="custom prompt")
         _, _, body = rec[0]
         assert body["model"] == "qwen"
@@ -61,21 +52,21 @@ class TestApiSummarizerRequestShape:
 
     def test_empty_prompt_uses_default(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=make_api_post_stub(rec))
         s.summarize("t", prompt="")
         _, _, body = rec[0]
         assert DEFAULT_SUMMARY_PROMPT in body["messages"][1]["content"]
 
     def test_max_tokens_included_when_set(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", max_tokens=2048, post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="m", max_tokens=2048, post_fn=make_api_post_stub(rec))
         s.summarize("t", prompt="p")
         _, _, body = rec[0]
         assert body["max_tokens"] == 2048
 
     def test_max_tokens_omitted_when_none(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", max_tokens=None, post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="m", max_tokens=None, post_fn=make_api_post_stub(rec))
         s.summarize("t", prompt="p")
         _, _, body = rec[0]
         assert "max_tokens" not in body
@@ -84,14 +75,14 @@ class TestApiSummarizerRequestShape:
 class TestApiSummarizerAuth:
     def test_authorized_when_key_set(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", api_key="s3cret", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="m", api_key="s3cret", post_fn=make_api_post_stub(rec))
         s.summarize("t", prompt="p")
         _, headers, _ = rec[0]
         assert headers["Authorization"] == "Bearer s3cret"
 
     def test_no_authorization_when_key_empty(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", api_key="", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="m", api_key="", post_fn=make_api_post_stub(rec))
         s.summarize("t", prompt="p")
         _, headers, _ = rec[0]
         assert "Authorization" not in headers
@@ -214,7 +205,7 @@ class TestApiSummarizerNames:
 
     def test_names_folded_into_user_message(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=make_api_post_stub(rec))
         s.summarize("transcript text", prompt="Summarize", names=["Alice Havso", "Bob Smith"])
         content = rec[0][2]["messages"][1]["content"]
         assert "Alice Havso" in content
@@ -224,13 +215,13 @@ class TestApiSummarizerNames:
 
     def test_no_names_leaves_user_message_unchanged(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=make_api_post_stub(rec))
         s.summarize("t", prompt="Summarize")
         assert "Known people" not in rec[0][2]["messages"][1]["content"]
 
     def test_persists_operator_prompt_not_the_hint(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=_make_stub(rec))
+        s = ApiSummarizer(base_url="http://x/v1", model="m", post_fn=make_api_post_stub(rec))
         res = s.summarize("t", prompt="Summarize", names=["Alice Havso"])
         assert res.prompt == "Summarize"
         assert "Alice Havso" not in res.prompt
