@@ -167,3 +167,44 @@ def test_load_fails_fast_with_actionable_error_when_mlx_voxtral_missing(monkeypa
 
     with pytest.raises(RuntimeError, match="mlx-voxtral"):
         MlxVoxtralTranscriber.load("voxtral-mini")
+
+
+def test_mlx_voxtral_upstream_contract():
+    """Smoke-test the real mlx_voxtral symbols when the package is installed."""
+    import inspect
+
+    mlx_voxtral = pytest.importorskip("mlx_voxtral")
+
+    for name in ("VoxtralForConditionalGeneration", "VoxtralProcessor"):
+        assert hasattr(mlx_voxtral, name), f"mlx_voxtral.{name} missing - upstream API drift"
+
+    processor_cls = mlx_voxtral.VoxtralProcessor
+    model_cls = mlx_voxtral.VoxtralForConditionalGeneration
+    for cls_name, cls in (
+        ("VoxtralProcessor", processor_cls),
+        ("VoxtralForConditionalGeneration", model_cls),
+    ):
+        assert hasattr(cls, "from_pretrained"), f"{cls_name}.from_pretrained missing"
+
+    request = getattr(processor_cls, "apply_transcrition_request", None)
+    assert request is not None, (
+        "VoxtralProcessor.apply_transcrition_request missing; update the adapter if upstream renamed the typo"
+    )
+
+    params = inspect.signature(request).parameters
+    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+    for required_param in ("audio", "model_id", "language"):
+        assert required_param in params or accepts_kwargs, (
+            f"VoxtralProcessor.apply_transcrition_request no longer accepts {required_param!r}; "
+            "mlx_voxtral.py's call will fail"
+        )
+
+    decode = getattr(processor_cls, "decode", None)
+    assert decode is not None, "VoxtralProcessor.decode missing"
+    decode_params = inspect.signature(decode).parameters
+    accepts_decode_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in decode_params.values()
+    )
+    assert "skip_special_tokens" in decode_params or accepts_decode_kwargs, (
+        "VoxtralProcessor.decode no longer accepts skip_special_tokens="
+    )
