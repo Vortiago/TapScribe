@@ -75,7 +75,9 @@ class TestApiSummarizerRequestShape:
 class TestApiSummarizerAuth:
     def test_authorized_when_key_set(self):
         rec: list[tuple] = []
-        s = ApiSummarizer(base_url="http://x/v1", model="m", api_key="s3cret", post_fn=make_api_post_stub(rec))
+        s = ApiSummarizer(
+            base_url="http://x/v1", model="m", api_key="s3cret", post_fn=make_api_post_stub(rec)
+        )
         s.summarize("t", prompt="p")
         _, headers, _ = rec[0]
         assert headers["Authorization"] == "Bearer s3cret"

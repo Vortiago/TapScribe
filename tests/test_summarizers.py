@@ -268,7 +268,9 @@ def test_local_and_api_share_the_same_system_framing_no_drift():
     assert SUMMARY_SYSTEM_FRAMING in msgs[0]["content"]
 
     rec: list[tuple] = []
-    ApiSummarizer(base_url="http://x/v1", model="m", post_fn=make_api_post_stub(rec)).summarize("T", prompt="p")
+    ApiSummarizer(base_url="http://x/v1", model="m", post_fn=make_api_post_stub(rec)).summarize(
+        "T", prompt="p"
+    )
     _, _, body = rec[0]
     assert body["messages"][0]["content"] == SUMMARY_SYSTEM_FRAMING
 
