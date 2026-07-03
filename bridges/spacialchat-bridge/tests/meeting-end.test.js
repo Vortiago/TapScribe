@@ -166,6 +166,55 @@ test("End meeting with no active meeting is a no-op", async () => {
   assert.equal(triggerCalls(b).length, 0, "no trigger when no meeting is active");
 });
 
+test("a speaker muted at End meeting does not reopen a ghost tap", async () => {
+  // A muted participant's audio worklet keeps emitting (silence) PCM — mute is
+  // a UI/utterance-boundary signal, not a media stop. If End dropped their mute
+  // state, that silence would sail past the pcm gate and open a ghost tap into
+  // the global Session after the bracket is already gone.
+  const b = createBridge({ settings: { meetingSessionId: "sess-1" } });
+  await ready(b);
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  b.lastSocket().triggerOpen();
+  b.post({ kind: "mute", identity: "u1", muted: true }); // muted before the meeting ends
+
+  b.requestEndMeeting();
+  const openedBefore = b.openSockets().length;
+
+  // The still-muted worklet keeps delivering PCM after End.
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+
+  assert.equal(
+    b.openSockets().length,
+    openedBefore,
+    "a still-muted speaker must not reopen a tap after End",
+  );
+});
+
+test("a speaker still talking (unmuted) after End is recorded into the global Session", async () => {
+  // The mirror of the ghost-tap fix: preserving mute state must NOT gate a
+  // genuinely-unmuted speaker who keeps talking after the meeting ends — their
+  // audio still belongs in the global Session.
+  const b = createBridge({ settings: { meetingSessionId: "sess-1" } });
+  await ready(b);
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  b.lastSocket().triggerOpen();
+  // u1 never mutes.
+
+  b.requestEndMeeting();
+  const openedBefore = b.openSockets().length;
+
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+
+  assert.equal(
+    b.openSockets().length,
+    openedBefore + 1,
+    "an unmuted speaker talking after End opens a fresh global tap",
+  );
+  assert.equal(sessionParam(b.lastSocket()), null, "routed to the global Session");
+});
+
 test("a new speaker during teardown does not stall the close-all barrier", async () => {
   // While a tap is mid-drain after End, a NEW speaker must not open a fresh
   // tap into the ending Session — that live WS would block the barrier and
