@@ -581,9 +581,7 @@ def _build_state_blob(
     otherwise capture would flip the signature ~2 Hz and drive a per-tick
     files/peaks refetch."""
     return {
-        "sessions": gather_sessions(
-            current_session=current_session, jobs=jobs_snapshot, open_wavs=open_wavs
-        ),
+        "sessions": gather_sessions(current_session=current_session, jobs=jobs_snapshot, open_wavs=open_wavs),
         "prompt": read_config("prompt"),
         "live_prompt": read_config("live-prompt"),
         "live_model_default": read_config("live-model"),

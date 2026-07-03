@@ -77,22 +77,20 @@ def test_files_sig_ignores_the_growing_size_of_an_open_wav(tmp_path: Path):
     wav = seed_wav(sd / "20260101T010000Z__alice__abc.wav")
     name = wav.name
 
-    sig_open = sessions._describe_session(
-        sd, jobs={}, current_session=sd.name, open_wavs={name}
-    )["files_sig"]
+    sig_open = sessions._describe_session(sd, jobs={}, current_session=sd.name, open_wavs={name})["files_sig"]
 
     # The tap keeps recording: the WAV grows on disk.
     seed_wav(wav, seconds=3.0)
-    sig_open_grown = sessions._describe_session(
-        sd, jobs={}, current_session=sd.name, open_wavs={name}
-    )["files_sig"]
+    sig_open_grown = sessions._describe_session(sd, jobs={}, current_session=sd.name, open_wavs={name})[
+        "files_sig"
+    ]
     assert sig_open_grown == sig_open, "an open WAV's growing size must not flip files_sig"
 
     # Once the utterance closes (wav leaves the open set) its final size IS
     # folded in, so the dashboard refetches the listing exactly once.
-    sig_closed = sessions._describe_session(
-        sd, jobs={}, current_session=sd.name, open_wavs=set()
-    )["files_sig"]
+    sig_closed = sessions._describe_session(sd, jobs={}, current_session=sd.name, open_wavs=set())[
+        "files_sig"
+    ]
     assert sig_closed != sig_open, "a closed WAV's final size must flip files_sig once"
 
 

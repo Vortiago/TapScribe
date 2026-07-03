@@ -500,12 +500,20 @@ async def test_overlapping_same_utterance_id_taps_do_not_clobber_each_other(
     both shared one conn_id/index record, deleted the live successor's row
     and stomped its state when the zombie closed."""
     a = await TapFanOut.open(
-        recorder, identity="alice", name="Alice",
-        utterance_id="utt-dup", do_record=True, do_live=False,
+        recorder,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-dup",
+        do_record=True,
+        do_live=False,
     )
     b = await TapFanOut.open(
-        recorder, identity="alice", name="Alice",
-        utterance_id="utt-dup", do_record=True, do_live=False,
+        recorder,
+        identity="alice",
+        name="Alice",
+        utterance_id="utt-dup",
+        do_record=True,
+        do_live=False,
     )
     await a.write_frame(PCM_FRAME)
     await b.write_frame(PCM_FRAME)
