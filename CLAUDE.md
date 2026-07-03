@@ -77,6 +77,37 @@
   `globalThis.__TAPSCRIBE_SIG_DRIFT`. The
   `test_renderregion_sig_audit_finds_no_drift` e2e test enables it across
   the views and asserts no drift.
+- Stale-while-revalidate for lazy, sig-keyed listings on `/next`: a
+  lazily-fetched, signature-keyed resource (`web/js/api.js` `_resource`)
+  whose key is a SESSION-LEVEL AGGREGATE that flips when any ONE sibling
+  changes — the canonical case is `files_sig`, which flips when a single
+  WAV of many is (re-)transcribed / stripped / added — must NOT return a
+  bare "loading" sentinel (`null`) on the refetch. The view renders that
+  sentinel exactly like a COLD first load and `replaceChildren`-blanks the
+  whole multi-item region to a "loading…" placeholder, once per sibling
+  change — the "multi-track pages blink while transcribing" bug (#266).
+  Hold the last-good value during the refetch (stale-while-revalidate) so
+  the region reconciles in place; return the cold-load sentinel ONLY when
+  nothing was ever resolved for that session. `loadSessionFiles` is the
+  reference: a per-session `_lastGoodFiles` cache returns the previous
+  listing while the new `files_sig` refetches, so the Recordings +
+  Transcript WAV lists (both `reconcileList`-backed) refresh in place
+  instead of flashing. Pin it with an identity-stamp e2e that stamps an
+  UNRELATED row, flips the sig via a sibling, and asserts the stamped node
+  survives the poll (`test_next_files_sig_flip_does_not_blank_wav_list`,
+  `…_does_not_blank_transcript_picker`). The same shape recurs for any
+  region fed by a lazy body keyed on a content stamp — the merged
+  transcript pane (`transcript.js`, `sessionTranscript`) and the summary
+  output pane (`summary.js`, `sessionSummary`) blank to "loading…" on a
+  re-transcribe / external re-summarize for the same reason; give them a
+  last-good hold if that blink matters. The DUAL requirement: a multi-item
+  region gated on such an aggregate must render through `reconcileList`
+  (keyed, in-place) — a full `replaceChildren` rebuild on the sig, even
+  WITHOUT a placeholder blank, still churns O(content) nodes + row
+  listeners on every sibling/tick change. `sessions.js` `listSig` folding
+  the per-tick `total_bytes` (unmasked, unlike `files_sig`) + a sibling's
+  `segment_count` into a whole-list `replaceChildren` is the known
+  offender; the fixed WAV lists are the pattern to copy.
 
 ## Runtime deps the install picker does NOT cover
 

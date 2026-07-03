@@ -186,13 +186,34 @@ export const sessionFiles = _resource(
 );
 
 /**
+ * Last resolved WAV listing per session — the stale-while-revalidate memory that
+ * keeps a files_sig FLIP from blanking the view. `files_sig` flips whenever a
+ * WAV is added / re-recorded / (re-)transcribed, so during a batch transcribe it
+ * flips ONCE PER TRACK as each finishes. Returning `null` on every flip made both
+ * multi-track views (Recordings, Transcript) blank the whole WAV list — and the
+ * Recordings header + waveform + stats — to a "loading…" placeholder for the
+ * round-trip until the fresh listing landed, then rebuild it: a visible blink on
+ * every per-WAV completion. Holding the last good listing here refreshes the list
+ * IN PLACE instead (the view reconciles by key when the fresh data lands via
+ * onLand). Capped via `_capCache` like the sibling resource caches, so a
+ * long-lived tab that browses many sessions doesn't retain every listing.
+ * The stored array is the resource's own value BY REFERENCE (the same array the
+ * view assigns to `currentFiles`), so callers must treat the listing as
+ * read-only — mutating it in place would corrupt every holder of it.
+ * @type {Map<string, import('./types.js').WavFile[]>} */
+const _lastGoodFiles = new Map();
+
+/**
  * Resolve a focused session's WAV listing for a per-tick render, the shape both
  * the Recordings and Transcript views need: returns the cached array when it's
  * in hand, `[]` when there's nothing to fetch (empty `filesSig` → no folder /
- * no WAVs yet), or `null` while a fetch is in flight (→ the caller shows a
- * loading placeholder). On a cache miss it fires the fetch ONCE (deduped via the
- * caller's `pending` set across the ticks before it lands) and calls `onLand`
- * when it settles so the view can drop its render gates + re-render.
+ * no WAVs yet), the session's last-good listing while a NEWER sig's fetch is in
+ * flight (stale-while-revalidate — a refresh must not blank the view), or `null`
+ * only on a genuine COLD load (a session with no last-good listing yet → the
+ * caller shows a loading placeholder). On a cache miss it fires the fetch ONCE
+ * (deduped via the caller's `pending` set across the ticks before it lands) and
+ * calls `onLand` when it settles so the view can drop its render gates and
+ * reconcile the fresh list in place.
  * @param {string} session
  * @param {string} filesSig
  * @param {Set<string>} pending - per-view in-flight (session@filesSig) keys
@@ -200,9 +221,22 @@ export const sessionFiles = _resource(
  * @returns {import('./types.js').WavFile[] | null}
  */
 export function loadSessionFiles(session, filesSig, pending, onLand) {
-  if (!session || !filesSig) return [];
+  if (!session) return [];
+  if (!filesSig) {
+    // No files on disk yet, or every WAV was just deleted (files_sig == ""):
+    // this session's last-good IS now empty. Record that, so a later non-empty
+    // flip (a new tap records in) shows the empty state through the stale path
+    // rather than resurrecting the pre-deletion rows as ghosts.
+    _lastGoodFiles.set(session, []);
+    _capCache(_lastGoodFiles);
+    return [];
+  }
   const cached = sessionFiles.peek(session, filesSig);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    _lastGoodFiles.set(session, cached);
+    _capCache(_lastGoodFiles);
+    return cached;
+  }
   const k = `${session}@${filesSig}`;
   if (!pending.has(k)) {
     pending.add(k);
@@ -210,7 +244,9 @@ export function loadSessionFiles(session, filesSig, pending, onLand) {
       .catch(() => { /* transient — the next poll refetches */ })
       .finally(() => { pending.delete(k); onLand(); });
   }
-  return null;
+  // Stale-while-revalidate: hold this session's last-good listing during the
+  // refetch; `null` only on a cold load (a session that never resolved yet).
+  return _lastGoodFiles.get(session) ?? null;
 }
 
 // ---- Waveform peaks fetch + client cache ---------------------------------

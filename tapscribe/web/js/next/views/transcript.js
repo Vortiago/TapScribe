@@ -142,6 +142,15 @@ export function build(ctx) {
   // lazy merged-transcript fetch lands — dedupes repeated misses.
   /** @type {Set<string>} */
   const txRerenderPending = new Set();
+  /** Per-session last-good merged body — the stale-while-revalidate hold that
+   * keeps a re-transcribe (a new transcribed_at) from blanking the merged pane
+   * to "loading transcript…" while the new body refetches. Show the previous
+   * merged transcript in place until the fresh one lands (markRegionStale on the
+   * fetch forces the swap), instead of wiping the transcript the operator is
+   * reading. Keyed by session, so switching to a previously-viewed session shows
+   * its own last-good rather than a cold-load placeholder. Same shape as
+   * api.js `_lastGoodFiles`. @type {Map<string, import('../../types.js').MergedTranscript>} */
+  const lastGoodMerged = new Map();
   /** The lazily-fetched WAV listing for the FOCUSED session — the array
    * /api/state no longer embeds. Refreshed at the top of update() from the
    * (sid, files_sig) client cache; sourceFiles()/recordingFor read it. */
@@ -166,7 +175,10 @@ export function build(ctx) {
     if (!marker || !marker.transcribed_at || !sid) return null;
     const stamp = marker.transcribed_at;
     const cached = sessionTranscript.peek(sid, stamp);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      if (cached) lastGoodMerged.set(sid, cached);
+      return cached;
+    }
     const key = `${sid}@${stamp}`;
     if (!txRerenderPending.has(key)) {
       txRerenderPending.add(key);
@@ -174,7 +186,12 @@ export function build(ctx) {
         .catch(() => { /* transient failure — next poll retries */ })
         .finally(() => { txRerenderPending.delete(key); markRegionStale(mergedHost); afterMutate(); });
     }
-    return null;
+    // Stale-while-revalidate: hold the previous merged body during the refetch
+    // so a re-transcribe refreshes the pane in place instead of blanking it to
+    // "loading transcript…". null (→ cold-load placeholder) only when this
+    // session never resolved a body. markRegionStale (above) forces the swap to
+    // the fresh body once the fetch lands.
+    return lastGoodMerged.get(sid) ?? null;
   };
 
   /** Effective source for the focused session — falls back to original when no

@@ -2290,6 +2290,315 @@ async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder:
             await browser.close()
 
 
+def _seed_multi_wav_session(rec, sid: str, *, n: int) -> tuple[Path, list[str]]:
+    """A non-current on-disk session with `n` WAVs and NO transcripts yet — the
+    multi-track page the blink report is about."""
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    names: list[str] = []
+    for i in range(n):
+        name = f"{sid}_spk{i}_id{i}_0000aa{i:02d}.wav"
+        synth_speech_like_wav(d / name, seconds=0.4, freq_hz=200.0 + 20 * i)
+        names.append(name)
+    return d, names
+
+
+def _land_wav_transcript(session_dir: Path, wav_name: str) -> None:
+    """Write a primary per-WAV transcript sidecar for one WAV — exactly what a
+    batch transcribe does as it finishes each track: it flips that WAV's
+    transcribed_at, and so the session's files_sig on the next /api/state poll."""
+    tdir = (session_dir / wav_name).with_suffix(".transcripts")
+    tdir.mkdir(parents=True, exist_ok=True)
+    # The lone sidecar resolves as the primary via wav_cache's newest-mtime
+    # fallback, so no `_primary` pointer is needed to make read_primary_marker
+    # surface transcribed_at (and so flip files_sig).
+    (tdir / "fake__tiny.en.json").write_text(
+        json.dumps(
+            {
+                "transcribed_at": "2025-02-01T10:00:00+00:00",
+                "backend": "fake",
+                "model": "tiny.en",
+                "source": "original",
+                "transcribe_ms": 1000,
+                "segments": [{"start": 0.0, "end": 1.0, "text": "hello world"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+async def test_next_files_sig_flip_does_not_blank_wav_list(running_recorder: RunningRecorder):
+    """Regression: on a multi-WAV session, one track finishing transcription
+    flips the session's files_sig. The lazy files listing then refetches under
+    the new sig — but the Recordings view must keep showing the LAST-GOOD listing
+    while that refetch is in flight, not blank the whole WAV list to a "loading…"
+    placeholder. Pre-fix, loadSessionFiles returned null on every sig change, so
+    each per-WAV completion during a batch transcribe wiped + rebuilt every row
+    (and the header/waveform) — the "multi-track pages keep blinking while
+    transcribing" report."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-01T09-00-00Z"
+    session_dir, names = _seed_multi_wav_session(rec, sid, n=3)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/", wait_until="domcontentloaded")
+
+            # Focus the seeded session and open its Recordings stage.
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "recordings")
+
+            # All three WAV rows render.
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wavrow[data-wav]').length >= 3""",
+                timeout=15000,
+            )
+
+            # Stamp the row for an UNRELATED track (names[0]) — it is NOT the one
+            # about to be transcribed, so nothing it renders changes.
+            stamped = await page.evaluate(
+                """(name) => {
+                    const row = document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`);
+                    if (!row) return false;
+                    row.__guardMark = 1;
+                    return true;
+                }""",
+                names[0],
+            )
+            assert stamped, "could not find the unrelated WAV row to stamp"
+
+            # A DIFFERENT track finishes transcription → its per-WAV sidecar lands
+            # → the session's files_sig flips on the next poll.
+            _land_wav_transcript(session_dir, names[2])
+
+            # Wait until the flip is observed: the transcribed row shows its ✓ tx
+            # marker (proves a full render cycle under the new files_sig ran).
+            await page.wait_for_function(
+                """(name) => {
+                    const tag = document.querySelector(`#viewRoot .wavrow[data-wav="${name}"] [data-slot="txTag"]`);
+                    return !!tag && tag.textContent.includes('✓');
+                }""",
+                arg=names[2],
+                timeout=15000,
+            )
+
+            # The unrelated row must be the SAME node — never wiped to a loading
+            # placeholder and rebuilt.
+            survived = await page.evaluate(
+                """(name) => {
+                    const row = document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`);
+                    return !!(row && row.__guardMark === 1);
+                }""",
+                names[0],
+            )
+            assert survived, (
+                "the whole WAV list was blanked to a loading placeholder and "
+                "rebuilt when one track's files_sig flipped — multi-track pages "
+                "blink on every per-WAV completion during a batch transcribe. Hold "
+                "the last-good listing while the refetch is in flight."
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_recorder: RunningRecorder):
+    """The Transcript stage's per-WAV picker shares the Recordings list's lazy
+    files listing, so it has the same blink: a track finishing transcription
+    flips files_sig and, pre-fix, blanked the whole picker to a "loading…"
+    placeholder before rebuilding. Same stale-while-revalidate hold; pins the
+    second multi-track surface."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-02T09-00-00Z"
+    session_dir, names = _seed_multi_wav_session(rec, sid, n=3)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/", wait_until="domcontentloaded")
+
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "transcript")
+
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wavrow[data-wav]').length >= 3""",
+                timeout=15000,
+            )
+            stamped = await page.evaluate(
+                """(name) => {
+                    const row = document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`);
+                    if (!row) return false;
+                    row.__guardMark = 1;
+                    return true;
+                }""",
+                names[0],
+            )
+            assert stamped, "could not find the unrelated picker row to stamp"
+
+            _land_wav_transcript(session_dir, names[2])
+
+            await page.wait_for_function(
+                """(name) => {
+                    const tag = document.querySelector(`#viewRoot .wavrow[data-wav="${name}"] [data-slot="txTag"]`);
+                    return !!tag && tag.textContent.includes('✓');
+                }""",
+                arg=names[2],
+                timeout=15000,
+            )
+            survived = await page.evaluate(
+                """(name) => {
+                    const row = document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`);
+                    return !!(row && row.__guardMark === 1);
+                }""",
+                names[0],
+            )
+            assert survived, (
+                "the Transcript picker was blanked + rebuilt when one track's "
+                "files_sig flipped — same blink as Recordings; hold the last-good "
+                "listing while the refetch is in flight."
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+def _write_merged_transcript(
+    session_dir: Path, *, segments: int, transcribed_at: str, text_prefix: str
+) -> None:
+    """(Over)write a session's merged transcript with `segments` lines stamped
+    `transcribed_at` — a re-transcribe bumps the stamp, which the dashboard
+    refetches. `text_prefix` distinguishes one merge's lines from another's."""
+    (session_dir / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "transcribed_at": transcribed_at,
+                "segments": [
+                    {
+                        "speaker": "Alice",
+                        "text": f"{text_prefix} {i}: the quick brown fox jumps over the lazy dog.",
+                        "abs_start": f"2025-02-01T09:{i // 60:02d}:{i % 60:02d}+00:00",
+                    }
+                    for i in range(segments)
+                ],
+                "speakers": ["Alice"],
+                "speaking_seconds": {"Alice": 480.0},
+                "suppressed": [],
+                "suppressed_count": 0,
+                "wav_count": 1,
+                "transcribe_ms": 1000,
+                "model": "tiny.en",
+                "backend": "fake",
+                "device": "cpu",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+async def test_next_retranscribe_does_not_blank_merged_pane(running_recorder: RunningRecorder):
+    """Re-transcribing a session bumps the merged transcript's transcribed_at,
+    which refetches the merged body. The pane must hold the PREVIOUS merged
+    transcript in place during the refetch (stale-while-revalidate), never
+    blanking to a "loading transcript…" placeholder — wiping the transcript the
+    operator is reading is the same blink as the WAV-list bug, on the same page."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-01T09-00-00Z"
+    _seed_merged_session(rec, sid, segments=120)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "transcript")
+
+            # The original merged body is on screen.
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll('{_MERGED_FIRST_LINE}').length >= 120""",
+                timeout=15000,
+            )
+
+            # Watch the pane for a "loading transcript…" blank across the refetch.
+            await page.evaluate(
+                """() => {
+                    const host = document.querySelector('#viewRoot [data-slot="mergedHost"]');
+                    window.__sawLoading = false;
+                    const obs = new MutationObserver(() => {
+                        if ((host.textContent || '').includes('loading transcript')) window.__sawLoading = true;
+                    });
+                    obs.observe(host, { childList: true, subtree: true, characterData: true });
+                }"""
+            )
+
+            # Re-transcribe: a new transcribed_at + a distinct body.
+            _write_merged_transcript(
+                rec.recordings_dir / sid,
+                segments=130,
+                transcribed_at="2025-02-01T11:00:00+00:00",
+                text_prefix="Bravo",
+            )
+
+            # The fresh body lands (a "Bravo" line appears)…
+            await page.wait_for_function(
+                f"""() => Array.from(document.querySelectorAll('{_MERGED_FIRST_LINE}'))
+                    .some((d) => (d.textContent || '').includes('Bravo'))""",
+                timeout=15000,
+            )
+            # …and the pane never blanked to the loading placeholder on the way.
+            saw_loading = await page.evaluate("() => window.__sawLoading")
+            assert not saw_loading, (
+                "the merged transcript pane blanked to 'loading transcript…' during a "
+                "re-transcribe refetch — hold the previous body (stale-while-revalidate) "
+                "so the pane refreshes in place instead of wiping what's on screen."
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
 async def test_meeting_pipeline_job_renders_stage_labelled_bar(running_recorder: RunningRecorder):
     """A bridge-triggered end-of-meeting pipeline surfaces as a NORMAL session
     job (issue #102's dashboard acceptance criterion): the shared job bar must
