@@ -1320,7 +1320,7 @@ def test_current_session_refused_before_dir_materialised(client, recorder_under_
 def test_refuse_current_or_busy_allows_when_neither_current_nor_busy(recorder_under_test):
     from tapscribe.app import _refuse_current_or_busy
 
-    _refuse_current_or_busy(recorder_under_test, "s", action="delete")  # must not raise
+    _refuse_current_or_busy(recorder_under_test, "s", current="s", action="delete")  # must not raise
 
 
 def test_refuse_current_or_busy_refuses_current_session(recorder_under_test):
@@ -1330,7 +1330,7 @@ def test_refuse_current_or_busy_refuses_current_session(recorder_under_test):
 
     cur = recorder_under_test.session_start
     with pytest.raises(HTTPException) as exc_info:
-        _refuse_current_or_busy(recorder_under_test, cur, action="delete")
+        _refuse_current_or_busy(recorder_under_test, cur, current=cur, action="delete")
     assert exc_info.value.status_code == 409
     assert "cannot delete the current session" in exc_info.value.detail
 
@@ -1352,35 +1352,29 @@ def test_refuse_current_or_busy_appends_hint_after_current_session_message(recor
 
 
 async def test_refuse_current_or_busy_refuses_single_session_job_in_flight(recorder_under_test):
-    from fastapi import HTTPException
-
     from tapscribe.app import _refuse_current_or_busy
-    from tapscribe.recorder import JobState
+    from tapscribe.recorder import JobState, SessionBusy
 
     await recorder_under_test.jobs.claim(
         JobState(session="s", kind="strip", current=0, total=1, started_at=datetime.now(UTC))
     )
-    with pytest.raises(HTTPException) as exc_info:
-        _refuse_current_or_busy(recorder_under_test, "s", action="delete")
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "a transcribe or strip job is in flight on this session"
+    with pytest.raises(SessionBusy) as exc_info:
+        _refuse_current_or_busy(recorder_under_test, "s", current="s", action="delete")
+    assert str(exc_info.value) == "a transcribe or strip job is in flight on this session"
 
 
 async def test_refuse_current_or_busy_ors_job_check_across_multiple_sessions(recorder_under_test):
-    from fastapi import HTTPException
-
     from tapscribe.app import _refuse_current_or_busy
-    from tapscribe.recorder import JobState
+    from tapscribe.recorder import JobState, SessionBusy
 
     # Only "src" is busy; "tgt" is clean. Neither is the current session.
     # The busy check must still refuse because it applies to EITHER session.
     await recorder_under_test.jobs.claim(
         JobState(session="src", kind="transcribe", current=0, total=1, started_at=datetime.now(UTC))
     )
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(SessionBusy) as exc_info:
         _refuse_current_or_busy(recorder_under_test, "tgt", "src", current="src", action="absorb")
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "a transcribe or strip job is in flight on one of these sessions"
+    assert str(exc_info.value) == "a transcribe or strip job is in flight on one of these sessions"
 
 
 def test_refuse_current_or_busy_target_may_be_current_source_may_not(recorder_under_test):
@@ -1394,14 +1388,15 @@ def test_refuse_current_or_busy_target_may_be_current_source_may_not(recorder_un
     _refuse_current_or_busy(recorder_under_test, cur, "src", current="src", action="absorb")
 
 
-def test_refuse_current_or_busy_requires_explicit_current_for_multi_session(recorder_under_test):
-    """A future multi-session caller that forgets `current=` must fail loudly
-    (a programming error) rather than silently skip the current-session
-    guard — the exact drift risk issue #256 exists to close."""
+def test_refuse_current_or_busy_requires_explicit_current(recorder_under_test):
+    """`current` is a required keyword-only arg (no derive-from-sole-session
+    default) — a caller can't silently skip the current-session guard by
+    forgetting it, single-session or multi. Python's own TypeError enforces
+    this; this test just pins that it's still required after any refactor."""
     from tapscribe.app import _refuse_current_or_busy
 
-    with pytest.raises(ValueError):
-        _refuse_current_or_busy(recorder_under_test, "tgt", "src", action="absorb")
+    with pytest.raises(TypeError):
+        _refuse_current_or_busy(recorder_under_test, "s", action="delete")
 
 
 def test_delete_wav_stripped_region_only(client, recorder_under_test):
