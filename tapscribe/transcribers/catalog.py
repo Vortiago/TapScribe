@@ -572,13 +572,14 @@ class TranscriberRegistry:
                 if kind not in avail:
                     continue
                 for binding in entry.backends:
-                    if kind in binding.kinds:
+                    if kind in binding.kinds and binding.is_installed():
                         return ResolvedBinding(kind=kind, loader=binding.loader)
-            # No machine-available × model-supported combination exists.
+            # No installed × machine-available combination exists.
             raise RuntimeError(
                 f"model {model_id!r} has no backend that runs on this "
                 f"machine. Model supports: {sorted(entry.supported_backend_kinds())!r}, "
-                f"machine has: {sorted(avail)!r}. Install the matching "
+                f"machine has: {sorted(avail)!r}. No installed × available "
+                f"combination found. Install the matching "
                 f"optional-dep group (pip install tapscribe[...])."
             )
 

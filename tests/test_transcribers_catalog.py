@@ -174,9 +174,13 @@ def test_resolve_returns_correct_loader_for_parakeet_on_cuda():
 
 def test_resolve_returns_correct_loader_for_parakeet_on_mlx():
     set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
-    rb = REGISTRY.resolve("parakeet-tdt-0.6b-v3", preference="auto")
-    assert rb.kind == "mlx"
-    assert rb.loader.__name__ == "_load_parakeet_mlx"
+    set_installed_modules_for_testing(frozenset({"parakeet_mlx"}))
+    try:
+        rb = REGISTRY.resolve("parakeet-tdt-0.6b-v3", preference="auto")
+        assert rb.kind == "mlx"
+        assert rb.loader.__name__ == "_load_parakeet_mlx"
+    finally:
+        set_installed_modules_for_testing(None)
 
 
 def test_resolve_nb_whisper_with_mlx_preference_raises():
@@ -513,15 +517,23 @@ def test_moonshine_backends_cover_mlx_and_cpu_cuda_with_probes():
 
 def test_moonshine_resolve_auto_prefers_mlx_when_available():
     set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
-    rb = REGISTRY.resolve("moonshine-tiny", preference="auto")
-    assert isinstance(rb, ResolvedBinding)
-    assert rb.kind == "mlx"
+    set_installed_modules_for_testing(frozenset({"moonshine"}))
+    try:
+        rb = REGISTRY.resolve("moonshine-tiny", preference="auto")
+        assert isinstance(rb, ResolvedBinding)
+        assert rb.kind == "mlx"
+    finally:
+        set_installed_modules_for_testing(None)
 
 
 def test_moonshine_resolve_auto_falls_back_to_cpu():
     set_available_backends_for_testing(frozenset({"cpu"}))
-    rb = REGISTRY.resolve("moonshine-base", preference="auto")
-    assert rb.kind == "cpu"
+    set_installed_modules_for_testing(frozenset({"optimum"}))
+    try:
+        rb = REGISTRY.resolve("moonshine-base", preference="auto")
+        assert rb.kind == "cpu"
+    finally:
+        set_installed_modules_for_testing(None)
 
 
 def test_moonshine_explicit_unavailable_backend_raises_runtimeerror():
