@@ -359,3 +359,21 @@ async def wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.05)
 async def streams_drained(recorder: Recorder) -> bool:
     """True once the recorder has finalised every in-flight /tap WS."""
     return len(await recorder.streams.snapshot()) == 0
+
+
+def utterance_released(recorder: Recorder, utterance_id: str) -> bool:
+    """True once this utterance's index record is closed (released) — the
+    actual precondition for a same-`utterance_id` reconnect to resume-append
+    onto the existing WAV instead of (by design) minting a second one.
+
+    `streams_drained` is a WEAKER proxy. The ActiveStream teardown and the
+    UtteranceIndex.release() are two separate steps of the /tap close, and
+    under the Windows ProactorEventLoop the stream can be observed gone before
+    the release lands — so a reconnect gated only on `streams_drained` can race
+    in while the record is still `open` and (correctly, per TapFanOut's
+    per-owner keying for overlapping taps) record its OWN second WAV. Because
+    `release()` runs only after `wave.close()`, this predicate also guarantees
+    the prior WAV is flushed and readable. Gate a reconnect on this, not on
+    drained."""
+    rec = recorder.utterances.snapshot().get(utterance_id)
+    return rec is not None and not rec.open

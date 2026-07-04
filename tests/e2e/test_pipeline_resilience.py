@@ -38,6 +38,7 @@ from .harness import (
     stream_wav_via_tap,
     streams_drained,
     synth_speech_like_wav,
+    utterance_released,
     wait_until,
 )
 
@@ -156,9 +157,13 @@ async def test_bridge_reconnect_mid_utterance_preserves_one_wav(
     )
     assert sent_first == len(first_chunk)
 
-    # The server-side cleanup is event-based — wait until ActiveStreams
-    # is empty so the second connect lands on a released UtteranceRecord.
-    assert await wait_until(lambda: streams_drained(rec), timeout=3.0)
+    # The server-side cleanup is event-based. Gate the reconnect on the
+    # utterance being RELEASED (record closed), NOT on ActiveStreams draining:
+    # the two are separate close steps and can be observed out of order under
+    # the Windows ProactorEventLoop, letting the reconnect race in while the
+    # record is still open and (by design) mint a SECOND WAV. See
+    # harness.utterance_released.
+    assert await wait_until(lambda: utterance_released(rec, utt), timeout=3.0)
 
     # WS2: reconnect with the SAME utterance_id, stream the rest, close
     # cleanly. The 60s UtteranceIndex.RESUME_WINDOW_SECONDS easily covers
@@ -168,7 +173,10 @@ async def test_bridge_reconnect_mid_utterance_preserves_one_wav(
         for frame in second_chunk:
             await ws.send(frame)
             await asyncio.sleep(0.005)
-    assert await wait_until(lambda: streams_drained(rec), timeout=3.0)
+    # Same reasoning: wait for the merged record to release before reading the
+    # WAV — release() runs after wave.close(), so this also guarantees the file
+    # is flushed for the frame-count assertions below.
+    assert await wait_until(lambda: utterance_released(rec, utt), timeout=3.0)
 
     # Exactly one WAV on disk — that's the load-bearing invariant.
     wavs = list(rec.session_dir.glob("*.wav"))
@@ -299,7 +307,10 @@ async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
         frames=first_chunk,
     )
     assert sent == len(first_chunk)
-    assert await wait_until(lambda: streams_drained(rec), timeout=3.0)
+    # Gate on release (record closed), not ActiveStreams draining — see
+    # harness.utterance_released; release() runs after wave.close(), so the
+    # first WAV is flushed and readable once this is true.
+    assert await wait_until(lambda: utterance_released(rec, utt), timeout=3.0)
 
     wavs = list(rec.session_dir.glob("*.wav"))
     assert len(wavs) == 1
