@@ -578,8 +578,7 @@ class TranscriberRegistry:
             raise RuntimeError(
                 f"model {model_id!r} has no backend that runs on this "
                 f"machine. Model supports: {sorted(entry.supported_backend_kinds())!r}, "
-                f"machine has: {sorted(avail)!r}. No installed × available "
-                f"combination found. Install the matching "
+                f"machine has: {sorted(avail)!r}. Install the matching "
                 f"optional-dep group (pip install tapscribe[...])."
             )
 

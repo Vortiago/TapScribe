@@ -62,13 +62,21 @@ def _entry(model_id: str, *bindings: BackendBinding) -> ModelEntry:
     )
 
 
-def _binding(kind: str, probe_module: str):
-    # A no-op loader thunk; resolve() never calls it, only returns it.
+def _multi_binding(kinds: frozenset[str], probe_module: str):
+    # One binding that serves several kinds behind a single probe module —
+    # the real shape of the parakeet/whisper `transformers`/`faster_whisper`
+    # (cuda+cpu) bindings.
     return BackendBinding(
-        kinds=frozenset({kind}),
+        kinds=kinds,
         loader=lambda *_: None,  # type: ignore[arg-type]
         probe_module=probe_module,
     )
+
+
+def _binding(kind: str, probe_module: str):
+    # A no-op loader thunk; resolve() never calls it, only returns it.
+    # The single-kind case of _multi_binding.
+    return _multi_binding(frozenset({kind}), probe_module)
 
 
 # ── auto skips an uninstalled higher-priority binding ────────────────────────
@@ -166,3 +174,41 @@ def test_auto_still_skips_machine_unavailable_kind():
     rb = reg.resolve("dual-model", preference="auto")
 
     assert rb.kind == "cpu"
+
+
+# ── multi-kind binding: one probe gates every kind it serves ─────────────────
+# The real parakeet/whisper cuda+cpu bindings are a SINGLE BackendBinding with
+# kinds={cuda, cpu} behind one probe module, so the auto walk visits the same
+# binding once per kind. The install-state skip must compose across ALL of a
+# multi-kind binding's kinds, not match it on the lower kind after skipping the
+# higher one.
+
+
+def test_auto_skips_multi_kind_binding_for_every_kind_when_uninstalled():
+    """A multi-kind (cuda+cpu) binding whose adapter is NOT installed must be
+    skipped at BOTH the cuda and the cpu step of the auto walk — not matched on
+    cpu after the cuda step skipped it — so with no other installed binding the
+    resolve raises rather than handing back an uninstalled binding."""
+    set_available_backends_for_testing(frozenset({"cuda", "cpu"}))
+    set_installed_modules_for_testing(frozenset())  # transformers NOT importable
+    entry = _entry("hf-only", _multi_binding(frozenset({"cuda", "cpu"}), "transformers"))
+    reg = TranscriberRegistry((entry,))
+
+    # The operator-facing error keeps the actionable pip-install hint.
+    with pytest.raises(RuntimeError, match="pip install tapscribe"):
+        reg.resolve("hf-only", preference="auto")
+
+
+def test_auto_returns_installed_multi_kind_binding_on_its_highest_kind():
+    """The composed skip must not OVER-skip: when the multi-kind binding's
+    adapter IS installed it is returned, on the highest machine-available kind
+    it serves (cuda before cpu)."""
+    set_available_backends_for_testing(frozenset({"cuda", "cpu"}))
+    set_installed_modules_for_testing(frozenset({"transformers"}))
+    entry = _entry("hf-only", _multi_binding(frozenset({"cuda", "cpu"}), "transformers"))
+    reg = TranscriberRegistry((entry,))
+
+    rb = reg.resolve("hf-only", preference="auto")
+
+    assert isinstance(rb, ResolvedBinding)
+    assert rb.kind == "cuda"
