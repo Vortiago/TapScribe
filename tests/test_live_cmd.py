@@ -108,12 +108,8 @@ def test_matches_returns_false_when_only_a_gate_knob_differs():
     assert chan.matches(**base, gate_hangover_ms=600) is False
     assert chan.matches(**base, gate_pre_roll_ms=500) is False
     assert chan.matches(**base, gate_min_speech_ms=120) is False
-    # Knobs equal to current config still force a restart — matches
-    # treats "explicitly supplied" as a restart request regardless of
-    # equality (operators rarely re-submit the exact same value). Pin
-    # the contract so a future "skip restart if value matches"
-    # optimisation is at least an opt-in change.
-    assert chan.matches(**base, gate_speech_threshold=0.5) is False
+    # Knob equal to current config is a no-op (issue #238).
+    assert chan.matches(**base, gate_speech_threshold=0.5) is True
 
 
 def test_whisper_live_kit_channel_supports_native_vad():

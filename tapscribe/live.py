@@ -464,11 +464,11 @@ class WhisperLiveKitChannel:
             and (not model or model == self.config.model)
             and (not language or language == self.config.language)
             and (gate_kind is None or gate_kind == self.config.gate_kind)
-            and conf is None
-            and gate_speech_threshold is None
-            and gate_hangover_ms is None
-            and gate_pre_roll_ms is None
-            and gate_min_speech_ms is None
+            and (conf is None or conf == self.config.confidence_validation)
+            and (gate_speech_threshold is None or gate_speech_threshold == self.config.gate_speech_threshold)
+            and (gate_hangover_ms is None or gate_hangover_ms == self.config.gate_hangover_ms)
+            and (gate_pre_roll_ms is None or gate_pre_roll_ms == self.config.gate_pre_roll_ms)
+            and (gate_min_speech_ms is None or gate_min_speech_ms == self.config.gate_min_speech_ms)
         )
 
     def begin_transition(
