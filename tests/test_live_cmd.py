@@ -30,6 +30,19 @@ EXE = "/path/to/whisperlivekit-server"
 DEFAULT_CFG = LiveConfig(model="tiny.en", language="en", host="localhost", port=8000)
 
 
+class _Alive:
+    """Stand-in for a live child whose process is still running: matches()
+    gates on running(), which polls self._proc."""
+
+    def poll(self):
+        return None
+
+
+# The "no override supplied" base for matches() — reduces to "is a child
+# running with this model/language?".
+BASE = dict(model=None, language=None, gate_kind=None, conf=None)
+
+
 def test_argv_starts_with_exe():
     cmd = build_live_cmd(EXE, DEFAULT_CFG, use_mlx=False)
     assert cmd[0] == EXE
@@ -95,21 +108,45 @@ def test_matches_returns_false_when_only_a_gate_knob_differs():
         gate_pre_roll_ms=300,
     )
     chan = LiveChannel(config=cfg, use_mlx=False)
-
-    class _Alive:
-        def poll(self):
-            return None
-
     chan._proc = _Alive()
 
-    base = dict(model=None, language=None, gate_kind=None, conf=None)
-    assert chan.matches(**base) is True
-    assert chan.matches(**base, gate_speech_threshold=0.7) is False
-    assert chan.matches(**base, gate_hangover_ms=600) is False
-    assert chan.matches(**base, gate_pre_roll_ms=500) is False
-    assert chan.matches(**base, gate_min_speech_ms=120) is False
+    assert chan.matches(**BASE) is True
+    assert chan.matches(**BASE, gate_speech_threshold=0.7) is False
+    assert chan.matches(**BASE, gate_hangover_ms=600) is False
+    assert chan.matches(**BASE, gate_pre_roll_ms=500) is False
+    assert chan.matches(**BASE, gate_min_speech_ms=120) is False
     # Knob equal to current config is a no-op (issue #238).
-    assert chan.matches(**base, gate_speech_threshold=0.5) is True
+    assert chan.matches(**BASE, gate_speech_threshold=0.5) is True
+
+
+def test_matches_threshold_survives_dashboard_display_rounding():
+    """The dashboard mirrors the threshold as `:.2f` and re-POSTs that rounded
+    value. A config that carries >2 decimals (0.567, set via the direct API)
+    would round-trip through the display as 0.57 — if `matches()` compared the
+    raw float with `==`, the unchanged re-submit would read as "changed" and
+    respawn the child, reintroducing the exact #238 spurious-restart. So a
+    supplied value equal to the config *at display precision* must be a no-op,
+    while a genuine (display-visible) change must still force a restart."""
+    cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_speech_threshold=0.567)
+    chan = LiveChannel(config=cfg, use_mlx=False)
+    chan._proc = _Alive()
+
+    # The dashboard re-submits the `:.2f`-rounded value for the unchanged field.
+    resubmitted = float(f"{0.567:.2f}")  # 0.57
+    assert chan.matches(**BASE, gate_speech_threshold=resubmitted) is True
+    # A display-visible change still restarts.
+    assert chan.matches(**BASE, gate_speech_threshold=0.62) is False
+
+
+def test_matches_gate_knob_int_equals_float_config_is_a_noop():
+    """A gate knob supplied as an int equal to the float config value (JSON
+    clients may send `1` where config holds `1.0`) must not force a restart —
+    `1 == 1.0` in Python, so the equality path already coalesces it; pin that
+    the boundary type mismatch stays a no-op rather than a spurious respawn."""
+    cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_speech_threshold=1.0)
+    chan = LiveChannel(config=cfg, use_mlx=False)
+    chan._proc = _Alive()
+    assert chan.matches(**BASE, gate_speech_threshold=1) is True
 
 
 def test_whisper_live_kit_channel_supports_native_vad():
