@@ -572,9 +572,9 @@ class TranscriberRegistry:
                 if kind not in avail:
                     continue
                 for binding in entry.backends:
-                    if kind in binding.kinds:
+                    if kind in binding.kinds and binding.is_installed():
                         return ResolvedBinding(kind=kind, loader=binding.loader)
-            # No machine-available × model-supported combination exists.
+            # No installed × machine-available combination exists.
             raise RuntimeError(
                 f"model {model_id!r} has no backend that runs on this "
                 f"machine. Model supports: {sorted(entry.supported_backend_kinds())!r}, "

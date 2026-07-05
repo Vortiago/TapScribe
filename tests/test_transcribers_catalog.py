@@ -41,11 +41,12 @@ def test_default_batch_model_is_multilingual():
 
 @pytest.fixture(autouse=True)
 def _restore_backends():
-    """Most tests force a specific available-backends set; restore the
-    auto-probe afterwards so other test files (e.g. routes) see real
-    detection."""
+    """Most tests force a specific available-backends set (and some also pin
+    the install-probe set); restore BOTH auto-probes afterwards so other test
+    files (e.g. routes) see real detection and no fake install-state leaks."""
     yield
     set_available_backends_for_testing(None)
+    set_installed_modules_for_testing(None)
 
 
 def test_default_registry_contains_expected_families():
@@ -163,6 +164,10 @@ def test_resolve_explicit_kind_raises_when_unavailable():
 
 def test_resolve_returns_correct_loader_for_parakeet_on_cuda():
     set_available_backends_for_testing(frozenset({"cuda", "cpu"}))
+    # Pin install-state so this stays box-independent: the parakeet cuda/cpu
+    # binding probes `transformers` (an optional extra, not a base/dev dep),
+    # so on a lean install the new is_installed() gate would otherwise skip it.
+    set_installed_modules_for_testing(frozenset({"transformers"}))
     rb = REGISTRY.resolve("parakeet-tdt-0.6b-v3", preference="auto")
     assert isinstance(rb, ResolvedBinding)
     assert rb.kind == "cuda"
@@ -174,6 +179,7 @@ def test_resolve_returns_correct_loader_for_parakeet_on_cuda():
 
 def test_resolve_returns_correct_loader_for_parakeet_on_mlx():
     set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    set_installed_modules_for_testing(frozenset({"parakeet_mlx"}))
     rb = REGISTRY.resolve("parakeet-tdt-0.6b-v3", preference="auto")
     assert rb.kind == "mlx"
     assert rb.loader.__name__ == "_load_parakeet_mlx"
@@ -191,6 +197,10 @@ def test_resolve_nb_whisper_with_auto_skips_mlx_and_picks_cpu():
     where MLX is available but the model has no MLX binding should
     silently fall through to the next kind (CPU here), not raise."""
     set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    # Box-independent: nb-whisper's sole (cpu/cuda) binding probes
+    # `faster_whisper` (an optional extra); pin it so the is_installed() gate
+    # doesn't skip it on a box without the whisper-cpu extra installed.
+    set_installed_modules_for_testing(frozenset({"faster_whisper"}))
     rb = REGISTRY.resolve("nb-whisper-medium", preference="auto")
     assert rb.kind == "cpu"
     assert rb.loader.__name__ == "_load_faster_whisper"
@@ -513,6 +523,7 @@ def test_moonshine_backends_cover_mlx_and_cpu_cuda_with_probes():
 
 def test_moonshine_resolve_auto_prefers_mlx_when_available():
     set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    set_installed_modules_for_testing(frozenset({"moonshine"}))
     rb = REGISTRY.resolve("moonshine-tiny", preference="auto")
     assert isinstance(rb, ResolvedBinding)
     assert rb.kind == "mlx"
@@ -520,6 +531,7 @@ def test_moonshine_resolve_auto_prefers_mlx_when_available():
 
 def test_moonshine_resolve_auto_falls_back_to_cpu():
     set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset({"optimum"}))
     rb = REGISTRY.resolve("moonshine-base", preference="auto")
     assert rb.kind == "cpu"
 
