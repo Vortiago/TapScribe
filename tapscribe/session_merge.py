@@ -24,10 +24,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
+
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
-from .session_paths import DIRNAME_STRIPPED
-from .sessions import _valid_strip_meta
+from .session_paths import DIRNAME_STRIPPED, FILENAME_STRIP_META_JSON, _safe_part
+from .sessions import strip_meta_owner_by_clip, valid_strip_meta
 from .text import parse_iso, parse_wav_start
 from .wav_cache import read_cached
 
@@ -105,28 +107,29 @@ def select_session_wavs(
                 from_iso=from_iso,
                 to_iso=to_iso,
             )
+        # Build owner_by_clip from strip-meta.json, so the silence gate below
+        # can key off the true original instead of the stripped clip itself.
+        # Read directly (not via `sessions.read_strip_meta`): this function is
+        # pure and makes no assumption that `session_dir` lives under
+        # `config.RECORDINGS_DIR` — every selection test (including this
+        # issue's) builds `session_dir` from a bare tmp_path, and the two
+        # production callers (`batch_transcribe`, `batch_pipeline`) only ever
+        # reach here with a `session_dir` already validated by
+        # `resolve_session_dir`, so the containment guarantee holds there too,
+        # just one layer up rather than re-checked here. `valid_strip_meta`
+        # still enforces the one shape contract shared with the safe reader.
+        meta_path = wav_dir / FILENAME_STRIP_META_JSON
+        try:
+            with meta_path.open("r", encoding="utf-8") as fh:
+                meta = valid_strip_meta(json.load(fh))
+        except (OSError, ValueError):
+            meta = None
+        if meta is not None:
+            owner_by_clip = strip_meta_owner_by_clip(meta)
     elif source in (None, "", "original"):
         wav_dir = session_dir
     else:
         raise ValueError(f"unknown source: {source!r}")
-
-    # Build owner_by_clip from strip-meta.json for stripped source.
-    # Read directly (not via read_strip_meta) because that function's
-    # _read_json_or_none wrapper enforces a RECORDINGS_DIR containment
-    # check that would reject the strip-meta in the strip branch below.
-    if source == "stripped":
-        meta_path = wav_dir / "strip-meta.json"
-        try:
-            with meta_path.open("r", encoding="utf-8") as fh:
-                meta = _valid_strip_meta(json.load(fh))
-        except (OSError, json.JSONDecodeError, ValueError, TypeError):
-            meta = None
-        if meta is not None:
-            for orig_name, entry in meta["files"].items():
-                if isinstance(entry, dict):
-                    for span in entry.get("spans") or []:
-                        if isinstance(span, dict) and isinstance(span.get("name"), str):
-                            owner_by_clip[span["name"]] = orig_name
 
     from_dt = parse_iso(from_iso)
     to_dt = parse_iso(to_iso)
@@ -155,6 +158,15 @@ def select_session_wavs(
         # the stripped sibling's RMS can be misleadingly high because
         # silero may have false-positive'd on a brief noise burst.
         original_name = owner_by_clip.get(wav.name, wav.name)
+        try:
+            # `original_name` came from strip-meta.json content, not a
+            # filesystem listing — run it through the same sanitiser
+            # `session_paths` uses for any name headed into a path join, so a
+            # malformed/adversarial sidecar entry can't walk `original_path`
+            # outside `base_dir`. An invalid name just isn't a usable owner.
+            _safe_part(original_name, "clip owner")
+        except HTTPException:
+            original_name = wav.name
         original_path = base_dir / original_name
         if not original_path.is_file():
             # The original wasn't in session_dir/ — fall back to checking the

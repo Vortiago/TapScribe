@@ -97,6 +97,50 @@ def test_stripped_clip_with_no_owner_mapping_falls_back_to_checking_itself(tmp_p
     assert CLIP_NAME in selection.skipped_silent
 
 
+def _write_strip_meta_with_owner(stripped_dir: Path, orig_name: str, clip_name: str) -> None:
+    """A strip-meta.json entry naming `clip_name`'s owner as `orig_name`
+    verbatim, with no requirement that `orig_name` correspond to a real WAV —
+    for pinning the owner-name sanitiser itself rather than silence
+    semantics (unlike `_write_strip_meta`, which stats the real original)."""
+    (stripped_dir / "strip-meta.json").write_text(
+        json.dumps(
+            {
+                "stripped_at": datetime.now(UTC).isoformat(),
+                "knobs": {},
+                "files": {
+                    orig_name: {
+                        "wav_size": 0,
+                        "wav_mtime_ns": 0,
+                        "spans": [{"name": clip_name, "start_s": 0.0, "end_s": 1.0}],
+                    }
+                },
+            }
+        )
+    )
+
+
+def test_stripped_clip_owner_with_path_traversal_is_rejected_not_followed(tmp_path: Path):
+    """A strip-meta.json entry naming an owner outside session_dir/ (path
+    traversal here; an absolute path would escape just as far) must never be
+    joined into a real filesystem lookup. The gate falls back to
+    RMS-checking the clip itself instead of walking outside session_dir/."""
+    session_dir = tmp_path / "session"
+    stripped = session_dir / "stripped"
+    stripped.mkdir(parents=True)
+
+    # An audible WAV sitting OUTSIDE session_dir/, at the traversal target.
+    # If the traversal were followed, the gate would read this instead and
+    # wrongly keep the (actually silent) clip selected.
+    seed_wav(tmp_path / "outside.wav")
+    seed_silent_wav(stripped / CLIP_NAME)
+    _write_strip_meta_with_owner(stripped, "../outside.wav", CLIP_NAME)
+
+    selection = select_session_wavs(session_dir, source="stripped")
+
+    assert selection.wavs == ()
+    assert CLIP_NAME in selection.skipped_silent
+
+
 def test_sessions_docstring_no_longer_claims_identical_filenames():
     """sessions.py's module docstring described the pre-uuid8 naming scheme
     ("stripped/ ... identical filenames"); strip_one_wav has minted a fresh
