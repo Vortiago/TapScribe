@@ -11,8 +11,9 @@ once-per-second read path: path resolution + the path-safety guard are in
 `session_paths`; destructive operator operations (absorb, delete, prune) are in
 `session_maintenance`; the strip-silence splitter is in `batch_strip`.
 
-`stripped/` is a sibling subfolder containing silence-trimmed copies of the
-originals with identical filenames, so per-WAV transcript caches stay isolated
+`stripped/` is a sibling subfolder containing silence-trimmed region clips
+with fresh uuid8-anchored filenames; `strip-meta.json` maps each clip back
+to its owning original, so per-WAV transcript caches stay isolated
 between the two sources.
 """
 
@@ -243,12 +244,34 @@ def read_wav_transcript(session: str, name: str, source: str = "original") -> di
     return read_primary_payload(wav_path)
 
 
-def _valid_strip_meta(meta: Any) -> dict[str, Any] | None:
-    """The v2 sidecar shape gate ({"files": {...}}): shared by the direct
-    reader and its poll-path cached variant so both enforce the one contract."""
+def valid_strip_meta(meta: Any) -> dict[str, Any] | None:
+    """The v2 sidecar shape gate ({"files": {...}}): shared by every reader of
+    strip-meta.json — the two RECORDINGS_DIR-contained readers below, and
+    `session_merge.select_session_wavs`'s direct read (that function is pure
+    and has no RECORDINGS_DIR of its own to check against) — so all three
+    enforce the one shape contract."""
     if not isinstance(meta, dict) or not isinstance(meta.get("files"), dict):
         return None
     return meta
+
+
+def strip_meta_owner_by_clip(meta: dict[str, Any]) -> dict[str, str]:
+    """Reverse-index an already shape-validated strip-meta.json (`valid_strip_meta`'s
+    return) into `{clip_name: owning_original_name}`, from
+    `files[<original>].spans[].name`. Shared by `build_session_files`'s
+    per-original region bucketing and `select_session_wavs`'s silence gate —
+    both need the same clip->original mapping, just for different purposes,
+    so the reverse-index loop has exactly one owner."""
+    owner_by_clip: dict[str, str] = {}
+    for orig_name, entry in meta["files"].items():
+        if isinstance(entry, dict):
+            for span in entry.get("spans") or []:
+                # A shape-valid sidecar can still carry a non-dict span
+                # (hand-edited or partially written); skip it rather than
+                # let span.get() crash a caller on the once-per-second poll.
+                if isinstance(span, dict) and isinstance(span.get("name"), str):
+                    owner_by_clip[span["name"]] = orig_name
+    return owner_by_clip
 
 
 def read_strip_meta(stripped: Path) -> dict[str, Any] | None:
@@ -261,7 +284,7 @@ def read_strip_meta(stripped: Path) -> dict[str, Any] | None:
 
     Un-cached: these callers run off the hot path. The once-per-second session
     listing reads the same sidecar through `_read_strip_meta_cached`."""
-    return _valid_strip_meta(_read_json_or_none(stripped / FILENAME_STRIP_META_JSON))
+    return valid_strip_meta(_read_json_or_none(stripped / FILENAME_STRIP_META_JSON))
 
 
 def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
@@ -381,7 +404,7 @@ def _read_strip_meta_cached(stripped: Path) -> dict[str, Any] | None:
     Shares `_SESSION_JSON_CACHE` with the other sidecars; a re-strip rewrites the
     file (new signature) and invalidates. `gather_sessions` keeps the path in the
     prune set so the entry survives across ticks."""
-    return _valid_strip_meta(_read_session_json_cached(stripped / FILENAME_STRIP_META_JSON))
+    return valid_strip_meta(_read_session_json_cached(stripped / FILENAME_STRIP_META_JSON))
 
 
 def _session_transcript_marker(data: Any) -> dict[str, Any] | None:
@@ -552,14 +575,7 @@ def build_session_files(
         # Which original each region clip was cut from, per the committed cut.
         meta = _read_strip_meta_cached(stripped_root)
         if meta is not None:
-            for orig_name, entry in meta["files"].items():
-                if isinstance(entry, dict):
-                    for span in entry.get("spans") or []:
-                        # A shape-valid sidecar can still carry a non-dict span
-                        # (hand-edited or partially written); skip it rather than
-                        # let span.get() crash the once-per-second poll.
-                        if isinstance(span, dict) and isinstance(span.get("name"), str):
-                            owner_by_clip[span["name"]] = orig_name
+            owner_by_clip = strip_meta_owner_by_clip(meta)
         # Sorted glob keeps region rows in filename (chronological) order.
         for rw in sorted(stripped_root.glob("*.wav")):
             if visited is not None:
