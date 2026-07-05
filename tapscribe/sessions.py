@@ -11,8 +11,9 @@ once-per-second read path: path resolution + the path-safety guard are in
 `session_paths`; destructive operator operations (absorb, delete, prune) are in
 `session_maintenance`; the strip-silence splitter is in `batch_strip`.
 
-`stripped/` is a sibling subfolder containing silence-trimmed copies of the
-originals with identical filenames, so per-WAV transcript caches stay isolated
+`stripped/` is a sibling subfolder containing silence-trimmed region clips
+with fresh uuid8-anchored filenames; `strip-meta.json` maps each clip back
+to its owning original, so per-WAV transcript caches stay isolated
 between the two sources.
 """
 

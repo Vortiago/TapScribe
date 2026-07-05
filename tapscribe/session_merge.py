@@ -18,6 +18,7 @@ through a Transcriber.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Any
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
 from .session_paths import DIRNAME_STRIPPED
+from .sessions import _valid_strip_meta
 from .text import parse_iso, parse_wav_start
 from .wav_cache import read_cached
 
@@ -90,6 +92,7 @@ def select_session_wavs(
         filename. Raises `ValueError` if either is unparseable.
     """
     base_dir = session_dir
+    owner_by_clip: dict[str, str] = {}
     if source == "stripped":
         wav_dir = session_dir / DIRNAME_STRIPPED
         if not wav_dir.is_dir():
@@ -106,6 +109,24 @@ def select_session_wavs(
         wav_dir = session_dir
     else:
         raise ValueError(f"unknown source: {source!r}")
+
+    # Build owner_by_clip from strip-meta.json for stripped source.
+    # Read directly (not via read_strip_meta) because that function's
+    # _read_json_or_none wrapper enforces a RECORDINGS_DIR containment
+    # check that would reject the strip-meta in the strip branch below.
+    if source == "stripped":
+        meta_path = wav_dir / "strip-meta.json"
+        try:
+            with meta_path.open("r", encoding="utf-8") as fh:
+                meta = _valid_strip_meta(json.load(fh))
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            meta = None
+        if meta is not None:
+            for orig_name, entry in meta["files"].items():
+                if isinstance(entry, dict):
+                    for span in entry.get("spans") or []:
+                        if isinstance(span, dict) and isinstance(span.get("name"), str):
+                            owner_by_clip[span["name"]] = orig_name
 
     from_dt = parse_iso(from_iso)
     to_dt = parse_iso(to_iso)
@@ -133,7 +154,8 @@ def select_session_wavs(
         # Silence gate always reads the ORIGINAL even when source=stripped;
         # the stripped sibling's RMS can be misleadingly high because
         # silero may have false-positive'd on a brief noise burst.
-        original_path = base_dir / wav.name
+        original_name = owner_by_clip.get(wav.name, wav.name)
+        original_path = base_dir / original_name
         if not original_path.is_file():
             # The original wasn't in session_dir/ — fall back to checking the
             # path we're actually using.
