@@ -2476,6 +2476,89 @@ async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder:
             await browser.close()
 
 
+async def test_next_merged_transcript_rows_are_content_visibility_gated(
+    running_recorder: RunningRecorder,
+):
+    """Each merged-transcript row must carry `content-visibility: auto` (with a
+    `contain-intrinsic-size` placeholder) so the browser skips layout+paint of
+    off-screen lines — the pure-CSS half of the huge-list virtualization already
+    proven on `.wavrow`. Without it, the one-shot O(segments) rebuild in
+    merged-transcript.js pays layout+paint for every off-screen row, which is
+    the bulk of the documented 100-200 ms long task at 3000 segments (#212).
+
+    Structural, no timing threshold (CI-runner safe): seed a merged session,
+    open its Transcript view, and assert the computed style on a real rendered
+    row. This also pins the SELECTOR — the merged rows are `.transcript > div`
+    (no `.line` class); putting the rule on `.line` (the live feed) would leave
+    these rows `content-visibility: visible` and fail here."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-01T09-00-00Z"
+    _seed_merged_session(rec, sid, segments=120)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#transcript", wait_until="domcontentloaded")
+
+            # Focus the seeded session (the recorder's own current session also
+            # lists and is focused by default).
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await page.evaluate(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    s.value = sid;
+                    s.dispatchEvent(new Event('change', { bubbles: true }));
+                }""",
+                sid,
+            )
+
+            # The merged body arrives via the lazy per-(session, stamp) fetch.
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll('{_MERGED_FIRST_LINE}').length >= 120""",
+                timeout=15000,
+            )
+
+            styles = await page.evaluate(
+                f"""() => {{
+                    const el = document.querySelector('{_MERGED_FIRST_LINE}');
+                    const cs = getComputedStyle(el);
+                    return {{
+                        contentVisibility: cs.contentVisibility,
+                        containIntrinsicSize: cs.containIntrinsicSize,
+                    }};
+                }}"""
+            )
+            assert styles["contentVisibility"] == "auto", (
+                "merged transcript rows must compute content-visibility:auto so "
+                "off-screen rows skip layout+paint (the .wavrow pattern); got "
+                f"{styles['contentVisibility']!r} — is the rule on `.transcript > div` "
+                "or did it land on `.line` (the live feed) by mistake? (#212)"
+            )
+            # The `auto` keyword (remember-real-height) is the load-bearing part;
+            # don't pin the exact px estimate so a future tune doesn't break this.
+            assert "auto" in styles["containIntrinsicSize"], (
+                "merged transcript rows need a contain-intrinsic-size:auto placeholder so "
+                f"skipped rows keep the scroll height; got {styles['containIntrinsicSize']!r}"
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
 def _seed_multi_wav_session(rec, sid: str, *, n: int) -> tuple[Path, list[str]]:
     """A non-current on-disk session with `n` WAVs and NO transcripts yet — the
     multi-track page the blink report is about."""
