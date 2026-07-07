@@ -597,50 +597,46 @@ def _english_fixtures() -> list[AudioFixture]:
     return [fx for fx in _real_audio_fixtures() if fx.wav.stem.endswith("-en")]
 
 
-def _ensure_hf_repo_cached(repo: str, *, attempts: int = 5) -> None:
-    """Provision a Hub `repo` into the shared HF cache to completion, serialized
-    by a cross-process lock, so a later `from_pretrained` is always a cache hit —
-    a real pre-test setup step, not a best-effort one that skips under load.
+async def _ensure_parakeet_cached_or_skip(model: str = "parakeet-tdt-0.6b-v3") -> None:
+    """Provision the Parakeet weights into the shared HF cache before the API
+    call, serialised across test processes by a file lock, so the server's later
+    in-process `from_pretrained` is a cache hit, not a live download.
 
-    This box runs several test processes against ONE HF cache. huggingface_hub
-    does `os.makedirs(.../<repo>/blobs)` BEFORE taking its per-file lock, so two
-    first-time downloads of the same large repo (parakeet is a 0.6 B model)
-    race: one `makedirs` finds the dir removed by the other's cleanup and aborts
-    with FileNotFoundError, the partial download is swept, and the model never
-    finishes caching — a perpetual re-download that surfaces as a flaky 500 from
-    the transcribe route. The file lock makes concurrent runs take turns (the
-    first downloads to completion, the rest are instant cache hits); the retries
-    absorb a race with any not-yet-locked writer. Contention is WAITED OUT, never
-    skipped. Only a genuine fetch failure (offline / hub down) propagates, for
-    the caller to skip — a real_audio test with no obtainable model can't run."""
+    Root cause of the flake: huggingface_hub does `makedirs(.../<repo>/blobs)`
+    BEFORE its per-file lock, so concurrent first-time downloads race, a partial
+    is swept, and the model never finishes caching → a flaky 500. The lock
+    serialises fixed-code runs; the bounded retry rides out a race with a
+    not-yet-locked writer. `ignore_patterns` skips the ~2.3 GB NeMo checkpoint the
+    transformers path never reads (it loads model.safetensors), halving the
+    download. Skip only when the weights are genuinely unobtainable — offline,
+    hub down, or a lock/queue that outlasts the timeout."""
     from filelock import FileLock
     from huggingface_hub import constants as hf_constants
     from huggingface_hub import snapshot_download
 
-    os.makedirs(hf_constants.HF_HUB_CACHE, exist_ok=True)
-    lock_name = repo.replace("/", "--") + ".tapscribe-prefetch.lock"
-    with FileLock(os.path.join(hf_constants.HF_HUB_CACHE, lock_name), timeout=900):
-        for attempt in range(attempts):
-            try:
-                snapshot_download(repo)
-                return
-            except (FileNotFoundError, OSError):  # transient race with a not-yet-locked writer
-                if attempt == attempts - 1:
-                    raise
-                time.sleep(0.5 * (attempt + 1))
-
-
-async def _ensure_parakeet_cached_or_skip(model: str = "parakeet-tdt-0.6b-v3") -> None:
-    """Download the Parakeet weights before the API call (see
-    `_ensure_hf_repo_cached`), skipping ONLY if they're genuinely unobtainable
-    (offline / hub down) — never merely because another run holds the download."""
     from tapscribe.transcribers.parakeet import _resolve_repo
 
     repo = _resolve_repo(model)
+    lock_path = os.path.join(hf_constants.HF_HUB_CACHE, repo.replace("/", "--") + ".tapscribe-prefetch.lock")
+
+    def _prefetch() -> None:
+        os.makedirs(hf_constants.HF_HUB_CACHE, exist_ok=True)
+        with FileLock(lock_path, timeout=900):
+            for attempt in range(5):
+                try:
+                    snapshot_download(repo, ignore_patterns=["*.nemo", "plots/*"])
+                    return
+                except OSError:  # concurrent-download race vs a not-yet-locked writer:
+                    # makedirs ENOENT (swept parent) or symlink EEXIST mid-swap;
+                    # both settle once the other writer finishes, so retry.
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.5)
+
     try:
-        await asyncio.to_thread(_ensure_hf_repo_cached, repo)
-    except Exception as e:  # noqa: BLE001 — genuinely offline / hub down → skip (contention is handled above)
-        pytest.skip(f"parakeet weights unavailable (offline / hub down?): {e}")
+        await asyncio.to_thread(_prefetch)
+    except Exception as e:  # noqa: BLE001 — offline / hub down / unresolved contention → skip, not fail
+        pytest.skip(f"parakeet weights unavailable (offline or shared-cache contention): {e}")
 
 
 @pytest.mark.real_audio
