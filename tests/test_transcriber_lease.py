@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -146,3 +147,44 @@ def test_both_batch_sites_go_through_the_lease_context_manager():
         assert "release_transcriber" not in src, (
             f"{fn.__name__} must not hand-roll release_transcriber — the lease owns release"
         )
+
+
+def test_batch_transcribe_no_longer_exposes_the_factory_bindings():
+    """Root-cause invariant: #231 drops `load_transcriber`/`release_transcriber`
+    from the `batch_transcribe` module namespace — they live in
+    `tapscribe.transcribers`, where `lease_transcriber` resolves them at call
+    time. Re-adding either (e.g. `from .transcribers import load_transcriber`)
+    is what would let a stale `monkeypatch.setattr(batch_transcribe, ...)` /
+    `setattr("tapscribe.batch_transcribe.load_transcriber", ...)` silently pass
+    again while the structural lease contract is broken. Pin the absence so the
+    regression fails here (form-independent) rather than as a scattered
+    AttributeError per stale-patch test."""
+    for name in ("load_transcriber", "release_transcriber"):
+        assert not hasattr(batch_transcribe, name), (
+            f"batch_transcribe must not re-export {name!r} — callers lease via "
+            "lease_transcriber, which resolves it from tapscribe.transcribers"
+        )
+
+
+def test_no_test_targets_the_removed_batch_transcribe_binding():
+    """Companion to the runtime invariant above: no test may name the removed
+    string target `monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", ...)`.
+    `inspect.getsource` only sees the two batch call sites; it cannot see stale
+    monkeypatch targets in sibling test files. This scanner reads the other
+    files (skipping itself, which names the forbidden targets)."""
+    self_path = Path(__file__).resolve()
+    tests_dir = self_path.parent
+    forbidden = (
+        "tapscribe.batch_transcribe.load_transcriber",
+        "tapscribe.batch_transcribe.release_transcriber",
+    )
+    offenders = []
+    for path in sorted(tests_dir.rglob("test_*.py")):
+        if path.resolve() == self_path:
+            continue
+        text = path.read_text(encoding="utf-8")
+        offenders.extend(f"{path.name}: {needle}" for needle in forbidden if needle in text)
+    assert not offenders, (
+        "these tests patch a binding #231 removed from tapscribe.batch_transcribe "
+        f"(retarget to tapscribe.transcribers): {offenders}"
+    )

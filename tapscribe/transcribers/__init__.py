@@ -18,8 +18,9 @@ A loaded model is several GB resident. `load_transcriber` doubles as the
 the `(model_name, kind)` key so a concurrent job's release can't evict a
 model out from under another job still using it. Batch callers SHOULD use
 `lease_transcriber()` (the `asynccontextmanager` that wraps acquire +
-release) or pair `load_transcriber` with `release_transcriber(transcriber)`
-in a `finally` (see `tapscribe.batch_transcribe`). The configured policy
+release — the shape both `tapscribe.batch_transcribe` sites use) or, for the
+rare hand-held case, pair `load_transcriber` with
+`release_transcriber(transcriber)` in a `finally`. The configured policy
 decides what release does:
 
   * ``0`` (default) — unload immediately when the last in-flight job for a
