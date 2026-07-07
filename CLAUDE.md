@@ -16,8 +16,9 @@
   unused binding (the canonical case is an async closure that mutates a
   variable consumed via a post-await cast — see `stripSession` in
   `main.js`), prefix the name with `_`.
-- `/next` re-renders every per-tick region on each 500ms `/api/state`
-  poll via `replaceChildren`, which would snap a focused `<select>`
+- `/next` re-renders every per-tick region on each `/api/state`
+  poll (500ms, adaptively backing off to 2s when idle — ADR-0011)
+  via `replaceChildren`, which would snap a focused `<select>`
   shut or drop a caret mid-edit. The governing rule is the
   **Interaction hold** (CONTEXT.md + ADR-0004): defer the render, never
   destroy interaction state, and never advance the render gate on a
