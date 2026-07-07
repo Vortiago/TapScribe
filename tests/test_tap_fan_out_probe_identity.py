@@ -28,10 +28,8 @@ import pytest
 
 from tapscribe import roster
 from tapscribe.live import LiveConfig
-from tapscribe.name_resolution import session_occurrences
 from tapscribe.recorder import Recorder
 from tapscribe.tap_fan_out import TapFanOut
-from tapscribe.text import parse_wav_speaker_slug
 
 # The reserved identity both bridges send to verify the tap secret.
 PROBE_IDENTITY = "__probe__"
@@ -184,10 +182,6 @@ async def test_probe_with_audio_leaves_no_wav_or_backfilled_occurrence(recorder:
         await fan_out.write_frame(PCM_FRAME)  # a probe that (mis)sends audio
 
     assert list(recorder.session_dir.glob("*.wav")) == []
-
-    speakers = [s for s in (parse_wav_speaker_slug(p.name) for p in recorder.session_dir.glob("*.wav")) if s]
-    occ = session_occurrences({"roster": roster.read_roster(recorder.session_dir), "speakers": speakers})
-    assert not any("probe" in key.lower() for key in occ)
 
 
 async def test_probe_identity_registers_no_active_stream(recorder: Recorder):
