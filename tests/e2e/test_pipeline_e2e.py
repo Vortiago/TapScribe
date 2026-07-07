@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import re
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -596,6 +597,52 @@ def _english_fixtures() -> list[AudioFixture]:
     return [fx for fx in _real_audio_fixtures() if fx.wav.stem.endswith("-en")]
 
 
+def _ensure_hf_repo_cached(repo: str, *, attempts: int = 5) -> None:
+    """Provision a Hub `repo` into the shared HF cache to completion, serialized
+    by a cross-process lock, so a later `from_pretrained` is always a cache hit —
+    a real pre-test setup step, not a best-effort one that skips under load.
+
+    This box runs several test processes against ONE HF cache. huggingface_hub
+    does `os.makedirs(.../<repo>/blobs)` BEFORE taking its per-file lock, so two
+    first-time downloads of the same large repo (parakeet is a 0.6 B model)
+    race: one `makedirs` finds the dir removed by the other's cleanup and aborts
+    with FileNotFoundError, the partial download is swept, and the model never
+    finishes caching — a perpetual re-download that surfaces as a flaky 500 from
+    the transcribe route. The file lock makes concurrent runs take turns (the
+    first downloads to completion, the rest are instant cache hits); the retries
+    absorb a race with any not-yet-locked writer. Contention is WAITED OUT, never
+    skipped. Only a genuine fetch failure (offline / hub down) propagates, for
+    the caller to skip — a real_audio test with no obtainable model can't run."""
+    from filelock import FileLock
+    from huggingface_hub import constants as hf_constants
+    from huggingface_hub import snapshot_download
+
+    os.makedirs(hf_constants.HF_HUB_CACHE, exist_ok=True)
+    lock_name = repo.replace("/", "--") + ".tapscribe-prefetch.lock"
+    with FileLock(os.path.join(hf_constants.HF_HUB_CACHE, lock_name), timeout=900):
+        for attempt in range(attempts):
+            try:
+                snapshot_download(repo)
+                return
+            except (FileNotFoundError, OSError):  # transient race with a not-yet-locked writer
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
+
+
+async def _ensure_parakeet_cached_or_skip(model: str = "parakeet-tdt-0.6b-v3") -> None:
+    """Download the Parakeet weights before the API call (see
+    `_ensure_hf_repo_cached`), skipping ONLY if they're genuinely unobtainable
+    (offline / hub down) — never merely because another run holds the download."""
+    from tapscribe.transcribers.parakeet import _resolve_repo
+
+    repo = _resolve_repo(model)
+    try:
+        await asyncio.to_thread(_ensure_hf_repo_cached, repo)
+    except Exception as e:  # noqa: BLE001 — genuinely offline / hub down → skip (contention is handled above)
+        pytest.skip(f"parakeet weights unavailable (offline / hub down?): {e}")
+
+
 @pytest.mark.real_audio
 async def test_pipeline_with_real_parakeet(running_recorder: RunningRecorder):
     """Full pipeline against real audio with the real `transformers` Parakeet
@@ -625,6 +672,7 @@ async def test_pipeline_with_real_parakeet(running_recorder: RunningRecorder):
         pytest.skip(
             "no English real-audio fixtures present — add one via tests/fixtures/audio/README.md to enable",
         )
+    await _ensure_parakeet_cached_or_skip()
 
     rec = running_recorder.recorder
     base = running_recorder.base_url
@@ -1032,6 +1080,7 @@ async def test_cover_real_parakeet_generalist_keeps_generalist_on_english_e2e(
         await asyncio.to_thread(download_nb_whisper_ct2_dir, "nb-whisper-tiny")
     except Exception as e:  # noqa: BLE001 — any fetch failure (offline, hub down) → skip, not fail
         pytest.skip(f"nb-whisper-tiny weights unavailable (offline?): {e}")
+    await _ensure_parakeet_cached_or_skip()
 
     rec = running_recorder.recorder
     base = running_recorder.base_url
