@@ -35,7 +35,7 @@ from .session_paths import (
     resolve_wav,
 )
 from .sessions import read_session_meta
-from .text import read_config, read_languages
+from .text import atomic_write_text, read_config, read_languages
 from .transcribers import lease_transcriber, run_on_model_thread
 from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY, cover_models
 from .wav_cache import CachedTranscription, cached_transcribe, read_primary_payload, set_primary_transcript
@@ -489,7 +489,7 @@ async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job)
         merged["model"] = req.model
 
     out_path = session_dir / FILENAME_TRANSCRIPT_JSON
-    out_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-    (session_dir / FILENAME_TRANSCRIPT_TXT).write_text(transcript.plain_text, encoding="utf-8")
+    atomic_write_text(out_path, json.dumps(merged, indent=2, ensure_ascii=False))
+    atomic_write_text(session_dir / FILENAME_TRANSCRIPT_TXT, transcript.plain_text)
 
     return merged

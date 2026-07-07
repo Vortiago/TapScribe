@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from . import hallucinations as hallucinations_mod
-from .text import parse_iso, parse_wav_speaker_slug, parse_wav_start
+from .text import atomic_write_text, parse_iso, parse_wav_speaker_slug, parse_wav_start
 from .transcribers.base import (
     ConstrainedLanguageDetector,
     Transcriber,
@@ -260,7 +260,7 @@ def set_primary_transcript(wav_path: Path, *, backend: str, model: str) -> None:
     if not target.is_file():
         raise FileNotFoundError(f"no cached transcript for backend={backend!r}, model={model!r} at {target}")
     d.mkdir(parents=True, exist_ok=True)
-    (d / _PRIMARY_POINTER).write_text(key, encoding="utf-8")
+    atomic_write_text(d / _PRIMARY_POINTER, key)
 
 
 # ---------------------------------------------------------------------------
@@ -459,14 +459,14 @@ def _write_entry(
     d = _transcripts_dir(wav_path)
     d.mkdir(parents=True, exist_ok=True)
     key = _entry_key(backend, model)
-    (d / f"{key}.json").write_text(
+    atomic_write_text(
+        d / f"{key}.json",
         json.dumps(_to_dict(cached), indent=2, ensure_ascii=False),
-        encoding="utf-8",
     )
     # A fresh write becomes the primary — operators flipping models on
     # the same WAV expect the dashboard to show the just-produced result
     # unless they explicitly pinned a different primary.
-    (d / _PRIMARY_POINTER).write_text(key, encoding="utf-8")
+    atomic_write_text(d / _PRIMARY_POINTER, key)
 
 
 def _migrate_legacy_if_needed(wav_path: Path) -> None:
@@ -497,11 +497,11 @@ def _migrate_legacy_if_needed(wav_path: Path) -> None:
         legacy.replace(target)
     except OSError:
         try:
-            target.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
+            atomic_write_text(target, legacy.read_text(encoding="utf-8"))
             legacy.unlink()
         except OSError:
             return
-    (d / _PRIMARY_POINTER).write_text(key, encoding="utf-8")
+    atomic_write_text(d / _PRIMARY_POINTER, key)
 
 
 # ---------------------------------------------------------------------------
