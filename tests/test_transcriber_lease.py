@@ -6,12 +6,12 @@ orchestrators each re-derive.
 The factory's `load_transcriber` / `release_transcriber` refcount pair
 (`tapscribe/transcribers/__init__.py`) is a leak-by-omission contract: a
 forgotten `finally` pins the model's in-flight refcount forever, keeping several
-GB resident and blocking idle eviction for that key. `batch_transcribe` carries
-that ritual twice by hand (`transcribe_one`, `transcribe_session_locked`), each
-also remembering to offload the release via `run_on_model_thread`. This is the
-identical shape `JobTracker.run` (`recorder.py`) already made structural for the
-job slot ("claim/release is structural, not a try/finally discipline each
-orchestrator re-derives").
+GB resident and blocking idle eviction for that key. `batch_transcribe` carried
+that ritual by hand in its per-model cover loop (shared by `transcribe_one` and
+`transcribe_session_locked` via `_run_cover`), also remembering to offload the
+release via `run_on_model_thread`. This is the identical shape `JobTracker.run`
+(`recorder.py`) already made structural for the job slot ("claim/release is
+structural, not a try/finally discipline each orchestrator re-derives").
 
 `lease_transcriber` makes the model lease structural too:
 
@@ -137,16 +137,26 @@ async def test_lease_runs_load_and_release_on_the_model_thread():
 
 
 def test_both_batch_sites_go_through_the_lease_context_manager():
-    """`transcribe_one` and `transcribe_session_locked` must acquire via
-    `lease_transcriber`, not re-derive the load + finally-release ritual by hand
-    (the leak-by-omission #231 removes). `release_transcriber` stays available
-    for the hand-held case, but these two batch sites must not call it directly."""
+    """`transcribe_one` and `transcribe_session_locked` must acquire the model
+    via `lease_transcriber`, not re-derive the load + finally-release ritual by
+    hand (the leak-by-omission #231 removes). Since ADR-0011's cover loop, both
+    delegate their model use to the shared `_run_cover` helper rather than
+    leasing directly — so the contract is: both entry points reach
+    `_run_cover`, and `_run_cover` itself is the one place that leases.
+    `release_transcriber` stays available for the hand-held case, but none of
+    these three must call it directly."""
     for fn in (batch_transcribe.transcribe_one, batch_transcribe.transcribe_session_locked):
         src = inspect.getsource(fn)
-        assert "lease_transcriber" in src, f"{fn.__name__} must acquire via lease_transcriber"
+        assert "_run_cover(" in src, f"{fn.__name__} must acquire the model via _run_cover"
         assert "release_transcriber" not in src, (
             f"{fn.__name__} must not hand-roll release_transcriber — the lease owns release"
         )
+
+    cover_src = inspect.getsource(batch_transcribe._run_cover)
+    assert "lease_transcriber" in cover_src, "_run_cover must acquire via lease_transcriber"
+    assert "release_transcriber" not in cover_src, (
+        "_run_cover must not hand-roll release_transcriber — the lease owns release"
+    )
 
 
 def test_batch_transcribe_no_longer_exposes_the_factory_bindings():
