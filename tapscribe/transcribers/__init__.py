@@ -16,10 +16,11 @@ Memory lifecycle (`TAPSCRIBE_MODEL_IDLE_TTL_S`)
 A loaded model is several GB resident. `load_transcriber` doubles as the
 *acquire* half of a use-tracking pair: it bumps an in-flight refcount for
 the `(model_name, kind)` key so a concurrent job's release can't evict a
-model out from under another job still using it. Batch callers MUST pair
-it with `release_transcriber(transcriber)` in a `finally` (see
-`tapscribe.batch_transcribe`). The configured policy decides what release
-does:
+model out from under another job still using it. Batch callers SHOULD use
+`lease_transcriber()` (the `asynccontextmanager` that wraps acquire +
+release) or pair `load_transcriber` with `release_transcriber(transcriber)`
+in a `finally` (see `tapscribe.batch_transcribe`). The configured policy
+decides what release does:
 
   * ``0`` (default) — unload immediately when the last in-flight job for a
     key finishes. Lowest idle footprint; the next job reloads from disk.
