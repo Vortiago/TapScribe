@@ -39,6 +39,12 @@ live (operator's stated priority). The pipeline already does
 strip → transcribe(regions) → summarize, so the run slots into its transcribe
 stage. Manual single-WAV transcribe and the live channel are unchanged in v1.
 
+> **Extended by [ADR-0011](0011-interactive-batch-is-language-driven.md):** the
+> interactive Transcript page later dropped its model picker and became
+> language-driven, which brought the manual single-WAV path into the cover (it
+> now runs the same generalist + specialist ensemble as the range). The live
+> channel remains out of scope.
+
 ## Seams (deliberately swappable, for later experimentation)
 
 - **Generalist model** = the existing `config/batch-model.txt` (default
