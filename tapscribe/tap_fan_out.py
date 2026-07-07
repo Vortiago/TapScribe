@@ -35,6 +35,11 @@ from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 # ending. Tuned visually rather than from first principles.
 LEVEL_DECAY_PER_FRAME: float = 0.92
 
+# Reserved identity used by bridges to verify the /tap tap-secret works.
+# A probe tap must leave no durable state (no roster occurrence → no
+# auto-bound Person in people.json).
+PROBE_IDENTITY = "__probe__"
+
 
 class TapFanOut:
     """One open `/tap` WebSocket worth of fan-out state. Built by
@@ -186,7 +191,22 @@ class TapFanOut:
         started_at = datetime.now(UTC)
         fname = "(record off)"
 
-        if self._do_record:
+        # A reserved __probe__ tap only proves the tap-secret works; it must
+        # leave NO durable and NO live-visible state. That means skipping THREE
+        # things below — the WAV open (here), the roster occurrence, and the
+        # ActiveStream registration — not just the roster. Skipping the WAV
+        # (rather than relying on the empty-WAV-unlink at close) decouples the
+        # "no auto-bound Person" guarantee from the probe sending zero audio: a
+        # misbehaving probe that DID send audio would otherwise keep a non-empty
+        # WAV whose slug the recorded-slug backfill (name_resolution F1) turns
+        # into a 'probe' Person. Skipping the ActiveStream keeps __probe__ out of
+        # /api/state's live_identities, which attach_people would auto-bind AND
+        # persist as a blank Person on the ~0.5s poll even with zero audio. We
+        # still build + open the relay so the context manager and write_frame
+        # stay valid (a probe that sends frames is fed through an inert relay).
+        is_probe = self._identity == PROBE_IDENTITY
+
+        if self._do_record and not is_probe:
             resumed = self._recorder.utterances.try_resume(
                 self._utterance_id,
                 identity=self._identity,
@@ -260,7 +280,9 @@ class TapFanOut:
         # read-modify-write is atomic under the event loop against concurrent
         # taps. Guarded so a record-off live tap doesn't materialise an empty
         # session folder just for a roster; a recording tap already created it.
-        if self._do_record or self._session_dir.exists():
+        # `not is_probe` is the People-pollution guard (see the _open preamble):
+        # a probe roster occurrence auto-binds a durable 'probe' Person.
+        if not is_probe and (self._do_record or self._session_dir.exists()):
             roster.record_occurrence(
                 self._session_dir,
                 identity=self._identity,
@@ -279,23 +301,30 @@ class TapFanOut:
             + "-"
             + self._owner[:6]
         )
-        await self._recorder.streams.register(
-            ActiveStream(
-                conn_id=self._conn_id,
-                identity=self._identity,
-                name=self._name,
-                filename=fname,
-                started_at=started_at,
-                # On resume, self._bytes_received already carries the prior
-                # utterance's byte count — register it that way so the
-                # dashboard's counter doesn't visibly drop to zero between
-                # the WS reopen and the first new frame's update_bytes call.
-                # Fresh (non-resumed) utterances have it at the default 0.
-                bytes_received=self._bytes_received,
-                record=self._do_record,
-                live=self._do_live,
+        # A probe registers NO ActiveStream: /api/state builds live_identities
+        # from the ActiveStreams snapshot, and attach_people auto-binds + PERSISTS
+        # a blank Person for every live identity — so a registered __probe__ would
+        # materialise a durable probe Person on the next dashboard poll, zero audio
+        # or not. (update_*/remove no-op on an unknown conn_id, so write_frame and
+        # _close stay safe without a row.)
+        if not is_probe:
+            await self._recorder.streams.register(
+                ActiveStream(
+                    conn_id=self._conn_id,
+                    identity=self._identity,
+                    name=self._name,
+                    filename=fname,
+                    started_at=started_at,
+                    # On resume, self._bytes_received already carries the prior
+                    # utterance's byte count — register it that way so the
+                    # dashboard's counter doesn't visibly drop to zero between
+                    # the WS reopen and the first new frame's update_bytes call.
+                    # Fresh (non-resumed) utterances have it at the default 0.
+                    bytes_received=self._bytes_received,
+                    record=self._do_record,
+                    live=self._do_live,
+                )
             )
-        )
 
         # Build the live leg (relay + gate + reconnect) and let it attach
         # if this is a live tap and the channel is up. A record-only or
