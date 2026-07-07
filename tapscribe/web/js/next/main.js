@@ -14,8 +14,9 @@
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
 import { fetchState, postJson, putJson } from "../api.js";
-import { loadTemplates, pick, consumeDeferredRender } from "../templates.js";
+import { loadTemplates, pick, consumeDeferredRender, interactionHeld } from "../templates.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
+import { createPollPacer, FAST_MS } from "./poll-pacer.js";
 import * as spine from "./components/spine.js";
 import * as engine from "./components/engine.js";
 import * as activeTaps from "../components/active-taps.js";
@@ -38,6 +39,62 @@ const $ = (id) => {
 // ---- Render state -----------------------------------------------------------
 /** @type {import('../types.js').AppState | null} */
 let lastJson = null;
+
+// Adaptive /api/state cadence (issue #247, ADR-0011): fast while anything moves,
+// back off to 2s when idle-and-unchanged, snap back on change/interaction.
+// Declared here (module init) so refresh() and the visibility handler — both
+// defined before the poll loop — reference an already-constructed pacer.
+const pacer = createPollPacer();
+
+// A poll is "active" (never back off) when a job, tap, or the live channel is
+// in-flight.
+/** @param {import('../types.js').AppState | null} j */
+function stateHasActivity(j) {
+  if (!j) return false;
+  if (Array.isArray(j.active) && j.active.length > 0) return true;
+  // The live channel can be mid-startup ("starting" — a silent model load) or
+  // streaming ("running") with no entry in j.active and no session job; keep
+  // polling fast so its ready/error transition and captions don't lag a
+  // backoff interval behind.
+  const live = j.live_info && j.live_info.state;
+  if (live === "starting" || live === "running") return true;
+  return Array.isArray(j.sessions) && j.sessions.some((s) => s.progress != null);
+}
+
+// Resolver for the in-flight BACKOFF sleep, so wake() can cut a 2s idle wait
+// short and poll NOW. Null whenever no interruptible sleep is pending.
+/** @type {(() => void) | null} */
+let _interruptSleep = null;
+/** @param {number} ms @returns {Promise<void>} */
+function pacedSleep(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      _interruptSleep = null;
+      resolve();
+    }, ms);
+    // Only a backed-off (slow) sleep is worth interrupting. Interrupting a fast
+    // sleep would let a burst of interaction events (key auto-repeat, typing)
+    // poll /api/state once per keystroke — the opposite of the backoff's point.
+    // A fast sleep already resolves within FAST_MS, and pacer.wake() has reset
+    // the streak so the next sleep stays fast regardless.
+    _interruptSleep = ms > FAST_MS
+      ? () => {
+          clearTimeout(t);
+          _interruptSleep = null;
+          resolve();
+        }
+      : null;
+  });
+}
+// Operator activity (click, keypress, focusing a control, tab re-show, a
+// mutation) resets the pacer to fast AND interrupts any in-flight backoff so
+// the next poll fires promptly — the interaction hold defers renders while a
+// control is focused, and a stale hold would apply up to a full idle interval
+// late on release.
+function wake() {
+  pacer.wake();
+  if (_interruptSleep) _interruptSleep();
+}
 /** @type {import('./shell.js').ViewId} */
 let currentView = "capture";
 /** @type {string | null} */
@@ -536,6 +593,11 @@ function renderAll(j) {
   renderRail(j);
 }
 
+/**
+ * Poll /api/state once and render if it changed. Returns the pacer signal for
+ * the poll loop ({changed, active}), or null if the poll threw.
+ * @returns {Promise<import('./poll-pacer.js').PollSignal | null>}
+ */
 async function tick() {
   try {
     const j = await fetchState();
@@ -552,14 +614,17 @@ async function tick() {
     const unchanged = j === lastJson;
     lastJson = j;
     const wasDeferred = consumeDeferredRender();
-    if (unchanged && !wasDeferred) return;
+    const signal = { changed: !unchanged, active: stateHasActivity(j) };
+    if (unchanged && !wasDeferred) return signal;
     renderAll(j);
+    return signal;
   } catch (e) {
     const spineEl = $("spine");
     if (!spineEl.querySelector(".spine__head")) {
       spineEl.textContent = `state error: ${e}`;
     }
     console.error("Stages tick failed:", e);
+    return null;
   }
 }
 
@@ -571,6 +636,7 @@ async function tick() {
 // wait" was a real bug report); test_ui_only_click_updates_dom_without_a_
 // fresh_poll pins it.
 async function refresh() {
+  wake();
   if (lastJson) renderAll(lastJson);
   await tick();
 }
@@ -624,16 +690,35 @@ initRail();
 let _catalogLoaded = false;
 (async () => {
   for (;;) {
+    let delay = FAST_MS;
     if (document.visibilityState === "visible") {
       if (!_catalogLoaded) {
         _catalogLoaded = true;
         loadModelCatalogs();
       }
-      await tick();
+      const signal = await tick();
+      // No signal = the poll threw; retry at the fast cadence rather than
+      // letting a transient error stall the loop into a backoff. Fold in
+      // interactionHeld(): never back off while the operator holds a focused
+      // control or a text selection, so a render the interaction hold deferred
+      // catches up on the next fast tick after release, not a backoff interval
+      // later (ADR-0004).
+      delay = signal
+        ? pacer.record({ changed: signal.changed, active: signal.active || interactionHeld() })
+        : FAST_MS;
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await pacedSleep(delay);
   }
 })();
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") tick();
+  if (document.visibilityState === "visible") {
+    wake();
+    tick();
+  }
 });
+// Operator interaction snaps the poll back to the fast cadence: a click,
+// keypress, or focusing a control means they're working, so live awareness
+// (and the interaction hold's next-tick catch-up) must not lag on a backoff.
+for (const ev of ["pointerdown", "keydown", "focusin"]) {
+  window.addEventListener(ev, wake, { passive: true });
+}
