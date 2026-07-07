@@ -28,8 +28,10 @@ import pytest
 
 from tapscribe import roster
 from tapscribe.live import LiveConfig
+from tapscribe.name_resolution import session_occurrences
 from tapscribe.recorder import Recorder
 from tapscribe.tap_fan_out import TapFanOut
+from tapscribe.text import parse_wav_speaker_slug
 
 # The reserved identity both bridges send to verify the tap secret.
 PROBE_IDENTITY = "__probe__"
@@ -125,3 +127,83 @@ async def test_normal_identity_still_rosters_via_fan_out(recorder: Recorder):
     r = roster.read_roster(recorder.session_dir)
     assert "alice_ident01" in r
     assert r["alice_ident01"]["name"] == "Alice"
+
+
+async def test_record_off_tap_in_existing_session_still_rosters(recorder: Recorder):
+    """Positive control for the OR-branch the probe skip guards: a record-OFF
+    live tap whose session folder ALREADY exists must still roster its (real)
+    identity. Pins that the skip stays `not is_probe and (do_record or dir
+    exists)` and doesn't collapse to `not is_probe and do_record` — which would
+    pass the other cases while silently dropping record-off rostering."""
+    recorder.session_dir.mkdir(parents=True, exist_ok=True)
+    async with await TapFanOut.open(
+        recorder,
+        identity="bob_ident02",
+        name="Bob",
+        utterance_id="utt-recordoff",
+        do_record=False,
+        do_live=False,
+    ):
+        pass
+
+    assert "bob_ident02" in roster.read_roster(recorder.session_dir)
+
+
+async def test_probe_lookalike_identity_still_rosters(recorder: Recorder):
+    """Exact-match control: an identity that merely RESEMBLES the reserved token
+    ('__probe__x') is a real user and MUST still roster — the skip keys off an
+    EXACT `== PROBE_IDENTITY`, not a `startswith('__probe__')` / `'probe' in`
+    match that would swallow real users like '__probe__x' or 'probeman'."""
+    async with await TapFanOut.open(
+        recorder,
+        identity="__probe__x",
+        name="Probey",
+        utterance_id="utt-lookalike",
+        do_record=True,
+        do_live=False,
+    ) as fan_out:
+        await fan_out.write_frame(PCM_FRAME)
+
+    assert "__probe__x" in roster.read_roster(recorder.session_dir)
+
+
+async def test_probe_with_audio_leaves_no_wav_or_backfilled_occurrence(recorder: Recorder):
+    """The ULTIMATE harm, decoupled from the zero-audio co-invariant: a
+    MISBEHAVING probe that sends audio must still leave no WAV, so the
+    recorded-slug backfill (name_resolution F1) has no speaker slug to turn into
+    a 'probe' Person. With an open-then-unlink fix a non-empty WAV would survive
+    and re-materialise the probe occurrence despite the roster skip."""
+    async with await TapFanOut.open(
+        recorder,
+        identity=PROBE_IDENTITY,
+        name="probe",
+        utterance_id="utt-probe-audio",
+        do_record=True,
+        do_live=False,
+    ) as fan_out:
+        await fan_out.write_frame(PCM_FRAME)  # a probe that (mis)sends audio
+
+    assert list(recorder.session_dir.glob("*.wav")) == []
+
+    speakers = [s for s in (parse_wav_speaker_slug(p.name) for p in recorder.session_dir.glob("*.wav")) if s]
+    occ = session_occurrences({"roster": roster.read_roster(recorder.session_dir), "speakers": speakers})
+    assert not any("probe" in key.lower() for key in occ)
+
+
+async def test_probe_identity_registers_no_active_stream(recorder: Recorder):
+    """The WAV-independent People path: /api/state builds live_identities from
+    the ActiveStreams snapshot and attach_people auto-binds AND persists a blank
+    Person for every live identity. A probe must therefore register no
+    ActiveStream, or a durable __probe__ Person materialises on the next poll
+    with zero audio sent."""
+    async with await TapFanOut.open(
+        recorder,
+        identity=PROBE_IDENTITY,
+        name="probe",
+        utterance_id="utt-probe-stream",
+        do_record=True,
+        do_live=False,
+    ):
+        live = {s.identity for s in await recorder.streams.snapshot()}
+
+    assert PROBE_IDENTITY not in live
