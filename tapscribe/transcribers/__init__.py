@@ -16,10 +16,12 @@ Memory lifecycle (`TAPSCRIBE_MODEL_IDLE_TTL_S`)
 A loaded model is several GB resident. `load_transcriber` doubles as the
 *acquire* half of a use-tracking pair: it bumps an in-flight refcount for
 the `(model_name, kind)` key so a concurrent job's release can't evict a
-model out from under another job still using it. Batch callers MUST pair
-it with `release_transcriber(transcriber)` in a `finally` (see
-`tapscribe.batch_transcribe`). The configured policy decides what release
-does:
+model out from under another job still using it. Batch callers SHOULD use
+`lease_transcriber()` (the `asynccontextmanager` that wraps acquire +
+release — the shape both `tapscribe.batch_transcribe` sites use) or, for the
+rare hand-held case, pair `load_transcriber` with
+`release_transcriber(transcriber)` in a `finally`. The configured policy
+decides what release does:
 
   * ``0`` (default) — unload immediately when the last in-flight job for a
     key finishes. Lowest idle footprint; the next job reloads from disk.
@@ -44,8 +46,9 @@ import gc
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 from .. import config
@@ -78,6 +81,7 @@ __all__ = [
     "Word",
     "clear_cache",
     "evict_idle_now",
+    "lease_transcriber",
     "load_transcriber",
     "release_transcriber",
     "run_on_model_thread",
@@ -372,6 +376,27 @@ def release_transcriber(transcriber: Transcriber) -> None:
             # >0 keep warm for the idle sweep; <0 keep indefinitely. Either
             # way refresh last_used so a >0 TTL measures idle-since-now.
             _last_used[key] = time.monotonic()
+
+
+@asynccontextmanager
+async def lease_transcriber(
+    model_name: str,
+    *,
+    backend: BackendPreference = "auto",
+    registry: TranscriberRegistry | None = None,
+) -> AsyncIterator[Transcriber]:
+    """Load a transcriber on the model thread, yield it, and release on
+    every exit path (normal exit AND exceptions).
+
+    Replacement for the hand-rolled `load_transcriber` + `try` +
+    `finally: release_transcriber` pattern in the batch orchestrators.
+    Keeps the model lease structural — no forgotten `finally` possible.
+    """
+    transcriber = await run_on_model_thread(load_transcriber, model_name, backend=backend, registry=registry)
+    try:
+        yield transcriber
+    finally:
+        await run_on_model_thread(release_transcriber, transcriber)
 
 
 def evict_idle_now() -> int:

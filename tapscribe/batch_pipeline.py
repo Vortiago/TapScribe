@@ -126,7 +126,8 @@ async def _run_claimed(recorder: Recorder, req: PipelineRequest, *, model: str, 
 # ---------------------------------------------------------------------------
 # Stages — each is one sibling orchestrator's pre-checks + its *_locked core.
 # Module-level so tests fake whole stages the same way the transcribe suite
-# fakes load_transcriber (patch the consumer's namespace).
+# fakes load_transcriber (patch it in tapscribe.transcribers, where
+# lease_transcriber resolves it at call time).
 # ---------------------------------------------------------------------------
 
 

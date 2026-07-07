@@ -36,7 +36,7 @@ from .session_paths import (
 )
 from .sessions import read_session_meta
 from .text import read_config, read_languages
-from .transcribers import load_transcriber, release_transcriber, run_on_model_thread
+from .transcribers import lease_transcriber, run_on_model_thread
 from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY, cover_models
 from .wav_cache import CachedTranscription, cached_transcribe, read_primary_payload, set_primary_transcript
 
@@ -269,8 +269,11 @@ async def _run_cover(
     step = 0
     for model_id in models:
         model_backend = backend if model_id == generalist else "auto"
-        transcriber = await run_on_model_thread(load_transcriber, model_id, backend=model_backend)
-        try:
+        # Structural lease (#231): acquire/release is handled by
+        # `lease_transcriber` on every exit path (including a failed transcribe),
+        # so the next model in the cover — or the next request — can never find
+        # this one pinned by a forgotten release.
+        async with lease_transcriber(model_id, backend=model_backend) as transcriber:
             for wav in wavs:
                 if on_step is not None:
                     await on_step(step, wav)
@@ -289,12 +292,6 @@ async def _run_cover(
                 )
                 per_wav[wav.name].append(cached)
                 step += 1
-        finally:
-            # Release each model before loading the next (and on any failure) so
-            # the idle-TTL policy can unload it. Offloaded because eviction may
-            # run gc + GPU-cache reclaim; a no-op when load_transcriber was
-            # monkeypatched to a fake in tests.
-            await run_on_model_thread(release_transcriber, transcriber)
     return per_wav
 
 

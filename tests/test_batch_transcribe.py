@@ -36,13 +36,12 @@ from tapscribe.session_merge import InvalidRange, NoUsableWavs, select_session_w
 @pytest.fixture
 def install_stub_transcriber(monkeypatch: pytest.MonkeyPatch):
     """Returns a function that swaps `load_transcriber` for one that
-    returns the supplied stub. Patches the binding in batch_transcribe
-    (the consumer) rather than the source package — same reason
-    test_routes.py double-patches."""
+    returns the supplied stub. Patches the binding in `transcribers`
+    (where `lease_transcriber` fetches it), the consumer target."""
 
     def _install(stub):
         monkeypatch.setattr(
-            "tapscribe.batch_transcribe.load_transcriber",
+            "tapscribe.transcribers.load_transcriber",
             lambda *a, **kw: stub,  # noqa: ARG005
         )
 
@@ -346,7 +345,7 @@ async def test_transcribe_session_locked_uses_caller_slot_and_releases_model(
     write_languages("en")
     install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m", text="merged"))
     released: list = []
-    monkeypatch.setattr("tapscribe.batch_transcribe.release_transcriber", released.append)
+    monkeypatch.setattr("tapscribe.transcribers.release_transcriber", released.append)
     sd = seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
     claimed = await recorder_under_test.jobs.claim(
         JobState(
@@ -803,7 +802,7 @@ def _install_by_model(monkeypatch, by_model: dict, *, default):
     model in turn, so the fakes must differ per id (unlike the single-stub
     `install_stub_transcriber`)."""
     monkeypatch.setattr(
-        "tapscribe.batch_transcribe.load_transcriber",
+        "tapscribe.transcribers.load_transcriber",
         lambda model_id, **kw: by_model.get(model_id, default),  # noqa: ARG005
     )
 
@@ -882,7 +881,7 @@ async def test_specialist_free_meeting_runs_generalist_only(recorder_under_test,
     def _no_selector():
         raise AssertionError("selector must not run for a single-model cover")
 
-    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", _factory)
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", _factory)
     monkeypatch.setattr("tapscribe.batch_transcribe.default_language_selector", _no_selector)
 
     sd = seed_session(recorder_under_test.recordings_dir, "s", COVER_WAVS)
@@ -1035,7 +1034,7 @@ async def test_explicit_source_lang_pin_runs_generalist_only(recorder_under_test
         loaded.append(model_id)
         return generalist
 
-    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", _factory)
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", _factory)
 
     sd = seed_session(recorder_under_test.recordings_dir, "s", [COVER_WAVS[0]])
     selection = select_session_wavs(sd, from_iso=None, to_iso=None, source="original")
@@ -1078,7 +1077,7 @@ async def test_specialist_loads_with_auto_backend_not_the_generalists(recorder_u
         seen_backend[model_id] = backend
         return specialist if model_id == "nb-whisper-large" else generalist
 
-    monkeypatch.setattr("tapscribe.batch_transcribe.load_transcriber", _factory)
+    monkeypatch.setattr("tapscribe.transcribers.load_transcriber", _factory)
 
     sd = seed_session(recorder_under_test.recordings_dir, "s", [COVER_WAVS[0]])
     selection = select_session_wavs(sd, from_iso=None, to_iso=None, source="original")

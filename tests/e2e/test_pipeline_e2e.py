@@ -55,18 +55,14 @@ FAKE_TEXT_BY_SPEAKER = {
 @pytest.fixture
 def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
     """Replace the real factory + cache with a single FakeTranscriber the
-    test owns. The orchestrator module imported `load_transcriber` at
-    module load, so we patch both the canonical reference and that
-    local binding."""
+    test owns. Patch `tapscribe.transcribers.load_transcriber`, which the
+    orchestrator's `lease_transcriber` resolves at call time."""
     fake = FakeTranscriber(text_by_speaker=FAKE_TEXT_BY_SPEAKER)
 
     def _factory(model_name: str, **_kwargs) -> FakeTranscriber:  # noqa: ARG001
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
-    import tapscribe.batch_transcribe as _bt
-
-    monkeypatch.setattr(_bt, "load_transcriber", _factory)
     _transcribers.clear_cache()
     return fake
 
@@ -861,17 +857,14 @@ async def _stream_cover_pair(running_recorder: RunningRecorder, nb: Path, en: Pa
 
 
 def _install_cover_fakes(monkeypatch, *, generalist: _ConfidenceFake, specialist: _ConfidenceFake) -> None:
-    """Patch `load_transcriber` (both bindings) to dispatch the cover models to
-    `specialist` (by its model id) else `generalist` — the way the batch path
-    loads each cover model in turn."""
+    """Patch `tapscribe.transcribers.load_transcriber` to dispatch the cover
+    models to `specialist` (by its model id) else `generalist` — the way the
+    batch path loads each cover model in turn."""
 
     def _factory(model_name: str, **_kwargs):
         return specialist if model_name == specialist.model_name else generalist
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
-    import tapscribe.batch_transcribe as _bt
-
-    monkeypatch.setattr(_bt, "load_transcriber", _factory)
     _transcribers.clear_cache()
 
 

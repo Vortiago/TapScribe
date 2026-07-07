@@ -221,7 +221,7 @@ async def test_pipeline_end_to_end_produces_stripped_transcript_and_summary(reco
     from tapscribe.sessions import read_session_summary
 
     monkeypatch.setattr(
-        "tapscribe.batch_transcribe.load_transcriber",
+        "tapscribe.transcribers.load_transcriber",
         lambda *a, **kw: TranscriberStub(backend="fake-be", model="fake-m", text="meeting words"),  # noqa: ARG005
     )
 
@@ -269,7 +269,7 @@ async def test_pipeline_transcribe_stage_honours_candidate_languages(recorder_un
     write_languages("da")  # the meeting is declared Danish-only → a pin
     stub = TranscriberStub(backend="fake-be", model="fake-m", text="hej med dig")
     monkeypatch.setattr(
-        "tapscribe.batch_transcribe.load_transcriber",
+        "tapscribe.transcribers.load_transcriber",
         lambda *a, **kw: stub,  # noqa: ARG005
     )
     monkeypatch.setattr(

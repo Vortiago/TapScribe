@@ -80,9 +80,6 @@ def hallucinating_fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTrans
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
-    import tapscribe.batch_transcribe as _bt
-
-    monkeypatch.setattr(_bt, "load_transcriber", _factory)
     _transcribers.clear_cache()
     return fake
 
@@ -182,9 +179,6 @@ def many_speaker_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber
         return fake
 
     monkeypatch.setattr(_transcribers, "load_transcriber", _factory)
-    import tapscribe.batch_transcribe as _bt
-
-    monkeypatch.setattr(_bt, "load_transcriber", _factory)
     _transcribers.clear_cache()
     return fake
 
