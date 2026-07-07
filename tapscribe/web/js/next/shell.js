@@ -26,28 +26,53 @@ export const ALL_VIEWS = [...GLOBAL_VIEWS, ...JOURNEY_VIEWS];
 const _headerSig = new WeakMap();
 
 /**
+ * The per-tick header rebuild gate, factored out of header() so it can be
+ * unit-tested without a DOM (node --test has no browser; `host` is only a
+ * WeakMap key). Returns true when a rebuild is needed — the sig changed, or
+ * `hasActions` (a fresh-listener Node no string sig can capture, always
+ * rebuilt) — and records the new sig. Actions clear the stored sig so a later
+ * gated render with the same sig can't skip falsely.
+ * @param {Element} host
+ * @param {string} sig
+ * @param {boolean} hasActions
+ */
+export function headerNeedsRender(host, sig, hasActions) {
+  if (hasActions) {
+    _headerSig.delete(host);
+    return true;
+  }
+  if (_headerSig.get(host) === sig) return false;
+  _headerSig.set(host, sig);
+  return true;
+}
+
+/**
  * Build the shared stage header into a view's `[data-slot=head]` host.
  * `sub`/`actions` accept either a string (→ textContent) or a Node to append,
  * so callers never inject HTML strings (XSS-safe, like the rest of the code).
- * Skips the rebuild when eyebrow/title/sub text are unchanged (see above).
+ * `sub` may also be a LAZY `{ sig, build }` pair: per-tick views build an
+ * `inline(...)`/`strong(...)` fragment via `build()`, invoked ONLY past the gate
+ * and keyed on `sig`, so the throwaway allocation is skipped on unchanged ticks
+ * (#246). Pairing `sig` WITH the builder makes a forgotten sig a type error, not
+ * a silent stale header. Skips the rebuild when eyebrow/title/sub key are
+ * unchanged (see above).
  * @param {Element} host
- * @param {{ eyebrow: string, title: string, sub?: string | Node, actions?: Node }} opts
+ * @param {{ eyebrow: string, title: string, sub?: string | Node | { sig: string, build: () => string | Node }, actions?: Node }} opts
  */
 export function header(host, { eyebrow, title, sub, actions }) {
-  const subText = sub instanceof Node ? sub.textContent || "" : sub ?? "";
-  if (!actions) {
-    const sig = `${eyebrow}§${title}§${subText}`;
-    if (_headerSig.get(host) === sig) return;
-    _headerSig.set(host, sig);
-  } else {
-    _headerSig.delete(host);
-  }
+  // Detect the lazy pair by duck-typing `build` rather than `!(sub instanceof
+  // Node)` — the latter touches the DOM-only `Node` global before the gate can
+  // skip, which breaks the headless gate test (and needlessly on a skip tick).
+  const lazy = typeof sub === "object" && sub !== null && "build" in sub;
+  const subKey = lazy ? sub.sig : sub instanceof Node ? sub.textContent || "" : sub ?? "";
+  if (!headerNeedsRender(host, `${eyebrow}§${title}§${subKey}`, !!actions)) return;
+  const resolved = lazy ? sub.build() : sub; // build() runs ONLY on a real rebuild
   const frag = tpl("tpl-next-head");
   pick(frag, "eyebrow").textContent = eyebrow;
   pick(frag, "title").textContent = title;
   const subEl = pick(frag, "sub");
-  if (sub instanceof Node) subEl.appendChild(sub);
-  else if (sub != null) subEl.textContent = sub;
+  if (resolved instanceof Node) subEl.appendChild(resolved);
+  else if (resolved != null) subEl.textContent = resolved;
   if (actions) pick(frag, "actions").appendChild(actions);
   host.replaceChildren(frag);
 }

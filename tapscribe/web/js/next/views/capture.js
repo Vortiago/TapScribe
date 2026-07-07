@@ -153,12 +153,19 @@ export function build(ctx) {
     header(headHost, {
       eyebrow: "Session · 1 Capture",
       title: "Capture",
-      sub: inline(
-        "live IRC captions · recorder ",
-        strong(recEnabled ? "armed" : "paused"),
-        sess ? " · " : "",
-        sess ? strong(metaFor(sess).label || sess.session) : "",
-      ),
+      sub: {
+        // Read session_meta.label directly (== metaFor(sess).label) so the
+        // per-tick sig doesn't allocate a throwaway EffectiveMeta; build() still
+        // uses metaFor(), but that only runs past the gate on a real change.
+        sig: `${recEnabled ? 1 : 0}§${sess ? sess.session_meta?.label || sess.session : ""}`,
+        build: () =>
+          inline(
+            "live IRC captions · recorder ",
+            strong(recEnabled ? "armed" : "paused"),
+            sess ? " · " : "",
+            sess ? strong(metaFor(sess).label || sess.session) : "",
+          ),
+      },
     });
 
     // Reused components — each touches only its passed hosts. (The active-taps

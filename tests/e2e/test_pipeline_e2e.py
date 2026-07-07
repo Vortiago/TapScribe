@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import re
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -596,6 +597,48 @@ def _english_fixtures() -> list[AudioFixture]:
     return [fx for fx in _real_audio_fixtures() if fx.wav.stem.endswith("-en")]
 
 
+async def _ensure_parakeet_cached_or_skip(model: str = "parakeet-tdt-0.6b-v3") -> None:
+    """Provision the Parakeet weights into the shared HF cache before the API
+    call, serialised across test processes by a file lock, so the server's later
+    in-process `from_pretrained` is a cache hit, not a live download.
+
+    Root cause of the flake: huggingface_hub does `makedirs(.../<repo>/blobs)`
+    BEFORE its per-file lock, so concurrent first-time downloads race, a partial
+    is swept, and the model never finishes caching → a flaky 500. The lock
+    serialises fixed-code runs; the bounded retry rides out a race with a
+    not-yet-locked writer. `ignore_patterns` skips the ~2.3 GB NeMo checkpoint the
+    transformers path never reads (it loads model.safetensors), halving the
+    download. Skip only when the weights are genuinely unobtainable — offline,
+    hub down, or a lock/queue that outlasts the timeout."""
+    from filelock import FileLock
+    from huggingface_hub import constants as hf_constants
+    from huggingface_hub import snapshot_download
+
+    from tapscribe.transcribers.parakeet import _resolve_repo
+
+    repo = _resolve_repo(model)
+    lock_path = os.path.join(hf_constants.HF_HUB_CACHE, repo.replace("/", "--") + ".tapscribe-prefetch.lock")
+
+    def _prefetch() -> None:
+        os.makedirs(hf_constants.HF_HUB_CACHE, exist_ok=True)
+        with FileLock(lock_path, timeout=900):
+            for attempt in range(5):
+                try:
+                    snapshot_download(repo, ignore_patterns=["*.nemo", "plots/*"])
+                    return
+                except OSError:  # concurrent-download race vs a not-yet-locked writer:
+                    # makedirs ENOENT (swept parent) or symlink EEXIST mid-swap;
+                    # both settle once the other writer finishes, so retry.
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.5)
+
+    try:
+        await asyncio.to_thread(_prefetch)
+    except Exception as e:  # noqa: BLE001 — offline / hub down / unresolved contention → skip, not fail
+        pytest.skip(f"parakeet weights unavailable (offline or shared-cache contention): {e}")
+
+
 @pytest.mark.real_audio
 async def test_pipeline_with_real_parakeet(running_recorder: RunningRecorder):
     """Full pipeline against real audio with the real `transformers` Parakeet
@@ -625,6 +668,7 @@ async def test_pipeline_with_real_parakeet(running_recorder: RunningRecorder):
         pytest.skip(
             "no English real-audio fixtures present — add one via tests/fixtures/audio/README.md to enable",
         )
+    await _ensure_parakeet_cached_or_skip()
 
     rec = running_recorder.recorder
     base = running_recorder.base_url
@@ -1032,6 +1076,7 @@ async def test_cover_real_parakeet_generalist_keeps_generalist_on_english_e2e(
         await asyncio.to_thread(download_nb_whisper_ct2_dir, "nb-whisper-tiny")
     except Exception as e:  # noqa: BLE001 — any fetch failure (offline, hub down) → skip, not fail
         pytest.skip(f"nb-whisper-tiny weights unavailable (offline?): {e}")
+    await _ensure_parakeet_cached_or_skip()
 
     rec = running_recorder.recorder
     base = running_recorder.base_url

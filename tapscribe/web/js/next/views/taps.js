@@ -91,11 +91,15 @@ export function build(ctx) {
     header(headHost, {
       eyebrow: "Global · Ingress",
       title: "Taps",
-      sub: inline(
-        `${active.length} connected · `,
-        strong(`${liveCount} live`),
-        " · per-tap gate & Person mapping",
-      ),
+      sub: {
+        sig: `${active.length}§${liveCount}`,
+        build: () =>
+          inline(
+            `${active.length} connected · `,
+            strong(`${liveCount} live`),
+            " · per-tap gate & Person mapping",
+          ),
+      },
     });
 
     recPill.textContent = recEnabled ? "● recording" : "⏸ paused";
