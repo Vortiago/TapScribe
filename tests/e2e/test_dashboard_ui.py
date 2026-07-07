@@ -1219,6 +1219,13 @@ async def test_dashboard_with_real_audio_and_whisper(
     assert await wait_until(lambda: streams_drained(rec), timeout=10.0)
     assert (rec.session_dir / "armstrong-en").with_suffix(".wav").parent.exists()
 
+    # The Transcript page declares languages, not a model (ADR-0011): the
+    # generalist comes from batch-model.txt. Pin it to tiny.en (75 MB — bounded
+    # first-run download) via the config API, since there's no engine picker.
+    async with httpx.AsyncClient(base_url=running_recorder.base_url, timeout=30.0) as client:
+        r = await client.put("/api/config/batch-model", json={"content": "tiny.en"})
+        assert r.status_code == 200, r.text
+
     async with playwright_session() as pw:
         try:
             browser = await pw.chromium.launch(headless=True)
@@ -1243,11 +1250,8 @@ async def test_dashboard_with_real_audio_and_whisper(
                 timeout=10000,
             )
 
-            # The engine panel's model select defaults to the catalog's first
-            # model. tiny.en is only 75 MB — better fit for a test that might
-            # run on a fresh machine.
-            await page.select_option("#viewRoot .sel--model", "tiny.en")
-
+            # The model is pinned via batch-model.txt above (no engine picker on
+            # the Transcript page any more, ADR-0011); the range button just runs.
             tx_button = page.locator('#viewRoot [data-slot="txRangeBtn"]')
             await tx_button.wait_for(state="visible", timeout=5000)
             await tx_button.click()
@@ -1787,6 +1791,149 @@ async def test_next_poll_render_does_not_clobber_open_controls(
                 """() => document.querySelectorAll('#viewRoot [data-slot="absorb"]').length >= 1""",
                 timeout=5000,
             )
+        finally:
+            await browser.close()
+
+
+async def test_transcript_languages_readout_names_the_specialist(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,  # noqa: ARG001 — fixture arms the fake backend so the view mounts
+    tmp_path: Path,
+):
+    """ADR-0011: the Transcript page declares LANGUAGES, not a model, and a
+    read-only readout names the exact models a transcribe will run — so the
+    Norwegian nb-whisper (faster-whisper) specialist is visible BEFORE clicking,
+    the direct fix for the surprise faster-whisper sidecar.
+
+    Three assertions: (1) the inherited default {da,no,en} already names
+    nb-whisper (the previously-silent specialist is now on screen, marked
+    inherited); (2) an English-only pick collapses to "generalist only"; (3)
+    picking Norwegian names nb-whisper-large again. No transcribe is run — this
+    is a pure readout/derivation test against the real /api/languages catalog."""
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+
+    src = synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.6, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=ws_base, identity="alice", name="Alice", wav_path=src, utterance_id="utt-lang-1"
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base, wait_until="domcontentloaded")
+            # Boot done once the spine lists the seeded session (proves /api/state
+            # + the catalogs, /api/languages among them, have landed).
+            await page.wait_for_function(
+                f"""() => {{
+                  const sel = document.querySelector('[data-slot="sessionPick"]');
+                  return sel && Array.from(sel.options).some((o) => o.value === {rec.session_start!r});
+                }}""",
+                timeout=10000,
+            )
+            await page.evaluate('() => window.gotoView("transcript")')
+            # The meeting-languages <select multiple> mounts, populated from the
+            # catalog (≥ da/no/en) — i.e. the view rebuilt with the loaded catalog.
+            await page.wait_for_function(
+                """() => {
+                  const s = document.querySelector('[data-slot="txLanguages"]');
+                  return s && s.options.length >= 3;
+                }""",
+                timeout=5000,
+            )
+
+            models = '[data-slot="txLangModels"]'
+            effective = '[data-slot="txLangEffective"]'
+
+            # (1) Inherited default {da,no,en} contains Norwegian → nb-whisper is
+            # already named (the surprise, now visible), and the effective line
+            # says it's inherited from the global default.
+            await page.wait_for_function(
+                f"""() => (document.querySelector({models!r})?.textContent || '').includes('nb-whisper-large')""",
+                timeout=5000,
+            )
+            assert "inherited" in (await page.text_content(effective) or "")
+
+            # (2) English-only pick → no specialist → "(generalist) only".
+            await page.select_option('[data-slot="txLanguages"]', "en")
+            await page.wait_for_function(
+                f"""() => /\\(generalist\\) only\\s*$/.test(document.querySelector({models!r})?.textContent || '')""",
+                timeout=5000,
+            )
+
+            # (3) Norwegian pick → nb-whisper-large (Norwegian) named again.
+            await page.select_option('[data-slot="txLanguages"]', "no")
+            await page.wait_for_function(
+                f"""() => {{
+                  const t = document.querySelector({models!r})?.textContent || '';
+                  return t.includes('nb-whisper-large') && t.includes('Norwegian');
+                }}""",
+                timeout=5000,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_transcript_transcribe_saves_languages_first_wysiwyg(
+    running_recorder: RunningRecorder,
+    fake_transcriber: FakeTranscriber,  # noqa: ARG001 — arms the fake backend so the cover completes
+    tmp_path: Path,
+):
+    """ADR-0011 save-on-transcribe (WYSIWYG): clicking a transcribe action writes
+    the current language selection to session-meta BEFORE running, so an operator
+    never transcribes with a stale set. Select Norwegian, click ▶ transcribe
+    range, and assert the meeting's session-meta now pins ["no"] — the selection
+    persisted as part of the action, not a separate step the operator can forget."""
+    rec = running_recorder.recorder
+    ws_base = running_recorder.ws_base_url
+    base = running_recorder.base_url
+    sid = rec.session_start
+
+    src = synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.6, freq_hz=220.0)
+    await stream_wav_via_tap(
+        ws_base_url=ws_base, identity="alice", name="Alice", wav_path=src, utterance_id="utt-save-1"
+    )
+    assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#transcript", wait_until="domcontentloaded")
+            # Wait until the languages <select> is populated AND the range button
+            # is enabled (session has a WAV to transcribe).
+            await page.wait_for_function(
+                """() => {
+                  const s = document.querySelector('[data-slot="txLanguages"]');
+                  const b = document.querySelector('#viewRoot [data-slot="txRangeBtn"]');
+                  return s && s.options.length >= 3 && b && !b.disabled;
+                }""",
+                timeout=10000,
+            )
+            await page.select_option('[data-slot="txLanguages"]', "no")
+            await page.locator('#viewRoot [data-slot="txRangeBtn"]').click()
+
+            # The PUT to session-meta runs before the transcribe POST, so the
+            # override lands regardless of the transcribe outcome. Poll it.
+            async def _meta_pins_no() -> bool:
+                async with httpx.AsyncClient(base_url=base, timeout=10.0) as client:
+                    r = await client.get(f"/api/session-meta/{sid}")
+                    return r.status_code == 200 and r.json().get("languages") == ["no"]
+
+            assert await wait_until(_meta_pins_no, timeout=10.0), "transcribe did not save languages first"
         finally:
             await browser.close()
 
@@ -2470,6 +2617,89 @@ async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder:
             await context.close()
         finally:
             rec.jobs._by_session.pop(sid, None)
+            await browser.close()
+
+
+async def test_next_merged_transcript_rows_are_content_visibility_gated(
+    running_recorder: RunningRecorder,
+):
+    """Each merged-transcript row must carry `content-visibility: auto` (with a
+    `contain-intrinsic-size` placeholder) so the browser skips layout+paint of
+    off-screen lines — the pure-CSS half of the huge-list virtualization already
+    proven on `.wavrow`. Without it, the one-shot O(segments) rebuild in
+    merged-transcript.js pays layout+paint for every off-screen row, which is
+    the bulk of the documented 100-200 ms long task at 3000 segments (#212).
+
+    Structural, no timing threshold (CI-runner safe): seed a merged session,
+    open its Transcript view, and assert the computed style on a real rendered
+    row. This also pins the SELECTOR — the merged rows are `.transcript > div`
+    (no `.line` class); putting the rule on `.line` (the live feed) would leave
+    these rows `content-visibility: visible` and fail here."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-01T09-00-00Z"
+    _seed_merged_session(rec, sid, segments=120)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#transcript", wait_until="domcontentloaded")
+
+            # Focus the seeded session (the recorder's own current session also
+            # lists and is focused by default).
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await page.evaluate(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    s.value = sid;
+                    s.dispatchEvent(new Event('change', { bubbles: true }));
+                }""",
+                sid,
+            )
+
+            # The merged body arrives via the lazy per-(session, stamp) fetch.
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll('{_MERGED_FIRST_LINE}').length >= 120""",
+                timeout=15000,
+            )
+
+            styles = await page.evaluate(
+                f"""() => {{
+                    const el = document.querySelector('{_MERGED_FIRST_LINE}');
+                    const cs = getComputedStyle(el);
+                    return {{
+                        contentVisibility: cs.contentVisibility,
+                        containIntrinsicSize: cs.containIntrinsicSize,
+                    }};
+                }}"""
+            )
+            assert styles["contentVisibility"] == "auto", (
+                "merged transcript rows must compute content-visibility:auto so "
+                "off-screen rows skip layout+paint (the .wavrow pattern); got "
+                f"{styles['contentVisibility']!r} — is the rule on `.transcript > div` "
+                "or did it land on `.line` (the live feed) by mistake? (#212)"
+            )
+            # The `auto` keyword (remember-real-height) is the load-bearing part;
+            # don't pin the exact px estimate so a future tune doesn't break this.
+            assert "auto" in styles["containIntrinsicSize"], (
+                "merged transcript rows need a contain-intrinsic-size:auto placeholder so "
+                f"skipped rows keep the scroll height; got {styles['containIntrinsicSize']!r}"
+            )
+            await context.close()
+        finally:
             await browser.close()
 
 

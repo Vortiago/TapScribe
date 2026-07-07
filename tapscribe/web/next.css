@@ -750,6 +750,20 @@ body::before { display: none; }
    strip above the prose; only the line + meta text take the measure. */
 .next-app .txbody [data-slot="metaStrip"],
 .next-app .txbody .transcript > div { max-width: 92ch; }
+/* Merged transcript rows: the pure-CSS half of huge-list virtualization, same
+   pattern + reasoning as .wavrow (next.css) — content-visibility lets the
+   browser skip layout + paint of off-screen lines, so the one-shot
+   O(segments) rebuild in merged-transcript.js only pays layout/paint for the
+   visible window instead of all ~3000 rows (the bulk of the documented
+   100-200 ms long task; #212). `auto` remembers each line's real (possibly
+   wrapped) height after first paint; 19px is the single-line estimate
+   (12px font × 1.55 line-height, no row padding) for the pre-scroll placeholder.
+   Rows are `.transcript > div` (the tpl-merged-line <div>, no class) — NOT
+   `.line`, which is the live feed. */
+.next-app .txbody .transcript > div {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 19px;
+}
 
 /* config-card: a grid of the prompt / hotwords / hallucination editor cols.
    In Settings the host panel is `panel--fill`, so the grid fills the panel

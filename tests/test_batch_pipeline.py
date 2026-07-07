@@ -182,8 +182,10 @@ async def test_pipeline_resolves_model_from_batch_model_config_else_default(
     recorder_under_test, monkeypatch, configured, expected
 ):
     """The transcribe stage's model comes from the operator's batch-model
-    config — validated against the catalog — never from the request."""
-    monkeypatch.setattr("tapscribe.batch_pipeline.read_config", lambda key: configured)
+    config — validated against the catalog — never from the request. Model
+    resolution now lives in the shared `batch_transcribe.resolve_batch_model`
+    (ADR-0011), so patch `read_config` there."""
+    monkeypatch.setattr("tapscribe.batch_transcribe.read_config", lambda key: configured)
     seen: dict = {}
 
     async def _strip(req, *, job):  # noqa: ARG001

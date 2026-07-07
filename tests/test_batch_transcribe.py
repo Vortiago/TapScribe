@@ -599,13 +599,13 @@ async def test_singleton_candidate_set_pins_that_language(recorder_under_test, i
     assert stub.seen_source_lang == ["da"]
 
 
-async def test_manual_single_wav_transcribe_ignores_candidate_languages(
+async def test_manual_single_wav_transcribe_applies_candidate_languages(
     recorder_under_test, install_stub_transcriber
 ):
-    """ADR-0010 scope: the candidate-language policy applies to the batch SESSION
-    path only. A manual single-WAV transcribe stays unchanged — even with a
-    singleton global default set, the transcriber is driven with the request's
-    own source_lang (None here), not the meeting's candidate set."""
+    """ADR-0011: the manual single-WAV path is now language-driven too — it runs
+    the meeting's cover as a one-WAV slice. A singleton global default pins that
+    language (the specialist-free `da` keeps the cover single-model), so the
+    transcriber is driven with source_lang="da", not the request's own None."""
     from tapscribe.text import write_languages
 
     write_languages("da")
@@ -624,7 +624,49 @@ async def test_manual_single_wav_transcribe_ignores_candidate_languages(
             target_lang=None,
         ),
     )
-    assert stub.seen_source_lang == [None]
+    assert stub.seen_source_lang == ["da"]
+
+
+async def test_manual_single_wav_transcribe_runs_cover_and_picks_winner(recorder_under_test, monkeypatch):
+    """ADR-0011 headline: re-transcribing ONE WAV runs the same cover as the range
+    — the generalist AND the Norwegian specialist both transcribe the WAV, two
+    sidecars land, and _primary points at the selector's winner (here the
+    generalist keeps the English region). The single-WAV counterpart to
+    test_cover_runs_both_models_and_selector_routes_primary_per_region."""
+    from tapscribe.text import write_languages
+    from tapscribe.wav_cache import read_all_cached, read_cached
+
+    write_languages("no, en")  # cover = {generalist, nb-whisper-large}
+    generalist = _ConfidenceStub(
+        backend="faster-whisper",
+        model="fake-generalist",
+        logprob_by_marker={"armstrong": -0.10},
+        language_by_marker={"armstrong": "en"},  # English region → generalist wins
+    )
+    specialist = _ConfidenceStub(
+        backend="faster-whisper", model="nb-whisper-large", logprob_by_marker={"armstrong": -0.80}
+    )
+    _install_by_model(monkeypatch, {"nb-whisper-large": specialist}, default=generalist)
+
+    sd = seed_session(recorder_under_test.recordings_dir, "s", [COVER_WAVS[1]])
+    payload = await transcribe_one(
+        recorder_under_test,
+        BatchOneRequest(
+            session="s",
+            name=COVER_WAVS[1],
+            source="original",
+            model="fake-generalist",
+            backend="cpu",
+            source_lang=None,
+            target_lang=None,
+        ),
+    )
+    armstrong = sd / COVER_WAVS[1]
+    # Both cover models ran on the one WAV — two sidecars.
+    assert {c.result.model for c in read_all_cached(armstrong)} == {"fake-generalist", "nb-whisper-large"}
+    # _primary points at the winner, and that's what the returned payload is.
+    assert read_cached(armstrong).result.model == "fake-generalist"
+    assert payload["model"] == "fake-generalist"
 
 
 async def test_multi_candidate_set_constrains_detection_to_the_set(
@@ -933,6 +975,48 @@ async def test_cover_rerun_without_force_keeps_primary_and_skips_retranscribe(
     assert read_cached(sd / COVER_WAVS[0]).result.model == "nb-whisper-large"
 
 
+async def test_narrowing_languages_repoints_primary_off_dropped_specialist(recorder_under_test, monkeypatch):
+    """ADR-0011 stale-primary guard: after a {no,en} cover routes the Norwegian
+    region to nb-whisper, NARROWING the meeting to English (a specialist-free,
+    single-model cover) and re-transcribing must repoint _primary to the
+    generalist — not leave it aimed at the now-unused specialist. The single-model
+    path used to skip set_primary; `_select_primaries` now always repoints."""
+    from tapscribe.text import write_languages
+    from tapscribe.wav_cache import read_all_cached, read_cached
+
+    write_languages("no, en")
+    generalist = _ConfidenceStub(
+        backend="faster-whisper", model="fake-generalist", logprob_by_marker={"marlene": -0.90}
+    )
+    specialist = _ConfidenceStub(
+        backend="faster-whisper", model="nb-whisper-large", logprob_by_marker={"marlene": -0.20}
+    )
+    _install_by_model(monkeypatch, {"nb-whisper-large": specialist}, default=generalist)
+
+    sd = seed_session(recorder_under_test.recordings_dir, "s", [COVER_WAVS[0]])
+    selection = select_session_wavs(sd, from_iso=None, to_iso=None, source="original")
+    async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(
+            _session_request(model="fake-generalist"), selection=selection, job=handle
+        )
+    assert read_cached(sd / COVER_WAVS[0]).result.model == "nb-whisper-large"  # specialist won pass 1
+
+    # Narrow to English only → specialist-free, single-model cover, and re-run.
+    write_languages("en")
+    selection = select_session_wavs(sd, from_iso=None, to_iso=None, source="original")
+    async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
+        await transcribe_session_locked(
+            _session_request(model="fake-generalist"), selection=selection, job=handle
+        )
+    # _primary flips to the generalist even though only ONE model ran this pass…
+    assert read_cached(sd / COVER_WAVS[0]).result.model == "fake-generalist"
+    # …and the specialist sidecar is still on disk — a pointer flip, not a delete.
+    assert {c.result.model for c in read_all_cached(sd / COVER_WAVS[0])} == {
+        "fake-generalist",
+        "nb-whisper-large",
+    }
+
+
 async def test_explicit_source_lang_pin_runs_generalist_only(recorder_under_test, monkeypatch):
     """An explicit per-job `source_lang` pin (the manual transcribe route)
     BYPASSES the candidate-set cover and honours the operator's chosen model:
@@ -1013,3 +1097,22 @@ async def test_specialist_loads_with_auto_backend_not_the_generalists(recorder_u
 
     assert seen_backend["fake-generalist"] == "mlx"  # operator's choice honoured for the generalist
     assert seen_backend["nb-whisper-large"] == "auto"  # specialist self-routes — no MLX crash
+
+
+def test_resolve_batch_model_warn_flag_gates_the_invalid_config_log(recorder_under_test, capsys):
+    """An out-of-band invalid batch-model.txt warns once by default (on a real
+    transcribe), but resolve_batch_model(warn=False) — used by the ~2 Hz /api/state
+    poll to DISPLAY the generalist — stays silent, so it can't spam stdout twice a
+    second. Both still fall back to the bundled default."""
+    from tapscribe.batch_transcribe import resolve_batch_model
+    from tapscribe.transcribers.catalog import DEFAULT_BATCH_MODEL
+
+    # Write the file DIRECTLY (bypassing write_config's write-time validation) to
+    # simulate a since-removed model id / out-of-band edit.
+    (recorder_under_test.config_dir / "batch-model.txt").write_text("not-a-real-model", encoding="utf-8")
+
+    assert resolve_batch_model(warn=False) == DEFAULT_BATCH_MODEL
+    assert "not in the catalog" not in capsys.readouterr().out  # poll path: silent
+
+    assert resolve_batch_model(warn=True) == DEFAULT_BATCH_MODEL
+    assert "not in the catalog" in capsys.readouterr().out  # on-demand: warns once

@@ -174,6 +174,23 @@ export function selectionInside(host) {
 }
 
 /**
+ * True while the operator is holding ANY live interaction anywhere in the
+ * document — an interactive control (select/input/textarea/contenteditable) is
+ * focused, or a non-collapsed text selection is held. The document-wide sibling
+ * of renderRegion's per-host focus/selection guard, exported for the poll pacer
+ * (`next/main.js`): the /api/state backoff must NOT engage while an interaction
+ * is held, or a render the hold deferred could land a whole backoff interval
+ * after release instead of on the next tick (ADR-0004). Keeps "what counts as
+ * an interaction" defined once, here with the hold.
+ */
+export function interactionHeld() {
+  const active = document.activeElement;
+  if (active && active !== document.body && _isInteractive(active)) return true;
+  const sel = document.getSelection();
+  return !!sel && !sel.isCollapsed && sel.rangeCount > 0;
+}
+
+/**
  * `selectionInside(host)` plus marking the deferred-render flag in one step —
  * the shape every per-tick gate that can't route through renderRegion needs
  * (recordings.js/transcript.js's WAV lists, active-taps.js, live-feed.js), so
