@@ -485,7 +485,11 @@ export function build(ctx) {
       eyebrow: "Global · Sessions",
       title: "Sessions",
       sub: total
-        ? inline(strong(`${total}`), ` session${total === 1 ? "" : "s"} · `, strong(`${transcribed}`), " transcribed")
+        ? {
+            sig: `${total}§${transcribed}`,
+            build: () =>
+              inline(strong(`${total}`), ` session${total === 1 ? "" : "s"} · `, strong(`${transcribed}`), " transcribed"),
+          }
         : "no sessions yet — start recording to populate this list",
     });
 

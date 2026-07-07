@@ -208,7 +208,13 @@ export function build(ctx) {
       eyebrow: "Global · Registry",
       title: "People",
       sub: sess
-        ? inline("highlighting people in ", strong(sess.session_meta?.label || sess.session))
+        ? {
+            // Sig mirrors the FULL rendered text (prefix included), like the old
+            // textContent key did — a bare-label sig could equal the sess-null
+            // fallback string below and wrongly skip the rebuild on sess → null.
+            sig: `highlighting people in ${sess.session_meta?.label || sess.session}`,
+            build: () => inline("highlighting people in ", strong(sess.session_meta?.label || sess.session)),
+          }
         : "everyone you've recorded, across every session",
     });
 
