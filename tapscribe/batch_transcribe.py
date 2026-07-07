@@ -36,7 +36,7 @@ from .session_paths import (
 )
 from .sessions import read_session_meta
 from .text import read_config, read_languages
-from .transcribers import load_transcriber, release_transcriber, run_on_model_thread
+from .transcribers import lease_transcriber, run_on_model_thread
 from .transcribers.catalog import cover_models
 from .wav_cache import CachedTranscription, cached_transcribe, read_primary_payload, set_primary_transcript
 
@@ -243,8 +243,7 @@ async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # n
             "hallucinate. Remove or skip this file."
         )
 
-    transcriber = await run_on_model_thread(load_transcriber, req.model, backend=req.backend)
-    try:
+    async with lease_transcriber(req.model, backend=req.backend) as transcriber:
         inv = _build_invocation(req.session, source_lang=req.source_lang, target_lang=req.target_lang)
 
         await run_on_model_thread(
@@ -268,12 +267,6 @@ async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # n
             # silently failed. Bubble as a 500-equivalent rather than masking.
             raise BatchTranscribeError("cached_transcribe completed but no sidecar landed on disk")
         return payload
-    finally:
-        # Release our use of the model so the configured idle-TTL policy can
-        # unload it (default: immediately, freeing several GB). Offloaded
-        # because eviction may run gc + GPU-cache reclaim; a no-op when
-        # load_transcriber was monkeypatched to a fake in tests.
-        await run_on_model_thread(release_transcriber, transcriber)
 
 
 async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> dict:
@@ -353,8 +346,7 @@ async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job)
         # MLX-preference generalist doesn't drag nb-whisper (cpu/cuda only, no MLX
         # binding) into an unsupported-backend crash on Apple Silicon.
         backend = req.backend if model_id == req.model else "auto"
-        transcriber = await run_on_model_thread(load_transcriber, model_id, backend=backend)
-        try:
+        async with lease_transcriber(model_id, backend=backend) as transcriber:
             for wav in selection.wavs:
                 await job.update(current=step, current_file=wav.name)
                 cached = await run_on_model_thread(
@@ -372,11 +364,6 @@ async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job)
                 )
                 per_wav[wav.name].append(cached)
                 step += 1
-        finally:
-            # Release each model before loading the next (and on any failure) so
-            # the idle-TTL policy can unload it. Offloaded because eviction may
-            # run gc + GPU-cache reclaim.
-            await run_on_model_thread(release_transcriber, transcriber)
 
     # When the cover ran ≥2 models, pick the winning transcript per region and
     # point _primary at it; merge_session then reads the winners. With a single
