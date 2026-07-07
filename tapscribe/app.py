@@ -75,6 +75,7 @@ from .batch_transcribe import (
     BatchSessionRequest,
     WavTooQuiet,
     WavUnreadable,
+    resolve_batch_model,
     transcribe_one,
     transcribe_session,
 )
@@ -119,8 +120,8 @@ from .text import (
 )
 from .transcribers import evict_idle_now, run_on_model_thread
 from .transcribers.catalog import (
-    DEFAULT_BATCH_MODEL,
     REGISTRY,
+    SPECIALIST_MODELS,
     available_backend_strs,
     candidate_language_codes,
     language_display_name,
@@ -621,6 +622,11 @@ def _build_state_blob(
         "live_prompt": read_config("live-prompt"),
         "live_model_default": read_config("live-model"),
         "batch_model_default": read_config("batch-model"),
+        # The generalist that will ACTUALLY run: batch-model.txt validated against
+        # the catalog, falling back to the bundled default when unset/invalid — so
+        # the Transcript "models that will run" readout names the real model, not the
+        # raw (possibly empty/stale) file value in `batch_model_default` (ADR-0011).
+        "batch_model_effective": resolve_batch_model(warn=False),
         "languages_default": list(read_languages()),
         "hotwords": read_config("hotwords"),
         # Non-secret projection ONLY (`summarizer_default_public` is the #85
@@ -707,6 +713,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "inputs_support": inputs_support,
         "live_model_default": blob["live_model_default"],
         "batch_model_default": blob["batch_model_default"],
+        "batch_model_effective": blob["batch_model_effective"],
         # The operator's DEFAULT candidate-language set (ADR-0010). The catalog
         # of selectable languages is served once via GET /api/languages; this is
         # the small, dynamic current value the picker pre-selects.
@@ -885,15 +892,28 @@ async def api_languages():
     operator's current global default. Static apart from the default, so the
     dashboard fetches it once (like /api/models) rather than per poll.
 
+    `specialists` maps a language code → the purpose-built model the cover adds
+    for it (ADR-0010's specialist table, v1: `{"no": "nb-whisper-large"}`),
+    registry-filtered like `cover_models`. The Transcript page reads it (with the
+    generalist from `/api/state`'s `batch_model_effective`) to show which models a
+    transcribe will actually run for the declared languages — so a Norwegian
+    meeting's nb-whisper (faster-whisper) pass is visible up front
+    rather than a surprise sidecar (ADR-0011).
+
     Response shape:
       {
-        "languages": [ {"code": "da", "name": "Danish"}, ... ],
-        "default":   ["da", "no", "en"]
+        "languages":   [ {"code": "da", "name": "Danish"}, ... ],
+        "default":     ["da", "no", "en"],
+        "specialists": {"no": "nb-whisper-large"}
       }
     """
     return {
         "languages": [{"code": c, "name": language_display_name(c)} for c in candidate_language_codes()],
         "default": list(read_languages()),
+        # Registry-filtered so the readout drops exactly what `cover_models` drops
+        # (an env-overridden specialist absent from the catalog never runs), keeping
+        # the client-side "models that will run" union provably equal to the cover.
+        "specialists": {lang: m for lang, m in SPECIALIST_MODELS.items() if REGISTRY.get(m) is not None},
     }
 
 
@@ -1611,7 +1631,10 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         session=session,
         name=name,
         source=source,
-        model=body.get("model") or DEFAULT_BATCH_MODEL,
+        # No model in the body → resolve the operator's generalist (batch-model.txt).
+        # The Transcript page declares languages, not a model (ADR-0011); an explicit
+        # per-call model is still honoured (CLI / future callers).
+        model=body.get("model") or resolve_batch_model(),
         # Per-call backend override — falls back to the Recorder's
         # preference when the body didn't carry one.
         backend=(body.get("backend") or "").strip() or recorder.backend,
@@ -1639,7 +1662,9 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
     request = BatchSessionRequest(
         session=session,
         source=source,
-        model=body.get("model") or DEFAULT_BATCH_MODEL,
+        # No model in the body → the operator's generalist (batch-model.txt); the
+        # candidate languages (session-meta) drive which specialists join (ADR-0011).
+        model=body.get("model") or resolve_batch_model(),
         backend=(body.get("backend") or "").strip() or recorder.backend,
         from_iso=body.get("from_iso") or None,
         to_iso=body.get("to_iso") or None,

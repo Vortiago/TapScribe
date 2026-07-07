@@ -116,10 +116,11 @@
 
 <!-- ===================== SESSION · 3 TRANSCRIPT ===================== -->
 <!-- The merged transcript (main/left) + the transcription control column
-     (right): the engine selector (backend chips + compact model dropdown +
-     any model-declared option selects), the transcribe controls (session range + force + per-WAV
-     re-transcribe), and the per-WAV transcript cache (set-primary). Built by
-     js/next/views/transcript.js, which owns the REAL transcribe wiring. -->
+     (right): the meeting-languages control (candidate-language <select multiple>
+     + an effective-set / models-that-will-run readout — ADR-0011), the transcribe
+     controls (session range + force + per-WAV re-transcribe), and the per-WAV
+     transcript cache (set-primary). Built by js/next/views/transcript.js, which
+     owns the REAL transcribe wiring. -->
 <template id="tpl-next-view-transcript">
   <div data-slot="head"></div>
   <div class="grid cols-tx fillcol">
@@ -138,11 +139,26 @@
       <div class="panel__body flush txbody"><div data-slot="mergedHost"></div></div>
     </div>
 
-    <!-- CONTROL COLUMN: engine selector + transcribe + per-WAV cache. -->
+    <!-- CONTROL COLUMN: meeting languages + transcribe + per-WAV cache. The
+         operator declares the meeting's LANGUAGES, not a model (ADR-0011); the
+         generalist is the global default (Settings), and the readout names the
+         exact models a transcribe will run so a specialist (Norwegian →
+         nb-whisper) is never a surprise. -->
     <div class="aside">
       <div class="panel panel--accent">
-        <div class="panel__head"><div class="panel__title"><span class="ic">🧠</span>Engine</div><div class="panel__hint">batch backend &amp; model</div></div>
-        <div class="panel__body"><div class="eng" data-slot="engineHost"></div></div>
+        <div class="panel__head"><div class="panel__title"><span class="ic">🗣️</span>Meeting languages</div><div class="panel__hint">what to expect</div></div>
+        <div class="panel__body">
+          <div class="field" style="margin-bottom:9px">
+            <label for="txLanguagesSel">languages this meeting is in <span class="dim">(blank → global default)</span></label>
+            <select id="txLanguagesSel" class="sel" multiple size="4" aria-label="meeting languages" data-slot="txLanguages"></select>
+            <div class="field__row"><button class="act act--sm" type="button" data-slot="txLanguagesSave">save</button><span class="dim mono" data-slot="txLanguagesStatus"></span></div>
+          </div>
+          <!-- effective set (incl. the inherited global default) + the models a
+               transcribe will actually load. Updated in place each tick / on
+               selection change — the antidote to a surprise faster-whisper pass. -->
+          <div class="dim mono ovr-note" data-slot="txLangEffective"></div>
+          <div class="dim mono ovr-note" data-slot="txLangModels" style="margin-top:4px"></div>
+        </div>
       </div>
 
       <div class="panel">
