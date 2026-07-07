@@ -35,6 +35,11 @@ from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 # ending. Tuned visually rather than from first principles.
 LEVEL_DECAY_PER_FRAME: float = 0.92
 
+# Reserved identity used by bridges to verify the /tap tap-secret works.
+# A probe tap must leave no durable state (no roster occurrence → no
+# auto-bound Person in people.json).
+PROBE_IDENTITY = "__probe__"
+
 
 class TapFanOut:
     """One open `/tap` WebSocket worth of fan-out state. Built by
@@ -260,7 +265,7 @@ class TapFanOut:
         # read-modify-write is atomic under the event loop against concurrent
         # taps. Guarded so a record-off live tap doesn't materialise an empty
         # session folder just for a roster; a recording tap already created it.
-        if self._do_record or self._session_dir.exists():
+        if self._identity != PROBE_IDENTITY and (self._do_record or self._session_dir.exists()):
             roster.record_occurrence(
                 self._session_dir,
                 identity=self._identity,
