@@ -52,18 +52,15 @@ let liveModelCatalog = { context: "live", available_backends: [], models: [] };
 // Candidate-language catalog (ADR-0010) — the selectable languages for the
 // per-meeting + global pickers. Loaded once at boot alongside the models.
 /** @type {import('../types.js').LanguageCatalog} */
-let languageCatalog = { languages: [], default: [] };
+let languageCatalog = { languages: [], default: [], specialists: {} };
 
-// Engine states: Settings holds the global batch DEFAULT; Transcript holds the
-// engine for the open session AND drives its transcribe jobs (one WAV / session
-// range). Both are kept client-side and seeded from the first catalog model
-// once it loads. (Recordings no longer has its own engine — transcription moved
-// to the Transcript stage, so one engine state covers Transcript's selector +
-// transcribe.)
+// Engine state: Settings holds the global batch DEFAULT (the ADR-0010
+// generalist, batch-model.txt). The Transcript stage no longer has its own
+// engine selector — the operator declares LANGUAGES there, not a model
+// (ADR-0011), and its transcribe jobs resolve the generalist server-side. Kept
+// client-side and seeded from the first catalog model once it loads.
 /** @type {import('./components/engine.js').EngineState} */
 let defaultEngine = { backend: "auto", model: "" };
-/** @type {import('./components/engine.js').EngineState} */
-let overrideEngine = { backend: "auto", model: "" };
 
 // Built-view cache. Capture + Settings are page-singletons; Transcript is
 // keyed by session id so a new session rebuilds its merged transcript.
@@ -113,12 +110,11 @@ function metaFor(s) {
   };
 }
 
-/** Seed both engine model ids from the catalog once it loads. */
+/** Seed the Settings engine model id from the catalog once it loads. */
 function seedEngineModels() {
   const first = modelCatalog.models[0];
   if (!first) return;
   if (!defaultEngine.model) defaultEngine = { ...defaultEngine, model: first.model_id };
-  if (!overrideEngine.model) overrideEngine = { ...overrideEngine, model: first.model_id };
 }
 
 // One-shot adoption of the operator's persisted batch default (batch-model.txt,
@@ -178,24 +174,6 @@ function renderDefaultEngine(host) {
       // model has the same prompt/hotwords support as the old one. (Settings'
       // update ignores the session arg — it renders global defaults.)
       if (lastJson) v?.update?.(lastJson, null);
-    },
-  });
-}
-
-/**
- * Render the session (Transcript) engine selector into a host. This engine
- * state also drives the Transcript stage's transcribe jobs (one WAV / session
- * range).
- * @param {Element} host
- */
-function renderOverrideEngine(host) {
-  engine.render(host, {
-    state: overrideEngine,
-    catalog: modelCatalog,
-    onChange: (next) => {
-      overrideEngine = next;
-      const v = viewCache.get(`transcript:${selectedSessionId || ""}`);
-      v?.rebuildEngine?.();
     },
   });
 }
@@ -383,8 +361,7 @@ function buildView(view, session) {
   if (view === "transcript") {
     const b = transcriptView.build({
       metaFor,
-      engineState: () => overrideEngine,
-      rebuildEngine: renderOverrideEngine,
+      languageCatalog,
       afterMutate: () => { refresh(); },
     });
     return { ...b, key: viewKey("transcript", session) };

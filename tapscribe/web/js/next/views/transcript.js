@@ -1,30 +1,33 @@
 // @ts-check
 // Stages · Transcript (SESSION stage 3). The merged transcript for the open
-// session (main/left) + a transcription CONTROL COLUMN (right): the engine
-// selector (backend chips + compact model dropdown + any option selects),
-// the transcribe controls (session range from/to + force + a Transcribe
-// action, plus a per-WAV re-transcribe picker), and the per-WAV transcript
-// cache (set-primary).
+// session (main/left) + a transcription CONTROL COLUMN (right): the meeting
+// LANGUAGES control (a candidate-language <select multiple> + a readout of the
+// effective set and the models that will run), the transcribe controls (session
+// range from/to + force + a Transcribe action, plus a per-WAV re-transcribe
+// picker), and the per-WAV transcript cache (set-primary).
 //
-// REUSES merged-transcript.js verbatim for the IRC merged result, and the new
-// Stages engine.js (which mirrors session-detail's engine controls) for the
-// engine panel. The REAL transcribe wiring (POST /api/transcribe, POST
-// /api/transcribe-session, PUT /api/wav/{s}/{name}/primary, job progress) was
-// moved here from recordings.js — Transcript drives the transcribe jobs now;
-// Recordings is files + silence-stripping only. No mock data here.
+// The operator declares LANGUAGES here, not a model (ADR-0011): the generalist
+// is the global default (Settings / batch-model.txt) and the transcribe routes
+// resolve it server-side, so both actions POST without a model/backend. REUSES
+// merged-transcript.js verbatim for the merged result and language-picker.js for
+// the candidate-language <select>. The REAL transcribe wiring (POST
+// /api/transcribe, POST /api/transcribe-session, PUT /api/wav/{s}/{name}/primary,
+// job progress) was moved here from recordings.js — Transcript drives the
+// transcribe jobs now; Recordings is files + silence-stripping only. No mock
+// data here.
 //
 // Built once for the page (per session id, like the rest of the SESSION
 // stages); `update(j, session)` re-renders the merged transcript + the
 // control column (signature-gated so an in-progress range edit isn't
-// clobbered). The engine panel is rebuilt by main on engine state changes
-// (rebuildEngine).
+// clobbered) and repaints the languages readout in place.
 
-import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside } from "../../templates.js";
-import { postJson, putJson, sessionTranscript, loadSessionFiles } from "../../api.js";
+import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside, selectionInside } from "../../templates.js";
+import { postJson, putJson, sessionTranscript, loadSessionFiles, wireSave } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
+import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 
 /**
  * The recording (original WAV) a selected file belongs to. `sel` may be an
@@ -70,14 +73,13 @@ export function recordingVariants(rec) {
 /**
  * @param {{
  *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
- *   engineState: () => import('../components/engine.js').EngineState,
- *   rebuildEngine: (host: Element) => void,
+ *   languageCatalog: import('../../types.js').LanguageCatalog,
  *   afterMutate: () => void,
  * }} ctx
- * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void, rebuildEngine: () => void }}
+ * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { metaFor, engineState, rebuildEngine, afterMutate } = ctx;
+  const { metaFor, languageCatalog, afterMutate } = ctx;
   const frag = tpl("tpl-next-view-transcript");
 
   const headHost = pick(frag, "head");
@@ -85,7 +87,13 @@ export function build(ctx) {
   const txCopyBtn = /** @type {HTMLButtonElement} */ (pick(frag, "txCopyBtn"));
   const txCopyStatus = pick(frag, "txCopyStatus");
   const mergedHost = pick(frag, "mergedHost");
-  const engineHost = pick(frag, "engineHost");
+  // Meeting-languages control (ADR-0011): declare the candidate languages; the
+  // generalist model is the global default, resolved server-side.
+  const txLanguages = /** @type {HTMLSelectElement} */ (pick(frag, "txLanguages"));
+  const txLanguagesSave = /** @type {HTMLButtonElement} */ (pick(frag, "txLanguagesSave"));
+  const txLanguagesStatus = pick(frag, "txLanguagesStatus");
+  const txLangEffective = pick(frag, "txLangEffective");
+  const txLangModels = pick(frag, "txLangModels");
   // Transcribe controls (moved from recordings.js).
   const txSelLabel = pick(frag, "txSelLabel");
   const txOneBtn = /** @type {HTMLButtonElement} */ (pick(frag, "txOneBtn"));
@@ -104,11 +112,32 @@ export function build(ctx) {
   const cacheHint = pick(frag, "cacheHint");
   const cacheBody = pick(frag, "cacheBody");
 
-  rebuildEngine(engineHost);
+  // Candidate-language options are a static catalog — fill once at build. A
+  // per-code display-name map drives the readout below (code → "Norwegian").
+  fillLanguageOptions(txLanguages, languageCatalog);
+  /** @type {Map<string, string>} */
+  const langNames = new Map((languageCatalog.languages || []).map((l) => [l.code, l.name]));
 
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
   let session = null;
+  // The generalist that will ACTUALLY run — the RESOLVED batch model
+  // (batch_model_effective: batch-model.txt validated + defaulted server-side),
+  // NOT the raw batch_model_default (empty/stale when unset). Refreshed each
+  // update() so the "models that will run" readout names the real model, and
+  // stays in step with a Settings edit. "" only until the first poll lands.
+  let generalist = "";
+  // The LIVE global candidate-language default (what an empty selection inherits),
+  // refreshed each update() from /api/state's `languages.default` — NOT the
+  // boot-frozen /api/languages catalog default, which would go stale the moment
+  // the operator edits the global default in Settings and reintroduce the exact
+  // surprise-specialist the readout exists to prevent.
+  /** @type {string[]} */
+  let inheritedDefault = [];
+  // Seed the language selection from session-meta exactly once per built view
+  // (the view is rebuilt per session id), so a poll — or a save-on-transcribe
+  // re-poll — never clobbers an unsaved in-progress selection (Interaction hold).
+  let langSeeded = false;
   // The merged body + meta currently rendered in the pane, captured inside the
   // merged-pane renderRegion build. The copy handler reads THESE (no re-fetch)
   // so the copied text is exactly what's on screen — same alias set, same loaded
@@ -226,31 +255,107 @@ export function build(ctx) {
     return files.find((f) => f.name === want) ?? files[0] ?? null;
   };
 
-  /** Read any model-declared option selects (e.g. source/target lang) from
-   * the engine panel. Returns "" for each when the model declares none. */
-  const langValues = () => {
-    /** @param {string} name */
-    const valOf = (name) => /** @type {HTMLSelectElement | null} */ (
-      engineHost.querySelector(`select[data-input-name="${name}"]`))?.value || "";
-    return { source_lang: valOf("source_lang"), target_lang: valOf("target_lang") };
+  // ---- Meeting languages (ADR-0011) -----------------------------------------
+
+  /** The effective candidate set = the current selection, or the global default
+   * when nothing is picked (inherit). Drives both the readout and what the
+   * server will run (it reads the same session-meta the save writes). */
+  const effectiveLanguages = () => {
+    const picked = selectedLanguages(txLanguages);
+    return { codes: picked.length ? picked : inheritedDefault, inherited: picked.length === 0 };
   };
 
+  /** @param {string} c */
+  const langName = (c) => langNames.get(c) || c;
+
+  /** Set an element's text in place, but ONLY when it changed AND no text
+   * selection is being made inside it — the Interaction hold for per-tick in-place
+   * text updaters (CLAUDE.md: apply `selectionInside`, don't clobber a mid-copy
+   * selection). The equality check also skips the common no-change tick, so the
+   * readout never churns a text node when nothing moved. Deferral advances no
+   * signature, so the held-back text lands on the first tick after the selection
+   * clears. @param {HTMLElement} el @param {string} val */
+  const setReadoutText = (el, val) => {
+    if (el.textContent !== val && !selectionInside(el)) el.textContent = val;
+  };
+
+  /** Repaint the "in effect" + "models that will run" lines. Derived and
+   * non-interactive, updated in place each tick / on selection change — never a
+   * sig-gated region (CLAUDE.md render hygiene). This is the antidote to a
+   * surprise specialist: the Norwegian nb-whisper pass is named before you click
+   * transcribe. */
+  const renderLangReadout = () => {
+    const { codes, inherited } = effectiveLanguages();
+    setReadoutText(
+      txLangEffective,
+      codes.length
+        ? `in effect: ${codes.map(langName).join(", ")}${inherited ? " — inherited from global default" : ""}`
+        : "no languages set",
+    );
+    // Models the cover will load = generalist ∪ specialists for the effective
+    // languages (mirrors catalog.cover_models; the server run is authoritative).
+    const specialists = languageCatalog.specialists || {};
+    const gen = generalist || "the global default model";
+    const extras = [];
+    const seen = new Set([generalist]);
+    for (const c of codes) {
+      const m = specialists[c];
+      if (m && !seen.has(m)) { seen.add(m); extras.push(`${m} (${langName(c)})`); }
+    }
+    setReadoutText(
+      txLangModels,
+      extras.length
+        ? `will run: ${gen} (generalist) + ${extras.join(" + ")}`
+        : `will run: ${gen} (generalist) only`,
+    );
+  };
+  txLanguages.addEventListener("change", renderLangReadout);
+
+  /** Persist the current selection to session-meta (empty = inherit the global
+   * default). The transcribe actions call this first (save-on-transcribe) so
+   * what the readout shows is exactly what runs; the Save button reuses it. */
+  const saveLanguages = async () => {
+    if (!session) return;
+    await putJson(`/api/session-meta/${encodeURIComponent(session.session)}`, {
+      languages: selectedLanguages(txLanguages),
+    });
+  };
+
+  /** Save-on-transcribe guard shared by both transcribe actions: persist the
+   * languages FIRST and, if that fails, tell the operator it was the SAVE that
+   * failed (the transcribe never ran) rather than mislabelling it a transcribe
+   * failure. Returns false when the caller should abort. */
+  const saveLanguagesOrAlert = async () => {
+    try {
+      await saveLanguages();
+      return true;
+    } catch (e) {
+      alert(`Saving languages failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      return false;
+    }
+  };
+
+  // The Save button (set-languages-without-transcribing) reuses the shared
+  // save-button lifecycle (disable → "saving…" → "saved"/"failed" → re-enable);
+  // the button is disabled whenever there's no session, so no guard is needed.
+  wireSave({ btn: txLanguagesSave, status: txLanguagesStatus, put: saveLanguages, onSuccess: afterMutate });
+
   // ---- Transcribe (REAL — moved from recordings.js) -------------------------
+  // Both actions are LANGUAGE-driven (ADR-0011): save the meeting's languages
+  // first (WYSIWYG), then POST WITHOUT a model/backend — the server resolves the
+  // generalist (batch-model.txt) + the specialists for those languages.
 
   /** @param {string} name @param {"original"|"stripped"} src */
   const transcribeWav = async (name, src) => {
     if (!session) return;
     const sid = session.session;
-    const eng = engineState();
     const key = wavKey(name, src);
     txInflight.add(key);
     lastCtlSig = " ";
     afterMutate();
     try {
-      await postJson("/api/transcribe", {
-        session: sid, name, source: src,
-        model: eng.model, backend: eng.backend, ...langValues(),
-      });
+      if (!(await saveLanguagesOrAlert())) return;
+      await postJson("/api/transcribe", { session: sid, name, source: src });
     } catch (e) {
       alert(`Transcribe failed: ${String(e).replace(/^Error:\s*/, "")}`);
     } finally {
@@ -267,17 +372,15 @@ export function build(ctx) {
   txRangeBtn.addEventListener("click", async () => {
     if (!session) return;
     const sid = session.session;
-    const eng = engineState();
     txRangeBtn.disabled = true;
     try {
+      if (!(await saveLanguagesOrAlert())) return;
       await postJson("/api/transcribe-session", {
         session: sid,
         source: effectiveSource(),
-        model: eng.model, backend: eng.backend,
         from_iso: rangeFrom.value.trim(),
         to_iso: rangeTo.value.trim(),
         force: forceBox.checked,
-        ...langValues(),
       });
     } catch (e) {
       alert(`Session transcribe failed: ${String(e).replace(/^Error:\s*/, "")}`);
@@ -489,15 +592,29 @@ export function build(ctx) {
   // ---- Per-tick update ------------------------------------------------------
 
   /**
-   * @param {import('../../types.js').AppState} _j
+   * @param {import('../../types.js').AppState} j
    * @param {import('../../types.js').Session | null} sess
    */
-  const update = (_j, sess) => {
+  const update = (j, sess) => {
     session = sess;
     const tx = sess?.session_transcript || null;
     const sid = sess?.session || "";
     const job = sess?.progress || null;
     const filesSig = sess?.files_sig || "";
+
+    // ---- Meeting languages (ADR-0011). Track the operator's generalist for the
+    // readout, seed the selection once per session-view (never per tick — an
+    // unsaved in-progress selection must survive a poll / a save-on-transcribe
+    // re-poll, Interaction hold), and repaint the derived readout in place.
+    generalist = j?.batch_model_effective || "";
+    inheritedDefault = j?.languages?.default || [];
+    if (!langSeeded && sess && document.activeElement !== txLanguages) {
+      setSelectedLanguages(txLanguages, metaFor(sess).languages || []);
+      langSeeded = true;
+    }
+    txLanguages.disabled = txLanguagesSave.disabled = !sess;
+    if (sess) renderLangReadout();
+    else { setReadoutText(txLangEffective, ""); setReadoutText(txLangModels, ""); }
 
     // Resolve the focused session's WAV listing — the array /api/state no
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
@@ -537,7 +654,7 @@ export function build(ctx) {
           title: "Transcript",
           sub: tx && sess
             ? inline("merged result for ", strong(metaFor(sess).label || sess.session))
-            : (sess ? "not transcribed yet — pick a model and transcribe below" : "no session selected — pick one from the spine"),
+            : (sess ? "not transcribed yet — declare languages and transcribe below" : "no session selected — pick one from the spine"),
         });
 
         // Copy button: enabled only once the FULL merged body has loaded (the
@@ -574,7 +691,7 @@ export function build(ctx) {
         h.textContent = sess ? "Not transcribed yet" : "No session selected";
         const d = document.createElement("div");
         d.textContent = sess
-          ? "Pick a model in the engine panel, then transcribe the session range (or a single WAV) to produce the merged transcript here."
+          ? "Declare the meeting's languages, then transcribe the session range (or a single WAV) to produce the merged transcript here."
           : "Pick a session from the spine to view its merged transcript.";
         empty.append(h, d);
         return empty;
@@ -673,5 +790,5 @@ export function build(ctx) {
     }
   };
 
-  return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };
+  return { node: frag, update };
 }

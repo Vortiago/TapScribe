@@ -1,8 +1,10 @@
 // @ts-check
 // Stages engine selector — a VISIBLE backend-chip row + a COMPACT model
-// dropdown + any model-declared option <select>s. Used in two places:
-//   - Settings (the global batch DEFAULT engine), and
-//   - Transcript (the engine for the open session, drives its transcribe jobs).
+// dropdown + any model-declared option <select>s. Used in ONE place now:
+//   - Settings (the global batch DEFAULT engine = the ADR-0010 generalist).
+// The Transcript stage dropped its engine selector — the operator declares
+// LANGUAGES there, not a model (ADR-0011), and its transcribe jobs resolve the
+// generalist server-side (batch-model.txt).
 // Mirrors the data flow of the classic dashboard's session-detail engine
 // controls (backend chips from `available_backends`, a model <select> grouped
 // by family with <optgroup> from /api/models, plus any SelectInputs the model
@@ -151,10 +153,11 @@ export function render(host, { state, catalog, onChange }) {
       for (const opt of input.options || []) {
         sel.add(new Option(opt.label, opt.value, false, opt.value === input.default));
       }
-      // The chosen lang lives only on the <select> (tagged with
-      // data-input-name); the Transcript view reads it back from this panel at
-      // submit time — see langValues() in views/transcript.js — so nothing here
-      // wires a change handler.
+      // The chosen value lives only on the <select> (tagged with
+      // data-input-name); a submit-time reader would read it back from this
+      // panel, so nothing here wires a change handler. (No shipped model
+      // declares a SelectInput today, and the Transcript view no longer consumes
+      // one — it's language-driven now, ADR-0011 — so this path is dormant.)
       wrap.appendChild(sf);
     }
     frag.appendChild(row("Options", wrap));

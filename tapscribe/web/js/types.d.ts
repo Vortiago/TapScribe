@@ -35,6 +35,10 @@ export interface AppState {
   // Seeds Settings' Default engine selector and resolves the end-of-meeting
   // pipeline's transcribe stage server-side.
   batch_model_default: string;
+  // The generalist that will ACTUALLY run — batch_model_default validated against
+  // the catalog + defaulted when unset/invalid (ADR-0011). The Transcript readout
+  // names this so it can't show a model the transcribe won't use.
+  batch_model_effective: string;
   hotwords: ConfigFile;
   inputs_support: InputsSupport;
   // The structured global summarizer default (#84) — the NON-SECRET projection
@@ -562,11 +566,14 @@ export interface EffectiveMeta {
 }
 
 // GET /api/languages — the candidate-language catalog (ADR-0010): the full
-// selectable allowlist (code + display name) plus the operator's current
-// global default. Fetched once at boot (like ModelCatalog).
+// selectable allowlist (code + display name), the operator's current global
+// default, and the specialist table (language → the extra model the cover adds,
+// ADR-0011) the Transcript readout uses to name what a transcribe will run.
+// Fetched once at boot (like ModelCatalog).
 export interface LanguageCatalog {
   languages: { code: string; name: string }[];
   default: string[];
+  specialists: Record<string, string>;
 }
 
 // --- Component ctx objects (passed from main.js into each render() call) ---

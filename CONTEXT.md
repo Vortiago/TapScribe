@@ -856,9 +856,12 @@ Two entry points:
 
 - `transcribe_one(recorder, BatchOneRequest) -> dict` — one WAV. Runs
   the silent-WAV pre-check (RMS-floor against the *original*) so the
-  operator gets fast feedback on noise files, forces a fresh transcribe
-  through the cache, then returns the freshly-written sidecar's raw
-  JSON dict.
+  operator gets fast feedback on noise files, then runs the meeting's
+  **cover** over that single WAV (the generalist plus any specialist for
+  the meeting's candidate languages — the same routing as the range,
+  ADR-0011), points `_primary` at the selector's winner, and returns the
+  winning sidecar's raw JSON dict. `force=True` — an explicit per-WAV
+  request bypasses the cache.
 - `transcribe_session(recorder, BatchSessionRequest) -> dict` — every
   WAV in the supplied `from_iso`/`to_iso` range. Brackets the loop in
   `recorder.jobs.run` (the Session job seam), reporting progress through the

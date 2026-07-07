@@ -367,11 +367,20 @@ def test_put_config_batch_model_writes_file_and_validates(client, recorder_under
 
 
 def test_api_state_includes_batch_model_default(client, recorder_under_test):  # noqa: ARG001 — recorder fixture pins the tmp config dir
-    """The dashboard's Default engine card seeds from the state poll, the
-    same way the Live engine card reads live_model_default."""
-    assert client.get("/api/state").json()["batch_model_default"] == ""
+    """The dashboard's Default engine card seeds from batch_model_default (the raw
+    file value); the Transcript readout uses batch_model_effective (validated +
+    defaulted), so it names the generalist that will actually run (ADR-0011)."""
+    from tapscribe.transcribers.catalog import DEFAULT_BATCH_MODEL
+
+    j = client.get("/api/state").json()
+    assert j["batch_model_default"] == ""  # unset…
+    assert (
+        j["batch_model_effective"] == DEFAULT_BATCH_MODEL
+    )  # …but the effective generalist is the bundled default
     client.put("/api/config/batch-model", json={"content": "small.en"})
-    assert client.get("/api/state").json()["batch_model_default"] == "small.en"
+    j = client.get("/api/state").json()
+    assert j["batch_model_default"] == "small.en"
+    assert j["batch_model_effective"] == "small.en"  # a valid catalog model resolves as-is
 
 
 def test_put_config_unknown_key_rejected(client):
@@ -950,6 +959,22 @@ def test_api_languages_serves_catalog_and_default(client):
     names = {row["code"]: row["name"] for row in body["languages"]}
     assert names["no"] == "Norwegian"
     assert body["default"] == ["da", "no", "en"]
+    # ADR-0011: the specialist table rides along so the Transcript page can show
+    # which extra model a declared language pulls in (Norwegian → nb-whisper).
+    assert body["specialists"]["no"] == "nb-whisper-large"
+
+
+def test_api_languages_specialists_drop_registry_absent_models(client, monkeypatch):
+    """ADR-0011: the served specialist table is registry-filtered exactly like
+    `cover_models`, so a specialist that isn't a real catalog model (e.g. a stray
+    env override) is dropped — the readout can't promise a model the cover won't
+    run."""
+    from tapscribe.transcribers import catalog
+
+    monkeypatch.setitem(catalog.SPECIALIST_MODELS, "da", "not-a-real-model")
+    specialists = client.get("/api/languages").json()["specialists"]
+    assert "da" not in specialists  # dropped: absent from REGISTRY
+    assert specialists["no"] == "nb-whisper-large"  # the real one survives
 
 
 def test_config_languages_put_persists_and_reflects_in_state(client):

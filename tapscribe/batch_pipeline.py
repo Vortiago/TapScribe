@@ -42,14 +42,12 @@ from .batch_summarize import (
     effective_summarizer_config,
     summarize_session_locked,
 )
-from .batch_transcribe import BatchSessionRequest, transcribe_session_locked
+from .batch_transcribe import BatchSessionRequest, resolve_batch_model, transcribe_session_locked
 from .recorder import JobState, Recorder, SessionBusy
 from .session_merge import InvalidRange, NoUsableWavs, select_session_wavs
 from .session_paths import resolve_session_dir
 from .sessions import read_session_transcript
 from .summarizers import load_summarizer
-from .text import read_config
-from .transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY
 
 
 @dataclass(frozen=True)
@@ -66,22 +64,6 @@ class PipelineRequest:
 _RUNNING: set[asyncio.Task] = set()
 
 
-def _resolve_batch_model() -> str:
-    """The operator's configured default batch model, validated against the
-    catalog — a stale/out-of-band edit of batch-model.txt must not reach a
-    model loader. Falls back to the bundled default."""
-    configured = read_config("batch-model")
-    if configured:
-        if REGISTRY.get(configured) is not None:
-            return configured
-        print(
-            f"[tapscribe] pipeline: configured batch model {configured!r} is not in the catalog — "
-            f"falling back to {DEFAULT_BATCH_MODEL!r}",
-            flush=True,
-        )
-    return DEFAULT_BATCH_MODEL
-
-
 async def start_pipeline(recorder: Recorder, req: PipelineRequest) -> asyncio.Task:
     """Claim the session's job slot and kick off the chain in the background.
 
@@ -90,7 +72,7 @@ async def start_pipeline(recorder: Recorder, req: PipelineRequest) -> asyncio.Ta
     two concurrent triggers get one deterministic winner. On success the
     returned task runs the chain; callers that just want fire-and-forget
     (the trigger route) ignore it, tests await it."""
-    model = _resolve_batch_model()
+    model = resolve_batch_model()
     claimed = await recorder.jobs.claim(
         JobState(
             session=req.session,
