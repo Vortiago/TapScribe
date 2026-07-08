@@ -85,6 +85,17 @@ def bridge_chromium_args(ext_dir: Path) -> list[str]:
     the PNA relax, recent Chromium silently strands every ``/tap`` WS (the dial
     never completes the handshake — see PR #148); in production the operator
     runs on ``localhost`` or enables TLS.
+
+    Also disables Chromium's background/occluded-tab throttling. The bridge
+    fixtures open the SpatialChat test tab via ``ctx.new_page()`` alongside
+    the persistent context's own initial tab, so Chromium can (and does, in a
+    loaded/headless-ish CI display) treat the test tab as occluded and
+    deprioritize its renderer — throttling the ``page-script.js`` poll timer
+    and delaying postMessage/WS-close delivery by seconds. That was the real
+    cause behind the ``bridge E2E`` job's intermittent WS-close-timeout
+    flakes (a prior fix, d1c3860, only widened the timeout from 5s to 15s —
+    the flake predated that change and still exceeded 15s afterwards);
+    without these flags, no ceiling is truly generous enough.
     """
     return [
         f"--disable-extensions-except={ext_dir}",
@@ -94,6 +105,9 @@ def bridge_chromium_args(ext_dir: Path) -> list[str]:
         "--use-fake-ui-for-media-stream",
         "--use-fake-device-for-media-stream",
         "--allow-running-insecure-content",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
         # One flag, comma-joined value — kept on a single line so it isn't read
         # as an implicit string-concat (CodeQL py/implicit-string-concatenation-
         # in-list flags adjacent literals in a list as a likely missing comma).
