@@ -137,3 +137,24 @@ def test_session_delete_allows_when_active_tap_is_on_a_different_session(client,
 
     assert r.status_code == 200
     assert not sd.exists()
+
+
+def test_absorb_allows_active_tap_on_target_when_target_is_the_live_session(client, recorder_under_test):
+    """The active-tap guard must scope to the same session the current-session
+    guard scopes to (`current` — source, for absorb), not to every session in
+    play. Target MAY be the live session (test_refuse_current_or_busy_
+    target_may_be_current_source_may_not in test_routes.py), and in
+    production every tap on it sets ActiveStream.session to it — so a live
+    tap on a live TARGET must not block absorb; absorb never rewrites
+    target's own files, only source's. A tap on the clean SOURCE would still
+    refuse (test_absorb_refuses_active_tap_on_source, above)."""
+    root = recorder_under_test.recordings_dir
+    target = recorder_under_test.session_start
+    seed_session(root, target, [])
+    src = seed_session(root, "src", ["20260101T000000Z__alice__abc.wav"])
+    _register_active_tap(recorder_under_test, target, "conn-1")
+
+    r = client.post(f"/api/sessions/{target}/absorb", json={"source": "src"})
+
+    assert r.status_code == 200
+    assert not src.exists()  # source absorbed away despite target's live tap

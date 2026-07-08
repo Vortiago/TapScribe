@@ -101,6 +101,7 @@ export interface ActiveStream {
   lag_s: number | null;         // WlK transcription backlog in seconds
   buffer_transcription: string; // in-flight (uncommitted) hypothesis
   gate_open: boolean;
+  session: string | null;       // session this tap was writing to at open time
 }
 
 export interface LiveFeedEntry {
