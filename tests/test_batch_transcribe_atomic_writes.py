@@ -91,7 +91,7 @@ async def test_session_transcript_json_survives_a_crash_mid_write(recorder_under
     #241) must not end up truncated by a crash."""
     write_languages("en")
     monkeypatch.setattr(
-        "tapscribe.batch_transcribe.load_transcriber",
+        "tapscribe.transcribers.load_transcriber",
         lambda *a, **kw: TranscriberStub(backend="fake-be", model="fake-m", text="merged"),  # noqa: ARG005
     )
     sd = seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
@@ -114,7 +114,7 @@ async def test_session_transcript_txt_survives_a_crash_mid_write(recorder_under_
     up truncated by a crash either."""
     write_languages("en")
     monkeypatch.setattr(
-        "tapscribe.batch_transcribe.load_transcriber",
+        "tapscribe.transcribers.load_transcriber",
         lambda *a, **kw: TranscriberStub(backend="fake-be", model="fake-m", text="merged"),  # noqa: ARG005
     )
     sd = seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
