@@ -12,22 +12,32 @@
 // covered by the playwright dashboard e2e (test_dashboard_ui.py) — same
 // pure/DOM split as live-feed.js's coalescing helpers.
 
-/** @type {[string, string][]} */
-export const FAMILY_LABELS = [
+// Frozen: this table is now imported by reference into every family-grouped
+// picker (previously each file held its own private copy, so a stray mutation
+// stayed local — now it would corrupt every consumer at once).
+/** @type {readonly (readonly [string, string])[]} */
+export const FAMILY_LABELS = Object.freeze([
   ["whisper", "Whisper"],
   ["nb-whisper", "NB-Whisper (Norwegian)"],
   ["voxtral", "Voxtral (Mistral)"],
   ["parakeet", "Parakeet (NVIDIA)"],
-];
+]);
 
 // Families with at least one live-eligible model today, sliced from
 // FAMILY_LABELS — adding a family there doesn't silently make it
 // live-eligible too; a family becomes live-eligible only when its key is
-// added here as well.
+// added here as well. A key with no matching FAMILY_LABELS entry would
+// otherwise silently vanish from LIVE_FAMILY_LABELS instead of erroring, so
+// membership is checked at load time.
 const LIVE_ELIGIBLE_FAMILIES = new Set(["whisper", "nb-whisper", "voxtral"]);
+for (const fam of LIVE_ELIGIBLE_FAMILIES) {
+  if (!FAMILY_LABELS.some(([f]) => f === fam)) {
+    throw new Error(`model-select: LIVE_ELIGIBLE_FAMILIES has "${fam}", which is not in FAMILY_LABELS`);
+  }
+}
 
-/** @type {[string, string][]} */
-export const LIVE_FAMILY_LABELS = FAMILY_LABELS.filter(([fam]) => LIVE_ELIGIBLE_FAMILIES.has(fam));
+/** @type {readonly (readonly [string, string])[]} */
+export const LIVE_FAMILY_LABELS = Object.freeze(FAMILY_LABELS.filter(([fam]) => LIVE_ELIGIBLE_FAMILIES.has(fam)));
 
 /**
  * Bucket `models` by family and order the groups per `familyLabels`; models
@@ -35,7 +45,7 @@ export const LIVE_FAMILY_LABELS = FAMILY_LABELS.filter(([fam]) => LIVE_ELIGIBLE_
  * group (first-seen order). Pure — no DOM — so it's unit-testable in Node.
  *
  * @param {import('./types.js').ModelEntry[]} models
- * @param {[string, string][]} familyLabels
+ * @param {readonly (readonly [string, string])[]} familyLabels
  * @returns {{ label: string, models: import('./types.js').ModelEntry[] }[]}
  */
 export function groupModelsByFamily(models, familyLabels) {
@@ -71,7 +81,7 @@ export function groupModelsByFamily(models, familyLabels) {
  * @param {import('./types.js').ModelEntry[]} models
  * @param {{
  *   selected: string,
- *   familyLabels: [string, string][],
+ *   familyLabels: readonly (readonly [string, string])[],
  *   withDescriptions?: boolean,
  *   unregisteredFallback?: boolean,
  *   emptyLabel?: string,
@@ -85,20 +95,26 @@ export function buildModelSelect(sel, models, opts) {
     const group = document.createElement("optgroup");
     group.label = label;
     for (const m of entries) {
-      const text = withDescriptions && m.description
-        ? `${m.display_name || m.model_id} — ${m.description}`
-        : (m.display_name || m.model_id);
+      const base = m.display_name || m.model_id;
+      const text = withDescriptions && m.description ? `${base} — ${m.description}` : base;
       const isSelected = m.model_id === selected;
       if (isSelected) found = true;
       group.appendChild(new Option(text, m.model_id, false, isSelected));
     }
     sel.appendChild(group);
   }
+  // Mutually exclusive: an unregistered-but-selected model is shown in
+  // preference to the empty-catalog placeholder — otherwise an empty catalog
+  // with a selected model would add two `selected` options (the last one
+  // added wins, silently hiding the operator's actual model) and disable the
+  // control despite a real selection being present.
   if (!found && unregisteredFallback && selected) {
     sel.add(new Option(`${selected} (unregistered)`, selected, false, true));
-  }
-  if (!models.length && emptyLabel) {
+    sel.disabled = false;
+  } else if (!models.length && emptyLabel) {
     sel.add(new Option(emptyLabel, "", true, true));
     sel.disabled = true;
+  } else {
+    sel.disabled = false;
   }
 }
