@@ -33,6 +33,15 @@ TAP_SUBPROTOCOL_PREFIX: str = "tapscribe.v1.tap."
 _TAP_PREFIX_SLASH: str = config.TAP_PREFIX + "/"
 
 
+def _utf8_compare_digest(a: str, b: str) -> bool:
+    """`hmac.compare_digest` needs equal-type operands, but every credential
+    here starts life as `str`. Centralizing the `.encode("utf-8")` in one
+    place means a future credential-comparison site can't forget it and
+    reintroduce the non-ASCII `TypeError` crash this was written to close
+    (#194)."""
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 def pick_tap_subprotocol(offered: Iterable[str] | None, expected_token: str) -> str | None:
     """Return the subprotocol the server should echo back, or None when
     no offered protocol carries the right tap token. Constant-time
@@ -45,7 +54,7 @@ def pick_tap_subprotocol(offered: Iterable[str] | None, expected_token: str) -> 
         if not proto.startswith(TAP_SUBPROTOCOL_PREFIX):
             continue
         offered_token = proto[len(TAP_SUBPROTOCOL_PREFIX) :]
-        if hmac.compare_digest(offered_token.encode("utf-8"), expected_token.encode("utf-8")):
+        if _utf8_compare_digest(offered_token, expected_token):
             return proto
     return None
 
@@ -67,7 +76,7 @@ def check_tap_bearer(authorization: str | None, expected_token: str) -> bool:
     scheme, _, token = (authorization or "").partition(" ")
     if scheme.lower() != "bearer":
         return False
-    return hmac.compare_digest(token.strip().encode("utf-8"), expected_token.encode("utf-8"))
+    return _utf8_compare_digest(token.strip(), expected_token)
 
 
 async def basic_auth_middleware(request: Request, call_next):
@@ -132,8 +141,8 @@ async def basic_auth_middleware(request: Request, call_next):
             {"detail": "Malformed Authorization header"}, status_code=401, headers=realm_header
         )
     user, _, pw = decoded.partition(":")
-    user_ok = hmac.compare_digest(user.encode("utf-8"), config.AUTH_USER.encode("utf-8"))
-    pass_ok = hmac.compare_digest(pw.encode("utf-8"), recorder.auth.value.encode("utf-8"))
+    user_ok = _utf8_compare_digest(user, config.AUTH_USER)
+    pass_ok = _utf8_compare_digest(pw, recorder.auth.value)
     if not (user_ok and pass_ok):
         return JSONResponse({"detail": "Invalid credentials"}, status_code=401, headers=realm_header)
     return await call_next(request)
