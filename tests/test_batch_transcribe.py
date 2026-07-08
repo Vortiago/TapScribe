@@ -72,7 +72,6 @@ async def test_transcribe_one_writes_sidecar_and_returns_payload(
         model="fake-m",
         backend="cpu",
         source_lang=None,
-        target_lang=None,
     )
     payload = await transcribe_one(recorder_under_test, request)
 
@@ -105,7 +104,6 @@ async def test_transcribe_one_raises_wav_unreadable_on_empty_file(
         model="fake-m",
         backend="cpu",
         source_lang=None,
-        target_lang=None,
     )
     with pytest.raises(WavUnreadable):
         await transcribe_one(recorder_under_test, request)
@@ -130,7 +128,6 @@ async def test_transcribe_one_raises_wav_too_quiet_on_silent_audio(
         model="fake-m",
         backend="cpu",
         source_lang=None,
-        target_lang=None,
     )
     with pytest.raises(WavTooQuiet):
         await transcribe_one(recorder_under_test, request)
@@ -147,7 +144,7 @@ async def test_transcribe_one_uses_session_meta_prompt_when_set(
     captured: dict[str, str | None] = {}
 
     class _Spy(TranscriberStub):
-        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
             captured["initial_prompt"] = initial_prompt
             captured["hotwords"] = hotwords
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
@@ -169,7 +166,6 @@ async def test_transcribe_one_uses_session_meta_prompt_when_set(
         model="fake-m",
         backend="cpu",
         source_lang=None,
-        target_lang=None,
     )
     await transcribe_one(recorder_under_test, request)
     assert captured["initial_prompt"] == "SESSION OVERRIDE"
@@ -182,7 +178,7 @@ async def test_transcribe_one_falls_back_to_global_when_meta_empty(
     captured: dict[str, str | None] = {}
 
     class _Spy(TranscriberStub):
-        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
             captured["initial_prompt"] = initial_prompt
             captured["hotwords"] = hotwords
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
@@ -199,7 +195,6 @@ async def test_transcribe_one_falls_back_to_global_when_meta_empty(
         model="fake-m",
         backend="cpu",
         source_lang=None,
-        target_lang=None,
     )
     await transcribe_one(recorder_under_test, request)
     assert captured["initial_prompt"] == "GLOBAL DEFAULT"
@@ -234,7 +229,6 @@ async def test_transcribe_session_writes_outputs_and_returns_merged(
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     merged = await transcribe_session(recorder_under_test, request)
 
@@ -264,7 +258,6 @@ async def test_transcribe_session_releases_jobtracker_on_success(
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     await transcribe_session(recorder_under_test, request)
     assert recorder_under_test.jobs.get("s") is None
@@ -291,7 +284,6 @@ async def test_transcribe_session_releases_jobtracker_on_exception(
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     with pytest.raises(RuntimeError, match="model exploded"):
         await transcribe_session(recorder_under_test, request)
@@ -324,7 +316,6 @@ async def test_transcribe_session_raises_session_busy_when_slot_taken(
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     with pytest.raises(SessionBusy):
         await transcribe_session(recorder_under_test, request)
@@ -364,7 +355,6 @@ async def test_transcribe_session_locked_uses_caller_slot_and_releases_model(
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     merged = await transcribe_session_locked(
         request, selection=selection, job=recorder_under_test.jobs.handle("s")
@@ -395,7 +385,6 @@ async def test_transcribe_session_raises_no_usable_wavs_on_empty_range(
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     with pytest.raises(NoUsableWavs):
         await transcribe_session(recorder_under_test, request)
@@ -419,7 +408,6 @@ async def test_transcribe_session_raises_invalid_range_on_unparseable_iso(
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     with pytest.raises(InvalidRange):
         await transcribe_session(recorder_under_test, request)
@@ -458,7 +446,6 @@ async def test_transcribe_session_progress_updates_per_wav(recorder_under_test, 
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     await transcribe_session(recorder_under_test, request)
 
@@ -503,7 +490,6 @@ async def test_transcribe_session_runs_model_on_one_dedicated_thread(
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     await transcribe_session(recorder_under_test, request)
 
@@ -574,7 +560,6 @@ def _session_request(model="fake-m"):
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
 
 
@@ -621,7 +606,6 @@ async def test_manual_single_wav_transcribe_applies_candidate_languages(
             model="fake-m",
             backend="cpu",
             source_lang=None,
-            target_lang=None,
         ),
     )
     assert stub.seen_source_lang == ["da"]
@@ -658,7 +642,6 @@ async def test_manual_single_wav_transcribe_runs_cover_and_picks_winner(recorder
             model="fake-generalist",
             backend="cpu",
             source_lang=None,
-            target_lang=None,
         ),
     )
     armstrong = sd / COVER_WAVS[1]
@@ -777,7 +760,7 @@ class _ConfidenceStub(TranscriberStub):
         # SpecialistRoutingSelector's routing key); defaults to "no".
         self.language_by_marker = language_by_marker or {}
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
         from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result
 
         self.calls.append(path)
@@ -1047,7 +1030,6 @@ async def test_explicit_source_lang_pin_runs_generalist_only(recorder_under_test
         to_iso=None,
         force=False,
         source_lang="no",  # …but an explicit PIN bypasses it
-        target_lang=None,
     )
     async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
         await transcribe_session_locked(req, selection=selection, job=handle)
@@ -1090,7 +1072,6 @@ async def test_specialist_loads_with_auto_backend_not_the_generalists(recorder_u
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     async with recorder_under_test.jobs.run("s", kind="transcribe", total=1) as handle:
         await transcribe_session_locked(req, selection=selection, job=handle)

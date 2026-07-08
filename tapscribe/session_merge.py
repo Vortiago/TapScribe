@@ -256,13 +256,10 @@ class SessionTranscript:
     suppressed: tuple[SuppressedSessionSegment, ...]
     plain_text: str
     low_confidence_count: int
-    # Translation-aware fields: a translation-capable adapter would populate
-    # `target_language` when the operator picked a target_lang different
-    # from source_lang. No shipped adapter does today, but the dashboard
-    # still renders a translation badge whenever `target_language` is
-    # non-empty (e.g. from a sidecar cached by one that did).
+    # The first non-empty per-WAV `source_language` (the language the models
+    # were told to expect) — a session-level display hint, not per-segment
+    # truth; the per-WAV sidecars carry the real values.
     source_language: str = ""
-    target_language: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -288,7 +285,6 @@ class SessionTranscript:
             "plain_text": self.plain_text,
             "low_confidence_count": self.low_confidence_count,
             "source_language": self.source_language,
-            "target_language": self.target_language,
         }
 
 
@@ -318,13 +314,11 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
     backend_label = ""
     device_label = ""
     model_label = ""
-    # First non-empty source_language / target_language seen across the
-    # session's sidecars wins. For a session with mixed source langs this
-    # is an oversimplification, but the per-WAV JSON
-    # still carries the real value — the session-level fields are just
-    # the merged-transcript badge hint.
+    # First non-empty source_language seen across the session's sidecars
+    # wins. For a session with mixed source langs this is an
+    # oversimplification, but the per-WAV JSON still carries the real
+    # value — the session-level field is just a display hint.
     source_language_label = ""
-    target_language_label = ""
 
     for wav in selection.wavs:
         cached = read_cached(wav)
@@ -338,8 +332,6 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
             model_label = cached.result.model
         if not source_language_label and cached.result.source_language:
             source_language_label = cached.result.source_language
-        if not target_language_label and cached.result.target_language:
-            target_language_label = cached.result.target_language
 
         wav_start = cached.wav_start or datetime.fromtimestamp(wav.stat().st_mtime, tz=UTC)
         speaker = cached.speaker_name or "<anon>"
@@ -415,7 +407,6 @@ def merge_session(selection: SessionSelection) -> SessionTranscript:
         plain_text=plain_text,
         low_confidence_count=low_confidence_count,
         source_language=source_language_label,
-        target_language=target_language_label,
     )
 
 

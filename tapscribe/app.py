@@ -1638,11 +1638,9 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         # Per-call backend override — falls back to the Recorder's
         # preference when the body didn't carry one.
         backend=(body.get("backend") or "").strip() or recorder.backend,
-        # Per-call language fields (for any model that declares source/target
-        # selects) ride alongside prompt/hotwords; no shipped model uses them
-        # today. Empty → adapter falls back to its own default.
+        # Per-call language pin rides alongside prompt/hotwords. Empty →
+        # the session's candidate languages decide (ADR-0010/0011).
         source_lang=(body.get("source_lang") or "").strip() or None,
-        target_lang=(body.get("target_lang") or "").strip() or None,
     )
     payload = await transcribe_one(recorder, request)
     print(
@@ -1670,7 +1668,6 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
         to_iso=body.get("to_iso") or None,
         force=bool(body.get("force")),
         source_lang=(body.get("source_lang") or "").strip() or None,
-        target_lang=(body.get("target_lang") or "").strip() or None,
     )
     return JSONResponse(await transcribe_session(recorder, request))
 

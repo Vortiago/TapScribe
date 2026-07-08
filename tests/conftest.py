@@ -445,7 +445,7 @@ class TranscriberStub:
         # assert the candidate-language resolution (ADR-0010) reached the model.
         self.seen_source_lang: list[str | None] = []
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
         from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result
 
         self.calls.append(path)

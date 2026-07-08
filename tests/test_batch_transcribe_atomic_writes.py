@@ -82,7 +82,6 @@ def _session_request() -> BatchSessionRequest:
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
 
 

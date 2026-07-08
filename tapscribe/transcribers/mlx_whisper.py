@@ -129,7 +129,6 @@ class MlxWhisperTranscriber:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Whisper doesn't translate
     ) -> TranscriptionResult:
         # Fold hotwords into the prompt with a clearly-marked framing line.
         # Keeps the joined value distinguishable from real prose context.

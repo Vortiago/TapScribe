@@ -75,7 +75,6 @@ class MlxVoxtralTranscriber:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Voxtral doesn't translate
     ) -> TranscriptionResult:
         # apply_transcrition_request mirrors HF's apply_transcription_request
         # (typo preserved); prompt + hotwords have no place in this call so

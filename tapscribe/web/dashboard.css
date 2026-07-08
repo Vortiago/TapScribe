@@ -1218,16 +1218,3 @@ button.box-hd {
   margin-top: 6px;
 }
 
-/* Translation badge in the merged-transcript header. Small pill shape so
-   it's spotted without dominating the heading. */
-.translate-badge {
-  display: inline-block;
-  margin-left: 8px;
-  padding: 1px 7px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--info) 14%, transparent);
-  color: var(--info);
-  font-size: 10.5px;
-  font-family: var(--mono);
-  letter-spacing: 0.02em;
-}

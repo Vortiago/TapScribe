@@ -80,7 +80,6 @@ class TranscriberInvocation:
     initial_prompt: str | None
     hotwords: str | None
     source_lang: str | None
-    target_lang: str | None
     # The meeting's candidate-language set when it stays a constrained
     # auto-detect (a multi-language set with no explicit pin). Empty when the
     # language is already pinned via `source_lang` (an explicit per-job pin or a
@@ -102,7 +101,6 @@ class BatchOneRequest:
     model: str
     backend: str
     source_lang: str | None
-    target_lang: str | None
 
 
 @dataclass(frozen=True)
@@ -119,7 +117,6 @@ class BatchSessionRequest:
     to_iso: str | None
     force: bool
     source_lang: str | None
-    target_lang: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +186,6 @@ def _build_invocation(
     session: str,
     *,
     source_lang: str | None,
-    target_lang: str | None,
     candidate_languages: tuple[str, ...] = (),
 ) -> TranscriberInvocation:
     """Build the per-call envelope: resolve prompt/hotwords (session-meta over
@@ -203,7 +199,6 @@ def _build_invocation(
         initial_prompt=prompt,
         hotwords=hotwords,
         source_lang=source_lang,
-        target_lang=target_lang,
         candidate_languages=candidate_languages,
         hallucination_rules=tuple(hallucinations_mod.parse_rules()),
     )
@@ -284,7 +279,6 @@ async def _run_cover(
                     initial_prompt=inv.initial_prompt,
                     hotwords=inv.hotwords,
                     source_lang=inv.source_lang,
-                    target_lang=inv.target_lang,
                     candidate_languages=inv.candidate_languages,
                     hallucination_rules=rules,
                     force=force,
@@ -329,14 +323,13 @@ def _resolve_cover(req):
     context). "Resolve languages → build the invocation → compute the cover" is a
     single conceptual step shared by both entry points (ADR-0011); `req` is a
     `BatchOneRequest` or `BatchSessionRequest` (both carry
-    session/source_lang/target_lang/model)."""
+    session/source_lang/model)."""
     resolved_source, candidate_languages, cover_languages = _resolve_language_plan(
         req.session, req.source_lang
     )
     inv = _build_invocation(
         req.session,
         source_lang=resolved_source,
-        target_lang=req.target_lang,
         candidate_languages=candidate_languages,
     )
     models = cover_models(cover_languages, generalist=req.model)

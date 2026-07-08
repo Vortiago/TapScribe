@@ -18,7 +18,6 @@ API contract:
   - `source_lang`: recorded on the result. Parakeet does not echo a
     detected language, so we trust the operator's pick. Missing →
     `language="auto"`.
-  - `target_lang`: ignored. Parakeet does not translate.
 
 Chunking & ffmpeg-free path
 ---------------------------

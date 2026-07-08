@@ -152,7 +152,6 @@ def test_transcribe_records_source_language(tmp_path: Path):
     assert r.language == "fr"
     assert r.source_language == "fr"
     # Parakeet doesn't translate — target stays empty.
-    assert r.target_language == ""
 
 
 def test_transcribe_defaults_language_to_auto(tmp_path: Path):

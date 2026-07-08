@@ -85,7 +85,6 @@ class ChunkedTranscriber:
     - `source_lang`: recorded on the result. Parakeet doesn't echo a
       detected language, so we trust the operator's pick; missing →
       `language="auto"`.
-    - `target_lang`: ignored. Parakeet doesn't translate.
     """
 
     def __init__(
@@ -129,7 +128,6 @@ class ChunkedTranscriber:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — Parakeet doesn't translate
     ) -> TranscriptionResult:
         # Pre-decode skips any ffmpeg load. `load_recorder_wav_as_pcm`
         # raises on unusual WAV formats — the operator's signal to convert

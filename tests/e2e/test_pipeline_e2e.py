@@ -795,7 +795,6 @@ class _ConfidenceFake:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — protocol parity
     ):
         from tapscribe.audio import wav_duration_s
         from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result

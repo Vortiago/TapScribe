@@ -2003,7 +2003,7 @@ def test_api_transcribe_uses_session_meta_prompt_when_set(client, recorder_under
     captured = {}
 
     class _Spy(TranscriberStub):
-        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
             captured["initial_prompt"] = initial_prompt
             captured["hotwords"] = hotwords
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
@@ -2031,7 +2031,7 @@ def test_api_transcribe_falls_back_to_global_when_session_meta_empty(
     captured = {}
 
     class _Spy(TranscriberStub):
-        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
             captured["initial_prompt"] = initial_prompt
             captured["hotwords"] = hotwords
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
@@ -2073,7 +2073,7 @@ def test_api_transcribe_session_re_runs_when_session_meta_prompt_changes(
     captured: list[dict] = []
 
     class _Spy(TranscriberStub):
-        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
             captured.append({"initial_prompt": initial_prompt, "hotwords": hotwords})
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
 
@@ -2107,7 +2107,7 @@ def test_api_transcribe_session_re_runs_when_session_meta_hotwords_change(
     captured: list[dict] = []
 
     class _Spy(TranscriberStub):
-        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
             captured.append({"hotwords": hotwords})
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
 
@@ -2136,7 +2136,7 @@ def test_api_transcribe_session_re_uses_cache_when_prompt_unchanged(client, reco
     runs: list[None] = []
 
     class _Spy(TranscriberStub):
-        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+        def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
             runs.append(None)
             return super().transcribe(path, initial_prompt=initial_prompt, hotwords=hotwords)
 

@@ -156,7 +156,6 @@ class VoxtralTranscriber:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Voxtral doesn't translate
     ) -> TranscriptionResult:
         # Voxtral exposes a purpose-built transcription request that bypasses
         # the chat-template path (which ships broken on some transformers

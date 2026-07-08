@@ -116,7 +116,6 @@ class FasterWhisperTranscriber:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Whisper doesn't translate
     ) -> TranscriptionResult:
         # An explicit source_lang (the per-region language pin, ADR-0010)
         # overrides the model-name heuristic; `default_language_for` remains
