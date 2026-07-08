@@ -17,7 +17,7 @@
 
 import { tpl, pick } from "../../templates.js";
 import { putJson, del } from "../../api.js";
-import { header, strong, inline, wireRecPill } from "../shell.js";
+import { header, strong, inline, wireRecPill, paintRecPill } from "../shell.js";
 import * as liveFeed from "../../components/live-feed.js";
 import * as liveChannel from "../../components/live-channel.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
@@ -184,9 +184,7 @@ export function build(ctx) {
     setHealth(healthHosts.hLag, lags.length ? `${Math.max(...lags).toFixed(1)}s` : "—");
     setHealth(healthHosts.hChan, li.state || "stopped");
 
-    recPill.textContent = recEnabled ? "● recording" : "⏸ paused";
-    recPill.classList.toggle("is-on", recEnabled);
-    recPill.classList.toggle("is-paused", !recEnabled);
+    paintRecPill(recPill, recEnabled);
 
     // Clear wipes the GLOBAL live-caption deque, so only the live session owns
     // it. Off the current session the panel shows another session's lines (or

@@ -5,7 +5,7 @@
 import { tpl, mount, pick, deferIfSelectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
-import { putJson } from "../api.js";
+import { putJson, mutateButton } from "../api.js";
 
 // Per-host render state, keyed by bodyEl (NOT module scope — active-taps renders
 // into several hosts at once on /next: the global rail + the Taps view, so a
@@ -214,7 +214,7 @@ export function toggleIntent(btn) {
  * @param {{ afterMutate: () => void }} ctx
  */
 export function wireToggles(bodyEl, { afterMutate }) {
-  bodyEl.addEventListener("click", async (ev) => {
+  bodyEl.addEventListener("click", (ev) => {
     const btn = /** @type {HTMLButtonElement | null} */ (
       /** @type {Element | null} */ (ev.target)?.closest(".tap-toggle"));
     if (!btn) return;
@@ -223,9 +223,9 @@ export function wireToggles(bodyEl, { afterMutate }) {
     const { identity, which, next } = intent;
     btn.dataset.state = next ? "1" : "0";
     btn.classList.toggle("on", next);
-    btn.disabled = true;
-    try { await putJson("/api/tap-settings", { identity, [which]: next }); }
-    catch (e) { alert(`Tap setting toggle failed: ${e}`); }
-    finally { btn.disabled = false; afterMutate(); }
+    mutateButton(btn, () => putJson("/api/tap-settings", { identity, [which]: next }), {
+      afterMutate,
+      failMessage: (e) => `Tap setting toggle failed: ${e}`,
+    });
   });
 }

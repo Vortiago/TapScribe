@@ -18,7 +18,7 @@
 // doesn't collide with Capture's.
 
 import { tpl, pick } from "../../templates.js";
-import { header, strong, inline, wireRecPill } from "../shell.js";
+import { header, strong, inline, wireRecPill, paintRecPill } from "../shell.js";
 import * as activeTaps from "../../components/active-taps.js";
 import * as liveChannel from "../../components/live-channel.js";
 
@@ -78,9 +78,7 @@ export function build(ctx) {
       },
     });
 
-    recPill.textContent = recEnabled ? "● recording" : "⏸ paused";
-    recPill.classList.toggle("is-on", recEnabled);
-    recPill.classList.toggle("is-paused", !recEnabled);
+    paintRecPill(recPill, recEnabled);
 
     // Reused components — each touches only its passed hosts.
     activeTaps.render(j, activeTapsCtx);

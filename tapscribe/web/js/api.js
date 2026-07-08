@@ -349,6 +349,25 @@ export function getSummaryCatalog() {
   return _summaryCatalog;
 }
 
+// The disable/await-mutate/catch-alert/finally-reenable core shared by
+// wireToggles (components/active-taps.js) and wireRecPill (next/shell.js) —
+// both bind their OWN click listener (each needs its own pre-mutate DOM step:
+// the tap-toggle's optimistic flip, the rec-pill's getState() read) and then
+// hand the actual network call to this core instead of duplicating the
+// disable/catch/finally wrapping. Lives here (not in either caller's module)
+// since both already import from api.js.
+/**
+ * @param {HTMLButtonElement} btn
+ * @param {() => Promise<unknown>} mutate
+ * @param {{ afterMutate: () => void, failMessage: (e: unknown) => string }} opts
+ */
+export function mutateButton(btn, mutate, { afterMutate, failMessage }) {
+  btn.disabled = true;
+  return mutate()
+    .catch((e) => { alert(failMessage(e)); })
+    .finally(() => { btn.disabled = false; afterMutate(); });
+}
+
 // Wire a save button to an async PUT with the shared status-badge lifecycle
 // (saving… / saved / failed, success badge clears after 1.5s). The generic
 // core under wireConfigSave; structured saves (the #84 summarizer-default

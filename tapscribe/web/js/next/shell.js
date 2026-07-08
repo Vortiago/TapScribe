@@ -5,7 +5,7 @@
 // don't warrant their own module.
 
 import { tpl, pick } from "../templates.js";
-import { postJson } from "../api.js";
+import { postJson, mutateButton } from "../api.js";
 
 /** The Stages views. GLOBAL group is pinned + un-numbered; the THIS SESSION
  * group is the numbered Capture → Recordings → Transcript → Summary journey. */
@@ -210,13 +210,26 @@ export function nextRecordingEnabled(state) {
  * @param {{ afterMutate: () => void }} ctx
  */
 export function wireRecPill(btn, getState, { afterMutate }) {
-  btn.addEventListener("click", async () => {
+  btn.addEventListener("click", () => {
     const enabled = nextRecordingEnabled(getState());
-    btn.disabled = true;
-    try { await postJson("/api/recording/toggle", { enabled }); }
-    catch (e) { alert(`Recording toggle failed: ${e}`); }
-    finally { btn.disabled = false; afterMutate(); }
+    mutateButton(btn, () => postJson("/api/recording/toggle", { enabled }), {
+      afterMutate,
+      failMessage: (e) => `Recording toggle failed: ${e}`,
+    });
   });
+}
+
+/**
+ * Paint the recording-enabled pill's label + state classes, shared by the
+ * Capture and Taps views (both compute `enabled` the same way:
+ * `j.recording_enabled !== false`).
+ * @param {HTMLButtonElement} btn
+ * @param {boolean} enabled
+ */
+export function paintRecPill(btn, enabled) {
+  btn.textContent = enabled ? "● recording" : "⏸ paused";
+  btn.classList.toggle("is-on", enabled);
+  btn.classList.toggle("is-paused", !enabled);
 }
 
 /**
