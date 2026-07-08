@@ -7,18 +7,18 @@ crystallize them; don't introduce shadow vocabulary in code or docs.
 ## Recorder
 
 The TapScribe Python application itself: the FastAPI server, the per-WAV
-`/record` WebSocket handler, the session bookkeeping, the dashboard, and
+`/tap` WebSocket handler, the session bookkeeping, the dashboard, and
 the orchestrator for the live channel. Operators think of it as their
 meeting recorder, hence the name — but its job extends to running and
 supervising the Transcribers (both live and batch).
 
 Verb/noun split: **the Recorder** writes **a recording** (a single WAV
-per utterance per speaker) via the `/record` WebSocket endpoint. The
-process-wide `RECORDING_ENABLED` flag controls whether new recordings
-get accepted; it does not stop live transcription, which is independent.
+per utterance per speaker) via the `/tap` WebSocket endpoint. The
+per-instance `recorder.recording_enabled` flag controls whether new
+recordings get accepted; it does not stop live transcription, which is
+independent.
 
-There is one Recorder instance per Python process. The class name
-introduced by the candidate-#5 refactor will be `Recorder`.
+There is one `Recorder` instance per Python process (`tapscribe/recorder.py`).
 
 ## Transcriber
 
@@ -578,8 +578,8 @@ boundaries on the Bridge side. One utterance maps to one WAV on disk
 and — most of the time — to one `/tap` WebSocket. When the network
 blips mid-utterance, the Bridge reconnects with the same `utterance_id`
 and the Recorder appends to the existing WAV rather than starting a new
-one (see `UtteranceIndex` in `tapscribe/app.py`), so an utterance is a
-logical concept that can span multiple physical `/tap` WSes.
+one (see `UtteranceIndex` in `tapscribe/recorder.py`), so an utterance is
+a logical concept that can span multiple physical `/tap` WSes.
 
 Lifecycle: Bridge detects speech → opens `/tap` → streams PCM → Bridge
 detects mute → drains any trailing PCM → Bridge closes `/tap` → Recorder
@@ -915,9 +915,11 @@ SummarizeSessionRequest) -> dict` — reads the session's merged transcript
 (`NoMergedTranscript` when absent/empty), builds a `Summarizer` via the factory
 (`SummarizerUnavailable` for a misconfigured source — *before* the slot claim,
 so a bad command fails fast), runs it under the `summarize` job kind, and
-returns the summary dict. As of the tracer-bullet slice (#82) there's no
-persistence (the summary is lost on reload) and no saved config (source /
-command / prompt arrive per request).
+returns the summary dict. The summary persists to `session-summary.json`
+(#83) and the operator's default source/command/model/prompt persist to
+`config/summarizer.json` (#84, `api_key` write-only); a per-session
+`session_meta` override still beats both, per
+`effective_summarizer_config`.
 
 ## End-of-meeting pipeline
 
@@ -991,9 +993,12 @@ operator-trusted free text; what a preset adds is hardening-by-default
 transcript can't make the tool read files or fetch URLs). Don't confuse the
 two catalogs' roles when adding rows to either.
 
-`ApiSummarizer` (OpenAI-compatible / Ollama, #85) is the remaining planned
-adapter behind the same one-method seam — one new `api` module. Adapter-level
-errors are `SummarizerUnavailable` (misconfigured / not-wired source → 400) and
+`ApiSummarizer` (OpenAI-compatible / Ollama, #85) is shipped: POSTs
+`{base_url}/chat/completions` over stdlib urllib, `base_url`/`model` are
+config, `api_key` is write-only (never echoed back, only `key_set`). Its
+model list is the one thing still pending — the `api` source takes a free-text
+model, not a catalog pick like `local`. Adapter-level errors are
+`SummarizerUnavailable` (misconfigured / not-wired source → 400) and
 `SummarizerFailed` (ran but failed → 502).
 
 ## Wire-format note
