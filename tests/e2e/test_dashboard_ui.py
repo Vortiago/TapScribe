@@ -43,7 +43,7 @@ import pytest
 from tapscribe import transcribers as _transcribers
 from tapscribe.recorder import JobState
 
-from .conftest import RunningRecorder, _FakeAliveProc
+from .conftest import FakeAliveProc, RunningRecorder
 from .fake_transcriber import FakeTranscriber
 from .harness import (
     playwright_session,
@@ -2415,10 +2415,10 @@ async def test_dashboard_live_channel_start_stop(
     rec.live.info["state"] = "stopped"
 
     def _fake_start(*, model=None, language=None):  # noqa: ARG001
-        # Stand in for a fully-started child: alive proc (`_FakeAliveProc` —
+        # Stand in for a fully-started child: alive proc (`FakeAliveProc` —
         # poll() is None) + running state, config.port still aimed at the fake
         # WlK so the relay connects.
-        rec.live._proc = _FakeAliveProc()
+        rec.live._proc = FakeAliveProc()
         rec.live.info["state"] = "running"
         rec.live.info["pid"] = "fake"
         return True, "started (faked spawn)"

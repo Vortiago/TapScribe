@@ -40,8 +40,9 @@ from tapscribe.recorder import Recorder
 from tapscribe.tls import ensure_self_signed_cert
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
-from conftest import (
-    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path picks up the project's tests/conftest.py
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path picks up the project's tests/conftest.py
+    FakeAliveProc,
+    FakeWlkThread,
 )
 
 from .harness import (
@@ -82,13 +83,6 @@ class TlsRunningRecorder:
         return f"wss://{self.host}:{self.port}"
 
 
-class _FakeAliveProc:
-    """LiveChannel.running() returns True iff `_proc.poll() is None`."""
-
-    def poll(self):
-        return None
-
-
 @pytest.fixture
 def tls_running_recorder(
     tmp_path: Path,
@@ -115,7 +109,7 @@ def tls_running_recorder(
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
     )
-    recorder.live._proc = _FakeAliveProc()
+    recorder.live._proc = FakeAliveProc()
 
     app.state.recorder = recorder
     app.dependency_overrides[get_recorder] = lambda: recorder

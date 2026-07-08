@@ -18,13 +18,13 @@ from pathlib import Path
 import pytest
 from conftest import (
     FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+    build_tap_recorder,
 )
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
-from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 
 # ---------------------------------------------------------------------------
@@ -44,36 +44,7 @@ def recorder_with_fake_wlk(
     monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
     monkeypatch.setattr(_config, "CONFIG_DIR", tmp_path / "config")
-    (tmp_path / "config").mkdir()
-    (tmp_path / "recordings").mkdir()
-
-    r = Recorder(
-        recordings_dir=tmp_path / "recordings",
-        config_dir=tmp_path / "config",
-        # Relay-focused tests use near-silent synthetic PCM that real
-        # Silero would block — pin gate_kind="backend" so they exercise
-        # the relay end-to-end without the gate eating their bytes.
-        live_config=LiveConfig(
-            model="tiny.en",
-            language="en",
-            host="localhost",
-            port=fake_wlk.port,
-            gate_kind="backend",
-        ),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
-
-    # The relay opens only when LiveChannel.running() is True. Force-mark
-    # the channel as running by injecting a fake proc that .poll() returns
-    # None (i.e., still alive). The real subprocess.Popen would do the
-    # same; we just don't have one in tests.
-    class _FakeProc:
-        def poll(self):
-            return None  # "alive"
-
-    r.live._proc = _FakeProc()
-    return r
+    return build_tap_recorder(tmp_path, port=fake_wlk.port, gate_kind="backend", live_running=True)
 
 
 @pytest.fixture

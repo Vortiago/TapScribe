@@ -22,11 +22,12 @@ import wave
 from pathlib import Path
 
 import pytest
-from conftest import (
-    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+    FakeWlkThread,
+    build_tap_recorder,
+    wait_for,
 )
 
-from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 from tapscribe.tap_fan_out import TapFanOut
 
@@ -35,36 +36,12 @@ from tapscribe.tap_fan_out import TapFanOut
 PCM_FRAME = b"\x10\x00" * 320
 
 
-async def _wait_for(predicate, *, timeout: float = 2.0, interval: float = 0.005) -> None:
-    """Event-style wait for state mutated outside the test coroutine
-    (fake WlK lives on its own thread loop; the relay's reconnect runs
-    in a background task). Wraps a tight poll inside `asyncio.wait_for`
-    so the test fails loudly on a stuck condition instead of hanging
-    until the suite timeout."""
-
-    async def _wait() -> None:
-        while not predicate():
-            await asyncio.sleep(interval)
-
-    await asyncio.wait_for(_wait(), timeout=timeout)
-
-
 @pytest.fixture
 def recorder(tmp_path: Path) -> Recorder:
     """A Recorder with the live channel marked stopped (live._proc=None),
     so the fan-out's relay path is never attempted. Relay-on tests build
     their own Recorder against the fake WlK fixture in test_tap_endpoint."""
-    recordings = tmp_path / "recordings"
-    config_dir = tmp_path / "config"
-    recordings.mkdir()
-    config_dir.mkdir()
-    return Recorder(
-        recordings_dir=recordings,
-        config_dir=config_dir,
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=9999),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
+    return build_tap_recorder(tmp_path)
 
 
 @pytest.fixture
@@ -74,35 +51,7 @@ def recorder_with_relay(tmp_path: Path, fake_wlk: FakeWlkThread) -> Recorder:
     a real WebSocket server. Same shape as test_tap_endpoint's relay
     fixture, minus the FastAPI app/config monkeypatching since these
     tests don't go through the HTTP layer."""
-    recordings = tmp_path / "recordings"
-    config_dir = tmp_path / "config"
-    recordings.mkdir()
-    config_dir.mkdir()
-    r = Recorder(
-        recordings_dir=recordings,
-        config_dir=config_dir,
-        live_config=LiveConfig(
-            model="tiny.en",
-            language="en",
-            host="localhost",
-            port=fake_wlk.port,
-            # Relay-focused tests pre-date the TapScribe gate and feed
-            # near-silent synthetic PCM that real Silero would block.
-            # Pin them to backend-mode gating to keep their semantics —
-            # gate-specific behavior is exercised separately by the
-            # tests that set gate_kind="tapscribe" explicitly.
-            gate_kind="backend",
-        ),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
-
-    class _FakeProc:
-        def poll(self):
-            return None  # "alive"
-
-    r.live._proc = _FakeProc()
-    return r
+    return build_tap_recorder(tmp_path, port=fake_wlk.port, gate_kind="backend", live_running=True)
 
 
 async def test_open_write_close_writes_wav_and_releases_utterance(recorder: Recorder):
@@ -628,7 +577,7 @@ async def test_relay_forwards_frames_to_wlk_when_live_running(
         await fan_out.write_frame(PCM_FRAME)
         # Event-based: wait for the relay to round-trip both frames into
         # the fake server's received buffer before we tear down the relay.
-        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 2)
+        await wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 2)
 
     # The fake WlK records every bytes frame it received from the relay.
     received = b"".join(fake_wlk.received)
@@ -668,7 +617,7 @@ async def test_relay_settled_lines_land_in_live_transcripts(
         await fan_out.write_frame(PCM_FRAME)
         # Wait for the frame to round-trip into the fake WlK before
         # pushing settled lines, so the fake's connection list is live.
-        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
+        await wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
         fake_wlk.push_committed("hello from WlK")
         fake_wlk.push_committed("second from WlK")
         # Event-based: wait until at least the first finalized line has
@@ -678,7 +627,7 @@ async def test_relay_settled_lines_land_in_live_transcripts(
     # Event-based: the drain on relay close flushes the tail, so the
     # second line is appended after __aexit__ runs. Wait until both
     # lines are visible in the snapshot.
-    await _wait_for(lambda: len(recorder_with_relay.transcripts.snapshot()) >= 2)
+    await wait_for(lambda: len(recorder_with_relay.transcripts.snapshot()) >= 2)
     snap = recorder_with_relay.transcripts.snapshot()
     texts = [e["text"] for e in snap]
     assert "hello from WlK" in texts
@@ -780,7 +729,7 @@ async def test_tapscribe_gate_passes_speech_frames_through(
         for _ in range(5):
             await fan_out.write_frame(PCM_FRAME)
         # Most of the frames should have round-tripped to WlK.
-        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 3)
+        await wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 3)
 
 
 async def test_backend_gate_kind_passes_all_frames_without_a_gate(
@@ -804,7 +753,7 @@ async def test_backend_gate_kind_passes_all_frames_without_a_gate(
     ) as fan_out:
         for _ in range(3):
             await fan_out.write_frame(PCM_FRAME)
-        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 3)
+        await wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME) * 3)
 
 
 async def test_gate_construction_failure_falls_back_to_passthrough(
@@ -834,7 +783,7 @@ async def test_gate_construction_failure_falls_back_to_passthrough(
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
         # Passthrough — frame reaches WlK despite the gate exploding.
-        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
+        await wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
 
 
 async def test_gate_open_state_propagates_to_active_stream(
@@ -961,7 +910,7 @@ async def test_relay_buffer_transcription_updates_active_stream(
         # Send a frame so the relay is alive and the fake server is
         # connected; then push a snapshot with a buffer_transcription.
         await fan_out.write_frame(PCM_FRAME)
-        await _wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
+        await wait_for(lambda: sum(len(c) for c in fake_wlk.received) >= len(PCM_FRAME))
         fake_wlk.push_buffer("in flight tail")
 
         async def _has_buffer() -> bool:
@@ -1119,7 +1068,7 @@ async def test_relay_auto_reconnects_after_live_channel_restart(
             wlk_b.push_committed("hello after restart")
             wlk_b.push_committed("second line settles the first")
             # Event-based: wait until the first line reaches LiveTranscripts.
-            await _wait_for(
+            await wait_for(
                 lambda: any(
                     "hello after restart" in e["text"] for e in recorder_with_relay.transcripts.snapshot()
                 )

@@ -23,6 +23,7 @@ from tapscribe.recorder import Recorder
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path insertion picks up the project's tests/conftest.py
+    FakeAliveProc,
     FakeWlkThread,
     all_probe_modules,
     repoint_config_files,
@@ -65,14 +66,6 @@ class RunningRecorder:
         return self.server.ws_base_url
 
 
-class _FakeAliveProc:
-    """LiveChannel.running() returns True iff `_proc.poll() is None`,
-    so any object with a poll-returning-None satisfies it."""
-
-    def poll(self):
-        return None
-
-
 @pytest.fixture
 def running_recorder(
     tmp_path: Path,
@@ -104,7 +97,7 @@ def running_recorder(
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
     )
-    recorder.live._proc = _FakeAliveProc()
+    recorder.live._proc = FakeAliveProc()
 
     app.state.recorder = recorder
     app.dependency_overrides[get_recorder] = lambda: recorder

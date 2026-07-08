@@ -18,11 +18,13 @@ from datetime import UTC
 from pathlib import Path
 
 import pytest
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+    build_tap_recorder,
+)
 
 from tapscribe import hallucinations
 from tapscribe import tap_relay as tr
-from tapscribe.live import LiveConfig
-from tapscribe.recorder import ActiveStream, Recorder
+from tapscribe.recorder import ActiveStream
 from tapscribe.tap_fan_out import TapFanOut
 
 pytestmark = pytest.mark.chaos
@@ -31,53 +33,6 @@ pytestmark = pytest.mark.chaos
 # A 20 ms frame of audible-ish PCM at 16 kHz mono int16 — same shape the
 # real Bridge sends (see CONTEXT.md "Bridge" wire contract).
 PCM_FRAME = b"\x10\x00" * 320
-
-
-async def _wait_for(predicate, *, timeout: float = 2.0, interval: float = 0.005) -> None:
-    """Wait until `predicate()` returns truthy or `timeout` seconds elapse,
-    raising `TimeoutError` on the latter. Tight inner sleep so a quick
-    flip resolves without burning real wall time."""
-
-    async def _wait() -> None:
-        while not predicate():
-            await asyncio.sleep(interval)
-
-    await asyncio.wait_for(_wait(), timeout=timeout)
-
-
-def _build_recorder(tmp_path: Path, port: int = 9999) -> Recorder:
-    recordings = tmp_path / "recordings"
-    config_dir = tmp_path / "config"
-    recordings.mkdir()
-    config_dir.mkdir()
-    return Recorder(
-        recordings_dir=recordings,
-        config_dir=config_dir,
-        # Pre-gate concurrency tests feed near-silent synthetic PCM that
-        # real Silero would block — pin gate_kind="backend" so they
-        # exercise relay reconnect / race semantics without the gate
-        # filtering their bytes.
-        live_config=LiveConfig(
-            model="tiny.en",
-            language="en",
-            host="localhost",
-            port=port,
-            gate_kind="backend",
-        ),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
-
-
-def _build_recorder_with_running_live(tmp_path: Path, port: int) -> Recorder:
-    r = _build_recorder(tmp_path, port=port)
-
-    class _FakeProc:
-        def poll(self):
-            return None  # "alive"
-
-    r.live._proc = _FakeProc()
-    return r
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +73,7 @@ async def test_relay_reconnect_attempts_are_bounded_by_real_backoff(
 
     monkeypatch.setattr(_lr.WlKRelay, "connect", _fast_fail_connect)
 
-    r = _build_recorder_with_running_live(tmp_path, port=_unused_port())
+    r = build_tap_recorder(tmp_path, port=_unused_port(), gate_kind="backend", live_running=True)
 
     original_backoff = tr.RELAY_RECONNECT_BACKOFF_S
     tr.RELAY_RECONNECT_BACKOFF_S = BACKOFF
@@ -201,7 +156,7 @@ async def test_active_stream_concurrent_update_and_remove_is_safe(
         behaviour here),
       - no asyncio warnings (`filterwarnings = ["error"]` in pyproject
         catches stray tasks / unawaited coroutines)."""
-    r = _build_recorder(tmp_path)
+    r = build_tap_recorder(tmp_path, gate_kind="backend")
 
     from datetime import datetime
 
@@ -265,7 +220,7 @@ async def test_live_channel_rapid_restart_settles_to_one_child(
 
     import tapscribe.live as live_mod
 
-    r = _build_recorder(tmp_path)
+    r = build_tap_recorder(tmp_path, gate_kind="backend")
 
     spawned: list = []
     terminated: list = []
