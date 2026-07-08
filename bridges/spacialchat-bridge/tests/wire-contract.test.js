@@ -207,6 +207,45 @@ test("flipping Use TLS on clears the sticky tls-required error so the bridge red
   assert.ok(b.lastSocket().url.startsWith("wss://"));
 });
 
+// Wraps client.isTrustworthyHost with a call-recording spy that still
+// delegates to the real predicate, so behavior is unaffected — only used to
+// pin WHICH function the ws:// guard consults, not its blocked/allowed
+// outcome (already covered by the guard tests above).
+function spyOnIsTrustworthyHost(bridge) {
+  const client = bridge.controlClient();
+  const calls = [];
+  const real = client.isTrustworthyHost;
+  client.isTrustworthyHost = (host) => {
+    calls.push(host);
+    return real(host);
+  };
+  return calls;
+}
+
+test("the WS mixed-content guard shares TapscribeControlClient.isTrustworthyHost — no private duplicate predicate", async () => {
+  // #251: content.js used to hand-roll its own isTrustworthyWsHost copy of
+  // this security-relevant predicate, duplicating the one control-client.js
+  // exports (and content.js already uses for the HTTP control plane's
+  // pipeline trigger). Pin that content.js's ws:// guard now calls through
+  // the SAME function — spying on it, not on private content.js internals —
+  // rather than hand-rolling its own copy. (This only pins content.js's call
+  // path; control-client.js's own HTTP-guard call sites reference the
+  // predicate via a private closure variable, not this exported property, so
+  // they aren't observed by this spy — see control-client.js's wouldBlockHttp.)
+  const blocked = createBridge({
+    settings: { recorderHost: "macmini", recorderPort: 8001, useTls: false, tapToken: "tok" },
+  });
+  await ready(blocked);
+  setupChannel(blocked);
+  const blockedCalls = spyOnIsTrustworthyHost(blocked);
+
+  blocked.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  assert.ok(
+    blockedCalls.includes("macmini"),
+    "the ws:// guard consulted TapscribeControlClient.isTrustworthyHost with the recorder host",
+  );
+});
+
 test("forwarded frame body is the same bytes the page-script sent", async () => {
   // Sanity-check: the bridge doesn't mutate / reframe / pad PCM. Whatever
   // page-script.js posts goes through verbatim. A regression that wrapped
