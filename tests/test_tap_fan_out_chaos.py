@@ -24,43 +24,17 @@ import wave
 from pathlib import Path
 
 import pytest
-from conftest import (
-    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+    FakeWlkThread,
+    build_tap_recorder,
 )
 
-from tapscribe.live import LiveConfig
-from tapscribe.recorder import Recorder
 from tapscribe.tap_fan_out import TapFanOut
 
 pytestmark = pytest.mark.chaos
 
 
 PCM_FRAME = b"\x10\x00" * 320  # 20 ms @ 16 kHz mono int16
-
-
-def _build_recorder(tmp_path: Path, port: int = 9999) -> Recorder:
-    recordings = tmp_path / "recordings"
-    config_dir = tmp_path / "config"
-    recordings.mkdir(parents=True, exist_ok=True)
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return Recorder(
-        recordings_dir=recordings,
-        config_dir=config_dir,
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=port),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
-
-
-def _build_recorder_with_relay(tmp_path: Path, fake_wlk: FakeWlkThread) -> Recorder:
-    r = _build_recorder(tmp_path, port=fake_wlk.port)
-
-    class _FakeProc:
-        def poll(self):
-            return None
-
-    r.live._proc = _FakeProc()
-    return r
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +67,7 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
     `asyncio.all_tasks()` at the boundary so a leak surfaces here, not
     later in some unrelated test."""
     # ---- Half A: frames received, then a mid-stream RuntimeError ----
-    r = _build_recorder_with_relay(tmp_path, fake_wlk)
+    r = build_tap_recorder(tmp_path, port=fake_wlk.port, live_running=True)
     tasks_before = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
 
     fan_out = await TapFanOut.open(
@@ -145,7 +119,7 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
     )
 
     # ---- Half B: zero frames, abnormal close before any audio ----
-    r2 = _build_recorder(tmp_path / "b")
+    r2 = build_tap_recorder(tmp_path / "b")
     tasks_before2 = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
 
     fan_out2 = await TapFanOut.open(
@@ -205,7 +179,7 @@ async def test_resume_across_session_rotation_pins_current_behaviour(
 
     Documents the gap and pins the current behaviour so any future
     fix breaks this test loudly."""
-    r = _build_recorder(tmp_path)
+    r = build_tap_recorder(tmp_path)
     utt = "utt-cross-session"
 
     # ----- session A: write the first half -----

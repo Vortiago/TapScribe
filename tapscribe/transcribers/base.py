@@ -11,7 +11,7 @@ adapter and the sidecar cache build them through the same
 decoder output) and serialise them through `to_mapping`. Decoder
 adapters never hand-roll the field-by-field wiring.
 
-`TextInput` / `SelectInput` describe the per-model UI form fields the
+`TextInput` describes the per-model UI form fields the
 `TranscriberRegistry` declares. The dashboard reads those declarations
 from `/api/models` and renders form fields accordingly; the API call
 forwards only the values the registry says the model accepts.
@@ -116,10 +116,10 @@ class TranscriptionResult:
     `TranscriptionResult` via `dataclasses.replace`.
 
     `language` (the existing field) is the source language as the model
-    saw it — kept for back-compat with cached sidecar JSONs. A
-    translation-capable adapter would also populate `source_language` /
-    `target_language`; everything else (every shipped adapter today)
-    leaves them empty.
+    saw it — kept for back-compat with cached sidecar JSONs.
+    `source_language` records what the model was told to expect (the
+    per-region language pin, ADR-0010); empty means the model's own
+    auto-detect was in charge.
     """
 
     transcriber: str  # echoes Transcriber.name
@@ -135,13 +135,10 @@ class TranscriptionResult:
     hotwords_used: str
     quality_settings: dict[str, Any]
     suppressed_hallucinations: tuple[TranscriptionSegment, ...] = field(default_factory=tuple)
-    # A translation-capable adapter would record the source vs output
-    # language explicitly. Empty string = adapter doesn't deal in
-    # translation; `language` carries the only language info. No shipped
-    # adapter sets these today (they're retained for back-compat with
-    # sidecars cached from one that did).
+    # The language the adapter was told to expect (`source_lang`), part of
+    # the cache match key. Empty = the model auto-detected; `language`
+    # carries what it decided.
     source_language: str = ""
-    target_language: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -180,35 +177,11 @@ class TextInput:
         }
 
 
-@dataclass(frozen=True)
-class SelectInput:
-    """A dropdown (closed enum of choices).
-
-    `options` is a tuple of `(value, label)` pairs. `default` must be one
-    of the option values. No shipped model declares one today (Canary's
-    source/target-lang selects were removed with the family); retained for
-    future use, e.g. an explicit Whisper language pin.
-    """
-
-    name: str
-    label: str
-    options: tuple[tuple[str, str], ...]
-    default: str
-    description: str = ""
-
-    def to_mapping(self) -> dict[str, Any]:
-        return {
-            "type": "select",
-            "name": self.name,
-            "label": self.label,
-            "options": [{"value": v, "label": label} for v, label in self.options],
-            "default": self.default,
-            "description": self.description,
-        }
-
-
-# Discriminated union of every input kind the dashboard knows how to render.
-ModelInput = TextInput | SelectInput
+# The one input kind the dashboard knows how to render. Widen back into a
+# discriminated union (`TextInput | NewKind`) in the same PR that ships a
+# model actually declaring a new kind — the renderer lives in
+# web/js/next/components/engine.js.
+ModelInput = TextInput
 
 
 @runtime_checkable
@@ -219,9 +192,8 @@ class Transcriber(Protocol):
     `transcribe()` accepts a generous superset of kwargs so the same call
     site can dispatch any registry-declared adapter. Each adapter consumes
     the ones it understands and silently echoes the rest into the result's
-    `initial_prompt_used` / `hotwords_used` / `source_language` /
-    `target_language` for audit parity — no adapter ever raises on an
-    unfamiliar kwarg.
+    `initial_prompt_used` / `hotwords_used` / `source_language` for audit
+    parity — no adapter ever raises on an unfamiliar kwarg.
     """
 
     name: ClassVar[str]
@@ -236,7 +208,6 @@ class Transcriber(Protocol):
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,
     ) -> TranscriptionResult: ...
 
 
@@ -273,16 +244,13 @@ def build_transcription_result(
     initial_prompt: str | None = None,
     hotwords: str | None = None,
     source_lang: str | None = None,
-    target_lang: str | None = None,
     quality_settings: dict[str, Any] | None = None,
 ) -> TranscriptionResult:
     """Build a `TranscriptionResult` with the audit-field boilerplate
     centralised. Reads `transcriber`/`backend`/`device`/`model` off the
     adapter; rounds `language_probability` and `duration` to the
-    canonical precision; coerces None prompt/hotwords/source_lang into
-    "" (the wire format never carries None for these); and sets
-    `target_language` only when it differs from `source_lang` — the
-    "translation badge" invariant the dashboard's UI depends on.
+    canonical precision; and coerces None prompt/hotwords/source_lang
+    into "" (the wire format never carries None for these).
 
     Adapters call it with just the engine-specific parts; the
     constructor is the one place that knows the audit shape."""
@@ -300,7 +268,6 @@ def build_transcription_result(
         hotwords_used=hotwords or "",
         quality_settings=quality_settings if quality_settings is not None else {},
         source_language=source_lang or "",
-        target_language=(target_lang or "") if (target_lang and target_lang != (source_lang or "")) else "",
     )
 
 

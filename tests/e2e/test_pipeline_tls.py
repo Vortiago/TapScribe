@@ -35,13 +35,13 @@ import websockets
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
-from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 from tapscribe.tls import ensure_self_signed_cert
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
-from conftest import (
-    FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path picks up the project's tests/conftest.py
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path picks up the project's tests/conftest.py
+    FakeWlkThread,
+    build_tap_recorder,
 )
 
 from .harness import (
@@ -82,13 +82,6 @@ class TlsRunningRecorder:
         return f"wss://{self.host}:{self.port}"
 
 
-class _FakeAliveProc:
-    """LiveChannel.running() returns True iff `_proc.poll() is None`."""
-
-    def poll(self):
-        return None
-
-
 @pytest.fixture
 def tls_running_recorder(
     tmp_path: Path,
@@ -105,17 +98,8 @@ def tls_running_recorder(
     monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
     monkeypatch.setattr(_config, "CONFIG_DIR", tmp_path / "config")
-    (tmp_path / "config").mkdir()
-    (tmp_path / "recordings").mkdir()
 
-    recorder = Recorder(
-        recordings_dir=tmp_path / "recordings",
-        config_dir=tmp_path / "config",
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=fake_wlk.port),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
-    recorder.live._proc = _FakeAliveProc()
+    recorder = build_tap_recorder(tmp_path, port=fake_wlk.port, live_running=True)
 
     app.state.recorder = recorder
     app.dependency_overrides[get_recorder] = lambda: recorder

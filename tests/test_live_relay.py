@@ -21,6 +21,9 @@ from typing import Any
 
 import pytest
 import websockets
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+    wait_for,
+)
 
 from tapscribe.live_relay import WlKRelay
 
@@ -58,20 +61,6 @@ class _SignalList(list):
                 await self._event.wait()
 
         await asyncio.wait_for(_wait(), timeout=timeout)
-
-
-async def _wait_for(predicate, *, timeout: float = 1.0, interval: float = 0.005) -> None:
-    """Poll-based fallback for state that doesn't have a natural event hook
-    (e.g. `fake_wlk.received` is mutated by the fake server's own loop in
-    a different thread — we can't intercept the append cheaply). Tight
-    polling interval so tests don't burn real wall time when the condition
-    flips quickly."""
-
-    async def _wait() -> None:
-        while not predicate():
-            await asyncio.sleep(interval)
-
-    await asyncio.wait_for(_wait(), timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +184,10 @@ async def test_relay_connect_then_send_round_trips_bytes(fake_wlk: _FakeWlk):
     )
     assert await relay.connect() is True
     assert await relay.send(b"\x00\x01" * 320) is True  # one 20 ms PCM frame
-    # Wait for the fake server's handler to receive the bytes (event-based
-    # via the fake's own connection list — see _wait_for above).
-    await _wait_for(lambda: fake_wlk.received == [b"\x00\x01" * 320])
+    # Wait for the fake server's handler to receive the bytes (poll-based
+    # via the shared conftest wait_for — the fake's receive list has no
+    # event hook to await).
+    await wait_for(lambda: fake_wlk.received == [b"\x00\x01" * 320])
     assert fake_wlk.received == [b"\x00\x01" * 320]
     await relay.close()
 
@@ -320,9 +310,9 @@ async def test_relay_pushes_buffer_transcription_to_on_buffer_callback(fake_wlk:
     )
     await relay.connect()
     await fake_wlk.push_lines_snapshot([], buffer_transcription="hello in flight")
-    await _wait_for(lambda: bufs == ["hello in flight"])
+    await wait_for(lambda: bufs == ["hello in flight"])
     await fake_wlk.push_lines_snapshot([], buffer_transcription="hello world in flight")
-    await _wait_for(lambda: bufs == ["hello in flight", "hello world in flight"])
+    await wait_for(lambda: bufs == ["hello in flight", "hello world in flight"])
     await relay.close()
 
 
@@ -340,13 +330,13 @@ async def test_relay_emits_empty_buffer_when_text_commits_to_lines(fake_wlk: _Fa
     )
     await relay.connect()
     await fake_wlk.push_lines_snapshot([], buffer_transcription="growing tail")
-    await _wait_for(lambda: bufs == ["growing tail"])
+    await wait_for(lambda: bufs == ["growing tail"])
     # Now the tail is committed and the buffer empties.
     await fake_wlk.push_lines_snapshot(
         [{"text": "growing tail", "speaker": 1, "start": 0.0, "end": 1.0}],
         buffer_transcription="",
     )
-    await _wait_for(lambda: bufs == ["growing tail", ""])
+    await wait_for(lambda: bufs == ["growing tail", ""])
     await relay.close()
 
 

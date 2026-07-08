@@ -116,11 +116,10 @@ class FasterWhisperTranscriber:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — accepted for protocol parity; Whisper doesn't translate
     ) -> TranscriptionResult:
-        # source_lang from the registry's SelectInput overrides the model-name
-        # heuristic; `default_language_for` remains the fallback so legacy
-        # callers (and adapters with no language SelectInput) keep working.
+        # An explicit source_lang (the language pin, ADR-0010)
+        # overrides the model-name heuristic; `default_language_for` remains
+        # the fallback so callers that pass no language keep working.
         language = source_lang or default_language_for(self.model_name)
         common = dict(
             language=language,

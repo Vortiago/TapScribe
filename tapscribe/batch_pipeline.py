@@ -163,7 +163,6 @@ async def run_transcribe_stage(req: PipelineRequest, *, job, model: str, backend
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     await job.update(total=len(selection.wavs))
     return await transcribe_session_locked(treq, selection=selection, job=job)

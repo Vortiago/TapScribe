@@ -445,7 +445,7 @@ class TranscriberStub:
         # assert the candidate-language resolution (ADR-0010) reached the model.
         self.seen_source_lang: list[str | None] = []
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
         from tapscribe.transcribers.base import TranscriptionSegment, build_transcription_result
 
         self.calls.append(path)
@@ -549,6 +549,74 @@ def recorder_under_test(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
     )
+
+
+# ---------------------------------------------------------------------------
+# Tap-path test helpers — shared by test_tap_fan_out / test_tap_endpoint /
+# test_tap_fan_out_chaos / test_concurrency_races (and, via
+# tests/e2e/conftest, the e2e running-recorder fixtures)
+# ---------------------------------------------------------------------------
+
+
+class FakeAliveProc:
+    """LiveChannel.running() returns True iff `_proc.poll() is None`, so any
+    object whose poll() returns None marks the channel "alive". Inject into
+    `recorder.live._proc` to open the tap relay path without spawning a real
+    whisperlivekit child."""
+
+    def poll(self):
+        return None
+
+
+async def wait_for(predicate: Callable[[], object], *, timeout: float = 2.0, interval: float = 0.005) -> None:
+    """Event-style wait for state mutated outside the test coroutine (a fake
+    WlK on its own thread loop; a relay reconnect in a background task).
+    Tight inner poll wrapped in `asyncio.wait_for` so a stuck condition
+    fails loudly instead of hanging until the suite timeout."""
+
+    async def _poll() -> None:
+        while not predicate():
+            await asyncio.sleep(interval)
+
+    await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+def build_tap_recorder(
+    tmp_path: Path,
+    *,
+    port: int = 9999,
+    gate_kind: str | None = None,
+    live_running: bool = False,
+):
+    """One tmpdir-rooted Recorder construction for the tap-path test files,
+    so the block isn't rebuilt per file. `gate_kind=None` keeps LiveConfig's
+    default (the TapScribe gate); relay-focused tests pin "backend" because
+    they feed near-silent synthetic PCM that real Silero would block.
+    `live_running=True` injects a FakeAliveProc so TapFanOut opens its
+    relay. tapscribe imports happen inside the helper so config-dir
+    redirection lands before module import (see module docstring)."""
+    import dataclasses
+
+    from tapscribe.live import LiveConfig
+    from tapscribe.recorder import Recorder
+
+    recordings = tmp_path / "recordings"
+    config_dir = tmp_path / "config"
+    recordings.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    live_config = LiveConfig(model="tiny.en", language="en", host="localhost", port=port)
+    if gate_kind is not None:
+        live_config = dataclasses.replace(live_config, gate_kind=gate_kind)
+    recorder = Recorder(
+        recordings_dir=recordings,
+        config_dir=config_dir,
+        live_config=live_config,
+        use_mlx=False,
+        auth_password_file=tmp_path / ".auth-password",
+    )
+    if live_running:
+        recorder.live._proc = FakeAliveProc()
+    return recorder
 
 
 # ── Setup-feature test helpers (shared so the probe + fake-subprocess machinery

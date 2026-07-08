@@ -49,7 +49,7 @@ class _StubByKey:
         self.model_name = model
         self.text = text
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
         return TranscriptionResult(
             transcriber=self.name,
             backend=self.backend,

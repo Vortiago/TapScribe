@@ -31,11 +31,11 @@ import websockets
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
-from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path insertion picks up the project's tests/conftest.py
+    build_tap_recorder,
     repoint_config_files,
 )
 
@@ -70,17 +70,9 @@ def auth_recorder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[A
     monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
     monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
     repoint_config_files(monkeypatch, tmp_path / "config")
-    (tmp_path / "config").mkdir()
-    (tmp_path / "recordings").mkdir()
 
-    recorder = Recorder(
-        recordings_dir=tmp_path / "recordings",
-        config_dir=tmp_path / "config",
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=free_port()),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
-    recorder.live._proc = None  # no relay — WAV + upgrade-gate focus
+    # live_running stays False: no relay — WAV + upgrade-gate focus.
+    recorder = build_tap_recorder(tmp_path, port=free_port())
 
     app.state.recorder = recorder
     app.dependency_overrides[get_recorder] = lambda: recorder

@@ -79,9 +79,15 @@ mlx-audio Canary contract test and pins the `transformers` symbols +
 - **Lost capability: speech translation.** Canary was the only
   translating backend. The `source_language` / `target_language` result
   fields, the `SelectInput` type, and the dashboard's translation badge
-  are retained (back-compat with any sidecar cached from a Canary run,
-  and for a future translating adapter) but no shipped adapter populates
-  them today.
+  were initially retained (back-compat with any sidecar cached from a
+  Canary run, and for a future translating adapter) but no shipped
+  adapter populated them.
+  *Update 2026-07-08:* the vestiges were deleted — the `target_lang`
+  kwarg / `target_language` field thread, `SelectInput`, and the badge
+  are gone (`source_language` stays; it carries the ADR-0010 language
+  pin). Canary-era sidecars still load; their `target_language` key is
+  ignored. A future translating adapter re-adds the thread in its own
+  PR.
 - **New caveat: `transformers` Parakeet timestamps are token-level.**
   The ASR *pipeline*'s `return_timestamps="word"` is CTC-only and raises
   on a TDT transducer, so we use the lower-level generate/decode path and

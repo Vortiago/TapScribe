@@ -47,7 +47,6 @@ class FakeTranscriber:
         initial_prompt: str | None = None,
         hotwords: str | None = None,
         source_lang: str | None = None,
-        target_lang: str | None = None,  # noqa: ARG002 — protocol parity
     ) -> TranscriptionResult:
         self.calls.append(path)
         slug = parse_wav_speaker_slug(path.name)

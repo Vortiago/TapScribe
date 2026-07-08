@@ -41,7 +41,7 @@ class _FakeTranscriber:
     device = "test"
     model_name = "fake-model"
 
-    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None, target_lang=None):  # noqa: ARG002
+    def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
         return TranscriptionResult(
             transcriber="fake",
             backend="fake-backend",
@@ -263,54 +263,6 @@ def test_build_transcription_result_passes_through_non_empty_inputs():
     assert result.initial_prompt_used == "please punctuate"
     assert result.hotwords_used == "Acme"
     assert result.source_language == "en"
-
-
-def test_build_transcription_result_blanks_target_when_equal_to_source():
-    """Translation contract: `target_language` is non-empty ONLY when
-    translation actually happened (target_lang != source_lang). When
-    they match — plain transcription — the field stays empty so the
-    dashboard's translation badge doesn't flash for a no-op."""
-    adapter = _FakeTranscriber()
-    result = build_transcription_result(
-        adapter,
-        text="",
-        segments=(),
-        duration=0.0,
-        language="en",
-        source_lang="en",
-        target_lang="en",
-    )
-    assert result.target_language == ""
-
-
-def test_build_transcription_result_keeps_target_when_translating():
-    adapter = _FakeTranscriber()
-    result = build_transcription_result(
-        adapter,
-        text="",
-        segments=(),
-        duration=0.0,
-        language="en",
-        source_lang="en",
-        target_lang="es",
-    )
-    assert result.target_language == "es"
-
-
-def test_build_transcription_result_blanks_target_when_none():
-    """Most adapters (Whisper, Voxtral, Parakeet) don't translate.
-    They call without `target_lang`; the field must end up empty so
-    the wire shape is uniform."""
-    adapter = _FakeTranscriber()
-    result = build_transcription_result(
-        adapter,
-        text="",
-        segments=(),
-        duration=0.0,
-        language="en",
-        source_lang="en",
-    )
-    assert result.target_language == ""
 
 
 def test_build_transcription_result_defaults_quality_settings_to_empty_dict():

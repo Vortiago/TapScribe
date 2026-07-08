@@ -20,7 +20,6 @@ either transparently):
   - `source_lang`: recorded on the result. Parakeet doesn't echo a
     detected language, so we trust the operator's pick. Missing →
     `language="auto"`.
-  - `target_lang`: ignored. Parakeet doesn't translate.
 
 ffmpeg-free path & chunking
 ---------------------------

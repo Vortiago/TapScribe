@@ -1,16 +1,15 @@
 // @ts-check
 // Stages engine selector — a VISIBLE backend-chip row + a COMPACT model
-// dropdown + any model-declared option <select>s. Used in ONE place now:
+// dropdown. Used in ONE place now:
 //   - Settings (the global batch DEFAULT engine = the ADR-0010 generalist).
 // The Transcript stage dropped its engine selector — the operator declares
 // LANGUAGES there, not a model (ADR-0011), and its transcribe jobs resolve the
 // generalist server-side (batch-model.txt).
 // Mirrors the data flow of the classic dashboard's session-detail engine
 // controls (backend chips from `available_backends`, a model <select> grouped
-// by family with <optgroup> from /api/models, plus any SelectInputs the model
-// declares in its `inputs`). The model list used to be a tall
-// model-by-family grid; we ship few models, so it's now a single dropdown that
-// matches the classic UI's session-detail model <select>.
+// by family with <optgroup> from /api/models). The model list used to be a
+// tall model-by-family grid; we ship few models, so it's now a single dropdown
+// that matches the classic UI's session-detail model <select>.
 
 import { tpl, pick } from "../../templates.js";
 import { FAMILY_LABELS, buildModelSelect } from "../../model-select.js";
@@ -97,35 +96,6 @@ export function render(host, { state, catalog, onChange }) {
     onChange({ ...state, model: sel.value });
   });
   frag.appendChild(row("Model", sel));
-
-  // ---- Model-declared option selects (any SelectInputs in the model's
-  // `inputs` — generic; no shipped model declares any today) ----
-  const entry = models.find((m) => m.model_id === state.model);
-  const selects = (entry?.inputs || []).filter(
-    /** @returns {x is import('../../types.js').SelectInput} */
-    (x) => x.type === "select",
-  );
-  if (selects.length) {
-    const wrap = document.createElement("div");
-    wrap.className = "selrow";
-    for (const input of selects) {
-      const sf = tpl("tpl-next-sel");
-      pick(sf, "label").textContent = input.label;
-      const sel = /** @type {HTMLSelectElement} */ (pick(sf, "select"));
-      sel.dataset.inputName = input.name;
-      if (input.description) sel.title = input.description;
-      for (const opt of input.options || []) {
-        sel.add(new Option(opt.label, opt.value, false, opt.value === input.default));
-      }
-      // The chosen value lives only on the <select> (tagged with
-      // data-input-name); a submit-time reader would read it back from this
-      // panel, so nothing here wires a change handler. (No shipped model
-      // declares a SelectInput today, and the Transcript view no longer consumes
-      // one — it's language-driven now, ADR-0011 — so this path is dormant.)
-      wrap.appendChild(sf);
-    }
-    frag.appendChild(row("Options", wrap));
-  }
 
   host.replaceChildren(frag);
 }

@@ -98,6 +98,12 @@ exactly the bug the refactor exists to eliminate.
 - `TranscriptionResult` gains `source_language` + `target_language`
   fields. Canary uses both; everything else leaves `target_language`
   empty and the dashboard's translation badge stays hidden.
+  *Update 2026-07-08:* Canary left with ADR-0006, and the vestiges this
+  ADR describes were later deleted — `SelectInput`, the
+  `target_lang`/`target_language` thread, and the translation badge are
+  gone (`source_language` remains; it carries the ADR-0010 language
+  pin). The registry design itself stands; read the input-field
+  references above as point-in-time history.
 
 ## What this ADR explicitly does NOT decide
 

@@ -23,7 +23,7 @@ There is one `Recorder` instance per Python process (`tapscribe/recorder.py`).
 ## Transcriber
 
 The protocol-level abstraction for "something that can transcribe one WAV":
-`transcribe(path, *, initial_prompt, hotwords, source_lang, target_lang) -> TranscriptionResult`.
+`transcribe(path, *, initial_prompt, hotwords, source_lang) -> TranscriptionResult`.
 
 Concrete implementations:
 - `FasterWhisperTranscriber` — faster-whisper / CTranslate2 on CPU **or
@@ -119,7 +119,7 @@ both atomic extras so the runtime can switch". After install the
 runtime side takes over with `BackendKind` / `BackendPreference`
 above; the picker has no presence there.
 
-## ModelInput — TextInput / SelectInput
+## ModelInput — TextInput
 
 The per-model UI form-field declarations the registry attaches to
 each `ModelEntry`. The dashboard reads them from `/api/models` and
@@ -130,18 +130,17 @@ given input ignore the kwarg but echo the value into the result's
 audit fields (`initial_prompt_used`, `hotwords_used`,
 `source_language`).
 
-Two kinds:
-- `TextInput(name, label, kind="text"|"textarea", placeholder,
-  description)` — for `initial_prompt` and `hotwords`.
-- `SelectInput(name, label, options, default, description)` — a
-  dropdown. No shipped model declares one today (Canary's
-  `source_lang`/`target_lang` selects were removed with the family);
-  retained for future use, e.g. an explicit Whisper language pin.
+One kind today: `TextInput(name, label, kind="text"|"textarea",
+placeholder, description)` — for `initial_prompt` and `hotwords`.
+(A `SelectInput` dropdown kind existed for Canary's language selects
+and was deleted with no remaining users — one adapter is a
+hypothetical seam; zero is dead code.)
 
-`ModelInput = TextInput | SelectInput` is the union. New input
-kinds are added by extending the union, adding a renderer in
-`web/js/next/components/engine.js`, and giving them a
-discriminator value in `to_mapping()`.
+`ModelInput = TextInput` is the (degenerate) union. A new input
+kind is added by widening the union, adding a renderer in
+`web/js/next/components/engine.js`, and giving it a
+discriminator value in `to_mapping()` — all in the same PR as the
+model that actually declares it.
 
 ## LiveChannel · WhisperLiveKitChannel
 
@@ -208,15 +207,14 @@ The frozen-dataclass return value of `Transcriber.transcribe(...)`. Carries
 the segments, the joined plain text, the metadata about which transcriber
 + model + device produced it, and the inputs that were in effect
 (`initial_prompt_used`, `hotwords_used`, `source_language`,
-`target_language`, `quality_settings`).
+`quality_settings`).
 
 `source_language` records the language the model was told to expect
-(or auto-detected); `target_language` is non-empty only when a
-translation-capable adapter was asked to translate
-(`source_lang != target_lang`). No shipped adapter translates today
-(Canary was removed — see ADR-0006), but the field + the dashboard's
-translation badge are retained for back-compat with any sidecar cached
-from one that did.
+(the ADR-0010 language pin; empty = the model auto-detected). TapScribe
+does not translate (Canary was removed — see ADR-0006); the Canary-era
+`target_lang`/`target_language` thread and the dashboard's translation
+badge were deleted with it. Old sidecars carrying a `target_language`
+key still load; the key is ignored.
 
 Post-processors (currently just `hallucinations.apply`, possibly future
 PII / phrase-replacement steps) consume a `TranscriptionResult` and
@@ -870,8 +868,8 @@ Two entry points:
   the session loop transcribes everything in range.
 
 Both forms share a `TranscriberInvocation` envelope (initial_prompt,
-hotwords, source_lang, target_lang, hallucination_rules) resolved once
-per request. The prompt/hotwords resolution layers session-meta over
+hotwords, source_lang, candidate_languages, hallucination_rules)
+resolved once per request. The prompt/hotwords resolution layers session-meta over
 the global config files (`config/prompt.txt`, `config/hotwords.txt`);
 an empty session-meta override falls back to the global default.
 

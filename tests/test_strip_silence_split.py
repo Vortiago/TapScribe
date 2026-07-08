@@ -312,7 +312,6 @@ def _fake_sidecar_json(*, text: str, duration: float, wav_start_iso: str | None 
         "hotwords_used": "",
         "quality_settings": {},
         "source_language": "",
-        "target_language": "",
         "wav_size": 0,
         "wav_mtime_ns": 0,
         "transcribed_at": "2026-05-12T09:31:00+00:00",
