@@ -530,9 +530,9 @@ export interface ModelEntry {
   available: boolean;
 }
 
-// Discriminated union of UI form fields each model declares it accepts.
-// Source: tapscribe/transcribers/base.py TextInput / SelectInput .to_mapping().
-export type ModelInput = TextInput | SelectInput;
+// The one UI form-field kind a model can declare it accepts.
+// Source: tapscribe/transcribers/base.py TextInput.to_mapping().
+export type ModelInput = TextInput;
 
 export interface TextInput {
   type: "text";
@@ -540,15 +540,6 @@ export interface TextInput {
   label: string;
   kind: "text" | "textarea";
   placeholder: string;
-  description: string;
-}
-
-export interface SelectInput {
-  type: "select";
-  name: string;
-  label: string;
-  options: { value: string; label: string }[];
-  default: string;
   description: string;
 }
 

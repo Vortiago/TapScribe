@@ -119,7 +119,7 @@ both atomic extras so the runtime can switch". After install the
 runtime side takes over with `BackendKind` / `BackendPreference`
 above; the picker has no presence there.
 
-## ModelInput — TextInput / SelectInput
+## ModelInput — TextInput
 
 The per-model UI form-field declarations the registry attaches to
 each `ModelEntry`. The dashboard reads them from `/api/models` and
@@ -130,18 +130,17 @@ given input ignore the kwarg but echo the value into the result's
 audit fields (`initial_prompt_used`, `hotwords_used`,
 `source_language`).
 
-Two kinds:
-- `TextInput(name, label, kind="text"|"textarea", placeholder,
-  description)` — for `initial_prompt` and `hotwords`.
-- `SelectInput(name, label, options, default, description)` — a
-  dropdown. No shipped model declares one today (Canary's
-  `source_lang`/`target_lang` selects were removed with the family);
-  retained for future use, e.g. an explicit Whisper language pin.
+One kind today: `TextInput(name, label, kind="text"|"textarea",
+placeholder, description)` — for `initial_prompt` and `hotwords`.
+(A `SelectInput` dropdown kind existed for Canary's language selects
+and was deleted with no remaining users — one adapter is a
+hypothetical seam; zero is dead code.)
 
-`ModelInput = TextInput | SelectInput` is the union. New input
-kinds are added by extending the union, adding a renderer in
-`web/js/next/components/engine.js`, and giving them a
-discriminator value in `to_mapping()`.
+`ModelInput = TextInput` is the (degenerate) union. A new input
+kind is added by widening the union, adding a renderer in
+`web/js/next/components/engine.js`, and giving it a
+discriminator value in `to_mapping()` — all in the same PR as the
+model that actually declares it.
 
 ## LiveChannel · WhisperLiveKitChannel
 

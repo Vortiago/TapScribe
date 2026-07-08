@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from tapscribe.transcribers.base import SelectInput, TextInput
+from tapscribe.transcribers.base import TextInput
 from tapscribe.transcribers.catalog import (
     DEFAULT_BATCH_MODEL,
     REGISTRY,
@@ -242,22 +242,6 @@ def test_to_mapping_serialises_text_inputs_with_discriminator():
     assert by_name["initial_prompt"]["kind"] == "textarea"
     assert by_name["hotwords"]["type"] == "text"
     assert by_name["hotwords"]["kind"] == "text"
-
-
-def test_select_input_serialises_with_discriminator():
-    """No registry model declares a SelectInput today (Canary's source/
-    target selects were removed with the family), but the type is kept for
-    future use — pin its serialisation shape directly."""
-    sel = SelectInput(
-        name="source_lang",
-        label="Source language",
-        options=(("en", "English"), ("de", "German")),
-        default="en",
-    )
-    out = sel.to_mapping()
-    assert out["type"] == "select"
-    assert out["default"] == "en"
-    assert {"value": "en", "label": "English"} in out["options"]
 
 
 def test_to_mapping_emits_sorted_backends_and_contexts():

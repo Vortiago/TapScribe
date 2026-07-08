@@ -552,9 +552,6 @@ body::before { display: none; }
    width <select>, grouped by family via <optgroup>, matching the .sel cell. */
 .sel--model { width: 100%; }
 
-.selrow { display: flex; gap: 9px; align-items: flex-end; flex-wrap: wrap; }
-.selfield { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 4px; }
-.selfield label { font-size: 9px; color: var(--fg-3); text-transform: uppercase; letter-spacing: .05em; }
 .sel {
   width: 100%;
   background: var(--bg-0); color: var(--fg-0); border: 1px solid var(--hairline);

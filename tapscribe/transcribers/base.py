@@ -11,7 +11,7 @@ adapter and the sidecar cache build them through the same
 decoder output) and serialise them through `to_mapping`. Decoder
 adapters never hand-roll the field-by-field wiring.
 
-`TextInput` / `SelectInput` describe the per-model UI form fields the
+`TextInput` describes the per-model UI form fields the
 `TranscriberRegistry` declares. The dashboard reads those declarations
 from `/api/models` and renders form fields accordingly; the API call
 forwards only the values the registry says the model accepts.
@@ -180,35 +180,11 @@ class TextInput:
         }
 
 
-@dataclass(frozen=True)
-class SelectInput:
-    """A dropdown (closed enum of choices).
-
-    `options` is a tuple of `(value, label)` pairs. `default` must be one
-    of the option values. No shipped model declares one today (Canary's
-    source/target-lang selects were removed with the family); retained for
-    future use, e.g. an explicit Whisper language pin.
-    """
-
-    name: str
-    label: str
-    options: tuple[tuple[str, str], ...]
-    default: str
-    description: str = ""
-
-    def to_mapping(self) -> dict[str, Any]:
-        return {
-            "type": "select",
-            "name": self.name,
-            "label": self.label,
-            "options": [{"value": v, "label": label} for v, label in self.options],
-            "default": self.default,
-            "description": self.description,
-        }
-
-
-# Discriminated union of every input kind the dashboard knows how to render.
-ModelInput = TextInput | SelectInput
+# The one input kind the dashboard knows how to render. Widen back into a
+# discriminated union (`TextInput | NewKind`) in the same PR that ships a
+# model actually declaring a new kind — the renderer lives in
+# web/js/next/components/engine.js.
+ModelInput = TextInput
 
 
 @runtime_checkable
