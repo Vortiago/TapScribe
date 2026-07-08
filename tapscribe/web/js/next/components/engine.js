@@ -13,17 +13,7 @@
 // matches the classic UI's session-detail model <select>.
 
 import { tpl, pick } from "../../templates.js";
-
-// Family display labels + order — used as <optgroup> labels in the model
-// dropdown, same set + order the classic dashboard uses (session-detail.js
-// FAMILY_LABELS); order here drives the group order in the dropdown.
-/** @type {[string, string][]} */
-const FAMILY_LABELS = [
-  ["whisper", "Whisper"],
-  ["nb-whisper", "NB-Whisper (Norwegian)"],
-  ["voxtral", "Voxtral (Mistral)"],
-  ["parakeet", "Parakeet (NVIDIA)"],
-];
+import { FAMILY_LABELS, buildModelSelect } from "../../model-select.js";
 
 /** @type {Record<string, string>} */
 const BACKEND_LABELS = { auto: "auto", mlx: "mlx", cuda: "cuda", cpu: "cpu" };
@@ -90,44 +80,18 @@ export function render(host, { state, catalog, onChange }) {
   frag.appendChild(row("Backend", chips));
 
   // ---- Model · compact dropdown grouped by family ----
-  // Mirrors session-detail.js buildModelSelect: one <select>, <optgroup> per
-  // family (FAMILY_LABELS order), an "Other" group for unknown families, and
-  // each option labelled "display_name — description" like the classic UI.
+  // Mirrors the classic dashboard's session-detail model <select>: one
+  // <select>, <optgroup> per family (FAMILY_LABELS order), an "Other" group
+  // for unknown families, and each option labelled "display_name —
+  // description". Shared with live-channel.js / settings.js — see #225.
   const candidates = filterByBackend(models, state.backend);
   const sel = /** @type {HTMLSelectElement} */ (tpl("tpl-next-modelsel").firstElementChild);
-  /** @type {Map<string, import('../../types.js').ModelEntry[]>} */
-  const byFamily = new Map();
-  for (const m of candidates) {
-    const fam = m.family || "other";
-    if (!byFamily.has(fam)) byFamily.set(fam, []);
-    (byFamily.get(fam) ?? []).push(m);
-  }
-  /** @param {string} label @param {import('../../types.js').ModelEntry[]} entries */
-  const addGroup = (label, entries) => {
-    const group = document.createElement("optgroup");
-    group.label = label;
-    for (const m of entries) {
-      const txt = m.description ? `${m.display_name || m.model_id} — ${m.description}` : (m.display_name || m.model_id);
-      group.appendChild(new Option(txt, m.model_id, false, m.model_id === state.model));
-    }
-    sel.appendChild(group);
-  };
-  for (const [fam, label] of FAMILY_LABELS) {
-    const entries = byFamily.get(fam);
-    if (!entries?.length) continue;
-    addGroup(label, entries);
-    byFamily.delete(fam);
-  }
-  if (byFamily.size) {
-    /** @type {import('../../types.js').ModelEntry[]} */
-    const rest = [];
-    for (const [, entries] of byFamily) rest.push(...entries);
-    addGroup("Other", rest);
-  }
-  if (!candidates.length) {
-    sel.add(new Option("no models for this backend", "", true, true));
-    sel.disabled = true;
-  }
+  buildModelSelect(sel, candidates, {
+    selected: state.model,
+    familyLabels: FAMILY_LABELS,
+    withDescriptions: true,
+    emptyLabel: "no models for this backend",
+  });
   sel.addEventListener("change", () => {
     if (!sel.value || sel.value === state.model) return;
     onChange({ ...state, model: sel.value });
