@@ -259,7 +259,6 @@ def set_primary_transcript(wav_path: Path, *, backend: str, model: str) -> None:
     target = d / f"{key}.json"
     if not target.is_file():
         raise FileNotFoundError(f"no cached transcript for backend={backend!r}, model={model!r} at {target}")
-    d.mkdir(parents=True, exist_ok=True)
     atomic_write_text(d / _PRIMARY_POINTER, key)
 
 
@@ -457,7 +456,6 @@ def _write_entry(
 ) -> None:
     _migrate_legacy_if_needed(wav_path)
     d = _transcripts_dir(wav_path)
-    d.mkdir(parents=True, exist_ok=True)
     key = _entry_key(backend, model)
     atomic_write_text(
         d / f"{key}.json",
