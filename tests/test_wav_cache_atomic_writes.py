@@ -128,6 +128,9 @@ def test_sidecar_json_survives_a_crash_mid_write(tmp_path: Path, monkeypatch: py
             hallucination_rules=[],
         )
     except OSError:
+        # Expected on the still-buggy code (the fault fired); the fixed
+        # code never opens `target` directly, so no exception is also a
+        # valid outcome here — _assert_never_torn is the real assertion.
         pass
 
     _assert_never_torn(target, state)
@@ -151,6 +154,9 @@ def test_primary_pointer_survives_a_crash_mid_write_on_first_transcribe(
             hallucination_rules=[],
         )
     except OSError:
+        # Expected on the still-buggy code (the fault fired); the fixed
+        # code never opens `target` directly, so no exception is also a
+        # valid outcome here — _assert_never_torn is the real assertion.
         pass
 
     _assert_never_torn(target, state)
@@ -184,6 +190,9 @@ def test_set_primary_transcript_pointer_survives_a_crash_mid_write(
     try:
         set_primary_transcript(wav, backend="faster-whisper", model="small.en")
     except OSError:
+        # Expected on the still-buggy code (the fault fired); the fixed
+        # code never opens `target` directly, so no exception is also a
+        # valid outcome here — _assert_never_torn is the real assertion.
         pass
 
     _assert_never_torn(target, state)
@@ -234,6 +243,9 @@ def test_legacy_migration_primary_pointer_survives_a_crash_mid_write(
             hallucination_rules=[],
         )
     except OSError:
+        # Expected on the still-buggy code (the fault fired); the fixed
+        # code never opens `target` directly, so no exception is also a
+        # valid outcome here — _assert_never_torn is the real assertion.
         pass
 
     _assert_never_torn(target, state)

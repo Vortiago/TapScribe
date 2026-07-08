@@ -104,6 +104,9 @@ async def test_session_transcript_json_survives_a_crash_mid_write(recorder_under
         try:
             await transcribe_session_locked(_session_request(), selection=selection, job=handle)
         except OSError:
+            # Expected on the still-buggy code (the fault fired); the fixed
+            # code never opens `target` directly, so no exception is also a
+            # valid outcome here — _assert_never_torn is the real assertion.
             pass
 
     _assert_never_torn(target, state)
@@ -127,6 +130,9 @@ async def test_session_transcript_txt_survives_a_crash_mid_write(recorder_under_
         try:
             await transcribe_session_locked(_session_request(), selection=selection, job=handle)
         except OSError:
+            # Expected on the still-buggy code (the fault fired); the fixed
+            # code never opens `target` directly, so no exception is also a
+            # valid outcome here — _assert_never_torn is the real assertion.
             pass
 
     _assert_never_torn(target, state)
