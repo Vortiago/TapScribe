@@ -323,6 +323,7 @@ class TapFanOut:
                     bytes_received=self._bytes_received,
                     record=self._do_record,
                     live=self._do_live,
+                    session=self._session,
                 )
             )
 
