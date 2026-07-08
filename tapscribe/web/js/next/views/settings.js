@@ -25,15 +25,7 @@ import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 import { header } from "../shell.js";
 import * as configCard from "../../components/config-card.js";
-
-// Live model family labels + order — same set the classic live-channel panel
-// uses (only families with live-eligible models).
-/** @type {[string, string][]} */
-const LIVE_FAMILY_LABELS = [
-  ["whisper", "Whisper"],
-  ["nb-whisper", "NB-Whisper (Norwegian)"],
-  ["voxtral", "Voxtral (Mistral)"],
-];
+import { LIVE_FAMILY_LABELS, buildModelSelect } from "../../model-select.js";
 
 /**
  * @param {{
@@ -183,7 +175,8 @@ export function build(ctx) {
     finally { afterMutate(); }
   };
 
-  /** Build the compact live-model <select> row (grouped by family). */
+  /** Build the compact live-model <select> row (grouped by family, shared
+   * with the classic live-channel panel and the Stages engine picker — #225). */
   /** @param {string} selected */
   const buildModelRow = (selected) => {
     const row = tpl("tpl-next-eng-row");
@@ -191,37 +184,12 @@ export function build(ctx) {
     const sel = /** @type {HTMLSelectElement} */ (tpl("tpl-next-modelsel").firstElementChild);
     sel.id = "nextLiveModelSelect";
     const models = liveCatalog?.models || [];
-    /** @type {Map<string, import('../../types.js').ModelEntry[]>} */
-    const byFamily = new Map();
-    for (const m of models) {
-      if (!byFamily.has(m.family)) byFamily.set(m.family, []);
-      (byFamily.get(m.family) ?? []).push(m);
-    }
-    let found = false;
-    /** @param {string} label @param {import('../../types.js').ModelEntry[]} entries */
-    const addGroup = (label, entries) => {
-      const og = document.createElement("optgroup");
-      og.label = label;
-      for (const m of entries) {
-        og.appendChild(new Option(m.display_name || m.model_id, m.model_id, false, m.model_id === selected));
-        if (m.model_id === selected) found = true;
-      }
-      sel.appendChild(og);
-    };
-    for (const [fam, label] of LIVE_FAMILY_LABELS) {
-      const entries = byFamily.get(fam);
-      if (!entries?.length) continue;
-      addGroup(label, entries);
-      byFamily.delete(fam);
-    }
-    if (byFamily.size) {
-      /** @type {import('../../types.js').ModelEntry[]} */
-      const rest = [];
-      for (const [, entries] of byFamily) rest.push(...entries);
-      addGroup("Other", rest);
-    }
-    if (!found && selected) sel.add(new Option(`${selected} (unregistered)`, selected, false, true));
-    if (!models.length) { sel.add(new Option("no live models", "", true, true)); sel.disabled = true; }
+    buildModelSelect(sel, models, {
+      selected,
+      familyLabels: LIVE_FAMILY_LABELS,
+      unregisteredFallback: true,
+      emptyLabel: "no live models",
+    });
     // blur() so the per-tick renderRegion no longer sees the <select> focused
     // and rebuilds the card (revealing "restart to apply" for the new model).
     sel.addEventListener("change", () => { if (sel.value) { sel.blur(); saveLiveModel(sel.value); } });

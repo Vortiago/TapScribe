@@ -5,16 +5,7 @@
 
 import { tpl, pick, renderRegion, selectionInside } from "../templates.js";
 import { wireConfigSave } from "../api.js";
-
-// Display labels for model families — used as <optgroup> labels in the live
-// model select. Mirrors session-detail.js's FAMILY_LABELS but trimmed to
-// the families that have live-eligible models today.
-/** @type {[string, string][]} */
-const LIVE_FAMILY_LABELS = [
-  ["whisper", "Whisper"],
-  ["nb-whisper", "NB-Whisper (Norwegian)"],
-  ["voxtral", "Voxtral (Mistral)"],
-];
+import { LIVE_FAMILY_LABELS, buildModelSelect } from "../model-select.js";
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let logDialogPoll = null;
@@ -102,46 +93,17 @@ function buildBody(j, { onAction, liveCatalog }) {
   const langInput = /** @type {HTMLInputElement} */ (frag.querySelector("#liveLangInput"));
   const currentModel = li.model || "tiny.en";
 
-  // Group live-eligible models by family (Whisper / NB-Whisper / …). If
-  // the currently-running model isn't in the catalog (operator pinned an
-  // unrecognised name via --live-model), surface it as an "Other" entry
-  // so the dropdown still reflects what's actually running.
+  // Group live-eligible models by family (Whisper / NB-Whisper / …), shared
+  // with the Stages engine/settings pickers — see #225. If the currently-
+  // running model isn't in the catalog (operator pinned an unrecognised name
+  // via --live-model), buildModelSelect's unregisteredFallback keeps it
+  // visible so the dropdown still reflects what's actually running.
   const models = liveCatalog?.models || [];
-  const byFamily = new Map();
-  for (const m of models) {
-    if (!byFamily.has(m.family)) byFamily.set(m.family, []);
-    byFamily.get(m.family).push(m);
-  }
-  let foundCurrent = false;
-  for (const [fam, label] of LIVE_FAMILY_LABELS) {
-    const entries = byFamily.get(fam);
-    if (!entries?.length) continue;
-    const group = document.createElement("optgroup");
-    group.label = label;
-    for (const m of entries) {
-      const opt = new Option(m.display_name, m.model_id, false, m.model_id === currentModel);
-      group.appendChild(opt);
-      if (m.model_id === currentModel) foundCurrent = true;
-    }
-    sel.appendChild(group);
-    byFamily.delete(fam);
-  }
-  if (byFamily.size) {
-    const group = document.createElement("optgroup");
-    group.label = "Other";
-    for (const [, entries] of byFamily) {
-      for (const m of entries) {
-        group.appendChild(new Option(m.display_name, m.model_id, false, m.model_id === currentModel));
-        if (m.model_id === currentModel) foundCurrent = true;
-      }
-    }
-    sel.appendChild(group);
-  }
-  if (!foundCurrent && currentModel) {
-    // Operator-pinned model not in the catalog — keep it visible so they
-    // see what's actually running, prefixed to make the gap obvious.
-    sel.add(new Option(`${currentModel} (unregistered)`, currentModel, false, true));
-  }
+  buildModelSelect(sel, models, {
+    selected: currentModel,
+    familyLabels: LIVE_FAMILY_LABELS,
+    unregisteredFallback: true,
+  });
   langInput.value = li.language || "en";
 
   // Speech-gate form: kind selector + three knob inputs. The "backend"
