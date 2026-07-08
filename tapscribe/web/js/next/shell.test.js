@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { header, headerNeedsRender } from "./shell.js";
+import { header, headerNeedsRender, nextRecordingEnabled } from "./shell.js";
 
 test("headerNeedsRender rebuilds on the first sig for a fresh host, then skips a repeat", () => {
   const host = {};
@@ -81,4 +81,20 @@ test("header() calls sub.build() when the sig changes (real rebuild)", () => {
     // Irrelevant here: we only assert build() was reached on the real change.
   }
   assert.equal(calls, 1);
+});
+
+// --- nextRecordingEnabled: the recording pill's toggle target, factored out
+// of wireRecPill (shared by Capture and Taps) so the branching is
+// unit-testable without a DOM. "Armed" (recording_enabled true, or unset,
+// which defaults to armed) always targets false; explicitly paused targets
+// true.
+
+test("nextRecordingEnabled targets false when currently armed (default/unset/true)", () => {
+  assert.equal(nextRecordingEnabled(null), false);
+  assert.equal(nextRecordingEnabled({}), false);
+  assert.equal(nextRecordingEnabled({ recording_enabled: true }), false);
+});
+
+test("nextRecordingEnabled targets true when currently explicitly paused", () => {
+  assert.equal(nextRecordingEnabled({ recording_enabled: false }), true);
 });

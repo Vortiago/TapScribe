@@ -18,8 +18,7 @@
 // doesn't collide with Capture's.
 
 import { tpl, pick } from "../../templates.js";
-import { putJson, postJson } from "../../api.js";
-import { header, strong, inline } from "../shell.js";
+import { header, strong, inline, wireRecPill } from "../shell.js";
 import * as activeTaps from "../../components/active-taps.js";
 import * as liveChannel from "../../components/live-channel.js";
 
@@ -52,31 +51,8 @@ export function build(ctx) {
   /** @type {import('../../types.js').AppState | null} */
   let latest = null;
 
-  // Delegated rec/live toggle → PUT /api/tap-settings (same contract as the
-  // classic dashboard's #activeTapsBody handler + Capture's). Bound once.
-  activeTapsCtx.bodyEl.addEventListener("click", async (ev) => {
-    const btn = /** @type {HTMLButtonElement | null} */ (
-      /** @type {Element | null} */ (ev.target)?.closest(".tap-toggle"));
-    if (!btn || btn.disabled) return;
-    const identity = btn.dataset.identity;
-    const which = btn.dataset.toggle;
-    if (!identity || !which) return;
-    const next = btn.dataset.state !== "1";
-    btn.dataset.state = next ? "1" : "0";
-    btn.classList.toggle("on", next);
-    btn.disabled = true;
-    try { await putJson("/api/tap-settings", { identity, [which]: next }); }
-    catch (e) { alert(`Tap setting toggle failed: ${e}`); }
-    finally { btn.disabled = false; afterMutate(); }
-  });
-
-  recPill.addEventListener("click", async () => {
-    const enabled = !((latest?.recording_enabled ?? true) !== false);
-    recPill.disabled = true;
-    try { await postJson("/api/recording/toggle", { enabled }); }
-    catch (e) { alert(`Recording toggle failed: ${e}`); }
-    finally { recPill.disabled = false; afterMutate(); }
-  });
+  activeTaps.wireToggles(activeTapsCtx.bodyEl, { afterMutate });
+  wireRecPill(recPill, () => latest, { afterMutate });
 
   /**
    * @param {import('../../types.js').AppState} j

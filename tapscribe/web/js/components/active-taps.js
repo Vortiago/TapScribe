@@ -5,6 +5,7 @@
 import { tpl, mount, pick, deferIfSelectionInside } from "../templates.js";
 import { speakerIndex } from "../speakers.js";
 import { fmtBytes, fmtDur, truncMid } from "../formatters.js";
+import { putJson } from "../api.js";
 
 // Per-host render state, keyed by bodyEl (NOT module scope — active-taps renders
 // into several hosts at once on /next: the global rail + the Taps view, so a
@@ -183,4 +184,48 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
       st.rows.delete(id);
     }
   }
+}
+
+/**
+ * Compute the tap-settings PUT intent for a `.tap-toggle` button, or null
+ * when the click should be ignored (disabled, or missing identity/kind).
+ * Pure — no DOM writes — so the validation + next-value branching is
+ * unit-testable without a DOM (node --test).
+ * @param {{ disabled: boolean, dataset: { identity?: string, toggle?: string, state?: string } }} btn
+ * @returns {{ identity: string, which: string, next: boolean } | null}
+ */
+export function toggleIntent(btn) {
+  if (btn.disabled) return null;
+  const identity = btn.dataset.identity;
+  const which = btn.dataset.toggle;
+  if (!identity || !which) return null;
+  return { identity, which, next: btn.dataset.state !== "1" };
+}
+
+/**
+ * Wire the delegated rec/live toggle click handler onto a host that renders
+ * rows via render() above. Bind ONCE per host — render() keys its row state
+ * by `bodyEl` because active-taps mounts into several hosts at once (the
+ * global rail + the Taps view), and a delegated listener on the parent
+ * survives every per-tick row swap, so this only needs binding once too.
+ * Flips the visual state immediately so the click feels responsive; the next
+ * poll repaints from the authoritative state.
+ * @param {HTMLElement} bodyEl
+ * @param {{ afterMutate: () => void }} ctx
+ */
+export function wireToggles(bodyEl, { afterMutate }) {
+  bodyEl.addEventListener("click", async (ev) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (
+      /** @type {Element | null} */ (ev.target)?.closest(".tap-toggle"));
+    if (!btn) return;
+    const intent = toggleIntent(btn);
+    if (!intent) return;
+    const { identity, which, next } = intent;
+    btn.dataset.state = next ? "1" : "0";
+    btn.classList.toggle("on", next);
+    btn.disabled = true;
+    try { await putJson("/api/tap-settings", { identity, [which]: next }); }
+    catch (e) { alert(`Tap setting toggle failed: ${e}`); }
+    finally { btn.disabled = false; afterMutate(); }
+  });
 }

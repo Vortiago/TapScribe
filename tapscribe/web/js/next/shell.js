@@ -3,6 +3,7 @@
 // modules stay untouched — see the Phase-1 brief. Pure DOM + template glue.
 
 import { tpl, pick } from "../templates.js";
+import { postJson } from "../api.js";
 
 /** The Stages views. GLOBAL group is pinned + un-numbered; the THIS SESSION
  * group is the numbered Capture → Recordings → Transcript → Summary journey. */
@@ -183,6 +184,36 @@ export function placeholderView(root, { eyebrow, title, sub, icon, heading, deta
   pick(body, "detail").textContent = detail;
   root.replaceChildren(headHost, body);
   header(headHost, { eyebrow, title, sub });
+}
+
+/**
+ * The recording-enabled pill's toggle target: the opposite of the current
+ * effective state (armed by default when unset). Pure — factored out of
+ * wireRecPill so the branching is unit-testable without a DOM.
+ * @param {import('../types.js').AppState | null} state
+ */
+export function nextRecordingEnabled(state) {
+  return !((state?.recording_enabled ?? true) !== false);
+}
+
+/**
+ * Wire the recording-enabled pill (● recording / ⏸ paused), shared by the
+ * Capture and Taps views (same contract in both: POST
+ * /api/recording/toggle, then afterMutate()). `getState` reads the calling
+ * view's latest poll snapshot at click time, via a closure over its own
+ * `latest` variable, so the toggle always flips from the current value.
+ * @param {HTMLButtonElement} btn
+ * @param {() => import('../types.js').AppState | null} getState
+ * @param {{ afterMutate: () => void }} ctx
+ */
+export function wireRecPill(btn, getState, { afterMutate }) {
+  btn.addEventListener("click", async () => {
+    const enabled = nextRecordingEnabled(getState());
+    btn.disabled = true;
+    try { await postJson("/api/recording/toggle", { enabled }); }
+    catch (e) { alert(`Recording toggle failed: ${e}`); }
+    finally { btn.disabled = false; afterMutate(); }
+  });
 }
 
 /**

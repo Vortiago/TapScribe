@@ -5605,6 +5605,139 @@ async def test_capture_recording_toggle_and_clear_captions(
             await browser.close()
 
 
+async def test_taps_toggle_and_recording_pill_wired_in_both_hosts(
+    running_recorder: RunningRecorder,
+    tmp_path: Path,
+):
+    """Issue #253: the `.tap-toggle` click delegation used to be copy-pasted
+    onto TWO separate DOM hosts (the global rail in main.js + the Taps view's
+    own row list in taps.js), and the recording pill's click handler was
+    copy-pasted across Capture + Taps. Neither was ever driven by a UI-level
+    test — this pins the consolidated `activeTaps.wireToggles` /
+    `wireRecPill` helpers actually work on every host they're bound to.
+
+    A single streamed tap (identity "alice") stays open long enough to
+    interact with. `/api/state`'s `active[].record`/`.live` mirror the LIVE
+    per-identity preference on every poll (app.py `api_state`), not a
+    connection-open-time snapshot, so a toggle click's effect is visible via
+    a fresh GET even while the WS is still streaming.
+    """
+    base = running_recorder.base_url
+    ws_base = running_recorder.ws_base_url
+    wav = synth_speech_like_wav(tmp_path / "alice.wav", seconds=10.0, freq_hz=220.0)
+
+    async def active_alice() -> dict | None:
+        async with httpx.AsyncClient(base_url=base) as client:
+            state = (await client.get("/api/state")).json()
+        return next((a for a in state.get("active", []) if a.get("identity") == "alice"), None)
+
+    async def record_is(value: bool) -> bool:
+        a = await active_alice()
+        return bool(a) and a["record"] is value
+
+    async def live_is(value: bool) -> bool:
+        a = await active_alice()
+        return bool(a) and a["live"] is value
+
+    async def recording_enabled() -> bool:
+        async with httpx.AsyncClient(base_url=base) as client:
+            return (await client.get("/api/state")).json().get("recording_enabled")
+
+    async def recording_is(value: bool) -> bool:
+        return await recording_enabled() is value
+
+    rail_toggle = '#tapsRailBody .tap-toggle[data-toggle="record"]'
+    taps_body_toggle = '#viewRoot [data-slot="activeTapsBody"] .tap-toggle[data-toggle="live"]'
+    taps_rec_pill = '#viewRoot [data-slot="recPill"]'
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#capture", wait_until="domcontentloaded")
+
+            alice_task = asyncio.create_task(
+                stream_wav_via_tap(
+                    ws_base_url=ws_base,
+                    identity="alice",
+                    name="Alice",
+                    wav_path=wav,
+                    utterance_id="utt-toggle-ui",
+                    frame_interval_s=0.02,
+                )
+            )
+            try:
+                # --- Rail host (main.js): record toggle, on the default view. ---
+                await page.wait_for_selector(rail_toggle, timeout=8000)
+                assert (await active_alice())["record"] is True, "record defaults on"
+
+                await page.locator(rail_toggle).click()
+                await page.wait_for_function(
+                    f"""() => !document.querySelector('{rail_toggle}')?.classList.contains('on')""",
+                    timeout=8000,
+                )
+                assert await wait_until(lambda: record_is(False), timeout=5.0), (
+                    "rail toggle click must PUT /api/tap-settings and flip record off"
+                )
+
+                await page.locator(rail_toggle).click()
+                await page.wait_for_function(
+                    f"""() => document.querySelector('{rail_toggle}')?.classList.contains('on')""",
+                    timeout=8000,
+                )
+                assert await wait_until(lambda: record_is(True), timeout=5.0), (
+                    "a second rail toggle click must re-arm record"
+                )
+
+                # --- Taps view's own host (taps.js): a DIFFERENT DOM host than
+                # the rail, per active-taps.js's per-host WeakMap render state.
+                # window.gotoView is the app's own client-side router (exposed
+                # for automation) — a plain hash-only page.goto would NOT switch
+                # the mounted view, since main.js resolves the hash once at load
+                # and never wires a hashchange listener.
+                await page.evaluate("() => window.gotoView('taps')")
+                await page.wait_for_selector(taps_body_toggle, timeout=8000)
+
+                await page.locator(taps_body_toggle).click()
+                await page.wait_for_function(
+                    f"""() => !document.querySelector('{taps_body_toggle}')?.classList.contains('on')""",
+                    timeout=8000,
+                )
+                assert await wait_until(lambda: live_is(False), timeout=5.0), (
+                    "the Taps view's OWN toggle host must also PUT /api/tap-settings"
+                )
+
+                # --- Taps view's recording pill (shell.js wireRecPill), the
+                # other duplicated-then-shared handler from the same issue.
+                assert await recording_enabled() is True
+                await page.locator(taps_rec_pill).click()
+                await page.wait_for_function(
+                    f"""() => document.querySelector('{taps_rec_pill}')?.classList.contains('is-paused')""",
+                    timeout=8000,
+                )
+                assert await wait_until(lambda: recording_is(False), timeout=5.0), (
+                    "Taps recPill click must pause recording"
+                )
+
+                await page.locator(taps_rec_pill).click()
+                await page.wait_for_function(
+                    f"""() => document.querySelector('{taps_rec_pill}')?.classList.contains('is-on')""",
+                    timeout=8000,
+                )
+                assert await wait_until(lambda: recording_is(True), timeout=5.0), (
+                    "a second Taps recPill click must re-arm recording"
+                )
+            finally:
+                await alice_task
+        finally:
+            await browser.close()
+
+
 async def test_recordings_delete_single_wav_removes_row_and_file(
     running_recorder: RunningRecorder,
 ):
