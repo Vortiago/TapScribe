@@ -45,7 +45,7 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
 
 import websockets  # noqa: E402
 
-from .harness import launch_bridge_context, playwright_session, wait_until  # noqa: E402
+from .harness import WAIT_POLLING_MS, launch_bridge_context, playwright_session, wait_until  # noqa: E402
 
 pytestmark = pytest.mark.browser_e2e
 
@@ -283,10 +283,12 @@ async def loaded_bridge(fake_tap_server: FakeTapServer) -> AsyncIterator[LoadedE
                 await page.wait_for_function(
                     "typeof window.__tsTest === 'object'",
                     timeout=5000,
+                    polling=WAIT_POLLING_MS,
                 )
                 await page.wait_for_function(
                     "!!document.getElementById('__tapscribe_indicator_host__')",
                     timeout=5000,
+                    polling=WAIT_POLLING_MS,
                 )
                 yield LoadedExtension(ctx=ctx, page=page, ext_id=ext_id)
             finally:
@@ -379,6 +381,7 @@ async def wait_for_pill_kind(page, kind: str, *, timeout_ms: int = 5000) -> None
         }}
         """,
         timeout=timeout_ms,
+        polling=WAIT_POLLING_MS,
     )
 
 
@@ -463,6 +466,7 @@ async def test_pill_transitions_idle_to_ok_to_warn_on_tap_drop(
         }
         """,
         timeout=8000,
+        polling=WAIT_POLLING_MS,
     )
     pill = await read_pill(page)
     assert pill["kind"] in ("warn", "err"), f"post-drop pill must be warn/err, got {pill}"
@@ -539,6 +543,7 @@ async def test_room_disconnect_cleans_up_audio_and_presence_only_taps(
             }
             """,
             timeout=5000,
+            polling=WAIT_POLLING_MS,
         )
     finally:
         await popup.close()
@@ -860,6 +865,7 @@ async def test_closed_spatialchat_tab_flips_popup_to_no_active_tab(
             }
             """,
             timeout=5000,
+            polling=WAIT_POLLING_MS,
         )
 
         # Close the SpatialChat tab: content.js stops refreshing `ts`, so the
@@ -876,6 +882,7 @@ async def test_closed_spatialchat_tab_flips_popup_to_no_active_tab(
             }
             """,
             timeout=12000,
+            polling=WAIT_POLLING_MS,
         )
     finally:
         await popup.close()

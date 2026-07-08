@@ -47,7 +47,7 @@ from playwright.async_api import async_playwright  # noqa: E402
 
 from tapscribe.text import build_recorder_wav_name  # noqa: E402
 
-from .harness import launch_bridge_context, word_tokens  # noqa: E402
+from .harness import WAIT_POLLING_MS, launch_bridge_context, word_tokens  # noqa: E402
 
 pytestmark = [pytest.mark.browser_e2e, pytest.mark.real_audio]
 
@@ -252,7 +252,7 @@ async def _open_meeting(ctx, recorder, *, fixture_index, fixture_mock, speech_b6
 
     await page.route("https://app.spatial.chat/**", route_handler)
     await page.goto("https://app.spatial.chat/test/room")
-    await page.wait_for_function("typeof window.__tsTest === 'object'", timeout=5000)
+    await page.wait_for_function("typeof window.__tsTest === 'object'", timeout=5000, polling=WAIT_POLLING_MS)
 
     popup = await ctx.new_page()
     await popup.goto(f"chrome-extension://{ext_id}/popup.html")
@@ -263,6 +263,7 @@ async def _open_meeting(ctx, recorder, *, fixture_index, fixture_mock, speech_b6
           return typeof meetingSessionId === 'string' && meetingSessionId.length > 0;
         }""",
         timeout=8000,
+        polling=WAIT_POLLING_MS,
     )
     sess = await popup.evaluate(
         "async () => (await chrome.storage.local.get(['meetingSessionId'])).meetingSessionId"
