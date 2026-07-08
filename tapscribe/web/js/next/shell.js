@@ -1,8 +1,11 @@
 // @ts-check
 // Stages-only shared helpers. New file under js/next/ so the existing shared
-// modules stay untouched — see the Phase-1 brief. Pure DOM + template glue.
+// modules stay untouched — see the Phase-1 brief. Mostly pure DOM + template
+// glue, plus a couple of shared click-to-mutate wirings (wireRecPill) that
+// don't warrant their own module.
 
 import { tpl, pick } from "../templates.js";
+import { postJson, mutateButton } from "../api.js";
 
 /** The Stages views. GLOBAL group is pinned + un-numbered; the THIS SESSION
  * group is the numbered Capture → Recordings → Transcript → Summary journey. */
@@ -183,6 +186,50 @@ export function placeholderView(root, { eyebrow, title, sub, icon, heading, deta
   pick(body, "detail").textContent = detail;
   root.replaceChildren(headHost, body);
   header(headHost, { eyebrow, title, sub });
+}
+
+/**
+ * The recording-enabled pill's toggle target: the opposite of the current
+ * effective state (armed by default when unset, so only an explicit `false`
+ * targets `true`). Pure — factored out of wireRecPill so the branching is
+ * unit-testable without a DOM.
+ * @param {import('../types.js').AppState | null} state
+ */
+export function nextRecordingEnabled(state) {
+  return state?.recording_enabled === false;
+}
+
+/**
+ * Wire the recording-enabled pill (● recording / ⏸ paused), shared by the
+ * Capture and Taps views (same contract in both: POST
+ * /api/recording/toggle, then afterMutate()). `getState` reads the calling
+ * view's latest poll snapshot at click time, via a closure over its own
+ * `latest` variable, so the toggle always flips from the current value.
+ * @param {HTMLButtonElement} btn
+ * @param {() => import('../types.js').AppState | null} getState
+ * @param {{ afterMutate: () => void }} ctx
+ */
+export function wireRecPill(btn, getState, { afterMutate }) {
+  btn.addEventListener("click", () => {
+    const enabled = nextRecordingEnabled(getState());
+    mutateButton(btn, () => postJson("/api/recording/toggle", { enabled }), {
+      afterMutate,
+      failMessage: (e) => `Recording toggle failed: ${e}`,
+    });
+  });
+}
+
+/**
+ * Paint the recording-enabled pill's label + state classes, shared by the
+ * Capture and Taps views (both compute `enabled` the same way:
+ * `j.recording_enabled !== false`).
+ * @param {HTMLButtonElement} btn
+ * @param {boolean} enabled
+ */
+export function paintRecPill(btn, enabled) {
+  btn.textContent = enabled ? "● recording" : "⏸ paused";
+  btn.classList.toggle("is-on", enabled);
+  btn.classList.toggle("is-paused", !enabled);
 }
 
 /**

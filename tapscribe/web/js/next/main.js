@@ -260,10 +260,9 @@ const applyLiveModel = async (model) => {
 // ---- Active-taps rail -------------------------------------------------------
 // The global, collapsible right rail. Hosts the reused active-taps component
 // on every view (Capture used to own it; now it lives here so the operator
-// sees live taps everywhere). The delegated rec/live toggle handler is bound
-// ONCE on the rail body — the body re-renders each tick, but a delegated click
-// on the parent survives every swap (same contract as the classic dashboard's
-// #activeTapsBody handler and the one Capture previously carried).
+// sees live taps everywhere). The rec/live toggle click delegation is wired
+// via activeTaps.wireToggles (bound ONCE on the rail body — see its own
+// docs), the same helper the Taps view's own row list uses for its host.
 
 const RAIL_HIDDEN_KEY = "tapscribe.next.tapsRailHidden";
 
@@ -278,24 +277,7 @@ function railContext() {
       badgeEl: pick($("tapsRail"), "activeTapsBadge"),
       bodyEl: $("tapsRailBody"),
     };
-    // Delegated rec/live toggle → PUT /api/tap-settings, then refresh(). Flip
-    // the visual state immediately so the click feels responsive; the next
-    // poll repaints from the authoritative state.
-    railCtx.bodyEl.addEventListener("click", async (ev) => {
-      const btn = /** @type {HTMLButtonElement | null} */ (
-        /** @type {Element | null} */ (ev.target)?.closest(".tap-toggle"));
-      if (!btn || btn.disabled) return;
-      const identity = btn.dataset.identity;
-      const which = btn.dataset.toggle;
-      if (!identity || !which) return;
-      const next = btn.dataset.state !== "1";
-      btn.dataset.state = next ? "1" : "0";
-      btn.classList.toggle("on", next);
-      btn.disabled = true;
-      try { await putJson("/api/tap-settings", { identity, [which]: next }); }
-      catch (e) { alert(`Tap setting toggle failed: ${e}`); }
-      finally { btn.disabled = false; await refresh(); }
-    });
+    activeTaps.wireToggles(railCtx.bodyEl, { afterMutate: () => { refresh(); } });
   }
   return railCtx;
 }
