@@ -3,7 +3,7 @@
 Local transcription recorder and operator dashboard.
 
 TapScribe records one WAV per utterance per speaker over a WebSocket, runs
-Whisper (or Voxtral) batch transcription on demand, and supervises a
+Whisper, Voxtral, or Parakeet batch transcription on demand, and supervises a
 [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) child process
 for live captions. Nothing leaves the machine.
 
@@ -16,6 +16,13 @@ A FastAPI app serves a REST API and a dashboard at `/`:
   segments are kept in an audit array.
 - Optional silero-VAD pass writes trimmed copies to `<session>/stripped/`.
   Originals are not touched.
+- Summarize a session's merged transcript — bundled local model, an
+  operator CLI, or an OpenAI-compatible API — and persist the result.
+- End-of-meeting pipeline: strip → transcribe → summarize as one job, so a
+  Bridge can take a session from raw WAVs to a summary with no operator
+  in the loop.
+- People registry: a cross-session identity → display-name map, with
+  merge/detach, so the same speaker keeps one name across meetings.
 
 Audio reaches TapScribe via a *bridge*: usually a browser extension that taps
 the meeting platform's audio tracks and forwards raw PCM over WebSocket. The
@@ -67,8 +74,9 @@ printed:
 - A `/tap` bearer token for the bridge, persisted to `.tap-token`. Paste it
   into the bridge popup along with the host and port.
 
-Rotate with `--rotate-password` or `--rotate-tap-token`. Pass `--tls` to serve
-`https://` and `wss://`; a self-signed cert is generated on first boot
+Rotate with `.venv/bin/tapscribe --rotate-password` or `--rotate-tap-token`
+(these are `tapscribe` flags, not `start.sh` flags). Pass `--tls` to `start.sh`
+to serve `https://` and `wss://`; a self-signed cert is generated on first boot
 (`.tapscribe-cert.pem`, `.tapscribe-key.pem`) and reused after. Supply your
 own with `--cert <path> --key <path>`.
 
@@ -81,14 +89,20 @@ own with `--cert <path> --key <path>`.
 
 ## Configuration
 
-Three text files under `config/` shape every job. All are re-read on every
-job.
+Eight files under `config/` shape transcription, live captions, and
+summarization; all are re-read on every job. Most are editable from the
+dashboard's Settings view instead of by hand.
 
-| File | Whisper feature | Format |
+| File | Shapes | Format |
 |---|---|---|
-| `config/prompt.txt` | `initial_prompt` | Prose under ~150 words. Biases style and vocabulary. |
-| `config/hotwords.txt` | `hotwords` | Comma- or space-separated proper nouns. Stronger than `initial_prompt` for names. faster-whisper only. |
+| `config/prompt.txt` | Batch `initial_prompt` | Prose under ~150 words. Biases style and vocabulary. |
+| `config/hotwords.txt` | Batch `hotwords` | Comma- or space-separated proper nouns. faster-whisper only. |
 | `config/hallucinations.txt` | Post-decode suppression | substring, `exact:`, or `re:`. Matches are kept in an audit array. |
+| `config/live-prompt.txt` | Live `--init-prompt` | Same prose format; independent of `prompt.txt`. |
+| `config/live-model.txt` | Default live-channel model | Model id; the live channel adopts it on (re)start. |
+| `config/batch-model.txt` | Default batch model (generalist) | Model id; what the end-of-meeting pipeline transcribes with. |
+| `config/languages.txt` | Candidate languages (ADR-0010) | Comma-separated ISO codes; default `da,no,en`. |
+| `config/summarizer.json` | Default summarizer | JSON: source, command/model/base_url, prompt. `api_key` is write-only. |
 
 Templates: `config/prompt.example.txt`, `config/hotwords.example.txt`.
 `config/hallucinations.txt` ships with rules for common YouTube-trained
@@ -117,7 +131,7 @@ flowchart LR
     Backend -- "forwards PCM" --> WLK
     WLK -- "settled live captions" --> Backend
     Backend -- "one WAV per utterance" --> WAVs
-    Operator <-- "HTTPS + dashboard WS" --> Backend
+    Operator <-- "HTTPS (500 ms /api/state poll)" --> Backend
 ```
 
 - **Bridges** tap a meeting platform's audio and stream raw PCM to `/tap`.
@@ -166,15 +180,32 @@ sequenceDiagram
     T->>R: close
 ```
 
+## After the meeting
+
+- **Summarize** (`POST /api/sessions/{session}/summarize`) turns a session's
+  merged transcript into a summary via a bundled local model, an operator
+  CLI (`command`), or an OpenAI-compatible API (`api`, e.g. Ollama). The
+  summary and the operator's default source/model/prompt both persist
+  (`session-summary.json`, `config/summarizer.json`).
+- **End-of-meeting pipeline** (`POST`/`GET /api/tap/sessions/{session}/pipeline`)
+  chains strip → transcribe → summarize as one job. A Bridge triggers it
+  and polls it with the tap bearer token — no dashboard needed.
+- **People** (`/api/people*`) is the cross-session identity → display-name
+  registry: every new speaker auto-gets a Person, merge/detach combine or
+  split them, and a per-session alias can override the name for one meeting.
+
+See [CONTEXT.md](CONTEXT.md) for the full model (Bracketed meeting, Detached
+session, Person/Identity/Roster).
+
 ## Backends
 
-| Model | Backend | Languages | Notes |
-|---|---|---|---|
-| `tiny.en` / `small.en` / `medium.en` | mlx-whisper (AS) / faster-whisper | English | Fast English-only models. |
-| `large-v3-turbo` | mlx-whisper (AS) / faster-whisper | Multilingual | The default generalist (ADR-0010) — multilingual so da/no auto-detect works. |
-| `large-v3` | mlx-whisper (AS) / faster-whisper | Multilingual | MLX or CUDA; CPU is slow. |
-| `nb-whisper-medium` / `nb-whisper-large` | faster-whisper on CT2 weights | Norwegian | Pulled from `NbAiLab/nb-whisper-*/ct2/`. No MLX. |
-| `voxtral-mini` | HF transformers | EN/ES/FR/PT/HI/DE/NL/IT | First load downloads ~6 GB. Best on CUDA. |
+| Family | Models | Backend | Languages | Notes |
+|---|---|---|---|---|
+| Whisper | `tiny(.en)`/`base(.en)`/`small(.en)`/`medium(.en)`, `large-v3`, `large-v3-turbo` | mlx-whisper (AS) / faster-whisper | English-only suffixes; else multilingual | `large-v3-turbo` is the default generalist (ADR-0010). |
+| NB-Whisper | `nb-whisper-tiny`/`base`/`small`/`medium`/`large` | faster-whisper on CT2 weights | Norwegian | Pulled from `NbAiLab/nb-whisper-*/ct2/`. No MLX. |
+| Voxtral | `voxtral-mini` | mlx-voxtral (AS) / HF transformers | EN/ES/FR/PT/HI/DE/NL/IT | Batch-only (no live channel yet). First load downloads ~6 GB. |
+| Parakeet | `parakeet-tdt-0.6b-v3` | parakeet-mlx (AS) / HF transformers | 25 EU languages, no Norwegian | Batch-only (no live channel yet); replaced Canary (ADR-0006). |
+| Moonshine | `moonshine-tiny`/`base` | MLX / ONNX | English | Live-only; catalog-registered but the runtime isn't wired yet (#122/#123). |
 
 On Apple Silicon, live and batch both route through mlx-whisper by default.
 Pass `--no-mlx` to opt out.
@@ -186,7 +217,7 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Three layers, all fast:
+Four layers:
 
 - **Unit + route tests** (`tests/test_*.py`) cover pure helpers
   (hallucination filter, prompt/hotwords reading, slug parsing, WAV I/O,
@@ -225,8 +256,13 @@ Three layers, all fast:
   python -m pytest tests/e2e/test_dashboard_ui.py
   ```
 
+- **Bridge browser E2E** (`tests/e2e/test_bridge_extension_e2e.py`,
+  `test_bridge_meeting_e2e.py`) loads the real MV3 extension in a headed
+  Chromium to test the tap/mute/pipeline flow end to end. Needs a display
+  (`xvfb-run -a python -m pytest ... -m browser_e2e`); self-skips without one.
+
 GitHub Actions runs the suite and `ruff check` on every push and PR across
-Python 3.12-3.13 on Ubuntu, macOS, and Windows.
+Python 3.12-3.14 on Ubuntu, macOS, and Windows.
 
 ## License
 

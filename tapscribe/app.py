@@ -1035,7 +1035,7 @@ async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_re
 @app.post("/api/recording/toggle")
 async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_recorder)):
     """Flip recorder.recording_enabled. Optional body {"enabled": bool} to
-    set explicitly; without a body, just toggles. New /record WSes are
+    set explicitly; without a body, just toggles. New /tap WSes are
     accepted then immediately closed when disabled — already-open WAVs
     continue to record their current utterance, which finalises cleanly
     on the bridge's normal trackMuted close."""
