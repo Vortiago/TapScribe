@@ -1,6 +1,8 @@
 // @ts-check
 // Stages-only shared helpers. New file under js/next/ so the existing shared
-// modules stay untouched — see the Phase-1 brief. Pure DOM + template glue.
+// modules stay untouched — see the Phase-1 brief. Mostly pure DOM + template
+// glue, plus a couple of shared click-to-mutate wirings (wireRecPill) that
+// don't warrant their own module.
 
 import { tpl, pick } from "../templates.js";
 import { postJson } from "../api.js";
@@ -188,12 +190,13 @@ export function placeholderView(root, { eyebrow, title, sub, icon, heading, deta
 
 /**
  * The recording-enabled pill's toggle target: the opposite of the current
- * effective state (armed by default when unset). Pure — factored out of
- * wireRecPill so the branching is unit-testable without a DOM.
+ * effective state (armed by default when unset, so only an explicit `false`
+ * targets `true`). Pure — factored out of wireRecPill so the branching is
+ * unit-testable without a DOM.
  * @param {import('../types.js').AppState | null} state
  */
 export function nextRecordingEnabled(state) {
-  return !((state?.recording_enabled ?? true) !== false);
+  return state?.recording_enabled === false;
 }
 
 /**

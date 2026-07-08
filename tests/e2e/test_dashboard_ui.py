@@ -5624,20 +5624,21 @@ async def test_taps_toggle_and_recording_pill_wired_in_both_hosts(
     """
     base = running_recorder.base_url
     ws_base = running_recorder.ws_base_url
-    wav = synth_speech_like_wav(tmp_path / "alice.wav", seconds=10.0, freq_hz=220.0)
+    # Long enough that the tap is still open for every click below (5 click +
+    # backend-confirm round trips plus a view switch), short enough not to
+    # drag the test out — same sizing rationale as the two-tap screenshot test
+    # above, which does more (6.0s for two concurrent streams + a caption
+    # exchange) and finds 6.0s comfortable margin.
+    wav = synth_speech_like_wav(tmp_path / "alice.wav", seconds=6.0, freq_hz=220.0)
 
     async def active_alice() -> dict | None:
         async with httpx.AsyncClient(base_url=base) as client:
             state = (await client.get("/api/state")).json()
         return next((a for a in state.get("active", []) if a.get("identity") == "alice"), None)
 
-    async def record_is(value: bool) -> bool:
+    async def alice_field_is(field: str, value: bool) -> bool:
         a = await active_alice()
-        return bool(a) and a["record"] is value
-
-    async def live_is(value: bool) -> bool:
-        a = await active_alice()
-        return bool(a) and a["live"] is value
+        return bool(a) and a[field] is value
 
     async def recording_enabled() -> bool:
         async with httpx.AsyncClient(base_url=base) as client:
@@ -5681,7 +5682,7 @@ async def test_taps_toggle_and_recording_pill_wired_in_both_hosts(
                     f"""() => !document.querySelector('{rail_toggle}')?.classList.contains('on')""",
                     timeout=8000,
                 )
-                assert await wait_until(lambda: record_is(False), timeout=5.0), (
+                assert await wait_until(lambda: alice_field_is("record", False), timeout=5.0), (
                     "rail toggle click must PUT /api/tap-settings and flip record off"
                 )
 
@@ -5690,7 +5691,7 @@ async def test_taps_toggle_and_recording_pill_wired_in_both_hosts(
                     f"""() => document.querySelector('{rail_toggle}')?.classList.contains('on')""",
                     timeout=8000,
                 )
-                assert await wait_until(lambda: record_is(True), timeout=5.0), (
+                assert await wait_until(lambda: alice_field_is("record", True), timeout=5.0), (
                     "a second rail toggle click must re-arm record"
                 )
 
@@ -5708,7 +5709,7 @@ async def test_taps_toggle_and_recording_pill_wired_in_both_hosts(
                     f"""() => !document.querySelector('{taps_body_toggle}')?.classList.contains('on')""",
                     timeout=8000,
                 )
-                assert await wait_until(lambda: live_is(False), timeout=5.0), (
+                assert await wait_until(lambda: alice_field_is("live", False), timeout=5.0), (
                     "the Taps view's OWN toggle host must also PUT /api/tap-settings"
                 )
 
