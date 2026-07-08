@@ -334,35 +334,42 @@ for _exc_type in _DOMAIN_ERROR_STATUS:
     app.add_exception_handler(_exc_type, _domain_error_handler)
 
 
-def _refuse_current_or_busy(
+async def _refuse_current_or_busy(
     recorder: Recorder,
     *sessions: str,
     action: str,
     current: str,
     hint: str = "",
 ) -> None:
-    """The two-guard pre-flight the destructive session/WAV routes need:
+    """The three-guard pre-flight the destructive session/WAV routes need:
     refuse the CURRENT session — before the caller's `resolve_session_dir`,
     since the live session's directory may not be materialised on disk yet
     (rotate_session creates it lazily) — then refuse if any of `sessions`
-    has a transcribe/strip job in flight.
+    has a transcribe/strip job in flight — then refuse if `current` has a
+    live tap writing to it.
 
     `current` names which of `sessions` must not be the live session —
     required, not derived, so a multi-session caller (absorb) can't
     silently skip it: absorb's target MAY be the live session, only its
-    source may not. `action` fills the current-session message's verb
+    source may not. The active-tap guard reuses that SAME `current` scope
+    (not all of `sessions`): absorb only moves source's files into target
+    and never rewrites target's own files, so a tap on a live TARGET is
+    never unsafe — only a tap on the session actually being emptied/deleted
+    (`current`) is. `action` fills the current-session message's verb
     phrase ("delete", "absorb", …); `hint` appends extra guidance (absorb's
-    rotate-then-absorb tip). The busy branch raises `SessionBusy` — the
-    same domain error `JobTracker.run` raises, mapped to 409 by
-    `_DOMAIN_ERROR_STATUS` — so "session busy" has one canonical exception
-    app-wide; the current-session branch has no such existing domain error
-    to reuse, so it raises `HTTPException` directly."""
+    rotate-then-absorb tip). The busy-job and active-tap branches both raise
+    `SessionBusy` — the same domain error `JobTracker.run` raises, mapped to
+    409 by `_DOMAIN_ERROR_STATUS` — so "session busy" has one canonical
+    exception app-wide; only the current-session branch raises
+    `HTTPException` directly (no domain error exists for session-identity)."""
     if current == recorder.session_start:
         msg = f"cannot {action} the current session — rotate to a new one first"
         raise HTTPException(409, f"{msg}, {hint}" if hint else msg)
     if any(recorder.jobs.get(s) is not None for s in sessions):
         noun = "this session" if len(sessions) == 1 else "one of these sessions"
         raise SessionBusy(f"a transcribe or strip job is in flight on {noun}")
+    if any(s.session == current for s in await recorder.streams.snapshot()):
+        raise SessionBusy("a live tap is writing to this session")
 
 
 # ---------------------------------------------------------------------------
@@ -1239,9 +1246,10 @@ async def api_session_stripped_delete(session: str, recorder: Recorder = Depends
 async def api_session_audio_delete(session: str, recorder: Recorder = Depends(get_recorder)):
     """Delete ALL of a session's audio (original WAVs + stripped/ + per-WAV
     transcript-cache sidecars) to reclaim disk. KEEPS the merged
-    session-transcript + session-meta. Refuses the CURRENT session and any
-    session with a transcribe/strip job in flight."""
-    _refuse_current_or_busy(recorder, session, current=session, action="delete audio from")
+    session-transcript + session-meta. Refuses the CURRENT session, any
+    session with a transcribe/strip job in flight, or a session with a live
+    tap writing to it."""
+    await _refuse_current_or_busy(recorder, session, current=session, action="delete audio from")
     resolve_session_dir(session)
     # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
     # ~1 Hz /api/state poll stays responsive — same as strip-silence.
@@ -1269,7 +1277,10 @@ async def api_session_absorb(
 
     Refuses if the source is the currently-recording session — rotate
     first if you want to absorb the live one into a previous folder.
-    Refuses if either side has an in-flight transcribe / strip job.
+    Refuses if either side has an in-flight transcribe / strip job, or if
+    the SOURCE has a live tap writing to it. The target may freely be the
+    live session or have a live tap open — absorb only ever moves source's
+    files in, it never rewrites target's own files.
     """
     body = await _json_body(req)
     source = body.get("source") or ""
@@ -1277,7 +1288,7 @@ async def api_session_absorb(
         raise HTTPException(400, "source session id required")
     if source == target:
         raise HTTPException(400, "cannot absorb a session into itself")
-    _refuse_current_or_busy(
+    await _refuse_current_or_busy(
         recorder,
         target,
         source,
@@ -1300,11 +1311,12 @@ async def api_session_absorb(
 
 @app.delete("/api/sessions/{session}")
 async def api_session_delete(session: str, recorder: Recorder = Depends(get_recorder)):
-    """Recursively delete a recordings folder. Refuses the CURRENT session and
-    any session with a transcribe/strip job in flight — `rmtree`-ing the folder
-    out from under a running job thread would crash it mid-write (the same guard
+    """Recursively delete a recordings folder. Refuses the CURRENT session,
+    any session with a transcribe/strip job in flight, or a session with a
+    live tap writing to it — `rmtree`-ing the folder out from under a running
+    job thread or an open tap WS would crash it mid-write (the same guard
     the sibling /audio and /absorb endpoints enforce)."""
-    _refuse_current_or_busy(recorder, session, current=session, action="delete")
+    await _refuse_current_or_busy(recorder, session, current=session, action="delete")
     session_dir = resolve_session_dir(session)
     try:
         shutil.rmtree(session_dir)
@@ -1575,11 +1587,12 @@ async def api_wav_delete(
 ):
     """Delete one WAV + its transcript-cache sidecars. source=stripped
     targets a region under <session>/stripped/. No region cascade — see
-    `delete_session_wav`. Refuses the CURRENT session and any session with
-    a transcribe/strip job in flight. An unknown `source` is rejected (400)
-    by `resolve_source_dir` — the path seam owns that check; `source` itself
-    is never a path component (only compared against the two literals)."""
-    _refuse_current_or_busy(recorder, session, current=session, action="delete WAVs from")
+    `delete_session_wav`. Refuses the CURRENT session, any session with
+    a transcribe/strip job in flight, or a session with a live tap writing
+    to it. An unknown `source` is rejected (400) by `resolve_source_dir` —
+    the path seam owns that check; `source` itself is never a path
+    component (only compared against the two literals)."""
+    await _refuse_current_or_busy(recorder, session, current=session, action="delete WAVs from")
     resolve_session_dir(session)
     summary = await asyncio.to_thread(delete_session_wav, session, name, source)
     print(

@@ -67,6 +67,9 @@ class ActiveStream:
     # "tapscribe"; under "backend" we can't see the backend VAD's state
     # so it stays False.
     gate_open: bool = False
+    # Session this tap was writing to at open time. None for test fixtures
+    # that don't simulate a real tap; production TapFanOut always sets it.
+    session: str | None = None
 
 
 _ACTIVE_STREAM_FIELDS = frozenset(f.name for f in fields(ActiveStream))
