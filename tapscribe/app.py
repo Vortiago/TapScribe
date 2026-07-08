@@ -368,7 +368,7 @@ async def _refuse_current_or_busy(
     if any(recorder.jobs.get(s) is not None for s in sessions):
         noun = "this session" if len(sessions) == 1 else "one of these sessions"
         raise SessionBusy(f"a transcribe or strip job is in flight on {noun}")
-    if any(s.session == current for s in await recorder.streams.snapshot() if s.session is not None):
+    if any(s.session == current for s in await recorder.streams.snapshot()):
         raise SessionBusy("a live tap is writing to this session")
 
 
