@@ -205,28 +205,19 @@
     return new WebSocket(url);
   };
 
-  // Chrome/Edge treat these origins as "potentially trustworthy", so
-  // ws:// to them is allowed from an https:// page. Anything else gets
-  // blocked by mixed-content policy — `new WebSocket(ws://...)` throws
-  // SecurityError synchronously, which would otherwise escape out of
-  // the PCM handler on every frame and leave /tap stuck at "idle".
-  function isTrustworthyWsHost(host) {
-    if (!host) return false;
-    const h = host.toLowerCase();
-    return (
-      h === "localhost" ||
-      h.endsWith(".localhost") ||
-      h === "127.0.0.1" ||
-      h === "[::1]" ||
-      h === "::1"
-    );
-  }
-
+  // ws:// to a "potentially trustworthy" host (Chrome/Edge's term) is
+  // allowed from an https:// page; anything else gets blocked by mixed-
+  // content policy — `new WebSocket(ws://...)` throws SecurityError
+  // synchronously, which would otherwise escape out of the PCM handler on
+  // every frame and leave /tap stuck at "idle". The host predicate itself
+  // lives in control-client.js's TapscribeControlClient.isTrustworthyHost —
+  // shared with the HTTP control plane's mixed-content guard so the two
+  // never drift apart (#251).
   function wouldBeMixedContentBlocked() {
     if (recorderUseTls) return false;
     if (typeof location === "undefined") return false;
     if (location.protocol !== "https:") return false;
-    return !isTrustworthyWsHost(recorderHost);
+    return !TapscribeControlClient.isTrustworthyHost(recorderHost);
   }
 
   // Backoff: jittered exponential, capped. Indexed by ch.reconnectAttempt

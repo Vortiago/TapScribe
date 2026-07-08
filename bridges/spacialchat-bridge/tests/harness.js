@@ -267,7 +267,11 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
   vm.createContext(sandbox);
   // Mirror the manifest's load order: control-client.js defines the shared
   // global the content script's control calls go through, and must run
-  // before content.js.
+  // before content.js. Re-read and re-executed fresh into this bridge's own
+  // sandbox on every createBridge() call, so the resulting
+  // TapscribeControlClient object is never shared across bridges — a test
+  // that monkey-patches one of its members via controlClient() (see below)
+  // can't leak that patch into another bridge or a later test.
   vm.runInContext(fs.readFileSync(CONTROL_CLIENT_JS, "utf8"), sandbox, { filename: "control-client.js" });
   const code = fs.readFileSync(CONTENT_JS, "utf8");
   vm.runInContext(code, sandbox, { filename: "content.js" });
@@ -380,6 +384,14 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     post,
     status,
     meetingEnd,
+    // The sandbox's TapscribeControlClient global, live — control-client.js
+    // assigns it before content.js loads, and content.js looks the name up
+    // fresh on every call rather than capturing a reference at load time. A
+    // test can therefore wrap one of its members with a spy AFTER the bridge
+    // is constructed and still observe content.js calling through it (e.g.
+    // pinning that content.js's mixed-content guard shares isTrustworthyHost
+    // with the HTTP control plane instead of hand-rolling its own copy).
+    controlClient: () => sandbox.TapscribeControlClient,
     // Every chrome.storage.local.set the content script made, in order — lets
     // a test assert on the durable meeting state (id kept, meetingActive
     // flipped) the popup card re-reads.
