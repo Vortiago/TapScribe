@@ -85,6 +85,20 @@ def bridge_chromium_args(ext_dir: Path) -> list[str]:
     the PNA relax, recent Chromium silently strands every ``/tap`` WS (the dial
     never completes the handshake — see PR #148); in production the operator
     runs on ``localhost`` or enables TLS.
+
+    Also disables Chromium's background/occluded-tab throttling. The bridge
+    fixtures open the SpatialChat test tab via ``ctx.new_page()`` alongside
+    the persistent context's own initial tab, so Chromium can (and does, in a
+    loaded/headless-ish CI display) treat the test tab as occluded and
+    deprioritize its renderer — throttling ``setTimeout``/``setInterval``
+    (``page-script.js``'s poll loop among them) and delaying postMessage/
+    WS-close delivery by seconds. One contributor to the ``bridge E2E`` job's
+    intermittent flakes (a prior fix, d1c3860, only widened a timeout from 5s
+    to 15s — the flake predated that change and still exceeded 15s
+    afterwards); see ``WAIT_POLLING_MS`` below for the other one — Chromium
+    also stops firing ``requestAnimationFrame`` for a backgrounded tab, which
+    these flags do NOT cover and which is what Playwright's
+    ``wait_for_function`` polls on by default.
     """
     return [
         f"--disable-extensions-except={ext_dir}",
@@ -94,11 +108,27 @@ def bridge_chromium_args(ext_dir: Path) -> list[str]:
         "--use-fake-ui-for-media-stream",
         "--use-fake-device-for-media-stream",
         "--allow-running-insecure-content",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
         # One flag, comma-joined value — kept on a single line so it isn't read
         # as an implicit string-concat (CodeQL py/implicit-string-concatenation-
         # in-list flags adjacent literals in a list as a likely missing comma).
         "--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,LocalNetworkAccessChecks",
     ]
+
+
+# Pass as `polling=` to every bridge-fixture `page.wait_for_function()` /
+# `popup.wait_for_function()` call instead of relying on the default
+# polling="raf": rAF-based polling only runs on compositor frames, which
+# Chromium simply stops producing for a page that isn't the frontmost tab.
+# Every bridge fixture opens more than one tab in the same context (an
+# initial blank tab, a popup, the SpatialChat mock page), so any of them can
+# be the backgrounded one at a given moment — an interval poll keeps working
+# regardless of which tab currently has focus. `bridge_chromium_args()`'s
+# throttling flags don't cover this: those affect setTimeout/setInterval and
+# renderer scheduling priority, not requestAnimationFrame.
+WAIT_POLLING_MS = 50
 
 
 async def launch_bridge_context(pw, ext_dir: Path, user_data_dir: str):
