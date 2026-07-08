@@ -88,7 +88,7 @@ bindings, both reusable across every model in the family:
 1. Write the adapter loader under `tapscribe/transcribers/` — a class
    satisfying the `Transcriber` Protocol (`tapscribe/transcribers/base.py`):
    `name`, `device`, `model_name`, `backend`, and
-   `transcribe(path, *, initial_prompt, hotwords, source_lang, target_lang)
+   `transcribe(path, *, initial_prompt, hotwords, source_lang)
    -> TranscriptionResult`.
 2. Add one `BackendBinding` per hardware kind it serves — each pairs a
    `kinds` set (`{"cpu", "cuda"}`, `{"mlx"}`, …) with a `loader(model_id,

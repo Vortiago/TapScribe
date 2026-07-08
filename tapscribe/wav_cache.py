@@ -285,7 +285,7 @@ def cached_transcribe(
     entry without evicting any other entry. Returns the fresh
     `CachedTranscription`.
 
-    Language-aware: `source_lang` (the per-region language pin, ADR-0010)
+    Language-aware: `source_lang` (the language pin, ADR-0010)
     is forwarded to the Transcriber and part of the match key — an entry
     transcribed under one pin must not be served when the caller now
     wants another. Adapters that ignore the kwarg record an empty
@@ -551,7 +551,9 @@ def _from_dict(data: dict[str, Any]) -> CachedTranscription:
         ),
         # source_language landed later than the rest of the schema — legacy
         # sidecars without it load with the empty-string default. (Sidecars
-        # may also carry a Canary-era "target_language"; it's ignored.)
+        # may also carry a Canary-era "target_language"; it's ignored — the
+        # accepted trade-off is that a Canary-translated sidecar's text now
+        # renders with no translation cue. See ADR-0006's update note.)
         source_language=data.get("source_language", "") or "",
     )
     transcribed_at = parse_iso(data["transcribed_at"])

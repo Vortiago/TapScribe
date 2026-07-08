@@ -595,6 +595,8 @@ def build_tap_recorder(
     `live_running=True` injects a FakeAliveProc so TapFanOut opens its
     relay. tapscribe imports happen inside the helper so config-dir
     redirection lands before module import (see module docstring)."""
+    import dataclasses
+
     from tapscribe.live import LiveConfig
     from tapscribe.recorder import Recorder
 
@@ -602,13 +604,13 @@ def build_tap_recorder(
     config_dir = tmp_path / "config"
     recordings.mkdir(parents=True, exist_ok=True)
     config_dir.mkdir(parents=True, exist_ok=True)
-    conf: dict[str, object] = {"model": "tiny.en", "language": "en", "host": "localhost", "port": port}
+    live_config = LiveConfig(model="tiny.en", language="en", host="localhost", port=port)
     if gate_kind is not None:
-        conf["gate_kind"] = gate_kind
+        live_config = dataclasses.replace(live_config, gate_kind=gate_kind)
     recorder = Recorder(
         recordings_dir=recordings,
         config_dir=config_dir,
-        live_config=LiveConfig(**conf),  # type: ignore[arg-type]
+        live_config=live_config,
         use_mlx=False,
         auth_password_file=tmp_path / ".auth-password",
     )

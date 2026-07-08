@@ -117,7 +117,7 @@ class FasterWhisperTranscriber:
         hotwords: str | None = None,
         source_lang: str | None = None,
     ) -> TranscriptionResult:
-        # An explicit source_lang (the per-region language pin, ADR-0010)
+        # An explicit source_lang (the language pin, ADR-0010)
         # overrides the model-name heuristic; `default_language_for` remains
         # the fallback so callers that pass no language keep working.
         language = source_lang or default_language_for(self.model_name)

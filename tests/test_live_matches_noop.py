@@ -30,17 +30,11 @@ not this file.)
 from __future__ import annotations
 
 import pytest
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+    FakeAliveProc,
+)
 
 from tapscribe.live import LiveConfig, WhisperLiveKitChannel
-
-
-class _Alive:
-    """Stand-in for a live child whose process is still running. matches()
-    gates on self.running(), which polls self._proc."""
-
-    def poll(self) -> None:
-        return None
-
 
 # A fully-specified config: every dashboard-tunable knob carries a concrete,
 # NON-default value, so "supply the same value" is a real equality test rather
@@ -75,7 +69,7 @@ KNOBS = [
 
 def _running_channel(cfg: LiveConfig = CFG) -> WhisperLiveKitChannel:
     chan = WhisperLiveKitChannel(config=cfg, use_mlx=False)
-    chan._proc = _Alive()
+    chan._proc = FakeAliveProc()
     assert chan.running() is True  # fixture guard: the child really is "running"
     return chan
 

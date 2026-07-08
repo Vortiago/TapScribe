@@ -84,7 +84,6 @@ async def _run() -> None:
         to_iso=None,
         force=False,
         source_lang=None,
-        target_lang=None,
     )
     print(f"running cover ({GENERALIST} + specialists) over {len(sel.wavs)} utterances…", flush=True)
     merged = await transcribe_session_locked(req, selection=sel, job=_FakeJob())

@@ -25,9 +25,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+    build_tap_recorder,
+)
 
 from tapscribe import roster
-from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 from tapscribe.tap_fan_out import TapFanOut
 
@@ -44,17 +46,7 @@ def recorder(tmp_path: Path) -> Recorder:
     """A Recorder with the live channel stopped (live._proc=None) so the
     fan-out's relay path is never attempted — same shape as the fixture in
     test_tap_fan_out.py."""
-    recordings = tmp_path / "recordings"
-    config_dir = tmp_path / "config"
-    recordings.mkdir()
-    config_dir.mkdir()
-    return Recorder(
-        recordings_dir=recordings,
-        config_dir=config_dir,
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=9999),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
+    return build_tap_recorder(tmp_path)
 
 
 async def test_probe_identity_leaves_no_roster_occurrence(recorder: Recorder):

@@ -12,6 +12,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
+    FakeAliveProc,
+)
 
 from tapscribe.live import (
     LiveConfig,
@@ -28,14 +31,6 @@ LiveChannel = WhisperLiveKitChannel
 
 EXE = "/path/to/whisperlivekit-server"
 DEFAULT_CFG = LiveConfig(model="tiny.en", language="en", host="localhost", port=8000)
-
-
-class _Alive:
-    """Stand-in for a live child whose process is still running: matches()
-    gates on running(), which polls self._proc."""
-
-    def poll(self):
-        return None
 
 
 # The "no override supplied" base for matches() — reduces to "is a child
@@ -108,7 +103,7 @@ def test_matches_returns_false_when_only_a_gate_knob_differs():
         gate_pre_roll_ms=300,
     )
     chan = LiveChannel(config=cfg, use_mlx=False)
-    chan._proc = _Alive()
+    chan._proc = FakeAliveProc()
 
     assert chan.matches(**BASE) is True
     assert chan.matches(**BASE, gate_speech_threshold=0.7) is False
@@ -129,7 +124,7 @@ def test_matches_threshold_survives_dashboard_display_rounding():
     while a genuine (display-visible) change must still force a restart."""
     cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_speech_threshold=0.567)
     chan = LiveChannel(config=cfg, use_mlx=False)
-    chan._proc = _Alive()
+    chan._proc = FakeAliveProc()
 
     # The dashboard re-submits the `:.2f`-rounded value for the unchanged field.
     resubmitted = float(f"{0.567:.2f}")  # 0.57
@@ -145,7 +140,7 @@ def test_matches_gate_knob_int_equals_float_config_is_a_noop():
     the boundary type mismatch stays a no-op rather than a spurious respawn."""
     cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_speech_threshold=1.0)
     chan = LiveChannel(config=cfg, use_mlx=False)
-    chan._proc = _Alive()
+    chan._proc = FakeAliveProc()
     assert chan.matches(**BASE, gate_speech_threshold=1) is True
 
 

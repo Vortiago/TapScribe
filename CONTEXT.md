@@ -868,8 +868,8 @@ Two entry points:
   the session loop transcribes everything in range.
 
 Both forms share a `TranscriberInvocation` envelope (initial_prompt,
-hotwords, source_lang, target_lang, hallucination_rules) resolved once
-per request. The prompt/hotwords resolution layers session-meta over
+hotwords, source_lang, candidate_languages, hallucination_rules)
+resolved once per request. The prompt/hotwords resolution layers session-meta over
 the global config files (`config/prompt.txt`, `config/hotwords.txt`);
 an empty session-meta override falls back to the global default.
 
