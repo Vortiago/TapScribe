@@ -45,7 +45,7 @@ def pick_tap_subprotocol(offered: Iterable[str] | None, expected_token: str) -> 
         if not proto.startswith(TAP_SUBPROTOCOL_PREFIX):
             continue
         offered_token = proto[len(TAP_SUBPROTOCOL_PREFIX) :]
-        if hmac.compare_digest(offered_token, expected_token):
+        if hmac.compare_digest(offered_token.encode("utf-8"), expected_token.encode("utf-8")):
             return proto
     return None
 
@@ -67,7 +67,7 @@ def check_tap_bearer(authorization: str | None, expected_token: str) -> bool:
     scheme, _, token = (authorization or "").partition(" ")
     if scheme.lower() != "bearer":
         return False
-    return hmac.compare_digest(token.strip(), expected_token)
+    return hmac.compare_digest(token.strip().encode("utf-8"), expected_token.encode("utf-8"))
 
 
 async def basic_auth_middleware(request: Request, call_next):
@@ -132,8 +132,8 @@ async def basic_auth_middleware(request: Request, call_next):
             {"detail": "Malformed Authorization header"}, status_code=401, headers=realm_header
         )
     user, _, pw = decoded.partition(":")
-    user_ok = hmac.compare_digest(user, config.AUTH_USER)
-    pass_ok = hmac.compare_digest(pw, recorder.auth.value)
+    user_ok = hmac.compare_digest(user.encode("utf-8"), config.AUTH_USER.encode("utf-8"))
+    pass_ok = hmac.compare_digest(pw.encode("utf-8"), recorder.auth.value.encode("utf-8"))
     if not (user_ok and pass_ok):
         return JSONResponse({"detail": "Invalid credentials"}, status_code=401, headers=realm_header)
     return await call_next(request)
