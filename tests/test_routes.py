@@ -3055,24 +3055,26 @@ def test_api_summarizer_config_key_cleared_via_empty_string(client):
 # ── Moonshine live surfacing — issue #121 ────────────────────────────────────
 
 
-def test_api_models_live_includes_moonshine_when_installed(client):
+def test_api_models_live_excludes_moonshine_placeholders(client):
     # autouse `_force_all_probes_installed` marks moonshine's probes importable
     r = client.get("/api/models?context=live")
     assert r.status_code == 200
     ids = {m["model_id"] for m in r.json()["models"]}
-    assert {"moonshine-tiny", "moonshine-base"} <= ids
+    # available=False short-circuits is_installed → excluded even with probes
+    assert ids.isdisjoint({"moonshine-tiny", "moonshine-base"})
 
 
-def test_api_models_live_excludes_moonshine_when_probe_absent(client):
-    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
-
-    # nothing importable → the install-probe filter drops moonshine
-    set_installed_modules_for_testing(frozenset())
+def test_api_models_live_includes_a_real_installed_model(client):
+    # Positive control for the exclusion pin above: its `isdisjoint` passes
+    # trivially if the listing is empty, so anchor that a genuine available live
+    # model DOES surface. (moonshine can no longer exercise the install-probe
+    # filter — available=False short-circuits is_installed before the probe — so
+    # a probe-absent moonshine test is now indistinguishable from the placeholder
+    # guard the sibling already pins; this positive control is the meaningful pin.)
     r = client.get("/api/models?context=live")
     assert r.status_code == 200
     ids = {m["model_id"] for m in r.json()["models"]}
-    assert "moonshine-tiny" not in ids
-    assert "moonshine-base" not in ids
+    assert "large-v3" in ids
 
 
 def test_api_models_batch_excludes_moonshine(client):

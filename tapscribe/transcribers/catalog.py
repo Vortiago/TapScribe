@@ -665,6 +665,7 @@ def _moonshine(model_id: str, display: str, description: str) -> ModelEntry:
         contexts=_LIVE_ONLY,
         backends=_MOONSHINE_BACKENDS,
         inputs=NO_INPUTS,
+        available=False,
     )
 
 
