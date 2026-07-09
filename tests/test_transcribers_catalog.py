@@ -505,28 +505,36 @@ def test_moonshine_backends_cover_mlx_and_cpu_cuda_with_probes():
         assert all(b.probe_module for b in e.backends)  # each declares a probe module
 
 
-def test_moonshine_resolve_auto_prefers_mlx_when_available():
+def test_moonshine_resolve_refused_as_placeholder():
     set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
     set_installed_modules_for_testing(frozenset({"moonshine"}))
-    rb = REGISTRY.resolve("moonshine-tiny", preference="auto")
-    assert isinstance(rb, ResolvedBinding)
-    assert rb.kind == "mlx"
+    try:
+        with pytest.raises(RuntimeError, match="not available"):
+            REGISTRY.resolve("moonshine-tiny", preference="auto")
+    finally:
+        set_available_backends_for_testing(None)
 
 
-def test_moonshine_resolve_auto_falls_back_to_cpu():
+def test_moonshine_base_also_refused_as_placeholder():
     set_available_backends_for_testing(frozenset({"cpu"}))
     set_installed_modules_for_testing(frozenset({"optimum"}))
-    rb = REGISTRY.resolve("moonshine-base", preference="auto")
-    assert rb.kind == "cpu"
+    try:
+        with pytest.raises(RuntimeError, match="not available"):
+            REGISTRY.resolve("moonshine-base", preference="auto")
+    finally:
+        set_available_backends_for_testing(None)
 
 
-def test_moonshine_explicit_unavailable_backend_raises_runtimeerror():
+def test_moonshine_explicit_backend_also_refused_as_placeholder():
     set_available_backends_for_testing(frozenset({"cpu"}))
-    with pytest.raises(RuntimeError, match="mlx"):
-        REGISTRY.resolve("moonshine-tiny", preference="mlx")
+    try:
+        with pytest.raises(RuntimeError, match="not available"):
+            REGISTRY.resolve("moonshine-tiny", preference="mlx")
+    finally:
+        set_available_backends_for_testing(None)
 
 
-def test_moonshine_install_probe_gates_is_installed():
+def test_moonshine_is_installed_always_false_when_placeholder():
     set_available_backends_for_testing(frozenset({"cpu"}))
     probes = frozenset(b.probe_module for e in _moonshine_entries() for b in e.backends if b.probe_module)
     assert probes
@@ -534,7 +542,8 @@ def test_moonshine_install_probe_gates_is_installed():
     try:
         assert all(not e.is_installed() for e in _moonshine_entries())
         set_installed_modules_for_testing(probes)  # all importable
-        assert all(e.is_installed() for e in _moonshine_entries())
+        # available=False short-circuits the probe — still not installed
+        assert all(not e.is_installed() for e in _moonshine_entries())
     finally:
         set_installed_modules_for_testing(None)
 

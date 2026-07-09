@@ -3055,12 +3055,13 @@ def test_api_summarizer_config_key_cleared_via_empty_string(client):
 # ── Moonshine live surfacing — issue #121 ────────────────────────────────────
 
 
-def test_api_models_live_includes_moonshine_when_installed(client):
+def test_api_models_live_excludes_moonshine_placeholders(client):
     # autouse `_force_all_probes_installed` marks moonshine's probes importable
     r = client.get("/api/models?context=live")
     assert r.status_code == 200
     ids = {m["model_id"] for m in r.json()["models"]}
-    assert {"moonshine-tiny", "moonshine-base"} <= ids
+    # available=False short-circuits is_installed → excluded even with probes
+    assert ids.isdisjoint({"moonshine-tiny", "moonshine-base"})
 
 
 def test_api_models_live_excludes_moonshine_when_probe_absent(client):
