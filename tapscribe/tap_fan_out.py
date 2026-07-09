@@ -127,9 +127,12 @@ class TapFanOut:
         )
         try:
             await self._open()
-        except BaseException:
-            await self._close()
-            raise
+        except BaseException as _exc:
+            try:
+                await self._close()
+            except BaseException:
+                pass  # suppress _close errors so they don't mask the original
+            raise _exc
         return self
 
     async def __aenter__(self) -> TapFanOut:
