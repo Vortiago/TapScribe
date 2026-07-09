@@ -338,11 +338,6 @@ def cached_transcribe(
     finished = datetime.now(UTC)
 
     wav_start = parse_wav_start(wav_path.name)
-    # Re-stat after transcribe in case the WAV was being written when we
-    # entered (the resume path closes the writer before transcribe runs,
-    # but a future caller might not). Either way the sidecar reflects
-    # what the transcriber actually saw.
-    size, mtime_ns = _wav_fingerprint(wav_path)
     cached = CachedTranscription(
         result=filtered,
         transcribed_at=finished,
