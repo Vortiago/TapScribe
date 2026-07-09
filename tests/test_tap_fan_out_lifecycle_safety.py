@@ -22,11 +22,16 @@ routinely on WS exit) skips the removal and strands the row.
 These tests pin the OPERATOR-observable harm at the aggregation layer — the
 `ActiveStreams` snapshot (the phantom live tap) and the `UtteranceIndex`
 snapshot (the record stuck open) — NEVER the proximate `_wf` handle or the
-presence of a try/except. Two failure injections at DIFFERENT points in `_open`
-(one after full registration, one before the ActiveStream is even registered)
-force a GENERAL unwind rather than a relay-specific catch; a guardrail pins that
-a normal open+close still registers-then-removes so a degenerate "hide/remove
-everything" fix can't pass.
+presence of a try/except. Failures are injected at EVERY partial-init seam the
+cleanup path branches on — the relay open (after full registration), the roster
+(after the WAV+index but before the ActiveStream), and — the subtle ones — the
+WAV open itself on BOTH the fresh and the resume paths: `register_new` /
+`try_resume` mark the `UtteranceRecord` open=True BEFORE `self._wf`/`self._record`
+are assigned, so if `open_recorder_wav` (fresh) or the resume reopen raises, a
+release coupled to the WAV-finalize guard would strand the record open=True
+forever. These force a GENERAL unwind rather than a relay-specific catch; a
+guardrail pins that a normal open+close still registers-then-removes so a
+degenerate "hide/remove everything" fix can't pass.
 
 Hermetic: the live leg is a hand-built `_FakeRelay` (the `open()` classmethod
 already accepts `tap_relay=`), so no real WhisperLiveKit child or socket is
@@ -37,6 +42,7 @@ stopped.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -44,7 +50,8 @@ from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest
     build_tap_recorder,
 )
 
-from tapscribe.recorder import Recorder
+from tapscribe.audio import open_recorder_wav
+from tapscribe.recorder import Recorder, UtteranceRecord
 from tapscribe.tap_fan_out import TapFanOut
 
 
@@ -156,6 +163,98 @@ async def test_open_failure_before_stream_registration_releases_utterance(
     assert await recorder.streams.snapshot() == [], "no stream should exist on this path"
 
 
+async def test_open_failure_opening_wav_fresh_releases_indexed_utterance(
+    recorder: Recorder, monkeypatch: pytest.MonkeyPatch
+):
+    """Harm case — the WAV open on the FRESH path raises (disk full / bad path).
+    `register_new` has already indexed the `UtteranceRecord` open=True BEFORE
+    `self._wf`/`self._record` are assigned, so this is the exact #196 window a
+    release coupled to the WAV-finalize guard leaves stranded. No ActiveStream is
+    registered yet, so the harm is purely the record stuck open=True."""
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full opening the recorder WAV")
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.open_recorder_wav", _boom)
+    relay = _FakeRelay()
+
+    with pytest.raises(OSError):
+        async with await TapFanOut.open(
+            recorder,
+            identity="frank",
+            name="Frank",
+            utterance_id="utt-wav-fail-fresh",
+            do_record=True,
+            do_live=True,
+            tap_relay=relay,
+        ):
+            pass  # pragma: no cover — open() raises before the body runs
+
+    assert relay.opened is False, "relay open() should not be reached when the WAV open fails first"
+    assert _open_records(recorder) == [], (
+        "an UtteranceRecord was left open=True after the fresh WAV open failed — "
+        "register_new indexed it open=True before self._wf was set, and _close's "
+        "WAV-finalize guard skipped the release"
+    )
+    assert await recorder.streams.snapshot() == [], "no stream should exist on this path"
+
+
+async def test_open_failure_reopening_wav_on_resume_releases_indexed_utterance(
+    recorder: Recorder, monkeypatch: pytest.MonkeyPatch
+):
+    """Harm case — the resume path's WAV reopen raises. `try_resume` re-marks the
+    existing record open=True (and transfers ownership to this tap) BEFORE
+    `self._wf`/`self._record` are assigned, so a raise from the reopen is the same
+    strand window as the fresh path — the second #196 failure point named in the
+    issue. Seed a resumable record (a real prior WAV + a closed index entry), then
+    fail the reopen; the record must be released (not left open=True)."""
+    session_dir = recorder.session_dir
+    session_dir.mkdir(parents=True, exist_ok=True)
+    prior = session_dir / "prior-erin.wav"
+    wf = open_recorder_wav(prior)
+    wf.writeframes(b"\x00\x00" * 100)  # non-empty so the record is kept (resumable)
+    wf.close()
+    seed = UtteranceRecord(
+        utterance_id="utt-wav-fail-resume",
+        identity="erin",
+        name="Erin",
+        filename="prior-erin.wav",
+        path=prior,
+        started_at=datetime.now(UTC),
+        owner="seed-owner",
+    )
+    recorder.utterances.register_new(seed)  # marks open=True
+    recorder.utterances.release(
+        "utt-wav-fail-resume", owner="seed-owner", bytes_received=200, kept=True
+    )  # open=False, within the resume window → resumable
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full reopening the WAV for append")
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.open_recorder_wav", _boom)
+    relay = _FakeRelay()
+
+    with pytest.raises(OSError):
+        async with await TapFanOut.open(
+            recorder,
+            identity="erin",
+            name="Erin",
+            utterance_id="utt-wav-fail-resume",
+            do_record=True,
+            do_live=True,
+            tap_relay=relay,
+        ):
+            pass  # pragma: no cover — open() raises before the body runs
+
+    assert relay.opened is False, "relay open() should not be reached when the resume reopen fails"
+    assert _open_records(recorder) == [], (
+        "an UtteranceRecord was left open=True after the resume WAV reopen failed — "
+        "try_resume re-marked it open=True before self._wf was set, and _close's "
+        "WAV-finalize guard skipped the release"
+    )
+    assert await recorder.streams.snapshot() == [], "no stream should exist on this path"
+
+
 async def test_close_removes_stream_even_when_relay_teardown_cancelled(recorder: Recorder):
     """Harm case — a `CancelledError` is delivered during the awaited relay
     teardown in `_close` (server shutdown / TestClient WS exit). The
@@ -181,6 +280,11 @@ async def test_close_removes_stream_even_when_relay_teardown_cancelled(recorder:
     assert await recorder.streams.snapshot() == [], (
         "the ActiveStream row survived a CancelledError during relay teardown — "
         "the dashboard shows a phantom active tap for the process lifetime"
+    )
+    assert _open_records(recorder) == [], (
+        "the UtteranceRecord was left open=True through a cancelled teardown — "
+        "utterances.release must run SYNC, before the awaited relay close, so a "
+        "future refactor that moves it after the cancelling await is caught here"
     )
 
 
