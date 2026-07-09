@@ -308,3 +308,41 @@ async def test_normal_open_close_registers_then_removes_stream(recorder: Recorde
 
     assert await recorder.streams.snapshot() == [], "the row must be removed on a clean exit"
     assert relay.closed is True, "the relay must be torn down on a clean exit"
+
+
+async def test_open_failure_at_wav_open_releases_the_indexed_utterance(
+    recorder: Recorder, monkeypatch: pytest.MonkeyPatch
+):
+    """Adversarial (the register_new -> _wf window, #196's headline case): the WAV
+    open itself raises AFTER `register_new` has indexed the UtteranceRecord
+    (open=True) but BEFORE `self._wf`/`self._record` are assigned — i.e. a
+    disk-full fresh `open_recorder_wav` (the resume branch's `wave.open` reopen is
+    the same window). `_close`'s WAV-finalize is guarded on `self._wf is not None`,
+    so releasing the utterance must NOT be coupled to that guard — otherwise the
+    indexed record is stranded open=True for the whole process lifetime, exactly
+    the leak #196 is about. Asserted at the aggregation layer (`_open_records`)."""
+
+    def _boom(path):
+        raise OSError("disk full opening the recorder WAV")
+
+    monkeypatch.setattr("tapscribe.tap_fan_out.open_recorder_wav", _boom)
+    relay = _FakeRelay()
+
+    with pytest.raises(OSError):
+        async with await TapFanOut.open(
+            recorder,
+            identity="erin",
+            name="Erin",
+            utterance_id="utt-wav-open-fail",
+            do_record=True,
+            do_live=True,
+            tap_relay=relay,
+        ):
+            pass  # pragma: no cover — open() raises before the body runs
+
+    assert _open_records(recorder) == [], (
+        "an indexed UtteranceRecord was stranded open=True after the WAV open "
+        "raised — releasing the utterance must not be coupled to the _wf guard"
+    )
+    assert await recorder.streams.snapshot() == [], "no stream is registered before the WAV opens"
+    assert relay.opened is False, "the relay open() seam is reached only after the WAV opens"
