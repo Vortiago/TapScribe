@@ -125,7 +125,11 @@ class TapFanOut:
             session_dir=session_dir,
             tap_relay=tap_relay,
         )
-        await self._open()
+        try:
+            await self._open()
+        except BaseException:
+            await self._close()
+            raise
         return self
 
     async def __aenter__(self) -> TapFanOut:
@@ -414,5 +418,7 @@ class TapFanOut:
         # WS to the WlK child) and then closes the relay, which drains
         # tail captions. Present on every path that registered a stream.
         if self._tap_relay is not None:
-            await self._tap_relay.close()
-        await self._recorder.streams.remove(self._conn_id)
+            try:
+                await self._tap_relay.close()
+            finally:
+                await self._recorder.streams.remove(self._conn_id)
