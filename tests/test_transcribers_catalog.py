@@ -506,32 +506,33 @@ def test_moonshine_backends_cover_mlx_and_cpu_cuda_with_probes():
 
 
 def test_moonshine_resolve_refused_as_placeholder():
+    # available=False short-circuits resolve() before the auto branch. Reverting
+    # it lets auto resolve the (installed) mlx binding, so this pin fails
+    # DID-NOT-RAISE — it genuinely exercises the placeholder guard. Teardown is
+    # the module autouse `_restore_backends` fixture (resets BOTH overrides).
     set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
     set_installed_modules_for_testing(frozenset({"moonshine"}))
-    try:
-        with pytest.raises(RuntimeError, match="not available"):
-            REGISTRY.resolve("moonshine-tiny", preference="auto")
-    finally:
-        set_available_backends_for_testing(None)
+    with pytest.raises(RuntimeError, match="not available yet"):
+        REGISTRY.resolve("moonshine-tiny", preference="auto")
 
 
 def test_moonshine_base_also_refused_as_placeholder():
     set_available_backends_for_testing(frozenset({"cpu"}))
     set_installed_modules_for_testing(frozenset({"optimum"}))
-    try:
-        with pytest.raises(RuntimeError, match="not available"):
-            REGISTRY.resolve("moonshine-base", preference="auto")
-    finally:
-        set_available_backends_for_testing(None)
+    with pytest.raises(RuntimeError, match="not available yet"):
+        REGISTRY.resolve("moonshine-base", preference="auto")
 
 
 def test_moonshine_explicit_backend_also_refused_as_placeholder():
-    set_available_backends_for_testing(frozenset({"cpu"}))
-    try:
-        with pytest.raises(RuntimeError, match="not available"):
-            REGISTRY.resolve("moonshine-tiny", preference="mlx")
-    finally:
-        set_available_backends_for_testing(None)
+    # mlx is available on the machine AND its probe importable, so the explicit
+    # backend WOULD resolve — the placeholder guard is the ONLY reason resolve()
+    # can raise. Distinguishing: revert available=False and this fails
+    # DID-NOT-RAISE. (With mlx absent the ordinary explicit-mismatch path also
+    # says "not available", so that setup would pass regardless of the guard.)
+    set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    set_installed_modules_for_testing(frozenset({"moonshine"}))
+    with pytest.raises(RuntimeError, match="not available yet"):
+        REGISTRY.resolve("moonshine-tiny", preference="mlx")
 
 
 def test_moonshine_is_installed_always_false_when_placeholder():
@@ -539,13 +540,25 @@ def test_moonshine_is_installed_always_false_when_placeholder():
     probes = frozenset(b.probe_module for e in _moonshine_entries() for b in e.backends if b.probe_module)
     assert probes
     set_installed_modules_for_testing(frozenset())  # nothing importable
-    try:
-        assert all(not e.is_installed() for e in _moonshine_entries())
-        set_installed_modules_for_testing(probes)  # all importable
-        # available=False short-circuits the probe — still not installed
-        assert all(not e.is_installed() for e in _moonshine_entries())
-    finally:
-        set_installed_modules_for_testing(None)
+    assert all(not e.is_installed() for e in _moonshine_entries())
+    set_installed_modules_for_testing(probes)  # all importable
+    # available=False short-circuits the probe — still not installed
+    assert all(not e.is_installed() for e in _moonshine_entries())
+
+
+def test_moonshine_placeholder_serialises_available_false():
+    """The `available` flag must survive to_mapping so a regression that drops
+    or flips it is caught — the only_installed listings the API serves exclude
+    placeholders, so the field's False value is otherwise never round-tripped.
+    Pinned at the placeholder-INCLUSIVE live listing (for_context without
+    only_installed), the one listing where a placeholder is still present.
+    Pins serialization, not a UI badge (the frontend declares the field but
+    doesn't read it yet)."""
+    inclusive = {e.model_id: e for e in REGISTRY.for_context("live")}
+    for mid in _MOONSHINE_IDS:
+        entry = inclusive.get(mid)
+        assert entry is not None, f"{mid} dropped from the placeholder-inclusive live listing"
+        assert entry.to_mapping()["available"] is False
 
 
 def test_unknown_model_id_rejected_before_loader():
