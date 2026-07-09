@@ -125,7 +125,16 @@ class TapFanOut:
             session_dir=session_dir,
             tap_relay=tap_relay,
         )
-        await self._open()
+        try:
+            await self._open()
+        except BaseException:
+            # Unwind partial state, then re-raise the original failure. Suppress
+            # only ordinary Exceptions from the cleanup so a _close error can't
+            # mask the original — a fresh CancelledError (BaseException, not
+            # Exception) still propagates rather than being silently dropped.
+            with suppress(Exception):
+                await self._close()
+            raise
         return self
 
     async def __aenter__(self) -> TapFanOut:
@@ -384,9 +393,10 @@ class TapFanOut:
         # Sync cleanup first: these must run even if the surrounding task
         # is being cancelled (TestClient does that on WS exit). Async
         # awaits below may raise CancelledError and skip remaining work.
+        kept = self._bytes_received > 0
+        # Finalize the WAV handle only if it was actually opened.
         if self._wf is not None and self._record is not None:
             self._wf.close()
-            kept = self._bytes_received > 0
             if not kept:
                 with suppress(OSError):
                     self._record.path.unlink()
@@ -401,18 +411,31 @@ class TapFanOut:
                     f"({dur:.2f}s) to {self._record.filename}",
                     flush=True,
                 )
-            self._recorder.utterances.release(
-                self._utterance_id,
-                owner=self._owner,
-                bytes_received=self._bytes_received,
-                kept=kept,
-            )
         else:
             print(f"[tapscribe] /tap closed (record off) for {self._identity}", flush=True)
+        # Release the UtteranceIndex record whenever it was indexed —
+        # register_new / try_resume mark it open=True BEFORE self._wf/self._record
+        # are assigned, so coupling this to the WAV-finalize guard above would
+        # strand the record open=True forever if the WAV open itself raised
+        # (disk-full fresh open, or the resume reopen — both #196 failure points).
+        # release() is a no-op when this connection never indexed the id (absent,
+        # or held by another owner), so it stays safe on record-off / probe / lost-
+        # overlap paths that never registered our own record.
+        self._recorder.utterances.release(
+            self._utterance_id,
+            owner=self._owner,
+            bytes_received=self._bytes_received,
+            kept=kept,
+        )
         # Tear down the live leg: TapRelay cancels any in-flight reconnect
         # (so it can't land a fresh relay right after teardown, leaking a
         # WS to the WlK child) and then closes the relay, which drains
-        # tail captions. Present on every path that registered a stream.
-        if self._tap_relay is not None:
-            await self._tap_relay.close()
-        await self._recorder.streams.remove(self._conn_id)
+        # tail captions. The ActiveStream row removal runs unconditionally in
+        # the `finally` — the row must go even if the relay is None (open unwound
+        # before it was built) or its teardown raises/cancels; remove() no-ops on
+        # an unregistered conn_id.
+        try:
+            if self._tap_relay is not None:
+                await self._tap_relay.close()
+        finally:
+            await self._recorder.streams.remove(self._conn_id)
