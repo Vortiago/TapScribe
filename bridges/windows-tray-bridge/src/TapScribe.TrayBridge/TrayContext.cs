@@ -291,7 +291,10 @@ internal sealed class TrayContext : ApplicationContext
             // controller awaits this to completion before it triggers the pipeline.
             drainAsync: async () =>
             {
-                await orchestrator.DisposeAsync().ConfigureAwait(false);
+                // End-meeting teardown is ONE call — drain every tap to completion
+                // THEN stop+dispose capture — so it can't be reduced to a drain that
+                // leaks the devices and streams past the barrier (see EndMeetingAsync).
+                await orchestrator.EndMeetingAsync().ConfigureAwait(false);
                 enumerator?.Dispose();
             });
     }

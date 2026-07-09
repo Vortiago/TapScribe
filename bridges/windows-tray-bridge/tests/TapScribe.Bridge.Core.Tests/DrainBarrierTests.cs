@@ -72,7 +72,7 @@ public class DrainBarrierTests
     }
 
     [Fact]
-    public async Task EndMeeting_TriggersThePipeline_OnlyAfterDrainAllAsyncCompletes()
+    public async Task EndMeeting_TriggersThePipeline_OnlyAfterEndMeetingAsyncCompletes()
     {
         await using FakeRecorder rec = await FakeRecorder.StartAsync();
         using var http = new HttpClient();
@@ -89,14 +89,15 @@ public class DrainBarrierTests
         capture.Emit(Loud(40));
         await transport.SendReached.WaitAsync(Wait);
 
-        // The tray's End-meeting barrier is DrainAllAsync (not the 2 s DisposeAsync).
+        // The tray's End-meeting barrier is EndMeetingAsync (drain-to-completion THEN
+        // dispose), NOT the 2 s DisposeAsync (Quit) — wire the production path.
         var controller = new MeetingController(
-            control, session, pollDelay: Immediate, drainAsync: () => orchestrator.DrainAllAsync());
+            control, session, pollDelay: Immediate, drainAsync: () => orchestrator.EndMeetingAsync());
         Task ending = controller.EndAsync();
 
-        // EndAsync awaits drainAsync() == DrainAllAsync, which is held on the tap's flush,
-        // so it CANNOT have reached TriggerPipelineAsync yet: the pipeline must not fire
-        // while a WAV is still being appended.
+        // EndAsync awaits drainAsync() == EndMeetingAsync, which is held on the tap's
+        // flush, so it CANNOT have reached TriggerPipelineAsync yet: the pipeline must
+        // not fire while a WAV is still being appended.
         Assert.False(ending.IsCompleted, "End fired before the drain barrier completed");
         Assert.Equal(0, rec.TriggerCount(session));
 
@@ -104,6 +105,7 @@ public class DrainBarrierTests
         await ending.WaitAsync(Wait);
 
         Assert.Equal(1, rec.TriggerCount(session));   // the pipeline fired — after the drain, exactly once
+        Assert.True(capture.Disposed, "End must dispose capture as part of the barrier, not leave it running");
     }
 
     [Fact]
@@ -130,6 +132,36 @@ public class DrainBarrierTests
 
         Assert.Equal(2, transport.Connections.Count);
         Assert.All(transport.Connections, c => Assert.True(c.Closed, "a tap was left open after DrainAllAsync"));
+    }
+
+    [Fact]
+    public async Task EndMeetingAsync_StopsAndDisposesCapture_SoNoAudioStreamsPastTheBarrier()
+    {
+        // Regression pin (the self-review deleted the End dispose, leaking the capture):
+        // the End-meeting barrier must STOP + DISPOSE capture, so a speaker who keeps
+        // talking after "End meeting" streams NO further frames — the pipeline can't
+        // strip/transcribe audio captured after End. A drain-only End (no dispose)
+        // leaves capture live and would fail this.
+        var transport = new FakeTapTransport();
+        var capture = new FakeAudioCapture(RecorderFormat);
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            [Spec(capture, "mic")],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            FastGate(), FastStream(), transport.Create);
+
+        capture.Emit(Loud(40));
+        await Poll.UntilAsync(() => transport.HasStreamed("mic"), Wait, "the pipeline to stream");
+
+        await orchestrator.EndMeetingAsync().WaitAsync(Wait);
+
+        Assert.True(capture.Stopped, "End must stop capture");
+        Assert.True(capture.Disposed, "End must dispose capture (release the device)");
+
+        int sentAtBarrier = transport.Connections.Sum(c => c.SentCount);
+        capture.Emit(Loud(40));  // a speaker keeps talking after End meeting
+        Assert.Equal(
+            sentAtBarrier,
+            transport.Connections.Sum(c => c.SentCount)); // capture is stopped → no post-barrier frames
     }
 }
 

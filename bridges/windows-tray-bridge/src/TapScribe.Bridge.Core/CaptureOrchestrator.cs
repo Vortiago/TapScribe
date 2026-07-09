@@ -130,6 +130,17 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
+    /// End-of-meeting drain: for each running session, close its open utterance and
+    /// await its drain to completion — bounded only by each stream's own
+    /// <see cref="TapStreamOptions.DrainBudget"/>, not the 2 s <see cref="DisposeAsync"/>
+    /// cap. The Recorder's strip / batch / summarize pipeline fires AFTER this returns,
+    /// so the WAVs must be fully flushed (a truncated WAV that leaks into the pipeline
+    /// is the bug this fixes).
+    /// </summary>
+    public async Task DrainAllAsync() =>
+        await Task.WhenAll(_sessions.Values.Select(s => s.DrainAllAsync())).ConfigureAwait(false);
+
+    /// <summary>
     /// Tear down every pipeline. Sessions are disposed <em>concurrently</em> — each
     /// <see cref="TapSession.DisposeAsync"/> is already bounded (drains within its
     /// own budget), so fanning them out keeps total teardown ~one budget instead of
@@ -138,4 +149,20 @@ public sealed class CaptureOrchestrator : IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync() =>
         await Task.WhenAll(_sessions.Values.Select(s => s.DisposeAsync().AsTask())).ConfigureAwait(false);
+
+    /// <summary>
+    /// End-of-meeting teardown: <see cref="DrainAllAsync"/> every tap to completion
+    /// (no 2 s Quit cap) and THEN <see cref="DisposeAsync"/> — stopping capture and
+    /// releasing the devices. Exposed as ONE call so the tray's End path can't drain
+    /// without disposing: dropping the dispose leaks the WASAPI capture devices and
+    /// lets them keep streaming PCM into the session past the barrier, so the pipeline
+    /// strips/transcribes audio captured after "End meeting". The pipeline trigger
+    /// fires only after this returns. (Quit stays on the 2 s-bounded
+    /// <see cref="DisposeAsync"/>.)
+    /// </summary>
+    public async Task EndMeetingAsync()
+    {
+        await DrainAllAsync().ConfigureAwait(false);
+        await DisposeAsync().ConfigureAwait(false);
+    }
 }
