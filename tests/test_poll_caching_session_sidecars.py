@@ -226,9 +226,7 @@ def test_meta_and_roster_caches_invalidate_when_a_sidecar_is_rewritten(
     )
 
 
-def test_cached_roster_preserves_the_full_coercion_taxonomy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_cached_roster_preserves_the_full_coercion_taxonomy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The cached roster read must apply the SAME coercion branch table as the
     uncached `roster.read_roster` — not pass the raw values through, nor a
     hand-rolled copy that can drift from it. Pin representative branches: an
