@@ -77,18 +77,6 @@ function drainWithTwoBufferedFrames(b) {
   return ws2;
 }
 
-// Make exactly the Nth send() on this socket throw (1-indexed), so a
-// multi-frame flush fails PARTWAY and re-queues only the tail.
-function failSendOnFrame(ws, n) {
-  const orig = ws.send.bind(ws);
-  let seen = 0;
-  ws.send = (buf) => {
-    seen += 1;
-    if (seen === n) throw new Error("tap-send-failed (simulated dead link)");
-    return orig(buf);
-  };
-}
-
 // Make the given 1-indexed send() calls throw; the rest pass through. Frames
 // only pile up on an OPEN socket via a caught send failure, so this both
 // buffers frames on an open WS AND fails one frame of the later mute-flush so
@@ -112,7 +100,7 @@ test("a send failure mid-drain keeps the tail buffered and does NOT finalise the
   const b = createBridge();
   return ready(b).then(() => {
     const ws2 = drainWithTwoBufferedFrames(b);
-    failSendOnFrame(ws2, 2); // frame 1 sends, frame 2 throws -> tail re-queued
+    failSendOnCalls(ws2, [2]); // frame 1 sends, frame 2 throws -> tail re-queued
     ws2.triggerOpen();
 
     // Bug: onopen finalises unconditionally -> WS closed, buffer emptied,
@@ -129,7 +117,7 @@ test("after a mid-drain send failure the reconnect retry delivers the tail, then
   const b = createBridge();
   return ready(b).then(() => {
     const ws2 = drainWithTwoBufferedFrames(b);
-    failSendOnFrame(ws2, 2);
+    failSendOnCalls(ws2, [2]);
     ws2.triggerOpen(); // partial flush: frame 1 out, frame 2 re-queued
     // The dead link that failed the send now drops -> the drain reconnect
     // ladder should schedule another attempt within the remaining window.
@@ -214,7 +202,7 @@ test("E: End-meeting mid-drain + partial flush finalises the meeting only AFTER 
   b.clock.tick(500);
   const ws2 = b.lastSocket();
   assert.notEqual(ws2, ws1, "drain reconnect opened a new WS");
-  failSendOnFrame(ws2, 2);
+  failSendOnCalls(ws2, [2]);
   ws2.triggerOpen();
   // A partial flush must NOT complete the barrier — ending the meeting now
   // would process a Session missing its last audio.
