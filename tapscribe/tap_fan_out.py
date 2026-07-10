@@ -227,11 +227,10 @@ class TapFanOut:
                 # Bridge reconnected within the resume window with the
                 # same utterance_id. Append to the existing WAV; preserve
                 # bytes_received and started_at so the merged file looks
-                # like one continuous utterance. `wave` has no append
-                # mode, so we read the existing frames and rewrite them
-                # through the canonical header so the resulting file
-                # stays structurally valid before AND after the resumed
-                # segment is appended.
+                # like one continuous utterance. open_recorder_wav_append
+                # seeks to the end of the existing data and patches the
+                # RIFF/data sizes on close — O(1), no re-read of the prior
+                # frames (see wav_append.py).
                 if self._name and self._name != resumed.name:
                     resumed.name = self._name
                 self._wf = open_recorder_wav_append(resumed.path)
