@@ -242,4 +242,27 @@ public sealed class TapSession : IAsyncDisposable
 
         _capture.Dispose();
     }
+
+    /// <summary>
+    /// Drain every currently-draining utterance to completion (no 2 s Quit cap)
+    /// — bounded only by each stream's own <see cref="TapStreamOptions.DrainBudget"/>.
+    /// Also closes any currently-open utterance and drains its tail. This is the
+    /// end-of-meeting teardown path: it must flush buffered tails fully so the
+    /// Recorder does not strip / transcribe a truncated WAV, so the 2 s bound on
+    /// <see cref="DisposeAsync"/> is wrong and a no-cap drain is needed.
+    /// </summary>
+    public async Task DrainAllAsync()
+    {
+        List<Task> draining;
+        lock (_lock)
+        {
+            draining = [.. _draining];
+            if (_current is not null)
+                draining.Add(_current.DrainAndDisposeAsync());
+            _current = null;
+        }
+
+        if (draining.Count > 0)
+            await Task.WhenAll(draining).ConfigureAwait(false);
+    }
 }
