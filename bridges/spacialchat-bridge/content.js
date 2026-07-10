@@ -492,7 +492,7 @@
       // If we only reopened to drain trailing PCM after a mute, finalise
       // the utterance now that the buffer has been handed off. Closing
       // cleanly is the recorder's "end of utterance" signal.
-      if (ch.draining) {
+      if (ch.draining && ch.buffer.length === 0) {
         finalizeDrain(identity, ch);
       }
       publishStatus();
