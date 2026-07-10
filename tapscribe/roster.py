@@ -54,6 +54,22 @@ def _coerce_entry(value: Any) -> dict[str, Any] | None:
     }
 
 
+def coerce_roster(raw: Any) -> dict[str, dict[str, Any]]:
+    """Coerce a raw parsed roster mapping into `{full identity: entry}`, dropping
+    non-str identities and non-dict entries (and per-field junk, via
+    `_coerce_entry`). Non-dict top level → `{}`. Shared by `read_roster` (the
+    uncached write-path reader) and the cached poll path
+    (`sessions._read_roster_cached`) so both produce the identical shape."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for identity, entry in raw.items():
+        coerced = _coerce_entry(entry)
+        if isinstance(identity, str) and coerced is not None:
+            out[identity] = coerced
+    return out
+
+
 def read_roster(session_dir: Path) -> dict[str, dict[str, Any]]:
     """The session's roster as `{full identity: entry}`. Missing, torn, or
     non-dict top level → `{}` so a single bad file never crashes the poll."""
@@ -65,14 +81,7 @@ def read_roster(session_dir: Path) -> dict[str, dict[str, Any]]:
         # is best-effort durable state, recovered on the next occurrence — a
         # read failure must degrade to "no roster", never propagate.
         return {}
-    if not isinstance(data, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for identity, entry in data.items():
-        coerced = _coerce_entry(entry)
-        if isinstance(identity, str) and coerced is not None:
-            out[identity] = coerced
-    return out
+    return coerce_roster(data)
 
 
 def record_occurrence(

@@ -33,10 +33,11 @@ from . import config
 from .audio import wav_duration_s
 from .name_resolution import known_names
 from .people import PeopleRegistry
-from .roster import read_roster
+from .roster import coerce_roster, read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
     FILENAME_META_JSON,
+    FILENAME_ROSTER_JSON,
     FILENAME_STRIP_META_JSON,
     FILENAME_SUMMARY_JSON,
     FILENAME_TRANSCRIPT_JSON,
@@ -93,21 +94,35 @@ def _coerce_languages(value: Any) -> list[str]:
     return list(dict.fromkeys(v.strip().lower() for v in value if isinstance(v, str) and v.strip()))
 
 
+def _coerce_session_meta(raw: Any) -> dict[str, Any]:
+    """Coerce a raw session-meta dict into the standard shape: string-field
+    projection, alias coercion, language normalisation. Shared by
+    `read_session_meta` (the uncached write-path caller) and the cached
+    path in `_describe_session` so both produce the identical result."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {k: raw[k] for k in _META_STRING_FIELDS if isinstance(raw.get(k), str)}
+    if isinstance(raw.get("aliases"), dict):
+        out["aliases"] = _coerce_aliases(raw["aliases"])
+    langs = _coerce_languages(raw.get("languages"))
+    if langs:
+        out["languages"] = langs
+    return out
+
+
+def _read_roster_cached(sd: Path) -> dict[str, dict[str, Any]]:
+    """session-roster.json through the stat-sig cache, coerced via the shared
+    `roster.coerce_roster` so the cached poll path and the uncached `read_roster`
+    write path produce the identical shape. {} on None/non-dict."""
+    return coerce_roster(_read_session_json_cached(sd / FILENAME_ROSTER_JSON))
+
+
 def read_session_meta(session: str) -> dict[str, Any]:
     """Return the per-session metadata dict: operator-editable display
     label, speaker aliases, and per-session batch prompt/hotwords
     overrides. Missing or unreadable → {} (caller can treat as no
     overrides). Non-string fields are dropped silently."""
-    data = _read_json_or_none(session_meta_path(session))
-    if not isinstance(data, dict):
-        return {}
-    out: dict[str, Any] = {k: data[k] for k in _META_STRING_FIELDS if isinstance(data.get(k), str)}
-    if isinstance(data.get("aliases"), dict):
-        out["aliases"] = _coerce_aliases(data["aliases"])
-    langs = _coerce_languages(data.get("languages"))
-    if langs:
-        out["languages"] = langs
-    return out
+    return _coerce_session_meta(_read_json_or_none(session_meta_path(session)))
 
 
 def write_session_meta(session: str, meta: dict[str, Any]) -> None:
@@ -365,8 +380,8 @@ def _read_json_or_none(path: Path) -> Any:
 # transcript-sidecar signature); see wav_cache.cache_signature.
 _WAV_DESC_CACHE: dict[str, tuple[tuple, dict[str, Any]]] = {}
 # str(path) -> ((mtime_ns, size) | None, parsed-json). For the per-session JSON
-# sidecars the poll re-reads: session-transcript.json, session-summary.json, and
-# stripped/strip-meta.json.
+# sidecars the poll re-reads: session-transcript.json, session-summary.json,
+# session-meta.json, session-roster.json, and stripped/strip-meta.json.
 _SESSION_JSON_CACHE: dict[str, tuple[tuple | None, Any]] = {}
 
 
@@ -683,10 +698,13 @@ def _describe_session(
     growing size is kept out of `files_sig` so capture doesn't drive a per-tick
     files refetch (see `_files_signature`)."""
     wavs, stripped = build_session_files(sd, visited=visited)
-    starts = [parse_wav_start(w["name"]) for w in wavs]
-    starts = [s for s in starts if s is not None]
-    earliest = min(starts) if starts else None
-    latest = max(starts) if starts else None
+    # earliest/latest reuse each descriptor's cached `wav_start` ISO (avoiding a
+    # re-strptime of every WAV name per tick). Lexicographic min/max == the
+    # chronological bound because `parse_wav_start` emits a fixed-width UTC
+    # seconds-precision `...+00:00` string, so string order equals time order.
+    wav_starts = [w["wav_start"] for w in wavs if w.get("wav_start")]
+    earliest_iso = min(wav_starts) if wav_starts else None
+    latest_iso = max(wav_starts) if wav_starts else None
     return {
         "session": sd.name,
         "wav_count": len(wavs),
@@ -707,8 +725,8 @@ def _describe_session(
         "speakers": sorted({w["speaker_name"] for w in wavs if w.get("speaker_name")}),
         "files_sig": _files_signature(wavs, stripped, open_wavs),
         "is_current": sd.name == current_session,
-        "earliest_iso": earliest.isoformat() if earliest else None,
-        "latest_iso": latest.isoformat() if latest else None,
+        "earliest_iso": earliest_iso,
+        "latest_iso": latest_iso,
         # SLIM marker only — the full merged transcript (segments[]/plain_text/
         # suppressed[]/speaking_seconds) is fetched lazily via
         # GET /api/sessions/{session}/transcript when the session is opened.
@@ -719,13 +737,13 @@ def _describe_session(
         ),
         "session_summary": _session_summary_marker(_read_session_json_cached(sd / FILENAME_SUMMARY_JSON)),
         "progress": jobs.get(sd.name),
-        "session_meta": read_session_meta(sd.name),
+        "session_meta": _coerce_session_meta(_read_session_json_cached(sd / FILENAME_META_JSON)),
         # The per-session Roster (full identity → name/source/slug/wavs). Cheap
         # read, freshly built each poll like the rest of this dict, and the
         # input the People Registry + per-session name resolution join on
         # (name_resolution.attach_people, called by /api/state). Empty {} for a
         # pre-feature session, which resolves purely via its retained aliases.
-        "roster": read_roster(sd),
+        "roster": _read_roster_cached(sd),
         "stripped": stripped,
     }
 
@@ -762,6 +780,8 @@ def gather_sessions(
         visited_session_jsons.add(str(sd / FILENAME_TRANSCRIPT_JSON))
         visited_session_jsons.add(str(sd / FILENAME_SUMMARY_JSON))
         visited_session_jsons.add(str(sd / DIRNAME_STRIPPED / FILENAME_STRIP_META_JSON))
+        visited_session_jsons.add(str(sd / FILENAME_META_JSON))
+        visited_session_jsons.add(str(sd / FILENAME_ROSTER_JSON))
         out.append(
             _describe_session(
                 sd,
