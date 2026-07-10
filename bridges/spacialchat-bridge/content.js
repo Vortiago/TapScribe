@@ -630,8 +630,16 @@
 
     if (wsOpen) {
       bufferFlush(ch);
-      endUtteranceImmediate(identity, ch, reason);
-      return;
+      // A send that throws PARTWAY through the flush re-queues the unsent tail
+      // and leaves it buffered (the #250 partial-flush case, same as the onopen
+      // drain branch). Closing+resetting now would discard that tail — the
+      // exact data-loss the onopen guard prevents. Only finalise when the
+      // buffer actually emptied; otherwise fall through to drain mode so the
+      // reconnect ladder retries the tail within the DRAIN_MAX_MS window.
+      if (ch.buffer.length === 0) {
+        endUtteranceImmediate(identity, ch, reason);
+        return;
+      }
     }
 
     console.log("[tapscribe-bridge] mute with " + ch.bufferBytes +
