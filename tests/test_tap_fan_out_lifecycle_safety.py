@@ -231,7 +231,7 @@ async def test_open_failure_reopening_wav_on_resume_releases_indexed_utterance(
     def _boom(*args: object, **kwargs: object) -> None:
         raise OSError("disk full reopening the WAV for append")
 
-    monkeypatch.setattr("tapscribe.tap_fan_out.open_recorder_wav", _boom)
+    monkeypatch.setattr("tapscribe.tap_fan_out.open_recorder_wav_append", _boom)
     relay = _FakeRelay()
 
     with pytest.raises(OSError):
