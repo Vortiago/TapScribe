@@ -33,6 +33,7 @@ from . import config
 from .audio import wav_duration_s
 from .name_resolution import known_names
 from .people import PeopleRegistry
+from .roster import _coerce_entry as _roster_coerce_entry
 from .roster import read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
@@ -108,21 +109,6 @@ def _coerce_session_meta(raw: Any) -> dict[str, Any]:
     if langs:
         out["languages"] = langs
     return out
-
-
-def _roster_coerce_entry(value: Any) -> dict[str, Any] | None:
-    """Minimal shape gate for one roster entry — mirrors roster._coerce_entry
-    so the cached read path in sessions.py stays self-contained."""
-    if not isinstance(value, dict):
-        return None
-    source = value.get("source")
-    wavs = value.get("wavs")
-    return {
-        "name": value["name"] if isinstance(value.get("name"), str) else "",
-        "source": source if source in ("recorded", "live") else "live",
-        "slug": value["slug"] if isinstance(value.get("slug"), str) else "",
-        "wavs": [w for w in wavs if isinstance(w, str)] if isinstance(wavs, list) else [],
-    }
 
 
 def _read_roster_cached(sd: Path) -> dict[str, dict[str, Any]]:
