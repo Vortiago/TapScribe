@@ -224,3 +224,27 @@ def test_meta_and_roster_caches_invalidate_when_a_sidecar_is_rewritten(
     assert second["roster"]["alice"]["name"] == "Alice Cooper", (
         "session-roster cache served stale data after a rewrite"
     )
+
+
+def test_cached_roster_preserves_the_full_coercion_taxonomy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The cached roster read must apply the SAME coercion branch table as the
+    uncached `roster.read_roster` — not pass the raw values through, nor a
+    hand-rolled copy that can drift from it. Pin representative branches: an
+    unknown source coerces to 'live', a non-str name to '', a non-list wavs to [].
+    The value-only assertions above (name == 'Alice') would pass a divergent
+    coercion, so this pins the taxonomy they miss."""
+    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path)
+    sd = tmp_path / _SESSION
+    sd.mkdir()
+    seed_wav(sd / "2026-01-01T01-00-00Z_alice_abc_u1.wav")
+    (sd / FILENAME_ROSTER_JSON).write_text(
+        json.dumps({"alice": {"name": 123, "source": "bogus", "slug": "alice", "wavs": "notalist"}}),
+        encoding="utf-8",
+    )
+
+    entry = sessions.gather_sessions(current_session=_SESSION)[0]["roster"]["alice"]
+    assert entry["source"] == "live", "an unknown roster source must coerce to 'live' (not passed through)"
+    assert entry["name"] == "", "a non-str roster name must coerce to ''"
+    assert entry["wavs"] == [], "a non-list roster wavs must coerce to []"
