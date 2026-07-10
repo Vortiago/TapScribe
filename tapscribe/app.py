@@ -667,6 +667,8 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         pref = recorder.tap_settings.get(s.identity)
         row["record"] = pref.record
         row["live"] = pref.live
+        row["level"] = round(row["level"], 2)
+        row["bytes_received"] = (row["bytes_received"] + 32768) // 65536 * 65536
         active.append(row)
     sessions_list = blob["sessions"]
     # Powers the "· N sessions override this" footer in the default config panel.
