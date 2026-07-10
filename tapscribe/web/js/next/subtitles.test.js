@@ -46,3 +46,9 @@ test("empty input: SRT is empty, VTT is just the header line", () => {
   assert.equal(toSRT([]), "");
   assert.equal(toVTT([]), "WEBVTT\n");
 });
+
+test("millisecond rounding carries into the seconds field (no 4-digit ms)", () => {
+  // 0.9999s = 999.9ms -> 1000ms must carry: 00:00:01,000, not 00:00:00,1000
+  assert.equal(toSRT([{ start: 0.9999, end: 1, text: "x" }]), "1\n00:00:01,000 --> 00:00:01,000\nx");
+  assert.equal(toVTT([{ start: 0.9999, end: 1, text: "x" }]), "WEBVTT\n\n00:00:01.000 --> 00:00:01.000\nx");
+});
