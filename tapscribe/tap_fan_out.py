@@ -27,6 +27,7 @@ from .audio import int16_peak_norm, open_recorder_wav
 from .recorder import ActiveStream, Recorder, UtteranceRecord
 from .tap_relay import RelayHandlers, TapRelay
 from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
+from .wav_append import open_recorder_wav_append
 
 # Per-frame decay factor for the volume-meter peak hold. Frames are 20 ms
 # (640 bytes @ 16 kHz mono int16); 0.92 per frame gives a ~165 ms half-life
@@ -226,19 +227,13 @@ class TapFanOut:
                 # Bridge reconnected within the resume window with the
                 # same utterance_id. Append to the existing WAV; preserve
                 # bytes_received and started_at so the merged file looks
-                # like one continuous utterance. `wave` has no append
-                # mode, so we read the existing frames and rewrite them
-                # through the canonical header so the resulting file
-                # stays structurally valid before AND after the resumed
-                # segment is appended.
+                # like one continuous utterance. open_recorder_wav_append
+                # seeks to the end of the existing data and patches the
+                # RIFF/data sizes on close — O(1), no re-read of the prior
+                # frames (see wav_append.py).
                 if self._name and self._name != resumed.name:
                     resumed.name = self._name
-                with wave.open(str(resumed.path), "rb") as r:
-                    existing = r.readframes(r.getnframes())
-                wf = open_recorder_wav(resumed.path)
-                if existing:
-                    wf.writeframes(existing)
-                self._wf = wf
+                self._wf = open_recorder_wav_append(resumed.path)
                 self._record = resumed
                 self._bytes_received = resumed.bytes_received
                 started_at = resumed.started_at

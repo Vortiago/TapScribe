@@ -20,15 +20,23 @@ RECORDER_SAMPLE_WIDTH = 2
 RECORDER_CHANNELS = 1
 
 
+def _configure_recorder_format(wf: wave.Wave_write) -> None:
+    """Apply the recorder's canonical PCM format (16 kHz / mono / int16) to a
+    freshly opened `Wave_write`. Shared by `open_recorder_wav` and the append
+    path (`wav_append.open_recorder_wav_append`) so the format lives in one
+    place — a future format tweak can't leave the two setups divergent."""
+    wf.setnchannels(RECORDER_CHANNELS)
+    wf.setsampwidth(RECORDER_SAMPLE_WIDTH)
+    wf.setframerate(RECORDER_SAMPLE_RATE)
+
+
 def open_recorder_wav(path: Path) -> wave.Wave_write:
     """Open `path` for writing in the recorder's canonical format
     (16 kHz / mono / int16). The caller closes the returned handle —
     typically via `with` or an explicit `.close()` from a longer-lived
     owner like TapFanOut."""
     wf = wave.open(str(path), "wb")
-    wf.setnchannels(RECORDER_CHANNELS)
-    wf.setsampwidth(RECORDER_SAMPLE_WIDTH)
-    wf.setframerate(RECORDER_SAMPLE_RATE)
+    _configure_recorder_format(wf)
     return wf
 
 
