@@ -34,7 +34,7 @@ import anyio.from_thread
 import pytest
 from fastapi.testclient import TestClient
 
-from tapscribe.app import app, get_recorder
+from tapscribe.app import _TAP_BYTES_BUCKET, app, get_recorder
 from tapscribe.recorder import ActiveStream, Recorder
 
 
@@ -74,6 +74,17 @@ def _etag(client: TestClient) -> str:
     r = client.get("/api/state")
     assert r.status_code == 200
     return r.headers["etag"]
+
+
+def _tap_row(client: TestClient, identity: str) -> dict:
+    """The served /api/state `active` row for one tap — the value the operator
+    actually sees, AFTER the display-granularity quantization. Matched by
+    identity (not row order) so the pins don't depend on iteration order."""
+    r = client.get("/api/state")
+    assert r.status_code == 200
+    rows = [row for row in r.json()["active"] if row["identity"] == identity]
+    assert len(rows) == 1, f"expected exactly one active row for {identity!r}, got {len(rows)}"
+    return rows[0]
 
 
 def test_a_subgranularity_tap_update_does_not_bust_the_state_etag(
@@ -127,4 +138,67 @@ def test_a_meaningful_tap_update_still_busts_the_state_etag(
     assert _etag(client) != etag_before, (
         "a large tap update did NOT change the ETag — the quantization is degenerate "
         "(constant), which would freeze the live dashboard during a meeting"
+    )
+
+
+def test_bytes_received_round_to_nearest_edges_are_served(client: TestClient, recorder_under_test: Recorder):
+    """Pin the exact round-to-nearest-_TAP_BYTES_BUCKET edges the operator sees on
+    the served `active` row (not just one interior bucket): the whole first
+    half-bucket collapses to 0 — a brand-new recording tap reads "0 B" until it
+    has buffered half a bucket — and the half-bucket midpoint rounds UP to a full
+    bucket (the 2x inflation). Both are #217-SANCTIONED cosmetic effects of the
+    ETag-stability quantization (the frontend renders these same values), pinned
+    here so a well-meaning "fix" back to raw counters is caught."""
+    _register_open_tap(
+        recorder_under_test, conn_id="c-edge", identity="edge-tap", bytes_received=1, level=0.5
+    )
+    # A single buffered byte is inside the first half-bucket → served as 0 ("0 B").
+    assert _tap_row(client, "edge-tap")["bytes_received"] == 0
+
+    # The half-bucket midpoint is the round-to-nearest tie → rounds UP to a full bucket.
+    _update_tap(recorder_under_test, "c-edge", bytes_received=_TAP_BYTES_BUCKET // 2, level=0.5)
+    assert _tap_row(client, "edge-tap")["bytes_received"] == _TAP_BYTES_BUCKET
+
+
+def test_quantized_tap_scalars_keep_their_json_types(client: TestClient, recorder_under_test: Recorder):
+    """The quantization must preserve types across the serialize boundary:
+    bytes_received stays int, level stays float. A `//`→`/` typo would make
+    bytes_received 65536.0, which serializes CONSISTENTLY every poll — so the
+    ETag-stability tests would pass it straight through; only a type check on the
+    served body catches it (and the frontend's byte formatting breaks on a float)."""
+    _register_open_tap(
+        recorder_under_test, conn_id="c-types", identity="types-tap", bytes_received=64_000, level=0.5
+    )
+    row = _tap_row(client, "types-tap")
+    assert isinstance(row["bytes_received"], int), "bytes_received must stay int (guard //→/ )"
+    assert isinstance(row["level"], float), "level must stay float"
+
+
+def test_granularity_is_pinned_at_the_real_harm_rate(client: TestClient, recorder_under_test: Recorder):
+    """Pin the bucket at BOTH ends via the production harm-rate, not the 1-byte
+    proxy (which any bucket >=2 bytes passes): a realistic sub-bucket poll delta
+    (a quarter bucket, ~= one poll-interval's worth of 20 ms frames) must HOLD the
+    ETag, while advancing a whole bucket — an operator-visible jump — must BUST
+    it. Deltas ride _TAP_BYTES_BUCKET so this pins the round-to-nearest semantics
+    through a deliberate bucket retune; the exact magnitudes live in the edge
+    test above."""
+    start = 64_000
+    _register_open_tap(
+        recorder_under_test, conn_id="c-rate", identity="rate-tap", bytes_received=start, level=0.5
+    )
+    _etag(client)  # warm-up — settle first-appearance People auto-bind
+
+    etag_before = _etag(client)
+    # A quarter-bucket advance stays inside the same bucket → same ETag.
+    _update_tap(recorder_under_test, "c-rate", bytes_received=start + _TAP_BYTES_BUCKET // 4, level=0.5)
+    assert _etag(client) == etag_before, (
+        "a sub-bucket (real poll-rate) advance busted the ETag — the display "
+        "bucket is smaller than one poll-interval's worth of audio frames"
+    )
+
+    # A full-bucket advance crosses into the next bucket → operator-visible → ETag busts.
+    _update_tap(recorder_under_test, "c-rate", bytes_received=start + _TAP_BYTES_BUCKET, level=0.5)
+    assert _etag(client) != etag_before, (
+        "a full-bucket advance did NOT change the ETag — the display bucket is "
+        "coarser than _TAP_BYTES_BUCKET, hiding operator-visible growth"
     )

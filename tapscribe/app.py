@@ -609,6 +609,12 @@ async def api_tap_pipeline_poll(session: str, recorder: Recorder = Depends(get_r
 # /api/state — the dashboard's once-per-second polling endpoint
 # ---------------------------------------------------------------------------
 
+# Round each open tap's raw bytes_received (bumped per 20 ms audio frame) to the
+# nearest bucket before it lands in /api/state, so a quiet-but-open tap's
+# sub-bucket byte drift stops busting the response ETag every poll (#217). One
+# constant so the round-to-nearest stays centred: half a bucket is _TAP_BYTES_BUCKET // 2.
+_TAP_BYTES_BUCKET = 64 * 1024
+
 
 def _build_state_blob(
     current_session: str, jobs_snapshot: dict[str, Any], open_wavs: set[str]
@@ -667,8 +673,17 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         pref = recorder.tap_settings.get(s.identity)
         row["record"] = pref.record
         row["live"] = pref.live
-        row["level"] = round(row["level"], 2)
-        row["bytes_received"] = (row["bytes_received"] + 32768) // 65536 * 65536
+        # Quantize the two per-frame-volatile tap scalars to display granularity
+        # so the ETag below (it hashes the whole body) busts only when an
+        # operator-visible value changes — otherwise a quiet-but-open tap reships
+        # the entire O(library) state on every ~0.5 s poll (#217). The frontend
+        # renders these same quantized values, so a fresh tap under half a bucket
+        # reading "0 B" and a midpoint rounding up to the next bucket are
+        # sanctioned cosmetic effects, not bugs to "fix" back to raw counters.
+        row["level"] = round(row["level"], 2)  # volume meter → 2 decimals
+        row["bytes_received"] = (
+            (row["bytes_received"] + _TAP_BYTES_BUCKET // 2) // _TAP_BYTES_BUCKET * _TAP_BYTES_BUCKET
+        )  # → nearest _TAP_BYTES_BUCKET
         active.append(row)
     sessions_list = blob["sessions"]
     # Powers the "· N sessions override this" footer in the default config panel.
