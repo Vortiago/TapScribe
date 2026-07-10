@@ -31,6 +31,7 @@ from .session_merge import InvalidRange, NoUsableWavs, merge_session, select_ses
 from .session_paths import (
     FILENAME_TRANSCRIPT_JSON,
     FILENAME_TRANSCRIPT_TXT,
+    resolve_original_wav,
     resolve_session_dir,
     resolve_wav,
 )
@@ -364,7 +365,7 @@ async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # n
     # Silence detection always reads the ORIGINAL, not the per-source
     # file. The stripped sibling's RMS can be misleadingly high because
     # silero may have false-positive'd on a brief noise burst.
-    original_path = config.RECORDINGS_DIR / req.session / req.name
+    original_path = resolve_original_wav(req.session, req.name)
     rms_dbfs = wav_rms_dbfs(original_path)
     if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
         raise WavTooQuiet(

@@ -53,6 +53,15 @@ def _safe_part(part: object, what: str = "session") -> str:
     return part
 
 
+def _assert_contained(candidate: Path) -> None:
+    """Layer 2: confirm `candidate` stays under RECORDINGS_DIR after
+    symlink resolution. Raises HTTPException(404) on escape."""
+    root = os.path.realpath(config.RECORDINGS_DIR)
+    real = os.path.realpath(candidate)
+    if real != root and not real.startswith(root + os.sep):
+        raise HTTPException(404, "session not found")
+
+
 # ---------------------------------------------------------------------------
 # On-disk session layout — the canonical name for each per-session bookkeeping
 # file and the stripped/ subdir. The ONE owner of each literal: every reader,
@@ -72,7 +81,9 @@ DIRNAME_STRIPPED = "stripped"
 
 
 def session_meta_path(session: str) -> Path:
-    return config.RECORDINGS_DIR / _safe_part(session, "session") / FILENAME_META_JSON
+    path = config.RECORDINGS_DIR / _safe_part(session, "session") / FILENAME_META_JSON
+    _assert_contained(path)
+    return path
 
 
 def stripped_dir(session: str) -> Path:
@@ -120,8 +131,30 @@ def resolve_source_dir(session: str, source: str | None) -> Path:
             raise HTTPException(404, "stripped/ not found for this session; run strip-silence first")
         return d
     if source in (None, "", "original"):
+        _assert_contained(session_dir)
         return session_dir
     raise HTTPException(400, f"unknown source: {source!r} (expected 'original' or 'stripped')")
+
+
+def create_session_dir(session: str) -> Path:
+    """Return `<RECORDINGS_DIR>/<session>` validated with both layers,
+    creating the directory if it does not yet exist."""
+    session = _safe_part(session, "session")
+    session_dir = config.RECORDINGS_DIR / session
+    _assert_contained(session_dir)
+    os.makedirs(session_dir, exist_ok=True)
+    return session_dir
+
+
+def resolve_original_wav(session: str, name: str) -> Path:
+    """Return the ORIGINAL WAV path for `session` / `name` with both
+    containment layers applied. Does NOT check existence (the caller
+    handles missing originals)."""
+    session = _safe_part(session, "session")
+    name = _safe_part(name, "file")
+    path = config.RECORDINGS_DIR / session / name
+    _assert_contained(path)
+    return path
 
 
 def resolve_wav(session: str, name: str, source: str = "original") -> Path:

@@ -41,7 +41,7 @@ from .session_paths import (
     FILENAME_STRIP_META_JSON,
     FILENAME_SUMMARY_JSON,
     FILENAME_TRANSCRIPT_JSON,
-    _safe_part,
+    create_session_dir,
     resolve_session_dir,
     resolve_wav,
     session_meta_path,
@@ -138,12 +138,7 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     Atomic via `atomic_write_text` so a crashed write never leaves a
     torn JSON file (which `_read_json_or_none` would silently swallow,
     losing the operator's label + aliases + overrides all at once)."""
-    session = _safe_part(session, "session")
-    root = os.path.realpath(config.RECORDINGS_DIR)
-    real_parent = os.path.realpath(os.path.join(root, session))
-    if real_parent != root and not real_parent.startswith(root + os.sep):
-        raise HTTPException(404, "session not found")
-    os.makedirs(real_parent, exist_ok=True)
+    session_dir = create_session_dir(session)
     existing = read_session_meta(session)
     allowed = {"aliases", "languages", *_META_STRING_FIELDS}
     merged = {**existing, **{k: v for k, v in meta.items() if k in allowed}}
@@ -173,7 +168,7 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
             f"(expected one of: {', '.join(s for s in SUMMARY_SOURCES if s)} — or '' to clear)",
         )
     atomic_write_text(
-        Path(real_parent) / FILENAME_META_JSON,
+        session_dir / FILENAME_META_JSON,
         json.dumps(sanitized, indent=2, ensure_ascii=False),
     )
 
