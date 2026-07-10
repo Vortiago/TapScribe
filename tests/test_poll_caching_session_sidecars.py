@@ -126,6 +126,38 @@ def test_roster_not_reparsed_on_a_warm_poll_tick(tmp_path: Path, monkeypatch: py
     assert out2[0]["roster"]["alice"]["name"] == "Alice"
 
 
+def test_roster_coercion_branch_table_holds_through_the_poll_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The cached poll path must coerce roster entries with the SAME branch table
+    as `read_roster` — source not in {recorded,live} -> 'live', non-str name -> '',
+    non-str wav member dropped, non-dict entry skipped. Pinning a coercion BRANCH
+    (not just a happy-path value) forbids a hand-rolled/looser mirror of the
+    coercion from passing green while diverging from `roster.coerce_roster` on junk
+    input — the whole point of routing both paths through one shared coercer."""
+    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path)
+    sd = tmp_path / _SESSION
+    sd.mkdir()
+    seed_wav(sd / "2026-01-01T01-00-00Z_alice_abc_u1.wav")
+    (sd / FILENAME_ROSTER_JSON).write_text(
+        json.dumps(
+            {
+                "alice": {"name": 123, "source": "bogus", "slug": "alice", "wavs": ["ok.wav", 7]},
+                "bob": "not-a-dict",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    roster = sessions.gather_sessions(current_session=_SESSION)[0]["roster"]
+
+    assert "bob" not in roster, "a non-dict entry must be dropped, not carried through"
+    entry = roster["alice"]
+    assert entry["source"] == "live", "an out-of-allowlist source must coerce to 'live'"
+    assert entry["name"] == "", "a non-str name must coerce to ''"
+    assert entry["wavs"] == ["ok.wav"], "non-str wav members must be dropped"
+
+
 def test_wav_start_not_recomputed_via_strptime_on_a_warm_tick(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -156,9 +188,11 @@ def test_wav_start_not_recomputed_via_strptime_on_a_warm_tick(
         "from each cached descriptor's wav_start ISO instead of re-parsing the WAV name"
     )
     # ...and the derived bounds are still correct (earliest = the 01:00:00 WAV).
-    assert out[0]["earliest_iso"] is not None
-    assert out[0]["earliest_iso"].startswith("2026-01-01T01:00:00")
-    assert out[0]["latest_iso"].startswith("2026-01-01T01:05:00")
+    # Pin the exact ISO round-trip: each descriptor stores
+    # `parse_wav_start(name).isoformat()` — a fixed-width UTC seconds-precision
+    # string — so lexicographic min/max must surface that value verbatim.
+    assert out[0]["earliest_iso"] == "2026-01-01T01:00:00+00:00"
+    assert out[0]["latest_iso"] == "2026-01-01T01:05:00+00:00"
 
 
 def test_meta_and_roster_caches_invalidate_when_a_sidecar_is_rewritten(

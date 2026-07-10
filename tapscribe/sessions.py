@@ -33,8 +33,7 @@ from . import config
 from .audio import wav_duration_s
 from .name_resolution import known_names
 from .people import PeopleRegistry
-from .roster import _coerce_entry as _roster_coerce_entry
-from .roster import read_roster
+from .roster import coerce_roster, read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
     FILENAME_META_JSON,
@@ -112,17 +111,10 @@ def _coerce_session_meta(raw: Any) -> dict[str, Any]:
 
 
 def _read_roster_cached(sd: Path) -> dict[str, dict[str, Any]]:
-    """session-roster.json through the stat-sig cache, with per-entry coercion.
-    Returns {} on None/non-dict — same contract as read_roster."""
-    raw = _read_session_json_cached(sd / FILENAME_ROSTER_JSON)
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for identity, entry in raw.items():
-        coerced = _roster_coerce_entry(entry)
-        if isinstance(identity, str) and coerced is not None:
-            out[identity] = coerced
-    return out
+    """session-roster.json through the stat-sig cache, coerced via the shared
+    `roster.coerce_roster` so the cached poll path and the uncached `read_roster`
+    write path produce the identical shape. {} on None/non-dict."""
+    return coerce_roster(_read_session_json_cached(sd / FILENAME_ROSTER_JSON))
 
 
 def read_session_meta(session: str) -> dict[str, Any]:
@@ -388,8 +380,8 @@ def _read_json_or_none(path: Path) -> Any:
 # transcript-sidecar signature); see wav_cache.cache_signature.
 _WAV_DESC_CACHE: dict[str, tuple[tuple, dict[str, Any]]] = {}
 # str(path) -> ((mtime_ns, size) | None, parsed-json). For the per-session JSON
-# sidecars the poll re-reads: session-transcript.json, session-summary.json, and
-# stripped/strip-meta.json.
+# sidecars the poll re-reads: session-transcript.json, session-summary.json,
+# session-meta.json, session-roster.json, and stripped/strip-meta.json.
 _SESSION_JSON_CACHE: dict[str, tuple[tuple | None, Any]] = {}
 
 
@@ -706,6 +698,10 @@ def _describe_session(
     growing size is kept out of `files_sig` so capture doesn't drive a per-tick
     files refetch (see `_files_signature`)."""
     wavs, stripped = build_session_files(sd, visited=visited)
+    # earliest/latest reuse each descriptor's cached `wav_start` ISO (avoiding a
+    # re-strptime of every WAV name per tick). Lexicographic min/max == the
+    # chronological bound because `parse_wav_start` emits a fixed-width UTC
+    # seconds-precision `...+00:00` string, so string order equals time order.
     wav_starts = [w["wav_start"] for w in wavs if w.get("wav_start")]
     earliest_iso = min(wav_starts) if wav_starts else None
     latest_iso = max(wav_starts) if wav_starts else None
