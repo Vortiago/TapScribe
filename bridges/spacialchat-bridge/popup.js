@@ -20,7 +20,7 @@ import { meetingView, shouldKeepPolling } from "./popup-presenter.js";
 import { snapshotIsLive, tapStateLabel } from "./taps-view.js";
 import {
   startMeeting as actStart,
-  requestEndMeeting as actEnd,
+  endMeeting as actEnd,
   dismissMeeting as actDismiss,
 } from "./popup-actions.js";
 
@@ -440,7 +440,14 @@ async function onEnd() {
   btnStart.setDisabled(true);
   btnEnd.setDisabled(true);
   try {
-    await actEnd({ storage, now: Date.now() });
+    await actEnd({
+      control,
+      storage,
+      cfg: cfg(),
+      sessionId: /** @type {string} */ (currentMeetingSessionId),
+      snapshot: latestStatus,
+      now: Date.now(),
+    });
   } catch (e) {
     setStatus("meetingStatus", "Couldn't request End meeting — try again.", "err");
     applyMeeting();

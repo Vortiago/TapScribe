@@ -7,10 +7,12 @@
 // to these and renders the returned outcome; these own no DOM and no "what to
 // show" decisions (that's popup-presenter.js).
 
+import { snapshotIsLive } from "./taps-view.js";
+
 /**
  * @typedef {{ host: string, port: number | string, useTls?: boolean, token?: string }} Cfg
  * @typedef {{ set(items: Record<string, unknown>): Promise<void> }} StorageArea
- * @typedef {{ createDetachedSession(cfg: Cfg, opts?: { timeoutMs?: number }): Promise<{ sessionId: string }> }} Control
+ * @typedef {{ createDetachedSession(cfg: Cfg, opts?: { timeoutMs?: number }): Promise<{ sessionId: string }>, triggerPipeline(cfg: Cfg, sessionId: string): Promise<{ outcome: string }> }} Control
  */
 
 /** @param {unknown} e */
@@ -51,6 +53,34 @@ export async function startMeeting({ control, storage, cfg }) {
  */
 export async function requestEndMeeting({ storage, now }) {
   await storage.set({ meetingEndRequestedAt: now });
+}
+
+/**
+ * End meeting: live-vs-stale dispatch. If a SpatialChat tab is live, delegate
+ * via the nonce path (the content script owns drain → trigger → meetingEnd).
+ * If stale/absent, complete the End ourselves by triggering the pipeline
+ * directly so the popup doesn't wedge on "Ending meeting…".
+ * @param {{ control: Control, storage: StorageArea, cfg: Cfg, sessionId: string, snapshot: any, now: number }} deps
+ * @returns {Promise<void>}
+ */
+export async function endMeeting({ control, storage, cfg, sessionId, snapshot, now }) {
+  if (snapshotIsLive(snapshot, now)) {
+    await requestEndMeeting({ storage, now });
+    return;
+  }
+  try {
+    const res = await control.triggerPipeline(cfg, sessionId);
+    const phase = res.outcome === "busy" ? "busy" : "started";
+    await storage.set({
+      meetingActive: false,
+      meetingEnd: { phase, sessionId, error: null, ts: now },
+    });
+  } catch (e) {
+    await storage.set({
+      meetingActive: false,
+      meetingEnd: { phase: "failed", sessionId, error: errText(e), ts: now },
+    });
+  }
 }
 
 /**

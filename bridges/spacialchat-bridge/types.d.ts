@@ -15,6 +15,7 @@ interface ControlClient {
     opts?: { timeoutMs?: number },
   ): Promise<{ sessionId: string; path: unknown }>;
   pollPipeline(cfg: RecorderCfg, sessionId: string, opts?: { timeoutMs?: number }): Promise<any>;
+  triggerPipeline(cfg: RecorderCfg, sessionId: string, opts?: { timeoutMs?: number }): Promise<{ outcome: string }>;
   checkHealth(
     cfg: RecorderCfg,
     opts?: { timeoutMs?: number },
