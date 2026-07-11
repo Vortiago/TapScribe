@@ -524,6 +524,18 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     }
 
 
+async def _trigger_pipeline(recorder: Recorder, session: str) -> dict[str, Any]:
+    """Shared body of the two pipeline-trigger twins (tap-bearer and dashboard
+    Basic auth): cross the path-safety seam, hand `start_pipeline` a
+    session-only `PipelineRequest` (the batch model, backend and summarizer
+    resolve from operator config, never the request body), and return the
+    running ack. The two routes keep their own decorators and auth boundaries;
+    only this fire-and-forget body is shared so they cannot drift."""
+    resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
+    await start_pipeline(recorder, PipelineRequest(session=session))
+    return {"ok": True, "session": session, "state": "running"}
+
+
 @app.post("/api/tap/sessions/{session}/pipeline", status_code=202)
 async def api_tap_pipeline_trigger(session: str, recorder: Recorder = Depends(get_recorder)):
     """Bridge-initiated end-of-meeting pipeline: strip → transcribe →
@@ -540,9 +552,7 @@ async def api_tap_pipeline_trigger(session: str, recorder: Recorder = Depends(ge
     the batch model, backend, and summarizer from operator-side configuration
     (`PipelineRequest` carries only the session), so a tap-token holder can
     never choose which model gets loaded or downloaded."""
-    resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
-    await start_pipeline(recorder, PipelineRequest(session=session))
-    return {"ok": True, "session": session, "state": "running"}
+    return await _trigger_pipeline(recorder, session)
 
 
 @app.post("/api/sessions/{session}/pipeline", status_code=202)
@@ -553,9 +563,7 @@ async def api_dashboard_pipeline_trigger(session: str, recorder: Recorder = Depe
     Resolves the batch model, backend, and summarizer from operator-side
     configuration; a dashboard operator can no more pick a model than the
     tap caller can. The request body is IGNORED entirely, never parsed."""
-    resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
-    await start_pipeline(recorder, PipelineRequest(session=session))
-    return {"ok": True, "session": session, "state": "running"}
+    return await _trigger_pipeline(recorder, session)
 
 
 @app.get("/api/tap/sessions/{session}/pipeline")
