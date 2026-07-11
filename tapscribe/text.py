@@ -110,13 +110,17 @@ def _check_batch_model(model_id: str) -> None:
 
 def _check_hallucinations(content: str) -> None:
     """WRITE-time check for the "hallucinations" key: iterate lines, skip
-    blank/comment/non-regex lines, and for `re:` lines validate the pattern
-    via `_regex_is_safe` (ReDoS guard) + `re.compile`. On failure raise
+    blank/comment/non-`re:` lines, and for `re:` lines validate the pattern via
+    the shared `hallucinations.regex_rule_ok` authority (empty / ReDoS-shape /
+    oversize / uncompilable). When it returns False raise
     `ValueError(f"invalid rule on line {n}: {line!r}")`.
 
     Non-`re:` lines (substr, `exact:`) pass through — always valid at write time.
-    The hallucinations module import is lazy to keep this module free of that
-    dependency for every other caller."""
+    STRICT at write, LENIENT at runtime: the runtime parser
+    (`hallucinations._parse_rules_uncached`) calls the SAME `regex_rule_ok`
+    but SKIPS a bad rule instead of raising, so a legacy hand-edited file can't
+    wedge a transcribe job. The hallucinations import is lazy to keep this
+    module free of that dependency for every other caller."""
     from . import hallucinations
 
     for n, line in enumerate(content.splitlines(), start=1):
@@ -125,14 +129,8 @@ def _check_hallucinations(content: str) -> None:
             continue
         if s.lower().startswith("re:"):
             pat = s[3:].strip()
-            if not pat:
+            if not hallucinations.regex_rule_ok(pat):
                 raise ValueError(f"invalid rule on line {n}: {line!r}")
-            if not hallucinations._regex_is_safe(pat):
-                raise ValueError(f"invalid rule on line {n}: {line!r}")
-            try:
-                re.compile(pat, re.IGNORECASE)
-            except re.error:
-                raise ValueError(f"invalid rule on line {n}: {line!r}") from None
 
 
 @dataclass(frozen=True)

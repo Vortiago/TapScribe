@@ -103,14 +103,17 @@ export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOv
   const sig = [
     p.length || 0, p.content || "",
     h.length || 0, h.content || "",
-    hl.count || 0, (hl.rules || []).join("|"), hl.content || "",
+    hl.count || 0, hl.content || "",
     support.batch_prompt ? 1 : 0,
     support.batch_hotwords ? 1 : 0,
     counts.prompt | 0, counts.hotwords | 0,
   ].join("§");
 
   const hotwordList = (h.content || "").split(",").map((s) => s.trim()).filter(Boolean);
-  const halRules = hl.rules || [];
+  // count === hl.rules.length by construction (server sets count = len(rules));
+  // the card renders the raw content textarea, not per-rule chips, so the label
+  // reads the count directly rather than keeping a live dep on the rules array.
+  const halCount = hl.count || 0;
 
   const build = () => {
     const out = document.createDocumentFragment();
@@ -150,8 +153,11 @@ export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOv
     out.appendChild(buildCol({
       title: "hallucination filter",
       file: "hallucinations.txt",
-      count: halRules.length ? `${halRules.length} rule${halRules.length === 1 ? "" : "s"}` : null,
+      count: halCount ? `${halCount} rule${halCount === 1 ? "" : "s"}` : null,
       body: (el) => {
+        // The filter is destructive — note it above the editor so broadening a
+        // rule reads as "drops transcript content", not "tags it".
+        el.appendChild(tpl("tpl-cfg-hal-prefix"));
         el.appendChild(buildEditor({
           key: "hallucinations",
           content: hl.content || "",

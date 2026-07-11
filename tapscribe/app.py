@@ -646,6 +646,10 @@ def _build_state_blob(
         # redaction seam) — the Settings card and Summary view pre-fill from it.
         "summarizer_default": summarizer_default_public(read_summarizer_config()),
         "halluc_rules": hallucinations_mod.parse_rules(),
+        # Raw file text for the editable hallucination card. Read here (off the
+        # event loop, with the other config reads) rather than in api_state so a
+        # cache-miss disk read on an operator edit doesn't block the loop.
+        "hallucinations_content": read_config("hallucinations"),
         "inputs_support": _compute_inputs_support(),
     }
 
@@ -748,7 +752,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "summarizer_default": blob["summarizer_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
-            "content": read_config("hallucinations"),
+            "content": blob["hallucinations_content"],
             "rules": [r["raw"] for r in halluc_rules],
             "count": len(halluc_rules),
         },

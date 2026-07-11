@@ -53,6 +53,7 @@ from tapscribe.app import app, get_recorder
 from tapscribe.hallucinations import _MAX_REGEX_PATTERN_LEN
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
+from tapscribe.text import read_config
 
 # ---------------------------------------------------------------------------
 # Fixtures — a plain Recorder with config paths repointed to tmp, wired into
@@ -157,3 +158,51 @@ def test_runtime_parse_stays_lenient(recorder_under_test: Recorder) -> None:
     assert "good substring" in raws
     assert "exact: keep me" in raws
     assert "re: (a+)+" not in raws  # the risky rule is dropped at runtime, quietly
+
+
+def test_rejects_empty_re_pattern_and_names_it(client: TestClient, recorder_under_test: Recorder) -> None:
+    """FOOTGUN: an empty `re:` pattern `re.compile("")`s into a MATCH-ALL rule
+    that suppresses EVERY segment. `_regex_is_safe("")` is True (len 0, no nested
+    quantifier), so a compile-only or safety-only check would wrongly accept it —
+    the write guard must reject the empty pattern explicitly (400, names the
+    line), leaving the previously-saved file UNCHANGED."""
+    good = "thank you for watching\n"
+    assert client.put("/api/config/hallucinations", json={"content": good}).status_code == 200
+
+    r = client.put("/api/config/hallucinations", json={"content": good + "re: \n"})
+    assert r.status_code == 400, r.text
+    assert "re:" in r.json()["detail"]  # names the bad line
+    assert _hal_file(recorder_under_test).read_text(encoding="utf-8") == good  # nothing landed
+
+
+def test_comment_re_line_is_saved(client: TestClient, recorder_under_test: Recorder) -> None:
+    """Prefix-classification consistency: a `#`-comment that merely CONTAINS a
+    `re:` (even a ReDoS shape) is a comment, not a rule — write and runtime both
+    skip `#` lines before the `re:` check, so it saves (200) rather than 400."""
+    content = "# re: (a+)+ is just a note here\nthank you for watching\n"
+    r = client.put("/api/config/hallucinations", json={"content": content})
+    assert r.status_code == 200, r.text
+    assert _hal_file(recorder_under_test).read_text(encoding="utf-8") == content
+
+
+def test_leading_whitespace_uppercase_re_is_classified_and_rejected(client: TestClient) -> None:
+    """Prefix-classification consistency: the write path strips + lowercases just
+    like the runtime parser, so a leading-whitespace, upper-case `  RE: (a+)+` is
+    still recognised as a `re:` rule and its ReDoS shape is rejected (400) — the
+    two hand-rolled classifiers must agree on what counts as a `re:` line."""
+    r = client.put("/api/config/hallucinations", json={"content": "  RE: (a+)+\n"})
+    assert r.status_code == 400, r.text
+
+
+def test_state_exposes_raw_hallucinations_content(client: TestClient) -> None:
+    """The editor's read half: /api/state carries the raw file text under
+    `hallucinations.content` so the card's textarea can pre-fill it. Assert it
+    equals the persisted content (stripped, matching `read_config`) — a silent
+    rename/removal of the field passes ruff+pytest otherwise while blanking the
+    editor (the JS half is gate-blind here)."""
+    content = "thank you for watching\nexact: please subscribe\nre: subtitles by .*\n"
+    assert client.put("/api/config/hallucinations", json={"content": content}).status_code == 200
+
+    payload = client.get("/api/state").json()
+    assert payload["hallucinations"]["content"] == content.strip()
+    assert payload["hallucinations"]["content"] == read_config("hallucinations")

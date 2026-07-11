@@ -78,6 +78,28 @@ def test_bad_regex_silently_skipped(tmp_config_dir):
     assert [r["raw"] for r in rules] == ["amara.org"]
 
 
+def test_empty_re_pattern_skipped_at_runtime_not_match_all(tmp_config_dir):
+    """FOOTGUN: a bare `re:` line (empty pattern) reaching the file by hand-edit
+    used to `re.compile("")` into a MATCH-ALL rule that suppressed EVERY segment,
+    silently emptying the transcript. The write guard blocks the PUT path, but a
+    legacy/hand-edited file bypasses it — so the runtime parser must drop the
+    empty `re:` too. The load-bearing assertion is that it is NOT a match-all."""
+    _write_rules(tmp_config_dir / "hallucinations.txt", "re:\nkeep this\n")
+    rules = hallucinations.parse_rules()
+    assert [r["raw"] for r in rules] == ["keep this"]  # the empty re: is dropped
+    assert hallucinations.match("literally any transcript segment", rules) is None
+
+
+def test_empty_exact_pattern_skipped_at_runtime(tmp_config_dir):
+    """Same degenerate class for `exact:`: a bare `exact:` normalises to "" and
+    would match every punctuation-only ("noise") segment — a match-many. The
+    runtime parser drops it, mirroring the empty-`re:` handling."""
+    _write_rules(tmp_config_dir / "hallucinations.txt", "exact:\nkeep this\n")
+    rules = hallucinations.parse_rules()
+    assert [r["raw"] for r in rules] == ["keep this"]  # the empty exact: is dropped
+    assert hallucinations.match("...", rules) is None  # a punctuation-only segment
+
+
 def test_catastrophic_backtracking_pattern_rejected(tmp_config_dir):
     """A `(a+)+$` rule against a long no-match input takes seconds on Python's
     backtracking engine — long enough to wedge a transcribe job. The ReDoS
