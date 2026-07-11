@@ -53,13 +53,26 @@ def _safe_part(part: object, what: str = "session") -> str:
     return part
 
 
-def _assert_contained(candidate: Path) -> None:
+def _assert_contained(candidate: Path, message: str = "session not found") -> None:
     """Layer 2: confirm `candidate` stays under RECORDINGS_DIR after
     symlink resolution. Raises HTTPException(404) on escape."""
     root = os.path.realpath(config.RECORDINGS_DIR)
     real = os.path.realpath(candidate)
     if real != root and not real.startswith(root + os.sep):
-        raise HTTPException(404, "session not found")
+        raise HTTPException(404, message)
+
+
+def _contained_path(*parts: str, message: str = "session not found") -> Path:
+    """Join already-`_safe_part`-validated `parts` under RECORDINGS_DIR and
+    apply layer 2, returning the joined Path. The single realpath check follows
+    a symlink in ANY component, so it refuses both a session-level and a
+    name-level escape in one shot. The ONE shared build+assert for the
+    helper-side resolvers; the inlined-idiom siblings (`stripped_dir`,
+    `resolve_session_dir`, `resolve_wav`) keep the check inline so CodeQL's
+    `py/path-injection` query recognises the sanitiser intraprocedurally."""
+    path = config.RECORDINGS_DIR.joinpath(*parts)
+    _assert_contained(path, message)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +94,7 @@ DIRNAME_STRIPPED = "stripped"
 
 
 def session_meta_path(session: str) -> Path:
-    path = config.RECORDINGS_DIR / _safe_part(session, "session") / FILENAME_META_JSON
-    _assert_contained(path)
-    return path
+    return _contained_path(_safe_part(session, "session"), FILENAME_META_JSON)
 
 
 def stripped_dir(session: str) -> Path:
@@ -124,37 +135,35 @@ def resolve_source_dir(session: str, source: str | None) -> Path:
     source in (None, '', 'original') → <session>/
     """
     session = _safe_part(session, "session")
-    session_dir = config.RECORDINGS_DIR / session
     if source == "stripped":
         d = stripped_dir(session)
         if not d.is_dir():
             raise HTTPException(404, "stripped/ not found for this session; run strip-silence first")
         return d
     if source in (None, "", "original"):
-        _assert_contained(session_dir)
-        return session_dir
+        return _contained_path(session)
     raise HTTPException(400, f"unknown source: {source!r} (expected 'original' or 'stripped')")
 
 
 def create_session_dir(session: str) -> Path:
     """Return `<RECORDINGS_DIR>/<session>` validated with both layers,
     creating the directory if it does not yet exist."""
-    session = _safe_part(session, "session")
-    session_dir = config.RECORDINGS_DIR / session
-    _assert_contained(session_dir)
+    session_dir = _contained_path(_safe_part(session, "session"))
     os.makedirs(session_dir, exist_ok=True)
     return session_dir
 
 
 def resolve_original_wav(session: str, name: str) -> Path:
     """Return the ORIGINAL WAV path for `session` / `name` with both
-    containment layers applied. Does NOT check existence (the caller
-    handles missing originals)."""
-    session = _safe_part(session, "session")
-    name = _safe_part(name, "file")
-    path = config.RECORDINGS_DIR / session / name
-    _assert_contained(path)
-    return path
+    containment layers applied. Does NOT check existence (the caller handles
+    missing originals) — it is `resolve_wav(..., source='original')` minus the
+    existence/extension checks. The file-level 404 body ("not found") matches
+    `resolve_wav` for the identical name-escape class."""
+    return _contained_path(
+        _safe_part(session, "session"),
+        _safe_part(name, "file"),
+        message="not found",
+    )
 
 
 def resolve_wav(session: str, name: str, source: str = "original") -> Path:
