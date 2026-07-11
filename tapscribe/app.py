@@ -545,6 +545,19 @@ async def api_tap_pipeline_trigger(session: str, recorder: Recorder = Depends(ge
     return {"ok": True, "session": session, "state": "running"}
 
 
+@app.post("/api/sessions/{session}/pipeline", status_code=202)
+async def api_dashboard_pipeline_trigger(session: str, recorder: Recorder = Depends(get_recorder)):
+    """Trigger the end-of-meeting pipeline from the dashboard (Basic auth).
+
+    A thin shim over `start_pipeline` — fire-and-forget, 202, body ignored.
+    Resolves the batch model, backend, and summarizer from operator-side
+    configuration; a dashboard operator can no more pick a model than the
+    tap caller can. The request body is IGNORED entirely, never parsed."""
+    resolve_session_dir(session)  # path-safety seam; 404s unknown/traversal ids
+    await start_pipeline(recorder, PipelineRequest(session=session))
+    return {"ok": True, "session": session, "state": "running"}
+
+
 @app.get("/api/tap/sessions/{session}/pipeline")
 async def api_tap_pipeline_poll(session: str, recorder: Recorder = Depends(get_recorder)):
     """Poll the end-of-meeting pipeline. Tap-bearer authenticated by the auth
