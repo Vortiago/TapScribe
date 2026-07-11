@@ -49,13 +49,18 @@ function fakeStorage() {
   };
 }
 
-/** Fake control client capturing triggerPipeline calls; outcome/throw scriptable. */
-function fakeControl({ outcome = "started", throws = null } = {}) {
+/**
+ * Fake control client capturing triggerPipeline calls; outcome/throw scriptable.
+ * Default outcome is the REAL 202 token the client emits ("accepted"), NOT the
+ * impl's derived phase — feeding "started" would let a mis-refactor
+ * (outcome==="started"?…) mask the real 202 path through the else-branch.
+ */
+function fakeControl({ outcome = "accepted", throws = null } = {}) {
   const calls = [];
   return {
     calls,
-    triggerPipeline: (cfg, sessionId) => {
-      calls.push({ cfg, sessionId });
+    triggerPipeline: (cfg, sessionId, opts) => {
+      calls.push({ cfg, sessionId, opts });
       return throws ? Promise.reject(throws) : Promise.resolve({ outcome });
     },
   };
@@ -69,16 +74,20 @@ function anyWriteHasKey(writes, key) { return writes.some((w) => Object.prototyp
 
 test("endMeeting with no live tab triggers the pipeline directly and writes the terminal meetingEnd", async () => {
   const storage = fakeStorage();
-  const control = fakeControl({ outcome: "started" });
+  const control = fakeControl({ outcome: "accepted" }); // the REAL 202 token
 
   await actions.endMeeting({ control, storage, cfg: CFG, sessionId: SID, snapshot: STALE, now: NOW });
 
-  // The pipeline was triggered directly (the content script isn't there to do it).
+  // The pipeline was triggered directly (the content script isn't there to do it),
+  // under a timeout so a reachable-but-unresponsive recorder can't hang the await
+  // and wedge the popup on "Ending meeting…" with both buttons disabled.
   assert.equal(control.calls.length, 1, "triggerPipeline must be called exactly once");
-  assert.deepEqual(control.calls[0], { cfg: CFG, sessionId: SID });
+  assert.deepEqual(control.calls[0], { cfg: CFG, sessionId: SID, opts: { timeoutMs: 6000 } });
 
   // The terminal state the card reads is written, so the popup leaves
-  // "Ending meeting…" instead of wedging.
+  // "Ending meeting…" instead of wedging. The REAL client returns
+  // outcome "accepted" (202) — never "started" — so this pins that the
+  // accepted→started mapping is validated against the real token.
   const m = merged(storage.writes);
   assert.equal(m.meetingActive, false, "meetingActive must be cleared");
   assert.ok(m.meetingEnd, "meetingEnd must be written");
@@ -88,6 +97,12 @@ test("endMeeting with no live tab triggers the pipeline directly and writes the 
   // It must NOT fall back to the nonce path — nothing would consume it.
   assert.equal(anyWriteHasKey(storage.writes, "meetingEndRequestedAt"), false,
     "a stale-tab End must not just bump the nonce");
+
+  // The durable poll target must be PRESERVED: the card polls the pipeline via
+  // meetingSessionId after End, so a write clearing it would strand the card.
+  // content.js finishEndMeeting only flips meetingActive:false and keeps the id.
+  assert.equal(anyWriteHasKey(storage.writes, "meetingSessionId"), false,
+    "the stale End must not touch (and never clear) the durable poll-target meetingSessionId");
 });
 
 // --- guardrail: a live tab still owns drain → trigger → meetingEnd ------------
@@ -129,4 +144,24 @@ test("endMeeting surfaces a failed trigger as meetingEnd.phase 'failed' and stil
   assert.equal(m.meetingEnd.phase, "failed", "a trigger failure must be a terminal 'failed', not a wedge");
   assert.ok(m.meetingEnd.error, "the failure reason must be recorded for the card");
   assert.equal(m.meetingActive, false, "even on trigger failure the meeting is no longer active");
+});
+
+// --- guardrail: a mixed-content-blocked End renders the SAME failed card ------
+// content.js's finishEndMeeting keys the failed reason off e.kind and emits the
+// hardcoded TLS message, NOT the raw error text. The stale path must match that
+// literal by construction so the two End cards can't silently drift on a future
+// control-client message reword. The thrown message here deliberately DIFFERS
+// from the expected literal — if endMeeting used raw errText(e) this would fail.
+test("endMeeting maps a mixed-content-blocked throw to content.js's exact failed-card text (parity, not raw message)", async () => {
+  const storage = fakeStorage();
+  const control = fakeControl({
+    throws: Object.assign(new Error("some future reworded control-client message"), { kind: "mixed-content-blocked" }),
+  });
+
+  await actions.endMeeting({ control, storage, cfg: CFG, sessionId: SID, snapshot: STALE, now: NOW });
+
+  const m = merged(storage.writes);
+  assert.equal(m.meetingEnd.phase, "failed");
+  assert.equal(m.meetingEnd.error, "recorder is http:// on a non-trustworthy host — enable TLS",
+    "must emit content.js's hardcoded TLS literal keyed off e.kind, not the raw thrown message");
 });

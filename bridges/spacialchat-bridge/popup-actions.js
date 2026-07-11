@@ -12,7 +12,7 @@ import { snapshotIsLive } from "./taps-view.js";
 /**
  * @typedef {{ host: string, port: number | string, useTls?: boolean, token?: string }} Cfg
  * @typedef {{ set(items: Record<string, unknown>): Promise<void> }} StorageArea
- * @typedef {{ createDetachedSession(cfg: Cfg, opts?: { timeoutMs?: number }): Promise<{ sessionId: string }>, triggerPipeline(cfg: Cfg, sessionId: string): Promise<{ outcome: string }> }} Control
+ * @typedef {{ createDetachedSession(cfg: Cfg, opts?: { timeoutMs?: number }): Promise<{ sessionId: string }>, triggerPipeline(cfg: Cfg, sessionId: string, opts?: { timeoutMs?: number }): Promise<{ outcome: string }> }} Control
  */
 
 /** @param {unknown} e */
@@ -68,19 +68,29 @@ export async function endMeeting({ control, storage, cfg, sessionId, snapshot, n
     await requestEndMeeting({ storage, now });
     return;
   }
+  // The trigger owns phase/error; the terminal persist is deliberately OUTSIDE
+  // this try (mirroring startMeeting) so a post-trigger storage failure can't be
+  // caught here and mislabel an already-successful trigger as phase:"failed"
+  // (it rejects instead, so onEnd re-enables the buttons — no wedge, no
+  // duplicate trigger on retry). Mixed-content is keyed off e.kind (as
+  // content.js's finishEndMeeting does) so the stale-tab failed card can't drift
+  // from the live-tab card on a control-client message reword.
+  /** @type {string} */ let phase;
+  /** @type {string | null} */ let error;
   try {
-    const res = await control.triggerPipeline(cfg, sessionId);
-    const phase = res.outcome === "busy" ? "busy" : "started";
-    await storage.set({
-      meetingActive: false,
-      meetingEnd: { phase, sessionId, error: null, ts: now },
-    });
+    const res = await control.triggerPipeline(cfg, sessionId, { timeoutMs: 6000 });
+    phase = res.outcome === "busy" ? "busy" : "started";
+    error = null;
   } catch (e) {
-    await storage.set({
-      meetingActive: false,
-      meetingEnd: { phase: "failed", sessionId, error: errText(e), ts: now },
-    });
+    phase = "failed";
+    error = errKind(e) === "mixed-content-blocked"
+      ? "recorder is http:// on a non-trustworthy host — enable TLS"
+      : errText(e);
   }
+  await storage.set({
+    meetingActive: false,
+    meetingEnd: { phase, sessionId, error, ts: now },
+  });
 }
 
 /**

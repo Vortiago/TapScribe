@@ -146,7 +146,14 @@ function buildCard() {
 async function load() {
   const s = await storage.get([
     "recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId", "meetingActive", "meetingEnd",
+    "bridgeStatus",
   ]);
+  // Seed latestStatus from the initial read BEFORE applyMeeting() enables End,
+  // so an End click in the load-time gap (before refresh() populates it) sees
+  // the real live/stale snapshot — otherwise a live meeting would be misread as
+  // stale (null snapshot) and take the direct-trigger path, skipping the drain
+  // and truncating the live taps' WAVs.
+  latestStatus = s.bridgeStatus || null;
   currentHost = (s.recorderHost || "localhost").trim();
   currentPort = Number(s.recorderPort) || 8001;
   currentTapToken = (s.tapToken || "").trim();
