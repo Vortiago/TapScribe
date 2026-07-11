@@ -9,20 +9,6 @@
   </div>
 </template>
 
-<template id="tpl-cfg-empty">
-  <span class="empty" data-slot="msg"></span>
-</template>
-
-<template id="tpl-cfg-hal-prefix">
-  <div class="dim tiny" style="margin-bottom:4px;">
-    matched segments dropped &amp; stashed in <code style="display:inline;">suppressed_hallucinations</code>
-  </div>
-</template>
-
-<template id="tpl-cfg-code">
-  <code data-slot="val"></code>
-</template>
-
 <!-- Editable textarea + save button used for prompt / live-prompt /
      hotwords editors. The component code wires the save handler to a
      PUT /api/config/<key>. `data-slot="status"` holds the save status

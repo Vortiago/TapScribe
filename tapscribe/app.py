@@ -748,6 +748,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
         "summarizer_default": blob["summarizer_default"],
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
+            "content": read_config("hallucinations"),
             "rules": [r["raw"] for r in halluc_rules],
             "count": len(halluc_rules),
         },

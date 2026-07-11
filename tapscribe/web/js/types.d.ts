@@ -147,6 +147,7 @@ export interface InputsSupport {
 
 export interface HallucinationsConfig {
   path: string;
+  content: string;
   rules: string[];
   count: number;
 }
