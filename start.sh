@@ -5,7 +5,7 @@
 #   bash start.sh                         # localhost only
 #   bash start.sh --lan                   # bind to 0.0.0.0 so other machines can connect
 #   bash start.sh --no-mlx                # skip MLX even on Apple Silicon (live AND batch)
-#   bash start.sh --no-auto-live          # boot the recorder without starting the live channel
+#   bash start.sh --auto-live         # boot the recorder with live channel auto-started
 #   bash start.sh --no-auth               # disable dashboard auth + /tap token gate (DEV ONLY; insecure on LAN)
 #   bash start.sh --tls                   # serve https:// + wss:// (auto self-signed if no cert provided)
 #   bash start.sh --non-interactive       # install the saved/default selection in-terminal (no browser)
@@ -49,7 +49,7 @@ cd "$(dirname "$0")"
 # --- Argument parsing -------------------------------------------------------
 LAN=0
 NO_MLX=0
-NO_AUTO_LIVE=0
+AUTO_LIVE=0
 NO_AUTH=0
 TLS=0
 NON_INTERACTIVE=0
@@ -57,7 +57,8 @@ for a in "$@"; do
     case "$a" in
         --lan) LAN=1 ;;
         --no-mlx) NO_MLX=1 ;;
-        --no-auto-live) NO_AUTO_LIVE=1 ;;
+        --auto-live) AUTO_LIVE=1 ;;
+        --no-auto-live) ;;  # deprecated — off is the default
         --no-auth) NO_AUTH=1 ;;
         --tls) TLS=1 ;;
         --non-interactive) NON_INTERACTIVE=1 ;;
@@ -264,8 +265,8 @@ EXTRA_ARGS=()
 if [ "$NO_MLX" -eq 1 ]; then
     EXTRA_ARGS+=(--no-mlx)
 fi
-if [ "$NO_AUTO_LIVE" -eq 1 ]; then
-    EXTRA_ARGS+=(--no-auto-live)
+if [ "$AUTO_LIVE" -eq 1 ]; then
+    EXTRA_ARGS+=(--auto-live)
 fi
 if [ "$NO_AUTH" -eq 1 ]; then
     EXTRA_ARGS+=(--no-auth)

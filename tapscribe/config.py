@@ -121,8 +121,9 @@ AUTH_EXEMPT_ROUTES = frozenset(
 TAP_PREFIX: str = "/api/tap"
 
 # Whether the FastAPI app's lifespan should auto-start the live channel.
-# Flipped off by --no-auto-live.
-AUTO_START_LIVE: bool = True
+# Opt-in via --auto-live (default is off to avoid loading a live model
+# and spending memory when nobody wants captions).
+AUTO_START_LIVE: bool = False
 
 
 # ---------------------------------------------------------------------------

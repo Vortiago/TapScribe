@@ -72,9 +72,9 @@ opens one internal WlK relay per `/tap`. Settled-line attribution is
 automatic — the line came from *this* WS, which we know belongs to
 `identity=alice`.
 
-**Graceful degradation:** if WhisperLiveKit isn't running (operator
-clicked Stop on the dashboard's live channel panel, or `--no-auto-live`
-was set at boot), the WAV recording proceeds unaffected; live captions
+**Graceful degradation:** if WhisperLiveKit isn't running (not
+auto-started by default, operator clicked Stop on the dashboard, or
+the child crashed), the WAV recording proceeds unaffected; live captions
 just don't flow until the live channel is restarted. The bridge sees no
 errors — there's nothing for it to do about WlK state anyway.
 

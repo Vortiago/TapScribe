@@ -18,6 +18,21 @@ from .live import LiveConfig
 from .recorder import Recorder
 
 
+def apply_live_autostart_flag(
+    no_auto_live: bool,
+    auto_live: bool,
+) -> bool:
+    """Map the CLI auto-live flags to config.AUTO_START_LIVE.
+
+    `--auto-live` (opt-in, takes precedence) sets True.
+    `--no-auto-live` is accepted for backwards-compat but is a no-op
+    since off is now the default.
+    """
+    if auto_live:
+        return True
+    return False
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="python -m tapscribe",
@@ -102,7 +117,16 @@ def main() -> None:
         help="Default backend preference. `auto` picks MLX on Apple Silicon, CUDA on NVIDIA, "
         "CPU otherwise. The dashboard's backend chip can override per-job.",
     )
-    p.add_argument("--no-auto-live", action="store_true", help="Don't auto-start the live channel on boot.")
+    p.add_argument(
+        "--auto-live",
+        action="store_true",
+        help="Auto-start the live channel on boot (default: off).",
+    )
+    p.add_argument(
+        "--no-auto-live",
+        action="store_true",
+        help="[deprecated — off is the default] Accepted for backwards-compat; no-op.",
+    )
     p.add_argument(
         "--no-auth",
         action="store_true",
@@ -152,7 +176,7 @@ def main() -> None:
     if args.no_mlx and backend_pref == "auto":
         backend_pref = "cpu"
     config.AUTH_ENABLED = not args.no_auth
-    config.AUTO_START_LIVE = not args.no_auto_live
+    config.AUTO_START_LIVE = apply_live_autostart_flag(args.no_auto_live, args.auto_live)
 
     live_config_kwargs: dict[str, object] = dict(
         model=args.live_model,
