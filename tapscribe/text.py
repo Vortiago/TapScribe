@@ -125,6 +125,8 @@ def _check_hallucinations(content: str) -> None:
             continue
         if s.lower().startswith("re:"):
             pat = s[3:].strip()
+            if not pat:
+                raise ValueError(f"invalid rule on line {n}: {line!r}")
             if not hallucinations._regex_is_safe(pat):
                 raise ValueError(f"invalid rule on line {n}: {line!r}")
             try:
