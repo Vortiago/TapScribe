@@ -17,12 +17,12 @@ This pins the SOUND, in-process-assertable harm: the boot spawn decision.
 
 The CLI-flag taxonomy — the new `--auto-live` opt-in and the OLD `--no-auto-live`
 retained as a deprecated NO-OP (accepted so existing launch scripts don't break)
-— plus the operator-doc / start-script help text are the OUT-OF-GATE half:
-`__main__.main()` is a single monolithic function (parser + parse_args +
-Recorder + uvicorn.run inline, no seam) with 0% test coverage, so the
-flag->config mapping cannot be asserted from a fast in-process gate without a
-parser seam the plan must PROPOSE. Those criteria ride the plan and are verified
-by inspection / the /code-review pass, NOT silently dropped. Graceful
+— is pinned in `tests/test_cli_flags.py`: `__main__` now exposes a `build_parser()`
+seam, so a fast in-process test drives the real argparse layer (that `--auto-live`
+parses to True — main() then assigns it to config.AUTO_START_LIVE — and that the
+deprecated `--no-auto-live` still PARSES for the out-of-gate e2e / C# consumers).
+The operator-doc / start-script help text
+stays out-of-gate, verified by inspection / the /code-review pass. Graceful
 degradation (/tap records with the channel down) is already covered by the tap
 endpoint suite.
 """

@@ -1,9 +1,10 @@
 """Entry point: `python -m tapscribe [options]`.
 
 Parses CLI flags, constructs the Recorder, attaches it to
-`app.state.recorder`, then hands off to uvicorn. The FastAPI app's
-lifespan auto-starts the WhisperLiveKit child (and stops it again on
-shutdown) via the Recorder's LiveChannel.
+`app.state.recorder`, then hands off to uvicorn. When
+`config.AUTO_START_LIVE` is set (opt-in via `--auto-live`; off by
+default), the FastAPI app's lifespan auto-starts the WhisperLiveKit
+child (and stops it again on shutdown) via the Recorder's LiveChannel.
 """
 
 from __future__ import annotations
@@ -18,22 +19,13 @@ from .live import LiveConfig
 from .recorder import Recorder
 
 
-def apply_live_autostart_flag(
-    no_auto_live: bool,
-    auto_live: bool,
-) -> bool:
-    """Map the CLI auto-live flags to config.AUTO_START_LIVE.
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the `python -m tapscribe` argument parser.
 
-    `--auto-live` (opt-in, takes precedence) sets True.
-    `--no-auto-live` is accepted for backwards-compat but is a no-op
-    since off is now the default.
+    Extracted from `main()` as a seam so a fast in-process test can pin
+    the actual flag-string wiring (e.g. `--auto-live` / the retained
+    deprecated `--no-auto-live`) without booting uvicorn.
     """
-    if auto_live:
-        return True
-    return False
-
-
-def main() -> None:
     p = argparse.ArgumentParser(
         prog="python -m tapscribe",
         description="TapScribe — local-first transcription recorder + dashboard.",
@@ -164,7 +156,11 @@ def main() -> None:
         help="Emit one JSON line per log record instead of uvicorn's plaintext format. "
         "Useful when piping into journalctl -o json / vector / fluent-bit.",
     )
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     # Boot-time constants that affect every transcribe-call route the
     # Recorder hands out. `backend` is the per-Recorder preference;
@@ -176,7 +172,7 @@ def main() -> None:
     if args.no_mlx and backend_pref == "auto":
         backend_pref = "cpu"
     config.AUTH_ENABLED = not args.no_auth
-    config.AUTO_START_LIVE = apply_live_autostart_flag(args.no_auto_live, args.auto_live)
+    config.AUTO_START_LIVE = args.auto_live
 
     live_config_kwargs: dict[str, object] = dict(
         model=args.live_model,

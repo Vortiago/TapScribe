@@ -4,7 +4,8 @@
 #   .\start.ps1                          # localhost only
 #   .\start.ps1 -Lan                     # bind to 0.0.0.0 (LAN access)
 #   .\start.ps1 -NoMlx                   # skip MLX (irrelevant on Windows but accepted for parity)
-#   .\start.ps1 -AutoLive              # boot with live channel auto-started
+#   .\start.ps1 -AutoLive                # boot with live channel auto-started
+#   .\start.ps1 -NoAutoLive              # [deprecated — off is the default] accepted for backward-compat
 #   .\start.ps1 -NoAuth                  # disable dashboard auth + /tap token gate (DEV ONLY)
 #   .\start.ps1 -Tls                     # serve https:// + wss:// (auto self-signed)
 #   .\start.ps1 -NonInteractive          # install the saved/default selection in-terminal (no browser)
@@ -14,7 +15,7 @@ param(
     [switch]$Lan,
     [switch]$NoMlx,
     [switch]$AutoLive,
-    [switch]$NoAutoLive,
+    [switch]$NoAutoLive,  # deprecated — off is the default; accepted for parity with start.sh, not forwarded
     [switch]$NoAuth,
     [switch]$Tls,
     [switch]$NonInteractive
