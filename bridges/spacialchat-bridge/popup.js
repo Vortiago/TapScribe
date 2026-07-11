@@ -20,7 +20,7 @@ import { meetingView, shouldKeepPolling } from "./popup-presenter.js";
 import { snapshotIsLive, tapStateLabel } from "./taps-view.js";
 import {
   startMeeting as actStart,
-  requestEndMeeting as actEnd,
+  endMeeting as actEnd,
   dismissMeeting as actDismiss,
 } from "./popup-actions.js";
 
@@ -146,7 +146,14 @@ function buildCard() {
 async function load() {
   const s = await storage.get([
     "recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId", "meetingActive", "meetingEnd",
+    "bridgeStatus",
   ]);
+  // Seed latestStatus from the initial read BEFORE applyMeeting() enables End,
+  // so an End click in the load-time gap (before refresh() populates it) sees
+  // the real live/stale snapshot — otherwise a live meeting would be misread as
+  // stale (null snapshot) and take the direct-trigger path, skipping the drain
+  // and truncating the live taps' WAVs.
+  latestStatus = s.bridgeStatus || null;
   currentHost = (s.recorderHost || "localhost").trim();
   currentPort = Number(s.recorderPort) || 8001;
   currentTapToken = (s.tapToken || "").trim();
@@ -440,7 +447,14 @@ async function onEnd() {
   btnStart.setDisabled(true);
   btnEnd.setDisabled(true);
   try {
-    await actEnd({ storage, now: Date.now() });
+    await actEnd({
+      control,
+      storage,
+      cfg: cfg(),
+      sessionId: /** @type {string} */ (currentMeetingSessionId),
+      snapshot: latestStatus,
+      now: Date.now(),
+    });
   } catch (e) {
     setStatus("meetingStatus", "Couldn't request End meeting — try again.", "err");
     applyMeeting();

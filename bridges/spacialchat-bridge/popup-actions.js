@@ -7,10 +7,12 @@
 // to these and renders the returned outcome; these own no DOM and no "what to
 // show" decisions (that's popup-presenter.js).
 
+import { snapshotIsLive } from "./taps-view.js";
+
 /**
  * @typedef {{ host: string, port: number | string, useTls?: boolean, token?: string }} Cfg
  * @typedef {{ set(items: Record<string, unknown>): Promise<void> }} StorageArea
- * @typedef {{ createDetachedSession(cfg: Cfg, opts?: { timeoutMs?: number }): Promise<{ sessionId: string }> }} Control
+ * @typedef {{ createDetachedSession(cfg: Cfg, opts?: { timeoutMs?: number }): Promise<{ sessionId: string }>, triggerPipeline(cfg: Cfg, sessionId: string, opts?: { timeoutMs?: number }): Promise<{ outcome: string }> }} Control
  */
 
 /** @param {unknown} e */
@@ -51,6 +53,44 @@ export async function startMeeting({ control, storage, cfg }) {
  */
 export async function requestEndMeeting({ storage, now }) {
   await storage.set({ meetingEndRequestedAt: now });
+}
+
+/**
+ * End meeting: live-vs-stale dispatch. If a SpatialChat tab is live, delegate
+ * via the nonce path (the content script owns drain → trigger → meetingEnd).
+ * If stale/absent, complete the End ourselves by triggering the pipeline
+ * directly so the popup doesn't wedge on "Ending meeting…".
+ * @param {{ control: Control, storage: StorageArea, cfg: Cfg, sessionId: string, snapshot: any, now: number }} deps
+ * @returns {Promise<void>}
+ */
+export async function endMeeting({ control, storage, cfg, sessionId, snapshot, now }) {
+  if (snapshotIsLive(snapshot, now)) {
+    await requestEndMeeting({ storage, now });
+    return;
+  }
+  // The trigger owns phase/error; the terminal persist is deliberately OUTSIDE
+  // this try (mirroring startMeeting) so a post-trigger storage failure can't be
+  // caught here and mislabel an already-successful trigger as phase:"failed"
+  // (it rejects instead, so onEnd re-enables the buttons — no wedge, no
+  // duplicate trigger on retry). Mixed-content is keyed off e.kind (as
+  // content.js's finishEndMeeting does) so the stale-tab failed card can't drift
+  // from the live-tab card on a control-client message reword.
+  /** @type {string} */ let phase;
+  /** @type {string | null} */ let error;
+  try {
+    const res = await control.triggerPipeline(cfg, sessionId, { timeoutMs: 6000 });
+    phase = res.outcome === "busy" ? "busy" : "started";
+    error = null;
+  } catch (e) {
+    phase = "failed";
+    error = errKind(e) === "mixed-content-blocked"
+      ? "recorder is http:// on a non-trustworthy host — enable TLS"
+      : errText(e);
+  }
+  await storage.set({
+    meetingActive: false,
+    meetingEnd: { phase, sessionId, error, ts: now },
+  });
 }
 
 /**
