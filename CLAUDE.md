@@ -25,21 +25,28 @@
   skip. Any `/next` region that's rebuilt on
   the tick AND can hold an interactive control (`<select>`/`<input>`/
   `<textarea>`/contenteditable) MUST render through `renderRegion`
-  (`web/js/templates.js`) rather than raw `replaceChildren` — it skips
-  the swap while a control inside the host is focused OR while a text
-  selection starts/ends inside it (clobbering a selection mid-copy is
-  the same bug as snapping a dropdown shut; see `spine.js` for the
+  (`web/js/templates.js` — the app seam over the vendored vanilla-web
+  canon in `web/js/lib/render.js`; never edit `web/js/lib/*` in place)
+  rather than raw `replaceChildren` — it skips the swap while a control
+  inside the host is focused, while a popover/`<dialog>` inside the host
+  is open, OR while a text selection starts/ends inside it (clobbering a
+  selection mid-copy is the same bug as snapping a dropdown shut), and a
+  deferred swap flushes ITSELF the instant the hold clears (one-shot
+  listener per host — no next poll tick needed); see `spine.js` for the
   reference adoption; `summary.js` output pane and `transcript.js` merged
-  pane render through it too, calling `markRegionStale(host)` to force the
-  next render after a mutate / lazy-body load WITHOUT bypassing the guards —
-  never `force:true`, which would clobber a mid-copy selection). Per-tick
+  pane render through it too, calling `markRegionStale(host)` (now canon,
+  upstreamed) to force the next render after a mutate / lazy-body load
+  WITHOUT bypassing the guards — never `force:true`, which would clobber
+  a mid-copy selection). Per-tick
   updaters that mutate text/rows in place instead of swapping a region (the
   live log dialog, `active-taps.js`, `live-feed.js`) and the `recordings.js`
   WAV-list view-level gate (it gates the whole view body, not a single host
   swap, so it can't use `renderRegion`) apply the exported
   `selectionInside(host)` for the same rule — defer WITHOUT updating
   the gate's signature, so the held-back render lands on the first
-  tick after the selection clears. `live-channel.js` and `config-card.js`
+  tick after the selection clears (these BESPOKE gates are the only
+  remaining users of the `markDeferredRender`/`consumeDeferredRender`
+  tick-retry; canon `renderRegion` deferrals no longer need it). `live-channel.js` and `config-card.js`
   render through it too, keeping only a 2-line `[data-cfg-key]` button
   guard renderRegion deliberately doesn't cover (a focused save button
   mid-putJson isn't an "interactive control" but must still hold the
@@ -105,10 +112,11 @@
   region gated on such an aggregate must render through `reconcileList`
   (keyed, in-place) — a full `replaceChildren` rebuild on the sig, even
   WITHOUT a placeholder blank, still churns O(content) nodes + row
-  listeners on every sibling/tick change. `sessions.js` `listSig` folding
-  the per-tick `total_bytes` (unmasked, unlike `files_sig`) + a sibling's
-  `segment_count` into a whole-list `replaceChildren` is the known
-  offender; the fixed WAV lists are the pattern to copy.
+  listeners on every sibling/tick change. The WAV lists AND `sessions.js`
+  (#312: chrome mounted once, rows keyed by id + structural bits, cells
+  mutated via a per-row sig with focused-control guards) are the pattern
+  to copy — `sessions.js`'s old whole-list `listSig` swap was the last
+  offender.
 
 ## Runtime deps the install picker does NOT cover
 
@@ -253,6 +261,37 @@ introduced and how to avoid them:
   what raises it, why suppression is intentional, and what's lost when
   it's swallowed. If suppression is *not* the right behaviour, log or
   re-raise instead.
+
+## Frontend toolkit vendoring + gates
+
+The frontend vendors parts of the Verktoykasse toolkit (vanilla-web /
+vanilla-components) as provenance-stamped, copy-verbatim files — **never
+edit them in place**; re-copy from the toolkit to update:
+
+- `tapscribe/web/js/vc/` — the vanilla-components library, ONE copy shared
+  by `/setup` and the dashboard (its `PROVENANCE.md` has the re-copy
+  commands); the shared token sheets live at `tapscribe/web/tokens.css` +
+  `tones.css` (canon NAMES — `dashboard.css` overrides the VALUES to
+  TapScribe's palette).
+- `tapscribe/web/tools/` — the gate tier: `check-conventions.mjs`
+  (signal-listener / html-string / raw-swap rules), `check-slots.mjs`
+  (the `.html` `<template>`/`[data-slot]` ↔ JS `tpl()`/`slot()`/`pick()`
+  seam) and `check-css-vars.mjs` (a required `var(--x)` defined nowhere).
+  Each scans `tapscribe/web/` (the directory holding `tools/`). CI runs
+  them in the `frontend-gates` job; the stop hook runs them locally.
+  Suppressions are comment-borne and must carry a WHY — `// static-render`
+  for a deliberate one-shot render, `// gate-allow: <rule> — reason`
+  trailing on the line, or file-level in the first ~10 lines. Same bar as
+  `except: pass` above: never a bare marker.
+- `bridges/spacialchat-bridge/{lib,components}/` — an older stamped copy
+  (`@48bf2bf`), deliberately left "stale" until its own re-vendor pass
+  (re-vendoring changes component APIs and needs the bridge e2e).
+
+Drift check (local-only — it needs a Verktoykasse checkout):
+`node tapscribe/web/tools/check-vendored.mjs <toolkit-checkout>` from the
+repo root. `stale` is fine (canon moved on; it prints the exact re-copy
+command); `forked` is the violation — never patch a vendored copy, extend
+around it or upstream the change (see Verktoykasse #70 for the shape).
 
 ## Verify before claiming green: actually run every CI job locally
 

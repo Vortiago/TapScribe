@@ -1,11 +1,15 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · Sessions (GLOBAL · all sessions). A dense, scannable, manageable
 // list of EVERY session on disk — the spine's session <select> doesn't scale
 // past a handful, so this is the place to find/manage one when there are many.
 // Pure /api/state data (the same Session[] the spine reads), no mock.
 //
 //   - a filter/search box narrows the list by label, session id, or date so
-//     it stays usable at 50+ sessions;
+//     it stays usable at 50+ sessions; when that local filter yields zero
+//     matches, the same box falls over to a server-side cross-session
+//     transcript-content search (GET /api/search, #315) and the rows body
+//     shows snippet-preview hits instead;
 //   - a dense table, newest first, one row per session: label (or
 //     fmtSessionLabel) + the raw id as a dim sub, a status chip (● live for the
 //     current session, else archived), WAV count, stripped?, transcript status
@@ -28,15 +32,19 @@
 //     (POST /api/sessions/prune-empty — deletes every session with 0 WAVs, no
 //     merged transcript, no label; skips the current one), surfacing the count.
 //
-// The list is rendered through renderRegion (templates.js): it holds the
-// search box + the rename inputs + the per-row absorb <select>, so the 500ms
-// poll must not clobber an open edit — renderRegion skips the swap while a
-// control inside the host is focused, and the caller-supplied signature skips
-// the rebuild when nothing the list shows has changed. The header (with its
-// live counts) repaints every tick; only the interactive list region is
-// guarded. The prune button lives OUTSIDE the guarded region (static head).
+// The list renders KEYED AND IN PLACE (reconcileList, #312): the region chrome
+// (search box, column header, placeholder sibling) mounts exactly once, and
+// rows reconcile per tick — content ticks mutate cells via fillRow (per-row
+// sig short-circuit; focused rename/absorb values are left alone), structural
+// flips (is_current, has-WAVs, absorb-target set) are folded into the row KEY
+// and recreate just that row. The 500ms poll therefore never clobbers an open
+// edit: reconcileList preserves the focused row's node (moveBefore), and a
+// text selection inside the list defers the reconcile via
+// deferIfSelectionInside (ADR-0004, same as the WAV lists). The header (with
+// its live counts) repaints every tick; the prune button lives in the static
+// panel head, wired once.
 
-import { tpl, pick, renderRegion } from "../../templates.js";
+import { tpl, pick, mount, reconcileList, deferIfSelectionInside } from "../../templates.js";
 import { putJson, postJson, del, getJson } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
@@ -116,8 +124,8 @@ export function build(ctx) {
   // ---- View-local state -----------------------------------------------------
   /** The focused session id (highlighted row); kept in step with `update`. */
   let focusedId = "";
-  /** Current filter text (lower-cased). Persists across poll ticks because the
-   * <input> lives inside the renderRegion host and is read on rebuild. */
+  /** Current filter text (lower-cased). The search <input> is built once with
+   * the region chrome and never rebuilt, so it persists trivially. */
   let filter = "";
   /** Optimistic local label overlay, per session id, so a save + re-poll round
    * trip doesn't clear the field the operator just typed (mirrors people.js). */
@@ -312,6 +320,7 @@ export function build(ctx) {
     idEl.title = s.session;
 
     // Status chip — ● live for the current (recording) session, else archived.
+    // is_current is folded into the reconcile KEY, so it's static per node.
     const status = pick(node, "status");
     if (s.is_current) {
       status.textContent = "● live";
@@ -321,29 +330,10 @@ export function build(ctx) {
       status.classList.add("is-archived");
     }
 
-    // WAV count.
     const wavs = s.wav_count || 0;
-    pick(node, "wavs").textContent = wavs ? `${wavs}` : "—";
-
-    // Stripped? — ✓ when a stripped/ folder exists, else —.
-    const strip = pick(node, "stripped");
-    if (s.stripped) { strip.textContent = "✓"; strip.classList.add("is-yes"); }
-    else { strip.textContent = "—"; strip.classList.add("is-no"); }
-
-    // Transcript status.
-    const tx = txStatus(s);
-    const txEl = pick(node, "tx");
-    txEl.textContent = tx.text;
-    txEl.classList.add(`tone-${tx.tone}`);
-
-    // Size — sum of original WAV sizes (the only size signal we have).
-    const bytes = totalBytes(s);
-    pick(node, "size").textContent = wavs ? fmtBytes(bytes) : "—";
 
     // ---- Rename (inline editable label) ----
     const nameInput = /** @type {HTMLInputElement} */ (pick(node, "rename"));
-    nameInput.value = labelFor(s);
-    nameInput.placeholder = fmtSessionLabel(s.session) || s.session;
     const renameStatus = pick(node, "renameStatus");
     nameInput.addEventListener("input", () => {
       localLabels.set(s.session, nameInput.value);
@@ -382,24 +372,21 @@ export function build(ctx) {
     }
 
     // ---- Absorb into… (fold THIS session, as source, into a target) ----
-    // The select lives inside the renderRegion host, so the poll's focus guard
-    // protects it while open. The backend refuses the CURRENT session as a
-    // source, so we drop the picker entirely on the current row (and when there
-    // is no other session to absorb into).
+    // While the select is focused (dropdown open), fillRow leaves its options
+    // alone — the poll updates around it. The backend refuses the CURRENT
+    // session as a source, so we drop the picker entirely on the current row
+    // (and when there is no other session to absorb into).
     const absorbSel = /** @type {HTMLSelectElement} */ (pick(node, "absorb"));
     if (s.is_current || !absorbTargets.length) {
       absorbSel.remove();
     } else {
-      for (const t of absorbTargets) {
-        const lbl = labelFor(t) || fmtSessionLabel(t.session) || t.session;
-        absorbSel.add(new Option(`${lbl} (${t.wav_count || 0}w)`, t.session));
-      }
+      // Options are filled (and label-refreshed) by fillRow below.
       absorbSel.addEventListener("change", () => {
         const targetId = absorbSel.value;
         if (!targetId) return;
         // Reset + blur before firing so a refused merge doesn't pin the select
-        // to the failed choice, and so the post-merge re-render isn't blocked by
-        // the renderRegion focus guard.
+        // to the failed choice, and so fillRow's focused-select guard doesn't
+        // hold back the post-merge option refresh.
         absorbSel.value = "";
         absorbSel.blur();
         absorbInto(s, targetId);
@@ -417,7 +404,68 @@ export function build(ctx) {
       delSessBtn.addEventListener("click", () => deleteSession(s));
     }
 
+    // Mutable content (label, counts, tx status, size, absorb options…) is
+    // owned by fillRow — shared with the per-tick reconcile update path.
+    fillRow(row, s, absorbTargets);
     return node;
+  };
+
+  /**
+   * Refresh a row's mutable cells IN PLACE — the reconcileList update path
+   * (and the tail of sessionRow). Structural bits (is_current, has-WAVs, the
+   * absorb-target id set) are folded into the reconcile KEY, so a flip
+   * recreates the row via sessionRow (its wiring differs); this touches only
+   * content. Focus guards: the rename input's value and the absorb <select>'s
+   * options are left alone while focused — updating around interaction is the
+   * point of the in-place path (ADR-0004).
+   * @param {HTMLElement} row
+   * @param {import('../../types.js').Session} s
+   * @param {import('../../types.js').Session[]} absorbTargets
+   */
+  const fillRow = (row, s, absorbTargets) => {
+    const rowSig = [
+      labelFor(s),
+      s.session === focusedId ? 1 : 0,
+      s.wav_count || 0,
+      s.stripped ? 1 : 0,
+      s.session_transcript ? s.session_transcript.segment_count || 0 : -1,
+      totalBytes(s),
+      s.progress ? 1 : 0,
+      absorbTargets.map((t) => `${labelFor(t)}·${t.wav_count || 0}`).join(","),
+    ].join("§");
+    if (row.dataset.rowSig === rowSig) return;
+    row.dataset.rowSig = rowSig;
+
+    row.classList.toggle("is-focused", s.session === focusedId);
+
+    const nameInput = /** @type {HTMLInputElement} */ (row.querySelector('[data-slot="rename"]'));
+    if (nameInput && document.activeElement !== nameInput) {
+      nameInput.value = labelFor(s);
+      nameInput.placeholder = fmtSessionLabel(s.session) || s.session;
+      const labelEl = row.querySelector('[data-slot="label"]');
+      if (labelEl) labelEl.textContent = displayName(s);
+    }
+
+    const wavs = s.wav_count || 0;
+    pick(row, "wavs").textContent = wavs ? `${wavs}` : "—";
+    const strip = pick(row, "stripped");
+    strip.textContent = s.stripped ? "✓" : "—";
+    strip.classList.toggle("is-yes", !!s.stripped);
+    strip.classList.toggle("is-no", !s.stripped);
+    const tx = txStatus(s);
+    const txEl = pick(row, "tx");
+    txEl.textContent = tx.text;
+    txEl.className = `sesstx mono tone-${tx.tone}`;
+    pick(row, "size").textContent = wavs ? fmtBytes(totalBytes(s)) : "—";
+
+    const absorbSel = /** @type {HTMLSelectElement | null} */ (row.querySelector('[data-slot="absorb"]'));
+    if (absorbSel && document.activeElement !== absorbSel) {
+      while (absorbSel.options.length > 1) absorbSel.remove(1);
+      for (const t of absorbTargets) {
+        const lbl = displayName(t);
+        absorbSel.add(new Option(`${lbl} (${t.wav_count || 0}w)`, t.session));
+      }
+    }
   };
 
   /**
@@ -436,59 +484,87 @@ export function build(ctx) {
   };
 
   /**
-   * Build the whole list region (search box + table) — only invoked by
-   * renderRegion when it actually swaps, so a skipped tick never builds.
-   * @param {import('../../types.js').Session[]} sessions
+   * Build the list region CHROME once — search box, column header, the
+   * placeholder sibling, and the (empty) rows host. Rows are reconciled into
+   * it in place by syncRows, so this never rebuilds: the search box is wired
+   * exactly once and is never swapped out from under the operator (the old
+   * whole-region rebuild needed a force+refocus hack for exactly that).
    */
-  const buildList = (sessions) => {
+  const buildRegion = () => {
     const region = tpl("tpl-next-sesslist");
-
-    // Search box. Re-wire its listener each rebuild (a fresh node every swap);
-    // renderRegion guards the swap while it's focused, so an in-progress query
-    // is never interrupted mid-keystroke.
     const search = /** @type {HTMLInputElement} */ (pick(region, "search"));
     search.value = filter;
     search.addEventListener("input", () => {
       filter = search.value.trim().toLowerCase();
-      // Re-render just the list region with the new filter. force:true so the
-      // focused search box doesn't make renderRegion skip its own update.
-      renderRegion(listHost, () => buildList(sessions), { force: true });
-      // Keep focus + caret at the end after the swap.
-      const next = /** @type {HTMLInputElement | null} */ (listHost.querySelector('[data-slot="search"]'));
-      if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
+      syncRows(); // in place — this input is untouched, focus + caret keep themselves
     });
+    return region;
+  };
 
+  /**
+   * Reconcile the rows INTO THE LIVE REGION in place (no host swap): the
+   * shown-count, the empty/filtered placeholder (a hidden-toggled SIBLING of
+   * the rows host — reconcileList owns the host's children outright), and the
+   * keyed row list. Safe per tick AND from the filter handler. Content ticks
+   * (bytes, tx status, labels) mutate cells via fillRow; structural flips
+   * (is_current, has-WAVs, the absorb-target set) change the KEY and recreate
+   * just that row. Defers — marking the tick-retry flag — while a text
+   * selection is inside the list, like the WAV lists (ADR-0004); a focused
+   * control alone never defers, because reconcileList updates AROUND it
+   * (moveBefore preserves the node, fillRow guards its value).
+   *
+   * When the local (label/id/date) filter yields zero matches, the rows host
+   * falls over to cross-session transcript search instead (#315): that's a
+   * COLD, discrete mode switch (not a per-tick content update), so it swaps
+   * the body directly rather than through reconcileList's keyed hot path.
+   * reconcileList picks the body back up cleanly once normal rows return —
+   * its bookkeeping lives in a WeakMap keyed by node identity, not by reading
+   * prior host state, so a raw swap in between is invisible to it.
+   */
+  const syncRows = () => {
+    const body = /** @type {HTMLElement | null} */ (listHost.querySelector('[data-slot="rows"]'));
+    if (!body) return; // region not mounted yet — update() mounts it first
+    const sessions = lastSessions;
     const shown = sessions.filter(matches);
-    pick(region, "shownCount").textContent =
-      filter ? `${shown.length} of ${sessions.length}` : `${sessions.length} total`;
+    const counts = listHost.querySelector('[data-slot="shownCount"]');
+    const ph = /** @type {HTMLElement | null} */ (listHost.querySelector('[data-slot="rowsEmpty"]'));
 
-    const body = pick(region, "rows");
-    if (!sessions.length) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = "No sessions yet — start recording to see them here.";
-      body.replaceChildren(empty);
-    } else if (!shown.length) {
-      // No local (label/id/date) matches — show the cross-session transcript
-      // search instead, into the SAME rows body (the two are mutually exclusive,
-      // so they share one container).
+    if (!filter && lastSearchQuery) {
+      // Leaving search mode — drop the cached result so a later, identical
+      // query re-fires against current data instead of replaying a stale hit.
+      lastSearchResults = null;
+      lastSearchQuery = "";
+    }
+
+    if (filter && !shown.length) {
+      if (ph) ph.hidden = true;
+      if (lastSearchQuery !== filter) fireSearch(filter);
+      if (counts) {
+        if (lastSearchResults === null) {
+          counts.textContent = `${sessions.length} total · searching transcripts…`;
+        } else if (!lastSearchResults.length) {
+          counts.textContent = "0 search results";
+        } else {
+          counts.textContent =
+            `${lastSearchResults.length} session${lastSearchResults.length === 1 ? "" : "s"} in transcript`;
+        }
+      }
+
+      if (deferIfSelectionInside(body)) return;
+
       if (lastSearchResults === null) {
-        // Still waiting for the server-side search to return.
-        pick(region, "shownCount").textContent =
-          `${sessions.length} total · searching transcripts…`;
-        body.replaceChildren();
-      } else if (lastSearchResults.length === 0) {
+        body.replaceChildren(); // static-render — cold search-mode transition, see docstring
+      } else if (!lastSearchResults.length) {
         const empty = document.createElement("div");
         empty.className = "empty";
-        empty.textContent = `No sessions match "search" for "${filter}".`;
-        body.replaceChildren(empty);
-        pick(region, "shownCount").textContent = `0 search results`;
+        empty.textContent = `No sessions match "${filter}".`;
+        body.replaceChildren(empty); // static-render — cold search-mode transition, see docstring
       } else {
-        // Render search hits with snippet previews.
+        // Render search hits with snippet previews. Template + textContent
+        // (NOT innerHTML) — hit.label/hit.session are operator-controlled and
+        // must never be parsed as HTML.
         const frag = document.createDocumentFragment();
         for (const hit of lastSearchResults) {
-          // Template + textContent (NOT innerHTML) — hit.label/hit.session are
-          // operator-controlled and must never be parsed as HTML.
           const node = tpl("tpl-next-searchrow");
           const row = /** @type {HTMLElement} */ (pick(node, "row"));
           row.style.cursor = "pointer";
@@ -502,45 +578,39 @@ export function build(ctx) {
           snippetEl.textContent = hit.snippet;
           frag.appendChild(snippetEl);
         }
-        body.replaceChildren(frag);
-        pick(region, "shownCount").textContent =
-          `${lastSearchResults.length} session${lastSearchResults.length === 1 ? "" : "s"} in transcript`;
+        body.replaceChildren(frag); // static-render — cold search-mode transition, see docstring
       }
-    } else {
-      // Absorb targets: archived sessions only — the current (recording) one is
-      // never a merge endpoint (classic kept it out of the picker entirely),
-      // and a row can't absorb into itself. Computed once over the FULL list
-      // (not just the filtered `shown`) so a filtered-out session is still a
-      // valid target.
-      const archived = sessions.filter((s) => !s.is_current);
-      const list = document.createDocumentFragment();
-      for (const s of shown) {
-        const targets = archived.filter((t) => t.session !== s.session);
-        list.appendChild(sessionRow(s, targets));
-      }
-      body.replaceChildren(list);
+      return;
     }
-    return region;
-  };
 
-  /** A signature of everything the list region shows, so renderRegion only
-   * rebuilds when the data (not just the tick) changes — and never while a
-   * control inside it is focused. */
-  /** @param {import('../../types.js').Session[]} sessions */
-  const listSig = (sessions) => [
-    focusedId,
-    filter,
-    // Search state MUST be in the sig: an async search result arriving flips
-    // `lastSearchResults` null→array without changing filter/sessions, so without
-    // this the sig-gated renderRegion never repaints and the rows stay "searching…".
-    lastSearchQuery,
-    lastSearchResults === null ? "…" : lastSearchResults.map((h) => `${h.session}:${h.count}`).join(","),
-    sessions.map((s) =>
-      `${s.session}=${labelFor(s)}/${s.wav_count || 0}/${s.is_current ? 1 : 0}` +
-      `/${s.stripped ? 1 : 0}/${s.session_transcript ? (s.session_transcript.segment_count || 0) : -1}` +
-      `/${totalBytes(s)}/${!!s.progress}`,
-    ).join("§"),
-  ].join("‖");
+    if (counts) {
+      counts.textContent = filter ? `${shown.length} of ${sessions.length}` : `${sessions.length} total`;
+    }
+    if (ph) {
+      ph.hidden = !!shown.length;
+      ph.textContent = "No sessions yet — start recording to see them here.";
+    }
+
+    if (deferIfSelectionInside(body)) return;
+
+    // Absorb targets: archived sessions only — the current (recording) one is
+    // never a merge endpoint, and a row can't absorb into itself. Computed
+    // over the FULL list (not just the filtered `shown`) so a filtered-out
+    // session is still a valid target. The target ID SET is structural (it
+    // changes the row's wiring) → folded into the key; target LABELS are
+    // content → refreshed by fillRow.
+    const archived = sessions.filter((s) => !s.is_current);
+    const targetsSig = archived.map((t) => t.session).join(",");
+    const targetsFor = (/** @type {import('../../types.js').Session} */ s) =>
+      archived.filter((t) => t.session !== s.session);
+    reconcileList(
+      body,
+      shown,
+      (s) => `${s.session}·c${s.is_current ? 1 : 0}·w${(s.wav_count || 0) > 0 ? 1 : 0}·t${targetsSig}`,
+      (s) => /** @type {HTMLElement} */ (sessionRow(s, targetsFor(s)).firstElementChild),
+      (row, s) => fillRow(/** @type {HTMLElement} */ (row), s, targetsFor(s)),
+    );
+  };
 
   // ---- Per-tick update ------------------------------------------------------
 
@@ -570,23 +640,10 @@ export function build(ctx) {
         : "no sessions yet — start recording to populate this list",
     });
 
-    // Reset search state when the filter becomes empty.
-    if (!filter) {
-      lastSearchResults = null;
-      lastSearchQuery = "";
-    }
-
-    // When local filter yields no results for a non-empty query, fire a
-    // server-side transcript search. Results are cached per query string
-    // so a poll tick that re-evaluates the same filter reuses them.
-    if (filter && lastSearchQuery !== filter && sessions.filter(matches).length === 0) {
-      fireSearch(filter);
-    }
-
-    // The list region holds the search box + rename inputs → renderRegion so
-    // the poll never clobbers an open edit; signature so it only rebuilds when
-    // the data actually changes.
-    renderRegion(listHost, () => buildList(sessions), { sig: listSig(sessions) });
+    // Chrome mounts once (static-render — never rebuilt); rows (or, in search
+    // mode, search hits — see syncRows) reconcile in place every tick.
+    if (!listHost.firstElementChild) mount(listHost, buildRegion());
+    syncRows();
   };
 
   return { node: frag, update };

@@ -1,0 +1,41 @@
+/* from vanilla-components/components/field/field.css@9f20766 - re-copy to update, don't fork */
+@layer vanilla-components {
+/* field — a labeled form control (input/select/textarea) with a hint and native
+   validation styling. Unifies TapScribe `.field/.input/.select`. */
+@scope (.field) {
+  :scope { display: flex; flex-direction: column; gap: 4px; }
+  .field-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  /* hideLabel: keep the label for assistive tech but take it out of the layout,
+     so the field collapses to just its control (fits a compact toolbar). */
+  .field-label.is-sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    margin: -1px; padding: 0; border: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .field-control { display: flex; }
+  .field-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    font: inherit;
+    font-size: 13px;
+    padding: 5px 8px;
+    background: var(--bg);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r);
+    color: var(--text);
+  }
+  .field-input:focus { outline: none; border-color: var(--accent); }
+  /* native constraint validation — only after the user has interacted */
+  .field-input:user-invalid { border-color: var(--bad); }
+  /* field-sizing: content auto-grows the textarea to its text (Chromium 123+) */
+  textarea.field-input { resize: vertical; min-height: 60px; field-sizing: content; }
+  .field-hint { font-size: 11px; color: var(--text-dim); }
+}
+}

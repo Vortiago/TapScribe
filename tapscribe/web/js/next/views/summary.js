@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · Summary (SESSION stage 4) — the post-transcription summarizer.
 //
 // WIRED for the Local, Command, and API sources. Local (#86) is the bundled,
@@ -31,6 +32,7 @@
 // pane).
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
+import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import { postJson, putJson, wireSave, sessionSummary } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar } from "../shell.js";
@@ -63,7 +65,7 @@ export function build(ctx) {
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
   const jobCount = pick(frag, "jobCount");
-  const jobFill = /** @type {HTMLElement} */ (pick(frag, "jobFill"));
+  const jobProgress = /** @type {HTMLElement} */ (pick(frag, "jobProgress"));
   const jobWav = pick(frag, "jobWav");
 
   // Source selector + per-source detail panes + the local model picker —
@@ -215,18 +217,16 @@ export function build(ctx) {
 
   /** @param {import('../../types.js').Session | null} sess */
   const renderPlaceholder = (sess) => {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    const h = document.createElement("div");
-    h.className = "empty__h";
-    h.textContent = sess ? "No summary yet" : "No session selected";
-    const d = document.createElement("div");
-    d.textContent = sess
-      ? hasTranscript()
-        ? "Edit the prompt and click Generate to summarize this session's merged transcript."
-        : "Transcribe this session first, then Generate a summary from its merged transcript."
-      : "Pick a session from the spine to summarize it.";
-    empty.append(h, d);
+    // vc empty-state (js/vc, warmed at boot) — .work .empty-state in next.css
+    // keeps the old .empty metrics so the pane looks unchanged.
+    const empty = createEmptyStateSync({
+      title: sess ? "No summary yet" : "No session selected",
+      detail: sess
+        ? hasTranscript()
+          ? "Edit the prompt and click Generate to summarize this session's merged transcript."
+          : "Transcribe this session first, then Generate a summary from its merged transcript."
+        : "Pick a session from the spine to summarize it.",
+    }).el;
     sumOutHint.textContent = "";
     return empty;
   };
@@ -289,7 +289,7 @@ export function build(ctx) {
   const reflectCmdPreview = () => {
     const cmd = cmdInput.value.trim();
     if (!cmd) {
-      cmdPreview.replaceChildren();
+      cmdPreview.replaceChildren(); // static-render — input-event reflect of a text-only preview; not a polled region
       return;
     }
     const p = promptTa.value.trim();
@@ -299,7 +299,7 @@ export function build(ctx) {
     l1.textContent = `will run: ${cmd}${promptArg}`;
     const l2 = document.createElement("div");
     l2.textContent = "merged transcript → stdin";
-    cmdPreview.replaceChildren(l1, l2);
+    cmdPreview.replaceChildren(l1, l2); // static-render — same input-event reflect
   };
   promptTa.addEventListener("input", reflectCmdPreview);
 
@@ -407,7 +407,7 @@ export function build(ctx) {
     // (deliberately outside the signature gates, same as transcript.js). Scoped
     // to a summarize job so a transcribe/strip on the same session doesn't show
     // in the Summarizer panel.
-    renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job, { only: "summarize" });
+    renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job, { only: "summarize" });
 
     // ---- Header — gated on session + has-transcript.
     const headSig = [sid, hasTranscript() ? 1 : 0].join("§");

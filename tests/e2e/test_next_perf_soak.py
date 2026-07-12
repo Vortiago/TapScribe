@@ -259,6 +259,7 @@ async def _run_pass(
     view: str,
     soak: Callable[[object, float], Awaitable[None]] = _sleep_soak,
     select_sid: str | None = None,
+    post_gc: Callable[[PerfProbe], Awaitable[None]] | None = None,
 ) -> PassMetrics:
     """One pass: fresh context → boot the dashboard on `view` → settle → forced-GC
     snapshot → soak window → snapshot → forced-GC snapshot → window-filtered
@@ -284,6 +285,8 @@ async def _run_pass(
         end = await probe.snapshot()
         await probe.force_gc()
         end_post_gc = await probe.snapshot()
+        if post_gc is not None:
+            await post_gc(probe)
         data = await probe.client_probe()
         return compute_pass(
             scenario=scenario,
@@ -498,7 +501,7 @@ async def test_soak_view_cycle(running_recorder: RunningRecorder, tmp_path: Path
     """Big library + 2 streaming taps while hopping across all 7 views every
     2 s — catches expensive view (re)mounts and first renders."""
     rr = running_recorder
-    _seed_library(rr, sessions=24, wavs_per=8)
+    sids = _seed_library(rr, sessions=24, wavs_per=8)
     stream_s = SETTLE_S + SOAK_S + 25.0
 
     async def cycle(page, soak_s: float) -> None:
@@ -507,8 +510,33 @@ async def test_soak_view_cycle(running_recorder: RunningRecorder, tmp_path: Path
         while asyncio.get_running_loop().time() < deadline:
             view = _NEXT_VIEWS[i % len(_NEXT_VIEWS)]
             await page.evaluate("(v) => window.gotoView(v)", view)
+            await page.evaluate("() => window.__tagViewRoot()")
             await page.wait_for_timeout(2000)
             i += 1
+        # Deterministic eviction census (toolkit mem.js pattern): visit MORE
+        # transcript sessions than the LRU keeps (6), tagging each mounted
+        # view root. The pass's forced GC must then collect the evicted ones —
+        # the post_gc gate below turns "an evicted view's DOM is still
+        # retained" into an integer assertion.
+        for sid in sids[:10]:
+            await _select_session(page, sid)
+            await page.wait_for_timeout(400)
+            await page.evaluate("() => window.__tagViewRoot()")
+
+    # Filled by the post-GC census of each pass; reported with the scenario.
+    censuses: list[dict] = []
+
+    async def census_gate(probe: PerfProbe) -> None:
+        census = await probe.view_root_census()
+        censuses.append(census)
+        # Bound = the view cache's design capacity: 6 LRU transcript views +
+        # 7 page-singleton views (next/main.js). Retained-but-detached roots
+        # past that are leaks (an evicted view pinned by a stray listener,
+        # registry, or closure).
+        assert census["alive_detached"] <= 13, (
+            f"leak: {census['alive_detached']} detached view roots survived a forced GC "
+            f"(cache bound is 13) — an evicted view's DOM is still retained: {census}"
+        )
 
     passes: list[PassMetrics] = []
     async with playwright_session() as pw:
@@ -528,8 +556,13 @@ async def test_soak_view_cycle(running_recorder: RunningRecorder, tmp_path: Path
                             pass_index=i,
                             view="capture",
                             soak=cycle,
+                            post_gc=census_gate,
                         )
                     )
         finally:
             await browser.close()
-    _report("view_cycle", passes, extra={"sessions": 24, "wavs_per": 8, "taps": 2})
+    _report(
+        "view_cycle",
+        passes,
+        extra={"sessions": 24, "wavs_per": 8, "taps": 2, "view_root_census": censuses},
+    )

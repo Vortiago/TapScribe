@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Summarizer source controls — the shared wiring behind the Summary view's
 // Summarizer panel and the Settings stage's Summarizer-default card. Each
 // view's template owns the MARKUP (different slots, different extras); this
@@ -164,7 +165,7 @@ export function wireSummarizerControls(els) {
     try {
       const cat = await getSummaryCatalog();
       models = cat.models || [];
-      modelSel.replaceChildren();
+      modelSel.replaceChildren(); // static-render — one-shot catalog fill at build
       for (const m of models) modelSel.add(new Option(m.label || m.repo_id, m.repo_id, m.is_default, m.is_default));
       if (!models.length) {
         modelSel.add(new Option("no local models", "", true, true));
@@ -181,7 +182,7 @@ export function wireSummarizerControls(els) {
       // Command presets (same fetch): "custom…" + one option per known tool,
       // pre-selecting whichever matches the template field's current value.
       presets = cat.command_presets || [];
-      presetSel.replaceChildren();
+      presetSel.replaceChildren(); // static-render — one-shot catalog fill at build
       presetSel.add(new Option("custom…", ""));
       for (const p of presets) presetSel.add(new Option(p.label, p.key));
       syncPresetToCommand();

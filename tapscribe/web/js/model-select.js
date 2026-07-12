@@ -89,7 +89,7 @@ export function groupModelsByFamily(models, familyLabels) {
  */
 export function buildModelSelect(sel, models, opts) {
   const { selected, familyLabels, withDescriptions, unregisteredFallback, emptyLabel } = opts;
-  sel.replaceChildren();
+  sel.replaceChildren(); // static-render — one-shot options rebuild of the <select> being (re)filled
   let found = false;
   for (const { label, models: entries } of groupModelsByFamily(models, familyLabels)) {
     const group = document.createElement("optgroup");

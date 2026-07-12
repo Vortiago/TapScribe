@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · Transcript (SESSION stage 3). The merged transcript for the open
 // session (main/left) + a transcription CONTROL COLUMN (right): the meeting
 // LANGUAGES control (a candidate-language <select multiple> + a readout of the
@@ -22,6 +23,7 @@
 // clobbered) and repaints the languages readout in place.
 
 import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside, selectionInside } from "../../templates.js";
+import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import { postJson, putJson, sessionTranscript, loadSessionFiles, wireSave } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -107,7 +109,7 @@ export function build(ctx) {
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
   const jobCount = pick(frag, "jobCount");
-  const jobFill = /** @type {HTMLElement} */ (pick(frag, "jobFill"));
+  const jobProgress = /** @type {HTMLElement} */ (pick(frag, "jobProgress"));
   const jobWav = pick(frag, "jobWav");
   const cacheHint = pick(frag, "cacheHint");
   const cacheBody = pick(frag, "cacheBody");
@@ -553,7 +555,7 @@ export function build(ctx) {
     // tag distinguishes them. recordingFor maps a selected region back to its
     // parent original so either selection lands on the same list.
     const rec = recordingFor(sel, currentFiles);
-    cacheBody.replaceChildren();
+    cacheBody.replaceChildren(); // static-render — user picked a row; one-shot rebuild of the cache list follows
     cacheHint.textContent = rec ? truncMid(rec.name, 30) : "no WAV";
     if (!rec) {
       const empty = document.createElement("div");
@@ -631,7 +633,7 @@ export function build(ctx) {
     // on prebuilt nodes, EVERY tick — deliberately outside both signature gates.
     // Sharing a signature with the O(segments) merged transcript was the "/next
     // freezes while transcribing" bug (one rebuild per job tick).
-    renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job);
+    renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job);
 
     // ---- Merged transcript + header — rendered through renderRegion on the
     // mergedHost: it gates on txSig (session, marker stamp, loaded-ness, and the
@@ -684,17 +686,14 @@ export function build(ctx) {
           return loading;
         }
         txHint.textContent = "not run";
-        const empty = document.createElement("div");
-        empty.className = "empty";
-        const h = document.createElement("div");
-        h.className = "empty__h";
-        h.textContent = sess ? "Not transcribed yet" : "No session selected";
-        const d = document.createElement("div");
-        d.textContent = sess
-          ? "Declare the meeting's languages, then transcribe the session range (or a single WAV) to produce the merged transcript here."
-          : "Pick a session from the spine to view its merged transcript.";
-        empty.append(h, d);
-        return empty;
+        // vc empty-state (js/vc, warmed at boot) — .work .empty-state in
+        // next.css keeps the old .empty metrics.
+        return createEmptyStateSync({
+          title: sess ? "Not transcribed yet" : "No session selected",
+          detail: sess
+            ? "Declare the meeting's languages, then transcribe the session range (or a single WAV) to produce the merged transcript here."
+            : "Pick a session from the spine to view its merged transcript.",
+        }).el;
       },
       { sig: txSig },
     );
@@ -727,7 +726,7 @@ export function build(ctx) {
 
       // Source toggle (original / stripped) — drives the range transcribe AND
       // the per-WAV picker below.
-      srcSwHost.replaceChildren(buildSourceToggle({
+      srcSwHost.replaceChildren(buildSourceToggle({ // gate-allow: raw-swap — ctlSig-gated swap of the buttons-only source toggle
         active: src,
         hasStripped: !!sess?.stripped,
         onPick: (which) => {
@@ -772,7 +771,7 @@ export function build(ctx) {
     if (pickState === "rows") {
       if (pickerSig !== lastPickerSig && !deferIfSelectionInside(wavList)) {
         // Clear any leftover placeholder so reconcileList owns the host.
-        if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren();
+        if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated picker gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
         reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
         lastPickerSig = pickerSig;
       }
@@ -786,7 +785,7 @@ export function build(ctx) {
         : sess
           ? (src === "stripped" ? "No stripped clips — strip silence in Recordings first." : "No WAVs recorded yet.")
           : "Pick a session from the spine.";
-      wavList.replaceChildren(empty);
+      wavList.replaceChildren(empty); // gate-allow: raw-swap — same pickerSig-gated placeholder swap
     }
   };
 

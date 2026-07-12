@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — boot-time wiring on page-lifetime singletons (rail buttons, document visibility, window wake); main.js runs once per page, so these listeners are deliberately permanent.
 // TapScribe · Stages — Phase-1 entry point for the /next dashboard.
 //
 // Boots a slim left SPINE (two groups: GLOBAL Taps·People·Settings, pinned;
@@ -14,7 +15,9 @@
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
 import { fetchState, postJson, putJson } from "../api.js";
-import { loadTemplates, pick, consumeDeferredRender, interactionHeld } from "../templates.js";
+import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
+import { warmProgress } from "../vc/components/progress/progress.js";
+import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import { createPollPacer, FAST_MS } from "./poll-pacer.js";
 import * as spine from "./components/spine.js";
@@ -352,7 +355,19 @@ function renderView(j, session) {
   }
 
   if (mountedKey !== key) {
-    root.replaceChildren(built.host ?? built.node);
+    // Deliberately a PLAIN synchronous mount, not withTransition: the poll
+    // loop's next tick (and the rest of THIS tick's built.update() call,
+    // immediately below) assumes the new view is fully attached the instant
+    // this line returns. withTransition can't give that — its mutation only
+    // runs inside document.startViewTransition's callback, which the browser
+    // may defer past the current microtask; under load, a poll tick or an
+    // interaction-hold sweep can observe the OLD view still attached (its
+    // childElementCount > 0 check passes vacuously) and tag/act on stale
+    // nodes that the deferred mount then rips out from under it — exactly
+    // the "don't read the new DOM synchronously after the call" trap the
+    // canon docs warn about (render.js). Tried and reverted (#310): see
+    // git history for the withTransition attempt this replaced.
+    mount(root, built.host ?? built.node);
     mountedKey = key;
   }
   built.update(j, session);
@@ -602,22 +617,33 @@ async function refresh() {
 
 // ---- Boot -------------------------------------------------------------------
 
-await loadTemplates(
-  // Existing component templates the REUSED components need:
-  "/web/components/live-feed.html",
-  "/web/components/active-taps.html",
-  "/web/components/live-channel.html",
-  "/web/components/merged-transcript.html",
-  "/web/components/config-card.html",
-  // New Stages templates:
-  "/web/components/next/spine.html",
-  "/web/components/next/views.html",
-  "/web/components/next/recordings.html",
-  "/web/components/next/taps.html",
-  "/web/components/next/people.html",
-  "/web/components/next/sessions.html",
-  "/web/components/next/summary.html",
-);
+// Surface listener exceptions / unhandled rejections in #errbar and beacon a
+// truncated copy to POST /api/client-errors — the one place an LLM session
+// maintaining the dashboard can actually read a browser-side failure.
+wireErrorBar();
+
+await Promise.all([
+  loadTemplates(
+    // Existing component templates the REUSED components need:
+    "/web/components/live-feed.html",
+    "/web/components/active-taps.html",
+    "/web/components/live-channel.html",
+    "/web/components/merged-transcript.html",
+    "/web/components/config-card.html",
+    // New Stages templates:
+    "/web/components/next/spine.html",
+    "/web/components/next/views.html",
+    "/web/components/next/recordings.html",
+    "/web/components/next/taps.html",
+    "/web/components/next/people.html",
+    "/web/components/next/sessions.html",
+    "/web/components/next/summary.html",
+  ),
+  // vc atoms the shell/views build synchronously (createXSync): warm once
+  // here so the sync path is safe everywhere after boot.
+  warmProgress(),
+  warmEmptyState(),
+]);
 
 async function loadModelCatalogs() {
   try {

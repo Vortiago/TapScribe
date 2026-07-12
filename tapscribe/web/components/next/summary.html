@@ -129,7 +129,7 @@
           <!-- job progress (one job per session — transcribe / strip / summarize) -->
           <div class="jobbar" data-slot="jobBar" hidden>
             <div class="jobbar__top"><span data-slot="jobLabel">Summarizing</span><span class="jobbar__pct mono" data-slot="jobCount"></span></div>
-            <div class="progress"><div class="progress__fill" data-slot="jobFill"></div></div>
+            <div data-slot="jobProgress"></div>
             <div class="jobbar__wav mono" data-slot="jobWav"></div>
           </div>
         </div>

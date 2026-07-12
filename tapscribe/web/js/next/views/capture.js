@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · Capture (SESSION stage 1). Live IRC captions + the live-channel
 // control + capture health + the per-session recording/prompt/hotwords
 // overrides. (The active taps that used to sit in the aside now live in the

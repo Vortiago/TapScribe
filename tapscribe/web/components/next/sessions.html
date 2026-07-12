@@ -65,9 +65,13 @@
       <span class="sesscol sesscol--act">Actions</span>
     </div>
 
+    <!-- Placeholder SIBLING of the rows host (hidden-toggled in place): the
+         host's children belong to reconcileList alone. -->
+    <div class="empty" data-slot="rowsEmpty" hidden></div>
     <!-- Session rows — OR the cross-session transcript-search hits when the
          local (label/id/date) filter yields zero matches. The two are mutually
-         exclusive, so they share this single body (sessions.js fills it). -->
+         exclusive; the search branch takes over the body with a raw swap
+         (sessions.js), reconcileList picks it back up once normal rows return. -->
     <div class="sessrows" data-slot="rows"></div>
   </div>
 </template>

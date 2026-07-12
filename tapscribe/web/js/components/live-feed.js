@@ -263,7 +263,7 @@ export function render(j, { countEl, shell, autoscrollEl, sessionId, isCurrent }
   } else {
     const frag = document.createDocumentFragment();
     for (const g of groups) frag.appendChild(buildLine(g));
-    body.replaceChildren(frag);
+    body.replaceChildren(frag); // gate-allow: raw-swap — cold/reset path of the in-place feed updater; gated by deferIfSelectionInside upstream (CLAUDE.md)
   }
   _renderedKeys.set(body, keys);
 

@@ -1,8 +1,13 @@
 // @ts-check
-// Pure formatters used across the dashboard.
+// Pure formatters used across the dashboard — the APP layer over the vendored
+// toolkit formatters (lib/format.js): fmtClock delegates to the viewer-zone
+// time(); the dense terminal-style number/duration forms (fmtDur, fmtMs,
+// fmtMmSs, fmtBytes) are a deliberate Stages aesthetic and stay hand-rolled.
 // No DOM dependency, no shared state — safe to unit-test in isolation.
 // (escapeHtml/cssEscape/fmtElapsed* were removed with the classic dashboard —
 // their only callers were classic main.js / ribbon.js / session-detail.js.)
+
+import { time } from "./lib/format.js";
 
 /** @param {number | null | undefined} b */
 export function fmtBytes(b) {
@@ -24,11 +29,19 @@ export function fmtMs(ms) {
   return ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " s";
 }
 
-/** @param {string | null | undefined} iso */
+/** Wall-clock hh:mm:ss for an absolute instant (ISO-with-offset), rendered in
+ * the VIEWER's timezone via the vendored toolkit formatter (lib/format.js) —
+ * the old version sliced the ISO string, which showed every viewer the
+ * origin-encoded (UTC) wall time. The instant is unambiguous; the viewer's
+ * zone is the right display zone (toolkit browser-timezone rule).
+ * @param {string | null | undefined} iso */
 export function fmtClock(iso) {
   if (!iso) return "?";
-  return iso.slice(11, 19);
+  return time(iso, CLOCK_OPTS);
 }
+const CLOCK_OPTS = /** @type {Intl.DateTimeFormatOptions} */ ({
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
 
 /**
  * Elapsed seconds → compact "m:ss" (90 → "1:30"). Distinct from `fmtDur`

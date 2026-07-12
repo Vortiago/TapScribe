@@ -1,16 +1,19 @@
 // @ts-check
+// gate-allow: raw-swap — linear wizard with no polled re-renders: every swap is
+// a one-shot render driven by a user action or a terminal install event, so
+// there is no tick that could clobber interaction state (renderRegion's case).
 // First-run / manage-models setup surface, composed from vanilla-components on
 // the shared tokens (see vc/PROVENANCE.md). Reads GET /api/setup/state, lets the
 // operator pick model families + a host-valid backend, POSTs to
 // /api/setup/install, and streams the Server-Sent progress into the log pane.
 // Served standalone (no dashboard machinery) so it works before any backend is
 // installed.
-import { warmAlert, createAlertSync } from "./vc/components/alert/alert.js";
-import { warmButton, createButtonSync } from "./vc/components/button/button.js";
-import { warmChip, createChipSync } from "./vc/components/chip/chip.js";
-import { warmField, createFieldSync } from "./vc/components/field/field.js";
-import { warmPanel, createPanelSync } from "./vc/components/panel/panel.js";
-import { warmSpinner, createSpinnerSync } from "./vc/components/spinner/spinner.js";
+import { warmAlert, createAlertSync } from "../vc/components/alert/alert.js";
+import { warmButton, createButtonSync } from "../vc/components/button/button.js";
+import { warmChip, createChipSync } from "../vc/components/chip/chip.js";
+import { warmField, createFieldSync } from "../vc/components/field/field.js";
+import { warmPanel, createPanelSync } from "../vc/components/panel/panel.js";
+import { warmSpinner, createSpinnerSync } from "../vc/components/spinner/spinner.js";
 
 /**
  * Minimal layout-scaffolding helper (NOT styling — look comes from components +

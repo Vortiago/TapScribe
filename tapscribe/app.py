@@ -30,7 +30,9 @@ import json
 import logging
 import math
 import shutil
+import time
 import wave
+from collections import deque
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -314,6 +316,43 @@ app.add_middleware(
 )
 app.middleware("http")(auth.basic_auth_middleware)
 
+# Security headers on EVERY response (pages, JSON, errors) — the toolkit
+# serve.mjs set, adapted to this app (vanilla-web reference/security.md):
+#
+# - script-src stays fully locked at 'self' (via default-src) AND
+#   `require-trusted-types-for 'script'` turns every DOM XSS sink
+#   (innerHTML & co) into a policy-guarded write. The dashboard has exactly
+#   one sanctioned sink — loadTemplates in the vendored templates lib —
+#   wrapped in the `vanilla-templates` policy. `'allow-duplicates'` is
+#   load-bearing: the dashboard page loads TWO stamped copies of that lib
+#   (the app seam's lib/templates.js and the vc components' vc/lib copy),
+#   each lazily creating the same-named policy.
+# - style-src carries 'unsafe-inline' for now: the component templates ship
+#   ~47 inline style="…" attributes (template-authored markup, not
+#   attacker-reachable — untrusted text only ever flows through
+#   textContent). Tightening this means moving those into classes; tracked
+#   as follow-up cleanup, deliberately not folded into this change.
+# - connect-src 'self' covers the dashboard's same-origin fetches AND its
+#   same-host WebSockets (/tap, /record, captions); media-src 'self' covers
+#   WAV playback.
+_CSP = (
+    "default-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "frame-ancestors 'none'; "
+    "trusted-types vanilla-templates 'allow-duplicates'; "
+    "require-trusted-types-for 'script'"
+)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
 
 # ---------------------------------------------------------------------------
 # Domain error → HTTP status. ONE source of truth: the orchestrators raise
@@ -396,6 +435,58 @@ async def _refuse_current_or_busy(
 # ---------------------------------------------------------------------------
 # Health + simple listings
 # ---------------------------------------------------------------------------
+
+
+# Client-error relay (wireErrorBar, tapscribe/web/js/lib/chrome.js): the
+# dashboard beacons unhandled browser errors here so an operator (or an LLM
+# session maintaining the app) can read them from the server log instead of
+# needing the browser console. Storage-free by design — log-and-drop, capped
+# and flood-guarded, mirroring the toolkit's serve.mjs endpoint.
+_CLIENT_ERR_WINDOW_S = 60.0
+_CLIENT_ERR_MAX_PER_WINDOW = 30
+_client_err_times: deque[float] = deque()
+
+
+@app.post("/api/client-errors", status_code=204)
+async def client_errors(request: Request) -> Response:
+    now = time.monotonic()
+    while _client_err_times and now - _client_err_times[0] > _CLIENT_ERR_WINDOW_S:
+        _client_err_times.popleft()
+    if len(_client_err_times) >= _CLIENT_ERR_MAX_PER_WINDOW:
+        # Silently drop past the cap: the relay is best-effort telemetry and a
+        # crash-looping page must not turn into a log flood.
+        return Response(status_code=204)
+    _client_err_times.append(now)
+
+    # sendBeacon posts text/plain, so parse the (size-capped) body by hand
+    # instead of a JSON body model. Every field is untrusted browser input:
+    # cap lengths and strip newlines so a crafted message can't forge extra
+    # log lines (log injection).
+    raw = (await request.body())[:8192]
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    def _field(name: str, cap: int) -> str:
+        value = payload.get(name, "")
+        text = value if isinstance(value, str) else str(value)
+        # Explicit log-injection hardening: neutralize CR/LF and drop other
+        # control chars, then collapse remaining whitespace and cap length.
+        text = text.replace("\r", " ").replace("\n", " ")
+        text = "".join(ch if (ch.isprintable() or ch == " ") else " " for ch in text)
+        return " ".join(text.split())[:cap]
+
+    logging.getLogger("tapscribe.client").warning(
+        "client error [%s] at %s: %s (ua: %s)",
+        _field("src", 40),
+        _field("url", 200),
+        _field("msg", 2000),
+        _field("ua", 200),
+    )
+    return Response(status_code=204)
 
 
 @app.get("/health")
@@ -1888,6 +1979,11 @@ DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
 NEXT_HTML_PATH = config.WEB_DIR / "next.html"
 NEXT_CSS_PATH = config.WEB_DIR / "next.css"
 SETUP_HTML_PATH = config.WEB_DIR / "setup.html"
+# Vendored toolkit token sheets (canon names; dashboard.css overrides the
+# values) — shared by the dashboard AND /setup, hence top-level like the
+# other page stylesheets.
+TOKENS_CSS_PATH = config.WEB_DIR / "tokens.css"
+TONES_CSS_PATH = config.WEB_DIR / "tones.css"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1932,6 +2028,20 @@ async def next_css():
     if not NEXT_CSS_PATH.is_file():
         raise HTTPException(404, "next.css not found")
     return FileResponse(NEXT_CSS_PATH, media_type="text/css")
+
+
+@app.get("/tokens.css")
+async def tokens_css():
+    if not TOKENS_CSS_PATH.is_file():
+        raise HTTPException(404, "tokens.css not found")
+    return FileResponse(TOKENS_CSS_PATH, media_type="text/css")
+
+
+@app.get("/tones.css")
+async def tones_css():
+    if not TONES_CSS_PATH.is_file():
+        raise HTTPException(404, "tones.css not found")
+    return FileResponse(TONES_CSS_PATH, media_type="text/css")
 
 
 # Dashboard JS modules and HTML component templates. StaticFiles handles

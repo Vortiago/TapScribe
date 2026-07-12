@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers ride nodes this component builds; replaced subtrees take their listeners with them, and the few persistent targets are wired exactly once per page.
 // Stages spine — the slim left rail in two groups. GLOBAL (Taps · People ·
 // Settings, pinned + un-numbered) and THIS SESSION (the numbered Capture →
 // Recordings → Transcript → Summary journey, with the session picker + New

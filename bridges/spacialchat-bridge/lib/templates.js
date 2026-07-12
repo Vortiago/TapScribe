@@ -1,3 +1,4 @@
+// from vanilla-components/lib/templates.js@48bf2bf - re-copy to update, don't fork
 // @ts-check
 // Canonical template + render helpers for the vanilla-web conventions
 // (see SKILL.md). Copy into <app>/web/lib/templates.js; extend, don't fork.
