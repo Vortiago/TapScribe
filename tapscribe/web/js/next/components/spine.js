@@ -53,18 +53,29 @@ function persistLabel(sid, statusEl) {
  */
 
 /**
+ * The People chip's count — the ADR-0009 registry (`j.people`, server-resolved
+ * from every session's Roster + live identities), NOT the pre-ADR-0009
+ * `session_meta.aliases` shadow join. Exported so it agrees, by construction,
+ * with the People view's own count (`people.js`'s `people.length`) rather than
+ * drifting from it. Factored out as a pure helper so it's unit-testable
+ * without a DOM (see spine.test.js).
+ * @param {import('../../types.js').AppState} j
+ * @returns {number}
+ */
+export function peopleCount(j) {
+  return (j.people || []).length;
+}
+
+/**
  * @param {import('../../types.js').AppState} j
  * @param {import('../../types.js').Session | null} sess
  * @returns {NavDef[]}
  */
 function globalDefs(j, sess) {
   const sessions = j.sessions || [];
-  const peopleNames = new Set();
-  for (const s of sessions) {
-    for (const k of Object.keys((s.session_meta || {}).aliases || {})) peopleNames.add(k);
-  }
   const liveTaps = (j.active || []).filter((a) => a.live !== false).length;
   const sessCount = sessions.length;
+  const nPeople = peopleCount(j);
   return [
     {
       id: "taps", name: "Taps", lead: "🛰️",
@@ -79,7 +90,7 @@ function globalDefs(j, sess) {
     },
     {
       id: "people", name: "People", lead: "👥",
-      chip: { tone: "mute", text: peopleNames.size ? `${peopleNames.size} named` : "registry" },
+      chip: { tone: "mute", text: nPeople ? `${nPeople} ${nPeople === 1 ? "person" : "people"}` : "registry" },
     },
     {
       id: "settings", name: "Settings", lead: "⚙️",
@@ -89,17 +100,24 @@ function globalDefs(j, sess) {
 }
 
 /**
- * The three REAL session milestones, each reflecting its own deliverable —
+ * The four REAL session milestones, each reflecting its own deliverable —
  * shared by journeyDefs (per-stage ✓) and the progress fill so the bar and
- * the checkmarks can't disagree. Summary is a mock stage with no backend and
- * is deliberately NOT a milestone (it can never be "done").
+ * the checkmarks can't disagree. Summary (#83/#84/#85/#86) is fully wired —
+ * a generated-and-persisted summary ships as the session's `session_summary`
+ * marker on /api/state — so it's a real milestone like the other three.
+ * Exported so the derivation is unit-testable without a DOM (see
+ * spine.test.js).
  * @param {import('../../types.js').Session | null} sess
  */
-function realMilestones(sess) {
+export function realMilestones(sess) {
   return {
     captured: (sess?.wav_count || 0) > 0,   // audio actually recorded
     stripped: !!sess?.stripped,             // silence-stripped clips exist
     transcribed: !!sess?.session_transcript, // a merged transcript exists
+    // `summarized_at` is null only on malformed on-disk JSON (see
+    // SummaryMarker's docstring) — a present-but-unstamped marker is not yet
+    // a real summary.
+    summarized: !!sess?.session_summary?.summarized_at,
   };
 }
 
@@ -114,7 +132,7 @@ function journeyDefs(j, sess) {
   const wavCount = sess?.wav_count || 0;
   const tx = sess?.session_transcript || null;
   const suppressed = tx?.suppressed_count || 0;
-  const { captured, stripped, transcribed } = realMilestones(sess);
+  const { captured, stripped, transcribed, summarized } = realMilestones(sess);
   return [
     {
       // Done once audio has actually been captured — NOT once the session is
@@ -143,11 +161,13 @@ function journeyDefs(j, sess) {
         : { tone: "mute", text: "not run" },
     },
     {
-      // Summary is a preview of a future feature — no backend yet (mock UI), so
-      // it never marks done and shows a mute "preview" chip.
+      // Summary is fully wired (Local #86 / Command #82 / API #85 sources,
+      // server-side persistence #83, saved config #84) — done once a summary
+      // has actually been generated for this session (the `session_summary`
+      // marker), matching Transcript's "not run" → "merged" shape.
       id: "summary", name: "Summary", lead: "4", numbered: true,
-      done: false,
-      chip: { tone: "mute", text: "preview" },
+      done: summarized,
+      chip: summarized ? { tone: "good", text: "summarized" } : { tone: "mute", text: "not run" },
     },
   ];
 }
@@ -280,12 +300,13 @@ export function render(host, j, ctx) {
     for (const d of jdefs) jnav.appendChild(navItem(d, currentView, onSelectView));
 
     // Progress fill — driven by how many of the session's REAL milestones
-    // (captured → stripped → transcribed) are actually done, NOT by which tab
-    // is selected. Summary is a mock stage with no backend, so it's excluded:
-    // an empty session reads 0% and a transcribed one reads 100% of real work.
+    // (captured → stripped → transcribed → summarized) are actually done, NOT
+    // by which tab is selected: an empty session reads 0% and a fully
+    // summarized one reads 100% of real work.
     const ms = realMilestones(session);
-    const realStages = 3; // captured, stripped, transcribed
-    const reached = (ms.captured ? 1 : 0) + (ms.stripped ? 1 : 0) + (ms.transcribed ? 1 : 0);
+    const realStages = 4; // captured, stripped, transcribed, summarized
+    const reached =
+      (ms.captured ? 1 : 0) + (ms.stripped ? 1 : 0) + (ms.transcribed ? 1 : 0) + (ms.summarized ? 1 : 0);
     const fillPct = Math.round((reached / realStages) * 100);
     /** @type {HTMLElement} */ (pick(frag, "journeyFill")).style.width = `${fillPct}%`;
     pick(frag, "journeyCap").textContent = session
@@ -316,19 +337,19 @@ export function render(host, j, ctx) {
   const sessions = j.sessions || [];
   const active = j.active || [];
   const tx = session?.session_transcript || null;
-  // One pass over sessions: the per-session string also carries that session's
-  // alias keys, so a change to who's named (the People chip's "N named" count
-  // in globalDefs) moves the sig without a second Set-building walk. Per-session
-  // alias keys are strictly finer-grained than the deduped total — they can
-  // never miss a change the count would have caught.
   const sig = [
     currentView,
     j.backend || "",
     active.filter((a) => a.live !== false).length,
     active.length,
     sessions.length,
-    sessions.map((s) => `${s.session}~${(localLabels.get(s.session) ?? metaFor(s).label) || ""}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}~${Object.keys((s.session_meta || {}).aliases || {}).join("|")}`).join(","),
-    session ? `${session.session}~${session.wav_count || 0}~${tx ? 1 : 0}~${tx?.suppressed_count || 0}~${session.stripped ? 1 : 0}~${session.is_current ? 1 : 0}` : "",
+    // The People chip's count reads the ADR-0009 registry directly (not a
+    // per-session walk), so ONE scalar covers it here.
+    peopleCount(j),
+    sessions.map((s) => `${s.session}~${(localLabels.get(s.session) ?? metaFor(s).label) || ""}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
+    session
+      ? `${session.session}~${session.wav_count || 0}~${tx ? 1 : 0}~${tx?.suppressed_count || 0}~${session.stripped ? 1 : 0}~${session.is_current ? 1 : 0}~${session.session_summary?.summarized_at || ""}`
+      : "",
   ].join("§");
 
   // renderRegion skips the swap while any control inside the spine holds focus
