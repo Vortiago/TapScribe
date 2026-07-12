@@ -220,7 +220,12 @@ async def test_live_channel_rapid_restart_settles_to_one_child(
 
     import tapscribe.live as live_mod
 
-    r = build_tap_recorder(tmp_path, gate_kind="backend")
+    # An explicit unused port, not the `build_tap_recorder` default
+    # (9999): `start()` preflights with a real socket bind
+    # (`_probe_port_free`) even though `subprocess.Popen` is fully
+    # faked below, so a fixed port number can collide with anything
+    # else already bound to it on the host running the suite.
+    r = build_tap_recorder(tmp_path, port=_unused_port(), gate_kind="backend")
 
     spawned: list = []
     terminated: list = []
