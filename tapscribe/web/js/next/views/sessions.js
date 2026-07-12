@@ -218,6 +218,19 @@ export function build(ctx) {
     }
   };
 
+  /** Trigger the end-of-meeting pipeline for a session.
+   * @param {import('../../types.js').Session} s */
+  const processSession = async (s) => {
+    try {
+      await postJson(`/api/sessions/${encodeURIComponent(s.session)}/pipeline`);
+    } catch (e) {
+      alert(`Process failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      return;
+    } finally {
+      afterMutate();
+    }
+  };
+
   /** Absorb (fold) the SOURCE session into the TARGET: source WAVs + sidecars
    * move into target, source aliases fill gaps in target's, target's merged
    * transcript is cleared (now stale against the fuller WAV set), and the
@@ -327,6 +340,16 @@ export function build(ctx) {
     // ---- Open (focus + route into the session) ----
     const openBtn = /** @type {HTMLButtonElement} */ (pick(node, "open"));
     openBtn.addEventListener("click", () => onSelectSession(s.session));
+
+    // ---- Process (strip → transcribe → summarize pipeline) ----
+    const procBtn = /** @type {HTMLButtonElement} */ (pick(node, "process"));
+    if (s.is_current) {
+      procBtn.disabled = true;
+      procBtn.title = "can't process the current (live) session — archive it first";
+    } else {
+      procBtn.title = "run the end-of-meeting pipeline: strip silence, transcribe, and summarize";
+      procBtn.addEventListener("click", () => processSession(s));
+    }
 
     // ---- Delete audio ----
     const delBtn = /** @type {HTMLButtonElement} */ (pick(node, "del"));
