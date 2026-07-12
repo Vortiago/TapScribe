@@ -96,9 +96,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* ── Primitives ──────────────────────────────────────────────── */
 
-/* .chip / .dot variants derive their hue from a single --accent custom
-   property set by the variant class — so adding a new accent only needs
-   to set --accent (and animation/border alpha where relevant). */
+/* App tone extensions on the canon tone→--tone pattern (tones.css maps the
+   base set: tone-ok / tone-warn / tone-bad / tone-info / tone-accent). These
+   are TapScribe's domain tones — "recording" is not "bad", so it keeps its
+   name rather than borrowing a canon one. */
+.tone-rec     { --tone: var(--rec); }
+.tone-magenta { --tone: var(--magenta); }
+
+/* .chip / .dot derive their hue from --tone, set by a tone-* class — the
+   same one-place mapping the vanilla-components atoms use, so app chips and
+   vc chips share a single tone vocabulary. */
 .chip {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 2px 7px;
@@ -112,16 +119,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   & > .k { color: var(--text-dim); }
   & > .v { color: var(--text); }
 
-  &.rec, &.ok, &.warn, &.info, &.magenta {
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  &[class*="tone-"] {
+    color: var(--tone);
+    background: color-mix(in srgb, var(--tone) 10%, transparent);
+    border-color: color-mix(in srgb, var(--tone) 32%, transparent);
   }
-  &.rec     { --accent: var(--rec); }
-  &.ok      { --accent: var(--ok); }
-  &.warn    { --accent: var(--warn); }
-  &.info    { --accent: var(--info); }
-  &.magenta { --accent: var(--magenta); }
 }
 
 .dot {
@@ -130,11 +132,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   display: inline-block;
   background: var(--fg-3);
 
-  &.rec, &.err { background: var(--rec); }
-  &.rec        { animation: pulse 1.4s ease-out infinite; }
-  &.ok         { background: var(--ok); }
-  &.warn       { background: var(--warn); }
-  &.idle       { background: var(--fg-3); }
+  &[class*="tone-"] { background: var(--tone); }
+  &.tone-rec        { animation: pulse 1.4s ease-out infinite; }
 }
 
 @keyframes pulse {

@@ -8,12 +8,12 @@
 // /api/setup/install, and streams the Server-Sent progress into the log pane.
 // Served standalone (no dashboard machinery) so it works before any backend is
 // installed.
-import { warmAlert, createAlertSync } from "./vc/components/alert/alert.js";
-import { warmButton, createButtonSync } from "./vc/components/button/button.js";
-import { warmChip, createChipSync } from "./vc/components/chip/chip.js";
-import { warmField, createFieldSync } from "./vc/components/field/field.js";
-import { warmPanel, createPanelSync } from "./vc/components/panel/panel.js";
-import { warmSpinner, createSpinnerSync } from "./vc/components/spinner/spinner.js";
+import { warmAlert, createAlertSync } from "../vc/components/alert/alert.js";
+import { warmButton, createButtonSync } from "../vc/components/button/button.js";
+import { warmChip, createChipSync } from "../vc/components/chip/chip.js";
+import { warmField, createFieldSync } from "../vc/components/field/field.js";
+import { warmPanel, createPanelSync } from "../vc/components/panel/panel.js";
+import { warmSpinner, createSpinnerSync } from "../vc/components/spinner/spinner.js";
 
 /**
  * Minimal layout-scaffolding helper (NOT styling — look comes from components +

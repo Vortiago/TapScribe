@@ -16,6 +16,10 @@
   --next-accent: var(--warn);   /* warm amber: active view + highlights */
   --next-spine-w: 232px;
   --next-rail-w: 260px;   /* global "active taps" rail; 0 when collapsed */
+  /* Stages aesthetic: minimal radius, no pills — vc atoms rendered on this
+     page (progress, chips, …) pick the hard radius up through the token. */
+  --r-pill: var(--next-r);
+  --r: var(--next-r);
 }
 
 /* The Stages page reuses dashboard.css's body reset (dark bg, sans, tnum).
@@ -510,17 +514,13 @@ body::before { display: none; }
 .autoscroll input { accent-color: var(--next-accent); }
 .live-mlx-note { font-size: 9.5px; margin-bottom: 7px; }
 
-/* empty / placeholder */
+/* empty / placeholder. `.empty` is the app's INLINE text placeholder (one dim
+   line inside a list/pane); view-level "nothing here yet" placeholders are the
+   vc empty-state atom (js/vc/components/empty-state) — the unlayered overrides
+   below keep the old Stages metrics on top of its @layer styling. */
 .empty { padding: 34px 18px; text-align: center; color: var(--fg-3); }
-.empty__ic { font-size: 26px; margin-bottom: 7px; opacity: .8; }
-.empty__h { font-weight: 600; color: var(--fg-1); margin-bottom: 4px; }
-.empty__phase {
-  margin-top: 12px; display: inline-block;
-  font-size: 9.5px; font-family: var(--mono); letter-spacing: .06em;
-  color: var(--next-accent);
-  border: 1px dashed color-mix(in srgb, var(--next-accent) 40%, transparent);
-  border-radius: var(--next-r); padding: 4px 9px;
-}
+.work .empty-state { padding: 34px 18px; color: var(--fg-3); }
+.work .empty-state .empty-state-title { color: var(--fg-1); }
 
 /* ====================================================================== */
 /* ENGINE controls — backend chips, model-by-family, option selects.       */
@@ -892,8 +892,11 @@ body::before { display: none; }
 .jobbar { padding: 10px 13px; border-top: 1px solid var(--hairline-2); }
 .jobbar__top { display: flex; align-items: baseline; justify-content: space-between; font-size: 10.5px; color: var(--text-dim); }
 .jobbar__pct { color: var(--next-accent); font-weight: 600; }
-.progress { height: 4px; background: var(--bg-elev-2); border-radius: var(--next-r-sm); overflow: hidden; margin-top: 5px; }
-.progress__fill { height: 100%; width: 0; background: var(--next-accent); transition: width .3s ease; }
+/* The meter is the vc progress atom (js/vc/components/progress); these
+   unlayered overrides keep the old Stages metrics (4px track, hard radius,
+   5px offset) on top of its @layer vanilla-components styling. */
+.jobbar .progress { margin-top: 5px; }
+.jobbar .progress-track { height: 4px; border-radius: var(--next-r-sm); }
 .jobbar__wav { margin-top: 5px; font-size: 9.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* per-WAV list: originals + indented stripped region clips. Inside a fill

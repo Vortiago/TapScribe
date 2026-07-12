@@ -76,7 +76,7 @@ export function build(ctx) {
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
   const jobCount = pick(frag, "jobCount");
-  const jobFill = /** @type {HTMLElement} */ (pick(frag, "jobFill"));
+  const jobProgress = /** @type {HTMLElement} */ (pick(frag, "jobProgress"));
   const jobWav = pick(frag, "jobWav");
   const wavHint = pick(frag, "wavHint");
   const wavList = pick(frag, "wavList");
@@ -850,7 +850,7 @@ export function build(ctx) {
     }
 
     // ---- Job progress bar (in place, every tick — render-signature hygiene) -
-    renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job);
+    renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job);
 
     // ---- WAV list (own gate) ------------------------------------------------
     // The list owns its host's content: a placeholder when there's nothing to

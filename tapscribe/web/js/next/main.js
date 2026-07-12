@@ -16,6 +16,8 @@
 
 import { fetchState, postJson, putJson } from "../api.js";
 import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
+import { warmProgress } from "../vc/components/progress/progress.js";
+import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import { createPollPacer, FAST_MS } from "./poll-pacer.js";
 import * as spine from "./components/spine.js";
@@ -608,22 +610,28 @@ async function refresh() {
 // maintaining the dashboard can actually read a browser-side failure.
 wireErrorBar();
 
-await loadTemplates(
-  // Existing component templates the REUSED components need:
-  "/web/components/live-feed.html",
-  "/web/components/active-taps.html",
-  "/web/components/live-channel.html",
-  "/web/components/merged-transcript.html",
-  "/web/components/config-card.html",
-  // New Stages templates:
-  "/web/components/next/spine.html",
-  "/web/components/next/views.html",
-  "/web/components/next/recordings.html",
-  "/web/components/next/taps.html",
-  "/web/components/next/people.html",
-  "/web/components/next/sessions.html",
-  "/web/components/next/summary.html",
-);
+await Promise.all([
+  loadTemplates(
+    // Existing component templates the REUSED components need:
+    "/web/components/live-feed.html",
+    "/web/components/active-taps.html",
+    "/web/components/live-channel.html",
+    "/web/components/merged-transcript.html",
+    "/web/components/config-card.html",
+    // New Stages templates:
+    "/web/components/next/spine.html",
+    "/web/components/next/views.html",
+    "/web/components/next/recordings.html",
+    "/web/components/next/taps.html",
+    "/web/components/next/people.html",
+    "/web/components/next/sessions.html",
+    "/web/components/next/summary.html",
+  ),
+  // vc atoms the shell/views build synchronously (createXSync): warm once
+  // here so the sync path is safe everywhere after boot.
+  warmProgress(),
+  warmEmptyState(),
+]);
 
 async function loadModelCatalogs() {
   try {

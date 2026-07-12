@@ -23,6 +23,7 @@
 // clobbered) and repaints the languages readout in place.
 
 import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside, selectionInside } from "../../templates.js";
+import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import { postJson, putJson, sessionTranscript, loadSessionFiles, wireSave } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -108,7 +109,7 @@ export function build(ctx) {
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
   const jobCount = pick(frag, "jobCount");
-  const jobFill = /** @type {HTMLElement} */ (pick(frag, "jobFill"));
+  const jobProgress = /** @type {HTMLElement} */ (pick(frag, "jobProgress"));
   const jobWav = pick(frag, "jobWav");
   const cacheHint = pick(frag, "cacheHint");
   const cacheBody = pick(frag, "cacheBody");
@@ -632,7 +633,7 @@ export function build(ctx) {
     // on prebuilt nodes, EVERY tick — deliberately outside both signature gates.
     // Sharing a signature with the O(segments) merged transcript was the "/next
     // freezes while transcribing" bug (one rebuild per job tick).
-    renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job);
+    renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job);
 
     // ---- Merged transcript + header — rendered through renderRegion on the
     // mergedHost: it gates on txSig (session, marker stamp, loaded-ness, and the
@@ -685,17 +686,14 @@ export function build(ctx) {
           return loading;
         }
         txHint.textContent = "not run";
-        const empty = document.createElement("div");
-        empty.className = "empty";
-        const h = document.createElement("div");
-        h.className = "empty__h";
-        h.textContent = sess ? "Not transcribed yet" : "No session selected";
-        const d = document.createElement("div");
-        d.textContent = sess
-          ? "Declare the meeting's languages, then transcribe the session range (or a single WAV) to produce the merged transcript here."
-          : "Pick a session from the spine to view its merged transcript.";
-        empty.append(h, d);
-        return empty;
+        // vc empty-state (js/vc, warmed at boot) — .work .empty-state in
+        // next.css keeps the old .empty metrics.
+        return createEmptyStateSync({
+          title: sess ? "Not transcribed yet" : "No session selected",
+          detail: sess
+            ? "Declare the meeting's languages, then transcribe the session range (or a single WAV) to produce the merged transcript here."
+            : "Pick a session from the spine to view its merged transcript.",
+        }).el;
       },
       { sig: txSig },
     );

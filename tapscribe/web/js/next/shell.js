@@ -6,6 +6,8 @@
 
 import { tpl, pick } from "../templates.js";
 import { postJson, mutateButton } from "../api.js";
+import { createProgressSync } from "../vc/components/progress/progress.js";
+import { createEmptyStateSync } from "../vc/components/empty-state/empty-state.js";
 
 /** The Stages views. GLOBAL group is pinned + un-numbered; the THIS SESSION
  * group is the numbered Capture → Recordings → Transcript → Summary journey. */
@@ -121,11 +123,11 @@ export const JOB_LABELS = {
  * there's no job, or — when `only` is given — when the running job isn't that
  * kind (so the Summary panel shows a summarize job but not a transcribe/strip
  * on the same session).
- * @param {{ jobBar: HTMLElement, jobLabel: HTMLElement, jobCount: HTMLElement, jobFill: HTMLElement, jobWav: HTMLElement }} hosts
+ * @param {{ jobBar: HTMLElement, jobLabel: HTMLElement, jobCount: HTMLElement, jobProgress: HTMLElement, jobWav: HTMLElement }} hosts
  * @param {import('../types.js').JobStateSnapshot | null} job
  * @param {{ only?: import('../types.js').JobStateSnapshot["kind"] }} [opts]
  */
-export function renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, job, { only } = {}) {
+export function renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job, { only } = {}) {
   // A pipeline job in stage X counts as an X job for the `only` filter, so
   // e.g. the Summary panel's bar shows the pipeline's summarize stage.
   const effectiveKind = job?.kind === "pipeline" && job.stage ? job.stage : job?.kind;
@@ -134,15 +136,28 @@ export function renderJobBar({ jobBar, jobLabel, jobCount, jobFill, jobWav }, jo
     return;
   }
   jobBar.hidden = false;
-  const pct = job.total > 0 ? Math.round((100 * job.current) / job.total) : 0;
   jobLabel.textContent =
     job.kind === "pipeline" && job.stage
       ? `${JOB_LABELS.pipeline} · ${JOB_LABELS[job.stage] || job.stage}`
       : JOB_LABELS[job.kind] || "Working";
   jobCount.textContent = `${job.current} / ${job.total}`;
-  jobFill.style.width = `${pct}%`;
+  // vc progress, one instance per host, mounted lazily on the first visible
+  // tick (warmProgress() runs at boot in main.js, so the sync build is safe)
+  // and mutated in place via setValue afterwards — same "never rebuild on a
+  // job tick" rule as the rest of this bar.
+  let meter = _jobMeters.get(jobProgress);
+  if (!meter) {
+    meter = createProgressSync({ value: job.current, max: job.total });
+    jobProgress.replaceChildren(meter.el); // static-render — one-shot mount of the meter shell
+    _jobMeters.set(jobProgress, meter);
+  } else {
+    meter.setValue(job.current, job.total);
+  }
   jobWav.textContent = job.current_file ? `current: ${job.current_file}` : "";
 }
+
+/** One vc progress instance per jobProgress host. @type {WeakMap<Element, { el: HTMLElement, setValue: (v: number, m?: number) => void }>} */
+const _jobMeters = new WeakMap();
 
 /**
  * Build the original/stripped source toggle (template `tpl-next-srcsw`), shared
@@ -180,10 +195,9 @@ export function buildSourceToggle({ active, hasStripped, onPick }) {
  */
 export function placeholderView(root, { eyebrow, title, sub, icon, heading, detail }) {
   const headHost = document.createElement("div");
-  const body = tpl("tpl-next-placeholder");
-  pick(body, "icon").textContent = icon;
-  pick(body, "heading").textContent = heading;
-  pick(body, "detail").textContent = detail;
+  // vc empty-state (js/vc) — warmed at boot in main.js, so the sync build is
+  // safe here. The reference leaf-atom adoption for view-level placeholders.
+  const body = createEmptyStateSync({ icon, title: heading, detail }).el;
   root.replaceChildren(headHost, body);
   header(headHost, { eyebrow, title, sub });
 }
