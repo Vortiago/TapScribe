@@ -113,3 +113,22 @@
     </span>
   </div>
 </template>
+
+<!-- A cross-session transcript-search hit: same grid columns as tpl-next-sessrow
+     (so the two align in the shared body), but only label/id, a 📄 chip, and the
+     match count. All dynamic text is set via textContent in JS — no HTML strings. -->
+<template id="tpl-next-searchrow">
+  <div class="sessrow sessrow--search" data-slot="row">
+    <span class="sesscol sesscol--label sessrow__id">
+      <span class="sessrow__label" data-slot="label"></span>
+      <span class="sessrow__raw mono dim" data-slot="id"></span>
+    </span>
+    <span class="sesscol sesscol--status"><span class="sesschip is-search">📄</span></span>
+    <span class="sesscol sesscol--num mono" data-slot="count"></span>
+    <span class="sesscol sesscol--strip mono"></span>
+    <span class="sesscol sesscol--tx"></span>
+    <span class="sesscol sesscol--size mono dim"></span>
+    <span class="sesscol sesscol--rename"></span>
+    <span class="sesscol sesscol--act sessrow__act"></span>
+  </div>
+</template>

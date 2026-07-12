@@ -152,6 +152,7 @@ export function build(ctx) {
     lastSearchResults = null;
     try {
       const data = await getJson(`/api/search?q=${encodeURIComponent(q)}`);
+      if (lastSearchQuery !== q) return; // filter moved on during the fetch — this result is stale
       lastSearchResults = Array.isArray(data) ? data : [];
     } catch { /* search unavailable — fall back to "searching…" */ }
   };
@@ -486,24 +487,16 @@ export function build(ctx) {
         // Render search hits with snippet previews.
         const frag = document.createDocumentFragment();
         for (const hit of lastSearchResults) {
-          const row = document.createElement("div");
-          row.className = "sessrow sessrow--search";
+          // Template + textContent (NOT innerHTML) — hit.label/hit.session are
+          // operator-controlled and must never be parsed as HTML.
+          const node = tpl("tpl-next-searchrow");
+          const row = /** @type {HTMLElement} */ (pick(node, "row"));
           row.style.cursor = "pointer";
-          row.innerHTML = `
-            <span class="sesscol sesscol--label">
-              <span class="sessrow__label">${hit.label || hit.session}</span>
-              <span class="sessrow__raw mono dim">${hit.session}</span>
-            </span>
-            <span class="sesscol sesscol--status"><span class="sesschip is-search">📄</span></span>
-            <span class="sesscol sesscol--num mono">${hit.count}</span>
-            <span class="sesscol sesscol--strip mono"></span>
-            <span class="sesscol sesscol--tx"></span>
-            <span class="sesscol sesscol--size mono dim"></span>
-            <span class="sesscol sesscol--rename"></span>
-            <span class="sesscol sesscol--act sessrow__act"></span>
-          `;
+          pick(node, "label").textContent = hit.label || hit.session;
+          pick(node, "id").textContent = hit.session;
+          pick(node, "count").textContent = String(hit.count);
           row.addEventListener("click", () => onSelectSession(hit.session));
-          frag.appendChild(row);
+          frag.appendChild(node);
           const snippetEl = document.createElement("div");
           snippetEl.className = "sessrow__snippet mono dim";
           snippetEl.textContent = hit.snippet;
@@ -537,6 +530,11 @@ export function build(ctx) {
   const listSig = (sessions) => [
     focusedId,
     filter,
+    // Search state MUST be in the sig: an async search result arriving flips
+    // `lastSearchResults` null→array without changing filter/sessions, so without
+    // this the sig-gated renderRegion never repaints and the rows stay "searching…".
+    lastSearchQuery,
+    lastSearchResults === null ? "…" : lastSearchResults.map((h) => `${h.session}:${h.count}`).join(","),
     sessions.map((s) =>
       `${s.session}=${labelFor(s)}/${s.wav_count || 0}/${s.is_current ? 1 : 0}` +
       `/${s.stripped ? 1 : 0}/${s.session_transcript ? (s.session_transcript.segment_count || 0) : -1}` +
