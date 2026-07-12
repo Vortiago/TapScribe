@@ -99,6 +99,7 @@ from .sessions import (
     read_session_transcript,
     read_wav_strip_meta,
     read_wav_transcript,
+    search_transcripts,
     write_session_meta,
 )
 from .setup_install import InstallSelectionError, run_install, sse, validate_selection
@@ -1495,6 +1496,20 @@ async def api_session_summary(session: str, recorder: Recorder = Depends(get_rec
     client-side. The disk read is offloaded with to_thread like the rest of
     the poll path."""
     return await asyncio.to_thread(read_session_summary, session)
+
+
+@app.get("/api/search")
+async def api_search(q: str = "", recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """Cross-session transcript-content search.
+
+    Scans every session's merged transcript for a query term (case-
+    insensitive) and returns one hit per matching session:
+    ``{session, label, snippet, count}``.
+
+    Basic-auth (not tap-bearer, not exempt). The scan runs off the event
+    loop via ``asyncio.to_thread`` so it doesn't block /api/state polling.
+    """
+    return await asyncio.to_thread(search_transcripts, q)
 
 
 # ---------------------------------------------------------------------------

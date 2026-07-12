@@ -37,7 +37,7 @@
 // guarded. The prune button lives OUTSIDE the guarded region (static head).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson, postJson, del } from "../../api.js";
+import { putJson, postJson, del, getJson } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
 
@@ -127,9 +127,15 @@ export function build(ctx) {
   /** @type {Map<string, ReturnType<typeof setTimeout>>} */
   const saveTimers = new Map();
   /** The sessions array from the most recent tick — the absorb confirm() reads
-   * it to resolve the target's display label. Kept in step with `update`. */
+    * it to resolve the target's display label. Kept in step with `update`. */
   /** @type {import('../../types.js').Session[]} */
   let lastSessions = [];
+  /** Cached transcript-search results for the current non-empty filter;
+    * null = not yet fetched or filter is empty. */
+  /** @type {import('../../types.js').SearchHit[] | null} */
+  let lastSearchResults = null;
+  /** The filter value that produced `lastSearchResults`. */
+  let lastSearchQuery = "";
 
   /** Effective label for a session = local overlay (if any) else server meta. */
   /** @param {import('../../types.js').Session} s */
@@ -139,8 +145,18 @@ export function build(ctx) {
     return metaFor(s).label;
   };
 
-  /** Debounced PUT /api/session-meta/{session} with just the { label }. The
-   * server merges partial meta, so aliases/prompt/hotwords are preserved. */
+  /** Fire a transcript-search query when the local filter yields no results.
+    * Results are cached per query string. */
+  const fireSearch = async (/** @type {string} */ q) => {
+    lastSearchQuery = q;
+    lastSearchResults = null;
+    try {
+      const data = await getJson(`/api/search?q=${encodeURIComponent(q)}`);
+      if (lastSearchQuery !== q) return; // filter moved on during the fetch — this result is stale
+      lastSearchResults = Array.isArray(data) ? data : [];
+    } catch { /* search unavailable — fall back to "searching…" */ }
+  };
+
   /** @param {string} sid @param {HTMLElement} statusEl */
   const persistLabel = (sid, statusEl) => {
     clearTimeout(saveTimers.get(sid));
@@ -453,10 +469,43 @@ export function build(ctx) {
       empty.textContent = "No sessions yet — start recording to see them here.";
       body.replaceChildren(empty);
     } else if (!shown.length) {
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = `No sessions match “${filter}”.`;
-      body.replaceChildren(empty);
+      // No local (label/id/date) matches — show the cross-session transcript
+      // search instead, into the SAME rows body (the two are mutually exclusive,
+      // so they share one container).
+      if (lastSearchResults === null) {
+        // Still waiting for the server-side search to return.
+        pick(region, "shownCount").textContent =
+          `${sessions.length} total · searching transcripts…`;
+        body.replaceChildren();
+      } else if (lastSearchResults.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = `No sessions match "search" for "${filter}".`;
+        body.replaceChildren(empty);
+        pick(region, "shownCount").textContent = `0 search results`;
+      } else {
+        // Render search hits with snippet previews.
+        const frag = document.createDocumentFragment();
+        for (const hit of lastSearchResults) {
+          // Template + textContent (NOT innerHTML) — hit.label/hit.session are
+          // operator-controlled and must never be parsed as HTML.
+          const node = tpl("tpl-next-searchrow");
+          const row = /** @type {HTMLElement} */ (pick(node, "row"));
+          row.style.cursor = "pointer";
+          pick(node, "label").textContent = hit.label || hit.session;
+          pick(node, "id").textContent = hit.session;
+          pick(node, "count").textContent = String(hit.count);
+          row.addEventListener("click", () => onSelectSession(hit.session));
+          frag.appendChild(node);
+          const snippetEl = document.createElement("div");
+          snippetEl.className = "sessrow__snippet mono dim";
+          snippetEl.textContent = hit.snippet;
+          frag.appendChild(snippetEl);
+        }
+        body.replaceChildren(frag);
+        pick(region, "shownCount").textContent =
+          `${lastSearchResults.length} session${lastSearchResults.length === 1 ? "" : "s"} in transcript`;
+      }
     } else {
       // Absorb targets: archived sessions only — the current (recording) one is
       // never a merge endpoint (classic kept it out of the picker entirely),
@@ -481,6 +530,11 @@ export function build(ctx) {
   const listSig = (sessions) => [
     focusedId,
     filter,
+    // Search state MUST be in the sig: an async search result arriving flips
+    // `lastSearchResults` null→array without changing filter/sessions, so without
+    // this the sig-gated renderRegion never repaints and the rows stay "searching…".
+    lastSearchQuery,
+    lastSearchResults === null ? "…" : lastSearchResults.map((h) => `${h.session}:${h.count}`).join(","),
     sessions.map((s) =>
       `${s.session}=${labelFor(s)}/${s.wav_count || 0}/${s.is_current ? 1 : 0}` +
       `/${s.stripped ? 1 : 0}/${s.session_transcript ? (s.session_transcript.segment_count || 0) : -1}` +
@@ -515,6 +569,19 @@ export function build(ctx) {
           }
         : "no sessions yet — start recording to populate this list",
     });
+
+    // Reset search state when the filter becomes empty.
+    if (!filter) {
+      lastSearchResults = null;
+      lastSearchQuery = "";
+    }
+
+    // When local filter yields no results for a non-empty query, fire a
+    // server-side transcript search. Results are cached per query string
+    // so a poll tick that re-evaluates the same filter reuses them.
+    if (filter && lastSearchQuery !== filter && sessions.filter(matches).length === 0) {
+      fireSearch(filter);
+    }
 
     // The list region holds the search box + rename inputs → renderRegion so
     // the poll never clobbers an open edit; signature so it only rebuilds when
