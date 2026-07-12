@@ -114,6 +114,7 @@ def _raises_domain_error(fn, *args):
     except Exception as exc:
         return exc
     pytest.fail(f"{label} did not raise — expected a domain error")
+    return None  # Unreachable: pytest.fail raises, kept explicit for static analysis.
 
 
 def test_resolve_session_dir_raises_session_not_found(rec_root):  # noqa: ARG001 - fixture seeds config
