@@ -452,6 +452,10 @@ async def client_errors(request: Request) -> Response:
     def _field(name: str, cap: int) -> str:
         value = payload.get(name, "")
         text = value if isinstance(value, str) else str(value)
+        # Explicit log-injection hardening: neutralize CR/LF and drop other
+        # control chars, then collapse remaining whitespace and cap length.
+        text = text.replace("\r", " ").replace("\n", " ")
+        text = "".join(ch if (ch.isprintable() or ch == " ") else " " for ch in text)
         return " ".join(text.split())[:cap]
 
     logging.getLogger("tapscribe.client").warning(
