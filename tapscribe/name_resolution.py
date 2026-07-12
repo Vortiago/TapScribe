@@ -191,15 +191,14 @@ def build_people_view(
     return rows
 
 
-def attach_people(
+def attach_people_mutation(
     sessions: list[dict[str, Any]],
     *,
     live_identities: set[str],
-) -> list[dict[str, Any]]:
-    """Sync the registry against every roster + live Identity (auto-bind),
-    persist only on a real change, resolve each session's `names` in place, and
-    return the People view rows. Synchronous (no `await`) so the load → sync →
-    save runs atomically under the event loop."""
+) -> tuple[PeopleRegistry, list[dict[str, Any]]]:
+    """Load registry, compute occurrences, sync, save if changed.
+    Returns (registry, per-session occurrence maps).
+    MUST run on the event loop (serialised with /api/people mutations)."""
     registry = PeopleRegistry.load()
     occs = [session_occurrences(s) for s in sessions]
     all_idents: set[str] = set(live_identities)
@@ -207,6 +206,17 @@ def attach_people(
         all_idents.update(occ)
     if registry.sync(all_idents):
         registry.save()
+    return registry, occs
+
+
+def attach_people_joins(
+    sessions: list[dict[str, Any]],
+    registry: PeopleRegistry,
+    occs: list[dict[str, Any]],
+    live_identities: set[str],
+) -> list[dict[str, Any]]:
+    """Pure joins: resolve session names, build people view, strip rosters.
+    Safe to run on a worker thread."""
     for s, occ in zip(sessions, occs, strict=True):
         s["names"] = resolve_session_names(
             roster=occ,
@@ -214,11 +224,15 @@ def attach_people(
             registry=registry,
         )
     people = build_people_view(sessions=sessions, registry=registry, live_identities=live_identities)
-    # The roster is server-side join input only — the dashboard renders from the
-    # resolved `names` map and the `people` view, never the raw roster. Drop it
-    # so /api/state doesn't broadcast full bridge identities (a disclosure) and
-    # re-ship them O(rosters) every ~0.5s poll (the bloat files[]/the merged
-    # transcript were already slimmed out to avoid).
     for s in sessions:
         s.pop("roster", None)
     return people
+
+
+def attach_people(
+    sessions: list[dict[str, Any]],
+    *,
+    live_identities: set[str],
+) -> list[dict[str, Any]]:
+    registry, occs = attach_people_mutation(sessions, live_identities=live_identities)
+    return attach_people_joins(sessions, registry, occs, live_identities)
