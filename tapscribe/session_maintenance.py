@@ -6,9 +6,9 @@ Split out of `sessions.py` (which keeps the poll-path listing / catalog): these
 are destructive, infrequent, operator-driven filesystem operations, not part of
 the once-per-second dashboard read path. They take a `session` id, resolve it
 through `session_paths` (the path-safety seam), and read/write session meta via
-`sessions`. FastAPI-free except for the `HTTPException`s the route layer maps —
-the route handlers do the current-session / in-flight-job pre-flight; these
-functions are purely the filesystem op.
+`sessions`. Pure — no FastAPI dependency. The route handlers do the
+current-session / in-flight-job pre-flight; these functions are purely the
+filesystem op.
 """
 
 from __future__ import annotations
@@ -17,8 +17,6 @@ import json
 import shutil
 from pathlib import Path
 from typing import Any
-
-from fastapi import HTTPException
 
 from . import config
 from .session_paths import (
@@ -32,6 +30,22 @@ from .session_paths import (
 )
 from .sessions import read_session_meta, read_strip_meta, write_session_meta
 from .text import atomic_write_text
+
+# ---------------------------------------------------------------------------
+# Domain errors — FastAPI-free maintenance exceptions.
+# ---------------------------------------------------------------------------
+
+
+class AbsorbCollision(Exception):
+    """Filename collision between source and target during absorb."""
+
+
+class InvalidAbsorbRequest(Exception):
+    """target == source — absorbing a session into itself is a no-op."""
+
+
+class SessionDeleteError(Exception):
+    """IO failure during session audio deletion (rmtree OSError)."""
 
 
 def session_is_empty(session_dir: Path) -> bool:
@@ -196,11 +210,11 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
 
     Pre-flight checks the route handler performs first (current-session
     refusal, in-flight-job refusal) live in the route; this function is
-    purely the filesystem operation. Raises `HTTPException` on validation
+    purely the filesystem operation. Raises domain errors on validation
     failures so the route doesn't have to translate exceptions.
     """
     if target == source:
-        raise HTTPException(400, "target and source must differ")
+        raise InvalidAbsorbRequest("target and source must differ")
 
     target_dir = resolve_session_dir(target)
     source_dir = resolve_session_dir(source)
@@ -220,7 +234,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         if (tgt_stripped_dir / w.name).exists():
             collisions.append(f"stripped/{w.name}")
     if collisions:
-        raise HTTPException(409, f"filename collision(s) between sessions: {', '.join(collisions[:5])}")
+        raise AbsorbCollision(f"filename collision(s) between sessions: {', '.join(collisions[:5])}")
 
     moved_wavs: list[str] = []
     moved_stripped: list[str] = []
@@ -351,7 +365,7 @@ def delete_session_audio(session: str) -> dict[str, Any]:
         try:
             shutil.rmtree(stripped)
         except OSError as e:
-            raise HTTPException(500, f"delete failed: {e}") from None
+            raise SessionDeleteError(f"delete failed: {e}") from None
     return {"session": session, "wavs_deleted": wavs_deleted, "bytes_freed": bytes_freed}
 
 
