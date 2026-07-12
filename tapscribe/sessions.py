@@ -143,7 +143,7 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     `prompt` and `hotwords` run through the same MAX_CONFIG_TEXT_LEN cap
     as the global config writers — symmetric with `PUT /api/config/{key}`
     so a buggy client can't bypass the guardrail via this endpoint.
-    Raises `HTTPException(400)` on oversize input.
+    Raises `MetaValidationError(400)` on oversize input.
 
     Atomic via `atomic_write_text` so a crashed write never leaves a
     torn JSON file (which `_read_json_or_none` would silently swallow,
