@@ -112,10 +112,11 @@
   region gated on such an aggregate must render through `reconcileList`
   (keyed, in-place) — a full `replaceChildren` rebuild on the sig, even
   WITHOUT a placeholder blank, still churns O(content) nodes + row
-  listeners on every sibling/tick change. `sessions.js` `listSig` folding
-  the per-tick `total_bytes` (unmasked, unlike `files_sig`) + a sibling's
-  `segment_count` into a whole-list `replaceChildren` is the known
-  offender; the fixed WAV lists are the pattern to copy.
+  listeners on every sibling/tick change. The WAV lists AND `sessions.js`
+  (#312: chrome mounted once, rows keyed by id + structural bits, cells
+  mutated via a per-row sig with focused-control guards) are the pattern
+  to copy — `sessions.js`'s old whole-list `listSig` swap was the last
+  offender.
 
 ## Runtime deps the install picker does NOT cover
 
@@ -267,8 +268,11 @@ The frontend vendors parts of the Verktoykasse toolkit (vanilla-web /
 vanilla-components) as provenance-stamped, copy-verbatim files — **never
 edit them in place**; re-copy from the toolkit to update:
 
-- `tapscribe/web/js/setup/vc/` — the `/setup` page's component library
-  (its `PROVENANCE.md` has the re-copy commands).
+- `tapscribe/web/js/vc/` — the vanilla-components library, ONE copy shared
+  by `/setup` and the dashboard (its `PROVENANCE.md` has the re-copy
+  commands); the shared token sheets live at `tapscribe/web/tokens.css` +
+  `tones.css` (canon NAMES — `dashboard.css` overrides the VALUES to
+  TapScribe's palette).
 - `tapscribe/web/tools/` — the gate tier: `check-conventions.mjs`
   (signal-listener / html-string / raw-swap rules), `check-slots.mjs`
   (the `.html` `<template>`/`[data-slot]` ↔ JS `tpl()`/`slot()`/`pick()`

@@ -303,6 +303,43 @@ app.add_middleware(
 )
 app.middleware("http")(auth.basic_auth_middleware)
 
+# Security headers on EVERY response (pages, JSON, errors) — the toolkit
+# serve.mjs set, adapted to this app (vanilla-web reference/security.md):
+#
+# - script-src stays fully locked at 'self' (via default-src) AND
+#   `require-trusted-types-for 'script'` turns every DOM XSS sink
+#   (innerHTML & co) into a policy-guarded write. The dashboard has exactly
+#   one sanctioned sink — loadTemplates in the vendored templates lib —
+#   wrapped in the `vanilla-templates` policy. `'allow-duplicates'` is
+#   load-bearing: the dashboard page loads TWO stamped copies of that lib
+#   (the app seam's lib/templates.js and the vc components' vc/lib copy),
+#   each lazily creating the same-named policy.
+# - style-src carries 'unsafe-inline' for now: the component templates ship
+#   ~47 inline style="…" attributes (template-authored markup, not
+#   attacker-reachable — untrusted text only ever flows through
+#   textContent). Tightening this means moving those into classes; tracked
+#   as follow-up cleanup, deliberately not folded into this change.
+# - connect-src 'self' covers the dashboard's same-origin fetches AND its
+#   same-host WebSockets (/tap, /record, captions); media-src 'self' covers
+#   WAV playback.
+_CSP = (
+    "default-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "frame-ancestors 'none'; "
+    "trusted-types vanilla-templates 'allow-duplicates'; "
+    "require-trusted-types-for 'script'"
+)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
 
 # ---------------------------------------------------------------------------
 # Domain error → HTTP status. ONE source of truth: the orchestrators raise

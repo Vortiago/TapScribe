@@ -2099,19 +2099,18 @@ async def test_next_idle_304_ticks_skip_render_all(running_recorder: RunningReco
 async def test_next_deferred_render_lands_after_focus_clears_across_304_ticks(
     running_recorder: RunningRecorder,
 ):
-    """Companion to the idle-304 skip above: the skip must not strand a render
-    that renderRegion deferred to protect operator interaction state (ADR-0004
-    'Interaction hold'). If a poll changes the Sessions list's signature while
-    a row's rename <input> is focused, renderRegion defers the swap without
-    advancing its own signature gate — that's existing, unaffected behaviour.
-    The guarantee this pins: once the operator blurs the input, the deferred
-    update must still land even if EVERY poll since the deferral was a plain
-    304 (nothing server-side changed further). Since the canon render.js
-    adoption the mechanism is a per-host one-shot flush that fires the INSTANT
-    the hold clears (no poll tick involved at all); the older #245 tick-retry
-    (markDeferredRender/consumeDeferredRender in main.js) still exists but now
-    serves only the bespoke selection gates that can't route through
-    renderRegion.
+    """The Sessions list renders keyed-and-in-place (#312, reconcileList): a
+    poll that changes a SIBLING row while a rename <input> is focused updates
+    that sibling's cells live, AROUND the focused input — no whole-region
+    deferral, no clobber. This pins the three legs of that contract at once:
+
+    - the sibling's transcript-status cell updates WHILE the rename input in
+      another row holds focus (the old whole-region renderRegion mechanism
+      deferred everything until blur);
+    - the update is IN PLACE: the sibling row keeps its DOM node identity
+      (identity-stamp trick — a rebuilt node can't carry the JS expando);
+    - the focused input is untouched: focus AND its typed value survive the
+      sibling's update crossing a poll.
     """
     rec = running_recorder.recorder
     base = running_recorder.base_url
@@ -2139,13 +2138,19 @@ async def test_next_deferred_render_lands_after_focus_clears_across_304_ticks(
                 timeout=10000,
             )
 
-            # Focus session A's inline rename input — renderRegion's focus
-            # guard now covers the WHOLE sessions list host, including B's row.
+            # Focus session A's inline rename input and type into it — fillRow
+            # must leave the focused input alone while B updates around it.
             a_rename = f'[data-sid="{sid_a}"] [data-slot="rename"]'
             await page.click(a_rename)
+            await page.type(a_rename, "standup notes")
             assert await page.evaluate(
                 "(sel) => document.activeElement === document.querySelector(sel)", a_rename
             )
+
+            # Identity-stamp B's row: a rebuilt node can't carry the expando,
+            # so the stamp surviving proves the update was in place.
+            b_row = f'[data-sid="{sid_b}"]'
+            await page.evaluate("(sel) => { document.querySelector(sel).__stamp = 'b-row'; }", b_row)
 
             # Mutate session B on disk: land a merged transcript, flipping its
             # tx-status cell from "not run" to "merged · N seg" server-side.
@@ -2169,29 +2174,32 @@ async def test_next_deferred_render_lands_after_focus_clears_across_304_ticks(
             )
 
             b_tx = f'[data-sid="{sid_b}"] [data-slot="tx"]'
-            # Cross a few polls: the change is pending but blocked by A's focus.
-            await page.wait_for_timeout(1500)
-            assert (
-                await page.evaluate("(sel) => document.querySelector(sel)?.textContent", b_tx) == "not run"
-            ), (
-                "B's row updated while A's rename input was focused — renderRegion's "
-                "focus guard should have deferred the swap"
-            )
-            assert await page.evaluate(
-                "(sel) => document.activeElement === document.querySelector(sel)", a_rename
-            ), "focus was clobbered by a deferred render attempt"
-
-            # Let the state settle: no further mutations, so every poll from
-            # here on is a plain 304 — exactly the window issue #245 optimizes.
-            await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
-
-            # Release the interaction hold. The deferred update must land.
-            await page.evaluate("(sel) => document.querySelector(sel).blur()", a_rename)
+            # B's cell updates WHILE A's rename holds focus — the reconcile
+            # path updates the sibling around the interaction instead of
+            # deferring the whole region (#312).
             await page.wait_for_function(
                 "(sel) => document.querySelector(sel)?.textContent?.startsWith('merged')",
                 arg=b_tx,
                 timeout=5000,
             )
+            # …in place: B's row kept its node (the stamp survived)…
+            assert await page.evaluate("(sel) => document.querySelector(sel).__stamp === 'b-row'", b_row), (
+                "B's row was rebuilt (stamp lost) — the reconcile should mutate cells in place"
+            )
+            # …and the focused input was untouched: focus AND the typed value.
+            assert await page.evaluate(
+                "(sel) => document.activeElement === document.querySelector(sel)", a_rename
+            ), "focus was clobbered by the sibling's in-place update"
+            assert (
+                await page.evaluate("(sel) => document.querySelector(sel).value", a_rename)
+            ) == "standup notes", "the focused rename input's typed value was clobbered"
+
+            # Cross a few plain-304 polls (nothing changing server-side) and
+            # re-assert: the idle skip must not repaint over the held input.
+            await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
+            assert (
+                await page.evaluate("(sel) => document.querySelector(sel).value", a_rename)
+            ) == "standup notes"
             await context.close()
         finally:
             await browser.close()

@@ -37,6 +37,18 @@ PROBE_INIT_JS = """
 (() => {
   const probe = { longTasks: [], statePolls: [] };
   Object.defineProperty(window, '__perfProbe', { value: probe });
+  // Deterministic leak census (the toolkit's mem.js WeakRef pattern): scenarios
+  // call __tagViewRoot() after each view mount; view_root_census() then counts
+  // which tagged roots survived a forced GC. A survivor that is no longer in
+  // the document is either a CACHED view (bounded: 6 LRU transcript views + 7
+  // singletons) or a leak — the integer gate needs no heap-size heuristics.
+  const viewRefs = [];
+  Object.defineProperty(window, '__viewRefs', { value: viewRefs });
+  Object.defineProperty(window, '__tagViewRoot', { value: () => {
+    const el = document.getElementById('viewRoot');
+    const root = el && el.firstElementChild;
+    if (root) viewRefs.push(new WeakRef(root));
+  } });
   // Default resource buffer is 250 entries; a multi-minute 2 Hz soak needs more.
   try { performance.setResourceTimingBufferSize(60000); } catch (e) { /* older engines */ }
   try {
@@ -118,6 +130,33 @@ class PerfProbe:
     async def client_probe(self) -> dict:
         """The injected probe's collected entries (longTasks, statePolls)."""
         return await self._page.evaluate("window.__perfProbe")
+
+    async def view_root_census(self) -> dict:
+        """Deterministic leak gate over the __tagViewRoot() WeakRefs — run it
+        AFTER force_gc(). `alive_detached` counts tagged view roots that are
+        retained but no longer in the document: legitimate only for the
+        bounded view cache (6 LRU transcript views + 7 singletons in
+        next/main.js); anything past that bound is a structural leak, caught
+        as an integer — no heap-size heuristics."""
+        return await self._page.evaluate(
+            """() => {
+              const refs = window.__viewRefs || [];
+              // Dedupe by node identity: a view revisited during the cycle is
+              // tagged once per VISIT but is one root — counting raw refs
+              // would inflate the census past the cache bound.
+              const seen = new Set();
+              let alive = 0, alive_detached = 0;
+              for (const r of refs) {
+                const el = r.deref();
+                if (el && !seen.has(el)) {
+                  seen.add(el);
+                  alive++;
+                  if (!el.isConnected) alive_detached++;
+                }
+              }
+              return { tagged: refs.length, alive, alive_detached };
+            }"""
+        )
 
 
 def _p95(values: list[float]) -> float:
