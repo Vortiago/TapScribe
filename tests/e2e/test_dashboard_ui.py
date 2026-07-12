@@ -2916,6 +2916,198 @@ async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_reco
             await browser.close()
 
 
+# JS init script for the two tests below: wraps Element.prototype.querySelectorAll
+# to count how many times each view's selection painter walks its list
+# (recordings.js's `.wavrow:not(.is-clip)` and transcript.js's `button.wavrow`),
+# alongside the same real-304 confirmation as _COUNT_STATE_304S_JS — so a flat
+# walk count across a window of CONFIRMED 304s means the painter is genuinely
+# skipping quiet ticks, not just getting lucky with an unchanged-looking DOM.
+_COUNT_SELECTION_WALKS_JS = """
+window.__selWalks = { recordings: 0, transcript: 0 };
+const _qsa = Element.prototype.querySelectorAll;
+Element.prototype.querySelectorAll = function (sel) {
+  if (sel === '.wavrow:not(.is-clip)') window.__selWalks.recordings++;
+  else if (sel === 'button.wavrow') window.__selWalks.transcript++;
+  return _qsa.call(this, sel);
+};
+window.__statePolls = 0;
+window.__state304s = 0;
+const _fetch = window.fetch;
+window.fetch = (...args) => {
+  const u = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+  const isState = u.includes('/api/state');
+  if (isState) window.__statePolls++;
+  const p = _fetch.apply(window, args);
+  if (isState) p.then((r) => { if (r.status === 304) window.__state304s++; }).catch(() => {});
+  return p;
+};
+"""
+
+
+async def test_next_apply_selection_skips_walk_on_quiet_tick(running_recorder: RunningRecorder):
+    """Issue #213: recordings.js's `applySelection` walked every `.wavrow` with
+    querySelectorAll + per-row classList/attribute writes on EVERY poll tick,
+    even when the selection hadn't changed and the list wasn't reconciled — an
+    O(rows) cost paid at 2Hz forever on a quiet tab. Guard: confirm several REAL
+    304s land with the walk count flat (the early-exit is skipping genuinely
+    quiet ticks), then select a DIFFERENT WAV and confirm the walk count moves
+    (responsiveness is unchanged — the click path still repaints)."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-03T09-00-00Z"
+    _session_dir, names = _seed_multi_wav_session(rec, sid, n=2)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.add_init_script(_COUNT_SELECTION_WALKS_JS)
+            await page.goto(base + "/", wait_until="domcontentloaded")
+
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "recordings")
+
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wavrow[data-wav]').length >= 2""",
+                timeout=15000,
+            )
+            # A selection exists (defaults to the first WAV) before the baseline.
+            await page.wait_for_function(
+                """() => !!document.querySelector('#viewRoot .wavrow.is-sel')""",
+                timeout=10000,
+            )
+
+            # Confirm real 304s are landing before the baseline — proves the
+            # server has genuinely gone quiet, not merely that nothing looks
+            # different in the payload.
+            await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
+            polls_baseline = await page.evaluate("() => window.__state304s")
+            walks_0 = await page.evaluate("() => window.__selWalks.recordings")
+
+            # Cross several more purely-idle, confirmed-304 polls.
+            await page.wait_for_function(
+                "(base) => window.__state304s >= base + 3",
+                arg=polls_baseline,
+                timeout=10000,
+            )
+            walks_1 = await page.evaluate("() => window.__selWalks.recordings")
+            assert walks_1 == walks_0, (
+                f"applySelection walked the WAV list {walks_1 - walks_0} extra "
+                "time(s) across purely-304 idle polls — it must skip the "
+                "querySelectorAll walk entirely when the selection is unchanged "
+                "and the list wasn't reconciled (issue #213)"
+            )
+
+            # Selecting a DIFFERENT WAV must still repaint (responsiveness is
+            # unchanged) — the walk count moves.
+            other = page.locator(f'#viewRoot .wavrow[data-wav="{names[1]}"]')
+            await other.locator("[data-wav-select]").click()
+            await page.wait_for_function(
+                """(name) => {
+                    const row = document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`);
+                    return !!(row && row.classList.contains('is-sel'));
+                }""",
+                arg=names[1],
+                timeout=10000,
+            )
+            walks_2 = await page.evaluate("() => window.__selWalks.recordings")
+            assert walks_2 > walks_1, (
+                "selecting a different WAV did not repaint the selection highlight"
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_next_apply_picker_selection_skips_walk_on_quiet_tick(running_recorder: RunningRecorder):
+    """The Transcript stage's per-WAV picker mirrors the Recordings list's
+    selection-painter shape (`applyPickerSelection` in transcript.js) — same
+    guard as test_next_apply_selection_skips_walk_on_quiet_tick, pinned on the
+    second surface."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-04T09-00-00Z"
+    _session_dir, names = _seed_multi_wav_session(rec, sid, n=2)
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return  # unreachable; for static analysers
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.add_init_script(_COUNT_SELECTION_WALKS_JS)
+            await page.goto(base + "/", wait_until="domcontentloaded")
+
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "transcript")
+
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot button.wavrow[data-wav]').length >= 2""",
+                timeout=15000,
+            )
+            await page.wait_for_function(
+                """() => !!document.querySelector('#viewRoot button.wavrow.is-sel')""",
+                timeout=10000,
+            )
+
+            await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
+            polls_baseline = await page.evaluate("() => window.__state304s")
+            walks_0 = await page.evaluate("() => window.__selWalks.transcript")
+
+            await page.wait_for_function(
+                "(base) => window.__state304s >= base + 3",
+                arg=polls_baseline,
+                timeout=10000,
+            )
+            walks_1 = await page.evaluate("() => window.__selWalks.transcript")
+            assert walks_1 == walks_0, (
+                f"applyPickerSelection walked the picker list {walks_1 - walks_0} "
+                "extra time(s) across purely-304 idle polls — it must skip the "
+                "querySelectorAll walk entirely when the selection is unchanged "
+                "and the list wasn't reconciled (issue #213)"
+            )
+
+            other = page.locator(f'#viewRoot button.wavrow[data-wav="{names[1]}"]')
+            await other.click()
+            await page.wait_for_function(
+                """(name) => {
+                    const row = document.querySelector(`#viewRoot button.wavrow[data-wav="${name}"]`);
+                    return !!(row && row.classList.contains('is-sel'));
+                }""",
+                arg=names[1],
+                timeout=10000,
+            )
+            walks_2 = await page.evaluate("() => window.__selWalks.transcript")
+            assert walks_2 > walks_1, (
+                "selecting a different WAV did not repaint the picker's selection highlight"
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
 def _write_merged_transcript(
     session_dir: Path, *, segments: int, transcribed_at: str, text_prefix: str
 ) -> None:

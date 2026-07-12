@@ -169,6 +169,14 @@ export function build(ctx) {
   // column keeps a closure sig here.
   let lastCtlSig = " "; // control column chrome: toggle/range/note/selected/cache
   let lastPickerSig = " "; // the per-WAV picker list (its own files-set gate)
+  /** Last selection name `applyPickerSelection` painted onto the picker rows —
+   * the change-detection guard so a quiet tick (selection unchanged, list not
+   * reconciled) skips the O(rows) querySelectorAll walk entirely. Reset to
+   * `null` right after a reconcile (below) so freshly-built/reused rows always
+   * get the class flip applied at least once, even when the selected name
+   * itself didn't change. */
+  /** @type {string | null} */
+  let appliedPickerSel = null;
   // Keys (session@stamp) we've already scheduled a re-render for after the
   // lazy merged-transcript fetch lands — dedupes repeated misses.
   /** @type {Set<string>} */
@@ -774,8 +782,17 @@ export function build(ctx) {
         if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated picker gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
         reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
         lastPickerSig = pickerSig;
+        // Rows were just (re)built — force the next line to reapply
+        // regardless of whether the selected name itself changed.
+        appliedPickerSel = null;
       }
-      applyPickerSelection(sel?.name || "");
+      // Skip the O(rows) walk on a quiet tick where neither the selection nor
+      // the list changed (issue #213).
+      const pickSelName = sel?.name || "";
+      if (pickSelName !== appliedPickerSel) {
+        applyPickerSelection(pickSelName);
+        appliedPickerSel = pickSelName;
+      }
     } else if (pickerSig !== lastPickerSig) {
       lastPickerSig = pickerSig;
       const empty = document.createElement("div");

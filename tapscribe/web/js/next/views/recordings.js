@@ -109,6 +109,14 @@ export function build(ctx) {
    * every poll tick. NOT advanced on a deferred reconcile (selection/focus
    * hold) so the held-back render lands once the interaction clears. */
   let lastListSig = " ";
+  /** Last selection name `applySelection` painted onto the list — the
+   * change-detection guard so a quiet tick (selection unchanged, list not
+   * reconciled) skips the O(rows) querySelectorAll walk entirely. Reset to
+   * `null` right after a reconcile (below) so freshly-built/reused rows
+   * always get the class flip applied at least once, even when the selected
+   * name itself didn't change. */
+  /** @type {string | null} */
+  let appliedSel = null;
   /** Last strip-silence response stats, per session id (overlay on s.stripped). */
   /** @type {Map<string, import('../../types.js').StripSilenceResult>} */
   const lastStrip = new Map();
@@ -657,6 +665,7 @@ export function build(ctx) {
         const sid2 = session.session;
         selectedWav.set(sid2, f.name);
         applySelection(f.name);
+        appliedSel = f.name;
         // paintWaveHeader (not just waveName + drawWaveform) so the clips /
         // speech / in / kept stat quartet is repainted too — otherwise selecting
         // away from a WAV that had a live strip preview leaves its stale preview
@@ -871,9 +880,18 @@ export function build(ctx) {
         if (!wavList.querySelector(".wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated view-level WAV-list gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
         reconcileList(wavList, buildRowModels(files, src, isCurrent), rowKey, buildRow);
         lastListSig = listSig;
+        // Rows were just (re)built — force the next line to reapply
+        // regardless of whether the selected name itself changed.
+        appliedSel = null;
       }
-      // Keep the selection highlight correct across reconciles + idle ticks.
-      applySelection(sel?.name || "");
+      // Keep the selection highlight correct across reconciles + idle ticks,
+      // but skip the O(rows) walk on a quiet tick where neither the selection
+      // nor the list changed (issue #213).
+      const selName = sel?.name || "";
+      if (selName !== appliedSel) {
+        applySelection(selName);
+        appliedSel = selName;
+      }
     } else if (listSig !== lastListSig) {
       lastListSig = listSig;
       const ph = document.createElement("div");
