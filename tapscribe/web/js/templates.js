@@ -1,111 +1,48 @@
 // @ts-check
-// Tiny template loader.
+// TapScribe's template/render seam over the vendored vanilla-web canon.
 //
-// Components live in `tapscribe/web/components/*.html` as one or more
-// `<template id="tpl-…">` blocks. `loadTemplates(…urls)` fetches each file,
-// inlines the `<template>` nodes into the document so `document.getElementById`
-// can find them, and is safe to call multiple times for the same URL.
+// The canon lives in ./lib/ as provenance-stamped, copy-verbatim files
+// (templates.js — the .html seam + view-lifecycle helpers; render.js —
+// interaction-safe re-rendering; chrome.js — page-chrome wiring). Never edit
+// those in place; re-copy from the toolkit to update (see CLAUDE.md →
+// "Frontend toolkit vendoring + gates"). This file re-exports them and layers
+// the TapScribe-only pieces on top:
 //
-// Components then do:
-//
-//   const node = tpl("tpl-live-row");
-//   node.querySelector("[data-slot=lbl]").textContent = "model";
-//   container.appendChild(node);
+//   - the ADR-0004 interaction-hold flag for the BESPOKE per-tick gates that
+//     can't route through renderRegion (recordings.js / transcript.js WAV
+//     lists, active-taps.js, live-feed.js): markDeferredRender /
+//     consumeDeferredRender / deferIfSelectionInside. Canon renderRegion
+//     needs none of this — a swap it defers flushes ITSELF the instant the
+//     interaction clears (one-shot listener per host), tick or no tick.
+//   - interactionHeld() — the document-wide hold predicate the poll pacer
+//     uses to keep the /api/state cadence fast while the operator works.
+//   - the dev/test-only sig-drift audit (__TAPSCRIBE_SIG_AUDIT), wrapped
+//     around canon renderRegion.
+//   - renderMarkdown — the safe, textContent-only markdown subset for LLM
+//     summaries.
 
-/** @type {Set<string>} */
-const fetched = new Set();
+export { loadTemplates, tpl, slot, pick, mount, loadCSS, every, withPending } from "./lib/templates.js";
+export { reconcileList, withTransition, selectionInside } from "./lib/render.js";
+export { wireTheme, wireErrorBar } from "./lib/chrome.js";
 
-/** @param {...string} urls */
-export async function loadTemplates(...urls) {
-  const fresh = urls.filter((u) => !fetched.has(u));
-  const texts = await Promise.all(
-    fresh.map((u) => fetch(u).then((r) => {
-      if (!r.ok) throw new Error(`template fetch ${u}: ${r.status}`);
-      return r.text();
-    })),
-  );
-  fresh.forEach((u) => fetched.add(u));
-  const holder = document.createElement("div");
-  holder.hidden = true;
-  holder.innerHTML = texts.join("\n");
-  document.body.append(...holder.children);
-}
-
-// Clone a `<template id>` and return its DocumentFragment.
-/**
- * @param {string} id
- * @returns {DocumentFragment}
- */
-export const tpl = (id) => {
-  const t = /** @type {HTMLTemplateElement | null} */ (document.getElementById(id));
-  if (!t) throw new Error(`template not loaded: ${id}`);
-  return /** @type {DocumentFragment} */ (t.content.cloneNode(true));
-};
-
-// Fill text slots: `{ slot: value }` sets textContent on `[data-slot=slot]`.
-// `null`/`undefined` values are skipped so a single object can describe a
-// partial update. Returns the frag for chaining.
-/**
- * @template {ParentNode & Node} T
- * @param {T} frag
- * @param {Record<string, unknown>} slots
- * @returns {T}
- */
-export function slot(frag, slots) {
-  for (const [k, v] of Object.entries(slots)) {
-    if (v == null) continue;
-    for (const el of frag.querySelectorAll(`[data-slot="${k}"]`)) {
-      el.textContent = String(v);
-    }
-  }
-  return frag;
-}
-
-// Convenience: `pick(frag, "name")` → first `[data-slot=name]` element.
-// Throws if the slot isn't present: template authors are expected to keep
-// `data-slot=…` markers in sync with their `pick()` calls, so a missing
-// slot is a programmer bug, not a runtime condition to handle. The throw
-// surfaces it at the call site (where the developer can see which slot
-// they typo'd) instead of as a "Cannot read properties of null" three
-// frames deeper.
-/**
- * @param {ParentNode} frag
- * @param {string} name
- * @returns {HTMLElement}
- */
-export const pick = (frag, name) => {
-  const el = /** @type {HTMLElement | null} */ (frag.querySelector(`[data-slot="${name}"]`));
-  if (!el) throw new Error(`template slot not found: data-slot="${name}"`);
-  return el;
-};
-
-// Replace `host`'s children with the rendered fragment. Avoids the
-// `innerHTML = ""` flicker by swapping once.
-/**
- * @param {Element} host
- * @param {Node} frag
- */
-export function mount(host, frag) {
-  host.replaceChildren(frag);
-}
-
-/** Per-host last signature, for the optional sig-gate. */
-/** @type {WeakMap<Element, string>} */
-const _regionSig = new WeakMap();
+import {
+  renderRegion as canonRenderRegion,
+  markRegionStale as canonMarkRegionStale,
+  selectionInside,
+} from "./lib/render.js";
 
 // A per-tick render can be DEFERRED (skipped without advancing its signature
 // gate) to protect operator interaction state — ADR-0004 "Interaction hold".
 // main.js's tick() short-circuits its whole renderAll pass when /api/state's
 // fetchState() returns the identical cached object (a 304), since there is
 // nothing new to show — but a fetch going quiet does NOT mean an interaction
-// hold has cleared. Without this flag, a render deferred while a control was
-// focused would never get retried once the server stopped changing, stranding
-// it even after the operator released focus/the selection. Every gate that
-// defers a render for that reason marks this — renderRegion below, and
-// deferIfSelectionInside (also below) for the bespoke gates that can't route
-// through renderRegion (recordings.js/transcript.js/active-taps.js/
-// live-feed.js); main.js consumes it right before a retry so a render that
-// lands this pass doesn't force another retry next tick.
+// hold has cleared. Without this flag, a render a BESPOKE gate held back while
+// a selection was live would never get retried once the server stopped
+// changing, stranding it even after the operator released the selection.
+// Only the bespoke gates mark this (via deferIfSelectionInside below); canon
+// renderRegion deferrals flush themselves the instant the hold clears and
+// never need the tick-retry. main.js consumes it right before a retry so a
+// render that lands this pass doesn't force another retry next tick.
 let _deferredRender = false;
 
 /** Mark that a render was skipped to protect operator interaction state and
@@ -122,29 +59,6 @@ export function consumeDeferredRender() {
   return had;
 }
 
-// Dev/test only. Re-runs `build` into a detached probe and compares to what the
-// region currently shows; a mismatch means `sig` is missing a dependency the
-// render reads, so the region would silently go stale. Records to
-// globalThis.__TAPSCRIBE_SIG_DRIFT (a throw would be swallowed by the dashboard's
-// event-handler try/catch, so we don't rely on it) and console.errors loudly.
-/**
- * @param {Element} host
- * @param {() => Node} build
- * @param {string} sig
- */
-function _auditSigCoversOutput(host, build, sig) {
-  const probe = /** @type {Element} */ (document.createElement(host.tagName || "div"));
-  probe.replaceChildren(build());
-  if (probe.innerHTML === host.innerHTML) return;
-  (globalThis.__TAPSCRIBE_SIG_DRIFT ||= []).push({ sig, expected: probe.innerHTML, actual: host.innerHTML });
-  console.error(
-    `renderRegion sig drift: output changed but sig ${JSON.stringify(sig)} did not — the build ` +
-      `closure reads a value missing from its sig, so this region will silently go stale. Add that ` +
-      `value to the sig, OR render the derived bit in place (a sibling toggled per-tick) instead of ` +
-      `through a sig-gated region.`,
-  );
-}
-
 /** @param {Element} el — true for controls that hold live interaction state. */
 function _isInteractive(el) {
   const tag = el.tagName;
@@ -155,33 +69,14 @@ function _isInteractive(el) {
 }
 
 /**
- * True while the operator has a non-collapsed text selection that starts or
- * ends inside `host`. Rebuilding (or rewriting textContent of) a node the
- * selection touches destroys the selection — mid-copy, that reads as the UI
- * "flashing away" the operator's marked text. The same interaction-state
- * rule as the focus guard, for selections. Exported for per-second updaters
- * that write text in place rather than going through renderRegion (the live
- * log dialog is the canonical case).
- * @param {Element} host
- */
-export function selectionInside(host) {
-  const sel = document.getSelection();
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
-  return (
-    (!!sel.anchorNode && host.contains(sel.anchorNode)) ||
-    (!!sel.focusNode && host.contains(sel.focusNode))
-  );
-}
-
-/**
  * True while the operator is holding ANY live interaction anywhere in the
  * document — an interactive control (select/input/textarea/contenteditable) is
  * focused, or a non-collapsed text selection is held. The document-wide sibling
  * of renderRegion's per-host focus/selection guard, exported for the poll pacer
  * (`next/main.js`): the /api/state backoff must NOT engage while an interaction
- * is held, or a render the hold deferred could land a whole backoff interval
- * after release instead of on the next tick (ADR-0004). Keeps "what counts as
- * an interaction" defined once, here with the hold.
+ * is held, or a render a bespoke gate held back could land a whole backoff
+ * interval after release instead of on the next tick (ADR-0004). Keeps "what
+ * counts as an interaction" defined once, here with the hold.
  */
 export function interactionHeld() {
   const active = document.activeElement;
@@ -204,103 +99,83 @@ export function deferIfSelectionInside(host) {
   return true;
 }
 
+// ── Sig-drift audit (dev/test only) ─────────────────────────────────────────
+
+/** App-side mirror of the canon's per-host sig, used ONLY to decide when the
+ * audit should probe. Advanced only when no interaction hold is live inside
+ * the host at call time, so a canon-DEFERRED swap (sig not yet rendered)
+ * can't be mistaken for a sig-gated skip. @type {WeakMap<Element, string>} */
+const _auditSig = new WeakMap();
+
+/** Mirror of the canon guards' predicates, for the audit gate only: a hold
+ * means the canon deferred (or would defer) rather than sig-skipped.
+ * @param {Element} host */
+function _holdInside(host) {
+  const active = document.activeElement;
+  if (active && active !== document.body && host.contains(active) && _isInteractive(active)) return true;
+  if (host.querySelector(":popover-open, dialog[open]")) return true;
+  return selectionInside(host);
+}
+
+// Re-runs `build` into a detached probe and compares to what the region
+// currently shows; a mismatch means `sig` is missing a dependency the render
+// reads, so the region would silently go stale. Records to
+// globalThis.__TAPSCRIBE_SIG_DRIFT (a throw would be swallowed by the
+// dashboard's event-handler try/catch, so we don't rely on it) and
+// console.errors loudly.
 /**
- * Render `build()`'s output into `host` WITHOUT clobbering live interaction.
- * The dashboard re-renders every poll; replacing a node that holds an open
- * <select>, a focused input, or a mid-edit textarea would snap it shut — and
- * replacing a node the operator is select-copying text from would dissolve
- * the selection. So:
- *   - skip the swap while the operator is interacting with a control INSIDE
- *     `host` (the active element is a select/input/textarea/contenteditable);
- *   - skip the swap while a text selection starts or ends inside `host`;
- *   - optionally skip when a caller-supplied `sig` is unchanged (perf);
- *   - otherwise replaceChildren(build()).
- * `build` is only invoked when we actually swap, so a skipped tick is cheap.
- * Use this instead of raw `host.replaceChildren(...)` for any region that is
- * re-rendered on the poll tick and may contain a control. `force:true` swaps
- * unconditionally.
- *
+ * @param {Element} host
+ * @param {() => Node} build
+ * @param {string} sig
+ */
+function _auditSigCoversOutput(host, build, sig) {
+  const probe = /** @type {Element} */ (document.createElement(host.tagName || "div"));
+  probe.replaceChildren(build());
+  if (probe.innerHTML === host.innerHTML) return;
+  (globalThis.__TAPSCRIBE_SIG_DRIFT ||= []).push({ sig, expected: probe.innerHTML, actual: host.innerHTML });
+  console.error(
+    `renderRegion sig drift: output changed but sig ${JSON.stringify(sig)} did not — the build ` +
+      `closure reads a value missing from its sig, so this region will silently go stale. Add that ` +
+      `value to the sig, OR render the derived bit in place (a sibling toggled per-tick) instead of ` +
+      `through a sig-gated region.`,
+  );
+}
+
+/**
+ * Canon renderRegion (lib/render.js) plus the dev/test-only sig-drift audit:
+ * when __TAPSCRIBE_SIG_AUDIT is set and a call is about to sig-skip (same sig,
+ * no interaction hold inside the host), the build is probed against the live
+ * DOM and any divergence is recorded to __TAPSCRIBE_SIG_DRIFT. Semantics are
+ * otherwise the canon's — including the instant deferred-flush: a swap held
+ * back by focus / an open overlay / a selection lands the moment that clears,
+ * not on the next poll tick.
  * @param {Element} host
  * @param {() => Node} build
  * @param {{ sig?: string, force?: boolean }} [opts]
  */
 export function renderRegion(host, build, opts = {}) {
-  if (!opts.force) {
-    const active = document.activeElement;
-    const focused = !!active && active !== document.body && host.contains(active) && _isInteractive(active);
-    if (focused || selectionInside(host)) {
-      markDeferredRender();
-      return;
-    }
-    if (opts.sig != null && _regionSig.get(host) === opts.sig) {
-      if (globalThis.__TAPSCRIBE_SIG_AUDIT) _auditSigCoversOutput(host, build, opts.sig);
-      return;
-    }
+  if (globalThis.__TAPSCRIBE_SIG_AUDIT && !opts.force && opts.sig != null &&
+      _auditSig.get(host) === opts.sig && !_holdInside(host)) {
+    _auditSigCoversOutput(host, build, opts.sig);
   }
-  if (opts.sig != null) _regionSig.set(host, opts.sig);
-  host.replaceChildren(build());
+  canonRenderRegion(host, build, opts);
+  if (opts.sig != null && (opts.force || !_holdInside(host))) _auditSig.set(host, opts.sig);
 }
 
-/** Per-node reconcile key, set on nodes reconcileList creates. @type {WeakMap<Element, string>} */
-const _reconcileKey = new WeakMap();
-
-/** Keyed, in-place list reconciliation that PRESERVES node state. Updates `host`'s
- * element children to match `items` by key, moving surviving nodes with
- * `moveBefore()` — which keeps focus, text selection, scroll position, running CSS
- * animations and playing media (and an open `<details>`) intact across the move —
- * instead of rebuilding. This is the snappy, interaction-safe answer to
- * "re-render a long list without clobbering interaction" and the JS half of the
- * huge-list virtualization: pair it with `content-visibility: auto` on the rows
- * (CSS) so the browser also skips layout/paint of the off-screen ones. Where
- * `moveBefore` is missing it falls back to `insertBefore` (still correct — just
- * loses the state preservation).
- *
- *   reconcileList(rowsHost, sessions, (s) => s.id,
- *     (s) => buildRow(s),                // create: a fresh row for a new key
- *     (node, s) => fillRow(node, s));    // update: mutate an existing row in place
- *
- * To recreate a row whenever its content changes (instead of updating in place),
- * fold the content into the key and omit `update` — a changed key drops the old
- * node and creates a fresh one, while truly-unchanged rows keep their key and
- * their state. The host's element children must be reconcileList's alone (no
- * stray text nodes / placeholders left behind by another renderer).
- * @template T
+/**
+ * Canon markRegionStale (lib/render.js) — invalidate `host`'s remembered
+ * render signature so the NEXT renderRegion call re-renders even if its `sig`
+ * is unchanged, WITHOUT bypassing the interaction guards the way `force:true`
+ * would (ADR-0004). Also resets the audit mirror so the next sig-skip isn't
+ * mis-probed.
  * @param {Element} host
- * @param {T[]} items - desired contents, in order
- * @param {(item: T) => string} keyOf - stable identity per item
- * @param {(item: T) => Element} create - build a node for a not-yet-present key
- * @param {(node: Element, item: T) => void} [update] - update an existing node in place */
-export function reconcileList(host, items, keyOf, create, update) {
-  /** @type {Map<string, Element>} */
-  const prev = new Map();
-  for (const n of host.children) {
-    const k = _reconcileKey.get(n);
-    if (k !== undefined) prev.set(k, n);
-  }
-  // moveBefore (Chromium 133+) repositions a node without resetting its state;
-  // cast it on once (lib.dom may not declare it), else fall back to insertBefore.
-  const h = /** @type {Element & { moveBefore?(node: Node, ref: Node | null): void }} */ (host);
-  let cursor = host.firstElementChild;
-  for (const item of items) {
-    const k = String(keyOf(item));
-    let node = prev.get(k);
-    if (node) {
-      prev.delete(k);
-      if (update) update(node, item);
-    } else {
-      node = create(item);
-      _reconcileKey.set(node, k);
-    }
-    if (node === cursor) {
-      cursor = cursor.nextElementSibling; // already in place
-    } else if (node.parentNode === host && h.moveBefore) {
-      h.moveBefore(node, cursor); // existing node: state-preserving move
-    } else {
-      host.insertBefore(node, cursor); // new node, or no moveBefore: plain insert
-    }
-  }
-  for (const n of prev.values()) n.remove(); // drop keys no longer present
+ */
+export function markRegionStale(host) {
+  canonMarkRegionStale(host);
+  _auditSig.delete(host);
 }
+
+// ── Markdown (LLM summaries) ────────────────────────────────────────────────
 
 /**
  * Inline markdown spans → nodes: `` `code` ``, `**bold**`, `*italic*`.
@@ -410,23 +285,4 @@ export function renderMarkdown(text) {
   flushPara();
   if (fence) flushFence(); // unterminated fence — still show what we got
   return root;
-}
-
-/**
- * Invalidate `host`'s remembered render signature so the NEXT `renderRegion`
- * call re-renders even if its `sig` is unchanged. This is the "mark stale"
- * companion to `renderRegion`'s perf gate: a mutation (a fresh summary landing,
- * a session switch, a lazy body resolving) makes the on-screen content stale
- * without changing the sig the caller computes, so the caller calls this to
- * force one more render.
- *
- * Deliberately NOT `force:true`: forcing would bypass the focus/selection
- * guards and could clobber an open control or a mid-copy selection. Marking
- * stale instead lets the held-back render land on the first tick AFTER the
- * interaction clears — preserving the interaction hold (ADR-0004).
- *
- * @param {Element} host
- */
-export function markRegionStale(host) {
-  _regionSig.delete(host);
 }

@@ -1331,3 +1331,20 @@ button.wavrow {
   .sesslist { --sess-cols: minmax(120px, 1.6fr) 58px 44px minmax(96px, 1fr) minmax(120px, 1.2fr) max-content; }
   .sesscol--strip, .sesscol--size { display: none; }
 }
+
+/* Client-error bar (wireErrorBar, web/js/lib/chrome.js) — hidden until an
+   unhandled error/rejection fills it. Fixed to the bottom edge so it can't
+   shift the layout under an open control mid-error. */
+#errbar {
+  position: fixed;
+  inset-block-end: 0;
+  inset-inline: 0;
+  z-index: 100;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: var(--font-small);
+  background: color-mix(in srgb, var(--rec) 22%, var(--bg-0));
+  color: var(--fg-0);
+  border-top: 1px solid var(--rec);
+  white-space: pre-wrap;
+}

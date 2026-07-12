@@ -2104,10 +2104,14 @@ async def test_next_deferred_render_lands_after_focus_clears_across_304_ticks(
     'Interaction hold'). If a poll changes the Sessions list's signature while
     a row's rename <input> is focused, renderRegion defers the swap without
     advancing its own signature gate — that's existing, unaffected behaviour.
-    What issue #245's fix must preserve: once the operator blurs the input,
-    the deferred update must still land even if EVERY poll since the deferral
-    was a plain 304 (nothing server-side changed further) — main.js must keep
-    retrying on a deferred render regardless of the state object's identity.
+    The guarantee this pins: once the operator blurs the input, the deferred
+    update must still land even if EVERY poll since the deferral was a plain
+    304 (nothing server-side changed further). Since the canon render.js
+    adoption the mechanism is a per-host one-shot flush that fires the INSTANT
+    the hold clears (no poll tick involved at all); the older #245 tick-retry
+    (markDeferredRender/consumeDeferredRender in main.js) still exists but now
+    serves only the bespoke selection gates that can't route through
+    renderRegion.
     """
     rec = running_recorder.recorder
     base = running_recorder.base_url

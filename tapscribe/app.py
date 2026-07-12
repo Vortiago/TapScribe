@@ -30,7 +30,9 @@ import json
 import logging
 import math
 import shutil
+import time
 import wave
+from collections import deque
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -375,6 +377,54 @@ async def _refuse_current_or_busy(
 # ---------------------------------------------------------------------------
 # Health + simple listings
 # ---------------------------------------------------------------------------
+
+
+# Client-error relay (wireErrorBar, tapscribe/web/js/lib/chrome.js): the
+# dashboard beacons unhandled browser errors here so an operator (or an LLM
+# session maintaining the app) can read them from the server log instead of
+# needing the browser console. Storage-free by design — log-and-drop, capped
+# and flood-guarded, mirroring the toolkit's serve.mjs endpoint.
+_CLIENT_ERR_WINDOW_S = 60.0
+_CLIENT_ERR_MAX_PER_WINDOW = 30
+_client_err_times: deque[float] = deque()
+
+
+@app.post("/api/client-errors", status_code=204)
+async def client_errors(request: Request) -> Response:
+    now = time.monotonic()
+    while _client_err_times and now - _client_err_times[0] > _CLIENT_ERR_WINDOW_S:
+        _client_err_times.popleft()
+    if len(_client_err_times) >= _CLIENT_ERR_MAX_PER_WINDOW:
+        # Silently drop past the cap: the relay is best-effort telemetry and a
+        # crash-looping page must not turn into a log flood.
+        return Response(status_code=204)
+    _client_err_times.append(now)
+
+    # sendBeacon posts text/plain, so parse the (size-capped) body by hand
+    # instead of a JSON body model. Every field is untrusted browser input:
+    # cap lengths and strip newlines so a crafted message can't forge extra
+    # log lines (log injection).
+    raw = (await request.body())[:8192]
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    def _field(name: str, cap: int) -> str:
+        value = payload.get(name, "")
+        text = value if isinstance(value, str) else str(value)
+        return " ".join(text.split())[:cap]
+
+    logging.getLogger("tapscribe.client").warning(
+        "client error [%s] at %s: %s (ua: %s)",
+        _field("src", 40),
+        _field("url", 200),
+        _field("msg", 2000),
+        _field("ua", 200),
+    )
+    return Response(status_code=204)
 
 
 @app.get("/health")

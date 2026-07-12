@@ -15,7 +15,7 @@
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
 import { fetchState, postJson, putJson } from "../api.js";
-import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld } from "../templates.js";
+import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import { createPollPacer, FAST_MS } from "./poll-pacer.js";
 import * as spine from "./components/spine.js";
@@ -602,6 +602,11 @@ async function refresh() {
 }
 
 // ---- Boot -------------------------------------------------------------------
+
+// Surface listener exceptions / unhandled rejections in #errbar and beacon a
+// truncated copy to POST /api/client-errors — the one place an LLM session
+// maintaining the dashboard can actually read a browser-side failure.
+wireErrorBar();
 
 await loadTemplates(
   // Existing component templates the REUSED components need:
