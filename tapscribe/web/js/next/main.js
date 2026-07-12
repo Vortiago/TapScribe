@@ -15,7 +15,7 @@
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
 import { fetchState, postJson, putJson } from "../api.js";
-import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar, withTransition } from "../templates.js";
+import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
 import { warmProgress } from "../vc/components/progress/progress.js";
 import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
@@ -355,10 +355,19 @@ function renderView(j, session) {
   }
 
   if (mountedKey !== key) {
-    // A view/session switch is a DISCRETE, user-initiated change — animate it
-    // with a View Transition (canon render.js). Never wraps the per-tick
-    // update below: mountedKey gates this to actual navigation.
-    withTransition(() => mount(root, built.host ?? built.node));
+    // Deliberately a PLAIN synchronous mount, not withTransition: the poll
+    // loop's next tick (and the rest of THIS tick's built.update() call,
+    // immediately below) assumes the new view is fully attached the instant
+    // this line returns. withTransition can't give that — its mutation only
+    // runs inside document.startViewTransition's callback, which the browser
+    // may defer past the current microtask; under load, a poll tick or an
+    // interaction-hold sweep can observe the OLD view still attached (its
+    // childElementCount > 0 check passes vacuously) and tag/act on stale
+    // nodes that the deferred mount then rips out from under it — exactly
+    // the "don't read the new DOM synchronously after the call" trap the
+    // canon docs warn about (render.js). Tried and reverted (#310): see
+    // git history for the withTransition attempt this replaced.
+    mount(root, built.host ?? built.node);
     mountedKey = key;
   }
   built.update(j, session);
