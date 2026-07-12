@@ -12,9 +12,9 @@ an empty value gets rejected with 404 BEFORE the path is concatenated
 from __future__ import annotations
 
 import pytest
-from fastapi import HTTPException
 
 from tapscribe import config, session_paths
+from tapscribe.session_paths import SessionNotFound
 
 
 @pytest.fixture
@@ -40,14 +40,14 @@ TRAVERSAL_INPUTS = [
 
 @pytest.mark.parametrize("bad", TRAVERSAL_INPUTS)
 def test_safe_part_rejects_traversal_strings(bad):
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(SessionNotFound) as exc:
         session_paths._safe_part(bad, "session")
     assert exc.value.status_code == 404
 
 
 @pytest.mark.parametrize("bad_type", [None, 42, b"bytes-not-str", object()])
 def test_safe_part_rejects_non_string_types(bad_type):
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(SessionNotFound) as exc:
         session_paths._safe_part(bad_type, "session")
     assert exc.value.status_code == 404
 
@@ -60,14 +60,14 @@ def test_safe_part_accepts_legitimate_session_ids():
 
 @pytest.mark.parametrize("bad_session", ["..", "../escape", "foo/bar", "foo\\bar"])
 def test_session_meta_path_rejects_bad_session(bad_session, recordings_dir):
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(SessionNotFound) as exc:
         session_paths.session_meta_path(bad_session)
     assert exc.value.status_code == 404
 
 
 @pytest.mark.parametrize("bad_session", ["..", "../escape", "foo/bar"])
 def test_resolve_session_dir_rejects_bad_session(bad_session, recordings_dir):
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(SessionNotFound) as exc:
         session_paths.resolve_session_dir(bad_session)
     assert exc.value.status_code == 404
 
@@ -79,7 +79,7 @@ def test_resolve_wav_rejects_bad_name(bad_name, recordings_dir):
     sess.mkdir()
     (sess / "ok.wav").write_bytes(b"")
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(SessionNotFound) as exc:
         session_paths.resolve_wav("20260516T130000Z", bad_name)
     assert exc.value.status_code == 404
 
@@ -91,7 +91,7 @@ def test_resolve_wav_rejects_bad_session_before_touching_disk(recordings_dir):
     target = recordings_dir.parent / "outside.wav"
     target.write_bytes(b"")  # would be a hit for is_file() if guard misfired
     try:
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(SessionNotFound) as exc:
             session_paths.resolve_wav("../" + target.parent.name, "outside.wav")
         assert exc.value.status_code == 404
     finally:

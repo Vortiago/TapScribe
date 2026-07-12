@@ -24,9 +24,43 @@ import os.path
 import re
 from pathlib import Path
 
-from fastapi import HTTPException
-
 from . import config
+
+# ---------------------------------------------------------------------------
+# Domain errors — FastAPI-free path-layer exceptions.
+# ---------------------------------------------------------------------------
+
+
+class SessionPathError(Exception):
+    """Base for session path-layer domain errors. Catch sites (sessions.known_names_for_session,
+    session_merge.select_session_wavs) catch this base to degrade gracefully."""
+
+    status_code: int = 404
+
+
+class SessionNotFound(SessionPathError):
+    """Session not found or path validation failed (unsafe input, containment escape, missing dir)."""
+
+    pass
+
+
+class WavNotFound(SessionPathError):
+    """WAV file not found (containment escape, missing file, wrong extension)."""
+
+    pass
+
+
+class UnknownSource(SessionPathError):
+    """Unknown `source` value in resolve_source_dir."""
+
+    status_code = 400
+
+
+class StrippedMissing(SessionPathError):
+    """stripped/ directory does not exist for the session."""
+
+    pass
+
 
 # Rejects values that would let an HTTP-supplied `session` or `name` escape
 # RECORDINGS_DIR when concatenated into a path. Catches:
@@ -41,7 +75,7 @@ _UNSAFE_PART_RE = re.compile(r"[\\/\x00]|^\.\.?$|^$")
 
 def _safe_part(part: object, what: str = "session") -> str:
     if not isinstance(part, str) or _UNSAFE_PART_RE.search(part):
-        raise HTTPException(404, f"{what} not found")
+        raise SessionNotFound(f"{what} not found")
     # Defense-in-depth: pathlib's `/` operator treats an absolute argument
     # as overriding the parent — `Path("D:/rec") / "C:foo"` is `C:foo` on
     # Windows, escaping RECORDINGS_DIR entirely. The regex above catches
@@ -49,17 +83,17 @@ def _safe_part(part: object, what: str = "session") -> str:
     # through any of those. Reject anything pathlib would consider
     # absolute on the current platform.
     if Path(part).is_absolute():
-        raise HTTPException(404, f"{what} not found")
+        raise SessionNotFound(f"{what} not found")
     return part
 
 
 def _assert_contained(candidate: Path, message: str = "session not found") -> None:
     """Layer 2: confirm `candidate` stays under RECORDINGS_DIR after
-    symlink resolution. Raises HTTPException(404) on escape."""
+    symlink resolution. Raises `SessionNotFound` on escape."""
     root = os.path.realpath(config.RECORDINGS_DIR)
     real = os.path.realpath(candidate)
     if real != root and not real.startswith(root + os.sep):
-        raise HTTPException(404, message)
+        raise SessionNotFound(message)
 
 
 def _contained_path(*parts: str, message: str = "session not found") -> Path:
@@ -107,13 +141,13 @@ def stripped_dir(session: str) -> Path:
     root = os.path.realpath(config.RECORDINGS_DIR)
     real = os.path.realpath(os.path.join(root, session, DIRNAME_STRIPPED))
     if real != root and not real.startswith(root + os.sep):
-        raise HTTPException(404, "session not found")
+        raise SessionNotFound("session not found")
     return Path(real)
 
 
 def resolve_session_dir(session: str) -> Path:
     """Return `<RECORDINGS_DIR>/<session>` after validating it exists and
-    doesn't escape RECORDINGS_DIR. Raises `HTTPException(404)` otherwise.
+    doesn't escape RECORDINGS_DIR. Raises `SessionNotFound` otherwise.
 
     Uses the canonical `os.path.realpath(x).startswith(root + os.sep)`
     sanitiser pattern that CodeQL's `py/path-injection` query recognises
@@ -122,9 +156,9 @@ def resolve_session_dir(session: str) -> Path:
     root = os.path.realpath(config.RECORDINGS_DIR)
     real = os.path.realpath(os.path.join(root, session))
     if real != root and not real.startswith(root + os.sep):
-        raise HTTPException(404, "session not found")
+        raise SessionNotFound("session not found")
     if not os.path.isdir(real):
-        raise HTTPException(404, "session not found")
+        raise SessionNotFound("session not found")
     return Path(real)
 
 
@@ -138,11 +172,11 @@ def resolve_source_dir(session: str, source: str | None) -> Path:
     if source == "stripped":
         d = stripped_dir(session)
         if not d.is_dir():
-            raise HTTPException(404, "stripped/ not found for this session; run strip-silence first")
+            raise StrippedMissing("stripped/ not found for this session; run strip-silence first")
         return d
     if source in (None, "", "original"):
         return _contained_path(session)
-    raise HTTPException(400, f"unknown source: {source!r} (expected 'original' or 'stripped')")
+    raise UnknownSource(f"unknown source: {source!r} (expected 'original' or 'stripped')")
 
 
 def create_session_dir(session: str) -> Path:
@@ -178,7 +212,7 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     root = os.path.realpath(config.RECORDINGS_DIR)
     real = os.path.realpath(os.path.join(str(source_dir), name))
     if real != root and not real.startswith(root + os.sep):
-        raise HTTPException(404, "not found")
+        raise WavNotFound("not found")
     if not os.path.isfile(real) or not real.lower().endswith(".wav"):
-        raise HTTPException(404, "not found")
+        raise WavNotFound("not found")
     return Path(real)

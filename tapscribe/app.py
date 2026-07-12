@@ -83,6 +83,9 @@ from .name_resolution import attach_people
 from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
 from .session_maintenance import (
+    AbsorbCollision,
+    InvalidAbsorbRequest,
+    SessionDeleteError,
     absorb_session,
     delete_session_audio,
     delete_session_wav,
@@ -90,8 +93,17 @@ from .session_maintenance import (
     session_is_empty,
 )
 from .session_merge import InvalidRange, NoUsableWavs
-from .session_paths import resolve_session_dir, resolve_wav, stripped_dir
+from .session_paths import (
+    SessionNotFound,
+    StrippedMissing,
+    UnknownSource,
+    WavNotFound,
+    resolve_session_dir,
+    resolve_wav,
+    stripped_dir,
+)
 from .sessions import (
+    MetaValidationError,
     gather_sessions,
     read_session_files,
     read_session_meta,
@@ -321,6 +333,14 @@ _DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
     NoMergedTranscript: 422,
     SummarizerUnavailable: 400,
     SummarizerFailed: 502,
+    SessionNotFound: 404,
+    UnknownSource: 400,
+    StrippedMissing: 404,
+    WavNotFound: 404,
+    MetaValidationError: 400,
+    AbsorbCollision: 409,
+    InvalidAbsorbRequest: 400,
+    SessionDeleteError: 500,
 }
 
 

@@ -19,7 +19,7 @@ these two resolvers skip it while every sibling (`resolve_session_dir`,
 `stripped_dir`, `resolve_wav`) applies it.
 
 These tests pin the harm at the containment layer: a symlinked-out session must be
-REFUSED (either rejected with HTTPException(404) as the siblings do, or returned as
+REFUSED (either rejected with SessionNotFound as the siblings do, or returned as
 a realpath that stays contained) — while a legitimate session still resolves with
 no false rejection, and `session_meta_path` keeps its by-design no-existence-check
 semantics (`read_session_meta` returns {} for an absent session; it must not start
@@ -40,9 +40,9 @@ import os
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
 
 from tapscribe import config, session_paths
+from tapscribe.session_paths import SessionPathError
 
 
 @pytest.fixture
@@ -80,13 +80,13 @@ def _plant_symlink_wav(recordings_dir: Path, session: str, name: str) -> None:
 def _assert_escape_refused(fn, recordings_dir: Path) -> None:
     """The seam's contract: every resolver returns a Path proven contained under
     RECORDINGS_DIR. Assert at the harm layer, mechanism-agnostic — the escape is
-    refused if `fn()` either raises HTTPException(404) or returns a path whose
-    realpath stays contained. Only the current behaviour (returning an escaping
-    path) fails."""
+    refused if `fn()` either raises `SessionPathError` (404) or returns a path
+    whose realpath stays contained. Only the current behaviour (returning an
+    escaping path) fails."""
     root = os.path.realpath(config.RECORDINGS_DIR)
     try:
         result = fn()
-    except HTTPException as exc:
+    except SessionPathError as exc:
         assert exc.status_code == 404
         return
     real = os.path.realpath(result)
