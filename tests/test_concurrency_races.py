@@ -215,12 +215,19 @@ async def test_live_channel_rapid_restart_settles_to_one_child(
     sentinel path and stub `subprocess.Popen` to a tiny lookalike that
     blocks-on-stdout so the supervisory pump thread doesn't immediately
     reap the child. The orchestration around it (`stop()` → `start()`,
-    `info` updates, lock contention) is real."""
+    `info` updates, lock contention) is real.
+
+    `port=_unused_port()` (same helper as the test above) rather than
+    `build_tap_recorder`'s fixed 9999 default: `start()` runs the real
+    `_probe_port_free` preflight against this port before the stubbed
+    Popen ever gets called, so a fixed port collides with anything else
+    on the host already bound to 9999 — this test doesn't care which
+    port it gets, only that start() succeeds."""
     import threading
 
     import tapscribe.live as live_mod
 
-    r = build_tap_recorder(tmp_path, gate_kind="backend")
+    r = build_tap_recorder(tmp_path, port=_unused_port(), gate_kind="backend")
 
     spawned: list = []
     terminated: list = []
