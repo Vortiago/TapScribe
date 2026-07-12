@@ -209,14 +209,14 @@ def attach_people_mutation(
     return registry, occs
 
 
-def attach_people_joins(
+def attach_people_view(
     sessions: list[dict[str, Any]],
     registry: PeopleRegistry,
     occs: list[dict[str, Any]],
     live_identities: set[str],
 ) -> list[dict[str, Any]]:
-    """Pure joins: resolve session names, build people view, strip rosters.
-    Safe to run on a worker thread."""
+    """Resolve session names, build people view rows, strip rosters.
+    Pure (no I/O) — safe to run on a worker thread."""
     for s, occ in zip(sessions, occs, strict=True):
         s["names"] = resolve_session_names(
             roster=occ,
@@ -235,4 +235,4 @@ def attach_people(
     live_identities: set[str],
 ) -> list[dict[str, Any]]:
     registry, occs = attach_people_mutation(sessions, live_identities=live_identities)
-    return attach_people_joins(sessions, registry, occs, live_identities)
+    return attach_people_view(sessions, registry, occs, live_identities)

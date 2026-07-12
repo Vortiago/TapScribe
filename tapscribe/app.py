@@ -79,7 +79,7 @@ from .batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
-from .name_resolution import attach_people, attach_people_joins, attach_people_mutation
+from .name_resolution import attach_people, attach_people_mutation, attach_people_view
 from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
 from .session_maintenance import (
@@ -670,7 +670,7 @@ def _build_state_blob(
     hallucinations_content = read_config("hallucinations")
     inputs_support = _compute_inputs_support()
 
-    people = attach_people_joins(sessions_list, registry, occs, live_identities)
+    people = attach_people_view(sessions_list, registry, occs, live_identities)
 
     override_counts: dict[str, int] = {"prompt": 0, "hotwords": 0, "summarizer": 0}
     for s in sessions_list:
