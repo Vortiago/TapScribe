@@ -83,19 +83,24 @@ def _parse_rules_uncached() -> list[dict[str, Any]]:
         lower = s.lower()
         if lower.startswith("re:"):
             pat = s[3:].strip()
-            if not _regex_is_safe(pat):
-                # Reject patterns that are too long or that contain a nested
-                # unbounded-quantifier shape. Skip silently — the rules file
-                # is operator-edited and we'd rather drop a risky rule than
-                # let a transcribe job hang on catastrophic backtracking.
+            if not regex_rule_ok(pat):
+                # Reject empty / oversize / nested-quantifier / uncompilable
+                # patterns. Skip silently — the rules file is operator-edited
+                # and we'd rather drop a risky rule than let a transcribe job
+                # hang on catastrophic backtracking (or let an empty pattern
+                # compile to a match-all that suppresses every segment). The
+                # WRITE path (text._check_hallucinations) raises on this same
+                # check; here we stay lenient. regex_rule_ok already proved
+                # the pattern compiles, so the re.compile below can't error.
                 continue
-            try:
-                rules.append({"raw": s, "kind": "regex", "matcher": re.compile(pat, re.IGNORECASE)})
-            except re.error:
-                # Bad regex: skip silently rather than break a job.
-                continue
+            rules.append({"raw": s, "kind": "regex", "matcher": re.compile(pat, re.IGNORECASE)})
         elif lower.startswith("exact:"):
             target = s[6:].strip()
+            if not target:
+                # An empty `exact:` normalises to "" and would match every
+                # punctuation-only ("noise") segment — a degenerate match-many.
+                # Drop it silently, mirroring the lenient empty-`re:` handling.
+                continue
             rules.append({"raw": s, "kind": "exact", "matcher": normalise_for_exact(target)})
         else:
             rules.append({"raw": s, "kind": "substr", "matcher": s.lower()})
@@ -142,6 +147,30 @@ def _regex_is_safe(pattern: str) -> bool:
     if len(pattern) > _MAX_REGEX_PATTERN_LEN:
         return False
     if _NESTED_QUANTIFIER_RE.search(pattern):
+        return False
+    return True
+
+
+def regex_rule_ok(pattern: str) -> bool:
+    """Single authority for whether a `re:` rule's PATTERN (the text after the
+    `re:` prefix) is acceptable. Returns True for a safe, compilable regex,
+    False to reject.
+
+    Shared by BOTH the strict WRITE path (`text._check_hallucinations` raises
+    `ValueError` when this returns False → the config PUT's 400) and the lenient
+    RUNTIME parser (`_parse_rules_uncached` silently SKIPS when it returns False
+    so a legacy hand-edited file can't wedge a transcribe job). The
+    strict/lenient split lives ONLY in how each caller reacts — this function
+    never raises. Reject cases: empty (compiles to a match-all that suppresses
+    every segment), oversize / nested-quantifier (ReDoS via `_regex_is_safe`),
+    or does-not-compile."""
+    if not pattern:
+        return False
+    if not _regex_is_safe(pattern):
+        return False
+    try:
+        re.compile(pattern, re.IGNORECASE)
+    except re.error:
         return False
     return True
 

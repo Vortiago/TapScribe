@@ -108,6 +108,31 @@ def _check_batch_model(model_id: str) -> None:
             raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
 
 
+def _check_hallucinations(content: str) -> None:
+    """WRITE-time check for the "hallucinations" key: iterate lines, skip
+    blank/comment/non-`re:` lines, and for `re:` lines validate the pattern via
+    the shared `hallucinations.regex_rule_ok` authority (empty / ReDoS-shape /
+    oversize / uncompilable). When it returns False raise
+    `ValueError(f"invalid rule on line {n}: {line!r}")`.
+
+    Non-`re:` lines (substr, `exact:`) pass through — always valid at write time.
+    STRICT at write, LENIENT at runtime: the runtime parser
+    (`hallucinations._parse_rules_uncached`) calls the SAME `regex_rule_ok`
+    but SKIPS a bad rule instead of raising, so a legacy hand-edited file can't
+    wedge a transcribe job. The hallucinations import is lazy to keep this
+    module free of that dependency for every other caller."""
+    from . import hallucinations
+
+    for n, line in enumerate(content.splitlines(), start=1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.lower().startswith("re:"):
+            pat = s[3:].strip()
+            if not hallucinations.regex_rule_ok(pat):
+                raise ValueError(f"invalid rule on line {n}: {line!r}")
+
+
 @dataclass(frozen=True)
 class _ConfigSpec:
     """One editable config text file. `attr` names the config-module Path
@@ -145,6 +170,10 @@ CONFIG_KEYS: dict[str, _ConfigSpec] = {
     # faster-whisper `hotwords` (hotwords.txt) — comma- or space-separated
     # proper nouns / tricky vocabulary.
     "hotwords": _ConfigSpec("HOTWORDS_FILE"),
+    # Hallucination filter rules (hallucinations.txt) — one rule per line:
+    # plain substring, `exact:...`, or `re:...`. Write-time check validates
+    # regex safety so a bad rule never lands on disk.
+    "hallucinations": _ConfigSpec("HALLUCINATIONS_FILE", check=_check_hallucinations),
 }
 
 

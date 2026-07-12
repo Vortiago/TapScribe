@@ -30,25 +30,6 @@ function buildCol({ title, file, count, body }) {
   return frag;
 }
 
-/** @param {string} text */
-function emptyMsg(text) {
-  const frag = tpl("tpl-cfg-empty");
-  pick(frag, "msg").textContent = text;
-  return frag;
-}
-
-/** @param {string[]} values */
-function codeList(values) {
-  const frag = document.createDocumentFragment();
-  for (const v of values) {
-    const c = tpl("tpl-cfg-code");
-    pick(c, "val").textContent = v;
-    frag.appendChild(c);
-    frag.appendChild(document.createTextNode(" "));
-  }
-  return frag;
-}
-
 /**
  * @param {{
  *   key: string,
@@ -102,7 +83,7 @@ export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOv
 
   const p = j.prompt || { path: "", content: "", length: 0 };
   const h = j.hotwords || { path: "", content: "", length: 0 };
-  const hl = j.hallucinations || { path: "", rules: [], count: 0 };
+  const hl = j.hallucinations || { path: "", content: "", rules: [], count: 0 };
   // Editor gating. By default we use the registry-wide inputs_support (any
   // installed batch model declaring the input) — that's the classic dashboard.
   // The Stages Settings view passes `supportOverride` so the prompt/hotwords
@@ -122,14 +103,17 @@ export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOv
   const sig = [
     p.length || 0, p.content || "",
     h.length || 0, h.content || "",
-    hl.count || 0, (hl.rules || []).join("|"),
+    hl.count || 0, hl.content || "",
     support.batch_prompt ? 1 : 0,
     support.batch_hotwords ? 1 : 0,
     counts.prompt | 0, counts.hotwords | 0,
   ].join("§");
 
   const hotwordList = (h.content || "").split(",").map((s) => s.trim()).filter(Boolean);
-  const halRules = hl.rules || [];
+  // count === hl.rules.length by construction (server sets count = len(rules));
+  // the card renders the raw content textarea, not per-rule chips, so the label
+  // reads the count directly rather than keeping a live dep on the rules array.
+  const halCount = hl.count || 0;
 
   const build = () => {
     const out = document.createDocumentFragment();
@@ -169,14 +153,17 @@ export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOv
     out.appendChild(buildCol({
       title: "hallucination filter",
       file: "hallucinations.txt",
-      count: halRules.length ? `${halRules.length} rule${halRules.length === 1 ? "" : "s"}` : null,
+      count: halCount ? `${halCount} rule${halCount === 1 ? "" : "s"}` : null,
       body: (el) => {
-        if (halRules.length) {
-          el.appendChild(tpl("tpl-cfg-hal-prefix"));
-          el.appendChild(codeList(halRules));
-        } else {
-          el.appendChild(emptyMsg("no patterns — nothing will be suppressed"));
-        }
+        // The filter is destructive — note it above the editor so broadening a
+        // rule reads as "drops transcript content", not "tags it".
+        el.appendChild(tpl("tpl-cfg-hal-prefix"));
+        el.appendChild(buildEditor({
+          key: "hallucinations",
+          content: hl.content || "",
+          placeholder: "one rule per line: substring, exact:..., or re:pattern",
+          overrideCount: 0,
+        }));
       },
     }));
 
