@@ -1,3 +1,4 @@
+// from vanilla-components/lib/tone.js@9f20766 - re-copy to update, don't fork
 // @ts-check
 // Shared tone resolution — the single home of the "base set + custom colour"
 // idiom every tone-bearing component uses (chip, status-dot, alert, …). A named

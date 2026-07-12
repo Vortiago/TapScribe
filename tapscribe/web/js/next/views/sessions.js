@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · Sessions (GLOBAL · all sessions). A dense, scannable, manageable
 // list of EVERY session on disk — the spine's session <select> doesn't scale
 // past a handful, so this is the place to find/manage one when there are many.
@@ -451,12 +452,12 @@ export function build(ctx) {
       const empty = document.createElement("div");
       empty.className = "empty";
       empty.textContent = "No sessions yet — start recording to see them here.";
-      body.replaceChildren(empty);
+      body.replaceChildren(empty); // gate-allow: raw-swap — listSig-gated empty-state swap (same documented debt as the list swap below)
     } else if (!shown.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
       empty.textContent = `No sessions match “${filter}”.`;
-      body.replaceChildren(empty);
+      body.replaceChildren(empty); // gate-allow: raw-swap — listSig-gated empty-state swap (same documented debt as the list swap below)
     } else {
       // Absorb targets: archived sessions only — the current (recording) one is
       // never a merge endpoint (classic kept it out of the picker entirely),
@@ -469,7 +470,7 @@ export function build(ctx) {
         const targets = archived.filter((t) => t.session !== s.session);
         list.appendChild(sessionRow(s, targets));
       }
-      body.replaceChildren(list);
+      body.replaceChildren(list); // gate-allow: raw-swap — the documented listSig whole-list swap (CLAUDE.md: known offender; fix is reconcileList adoption)
     }
     return region;
   };

@@ -9,7 +9,7 @@
 // the cut overlay (a later slice) draws on top of the same canvas, and a
 // renderer with no state coupling is the seam that makes that easy.
 
-import { tpl, pick } from "../../templates.js";
+import { tpl, mount, pick } from "../../templates.js";
 import { fmtMmSs } from "../../formatters.js";
 
 /** How many time-axis ticks to label under the waveform. */
@@ -182,7 +182,7 @@ export function createWaveform() {
       span.textContent = label;
       out.appendChild(span);
     }
-    axisHost.replaceChildren(out);
+    mount(axisHost, out);
   };
 
   /** Derive the overlay chrome — the data-cut-spans / data-previewSpans e2e
@@ -225,7 +225,7 @@ export function createWaveform() {
     syncChrome();
     msgHost.textContent = text;
     msgHost.hidden = false;
-    axisHost.replaceChildren();
+    axisHost.replaceChildren(); // static-render — one-shot clear under an error message
     paint();
   };
 

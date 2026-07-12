@@ -1,3 +1,4 @@
+// from vanilla-components/lib/component.js@9f20766 - re-copy to update, don't fork
 // @ts-check
 // defineComponent — the single home of the warm-load-once + build contract every
 // component shares. Given the component's module URL and kebab name, it loads the

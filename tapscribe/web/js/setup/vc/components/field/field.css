@@ -1,3 +1,4 @@
+/* from vanilla-components/components/field/field.css@9f20766 - re-copy to update, don't fork */
 @layer vanilla-components {
 /* field — a labeled form control (input/select/textarea) with a hint and native
    validation styling. Unifies TapScribe `.field/.input/.select`. */

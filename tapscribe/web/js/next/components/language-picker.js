@@ -12,7 +12,7 @@
  * @param {import('../../types.js').LanguageCatalog} catalog
  */
 export function fillLanguageOptions(sel, catalog) {
-  sel.replaceChildren();
+  sel.replaceChildren(); // static-render — one-shot options (re)fill of the <select> being built
   for (const { code, name } of catalog?.languages || []) {
     sel.add(new Option(`${name} (${code})`, code));
   }

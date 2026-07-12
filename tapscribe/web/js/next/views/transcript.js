@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · Transcript (SESSION stage 3). The merged transcript for the open
 // session (main/left) + a transcription CONTROL COLUMN (right): the meeting
 // LANGUAGES control (a candidate-language <select multiple> + a readout of the
@@ -553,7 +554,7 @@ export function build(ctx) {
     // tag distinguishes them. recordingFor maps a selected region back to its
     // parent original so either selection lands on the same list.
     const rec = recordingFor(sel, currentFiles);
-    cacheBody.replaceChildren();
+    cacheBody.replaceChildren(); // static-render — user picked a row; one-shot rebuild of the cache list follows
     cacheHint.textContent = rec ? truncMid(rec.name, 30) : "no WAV";
     if (!rec) {
       const empty = document.createElement("div");
@@ -727,7 +728,7 @@ export function build(ctx) {
 
       // Source toggle (original / stripped) — drives the range transcribe AND
       // the per-WAV picker below.
-      srcSwHost.replaceChildren(buildSourceToggle({
+      srcSwHost.replaceChildren(buildSourceToggle({ // gate-allow: raw-swap — ctlSig-gated swap of the buttons-only source toggle
         active: src,
         hasStripped: !!sess?.stripped,
         onPick: (which) => {
@@ -772,7 +773,7 @@ export function build(ctx) {
     if (pickState === "rows") {
       if (pickerSig !== lastPickerSig && !deferIfSelectionInside(wavList)) {
         // Clear any leftover placeholder so reconcileList owns the host.
-        if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren();
+        if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated picker gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
         reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
         lastPickerSig = pickerSig;
       }
@@ -786,7 +787,7 @@ export function build(ctx) {
         : sess
           ? (src === "stripped" ? "No stripped clips — strip silence in Recordings first." : "No WAVs recorded yet.")
           : "Pick a session from the spine.";
-      wavList.replaceChildren(empty);
+      wavList.replaceChildren(empty); // gate-allow: raw-swap — same pickerSig-gated placeholder swap
     }
   };
 

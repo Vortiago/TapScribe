@@ -1,3 +1,4 @@
+// from vanilla-components/components/chip/chip.js@9f20766 - re-copy to update, don't fork
 // @ts-check
 // Chip — a compact inline pill/badge with an optional tone and leading dot.
 import { tpl, pick } from "../../lib/templates.js";

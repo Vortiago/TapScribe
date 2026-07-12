@@ -128,6 +128,35 @@ jobs:
       - name: Typecheck
         run: cd frontend && npm run typecheck
 
+  # Frontend convention gates — the vendored vanilla-web checkers
+  # (tapscribe/web/tools/, provenance-stamped; re-copy from the toolkit to
+  # update, never edit in place): check-conventions (signal-listener /
+  # html-string / raw-swap), check-slots (the .html <template>/[data-slot] ↔
+  # JS tpl()/slot()/pick() seam) and check-css-vars (a required var(--x)
+  # whose name is defined nowhere). Zero-dep; each tool scans the directory
+  # holding tools/ — tapscribe/web/. check-vendored.mjs (drift against the
+  # toolkit) needs a Verktoykasse checkout, so it stays a local run — see
+  # CLAUDE.md.
+  frontend-gates:
+    name: frontend gates (conventions · slots · css-vars)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: check-conventions
+        run: node tapscribe/web/tools/check-conventions.mjs
+
+      - name: check-slots
+        run: node tapscribe/web/tools/check-slots.mjs
+
+      - name: check-css-vars
+        run: node tapscribe/web/tools/check-css-vars.mjs
+
   # Bridge typecheck — the SpatialChat Bridge's shared, dependency-free
   # helpers (control-client.js + pipeline-view.js) opt into `// @ts-check`
   # and are gated by `tsc --noEmit --strict`. Same rationale + shape as

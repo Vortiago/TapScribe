@@ -254,6 +254,34 @@ introduced and how to avoid them:
   it's swallowed. If suppression is *not* the right behaviour, log or
   re-raise instead.
 
+## Frontend toolkit vendoring + gates
+
+The frontend vendors parts of the Verktoykasse toolkit (vanilla-web /
+vanilla-components) as provenance-stamped, copy-verbatim files — **never
+edit them in place**; re-copy from the toolkit to update:
+
+- `tapscribe/web/js/setup/vc/` — the `/setup` page's component library
+  (its `PROVENANCE.md` has the re-copy commands).
+- `tapscribe/web/tools/` — the gate tier: `check-conventions.mjs`
+  (signal-listener / html-string / raw-swap rules), `check-slots.mjs`
+  (the `.html` `<template>`/`[data-slot]` ↔ JS `tpl()`/`slot()`/`pick()`
+  seam) and `check-css-vars.mjs` (a required `var(--x)` defined nowhere).
+  Each scans `tapscribe/web/` (the directory holding `tools/`). CI runs
+  them in the `frontend-gates` job; the stop hook runs them locally.
+  Suppressions are comment-borne and must carry a WHY — `// static-render`
+  for a deliberate one-shot render, `// gate-allow: <rule> — reason`
+  trailing on the line, or file-level in the first ~10 lines. Same bar as
+  `except: pass` above: never a bare marker.
+- `bridges/spacialchat-bridge/{lib,components}/` — an older stamped copy
+  (`@48bf2bf`), deliberately left "stale" until its own re-vendor pass
+  (re-vendoring changes component APIs and needs the bridge e2e).
+
+Drift check (local-only — it needs a Verktoykasse checkout):
+`node tapscribe/web/tools/check-vendored.mjs <toolkit-checkout>` from the
+repo root. `stale` is fine (canon moved on; it prints the exact re-copy
+command); `forked` is the violation — never patch a vendored copy, extend
+around it or upstream the change (see Verktoykasse #70 for the shape).
+
 ## Verify before claiming green: actually run every CI job locally
 
 CI has multiple jobs and they don't all run by default. **Skipped tests

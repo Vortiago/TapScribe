@@ -1,3 +1,4 @@
+// from vanilla-components/components/spinner/spinner.js@9f20766 - re-copy to update, don't fork
 // @ts-check
 // Spinner — an indeterminate loading ring with an optional label.
 import { tpl, pick } from "../../lib/templates.js";

@@ -1,4 +1,7 @@
 // @ts-check
+// gate-allow: raw-swap — linear wizard with no polled re-renders: every swap is
+// a one-shot render driven by a user action or a terminal install event, so
+// there is no tick that could clobber interaction state (renderRegion's case).
 // First-run / manage-models setup surface, composed from vanilla-components on
 // the shared tokens (see vc/PROVENANCE.md). Reads GET /api/setup/state, lets the
 // operator pick model families + a host-valid backend, POSTs to

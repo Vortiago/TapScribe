@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages engine selector — a VISIBLE backend-chip row + a COMPACT model
 // dropdown. Used in ONE place now:
 //   - Settings (the global batch DEFAULT engine = the ADR-0010 generalist).
@@ -11,7 +12,7 @@
 // tall model-by-family grid; we ship few models, so it's now a single dropdown
 // that matches the classic UI's session-detail model <select>.
 
-import { tpl, pick } from "../../templates.js";
+import { tpl, mount, pick } from "../../templates.js";
 import { FAMILY_LABELS, buildModelSelect } from "../../model-select.js";
 
 /** @type {Record<string, string>} */
@@ -97,5 +98,5 @@ export function render(host, { state, catalog, onChange }) {
   });
   frag.appendChild(row("Model", sel));
 
-  host.replaceChildren(frag);
+  mount(host, frag);
 }

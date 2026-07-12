@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · Summary (SESSION stage 4) — the post-transcription summarizer.
 //
 // WIRED for the Local, Command, and API sources. Local (#86) is the bundled,
@@ -289,7 +290,7 @@ export function build(ctx) {
   const reflectCmdPreview = () => {
     const cmd = cmdInput.value.trim();
     if (!cmd) {
-      cmdPreview.replaceChildren();
+      cmdPreview.replaceChildren(); // static-render — input-event reflect of a text-only preview; not a polled region
       return;
     }
     const p = promptTa.value.trim();
@@ -299,7 +300,7 @@ export function build(ctx) {
     l1.textContent = `will run: ${cmd}${promptArg}`;
     const l2 = document.createElement("div");
     l2.textContent = "merged transcript → stdin";
-    cmdPreview.replaceChildren(l1, l2);
+    cmdPreview.replaceChildren(l1, l2); // static-render — same input-event reflect
   };
   promptTa.addEventListener("input", reflectCmdPreview);
 

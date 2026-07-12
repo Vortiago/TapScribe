@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · People (GLOBAL · Registry) — the canonical cross-session Person
 // model (ADR-0009; CONTEXT.md: Person · Identity · Roster · People Registry).
 //

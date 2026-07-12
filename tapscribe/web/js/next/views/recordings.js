@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers attach to nodes this view builds and owns; an evicted or rebuilt view drops the whole subtree with its listeners (no document/window targets here). Revisit if views gain a mount AbortSignal.
 // Stages · Recordings (SESSION stage 2). The per-session AUDIO-FILES stage: a
 // real waveform (an isolated <canvas> drawn from server-computed peaks)
 // sitting above the REAL strip-silence knobs + the per-WAV list (originals +
@@ -30,7 +31,7 @@
 // (files_sig / source), deferring while a control is focused or text is being
 // selected inside the list.
 
-import { tpl, pick, reconcileList, deferIfSelectionInside } from "../../templates.js";
+import { tpl, mount, pick, reconcileList, deferIfSelectionInside } from "../../templates.js";
 import { postJson, del, loadSessionFiles, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
@@ -416,7 +417,7 @@ export function build(ctx) {
     const el = document.createElement("div");
     el.className = "expand-tx-loading dim small";
     el.textContent = msg;
-    host.replaceChildren(el);
+    mount(host, el);
   };
 
   /** Fill one open <details>'s body with the WAV's FULL cached transcript,
@@ -438,18 +439,18 @@ export function build(ctx) {
     const stamp = marker.transcribed_at || "";
     const cached = wavTranscript.peek(sid, name, src, stamp);
     if (cached !== undefined) {
-      if (cached) host.replaceChildren(buildExpand(cached, speakerName));
+      if (cached) mount(host, buildExpand(cached, speakerName));
       else fillExpandMessage(host, "no transcript body on disk");
       return;
     }
-    host.replaceChildren(tpl("tpl-next-txloading"));
+    mount(host, tpl("tpl-next-txloading"));
     // Tag the host with the stamp we're fetching so a re-transcribe that
     // recreates the row (new marker) doesn't get an older body painted in.
     host.dataset.txStamp = stamp;
     wavTranscript.fetch(sid, name, src, stamp)
       .then((full) => {
         if (host.dataset.txStamp !== stamp || !host.isConnected) return;
-        if (full) host.replaceChildren(buildExpand(full, speakerName));
+        if (full) mount(host, buildExpand(full, speakerName));
         else fillExpandMessage(host, "no transcript body on disk");
       })
       .catch(() => {
@@ -867,7 +868,7 @@ export function build(ctx) {
       if (listSig !== lastListSig && !deferIfSelectionInside(wavList)) {
         // Clear any leftover empty/loading placeholder (a non-reconcile child)
         // so reconcileList owns the host's children outright.
-        if (!wavList.querySelector(".wavrow")) wavList.replaceChildren();
+        if (!wavList.querySelector(".wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated view-level WAV-list gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
         reconcileList(wavList, buildRowModels(files, src, isCurrent), rowKey, buildRow);
         lastListSig = listSig;
       }
@@ -883,7 +884,7 @@ export function build(ctx) {
           : listState === "empty"
             ? "No recordings yet. Once taps record into this session, each WAV appears here."
             : "Pick a session from the spine to manage its recordings.";
-      wavList.replaceChildren(ph);
+      wavList.replaceChildren(ph); // gate-allow: raw-swap — same listSig-gated gate: placeholder swap that cannot route through renderRegion
     }
   };
 

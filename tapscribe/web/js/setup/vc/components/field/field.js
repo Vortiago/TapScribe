@@ -1,3 +1,4 @@
+// from vanilla-components/components/field/field.js@9f20766 - re-copy to update, don't fork
 // @ts-check
 // field — a labeled form control. The control is a native input/select/textarea
 // (per `type`); native constraint validation styling via :user-invalid in the CSS.

@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers ride nodes this component builds; replaced subtrees take their listeners with them, and the few persistent targets are wired exactly once per page.
 // Active taps panel — one row per live audio source the recorder is
 // currently receiving bytes from.
 
@@ -151,7 +152,7 @@ export function render(j, { countEl, badgeEl, bodyEl }) {
   // empty-state node once. The rows themselves are then managed in place below.
   if (st.mode !== "active") {
     mount(badgeEl, tpl("tpl-active-badge-capturing"));
-    bodyEl.replaceChildren();
+    bodyEl.replaceChildren(); // static-render — one-shot clear on the idle→active transition; rows are then managed in place
     st.mode = "active";
     st.rows.clear();
   }

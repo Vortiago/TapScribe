@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers ride nodes this component builds; replaced subtrees take their listeners with them, and the few persistent targets are wired exactly once per page.
 // "Default config" card — global batch defaults (prompt.txt, hotwords.txt)
 // + the hallucination filter. The live prompt has moved into the live
 // channel panel; each session's per-batch override lives in the session

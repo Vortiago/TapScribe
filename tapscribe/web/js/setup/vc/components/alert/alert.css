@@ -1,3 +1,4 @@
+/* from vanilla-components/components/alert/alert.css@9f20766 - re-copy to update, don't fork */
 @layer vanilla-components {
 /* Alert — an inline banner. Neutral by default; a tone colours the border, a
    faint fill, and the title via the shared --tone (var() fallback = neutral). */

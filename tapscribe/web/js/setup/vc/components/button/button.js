@@ -1,3 +1,4 @@
+// from vanilla-components/components/button/button.js@9f20766 - re-copy to update, don't fork
 // @ts-check
 // Button — a styled native <button> with tone/size variants.
 import { tpl, pick } from "../../lib/templates.js";

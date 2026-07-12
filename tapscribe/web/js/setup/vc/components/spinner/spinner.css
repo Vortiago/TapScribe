@@ -1,3 +1,4 @@
+/* from vanilla-components/components/spinner/spinner.css@9f20766 - re-copy to update, don't fork */
 @layer vanilla-components {
 /* Spinner — an indeterminate ring. Colour is currentColor (inherits, or set via
    a tone/--accent on the host); size is one --spinner-size custom property. */

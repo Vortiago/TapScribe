@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — boot-time wiring on page-lifetime singletons (rail buttons, document visibility, window wake); main.js runs once per page, so these listeners are deliberately permanent.
 // TapScribe · Stages — Phase-1 entry point for the /next dashboard.
 //
 // Boots a slim left SPINE (two groups: GLOBAL Taps·People·Settings, pinned;
@@ -14,7 +15,7 @@
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
 import { fetchState, postJson, putJson } from "../api.js";
-import { loadTemplates, pick, consumeDeferredRender, interactionHeld } from "../templates.js";
+import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld } from "../templates.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import { createPollPacer, FAST_MS } from "./poll-pacer.js";
 import * as spine from "./components/spine.js";
@@ -352,7 +353,7 @@ function renderView(j, session) {
   }
 
   if (mountedKey !== key) {
-    root.replaceChildren(built.host ?? built.node);
+    mount(root, built.host ?? built.node);
     mountedKey = key;
   }
   built.update(j, session);

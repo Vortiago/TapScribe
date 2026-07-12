@@ -1,3 +1,4 @@
+/* from vanilla-components/components/panel/panel.css@9f20766 - re-copy to update, don't fork */
 @layer vanilla-components {
 /* Panel — a bordered, elevated surface with an optional header and a body.
    The building-block container the apps reach for first (Slipestein `.panel`,
@@ -21,6 +22,12 @@
 
   .panel-body {
     padding: var(--space-m);
+  }
+
+  /* collapsed: the body is hidden (native [hidden]); drop the head's bottom
+     border so it doesn't sit above an empty gap. */
+  :scope[data-collapsed="true"] .panel-head {
+    border-bottom-color: transparent;
   }
 
   /* fill: stretch inside a flex column and let the body own the scroll —

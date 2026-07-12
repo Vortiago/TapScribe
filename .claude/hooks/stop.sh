@@ -62,3 +62,20 @@ if [ -f frontend/package.json ] && [ -x frontend/node_modules/.bin/tsc ]; then
     exit 2
   fi
 fi
+
+# Frontend convention gates — same three vendored checkers as CI's
+# frontend-gates job (tapscribe/web/tools/), so a violation surfaces here
+# instead of on the PR. Zero-dep beyond node; skipped when node is missing,
+# same fail-open philosophy as the ruff/tsc skips above.
+if command -v node >/dev/null 2>&1 && [ -f tapscribe/web/tools/check-conventions.mjs ]; then
+  for gate in check-conventions check-slots check-css-vars; do
+    if ! gate_out=$(node "tapscribe/web/tools/$gate.mjs" 2>&1); then
+      {
+        echo "$gate failed — fix the findings below before ending the turn:"
+        echo
+        echo "$gate_out"
+      } >&2
+      exit 2
+    fi
+  done
+fi

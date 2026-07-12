@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — handlers ride nodes this component builds; replaced subtrees take their listeners with them, and the few persistent targets are wired exactly once per page.
 // Live channel panel — model/lang form + start/stop/apply controls + recent
 // log. Body rebuild is skipped while the user is editing the form or the
 // payload hasn't actually changed, so open <details>/<select> stay open.

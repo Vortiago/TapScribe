@@ -382,7 +382,7 @@ export function mutateButton(btn, mutate, { afterMutate, failMessage }) {
  * }} opts
  */
 export function wireSave({ btn, status, put, onSuccess }) {
-  btn.addEventListener("click", async () => {
+  btn.addEventListener("click", async () => { // gate-allow: signal-listener — wireSave wires the button once when the caller builds it; the listener dies with the button
     if (!status) return;
     btn.disabled = true;
     status.textContent = "saving…";
