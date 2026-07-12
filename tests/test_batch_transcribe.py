@@ -201,6 +201,44 @@ async def test_transcribe_one_falls_back_to_global_when_meta_empty(
     assert captured["hotwords"] == "Acme"
 
 
+async def test_transcribe_one_precheck_runs_off_the_event_loop(
+    recorder_under_test, install_stub_transcriber, monkeypatch
+):
+    """Issue #214: the original WAV's duration + whole-file RMS pre-check
+    reads the file from disk and runs a numpy pass over it — pure disk/CPU
+    work that must run via `asyncio.to_thread`, not inline on the event
+    loop, or a slow disk stalls every concurrent await (the /api/state poll
+    included) for as long as the read takes. Thread-identity assertion
+    (not a timing race) — same style as
+    test_transcribe_session_runs_model_on_one_dedicated_thread below."""
+    import threading
+
+    from tapscribe.audio import wav_rms_dbfs as real_rms
+
+    install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m", text="hi"))
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+
+    seen_is_main: list[bool] = []
+
+    def _spy_rms(path):
+        seen_is_main.append(threading.current_thread() is threading.main_thread())
+        return real_rms(path)
+
+    monkeypatch.setattr("tapscribe.batch_transcribe.wav_rms_dbfs", _spy_rms)
+
+    request = BatchOneRequest(
+        session="s",
+        name=WAV_NAME,
+        source="original",
+        model="fake-m",
+        backend="cpu",
+        source_lang=None,
+    )
+    await transcribe_one(recorder_under_test, request)
+
+    assert seen_is_main == [False], seen_is_main
+
+
 # ---------------------------------------------------------------------------
 # transcribe_session — happy path + JobTracker + range errors
 # ---------------------------------------------------------------------------
@@ -498,6 +536,80 @@ async def test_transcribe_session_runs_model_on_one_dedicated_thread(
     # dedicated model worker — never a default-pool thread.
     assert len(set(seen_threads)) == 1, f"model scattered across threads: {seen_threads}"
     assert seen_threads[0].startswith(MODEL_THREAD_PREFIX), seen_threads[0]
+
+
+async def test_transcribe_session_selection_runs_off_the_event_loop(
+    recorder_under_test, install_stub_transcriber, monkeypatch
+):
+    """Issue #214: `select_session_wavs` walks every WAV in the session and
+    reads a whole-file RMS pass for each — pure disk/CPU work that must be
+    offloaded via `asyncio.to_thread` (before the job slot is even claimed,
+    per the issue) rather than run inline on the event loop."""
+    import threading
+
+    from tapscribe.session_merge import select_session_wavs as real_select
+
+    install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m", text="merged"))
+    seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+
+    seen_is_main: list[bool] = []
+
+    def _spy(*a, **kw):
+        seen_is_main.append(threading.current_thread() is threading.main_thread())
+        return real_select(*a, **kw)
+
+    monkeypatch.setattr("tapscribe.batch_transcribe.select_session_wavs", _spy)
+
+    request = BatchSessionRequest(
+        session="s",
+        source="original",
+        model="fake-m",
+        backend="cpu",
+        from_iso=None,
+        to_iso=None,
+        force=False,
+        source_lang=None,
+    )
+    await transcribe_session(recorder_under_test, request)
+
+    assert seen_is_main == [False], seen_is_main
+
+
+async def test_transcribe_session_locked_merge_and_write_run_off_the_event_loop(
+    recorder_under_test, install_stub_transcriber, monkeypatch
+):
+    """Issue #214: `merge_session` re-parses every WAV's cached sidecar JSON,
+    and the merged transcript is then `json.dumps`'d and written twice — all
+    pure disk/CPU work that must be offloaded so the merge-and-write tail
+    doesn't stall the loop right after the model loop finishes."""
+    import threading
+
+    from tapscribe.session_merge import merge_session as real_merge
+
+    install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m", text="merged"))
+    seed_session(recorder_under_test.recordings_dir, "s", SESSION_WAVS)
+
+    seen_is_main: list[bool] = []
+
+    def _spy(*a, **kw):
+        seen_is_main.append(threading.current_thread() is threading.main_thread())
+        return real_merge(*a, **kw)
+
+    monkeypatch.setattr("tapscribe.batch_transcribe.merge_session", _spy)
+
+    request = BatchSessionRequest(
+        session="s",
+        source="original",
+        model="fake-m",
+        backend="cpu",
+        from_iso=None,
+        to_iso=None,
+        force=False,
+        source_lang=None,
+    )
+    await transcribe_session(recorder_under_test, request)
+
+    assert seen_is_main == [False], seen_is_main
 
 
 # ---------------------------------------------------------------------------

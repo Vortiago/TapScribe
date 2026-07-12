@@ -146,10 +146,17 @@ async def run_transcribe_stage(req: PipelineRequest, *, job, model: str, backend
     """`transcribe_session` minus the claim, pinned to the stripped output of
     the stage before. A session whose strip found zero speech has no
     stripped/ dir at all, so the selection comes back empty → `NoUsableWavs`
-    — the correct verdict for a meeting with nothing usable in it."""
+    — the correct verdict for a meeting with nothing usable in it.
+
+    `select_session_wavs` reads a whole-file RMS pass per WAV (issue #214)
+    — offloaded via `asyncio.to_thread`, same as the manual transcribe
+    path, so the pipeline's transcribe stage doesn't stall the loop before
+    the model is even loaded."""
     session_dir = resolve_session_dir(req.session)
     try:
-        selection = select_session_wavs(session_dir, from_iso=None, to_iso=None, source="stripped")
+        selection = await asyncio.to_thread(
+            select_session_wavs, session_dir, from_iso=None, to_iso=None, source="stripped"
+        )
     except ValueError as e:
         raise InvalidRange(str(e)) from e
     if not selection.wavs:

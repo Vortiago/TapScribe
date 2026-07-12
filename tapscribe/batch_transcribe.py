@@ -18,8 +18,10 @@ re-implementing the chain.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from . import config
@@ -342,6 +344,32 @@ def _resolve_cover(req):
 # ---------------------------------------------------------------------------
 
 
+def _precheck_wav(path: Path, original_path: Path) -> None:
+    """Synchronous body of `transcribe_one`'s pre-check: whole-file duration
+    read plus a numpy RMS pass over the ORIGINAL (issue #214) — pure disk/CPU
+    work, run by the caller via `asyncio.to_thread` so it never blocks the
+    event loop. Raises `WavUnreadable` / `WavTooQuiet` exactly as before;
+    those exceptions cross the executor boundary unchanged.
+
+    Silence detection always reads the ORIGINAL, not the per-source file.
+    The stripped sibling's RMS can be misleadingly high because silero may
+    have false-positive'd on a brief noise burst."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if size < 64 or wav_duration_s(path) <= 0.0:
+        raise WavUnreadable(f"empty or unreadable WAV (size={size} bytes)")
+
+    rms_dbfs = wav_rms_dbfs(original_path)
+    if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
+        raise WavTooQuiet(
+            f"original WAV is essentially silent ({rms_dbfs:.1f} dBFS RMS, "
+            f"floor {config.SILENT_RMS_DBFS_FLOOR} dBFS) — Whisper would "
+            "hallucinate. Remove or skip this file."
+        )
+
+
 async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # noqa: ARG001 — Recorder unused for the single-WAV path today but kept for symmetry with transcribe_session and so future per-WAV state (e.g. per-tap overrides) has a place to land
     """Transcribe one WAV, running the meeting's cover as a one-WAV slice
     (ADR-0011): the generalist plus a specialist for any of the meeting's
@@ -350,29 +378,15 @@ async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # n
     Returns the winning sidecar's raw JSON dict so the wire shape callers expect
     is preserved.
 
-    Pre-checks the ORIGINAL WAV's size and RMS so the operator gets fast
+    Pre-checks the ORIGINAL WAV's size and RMS (offloaded via
+    `asyncio.to_thread` — issue #214) so the operator gets fast
     `WavUnreadable` / `WavTooQuiet` feedback on noise files instead of
     waiting for the model to chew through silence and produce a
-    hallucinated transcript."""
+    hallucinated transcript, without blocking the event loop while the
+    file is read."""
     path = resolve_wav(req.session, req.name, req.source)
-    try:
-        size = path.stat().st_size
-    except OSError:
-        size = 0
-    if size < 64 or wav_duration_s(path) <= 0.0:
-        raise WavUnreadable(f"empty or unreadable WAV (size={size} bytes)")
-
-    # Silence detection always reads the ORIGINAL, not the per-source
-    # file. The stripped sibling's RMS can be misleadingly high because
-    # silero may have false-positive'd on a brief noise burst.
     original_path = resolve_original_wav(req.session, req.name)
-    rms_dbfs = wav_rms_dbfs(original_path)
-    if rms_dbfs < config.SILENT_RMS_DBFS_FLOOR:
-        raise WavTooQuiet(
-            f"original WAV is essentially silent ({rms_dbfs:.1f} dBFS RMS, "
-            f"floor {config.SILENT_RMS_DBFS_FLOOR} dBFS) — Whisper would "
-            "hallucinate. Remove or skip this file."
-        )
+    await asyncio.to_thread(_precheck_wav, path, original_path)
 
     # Same language policy + cover as the session range (ADR-0011): declare
     # languages, not a model. An explicit per-job source_lang still pins and
@@ -411,11 +425,17 @@ async def transcribe_session(recorder: Recorder, req: BatchSessionRequest) -> di
     slot is already taken (releasing nothing in that case — and before the
     model is even loaded) and releases the slot on every other exit path.
     Raises `NoUsableWavs` when the range filter rejected every WAV; per-WAV
-    failures inside the loop propagate through the cm, which still releases."""
+    failures inside the loop propagate through the cm, which still releases.
+
+    `select_session_wavs` walks every WAV in the session and reads a
+    whole-file RMS pass on each (issue #214) — offloaded via
+    `asyncio.to_thread` so that scan doesn't block the event loop before
+    the job slot is even claimed."""
     session_dir = resolve_session_dir(req.session)
 
     try:
-        selection = select_session_wavs(
+        selection = await asyncio.to_thread(
+            select_session_wavs,
             session_dir,
             from_iso=req.from_iso,
             to_iso=req.to_iso,
@@ -477,13 +497,19 @@ async def transcribe_session_locked(req: BatchSessionRequest, *, selection, job)
     # leave _primary aimed at a prior cover's specialist.
     _select_primaries(selection.wavs, per_wav, cover_languages=cover_languages)
 
-    transcript = merge_session(selection)
-    merged = transcript.to_dict()
-    if not merged.get("model"):
-        merged["model"] = req.model
+    def _merge_and_write() -> dict[str, Any]:
+        """`merge_session` re-parses every WAV's cached sidecar JSON, and the
+        merged transcript is then `json.dumps`'d and written twice — pure
+        disk/CPU work (issue #214), run in one `asyncio.to_thread` call so
+        the tail doesn't stall the loop right after the model loop ends."""
+        transcript = merge_session(selection)
+        merged = transcript.to_dict()
+        if not merged.get("model"):
+            merged["model"] = req.model
 
-    out_path = session_dir / FILENAME_TRANSCRIPT_JSON
-    atomic_write_text(out_path, json.dumps(merged, indent=2, ensure_ascii=False))
-    atomic_write_text(session_dir / FILENAME_TRANSCRIPT_TXT, transcript.plain_text)
+        out_path = session_dir / FILENAME_TRANSCRIPT_JSON
+        atomic_write_text(out_path, json.dumps(merged, indent=2, ensure_ascii=False))
+        atomic_write_text(session_dir / FILENAME_TRANSCRIPT_TXT, transcript.plain_text)
+        return merged
 
-    return merged
+    return await asyncio.to_thread(_merge_and_write)
