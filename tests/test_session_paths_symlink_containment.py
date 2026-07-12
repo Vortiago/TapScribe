@@ -86,8 +86,9 @@ def _assert_escape_refused(fn, recordings_dir: Path) -> None:
     root = os.path.realpath(config.RECORDINGS_DIR)
     try:
         result = fn()
-    except SessionPathError as exc:
-        assert exc.status_code == 404
+    except SessionPathError:
+        # Raising the domain error IS the refusal; its HTTP status is pinned
+        # once at app._DOMAIN_ERROR_STATUS, not duplicated on the exception.
         return
     real = os.path.realpath(result)
     assert real == root or real.startswith(root + os.sep), (

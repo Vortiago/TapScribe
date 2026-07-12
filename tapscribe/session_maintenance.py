@@ -39,19 +39,13 @@ from .text import atomic_write_text
 class AbsorbCollision(Exception):
     """Filename collision between source and target during absorb."""
 
-    status_code = 409
-
 
 class InvalidAbsorbRequest(Exception):
     """target == source — absorbing a session into itself is a no-op."""
 
-    status_code = 400
-
 
 class SessionDeleteError(Exception):
     """IO failure during session audio deletion (rmtree OSError)."""
-
-    status_code = 500
 
 
 def session_is_empty(session_dir: Path) -> bool:

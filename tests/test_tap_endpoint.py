@@ -1024,8 +1024,8 @@ class TestTapSessionParam:
         (mirroring token rejection) — a misconfigured bridge fails loudly
         instead of silently recording into the wrong session. The id
         crosses resolve_session_dir (the canonical path-safety seam), whose
-        HTTPException(404) denies the upgrade with an HTTP 404 response
-        before accept."""
+        SessionNotFound (mapped to 404 by app._DOMAIN_ERROR_STATUS) denies the
+        upgrade with an HTTP 404 WebSocketDenialResponse before accept."""
         from starlette.testclient import WebSocketDenialResponse
 
         with pytest.raises(WebSocketDenialResponse) as exc_info:

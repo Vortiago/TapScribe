@@ -33,33 +33,24 @@ from . import config
 
 class SessionPathError(Exception):
     """Base for session path-layer domain errors. Catch sites (sessions.known_names_for_session,
-    session_merge.select_session_wavs) catch this base to degrade gracefully."""
-
-    status_code: int = 404
+    session_merge.select_session_wavs) catch this base to degrade gracefully. The HTTP status
+    for each subclass lives ONCE in app._DOMAIN_ERROR_STATUS (the handler's only source)."""
 
 
 class SessionNotFound(SessionPathError):
     """Session not found or path validation failed (unsafe input, containment escape, missing dir)."""
 
-    pass
-
 
 class WavNotFound(SessionPathError):
     """WAV file not found (containment escape, missing file, wrong extension)."""
 
-    pass
-
 
 class UnknownSource(SessionPathError):
-    """Unknown `source` value in resolve_source_dir."""
-
-    status_code = 400
+    """Unknown `source` value in resolve_source_dir (a 400 client-input error, not a not-found)."""
 
 
 class StrippedMissing(SessionPathError):
     """stripped/ directory does not exist for the session."""
-
-    pass
 
 
 # Rejects values that would let an HTTP-supplied `session` or `name` escape
