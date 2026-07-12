@@ -552,6 +552,14 @@ export interface EffectiveMeta {
   languages: string[];
 }
 
+// GET /api/search — one hit per matching session.
+export interface SearchHit {
+  session: string;
+  label: string;
+  snippet: string;
+  count: number;
+}
+
 // GET /api/languages — the candidate-language catalog (ADR-0010): the full
 // selectable allowlist (code + display name), the operator's current global
 // default, and the specialist table (language → the extra model the cover adds,

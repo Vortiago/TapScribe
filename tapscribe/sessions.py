@@ -820,3 +820,79 @@ def gather_sessions(
             },
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Cross-session transcript-content search
+# ---------------------------------------------------------------------------
+
+
+def search_transcripts(query: str) -> list[dict[str, Any]]:
+    """Scan every session's merged transcript for `query` (case-insensitive).
+
+    Returns one hit per matching session: ``{session, label, snippet, count}``.
+    Sessions without a valid merged transcript are silently skipped.
+
+    A blank/whitespace-only query short-circuits to ``[]`` — never iterates,
+    never parses, never 500.
+    """
+    if not query.strip():
+        return []
+
+    root = config.RECORDINGS_DIR
+    results: list[dict[str, Any]] = []
+    term = query.lower()
+
+    for sd in sorted(root.glob("*"), reverse=True):
+        if not sd.is_dir():
+            continue
+
+        # Read the merged transcript; skip sessions without one.
+        raw = _read_session_json_cached(sd / FILENAME_TRANSCRIPT_JSON)
+        if not isinstance(raw, dict):
+            continue
+        plain = raw.get("plain_text")
+        if not isinstance(plain, str) or not plain:
+            continue
+
+        text_lower = plain.lower()
+        if term not in text_lower:
+            continue
+
+        # Read the label from session-meta; _coerce_session_meta returns {}
+        # on None/non-dict, so .get("label") is always safe and str.
+        meta = _coerce_session_meta(_read_session_json_cached(sd / FILENAME_META_JSON))
+        label = meta.get("label", "")
+
+        # Compute occurrence count.
+        count = text_lower.count(term)
+
+        # Extract a ~±100-char snippet around the first match.
+        first = text_lower.find(term)
+        win_start = max(0, first - 100)
+        win_end = min(len(plain), first + len(term) + 100)
+        snippet = plain[win_start:win_end]
+        left_clipped = win_start > 0
+        right_clipped = win_end < len(plain)
+        # Trim to whole-word boundaries and mark clipping with `…`.
+        if left_clipped:
+            idx = snippet.find(" ")
+            if idx != -1:
+                snippet = snippet[idx + 1 :]
+                snippet = "…" + snippet
+        if right_clipped:
+            idx = snippet.rfind(" ")
+            if idx != -1:
+                snippet = snippet[:idx]
+            snippet = snippet + "…"
+
+        results.append(
+            {
+                "session": sd.name,
+                "label": label,
+                "snippet": snippet,
+                "count": count,
+            }
+        )
+
+    return results
