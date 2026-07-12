@@ -391,7 +391,23 @@ class TapFanOut:
         kept = self._bytes_received > 0
         # Finalize the WAV handle only if it was actually opened.
         if self._wf is not None and self._record is not None:
-            self._wf.close()
+            try:
+                self._wf.close()
+            except OSError as e:
+                # Disk-full (or similar) can strike HERE too, patching the
+                # RIFF/data-size header, even though every prior writeframes()
+                # call already succeeded (#264). Letting this propagate would
+                # skip the UtteranceIndex release and the relay/ActiveStream
+                # teardown below, stranding the record open=True forever and
+                # wedging a phantom "live" row on the dashboard (the same
+                # shape of leak #196 fixed for a failure during _open()). The
+                # frames already on disk aren't lost by swallowing this; only
+                # the header patch is best-effort, matching the unlink()
+                # suppression a few lines down.
+                print(
+                    f"[tapscribe] /tap WAV finalize failed for {self._record.filename}: {e}",
+                    flush=True,
+                )
             if not kept:
                 with suppress(OSError):
                     self._record.path.unlink()
