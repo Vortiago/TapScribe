@@ -82,10 +82,13 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
 # The TapScribe per-tap silence gate (gate_kind="tapscribe", which is the
 # default) imports silero_vad lazily on the first /tap WS. Missing → the tap
 # falls back to passthrough mode ("gate construction failed … falling back to
-# passthrough"), which silently disables the gate the operator picked. Install
-# the [vad] extra so the dependency is satisfied alongside the model install.
-# No-op on re-runs once installed. (No ffmpeg branch here: the array-accepting
-# backends — mlx-whisper, parakeet-mlx, and the transformers Parakeet path —
+# passthrough"), which silently disables the gate the operator picked.
+# silero-vad is a CORE dependency (no [vad] extra — it installs
+# unconditionally with a plain `pip install -e .`), so this branch is a
+# venv-repair fallback for an environment created before silero-vad became
+# core; on a fresh install the probe below already passes and the branch
+# no-ops. (No ffmpeg branch here: the array-accepting backends —
+# mlx-whisper, parakeet-mlx, and the transformers Parakeet path —
 # pre-decode the recorder's WAV via tapscribe/wav_predecode.py and skip the
 # ffmpeg-shelling audio loaders the upstream packages would otherwise use. See
 # CLAUDE.md.)
@@ -95,12 +98,12 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
 # the import path.
 & python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('silero_vad') else 1)" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[start] silero-vad missing — installing the [vad] extra so the TapScribe gate works…"
+    Write-Host "[start] silero-vad missing — repairing this venv with 'pip install -e .' (it's a core dependency)…"
     # NOT --quiet: torch is ~700MB and wheel resolution sometimes fails; visible
     # pip output gives the operator something to act on instead of a mute warning.
-    & python -m pip install -e ".[vad]"
+    & python -m pip install -e .
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "[start] 'pip install -e .[vad]' failed. The recorder will still boot, but the TapScribe silence gate will fall back to passthrough on every /tap."
+        Write-Warning "[start] 'pip install -e .' failed. The recorder will still boot, but the TapScribe silence gate will fall back to passthrough on every /tap."
     }
 }
 

@@ -337,9 +337,13 @@ class JobTracker:
 
 
 class LiveTranscripts:
-    """The dashboard's 'live transcripts' panel reads from this. The
-    Bridge POSTs settled WhisperLiveKit lines to /api/live-transcript;
-    they accumulate here until cleared."""
+    """The dashboard's 'live transcripts' panel reads from this. Settled
+    lines are consumed from the Recorder's own per-tap WlK relays —
+    TapFanOut._on_settled_line appends here directly, attributed to the
+    originating tap's identity/name and snapshotted session (CONTEXT.md:
+    LiveChannel · ActiveStreams · LiveTranscripts) — bounded to the last
+    `max_entries` (default 200) until cleared. There is no Bridge-POST path;
+    the Bridge never sends settled lines back (ADR-0002)."""
 
     def __init__(self, max_entries: int = 200) -> None:
         self._entries: deque[dict] = deque(maxlen=max_entries)

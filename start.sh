@@ -176,8 +176,11 @@ fi
 # the default) imports `silero_vad` lazily on the first /tap WS. Missing
 # → the tap falls back to passthrough mode ("gate construction failed …
 # falling back to passthrough"), which silently disables the gate the
-# operator picked. Pull the `[vad]` extra so the dependency is satisfied
-# alongside the model install. No-op on re-runs once installed.
+# operator picked. silero-vad is a CORE dependency (no `[vad]` extra —
+# it installs unconditionally with a plain `pip install -e .`), so this
+# branch is a venv-repair fallback for an environment created before
+# silero-vad became core; on a fresh install the probe below already
+# passes and the branch no-ops.
 #
 # (No ffmpeg branch here: the array-accepting backends — mlx-whisper,
 # parakeet-mlx, and the transformers Parakeet path — pre-decode the
@@ -191,13 +194,13 @@ fi
 # whether silero-vad is on the import path. The actual import is
 # deferred to `tapscribe.speech_gate` on the first /tap WS.
 if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('silero_vad') else 1)" 2>/dev/null; then
-    echo "[start] silero-vad missing — installing the [vad] extra so the TapScribe gate works…"
+    echo "[start] silero-vad missing — repairing this venv with 'pip install -e .' (it's a core dependency)…"
     # NOT --quiet: the install pulls torch (~700MB), which can take
     # minutes and occasionally fails on wheel resolution. Visible
     # pip output makes the failure reason recoverable; a silent
     # warning + no diagnostic would just frustrate the operator.
-    if ! python -m pip install -e ".[vad]"; then
-        echo "[start] 'pip install -e .[vad]' failed. The recorder will still boot, but the" >&2
+    if ! python -m pip install -e .; then
+        echo "[start] 'pip install -e .' failed. The recorder will still boot, but the" >&2
         echo "        TapScribe silence gate will fall back to passthrough on every /tap." >&2
     fi
 fi
