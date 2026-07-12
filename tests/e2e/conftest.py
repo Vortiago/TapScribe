@@ -51,7 +51,7 @@ def _e2e_probes_installed():
     probe installed (mirrors the unit `_force_all_probes_installed`). Without
     this a backend-less CI box is "first run", so GET / now redirects to /setup
     and the dashboard tests would break. The /setup smoke is robust either way."""
-    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+    from tapscribe.runtime_probe import set_installed_modules_for_testing
 
     set_installed_modules_for_testing(all_probe_modules())
     try:

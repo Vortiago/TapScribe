@@ -398,16 +398,16 @@ def backend_module_available(backend: str) -> bool:
     """True iff the python package powering `backend` is importable — a cheap
     `find_spec` probe (no heavy import, no torch/Metal init). A module-level
     function so a test can force it without touching the real environment, the
-    same shape as the transcriber catalog's `_is_module_available`."""
+    same shape as the runtime probe's `_is_module_available`."""
     b = BACKENDS.get(backend)
     return b is not None and importlib.util.find_spec(b.module) is not None
 
 
 def resolve_local_backend() -> str:
-    """Pick the backend for this machine, reusing the transcriber catalog's
+    """Pick the backend for this machine, reusing `tapscribe.runtime_probe`'s
     hardware probe so 'is this an Apple-Silicon MLX box' has ONE source of truth
     (no shadow detection). MLX on Apple Silicon; the GGUF/CPU path everywhere
     else — CPU and CUDA alike, since there's no MLX off Apple Silicon."""
-    from ..transcribers.catalog import available_backends
+    from ..runtime_probe import available_backends
 
     return "mlx" if "mlx" in available_backends() else "gguf"

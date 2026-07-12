@@ -3,7 +3,7 @@ surface renders from. Pure assembly over the transcriber registry, so it can't
 drift from what the app actually supports.
 
 These tests drive the two probes (installed modules + available backends)
-through the catalog's test hooks so they're deterministic on any host.
+through the runtime probe's test hooks so they're deterministic on any host.
 """
 
 from __future__ import annotations
@@ -11,14 +11,12 @@ from __future__ import annotations
 import pytest
 from conftest import all_probe_modules  # type: ignore[import-not-found]
 
-from tapscribe.setup_state import FAMILY_META, build_setup_state, is_first_run
-from tapscribe.transcribers.catalog import (
-    BackendBinding,
-    ModelEntry,
-    TranscriberRegistry,
+from tapscribe.runtime_probe import (
     set_available_backends_for_testing,
     set_installed_modules_for_testing,
 )
+from tapscribe.setup_state import FAMILY_META, build_setup_state, is_first_run
+from tapscribe.transcribers.catalog import BackendBinding, ModelEntry, TranscriberRegistry
 
 
 @pytest.fixture(autouse=True)

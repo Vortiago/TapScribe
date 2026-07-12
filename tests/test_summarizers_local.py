@@ -6,7 +6,7 @@ elsewhere. The heavy backends are lazy-imported, so these tests drive the
 adapter through an **injected `generate_fn`** — the same testability seam the
 MLX transcriber adapters use (`transcribe_fn`) — and never import mlx_lm /
 llama_cpp or download a 4.5 GB model. The routing decision is exercised by
-forcing `available_backends()` via the catalog's test hook.
+forcing `available_backends()` via the runtime probe's test hook.
 
 The two `importorskip`-gated smoke tests at the bottom pin the upstream symbols
 the real backends import lazily (`mlx_lm.load`/`generate`,
@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import pytest
 
+# Internal helpers live in their submodules; import them from where they're
+# defined (the package __init__ re-exports only the public interface).
+from tapscribe.runtime_probe import set_available_backends_for_testing
 from tapscribe.summarizers import (
     DEFAULT_SUMMARY_PROMPT,
     ENV_LOCAL_GGUF_MODEL,
@@ -33,12 +36,8 @@ from tapscribe.summarizers import (
     load_summarizer,
     summary_model_catalog,
 )
-
-# Internal helpers live in their submodules; import them from where they're
-# defined (the package __init__ re-exports only the public interface).
 from tapscribe.summarizers.catalog import MAX_TOKENS_BOUNDS, clamp_max_tokens
 from tapscribe.summarizers.local import _build_local_messages
-from tapscribe.transcribers.catalog import set_available_backends_for_testing
 
 
 def test_catalog_cross_module_names_are_public():

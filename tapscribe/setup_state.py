@@ -29,11 +29,8 @@ the package is installed).
 
 from __future__ import annotations
 
-from .transcribers.catalog import (
-    REGISTRY,
-    TranscriberRegistry,
-    available_backend_strs,
-)
+from .runtime_probe import available_backend_strs
+from .transcribers.catalog import REGISTRY, TranscriberRegistry
 
 # Curated per-family display metadata, in matrix order: (catalog family, label,
 # rough size hint). An allowlist (like SUMMARY_MODELS) so unimplemented families
@@ -48,10 +45,10 @@ FAMILY_META: tuple[tuple[str, str, str], ...] = (
     ("voxtral", "Voxtral (Mistral)", "~2 GB"),
     ("parakeet", "Parakeet (NVIDIA)", "~1.5–2.5 GB"),
 )
-# Display order for backend chips (preferred first). Mirrors the catalog's
-# _AUTO_RESOLUTION_ORDER by intent, but kept a separate local constant — display
-# order and auto-resolution priority are distinct concerns that needn't move
-# together (and the catalog's is private).
+# Display order for backend chips (preferred first). Mirrors the runtime
+# probe's _AUTO_RESOLUTION_ORDER by intent, but kept a separate local constant
+# — display order and auto-resolution priority are distinct concerns that
+# needn't move together (and the probe's is private).
 _BACKEND_DISPLAY_ORDER: tuple[str, ...] = ("mlx", "cuda", "cpu")
 
 
