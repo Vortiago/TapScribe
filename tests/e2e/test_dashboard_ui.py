@@ -4742,6 +4742,82 @@ async def test_settings_models_card_links_to_setup(running_recorder: RunningReco
             await browser.close()
 
 
+async def test_settings_connect_a_bridge_card_reveals_and_hides_tap_token(running_recorder: RunningRecorder):
+    """#190: the Settings stage's "Connect a bridge" card is the dashboard's
+    only surface for the /tap bearer token — before this, an operator had to
+    scrape terminal output or open .tap-token by hand.
+
+    The token must NOT be in the DOM until an explicit reveal click (never
+    rendered by default, never fetched on page load), the reveal fetches
+    GET /api/tap-token exactly once (a second reveal reuses the cached
+    value), and hiding re-masks the DOM rather than leaving the plaintext
+    sitting behind CSS. The expected token comes from the running Recorder
+    the test harness minted for THIS run (`rr.recorder.tap.value`) — never a
+    hardcoded fixture token."""
+    rr = running_recorder
+    real_token = rr.recorder.tap.value
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+
+            tap_token_requests = []
+            page.on("request", lambda req: tap_token_requests.append(req) if "/api/tap-token" in req.url else None)
+
+            await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
+
+            token_el = page.locator('[data-slot="bridgeToken"]')
+            reveal_btn = page.get_by_role("button", name=re.compile(r"reveal"))
+            await reveal_btn.wait_for(timeout=6000)
+
+            # Host/port render immediately (not sensitive, no reveal needed);
+            # the token stays masked and unfetched until the operator asks.
+            assert real_token not in (await page.content()), "tap token must not be in the DOM before reveal"
+            assert len(tap_token_requests) == 0, "GET /api/tap-token must not fire before an explicit reveal click"
+            masked_before = await token_el.text_content()
+            assert masked_before and real_token not in masked_before
+
+            await reveal_btn.click()
+            await page.wait_for_function(
+                """(expected) => {
+                  const el = document.querySelector('[data-slot="bridgeToken"]');
+                  return el && el.textContent === expected;
+                }""",
+                arg=real_token,
+                timeout=6000,
+            )
+            assert len(tap_token_requests) == 1
+
+            # A second reveal-toggle round trip (hide, then reveal again)
+            # must reuse the cached value rather than re-fetching.
+            hide_btn = page.get_by_role("button", name=re.compile(r"hide"))
+            await hide_btn.click()
+            masked_after_hide = await token_el.text_content()
+            assert masked_after_hide and real_token not in masked_after_hide, (
+                "hiding must re-mask the DOM, not just leave the plaintext behind CSS"
+            )
+
+            reveal_again = page.get_by_role("button", name=re.compile(r"reveal"))
+            await reveal_again.click()
+            await page.wait_for_function(
+                """(expected) => {
+                  const el = document.querySelector('[data-slot="bridgeToken"]');
+                  return el && el.textContent === expected;
+                }""",
+                arg=real_token,
+                timeout=6000,
+            )
+            assert len(tap_token_requests) == 1, "a second reveal must reuse the cached token, not re-fetch"
+        finally:
+            await browser.close()
+
+
 # Shared layout-reachability probe used by the Settings stack guard AND the
 # cross-view sweep below. Returns the granular per-`.work__inner .panel` signals
 # both reason over — is the card clipped (an overflow:hidden box shorter than its
