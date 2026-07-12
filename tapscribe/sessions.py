@@ -847,7 +847,6 @@ def search_transcripts(query: str) -> list[dict[str, Any]]:
         if not sd.is_dir():
             continue
 
-        # Read the merged transcript; skip sessions without one.
         raw = _read_session_json_cached(sd / FILENAME_TRANSCRIPT_JSON)
         if not isinstance(raw, dict):
             continue
@@ -859,15 +858,11 @@ def search_transcripts(query: str) -> list[dict[str, Any]]:
         if term not in text_lower:
             continue
 
-        # Read the label from session-meta; _coerce_session_meta returns {}
-        # on None/non-dict, so .get("label") is always safe and str.
         meta = _coerce_session_meta(_read_session_json_cached(sd / FILENAME_META_JSON))
         label = meta.get("label", "")
 
-        # Compute occurrence count.
         count = text_lower.count(term)
 
-        # Extract a ~±100-char snippet around the first match.
         first = text_lower.find(term)
         win_start = max(0, first - 100)
         win_end = min(len(plain), first + len(term) + 100)

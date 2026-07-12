@@ -145,10 +145,7 @@ export function build(ctx) {
     return metaFor(s).label;
   };
 
-  /** Debounced PUT /api/session-meta/{session} with just the { label }. The
-    * server merges partial meta, so aliases/prompt/hotwords are preserved.
-    *
-    * Fire a transcript-search query when the local filter yields no results.
+  /** Fire a transcript-search query when the local filter yields no results.
     * Results are cached per query string. */
   const fireSearch = async (/** @type {string} */ q) => {
     lastSearchQuery = q;
