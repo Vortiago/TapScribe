@@ -4,8 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TapScribe · Stages</title>
-    <!-- Reuse the classic dashboard's design tokens + primitives first, then
+    <!-- Toolkit design tokens + tone mixin first (canon NAMES; dashboard.css
+         overrides the VALUES to TapScribe's palette), then the classic
+         dashboard's primitives, then
          layer the Stages-specific (sharp / de-bubbled / dense) styles on top. -->
+    <link rel="stylesheet" href="/tokens.css" />
+    <link rel="stylesheet" href="/tones.css" />
     <link rel="stylesheet" href="/dashboard.css" />
     <link rel="stylesheet" href="/next.css" />
   </head>

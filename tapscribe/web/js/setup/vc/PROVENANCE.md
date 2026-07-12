@@ -19,11 +19,15 @@ prints the exact re-copy command for stale ones. Layout:
   element faces the component sidecars ship)
 - `components/<name>/` — the components the setup page composes
   (panel, button, field, chip, alert, spinner)
-- `tokens.css`, `tones.css` — the design tokens + tone mixin
+
+The design tokens + tone mixin (`tokens.css`, `tones.css`) live at
+`tapscribe/web/` — ONE vendored copy shared by this page and the dashboard
+(both served as top-level `/tokens.css` + `/tones.css`; the dashboard's
+`dashboard.css` overrides the values to TapScribe's palette).
 
 To update: from the toolkit checkout's `vanilla-components/` run
 `./vendor.sh <component> <this dir>/components` (and
-`./vendor.sh tokens|tones <this dir>`); lib files are `cp` + re-stamp (see
+`./vendor.sh tokens|tones tapscribe/web`); lib files are `cp` + re-stamp (see
 `lib-stamp.sh` there).
 
 The page's own layout lives in `../setup.css` (app-level, unlayered so it can

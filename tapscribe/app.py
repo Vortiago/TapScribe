@@ -1903,6 +1903,11 @@ DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
 NEXT_HTML_PATH = config.WEB_DIR / "next.html"
 NEXT_CSS_PATH = config.WEB_DIR / "next.css"
 SETUP_HTML_PATH = config.WEB_DIR / "setup.html"
+# Vendored toolkit token sheets (canon names; dashboard.css overrides the
+# values) — shared by the dashboard AND /setup, hence top-level like the
+# other page stylesheets.
+TOKENS_CSS_PATH = config.WEB_DIR / "tokens.css"
+TONES_CSS_PATH = config.WEB_DIR / "tones.css"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1947,6 +1952,20 @@ async def next_css():
     if not NEXT_CSS_PATH.is_file():
         raise HTTPException(404, "next.css not found")
     return FileResponse(NEXT_CSS_PATH, media_type="text/css")
+
+
+@app.get("/tokens.css")
+async def tokens_css():
+    if not TOKENS_CSS_PATH.is_file():
+        raise HTTPException(404, "tokens.css not found")
+    return FileResponse(TOKENS_CSS_PATH, media_type="text/css")
+
+
+@app.get("/tones.css")
+async def tones_css():
+    if not TONES_CSS_PATH.is_file():
+        raise HTTPException(404, "tones.css not found")
+    return FileResponse(TONES_CSS_PATH, media_type="text/css")
 
 
 # Dashboard JS modules and HTML component templates. StaticFiles handles

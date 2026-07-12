@@ -1,25 +1,39 @@
 /* TapScribe — terminal-forward operator console.
-   Dark only. Mono for code/timestamps; system sans for body text. */
+   Dark only. Mono for code/timestamps; system sans for body text.
+
+   Token architecture: the vendored toolkit sheet (/tokens.css, @layer tokens)
+   defines the canon NAMES with light-dark() defaults; this UNLAYERED block
+   overrides the VALUES to TapScribe's palette (unlayered beats @layer), and
+   `color-scheme: dark` resolves any non-overridden canon token to its dark
+   side. Canon slots in use: --bg / --bg-elev / --bg-elev-2 (was --bg-0/1/2),
+   --line (aliased to --hairline by canon), --text / --text-dim (was
+   --fg-0 / --fg-2), --ok / --warn / --bad / --info / --accent, --sans /
+   --mono, --space-xs..l (was --gap-*), --r. Everything below the canon block
+   is TapScribe-only vocabulary layered on top. */
 
 :root {
-  --bg-0:        #181b1f;
-  --bg-1:        #1f2329;
-  --bg-2:        #262b32;
-  --bg-elev:    rgba(230, 235, 225, 0.05);
-  --hairline:   rgba(180, 195, 180, 0.28);
-  --hairline-2: rgba(180, 195, 180, 0.18);
-  --rule:       rgba(180, 195, 180, 0.36);
+  color-scheme: dark;
 
-  /* Contrast bumped for AA on dark panels (v2 design). */
-  --fg-0:        #eef1e8;
-  --fg-1:        #d2d6ca;
-  --fg-2:        #a3a99b;
-  --fg-3:        #7a8074;
+  /* ── Canon token overrides (toolkit names, TapScribe palette) ── */
+  --bg:        #181b1f;
+  --bg-elev:   #1f2329;
+  --bg-elev-2: #262b32;
+  --line:      rgba(180, 195, 180, 0.28);
+
+  /* Ink ramp: --text > --fg-1 > --text-dim > --fg-3 (the outer two are
+     canon; the middle steps are TapScribe's extended ramp).
+     Contrast bumped for AA on dark panels (v2 design). */
+  --text:      #eef1e8;
+  --fg-1:      #d2d6ca;
+  --text-dim:  #a3a99b;
+  --fg-3:      #7a8074;
 
   --rec:         #e45a55;
   --ok:          #7cd66f;
   --warn:        #d9aa55;
   --info:        #6fc7d6;
+  --bad:         var(--rec);   /* canon slot for vc components; --rec is the domain name */
+  --accent:      var(--warn);  /* the one warm accent (same #d9aa55 the /setup page uses) */
   --magenta:     #c089ff;
   --spk-4:       #e2c66c;  /* 5th speaker — no matching status colour */
 
@@ -36,10 +50,16 @@
           "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  --gap-xs: 4px;
-  --gap-s:  8px;
-  --gap-m:  12px;
-  --gap-l:  16px;
+  /* Canon space scale — values identical to the old --gap-* set. */
+  --space-xs: 4px;
+  --space-s:  8px;
+  --space-m:  12px;
+  --space-l:  16px;
+
+  /* ── TapScribe-only tokens ── */
+  --bg-glow:    rgba(230, 235, 225, 0.05); /* was --bg-elev pre-toolkit: a translucent lift, not a surface */
+  --hairline-2: rgba(180, 195, 180, 0.18);
+  --rule:       rgba(180, 195, 180, 0.36);
   --pad-card: 12px;
   --font-base: 12.5px;
   --font-small: 11px;
@@ -50,8 +70,8 @@
 
 html, body {
   margin: 0;
-  background: var(--bg-0);
-  color: var(--fg-0);
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--sans);
   font-size: var(--font-base);
   line-height: 1.45;
@@ -84,13 +104,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 2px 7px;
   font-size: 11px;
   color: var(--fg-1);
-  background: var(--bg-elev);
+  background: var(--bg-glow);
   border: 1px solid var(--hairline);
   border-radius: 3px;
   white-space: nowrap;
 
-  & > .k { color: var(--fg-2); }
-  & > .v { color: var(--fg-0); }
+  & > .k { color: var(--text-dim); }
+  & > .v { color: var(--text); }
 
   &.rec, &.ok, &.warn, &.info, &.magenta {
     color: var(--accent);
@@ -126,9 +146,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px;
-  background: var(--bg-elev);
+  background: var(--bg-glow);
   border: 1px solid var(--hairline);
-  color: var(--fg-0);
+  color: var(--text);
   border-radius: 3px;
   cursor: pointer;
   font-size: var(--font-small);
@@ -153,10 +173,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 :is(.input, .textarea, .select) {
   width: 100%;
-  background: var(--bg-0);
+  background: var(--bg);
   border: 1px solid var(--hairline);
   border-radius: 3px;
-  color: var(--fg-0);
+  color: var(--text);
   padding: 5px 8px;
   font-size: var(--font-small);
   font-family: var(--mono);
@@ -176,14 +196,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
     "rail     feed"
     "config   config"
     "sessions sessions";
-  gap: var(--gap-m);
-  padding: var(--gap-m);
+  gap: var(--space-m);
+  padding: var(--space-m);
   max-width: 1680px;
   margin: 0 auto;
   min-height: 100vh;
 
   & > .header   { grid-area: header; }
-  & > .rail     { grid-area: rail; display: flex; flex-direction: column; gap: var(--gap-m); min-width: 0; }
+  & > .rail     { grid-area: rail; display: flex; flex-direction: column; gap: var(--space-m); min-width: 0; }
   & > .feed     { grid-area: feed;  min-width: 0; display: flex; flex-direction: column; min-height: 0; }
   & > .config   { grid-area: config; min-width: 0; }
   & > .sessions { grid-area: sessions; min-width: 0; }
@@ -192,23 +212,23 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* ── Panel chrome ────────────────────────────────────────────── */
 
 .panel {
-  background: var(--bg-1);
+  background: var(--bg-elev);
   border: 1px solid var(--hairline);
   border-radius: 4px;
 }
 
 .panel-hd {
-  display: flex; align-items: center; gap: var(--gap-s);
+  display: flex; align-items: center; gap: var(--space-s);
   padding: 8px var(--pad-card);
   border-bottom: 1px solid var(--hairline-2);
   font-size: 10.5px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--fg-2);
+  color: var(--text-dim);
 
   & > .ttl    { color: var(--fg-1); font-weight: 600; }
   & > .spacer { flex: 1 1 auto; }
-  & .count    { color: var(--fg-2); font-variant-numeric: tabular-nums; }
+  & .count    { color: var(--text-dim); font-variant-numeric: tabular-nums; }
   & :is(.pre, .post) { color: var(--fg-3); }
 }
 .panel-bd {
@@ -223,19 +243,19 @@ button, input, select, textarea { font: inherit; color: inherit; }
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: var(--gap-m);
+  gap: var(--space-m);
   padding: 10px 14px;
-  background: var(--bg-1);
+  background: var(--bg-elev);
   border: 1px solid var(--hairline);
   border-radius: 4px;
 
   & .brand {
     display: flex; align-items: center; gap: 10px;
     font-size: 13px;
-    color: var(--fg-0);
+    color: var(--text);
 
-    & .slug { color: var(--fg-2); letter-spacing: 0.04em; }
-    & .name { color: var(--fg-0); font-weight: 600; }
+    & .slug { color: var(--text-dim); letter-spacing: 0.04em; }
+    & .name { color: var(--text); font-weight: 600; }
 
     & .rec-pill {
       display: inline-flex; align-items: center; gap: 6px;
@@ -257,11 +277,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
           border-color: color-mix(in srgb, var(--rec) 55%, transparent);
         }
         &.paused {
-          background: var(--bg-elev);
-          color: var(--fg-2);
+          background: var(--bg-glow);
+          color: var(--text-dim);
           border-color: var(--hairline);
 
-          & .dot    { background: var(--fg-2); animation: none; box-shadow: none; }
+          & .dot    { background: var(--text-dim); animation: none; box-shadow: none; }
           &:hover   { background: rgba(160, 175, 160, 0.10); color: var(--fg-1); border-color: var(--rule); }
         }
       }
@@ -281,15 +301,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .model-pick {
   display: flex; align-items: center; gap: 8px;
-  background: var(--bg-2);
+  background: var(--bg-elev-2);
   border: 1px solid var(--hairline);
   border-radius: 3px;
   padding: 3px 4px 3px 10px;
   font-size: 11px;
   color: var(--fg-1);
 
-  & .lbl    { color: var(--fg-2); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
-  & .select { width: auto; background: transparent; border: 0; padding: 2px 4px; color: var(--fg-0); }
+  & .lbl    { color: var(--text-dim); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+  & .select { width: auto; background: transparent; border: 0; padding: 2px 4px; color: var(--text); }
   & .select:focus { box-shadow: none; }
 }
 
@@ -309,13 +329,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
   align-items: center;
   margin-bottom: 6px;
 
-  & .lbl { font-size: 10.5px; color: var(--fg-2); letter-spacing: 0.06em; text-transform: uppercase; }
+  & .lbl { font-size: 10.5px; color: var(--text-dim); letter-spacing: 0.06em; text-transform: uppercase; }
   & :is(.input, .select) { padding: 3px 6px; font-size: 11px; }
 }
 
 .live-meta {
   font-size: 10.5px;
-  color: var(--fg-2);
+  color: var(--text-dim);
   border-top: 1px dashed var(--hairline-2);
   padding-top: 6px;
   margin-top: 4px;
@@ -324,7 +344,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   & code {
     font-family: var(--mono);
     color: var(--fg-1);
-    background: var(--bg-2);
+    background: var(--bg-elev-2);
     padding: 1px 4px;
     border-radius: 2px;
     font-size: 10.5px;
@@ -341,7 +361,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   word-break: break-word;
 }
 .live-log-row { margin-top: 6px; }
-.live-log-row .dim { color: var(--fg-2); margin-left: 4px; }
+.live-log-row .dim { color: var(--text-dim); margin-left: 4px; }
 
 .live-log-dialog {
   width: min(900px, 92vw);
@@ -349,7 +369,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 0;
   border: 1px solid var(--hairline-1, var(--hairline-2));
   border-radius: 6px;
-  background: var(--bg-1);
+  background: var(--bg-elev);
   color: var(--fg-1);
 }
 .live-log-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
@@ -360,7 +380,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 10px 14px;
   border-bottom: 1px solid var(--hairline-2);
 
-  & h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--fg-0); }
+  & h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
   & .spacer { flex: 1; }
 }
 .live-log-pre {
@@ -370,7 +390,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   overflow: auto;
   font-family: var(--mono);
   font-size: 11px;
-  background: var(--bg-0);
+  background: var(--bg);
   white-space: pre-wrap;
   color: var(--fg-1);
 }
@@ -389,13 +409,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .stream-row .who { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .stream-row .who .name {
   font-size: 12px;
-  color: var(--fg-0);
+  color: var(--text);
   font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .stream-row .who .ident {
   font-size: 10px;
-  color: var(--fg-2);
+  color: var(--text-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .stream-row .who .level-meter {
@@ -425,9 +445,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-1);
   font-variant-numeric: tabular-nums;
 
-  & .b { color: var(--fg-0); }
-  & .m { color: var(--fg-2); }
-  & .lag { color: var(--fg-2); }
+  & .b { color: var(--text); }
+  & .m { color: var(--text-dim); }
+  & .lag { color: var(--text-dim); }
   & .lag.lag-warn { color: #c79a3a; }
   & .lag.lag-bad  { color: #c44; font-weight: 600; }
 }
@@ -443,14 +463,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-radius: 3px;
   cursor: pointer;
   border: 1px solid var(--hairline-2);
-  background: var(--bg-0);
+  background: var(--bg);
   color: var(--fg-3);
   min-width: 44px;
   text-align: center;
   transition: background 0.08s, color 0.08s, border-color 0.08s;
 
   &:hover    { border-color: var(--hairline-1, var(--hairline-2)); color: var(--fg-1); }
-  &.on       { background: var(--bg-2); color: var(--fg-0); border-color: var(--hairline-1, var(--hairline-2)); }
+  &.on       { background: var(--bg-elev-2); color: var(--text); border-color: var(--hairline-1, var(--hairline-2)); }
   &.on.rec   { color: #c44; border-color: rgba(196, 68, 68, 0.45); }
   &.on.live  { color: #2a8; border-color: rgba(42, 170, 80, 0.45); }
   &[disabled] { opacity: 0.5; cursor: progress; }
@@ -489,13 +509,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
   gap: 6px;
   align-items: baseline;
 
-  & .buffer-text { color: var(--fg-2); }
+  & .buffer-text { color: var(--text-dim); }
 }
 /* Active hypothesis — Whisper is currently transcribing this. */
 .stream-buffer.buf-active .buffer-text { color: var(--fg-1); }
 .stream-buffer.buf-active .buffer-icon { color: var(--ok, #2a8); }
 /* Listening — audio is reaching the model but nothing transcribed yet. */
-.stream-buffer.buf-listening .buffer-text { color: var(--fg-2); }
+.stream-buffer.buf-listening .buffer-text { color: var(--text-dim); }
 .stream-buffer.buf-listening .buffer-icon { color: var(--ok, #2a8); }
 /* Quiet — gate is closed; the model isn't being fed any audio right now. */
 .stream-buffer.buf-quiet .buffer-text,
@@ -526,7 +546,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding-left: 12px;
   margin-bottom: 6px;
 
-  & .lbl  { grid-area: lbl; font-size: 11px; color: var(--fg-2); }
+  & .lbl  { grid-area: lbl; font-size: 11px; color: var(--text-dim); }
   & .input { grid-area: inp; max-width: 100%; }
   & .dim.tiny {
     grid-area: hint;
@@ -558,7 +578,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   & .cfg-col {
     & .k {
       font-size: 10px;
-      color: var(--fg-2);
+      color: var(--text-dim);
       letter-spacing: 0.08em;
       text-transform: uppercase;
       margin-bottom: 6px;
@@ -568,14 +588,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
     }
     & .v {
       font-size: 11.5px;
-      color: var(--fg-0);
+      color: var(--text);
       line-height: 1.55;
       word-break: break-word;
 
       & .empty { color: var(--fg-3); font-style: italic; }
       & code   {
         font-family: var(--mono);
-        background: var(--bg-2);
+        background: var(--bg-elev-2);
         padding: 1px 5px;
         border-radius: 2px;
         font-size: 10.5px;
@@ -641,7 +661,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
     border-radius: 3px;
   }
   & .badge.default {
-    background: var(--bg-2);
+    background: var(--bg-elev-2);
     color: var(--fg-3);
   }
   & .badge.override {
@@ -665,7 +685,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
     font-size: 10px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--fg-2);
+    color: var(--text-dim);
     cursor: pointer;
     list-style: none;
     user-select: none;
@@ -711,9 +731,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
   &::-webkit-scrollbar-track { background: transparent; }
 
   & .line { display: grid; grid-template-columns: 70px 110px 1fr; gap: 12px; padding: 2px 0; border-radius: 2px; }
-  & .ts   { color: var(--fg-2); font-family: var(--mono); }
+  & .ts   { color: var(--text-dim); font-family: var(--mono); }
   & .who  { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  & .txt  { color: var(--fg-0); }
+  & .txt  { color: var(--text); }
 }
 
 .feed-empty {
@@ -781,8 +801,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   font-family: inherit;
 }
 .sess-item {
-  &:hover  { background: rgba(255, 255, 255, 0.02); color: var(--fg-0); }
-  &.active { background: color-mix(in srgb, var(--ok) 5%, transparent); border-left-color: var(--ok); color: var(--fg-0); }
+  &:hover  { background: rgba(255, 255, 255, 0.02); color: var(--text); }
+  &.active { background: color-mix(in srgb, var(--ok) 5%, transparent); border-left-color: var(--ok); color: var(--text); }
 
   & .indic { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); }
   &.current .indic { background: var(--rec); animation: pulse 1.4s ease-out infinite; }
@@ -823,7 +843,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .sess-name {
   font-size: 16px;
   font-weight: 600;
-  color: var(--fg-0);
+  color: var(--text);
   background: transparent;
   border: 0;
   border-bottom: 1px dashed transparent;
@@ -833,33 +853,33 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
   &:hover    { border-bottom-color: var(--hairline); }
   &:focus    { outline: none; border-bottom-color: var(--info); }
-  &.unnamed  { color: var(--fg-2); font-style: italic; font-weight: 500; }
+  &.unnamed  { color: var(--text-dim); font-style: italic; font-weight: 500; }
 }
-.sess-folder { font-family: var(--mono); color: var(--fg-2); font-size: 11px; }
+.sess-folder { font-family: var(--mono); color: var(--text-dim); font-size: 11px; }
 
 .sess-detail {
   container-type: inline-size;
   padding: var(--pad-card);
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: var(--gap-m);
+  gap: var(--space-m);
   min-width: 0;
 
   @container (max-width: 1080px) {
     & { grid-template-columns: 1fr; }
   }
 }
-.sess-side { display: flex; flex-direction: column; gap: var(--gap-m); min-width: 0; }
-.sess-main { display: flex; flex-direction: column; gap: var(--gap-m); min-width: 0; }
+.sess-side { display: flex; flex-direction: column; gap: var(--space-m); min-width: 0; }
+.sess-main { display: flex; flex-direction: column; gap: var(--space-m); min-width: 0; }
 
-.box { background: var(--bg-2); border: 1px solid var(--hairline-2); border-radius: 3px; }
+.box { background: var(--bg-elev-2); border: 1px solid var(--hairline-2); border-radius: 3px; }
 .box-hd {
   padding: 6px 10px;
   border-bottom: 1px solid var(--hairline-2);
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--fg-2);
+  color: var(--text-dim);
   display: flex; align-items: center; gap: 8px;
 
   & .spacer { flex: 1 1 auto; }
@@ -872,7 +892,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   gap: 6px 10px;
   align-items: center;
 
-  & .lbl { font-size: 10.5px; color: var(--fg-2); letter-spacing: 0.04em; text-transform: uppercase; }
+  & .lbl { font-size: 10.5px; color: var(--text-dim); letter-spacing: 0.04em; text-transform: uppercase; }
 }
 
 .action-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
@@ -883,14 +903,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.55;
-  background: var(--bg-0);
+  background: var(--bg);
   border: 1px solid var(--hairline-2);
   border-radius: 3px;
   padding: 10px 12px;
   max-height: 380px;
   overflow: auto;
 
-  & .ts { color: var(--fg-2); }
+  & .ts { color: var(--text-dim); }
   & :is(.who-0, .who-1, .who-2, .who-3, .who-4) { color: var(--spk-c); font-weight: 600; }
 
   & .seg.suppressed {
@@ -921,7 +941,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   }
   & th {
     font-weight: 500;
-    color: var(--fg-2);
+    color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     font-size: 10px;
@@ -934,7 +954,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .audit-tbl td code {
   font-family: var(--mono);
-  background: var(--bg-0);
+  background: var(--bg);
   padding: 1px 4px;
   border-radius: 2px;
   font-size: 11px;
@@ -958,7 +978,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
     &.just-completed { animation: sx-flash 1.5s ease-out; }
   }
   & .wav-name {
-    color: var(--fg-0);
+    color: var(--text);
     text-decoration: none;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 
@@ -969,7 +989,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   & .wav-num {
     color: var(--fg-1); font-variant-numeric: tabular-nums; font-size: 11px;
 
-    & .m         { color: var(--fg-2); }
+    & .m         { color: var(--text-dim); }
     &.in-flight  { color: var(--warn); }
   }
   /* Stripped region sub-rows under each original — indented and slightly
@@ -993,7 +1013,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
     gap: 3px;
 
     & .lbl {
-      color: var(--fg-2);
+      color: var(--text-dim);
       font-size: 10.5px;
       letter-spacing: 0.04em;
       text-transform: uppercase;
@@ -1026,35 +1046,35 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .expand-tx {
   grid-column: 1 / -1;
   margin: 6px 10px 8px;
-  background: var(--bg-0);
+  background: var(--bg);
   padding: 8px 10px;
   border-radius: 3px;
   font-size: 11.5px;
   white-space: pre-wrap;
-  color: var(--fg-0);
+  color: var(--text);
   border: 1px solid var(--hairline-2);
 
-  & .meta { font-size: 10px; color: var(--fg-2); margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
-  & .meta .fg { color: var(--fg-0); }
+  & .meta { font-size: 10px; color: var(--text-dim); margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  & .meta .fg { color: var(--text); }
   & .body { font-family: var(--mono); font-size: 11.5px; line-height: 1.55; }
 }
 
 /* ── Utility classes ─────────────────────────────────────────── */
 
-.muted { color: var(--fg-2); }
+.muted { color: var(--text-dim); }
 .dim   { color: var(--fg-3); }
-.fg    { color: var(--fg-0); }
+.fg    { color: var(--text); }
 .c-rec  { color: var(--rec); }
 .c-warn { color: var(--warn); }
 .mono  { font-family: var(--mono); }
 .tnum  { font-variant-numeric: tabular-nums; }
 .small { font-size: var(--font-small); }
 .tiny  { font-size: 10.5px; letter-spacing: 0.04em; }
-.row   { display: flex; align-items: center; gap: var(--gap-s); flex-wrap: wrap; }
-.col   { display: flex; flex-direction: column; gap: var(--gap-s); }
+.row   { display: flex; align-items: center; gap: var(--space-s); flex-wrap: wrap; }
+.col   { display: flex; flex-direction: column; gap: var(--space-s); }
 
 /* Utility classes used by template files in lieu of inline styles. */
-.gap-xs    { gap: var(--gap-xs); }
+.gap-xs    { gap: var(--space-xs); }
 .mt-s      { margin-top: 6px; }
 .row-click { cursor: pointer; }
 .rule-top  { border-top: 1px solid var(--hairline-2); }
@@ -1081,7 +1101,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   height: 8px;
   border-radius: 2px;
   overflow: hidden;
-  background: var(--bg-2);
+  background: var(--bg-elev-2);
   margin: 6px 0 4px;
 
   & > span { display: block; height: 100%; background: var(--spk-c); }
@@ -1091,7 +1111,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   flex-wrap: wrap;
   gap: 4px 14px;
   font-size: 10.5px;
-  color: var(--fg-2);
+  color: var(--text-dim);
   margin-top: 2px;
 
   & > span { display: inline-flex; align-items: center; gap: 4px; }
@@ -1124,7 +1144,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   align-items: center;
   padding: 4px 0;
 
-  & code   { font-family: var(--mono); font-size: 10.5px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  & code   { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   & .input { padding: 3px 6px; font-size: 11px; }
 }
 
@@ -1149,7 +1169,7 @@ button.box-hd {
   border-radius: 0;
   justify-content: flex-start;
   padding: 8px 12px;
-  color: var(--fg-2);
+  color: var(--text-dim);
 }
 
 /* ── Regex tester ───────────────────────────────────────────── */
@@ -1168,15 +1188,15 @@ button.box-hd {
     font-family: var(--mono);
     font-size: 11px;
 
-    & .ctx { color: var(--fg-2); font-size: 10px; display: block; margin-top: 2px; }
+    & .ctx { color: var(--text-dim); font-size: 10px; display: block; margin-top: 2px; }
   }
-  & .rx-empty { color: var(--fg-2); font-style: italic; }
+  & .rx-empty { color: var(--text-dim); font-style: italic; }
   & .rx-error { color: var(--rec); font-family: var(--mono); font-size: 11px; }
   & .rx-seed code {
     font-family: var(--mono);
     cursor: pointer;
     color: var(--fg-1);
-    background: var(--bg-0);
+    background: var(--bg);
     padding: 1px 4px;
     border-radius: 2px;
     margin-right: 6px;

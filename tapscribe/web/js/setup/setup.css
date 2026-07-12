@@ -1,7 +1,9 @@
 /* Setup-page layout for the vanilla-components surface.
  *
- * Component look/colour comes from the vendored vc/ (tokens.css + tones.css +
- * each component's own @layer vanilla-components CSS). This file does only the
+ * Component look/colour comes from the shared vendored token sheets
+ * (/tokens.css + /tones.css, one copy at tapscribe/web/ for this page AND the
+ * dashboard) + each component's own @layer vanilla-components CSS. This file
+ * does only the
  * PAGE layout, on the shared tokens. Page rules live in `@layer app` (declared
  * after vanilla-components), so a page rule that touches a component element
  * (e.g. the full-width install button) wins WITHOUT the unlayered sledgehammer
