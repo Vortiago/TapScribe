@@ -24,11 +24,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException
-
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
-from .session_paths import DIRNAME_STRIPPED, FILENAME_STRIP_META_JSON, _safe_part
+from .session_paths import DIRNAME_STRIPPED, FILENAME_STRIP_META_JSON, SessionPathError, _safe_part
 from .sessions import strip_meta_owner_by_clip, valid_strip_meta
 from .text import parse_iso, parse_wav_start
 from .wav_cache import read_cached
@@ -165,7 +163,7 @@ def select_session_wavs(
             # malformed/adversarial sidecar entry can't walk `original_path`
             # outside `base_dir`. An invalid name just isn't a usable owner.
             _safe_part(original_name, "clip owner")
-        except HTTPException:
+        except SessionPathError:
             original_name = wav.name
         original_path = base_dir / original_name
         if not original_path.is_file():

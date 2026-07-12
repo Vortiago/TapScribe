@@ -6,7 +6,10 @@
 // Pure /api/state data (the same Session[] the spine reads), no mock.
 //
 //   - a filter/search box narrows the list by label, session id, or date so
-//     it stays usable at 50+ sessions;
+//     it stays usable at 50+ sessions; when that local filter yields zero
+//     matches, the same box falls over to a server-side cross-session
+//     transcript-content search (GET /api/search, #315) and the rows body
+//     shows snippet-preview hits instead;
 //   - a dense table, newest first, one row per session: label (or
 //     fmtSessionLabel) + the raw id as a dim sub, a status chip (● live for the
 //     current session, else archived), WAV count, stripped?, transcript status
@@ -42,7 +45,7 @@
 // panel head, wired once.
 
 import { tpl, pick, mount, reconcileList, deferIfSelectionInside } from "../../templates.js";
-import { putJson, postJson, del } from "../../api.js";
+import { putJson, postJson, del, getJson } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
 
@@ -132,9 +135,15 @@ export function build(ctx) {
   /** @type {Map<string, ReturnType<typeof setTimeout>>} */
   const saveTimers = new Map();
   /** The sessions array from the most recent tick — the absorb confirm() reads
-   * it to resolve the target's display label. Kept in step with `update`. */
+    * it to resolve the target's display label. Kept in step with `update`. */
   /** @type {import('../../types.js').Session[]} */
   let lastSessions = [];
+  /** Cached transcript-search results for the current non-empty filter;
+    * null = not yet fetched or filter is empty. */
+  /** @type {import('../../types.js').SearchHit[] | null} */
+  let lastSearchResults = null;
+  /** The filter value that produced `lastSearchResults`. */
+  let lastSearchQuery = "";
 
   /** Effective label for a session = local overlay (if any) else server meta. */
   /** @param {import('../../types.js').Session} s */
@@ -144,8 +153,18 @@ export function build(ctx) {
     return metaFor(s).label;
   };
 
-  /** Debounced PUT /api/session-meta/{session} with just the { label }. The
-   * server merges partial meta, so aliases/prompt/hotwords are preserved. */
+  /** Fire a transcript-search query when the local filter yields no results.
+    * Results are cached per query string. */
+  const fireSearch = async (/** @type {string} */ q) => {
+    lastSearchQuery = q;
+    lastSearchResults = null;
+    try {
+      const data = await getJson(`/api/search?q=${encodeURIComponent(q)}`);
+      if (lastSearchQuery !== q) return; // filter moved on during the fetch — this result is stale
+      lastSearchResults = Array.isArray(data) ? data : [];
+    } catch { /* search unavailable — fall back to "searching…" */ }
+  };
+
   /** @param {string} sid @param {HTMLElement} statusEl */
   const persistLabel = (sid, statusEl) => {
     clearTimeout(saveTimers.get(sid));
@@ -493,22 +512,83 @@ export function build(ctx) {
    * selection is inside the list, like the WAV lists (ADR-0004); a focused
    * control alone never defers, because reconcileList updates AROUND it
    * (moveBefore preserves the node, fillRow guards its value).
+   *
+   * When the local (label/id/date) filter yields zero matches, the rows host
+   * falls over to cross-session transcript search instead (#315): that's a
+   * COLD, discrete mode switch (not a per-tick content update), so it swaps
+   * the body directly rather than through reconcileList's keyed hot path.
+   * reconcileList picks the body back up cleanly once normal rows return —
+   * its bookkeeping lives in a WeakMap keyed by node identity, not by reading
+   * prior host state, so a raw swap in between is invisible to it.
    */
   const syncRows = () => {
     const body = /** @type {HTMLElement | null} */ (listHost.querySelector('[data-slot="rows"]'));
     if (!body) return; // region not mounted yet — update() mounts it first
     const sessions = lastSessions;
     const shown = sessions.filter(matches);
-
     const counts = listHost.querySelector('[data-slot="shownCount"]');
+    const ph = /** @type {HTMLElement | null} */ (listHost.querySelector('[data-slot="rowsEmpty"]'));
+
+    if (!filter && lastSearchQuery) {
+      // Leaving search mode — drop the cached result so a later, identical
+      // query re-fires against current data instead of replaying a stale hit.
+      lastSearchResults = null;
+      lastSearchQuery = "";
+    }
+
+    if (filter && !shown.length) {
+      if (ph) ph.hidden = true;
+      if (lastSearchQuery !== filter) fireSearch(filter);
+      if (counts) {
+        if (lastSearchResults === null) {
+          counts.textContent = `${sessions.length} total · searching transcripts…`;
+        } else if (!lastSearchResults.length) {
+          counts.textContent = "0 search results";
+        } else {
+          counts.textContent =
+            `${lastSearchResults.length} session${lastSearchResults.length === 1 ? "" : "s"} in transcript`;
+        }
+      }
+
+      if (deferIfSelectionInside(body)) return;
+
+      if (lastSearchResults === null) {
+        body.replaceChildren(); // static-render — cold search-mode transition, see docstring
+      } else if (!lastSearchResults.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = `No sessions match "${filter}".`;
+        body.replaceChildren(empty); // static-render — cold search-mode transition, see docstring
+      } else {
+        // Render search hits with snippet previews. Template + textContent
+        // (NOT innerHTML) — hit.label/hit.session are operator-controlled and
+        // must never be parsed as HTML.
+        const frag = document.createDocumentFragment();
+        for (const hit of lastSearchResults) {
+          const node = tpl("tpl-next-searchrow");
+          const row = /** @type {HTMLElement} */ (pick(node, "row"));
+          row.style.cursor = "pointer";
+          pick(node, "label").textContent = hit.label || hit.session;
+          pick(node, "id").textContent = hit.session;
+          pick(node, "count").textContent = String(hit.count);
+          row.addEventListener("click", () => onSelectSession(hit.session));
+          frag.appendChild(node);
+          const snippetEl = document.createElement("div");
+          snippetEl.className = "sessrow__snippet mono dim";
+          snippetEl.textContent = hit.snippet;
+          frag.appendChild(snippetEl);
+        }
+        body.replaceChildren(frag); // static-render — cold search-mode transition, see docstring
+      }
+      return;
+    }
+
     if (counts) {
       counts.textContent = filter ? `${shown.length} of ${sessions.length}` : `${sessions.length} total`;
     }
-    const ph = /** @type {HTMLElement | null} */ (listHost.querySelector('[data-slot="rowsEmpty"]'));
     if (ph) {
       ph.hidden = !!shown.length;
-      if (!sessions.length) ph.textContent = "No sessions yet — start recording to see them here.";
-      else if (!shown.length) ph.textContent = `No sessions match “${filter}”.`;
+      ph.textContent = "No sessions yet — start recording to see them here.";
     }
 
     if (deferIfSelectionInside(body)) return;
@@ -560,8 +640,8 @@ export function build(ctx) {
         : "no sessions yet — start recording to populate this list",
     });
 
-    // Chrome mounts once (static-render — never rebuilt); rows reconcile in
-    // place every tick.
+    // Chrome mounts once (static-render — never rebuilt); rows (or, in search
+    // mode, search hits — see syncRows) reconcile in place every tick.
     if (!listHost.firstElementChild) mount(listHost, buildRegion());
     syncRows();
   };

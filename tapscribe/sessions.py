@@ -27,8 +27,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException
-
 from . import config
 from .audio import wav_duration_s
 from .name_resolution import known_names
@@ -41,6 +39,7 @@ from .session_paths import (
     FILENAME_STRIP_META_JSON,
     FILENAME_SUMMARY_JSON,
     FILENAME_TRANSCRIPT_JSON,
+    SessionPathError,
     create_session_dir,
     resolve_session_dir,
     resolve_wav,
@@ -62,6 +61,15 @@ from .wav_cache import cache_listing, cache_signature, read_primary_marker, read
 # (`recorder.streams`, `recorder.jobs`). Helpers below remain on this
 # module because they're pure filesystem reads against `session_dir`
 # / `stripped/` — not lifecycle state.
+
+
+# ---------------------------------------------------------------------------
+# Domain errors — FastAPI-free validation exceptions.
+# ---------------------------------------------------------------------------
+
+
+class MetaValidationError(Exception):
+    """Invalid session metadata (bad language, oversize field, unknown summary_source)."""
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +141,7 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
     `prompt` and `hotwords` run through the same MAX_CONFIG_TEXT_LEN cap
     as the global config writers — symmetric with `PUT /api/config/{key}`
     so a buggy client can't bypass the guardrail via this endpoint.
-    Raises `HTTPException(400)` on oversize input.
+    Raises `MetaValidationError` (mapped to HTTP 400) on oversize input.
 
     Atomic via `atomic_write_text` so a crashed write never leaves a
     torn JSON file (which `_read_json_or_none` would silently swallow,
@@ -154,16 +162,15 @@ def write_session_meta(session: str, meta: dict[str, Any]) -> None:
 
         for code in languages:
             if not is_candidate_language(code):
-                raise HTTPException(400, f"unknown language code: {code!r} (not in the catalog)")
+                raise MetaValidationError(f"unknown language code: {code!r} (not in the catalog)")
         sanitized["languages"] = languages
     for capped_field in ("prompt", "hotwords", "summary_prompt"):
         try:
             validate_config_text(sanitized[capped_field])
         except ValueError as e:
-            raise HTTPException(400, str(e)) from e
+            raise MetaValidationError(str(e)) from e
     if sanitized["summary_source"] not in SUMMARY_SOURCES:
-        raise HTTPException(
-            400,
+        raise MetaValidationError(
             f"unknown summary_source: {sanitized['summary_source']!r} "
             f"(expected one of: {', '.join(s for s in SUMMARY_SOURCES if s)} — or '' to clear)",
         )
@@ -193,7 +200,7 @@ def known_names_for_session(session: str) -> list[str]:
     `read_session_meta` → `{}`, `PeopleRegistry.load` → empty)."""
     try:
         session_dir = resolve_session_dir(session)
-    except HTTPException:
+    except SessionPathError:
         # The only raiser here: the session dir vanished between the merged-
         # transcript read and now. No names to inject; the summarize proceeds
         # unhinted rather than 404-ing on an optional enrichment.
@@ -820,3 +827,74 @@ def gather_sessions(
             },
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Cross-session transcript-content search
+# ---------------------------------------------------------------------------
+
+
+def search_transcripts(query: str) -> list[dict[str, Any]]:
+    """Scan every session's merged transcript for `query` (case-insensitive).
+
+    Returns one hit per matching session: ``{session, label, snippet, count}``.
+    Sessions without a valid merged transcript are silently skipped.
+
+    A blank/whitespace-only query short-circuits to ``[]`` — never iterates,
+    never parses, never 500.
+    """
+    if not query.strip():
+        return []
+
+    root = config.RECORDINGS_DIR
+    results: list[dict[str, Any]] = []
+    term = query.lower()
+
+    for sd in sorted(root.glob("*"), reverse=True):
+        if not sd.is_dir():
+            continue
+
+        raw = _read_session_json_cached(sd / FILENAME_TRANSCRIPT_JSON)
+        if not isinstance(raw, dict):
+            continue
+        plain = raw.get("plain_text")
+        if not isinstance(plain, str) or not plain:
+            continue
+
+        text_lower = plain.lower()
+        if term not in text_lower:
+            continue
+
+        meta = _coerce_session_meta(_read_session_json_cached(sd / FILENAME_META_JSON))
+        label = meta.get("label", "")
+
+        count = text_lower.count(term)
+
+        first = text_lower.find(term)
+        win_start = max(0, first - 100)
+        win_end = min(len(plain), first + len(term) + 100)
+        snippet = plain[win_start:win_end]
+        left_clipped = win_start > 0
+        right_clipped = win_end < len(plain)
+        # Trim to whole-word boundaries and mark clipping with `…`.
+        if left_clipped:
+            idx = snippet.find(" ")
+            if idx != -1:
+                snippet = snippet[idx + 1 :]
+                snippet = "…" + snippet
+        if right_clipped:
+            idx = snippet.rfind(" ")
+            if idx != -1:
+                snippet = snippet[:idx]
+            snippet = snippet + "…"
+
+        results.append(
+            {
+                "session": sd.name,
+                "label": label,
+                "snippet": snippet,
+                "count": count,
+            }
+        )
+
+    return results

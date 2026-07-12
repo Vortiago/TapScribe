@@ -85,6 +85,9 @@ from .name_resolution import attach_people
 from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
 from .session_maintenance import (
+    AbsorbCollision,
+    InvalidAbsorbRequest,
+    SessionDeleteError,
     absorb_session,
     delete_session_audio,
     delete_session_wav,
@@ -92,8 +95,17 @@ from .session_maintenance import (
     session_is_empty,
 )
 from .session_merge import InvalidRange, NoUsableWavs
-from .session_paths import resolve_session_dir, resolve_wav, stripped_dir
+from .session_paths import (
+    SessionNotFound,
+    StrippedMissing,
+    UnknownSource,
+    WavNotFound,
+    resolve_session_dir,
+    resolve_wav,
+    stripped_dir,
+)
 from .sessions import (
+    MetaValidationError,
     gather_sessions,
     read_session_files,
     read_session_meta,
@@ -101,6 +113,7 @@ from .sessions import (
     read_session_transcript,
     read_wav_strip_meta,
     read_wav_transcript,
+    search_transcripts,
     write_session_meta,
 )
 from .setup_install import InstallSelectionError, run_install, sse, validate_selection
@@ -360,6 +373,14 @@ _DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
     NoMergedTranscript: 422,
     SummarizerUnavailable: 400,
     SummarizerFailed: 502,
+    SessionNotFound: 404,
+    UnknownSource: 400,
+    StrippedMissing: 404,
+    WavNotFound: 404,
+    MetaValidationError: 400,
+    AbsorbCollision: 409,
+    InvalidAbsorbRequest: 400,
+    SessionDeleteError: 500,
 }
 
 
@@ -1586,6 +1607,20 @@ async def api_session_summary(session: str, recorder: Recorder = Depends(get_rec
     client-side. The disk read is offloaded with to_thread like the rest of
     the poll path."""
     return await asyncio.to_thread(read_session_summary, session)
+
+
+@app.get("/api/search")
+async def api_search(q: str = "", recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+    """Cross-session transcript-content search.
+
+    Scans every session's merged transcript for a query term (case-
+    insensitive) and returns one hit per matching session:
+    ``{session, label, snippet, count}``.
+
+    Basic-auth (not tap-bearer, not exempt). The scan runs off the event
+    loop via ``asyncio.to_thread`` so it doesn't block /api/state polling.
+    """
+    return await asyncio.to_thread(search_transcripts, q)
 
 
 # ---------------------------------------------------------------------------
