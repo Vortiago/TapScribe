@@ -8,13 +8,26 @@ relay path is fully exercised.
 
 from __future__ import annotations
 
+import os as _os
 import sys as _sys
+import time as _time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import Path as _Path
 
 import pytest
+
+# Pin the process (and every spawned chromium's) timezone: the dashboard
+# renders absolute instants in the VIEWER's zone (lib/format.js `time()`), so
+# a timestamp assert would otherwise depend on the box running the suite.
+# UTC matches the recorder's ISO-encoded instants — the pre-toolkit
+# string-slice output — so expectations stay literal. Forced, not setdefault:
+# the dev box's own TZ must not leak into assertions. (No tzset on Windows;
+# the playwright suites are Linux-only in CI.)
+_os.environ["TZ"] = "UTC"
+if hasattr(_time, "tzset"):
+    _time.tzset()
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder

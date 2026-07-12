@@ -86,7 +86,8 @@
       <span class="dim tiny" data-slot="status"></span>
       <span class="spacer"></span>
       <button class="btn tiny" id="liveLogRefreshBtn" type="button">refresh</button>
-      <button class="btn tiny" id="liveLogCloseBtn" type="button">close</button>
+      <!-- Invoker Commands: closes the dialog declaratively — no JS wiring. -->
+      <button class="btn tiny" id="liveLogCloseBtn" type="button" command="close" commandfor="liveLogDialog">close</button>
     </header>
     <pre class="live-log-pre" data-slot="pre"></pre>
   </dialog>

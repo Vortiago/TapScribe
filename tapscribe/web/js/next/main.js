@@ -15,7 +15,7 @@
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
 import { fetchState, postJson, putJson } from "../api.js";
-import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
+import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar, withTransition } from "../templates.js";
 import { warmProgress } from "../vc/components/progress/progress.js";
 import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
@@ -355,7 +355,10 @@ function renderView(j, session) {
   }
 
   if (mountedKey !== key) {
-    mount(root, built.host ?? built.node);
+    // A view/session switch is a DISCRETE, user-initiated change — animate it
+    // with a View Transition (canon render.js). Never wraps the per-tick
+    // update below: mountedKey gates this to actual navigation.
+    withTransition(() => mount(root, built.host ?? built.node));
     mountedKey = key;
   }
   built.update(j, session);

@@ -1351,3 +1351,11 @@ button.wavrow {
   border-top: 1px solid var(--rec);
   white-space: pre-wrap;
 }
+
+/* View Transitions (withTransition on user-initiated view switches): the
+   default crossfade, neutralised under reduced motion — the canon rule. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none !important; }
+}

@@ -289,8 +289,8 @@ async function openLogDialog() {
     const frag = tpl("tpl-live-log-dialog");
     document.body.appendChild(frag);
     dlg = /** @type {HTMLDialogElement} */ (document.getElementById("liveLogDialog"));
-    const closeBtn = dlg.querySelector("#liveLogCloseBtn");
-    closeBtn?.addEventListener("click", () => dlg?.close());
+    // The close button needs no wiring — it carries command="close"
+    // commandfor="liveLogDialog" (Invoker Commands) in the template.
     dlg.querySelector("#liveLogRefreshBtn")?.addEventListener("click", async () => {
       if (dlg) renderLogInto(dlg, await fetchLog());
     });
