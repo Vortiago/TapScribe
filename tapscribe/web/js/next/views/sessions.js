@@ -37,7 +37,7 @@
 // guarded. The prune button lives OUTSIDE the guarded region (static head).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson, postJson, del } from "../../api.js";
+import { putJson, postJson, del, getJson } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline } from "../shell.js";
 
@@ -151,11 +151,8 @@ export function build(ctx) {
     lastSearchQuery = q;
     lastSearchResults = null;
     try {
-      const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-      if (resp.ok) {
-        const data = await resp.json();
-        lastSearchResults = Array.isArray(data) ? data : (data.results ?? []);
-      }
+      const data = await getJson(`/api/search?q=${encodeURIComponent(q)}`);
+      lastSearchResults = Array.isArray(data) ? data : [];
     } catch { /* search unavailable — fall back to "searching…" */ }
   };
 
@@ -471,8 +468,21 @@ export function build(ctx) {
       empty.textContent = "No sessions yet — start recording to see them here.";
       body.replaceChildren(empty);
     } else if (!shown.length) {
-      const searchResultsEl = pick(region, "searchResults");
-      if (lastSearchResults !== null) {
+      // No local (label/id/date) matches — show the cross-session transcript
+      // search instead, into the SAME rows body (the two are mutually exclusive,
+      // so they share one container).
+      if (lastSearchResults === null) {
+        // Still waiting for the server-side search to return.
+        pick(region, "shownCount").textContent =
+          `${sessions.length} total · searching transcripts…`;
+        body.replaceChildren();
+      } else if (lastSearchResults.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = `No sessions match "search" for "${filter}".`;
+        body.replaceChildren(empty);
+        pick(region, "shownCount").textContent = `0 search results`;
+      } else {
         // Render search hits with snippet previews.
         const frag = document.createDocumentFragment();
         for (const hit of lastSearchResults) {
@@ -499,26 +509,10 @@ export function build(ctx) {
           snippetEl.textContent = hit.snippet;
           frag.appendChild(snippetEl);
         }
-        if (lastSearchResults.length === 0) {
-          const empty = document.createElement("div");
-          empty.className = "empty";
-          empty.textContent = `No sessions match "search" for "${filter}".`;
-          searchResultsEl.replaceChildren(empty);
-        } else {
-          searchResultsEl.replaceChildren(frag);
-        }
-        // Reset count display — we're showing search results, not local matches.
+        body.replaceChildren(frag);
         pick(region, "shownCount").textContent =
-          lastSearchResults.length === 0
-            ? `0 search results`
-            : `${lastSearchResults.length} session${lastSearchResults.length === 1 ? "" : "s"} in transcript`;
-      } else {
-        // Still waiting for search results.
-        pick(region, "shownCount").textContent =
-          `${sessions.length} total · searching transcripts…`;
+          `${lastSearchResults.length} session${lastSearchResults.length === 1 ? "" : "s"} in transcript`;
       }
-      // Clear rows body when showing search results — it lives in searchResultsEl.
-      body.replaceChildren();
     } else {
       // Absorb targets: archived sessions only — the current (recording) one is
       // never a merge endpoint (classic kept it out of the picker entirely),
@@ -587,7 +581,7 @@ export function build(ctx) {
     // When local filter yields no results for a non-empty query, fire a
     // server-side transcript search. Results are cached per query string
     // so a poll tick that re-evaluates the same filter reuses them.
-    if (filter && lastSearchQuery !== filter) {
+    if (filter && lastSearchQuery !== filter && sessions.filter(matches).length === 0) {
       fireSearch(filter);
     }
 

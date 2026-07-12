@@ -1499,7 +1499,7 @@ async def api_session_summary(session: str, recorder: Recorder = Depends(get_rec
 
 
 @app.get("/api/search")
-async def api_search(req: Request, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+async def api_search(q: str = "", recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
     """Cross-session transcript-content search.
 
     Scans every session's merged transcript for a query term (case-
@@ -1509,7 +1509,6 @@ async def api_search(req: Request, recorder: Recorder = Depends(get_recorder)): 
     Basic-auth (not tap-bearer, not exempt). The scan runs off the event
     loop via ``asyncio.to_thread`` so it doesn't block /api/state polling.
     """
-    q = req.query_params.get("q", "")
     return await asyncio.to_thread(search_transcripts, q)
 
 
