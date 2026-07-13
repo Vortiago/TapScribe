@@ -3023,9 +3023,7 @@ async def test_next_apply_selection_skips_walk_on_quiet_tick(running_recorder: R
                 timeout=10000,
             )
             walks_2 = await page.evaluate("() => window.__selWalks.recordings")
-            assert walks_2 > walks_1, (
-                "selecting a different WAV did not repaint the selection highlight"
-            )
+            assert walks_2 > walks_1, "selecting a different WAV did not repaint the selection highlight"
             await context.close()
         finally:
             await browser.close()
