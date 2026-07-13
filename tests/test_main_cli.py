@@ -248,9 +248,10 @@ def test_main_live_gate_min_speech_ms_unset_keeps_liveconfig_default(
 
     _run_main([], monkeypatch)
 
-    assert app.state.recorder.live.config.gate_min_speech_ms == LiveConfig(
-        model="x", language="x", host="x", port=0
-    ).gate_min_speech_ms
+    assert (
+        app.state.recorder.live.config.gate_min_speech_ms
+        == LiveConfig(model="x", language="x", host="x", port=0).gate_min_speech_ms
+    )
 
 
 def test_main_no_mlx_forces_cpu_when_backend_is_auto(
