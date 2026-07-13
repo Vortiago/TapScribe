@@ -38,7 +38,9 @@ from unittest.mock import patch
 import pytest
 
 import tapscribe.live as live_mod
-from tapscribe.live import LiveConfig, WhisperLiveKitChannel
+
+LiveConfig = live_mod.LiveConfig
+WhisperLiveKitChannel = live_mod.WhisperLiveKitChannel
 
 
 def _make_channel(*, gate_kind: str = "tapscribe", **overrides) -> WhisperLiveKitChannel:
