@@ -154,6 +154,31 @@ public class MeetingControllerTests
     }
 
     [Fact]
+    public async Task EndMeeting_RecordOnly_DrainsButNeverTriggersOrPolls_AndEndsAtSaved()
+    {
+        // ProcessOnEnd == false: the operator wants the recordings saved but NOT auto-processed.
+        await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(
+            triggerStatus: 202, pollScript: [Done("should never be reached")]);
+        using var http = new HttpClient();
+        var views = new List<PipelineView>();
+        int drainCount = 0;
+
+        MeetingController controller = EndController(
+            server, http, views,
+            drainAsync: () => { Interlocked.Increment(ref drainCount); return Task.CompletedTask; });
+
+        await controller.EndAsync(triggerPipeline: false);
+
+        Assert.Equal(1, drainCount);          // the taps still drain — the recordings are flushed
+        Assert.Equal(0, server.TriggerCount); // ...but the pipeline is never triggered
+        Assert.Equal(0, server.PollCount);    // ...and never polled
+        // ending (taps draining) -> saved (terminal), with no Running/Done in between.
+        Assert.Equal(PipelinePhase.Ending, views[0].Phase);
+        Assert.Equal(PipelinePhase.Saved, views[^1].Phase);
+        Assert.DoesNotContain(views, v => v.Phase is PipelinePhase.Running or PipelinePhase.Done);
+    }
+
+    [Fact]
     public async Task Resume_PollsAPersistedSession_WithoutDrainingOrRetriggering()
     {
         await using FakeRecorderServer server = await FakeRecorderServer.StartAsync(

@@ -146,4 +146,15 @@ public class PipelineViewTests
     {
         Assert.True(PipelineView.Map(new PipelinePoll { State = "running", Stage = "strip" }).KeepPolling);
     }
+
+    [Fact]
+    public void Saved_IsTerminal_WithNoSummaryOrFailure()
+    {
+        PipelineView view = PipelineView.Saved();
+
+        Assert.Equal(PipelinePhase.Saved, view.Phase);
+        Assert.False(view.KeepPolling); // record-only End is terminal — the loop must stop
+        Assert.Null(view.SummaryText);
+        Assert.Null(view.FailureReason);
+    }
 }

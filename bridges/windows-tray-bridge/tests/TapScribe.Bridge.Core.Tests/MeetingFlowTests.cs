@@ -70,6 +70,40 @@ public class MeetingFlowTests
     }
 
     [Fact]
+    public async Task FullMeeting_RecordOnly_StreamsAndDrains_ButLeavesTheSessionUnprocessed()
+    {
+        await using FakeRecorder rec = await FakeRecorder.StartAsync();
+        using var http = new HttpClient();
+        using ControlClient control = Control(rec, http);
+
+        // Start meeting: mint a detached session and stream the mic into it.
+        string session = await control.CreateDetachedSessionAsync();
+        var mic = new FakeAudioCapture(RecorderFormat);
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            [new PipelineSpec(mic, Tap(rec.Port, "mic", session))],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            gate: FastGate(), stream: FastStream());
+
+        mic.Emit(Loud(40));
+        await Poll.UntilAsync(
+            () => rec.FramesFor(session, "mic") > 0, Wait, "the mic to stream into the detached session");
+
+        // End meeting in RECORD-ONLY mode: the real Drain still closes the tap, but the
+        // pipeline is never triggered — the recordings are simply left for later.
+        var views = new List<PipelineView>();
+        var controller = new MeetingController(
+            control, session, pollDelay: Immediate, drainAsync: () => orchestrator.EndMeetingAsync());
+        controller.Updated += view => { lock (views) views.Add(view); };
+
+        await controller.EndAsync(triggerPipeline: false);
+
+        await Poll.UntilAsync(() => rec.AllTapsClosed(session), Wait, "the real Drain to close the tap");
+        Assert.Equal(1, rec.NewSessionCount);        // the session was minted...
+        Assert.Equal(0, rec.TriggerCount(session));  // ...but no pipeline ever ran on it
+        Assert.Equal(PipelinePhase.Saved, views[^1].Phase);
+    }
+
+    [Fact]
     public async Task FullMeeting_WalksEveryPipelineStageInOrder()
     {
         await using FakeRecorder rec = await FakeRecorder.StartAsync();

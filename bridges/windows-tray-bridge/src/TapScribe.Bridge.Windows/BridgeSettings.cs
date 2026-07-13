@@ -37,6 +37,17 @@ public sealed class BridgeSettings
     public string Name { get; set; } = "";
 
     /// <summary>
+    /// When true (the default), <b>End meeting</b> fires the Recorder's end-of-meeting
+    /// pipeline (strip → transcribe → summarize) and shows the summary. When false, End
+    /// meeting only drains + closes the taps: the detached session and its recordings are
+    /// left on the Recorder untouched, to be transcribed / summarized from the dashboard
+    /// later. Defaults to true so a settings file written before this key existed keeps the
+    /// original auto-process behaviour (System.Text.Json preserves the initializer when the
+    /// key is absent).
+    /// </summary>
+    public bool ProcessOnEnd { get; set; } = true;
+
+    /// <summary>
     /// Which devices to tap, as resolvable selections (follow-default or pinned). An
     /// empty list means "use the default pair" — see <see cref="EffectiveDevices"/>;
     /// this keeps a pre-#106 settings file (no devices key) behaving like today.

@@ -43,8 +43,14 @@ public sealed class MeetingController
     }
 
     /// <summary>End the meeting: drain the open taps, trigger the pipeline, and poll to
-    /// the finished summary (or a failure). A no-op on a second call.</summary>
-    public async Task EndAsync(CancellationToken cancellationToken = default)
+    /// the finished summary (or a failure). A no-op on a second call.
+    ///
+    /// When <paramref name="triggerPipeline"/> is false (the operator's record-only mode,
+    /// <c>BridgeSettings.ProcessOnEnd == false</c>), the taps still drain — so the recordings
+    /// are fully written — but the pipeline is NOT triggered and NOT polled: the flow emits a
+    /// terminal <see cref="PipelineView.Saved"/> and stops. The session and its recordings
+    /// stay on the Recorder to be processed from the dashboard later.</summary>
+    public async Task EndAsync(bool triggerPipeline = true, CancellationToken cancellationToken = default)
     {
         if (Interlocked.Exchange(ref _started, 1) != 0)
             return; // a double-clicked End meeting can't fire a second pipeline
@@ -52,6 +58,15 @@ public sealed class MeetingController
 
         Updated?.Invoke(PipelineView.Map(null, ending: true));
         await _drainAsync().ConfigureAwait(false); // flush every utterance before strip runs
+
+        if (!triggerPipeline)
+        {
+            // Record-only: taps drained, WAVs saved, no automatic processing. Terminal — no
+            // trigger, no poll (so nothing to resume either; the tray persists no state).
+            Updated?.Invoke(PipelineView.Saved());
+            return;
+        }
+
         PipelineTriggerOutcome outcome =
             await _control.TriggerPipelineAsync(_sessionId, cancellationToken).ConfigureAwait(false);
         if (outcome == PipelineTriggerOutcome.Busy)
