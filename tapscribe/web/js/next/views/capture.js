@@ -39,7 +39,7 @@ const setHealth = (el, value) => {
  *   liveCatalog: import('../../types.js').ModelCatalog,
  *   languageCatalog: import('../../types.js').LanguageCatalog,
  *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
- *   onLiveStart: () => void,
+ *   onLiveStart: (host: HTMLElement) => void,
  *   onLiveStop: () => void,
  *   afterMutate: () => void,
  * }} ctx

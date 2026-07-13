@@ -12,6 +12,7 @@ TapFanOut.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 
 import pytest
@@ -351,3 +352,227 @@ def test_default_relay_factory_binds_config_and_handlers():
     assert relay._on_settled_line is handlers.on_settled_line
     assert relay._on_metrics is handlers.on_metrics
     assert relay._on_buffer is handlers.on_buffer
+
+
+# --------------------------------------------------------------------------
+# Gate construction off the event loop (#249)
+#
+# `SpeechGate` construction (real Silero: lazy import + ONNX model load)
+# is genuinely blocking CPU work, so a fake that proves "ran off the loop"
+# has to actually block a real OS thread — an `asyncio.sleep` fake would
+# already yield on its own and couldn't tell a fixed synchronous call
+# apart from one dispatched via `asyncio.to_thread`.
+#
+# The naive way to prove that — have the test await a `threading.Event`
+# via `asyncio.to_thread` and check it fired — doesn't work: if the gate
+# factory is (still, buggily) called directly on the loop, the ENTIRE
+# loop is blocked for the duration of that call, including the coroutine
+# that's supposed to be *observing* it, so the observer can't distinguish
+# "it's happening right now" from "it already finished" — by the time
+# the observer gets scheduled at all, a synchronous call has always
+# already returned. The reliable signal is instead the *return value* of
+# `threading.Event.wait(timeout=...)`: `True` means something else set it
+# before the timeout elapsed (proof of genuine concurrency); `False`
+# means only the timeout itself unblocked the wait (nothing else got a
+# chance to run). `_blocking_gate_factory` below records that boolean
+# into a shared dict rather than just returning the gate.
+# --------------------------------------------------------------------------
+
+
+def _blocking_gate_factory(release: threading.Event, outcome: dict, gate, *, timeout: float = 3.0):
+    """A synchronous (non-async) gate factory — the shape `TapRelay` calls
+    directly today and would dispatch via `asyncio.to_thread` once fixed.
+    Blocks until `release` fires, recording whether that happened before
+    `timeout` elapsed into `outcome["released_in_time"]` — the bounded
+    timeout keeps a regression a fast, deterministic failure rather than
+    a hang."""
+
+    def factory(_cfg):
+        outcome["released_in_time"] = release.wait(timeout=timeout)
+        return gate
+
+    return factory
+
+
+async def test_gate_construction_runs_off_the_event_loop():
+    """Gate construction must not block the event loop: a `ticker`
+    coroutine scheduled alongside `open()` must get to run 20 loop turns
+    and flip `release` WHILE the (real-thread-blocked) factory is still
+    waiting on it. Pre-fix, `_attach` called the factory directly on the
+    loop, so the ticker could never run until the factory had already
+    given up and returned on its own bounded timeout — `release` would
+    then be set too late to be observed, so `released_in_time` reads
+    `False`. This is a structural proof (a bool from `Event.wait`'s
+    return value), not a wall-clock threshold, so it holds on slow CI."""
+    release = threading.Event()
+    outcome: dict = {}
+
+    async def ticker() -> None:
+        for _ in range(20):
+            await asyncio.sleep(0)
+        release.set()
+
+    factory = _RecordingFactory()
+    relay = _tap_relay(_FakeLive(_FakeConfig()), do_live=True, factory=factory, gate=None)
+    relay._gate_factory = _blocking_gate_factory(release, outcome, None)
+
+    open_task = asyncio.create_task(relay.open())
+    ticker_task = asyncio.create_task(ticker())
+
+    await asyncio.wait_for(open_task, timeout=6.0)
+    await asyncio.wait_for(ticker_task, timeout=6.0)
+
+    assert outcome.get("released_in_time") is True, (
+        "the ticker never ran concurrently with gate construction — construction is stalling the event loop"
+    )
+    assert relay.connected is not None
+
+
+async def test_frames_during_gate_construction_pass_through():
+    """Frames that arrive while the gate is still under construction take
+    the SAME deliberate passthrough path as a construction failure
+    (`self._gate is None` → forward unfiltered, `gate_open=False`) —
+    rather than being buffered or dropped. The relay is already attached
+    (connect() finished) before gate construction even starts, so a slow
+    gate must not hold up delivery of frames that arrive in the interim.
+
+    Pre-fix this fails for the same structural reason described above:
+    a synchronous factory call blocks `open()`'s single loop turn to
+    completion before this test's own polling loop (or `feed()` call)
+    ever gets to run, so by the time control returns here the (real)
+    gate is already fully built and `fed.gate_open` reads `True`, not
+    the expected passthrough `False`."""
+    release = threading.Event()
+    outcome: dict = {}
+    ready_gate = _FakeGate(output=[PCM_FRAME], is_open=True)
+
+    factory = _RecordingFactory()
+    relay = _tap_relay(_FakeLive(_FakeConfig()), do_live=True, factory=factory, gate=None)
+    relay._gate_factory = _blocking_gate_factory(release, outcome, ready_gate)
+
+    open_task = asyncio.create_task(relay.open())
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if relay.connected is not None:
+            break
+    assert relay.connected is not None  # attaches before the gate is ready
+
+    fed = await relay.feed(PCM_FRAME)
+    assert fed == FedFrames(frames=(PCM_FRAME,), gate_open=False)
+    assert factory.relays[0].sent == [PCM_FRAME]
+
+    release.set()
+    await asyncio.wait_for(open_task, timeout=6.0)
+    # Sanity: we really did observe the mid-construction state above, not
+    # a lucky coincidence — the factory's wait was released BY us, not by
+    # its own bounded timeout.
+    assert outcome.get("released_in_time") is True
+
+    # Once construction completes, the real gate takes over.
+    fed2 = await relay.feed(PCM_FRAME)
+    assert fed2 == FedFrames(frames=(PCM_FRAME,), gate_open=True)
+
+
+async def test_gate_construction_failure_falls_back_to_passthrough(capsys: pytest.CaptureFixture[str]):
+    """A gate factory that raises must not take the tap down — the relay
+    still attaches, and feed() degrades to passthrough. Pins the exact
+    log contract (`CLAUDE.md`): 'gate construction failed ... falling
+    back to passthrough'."""
+    factory = _RecordingFactory()
+    relay = _tap_relay(_FakeLive(_FakeConfig()), do_live=True, factory=factory, gate=None)
+
+    def _raise(_cfg):
+        raise RuntimeError("boom")
+
+    relay._gate_factory = _raise
+
+    await relay.open()
+    assert relay.connected is not None  # the tap still attaches
+
+    fed = await relay.feed(PCM_FRAME)
+    assert fed == FedFrames(frames=(PCM_FRAME,), gate_open=False)  # passthrough
+
+    out = capsys.readouterr().out
+    assert "gate construction failed" in out
+    assert "falling back to passthrough" in out
+
+
+async def test_reconnect_does_not_feed_through_the_stale_gate_while_rebuilding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A reconnect (WlK restart / operator swapped model+gate settings)
+    rebuilds the gate too. While the NEW gate is under construction,
+    frames must not keep running through the OLD gate (built for the
+    config that just changed) — they take the same deliberate passthrough
+    as first-attach construction. Regression for a scenario the naive
+    `asyncio.to_thread` swap alone doesn't cover: `_attach` must clear
+    `self._gate` BEFORE kicking off construction, not just after it
+    finishes."""
+    monkeypatch.setattr(tr, "RELAY_RECONNECT_BACKOFF_S", 0.0)
+    live = _FakeLive(_FakeConfig())
+    factory = _RecordingFactory(connect_ok=True)
+
+    # Both gates forward the frame (output=[PCM_FRAME]) so relay-death
+    # detection + reconnect scheduling behave identically regardless of
+    # which one is (or isn't) live — the discriminator is `is_open=True`
+    # on both, so a stale `old_gate` still wired up during the rebuild
+    # would report `gate_open=True` exactly like the eventual new gate.
+    # Only a properly-cleared `self._gate is None` forces `gate_open=False`
+    # (the passthrough contract), which is what distinguishes "still on
+    # the stale gate" from "correctly cleared, pending construction".
+    old_gate = _FakeGate(output=[PCM_FRAME], is_open=True)
+    new_ready_gate = _FakeGate(output=[PCM_FRAME], is_open=True)
+    release = threading.Event()
+    outcome: dict = {}
+    calls = {"n": 0}
+
+    def gate_factory(_cfg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return old_gate
+        outcome["released_in_time"] = release.wait(timeout=3.0)
+        return new_ready_gate
+
+    relay = TapRelay(
+        live,
+        do_live=True,
+        handlers=_handlers(),
+        relay_factory=factory,
+        gate_factory=gate_factory,
+    )
+    await relay.open()
+    assert relay.connected is not None
+
+    # WlK dies; the next feed schedules a reconnect (new gate_factory call).
+    factory.relays[0].alive = False
+    await relay.feed(PCM_FRAME)  # detects the death
+    await relay.feed(PCM_FRAME)  # schedules the reconnect
+
+    # Poll with a real (small) delay rather than bare `sleep(0)` — the
+    # second gate_factory call happens on a background thread pool
+    # worker (`asyncio.to_thread`), and its `call_soon_threadsafe`
+    # handoff back to the loop needs the loop to actually reach a timed
+    # `select()`/epoll wait at least once; an all-zero-delay busy loop
+    # can spin through many iterations without ever giving that handoff
+    # a chance to land.
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if relay.connected is not None and calls["n"] >= 2:
+            break
+    assert relay.connected is not None and calls["n"] >= 2
+
+    # The reconnect has a fresh relay attached but the new gate isn't
+    # ready yet — frames must pass straight through (gate_open=False),
+    # NOT through the stale old_gate (which would report gate_open=True).
+    fed = await relay.feed(PCM_FRAME)
+    assert fed == FedFrames(frames=(PCM_FRAME,), gate_open=False)
+
+    release.set()
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if outcome.get("released_in_time") is not None:
+            break
+    assert outcome.get("released_in_time") is True
+
+    fed2 = await relay.feed(PCM_FRAME)
+    assert fed2 == FedFrames(frames=(PCM_FRAME,), gate_open=True)

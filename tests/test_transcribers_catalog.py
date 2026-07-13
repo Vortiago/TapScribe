@@ -10,6 +10,11 @@ from __future__ import annotations
 
 import pytest
 
+from tapscribe.runtime_probe import (
+    resolve_backend_preference,
+    set_available_backends_for_testing,
+    set_installed_modules_for_testing,
+)
 from tapscribe.transcribers.base import TextInput
 from tapscribe.transcribers.catalog import (
     DEFAULT_BATCH_MODEL,
@@ -20,9 +25,6 @@ from tapscribe.transcribers.catalog import (
     TranscriberRegistry,
     _load_moonshine_mlx,
     _load_moonshine_onnx,
-    resolve_backend_preference,
-    set_available_backends_for_testing,
-    set_installed_modules_for_testing,
 )
 
 

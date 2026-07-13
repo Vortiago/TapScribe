@@ -362,7 +362,7 @@ def _seed_device_label(use_mlx: bool) -> str:
     if use_mlx:
         return "Apple Silicon GPU"
     # Late import: the probe imports torch on first call (cached after).
-    from .transcribers.catalog import available_backends
+    from .runtime_probe import available_backends
 
     return "CUDA (auto)" if "cuda" in available_backends() else "CPU"
 

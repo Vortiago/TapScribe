@@ -601,7 +601,10 @@ export interface LiveChannelCtx {
   /** Acceleration note (historical name) — filled from available_backends. */
   mlxEl: HTMLElement;
   bodyEl: HTMLElement;
-  onAction: { start: () => void; stop: () => void };
+  // `start` is handed the bodyEl it was invoked from (see live-channel.js's
+  // formValues(host)) so the caller reads the right instance's form when two
+  // views (Capture + Taps) each hold their own live-channel body.
+  onAction: { start: (host: HTMLElement) => void; stop: () => void };
   liveCatalog: ModelCatalog;
 }
 

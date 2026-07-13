@@ -635,7 +635,7 @@ class Recorder:
         # handler — it would make the dashboard's first poll appear to
         # hang and the e2e tests time out on otherwise-correct DOM
         # assertions.
-        from .transcribers.catalog import available_backends
+        from .runtime_probe import available_backends
 
         available_backends()
 
@@ -689,7 +689,7 @@ class Recorder:
             return True
         if self.backend == "auto":
             try:
-                from .transcribers.catalog import resolve_backend_preference
+                from .runtime_probe import resolve_backend_preference
 
                 return resolve_backend_preference("auto") == "mlx"
             except Exception:  # noqa: BLE001 — never let the shim crash a caller

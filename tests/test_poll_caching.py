@@ -17,8 +17,7 @@ from conftest import TranscriberStub  # type: ignore[import-not-found]
 from wav_builders import seed_wav  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
-from tapscribe import hallucinations, sessions, text
-from tapscribe.transcribers import catalog
+from tapscribe import hallucinations, runtime_probe, sessions, text
 from tapscribe.wav_cache import cache_signature, cached_transcribe
 
 
@@ -31,7 +30,7 @@ def _clear_poll_caches():
         sessions._SESSION_JSON_CACHE.clear()
         text._CONFIG_TEXT_CACHE.clear()
         hallucinations._RULES_CACHE.clear()
-        catalog._FIND_SPEC_CACHE.clear()
+        runtime_probe._FIND_SPEC_CACHE.clear()
 
     _reset()
     yield
@@ -174,24 +173,24 @@ def test_parse_rules_caches_and_invalidates(tmp_path: Path, monkeypatch: pytest.
 
 
 # ---------------------------------------------------------------------------
-# catalog._is_module_available memoisation
+# runtime_probe._is_module_available memoisation
 # ---------------------------------------------------------------------------
 
 
 def test_is_module_available_memoises_and_clears_on_override():
-    assert catalog._is_module_available("os") is True
-    assert catalog._FIND_SPEC_CACHE.get("os") is True
-    assert catalog._is_module_available("definitely_not_a_real_module_xyz") is False
-    assert catalog._FIND_SPEC_CACHE.get("definitely_not_a_real_module_xyz") is False
+    assert runtime_probe._is_module_available("os") is True
+    assert runtime_probe._FIND_SPEC_CACHE.get("os") is True
+    assert runtime_probe._is_module_available("definitely_not_a_real_module_xyz") is False
+    assert runtime_probe._FIND_SPEC_CACHE.get("definitely_not_a_real_module_xyz") is False
 
-    catalog.set_installed_modules_for_testing(frozenset({"os"}))
+    runtime_probe.set_installed_modules_for_testing(frozenset({"os"}))
     try:
-        assert catalog._FIND_SPEC_CACHE == {}  # setting the override clears the memo
-        assert catalog._is_module_available("os") is True
-        assert catalog._is_module_available("anything") is False
-        assert catalog._FIND_SPEC_CACHE == {}  # the override path never populates it
+        assert runtime_probe._FIND_SPEC_CACHE == {}  # setting the override clears the memo
+        assert runtime_probe._is_module_available("os") is True
+        assert runtime_probe._is_module_available("anything") is False
+        assert runtime_probe._FIND_SPEC_CACHE == {}  # the override path never populates it
     finally:
-        catalog.set_installed_modules_for_testing(None)
+        runtime_probe.set_installed_modules_for_testing(None)
 
 
 # ---------------------------------------------------------------------------

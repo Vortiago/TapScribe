@@ -2,9 +2,9 @@
 
 Parallel to `tapscribe.transcribers.voxtral` but uses the `mlx_voxtral`
 package (https://github.com/mzbac/mlx.voxtral / pip install mlx-voxtral)
-instead of `transformers`. The high-level call shape mirrors the HF
-adapter — apply_transcrition_request → generate → decode — so most of the
-adapter is the same; the differences are:
+instead of `transformers`. The shared transcribe flow lives in
+`_voxtral_common.py`'s `VoxtralTranscriberBase`; this module implements
+only the mlx-voxtral-specific hooks, which differ from the HF adapter in:
 
   - The upstream method is spelled `apply_transcrition_request` (sic —
     note the missing 'c'). We forward that name as-is. A regression test
@@ -17,12 +17,9 @@ adapter is the same; the differences are:
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, ClassVar
 
-from ..audio import wav_duration_s
-from .base import TranscriptionResult, build_transcription_result, default_language_for
-from .voxtral import split_voxtral_text_into_segments
+from ._voxtral_common import VoxtralTranscriberBase, _inputs_kwargs
 
 # Quantised MLX builds live under mlx-community. Default to bf16 — full
 # quality with the MLX speedup; users on tight RAM can swap to 4bit/8bit
@@ -30,7 +27,7 @@ from .voxtral import split_voxtral_text_into_segments
 _MLX_VOXTRAL_REPO = "mlx-community/Voxtral-Mini-3B-2507-bf16"
 
 
-class MlxVoxtralTranscriber:
+class MlxVoxtralTranscriber(VoxtralTranscriberBase):
     """A Voxtral model loaded via mlx_voxtral, satisfying the `Transcriber`
     Protocol. Same `name="voxtral"` as the HF adapter so the dashboard
     treats them as the same model family; `backend` disambiguates."""
@@ -68,64 +65,28 @@ class MlxVoxtralTranscriber:
         model = VoxtralForConditionalGeneration.from_pretrained(_MLX_VOXTRAL_REPO)
         return cls(model_name=model_name, processor=processor, model=model)
 
-    def transcribe(
-        self,
-        path: Path,
-        *,
-        initial_prompt: str | None = None,
-        hotwords: str | None = None,
-        source_lang: str | None = None,
-    ) -> TranscriptionResult:
+    def _repo_id(self) -> str:
+        return _MLX_VOXTRAL_REPO
+
+    def _apply_request(self, request_kwargs: dict[str, Any]) -> Any:
         # apply_transcrition_request mirrors HF's apply_transcription_request
         # (typo preserved); prompt + hotwords have no place in this call so
-        # we drop them but record them on the result for protocol parity.
-        language = source_lang or default_language_for(self.model_name)
-        request_kwargs: dict[str, Any] = {"audio": str(path), "model_id": _MLX_VOXTRAL_REPO}
-        if language:
-            request_kwargs["language"] = language
-        inputs = self._processor.apply_transcrition_request(**request_kwargs)
+        # the base class drops them but records them on the result for
+        # protocol parity.
+        return self._processor.apply_transcrition_request(**request_kwargs)
 
-        gen_kwargs: dict[str, Any] = dict(
+    def _gen_kwargs(self) -> dict[str, Any]:
+        return dict(
             max_new_tokens=2048,
             temperature=0.0,
         )
-        outputs = self._model.generate(**_inputs_kwargs(inputs), **gen_kwargs)
 
-        prompt_len = inputs.input_ids.shape[1] if hasattr(inputs, "input_ids") else 0
+    def _generate(self, inputs: Any, gen_kwargs: dict[str, Any]) -> Any:
+        return self._model.generate(**_inputs_kwargs(inputs), **gen_kwargs)
+
+    def _decode(self, outputs: Any, prompt_len: int) -> str:
         # mlx-voxtral's processor.decode takes a single token sequence and
         # returns one string (unlike HF transformers' batch_decode).
         gen_ids = outputs[0][prompt_len:]
         text_value = self._processor.decode(gen_ids, skip_special_tokens=True)
-        text = (text_value or "").strip()
-
-        dur = round(wav_duration_s(path), 2)
-        # Sentence-split with interpolated timestamps — shared with the HF
-        # adapter so both backends yield the same readable merged transcript.
-        segments = split_voxtral_text_into_segments(text, duration=dur)
-        # Voxtral doesn't echo a detected language; record the hint
-        # we sent, or "auto" when we let it auto-detect.
-        return build_transcription_result(
-            self,
-            text=text,
-            segments=segments,
-            duration=dur,
-            language=language or "auto",
-            initial_prompt=initial_prompt,
-            hotwords=hotwords,
-            source_lang=source_lang,
-            quality_settings=dict(gen_kwargs),
-        )
-
-
-def _inputs_kwargs(inputs: Any) -> dict[str, Any]:
-    """Best-effort: convert the processor output into kwargs for `.generate()`.
-
-    Same helper as the HF voxtral adapter — the processor output supports
-    `**inputs` in practice; this exists so a MagicMock in tests can still
-    be unpacked without raising."""
-    try:
-        return dict(inputs)
-    except (TypeError, ValueError):
-        if hasattr(inputs, "input_ids"):
-            return {"input_ids": inputs.input_ids}
-        return {}
+        return (text_value or "").strip()

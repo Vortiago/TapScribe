@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from tapscribe import transcribers
+from tapscribe import runtime_probe, transcribers
 from tapscribe.transcribers import catalog
 from tapscribe.transcribers.base import TranscriptionResult
 
@@ -84,11 +84,11 @@ def _stub_loaders_and_backends(monkeypatch):
     # registry that picks up the patched loaders.
     monkeypatch.setattr(transcribers, "REGISTRY", _rebuild_registry(monkeypatch))
 
-    catalog.set_available_backends_for_testing(frozenset({"mlx", "cuda", "cpu"}))
+    runtime_probe.set_available_backends_for_testing(frozenset({"mlx", "cuda", "cpu"}))
     transcribers.clear_cache()
     yield
     transcribers.clear_cache()
-    catalog.set_available_backends_for_testing(None)
+    runtime_probe.set_available_backends_for_testing(None)
 
 
 def _rebuild_registry(monkeypatch):
@@ -200,7 +200,7 @@ def test_routes_nb_whisper_to_faster_whisper_via_auto_when_mlx_only():
     """Back-compat with ADR-0001 §4: NB-Whisper has no MLX binding, so
     `auto` on a machine that only has MLX should fall through to CPU,
     not raise."""
-    catalog.set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    runtime_probe.set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
     t = _load("nb-whisper-medium", backend="auto")
     assert t.name == "faster-whisper"
     assert t.device == "CPU"
