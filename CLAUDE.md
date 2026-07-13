@@ -50,8 +50,9 @@
   render through it too, keeping only a 2-line `[data-cfg-key]` button
   guard renderRegion deliberately doesn't cover (a focused save button
   mid-putJson isn't an "interactive control" but must still hold the
-  swap). The People editor's bespoke guard predates `renderRegion` and
-  is left as-is; `renderRegion` is the pattern for NEW regions. The
+  swap). The People editor (`people.js`) renders its list through
+  `renderRegion` too — `renderRegion` is the pattern for every region,
+  new or existing. The
   `test_next_poll_render_does_not_clobber_open_controls` sweep in
   `tests/e2e/test_dashboard_ui.py` enforces this — it focuses every
   control in each view, crosses a poll, and fails if a node is rebuilt
@@ -125,12 +126,16 @@
 that matrix and is wired into `start.sh` / `start.ps1` instead, after
 the picker runs:
 
-- **`silero-vad` (`[vad]` extra, pulls `torch>=2.1`)** — the per-tap
-  TapScribe gate (`gate_kind="tapscribe"`, the default) imports
-  `silero_vad` lazily on the first `/tap` WS. Missing → the tap logs
-  `gate construction failed … falling back to passthrough` and the
-  gate the operator picked is silently a no-op. `start.sh` runs
-  `pip install -e ".[vad]"` when the module isn't importable.
+- **`silero-vad`** (pulls `torch>=2.1`) — the per-tap TapScribe gate
+  (`gate_kind="tapscribe"`, the default) imports `silero_vad` lazily
+  on the first `/tap` WS. Missing → the tap logs `gate construction
+  failed … falling back to passthrough` and the gate the operator
+  picked is silently a no-op. It is a **core** dependency (no `[vad]`
+  extra — `pyproject.toml`'s `dependencies` list installs it
+  unconditionally with a plain `pip install -e .`), so `start.sh`'s
+  `find_spec` probe + reinstall branch exists only to repair a venv
+  created before silero-vad became core; on a fresh install it's
+  already satisfied and the branch no-ops.
 
 **`ffmpeg` is NOT required, period.** Every array-accepting backend
 (`mlx_whisper`, `mlx_parakeet`, and the `transformers` Parakeet path in

@@ -41,9 +41,11 @@ class NoMergedTranscript(SummarizerError):
 
 @dataclass(frozen=True)
 class SummarizeSessionRequest:
-    """Inputs for summarizing a session. For the tracer-bullet slice the
-    source / command / prompt arrive per request (no saved config yet); the
-    prompt default lives HERE so `SummarizeSessionRequest(session=…)` is the
+    """Inputs for summarizing a session. The operator's saved defaults
+    (source / command / model / prompt, #84) live in `config/summarizer.json`
+    and are resolved via `effective_summarizer_config`; direct callers may
+    still pass source / command / prompt explicitly per request. The prompt
+    default lives HERE so `SummarizeSessionRequest(session=…)` is the
     canonical invocation — the same convention as `StripSessionRequest`'s knob
     defaults."""
 

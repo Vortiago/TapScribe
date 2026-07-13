@@ -71,8 +71,15 @@ about. Lives in `tapscribe/transcribers/catalog.py` as the module-level
 
 Each entry (`ModelEntry`) declares:
 - `model_id` — canonical short name (e.g. `parakeet-tdt-0.6b-v3`)
-- `family` — one of `whisper`, `nb-whisper`, `voxtral`, `parakeet`.
-  Drives `<optgroup>` labelling in the dashboard.
+- `family` — one of `whisper`, `nb-whisper`, `voxtral`, `parakeet`,
+  `moonshine`. Drives `<optgroup>` labelling in the dashboard. Moonshine
+  (issue #121) is registered live-only-ahead-of-inference: its two
+  entries (`moonshine-tiny`/`moonshine-base`) have `available=False` (the
+  "coming soon" placeholder flag, so the factory refuses to load them and
+  `/api/models` never lists them regardless of whether the `moonshine` /
+  `optimum` probe modules happen to be installed) and their loaders raise
+  `NotImplementedError` pending the real MLX (#122) and ONNX CPU/CUDA
+  (#123) backends.
 - `languages` — ISO codes, or `("auto",)` for auto-detecting models
 - `contexts` — frozenset of `"batch"` / `"live"` — gates which
   picker shows the model
@@ -158,7 +165,12 @@ the Recorder. That's the whole point of the seam.
 The dashboard's live-channel picker reads `/api/models?context=live`,
 which excludes Parakeet and Voxtral (both batch-only — `build_live_cmd`
 has no backend for either) while only the true-streaming Whisper
-families (Whisper, NB-Whisper) light up.
+families (Whisper, NB-Whisper) light up. Moonshine (#121) is declared
+`contexts={"live"}` too, but its `available=False` placeholder entries
+are filtered out of `/api/models` regardless (see TranscriberRegistry
+above) and `build_live_cmd` has no Moonshine branch, so it doesn't yet
+appear in the picker either — it's registered ahead of both inference
+(#122/#123) and live-channel wiring.
 
 Each `LiveChannel` declares a class attribute
 `supports_native_vad: bool` so the dashboard (and the `/api/live/start`
