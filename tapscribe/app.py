@@ -558,6 +558,18 @@ def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
     }
 
 
+@app.get("/api/tap-token")
+async def api_tap_token(recorder: Recorder = Depends(get_recorder)):
+    """Reveal the /tap bearer token for bridge onboarding (#190) — the
+    dashboard's "Connect a bridge" card fetches this only when the operator
+    clicks reveal, never on every poll. Gated by dashboard BASIC auth like
+    any other /api/* route: the path starts with "/api/tap" but NOT
+    "/api/tap/" (config.TAP_PREFIX + "/"), so the auth middleware's
+    startswith check does not route it into the TAP-BEARER scheme — see
+    `auth.basic_auth_middleware`. Never logged."""
+    return {"token": recorder.tap.value}
+
+
 @app.post("/api/new-session")
 async def api_new_session(recorder: Recorder = Depends(get_recorder)):
     """Rotate the current session and prune now-empty sessions. Already-open

@@ -63,6 +63,101 @@ export function build(ctx) {
     })
     .catch(() => { modelsInstalled.textContent = "Couldn't load installed models."; });
 
+  // ---- Connect-a-bridge card (#190) ------------------------------------------
+  // Host/port are read straight off window.location — the browser already
+  // reached this dashboard via the same host:port a Bridge needs, so there's
+  // no backend state to keep in sync. The token itself is fetched from
+  // GET /api/tap-token only on an explicit reveal or copy click (never on
+  // load, never on a poll tick) and cached in a closure var so a second
+  // click doesn't re-fetch; the card is built once here and never touched
+  // by `update`, so there is nothing to renderRegion-guard.
+  const bridgeHost = pick(frag, "bridgeHost");
+  const bridgePort = pick(frag, "bridgePort");
+  const bridgeToken = pick(frag, "bridgeToken");
+  const bridgeReveal = /** @type {HTMLButtonElement} */ (pick(frag, "bridgeReveal"));
+  const bridgeCopy = /** @type {HTMLButtonElement} */ (pick(frag, "bridgeCopy"));
+  const bridgeStatus = pick(frag, "bridgeStatus");
+
+  bridgeHost.textContent = window.location.hostname || "localhost";
+  bridgePort.textContent = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+
+  const TOKEN_MASK = "••••••••••••";
+  /** @type {string | null} */
+  let cachedTapToken = null;
+  let tokenRevealed = false;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let bridgeStatusTimer = null;
+
+  /** @param {string} msg */
+  const flashBridgeStatus = (msg) => {
+    if (bridgeStatusTimer != null) clearTimeout(bridgeStatusTimer);
+    bridgeStatus.textContent = msg;
+    bridgeStatusTimer = setTimeout(() => {
+      if (bridgeStatus.textContent === msg) bridgeStatus.textContent = "";
+      bridgeStatusTimer = null;
+    }, 1500);
+  };
+
+  /** Fetch the tap token once and cache it; every subsequent reveal/copy
+   * reuses the cached value instead of hitting the endpoint again.
+   * @returns {Promise<string>} */
+  const loadTapToken = async () => {
+    if (cachedTapToken === null) {
+      const j = await getJson("/api/tap-token");
+      cachedTapToken = j.token || "";
+    }
+    return /** @type {string} */ (cachedTapToken);
+  };
+
+  bridgeReveal.addEventListener("click", async () => {
+    if (tokenRevealed) {
+      // Hiding again re-masks the DOM rather than leaving the plaintext
+      // token sitting in a display:none node — "explicit reveal", not
+      // "revealed once, then forever in the DOM".
+      tokenRevealed = false;
+      bridgeToken.textContent = TOKEN_MASK;
+      bridgeReveal.textContent = "👁 reveal";
+      return;
+    }
+    bridgeReveal.disabled = true;
+    try {
+      const t = await loadTapToken();
+      tokenRevealed = true;
+      bridgeToken.textContent = t;
+      bridgeReveal.textContent = "🙈 hide";
+    } catch (e) {
+      flashBridgeStatus(`couldn't load token: ${String(e).replace(/^Error:\s*/, "")}`);
+    } finally {
+      bridgeReveal.disabled = false;
+    }
+  });
+
+  bridgeCopy.addEventListener("click", async () => {
+    let t;
+    try {
+      t = await loadTapToken();
+    } catch (e) {
+      flashBridgeStatus(`couldn't load token: ${String(e).replace(/^Error:\s*/, "")}`);
+      return;
+    }
+    // Same non-secure-context fallback as the transcript pane's copy button:
+    // start.sh --lan is plain http, where navigator.clipboard doesn't exist.
+    const haveClipboard = window.isSecureContext
+      && typeof navigator.clipboard?.writeText === "function";
+    if (!haveClipboard) {
+      window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(t);
+      flashBridgeStatus("✓ copied");
+    } catch {
+      // Clipboard write rejected (permission denied) — fall back to a
+      // prompt() the operator can select-copy from.
+      window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t);
+    }
+  });
+
   // BATCH card hosts (reused engine selector + config-card).
   const engineHost = pick(frag, "engineHost");
   const configCardCtx = {
