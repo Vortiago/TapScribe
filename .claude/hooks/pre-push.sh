@@ -63,14 +63,18 @@ if ! command -v ruff >/dev/null 2>&1; then
 fi
 
 echo "[pre-push] ruff check (CI parity)…" >&2
-if ! ruff check tapscribe tools tests bridges/local-test-bridge >&2; then
+if ! ruff check tapscribe tools tests benchmarks bridges/local-test-bridge >&2; then
     block
 fi
 
-# NB: deliberately NOT running `ruff format --check` here — CI's lint
-# step only runs `ruff check`, and the Stop hook already enforces format
-# on tapscribe/ + tests/ at end-of-turn. Adding it here would block
-# pushes on pre-existing format drift in tools/ that CI ignores.
+# Mirror ci.yml's `Format check (ruff)` step — same paths as the lint
+# step. CI fails unformatted Python, so pushing it just moves the red
+# from the terminal to the PR (this gap shipped four red PRs at once
+# when parallel agents relied on this hook as their CI mirror).
+echo "[pre-push] ruff format --check (CI parity)…" >&2
+if ! ruff format --check tapscribe tools tests benchmarks bridges/local-test-bridge >&2; then
+    block
+fi
 
 # Mirror ci.yml's `Run tests` step. Coverage is omitted — it doesn't
 # affect pass/fail and costs ~5s we don't want on every push. The
