@@ -64,7 +64,9 @@ def test_prune_partial_rmtree_failure_still_prunes_the_other_empty_session(
     assert result["count"] == 1
     assert result["failed"] == [{"session": "empty-boom", "error": "delete failed"}]
     assert not (rec_root / "empty-ok").exists()
-    assert (rec_root / "empty-boom").exists(), "a failed rmtree must leave the folder in place, not half-deleted"
+    assert (rec_root / "empty-boom").exists(), (
+        "a failed rmtree must leave the folder in place, not half-deleted"
+    )
 
 
 def test_prune_rmtree_failure_does_not_raise(rec_root: Path, monkeypatch: pytest.MonkeyPatch):  # noqa: ARG001
