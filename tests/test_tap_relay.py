@@ -497,7 +497,9 @@ async def test_gate_construction_failure_falls_back_to_passthrough(capsys: pytes
     assert "falling back to passthrough" in out
 
 
-async def test_reconnect_does_not_feed_through_the_stale_gate_while_rebuilding(monkeypatch: pytest.MonkeyPatch):
+async def test_reconnect_does_not_feed_through_the_stale_gate_while_rebuilding(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """A reconnect (WlK restart / operator swapped model+gate settings)
     rebuilds the gate too. While the NEW gate is under construction,
     frames must not keep running through the OLD gate (built for the
