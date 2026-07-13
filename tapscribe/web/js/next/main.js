@@ -238,10 +238,16 @@ function renderDefaultEngine(host) {
   });
 }
 
-const liveStart = async () => {
+// `bodyEl` is the specific live-channel host (Capture's or Taps') the
+// start/apply click came from — see live-channel.js's formValues(host) and
+// #254: reading the form via a global document lookup instead of the
+// instance that was actually clicked broke as soon as more than one view's
+// live-channel body could be alive at once.
+/** @param {HTMLElement} bodyEl */
+const liveStart = async (bodyEl) => {
   try {
     const { formValues } = await import("../components/live-channel.js");
-    await postJson("/api/live/start", formValues());
+    await postJson("/api/live/start", formValues(bodyEl));
   } catch (e) { alert(`Live start/apply failed: ${e}`); }
   finally { await refresh(); }
 };
