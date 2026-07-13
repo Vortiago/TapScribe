@@ -273,14 +273,32 @@ class TapRelay:
 
         Gate-construction failures (Silero load error, etc.) don't kill
         the tap — we log and fall through with `gate=None`, so the bridge
-        sees passthrough rather than a dropped `/tap` WS."""
+        sees passthrough rather than a dropped `/tap` WS.
+
+        Gate construction (the default factory: a lazy `silero_vad` import
+        + ONNX model load, ~0.1-0.2 s of synchronous CPU work, more on a
+        cold import) runs off the event loop via `asyncio.to_thread` (#249)
+        — otherwise the first live `/tap` open (or first reconnect after a
+        live-channel restart) stalls every OTHER open tap's frames and the
+        dashboard's `/api/state` poll for the duration.
+
+        `self._gate` is cleared BEFORE construction starts, not just on
+        failure. Frames that land in that window — this tap's own during
+        first attach can't (the WS receive loop doesn't start until `open()`
+        resolves — see `TapFanOut._open`), but a RECONNECT runs as a
+        background task while frames keep arriving for this same tap — take
+        the identical passthrough path as a construction failure, rather
+        than continuing to run through a gate built for a config that may
+        have just changed (a reconnect can follow an operator swapping the
+        gate's own threshold/hangover/pre-roll knobs)."""
         candidate = self._relay_factory(cfg, self._handlers)
         if not await candidate.connect():
             return False
         self._relay = candidate
         self._connected = (cfg.host, cfg.port, cfg.language)
+        self._gate = None
         try:
-            self._gate = self._gate_factory(cfg)
+            self._gate = await asyncio.to_thread(self._gate_factory, cfg)
         except Exception as e:
             print(
                 f"[tapscribe] /tap gate construction failed{self._label_suffix}: {e}; falling back to passthrough",
