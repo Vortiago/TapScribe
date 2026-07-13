@@ -241,7 +241,7 @@ async def test_run_install_finishes_with_done_even_if_hot_reload_raises():
 
 
 def test_refresh_backend_probes_reenables_detection():
-    from tapscribe.transcribers.catalog import (
+    from tapscribe.runtime_probe import (
         available_backends,
         refresh_backend_probes,
         set_available_backends_for_testing,

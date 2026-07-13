@@ -626,7 +626,7 @@ def build_tap_recorder(
 def all_probe_modules() -> frozenset[str]:
     """Every backend probe module the registry declares — for tests that
     simulate a fully-installed machine via
-    `catalog.set_installed_modules_for_testing(all_probe_modules())`."""
+    `runtime_probe.set_installed_modules_for_testing(all_probe_modules())`."""
     from tapscribe.transcribers.catalog import REGISTRY
 
     return frozenset(b.probe_module for e in REGISTRY.entries() for b in e.backends if b.probe_module)

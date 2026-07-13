@@ -31,13 +31,15 @@ from __future__ import annotations
 
 import pytest
 
+from tapscribe.runtime_probe import (
+    set_available_backends_for_testing,
+    set_installed_modules_for_testing,
+)
 from tapscribe.transcribers.catalog import (
     BackendBinding,
     ModelEntry,
     ResolvedBinding,
     TranscriberRegistry,
-    set_available_backends_for_testing,
-    set_installed_modules_for_testing,
 )
 
 

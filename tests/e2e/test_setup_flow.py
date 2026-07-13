@@ -24,7 +24,8 @@ from conftest import (
     fake_install_spawn,  # type: ignore[import-not-found]  # e2e conftest puts tests/ on sys.path
 )
 
-from tapscribe.transcribers.catalog import REGISTRY, set_installed_modules_for_testing
+from tapscribe.runtime_probe import set_installed_modules_for_testing
+from tapscribe.transcribers.catalog import REGISTRY
 
 
 def _probe_modules_for(family: str, kind: str) -> set[str]:

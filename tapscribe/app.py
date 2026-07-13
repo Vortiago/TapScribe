@@ -84,6 +84,7 @@ from .batch_transcribe import (
 from .name_resolution import attach_people
 from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
+from .runtime_probe import available_backend_strs, refresh_backend_probes
 from .session_maintenance import (
     AbsorbCollision,
     InvalidAbsorbRequest,
@@ -137,10 +138,8 @@ from .transcribers import evict_idle_now, run_on_model_thread
 from .transcribers.catalog import (
     REGISTRY,
     SPECIALIST_MODELS,
-    available_backend_strs,
     candidate_language_codes,
     language_display_name,
-    refresh_backend_probes,
 )
 from .wav_cache import set_primary_transcript
 

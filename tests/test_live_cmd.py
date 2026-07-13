@@ -403,7 +403,7 @@ def test_seed_device_label_mlx_is_apple_silicon():
 def test_seed_device_label_predicts_from_backend_probe(backends, expected):
     """The non-MLX seed is a PREDICTION from the parent's probe — '(auto)'
     flags that CTranslate2 resolves the real device inside the child."""
-    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+    from tapscribe.runtime_probe import set_available_backends_for_testing
 
     set_available_backends_for_testing(backends)
     try:

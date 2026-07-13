@@ -32,12 +32,11 @@ from __future__ import annotations
 
 import pytest
 
-from tapscribe.transcribers.catalog import (
-    REGISTRY,
-    ResolvedBinding,
+from tapscribe.runtime_probe import (
     set_available_backends_for_testing,
     set_installed_modules_for_testing,
 )
+from tapscribe.transcribers.catalog import REGISTRY, ResolvedBinding
 
 _MOONSHINE_IDS = frozenset({"moonshine-tiny", "moonshine-base"})
 # The Moonshine bindings' own probe modules (mlx: `moonshine`, onnx: `optimum`).

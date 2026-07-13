@@ -49,7 +49,7 @@ def _force_all_probes_installed():
     this file would all flap. Pretend every probe module is installed
     so the route tests check the JSON shape, not the host's pip state.
     Tests that exercise the filter itself override per-test."""
-    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+    from tapscribe.runtime_probe import set_installed_modules_for_testing
 
     set_installed_modules_for_testing(all_probe_modules())
     try:
@@ -228,7 +228,7 @@ def test_api_models_hides_families_whose_adapters_are_not_installed(client):
     `None` between tests, so this test only needs to set its own
     simulated install set — no manual restore.
     """
-    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+    from tapscribe.runtime_probe import set_installed_modules_for_testing
 
     set_installed_modules_for_testing(frozenset({"faster_whisper", "mlx_whisper"}))
     r = client.get("/api/models?context=batch")
@@ -307,7 +307,7 @@ def test_api_state_inputs_support_hides_when_only_non_supporting_models_installe
     declare initial_prompt or hotwords), batch_prompt and batch_hotwords
     are False. Same logic for live: if the only installed live family
     doesn't declare initial_prompt, live_prompt is False."""
-    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+    from tapscribe.runtime_probe import set_installed_modules_for_testing
 
     # Pretend only voxtral (mistral_common + mlx_voxtral) is installed.
     # No Whisper family → no initial_prompt / hotwords support anywhere.
@@ -2521,7 +2521,7 @@ def test_root_serves_stages_shell(client):
 def test_root_redirects_to_setup_on_first_run(client):
     """With no transcription backend installed, GET / sends the operator to the
     browser setup surface instead of an empty dashboard."""
-    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+    from tapscribe.runtime_probe import set_installed_modules_for_testing
 
     set_installed_modules_for_testing(frozenset())  # nothing installed → first run
     try:
@@ -2647,7 +2647,7 @@ def test_summarize_local_model_load_failure_returns_400(client, recorder_under_t
     doesn't depend on which backends this box happens to have."""
     import tapscribe.summarizers.catalog as summarizers_catalog
     import tapscribe.summarizers.local as summarizers_local
-    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+    from tapscribe.runtime_probe import set_available_backends_for_testing
 
     set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
     monkeypatch.setattr(summarizers_catalog, "backend_module_available", lambda backend: True)
@@ -2815,7 +2815,7 @@ def test_api_summarize_models_reflects_env_override(client, recorder_under_test,
     not untrusted request input). Forces the gguf route so the result is
     deterministic regardless of this box's hardware."""
     import tapscribe.summarizers.catalog as summarizers_catalog
-    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+    from tapscribe.runtime_probe import set_available_backends_for_testing
 
     set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
     monkeypatch.setenv(summarizers_catalog.ENV_LOCAL_GGUF_MODEL, "vendor/operator-custom-gguf")
@@ -2874,7 +2874,7 @@ def test_summarizer_config_round_trips(client):
 
 
 def test_summarizer_config_put_rejects_bad_fields(client):
-    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+    from tapscribe.runtime_probe import set_available_backends_for_testing
 
     set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
     try:
@@ -2980,7 +2980,7 @@ def test_summarize_local_rejects_unknown_model_returns_400(client, recorder_unde
     from the dashboard can't reach mlx_lm.load / a download. The allowlist check
     fires inside the factory, before the transcript read, so it 400s regardless
     of which backends this box has."""
-    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+    from tapscribe.runtime_probe import set_available_backends_for_testing
 
     set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
     try:

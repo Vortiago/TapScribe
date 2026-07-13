@@ -58,7 +58,7 @@ async def test_backend_select_defaults_to_first_backend(running_recorder: Runnin
     that DEFAULTS to (and so submits) the first backend, not a blank selection.
     A dropped field `value` once left the select blank while state held
     backends[0] — invisible on a single-backend (cpu-only) host like CI."""
-    from tapscribe.transcribers.catalog import set_available_backends_for_testing
+    from tapscribe.runtime_probe import set_available_backends_for_testing
 
     # Two host-valid kinds → Whisper renders a real dropdown (cuda, cpu).
     set_available_backends_for_testing(frozenset({"cuda", "cpu"}))

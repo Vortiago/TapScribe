@@ -212,7 +212,7 @@ def main() -> None:
             flush=True,
         )
 
-    from .transcribers.catalog import available_backends, resolve_backend_preference
+    from .runtime_probe import available_backends, resolve_backend_preference
 
     avail = sorted(available_backends())
     try:
