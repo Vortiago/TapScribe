@@ -220,7 +220,7 @@ async def test_live_channel_rapid_restart_settles_to_one_child(
 
     import tapscribe.live as live_mod
 
-    r = build_tap_recorder(tmp_path, gate_kind="backend")
+    r = build_tap_recorder(tmp_path, port=_unused_port(), gate_kind="backend")
 
     spawned: list = []
     terminated: list = []
