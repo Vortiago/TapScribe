@@ -31,6 +31,8 @@ import signal
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -111,6 +113,22 @@ class _FakeChildProc:
         return self._rc
 
 
+@contextmanager
+def _pumping(chan: WhisperLiveKitChannel, proc: _FakeChildProc):
+    """Run `chan._pump_logs(proc)` on a background thread for the body
+    of the `with`, then EOF the fake stdout and join — the shared
+    scaffolding of every _pump_logs test. Post-`with` assertions run
+    after the pump has fully exited (its `finally` included)."""
+    t = threading.Thread(target=chan._pump_logs, args=(proc,), daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        proc.stdout.close()
+        t.join(timeout=2)
+    assert not t.is_alive()
+
+
 # ---------------------------------------------------------------------------
 # _pump_logs — starting->running promotion, device overwrite, crash capture
 # ---------------------------------------------------------------------------
@@ -121,15 +139,9 @@ def test_pump_logs_promotes_starting_to_running_on_uvicorn_banner():
     chan.info["state"] = "starting"
     proc = _FakeChildProc(rc=0)
     chan._proc = proc  # mirrors what start() would have set
-    t = threading.Thread(target=chan._pump_logs, args=(proc,), daemon=True)
-    t.start()
-    try:
+    with _pumping(chan, proc):
         proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)")
         _wait_until(lambda: chan.info["state"] == "running")
-    finally:
-        proc.stdout.close()
-        t.join(timeout=2)
-    assert not t.is_alive()
     # rc=0 on exit overwrites the promoted "running" with a graceful stop.
     assert chan.info["state"] == "stopped"
 
@@ -139,14 +151,9 @@ def test_pump_logs_promotes_on_application_startup_complete_line_too():
     chan = _make_channel()
     proc = _FakeChildProc(rc=0)
     chan._proc = proc
-    t = threading.Thread(target=chan._pump_logs, args=(proc,), daemon=True)
-    t.start()
-    try:
+    with _pumping(chan, proc):
         proc.stdout.push("INFO:     Application startup complete.")
         _wait_until(lambda: chan.info["state"] == "running")
-    finally:
-        proc.stdout.close()
-        t.join(timeout=2)
 
 
 def test_pump_logs_overwrites_seeded_device_with_child_accelerator_report():
@@ -154,22 +161,15 @@ def test_pump_logs_overwrites_seeded_device_with_child_accelerator_report():
     chan.info["device"] = "CPU"  # the parent's seeded prediction
     proc = _FakeChildProc(rc=0)
     chan._proc = proc
-    t = threading.Thread(target=chan._pump_logs, args=(proc,), daemon=True)
-    t.start()
-    try:
+    with _pumping(chan, proc):
         proc.stdout.push("  Accelerator: CUDA (NVIDIA A100)")
         _wait_until(lambda: chan.info["device"] == "CUDA (NVIDIA A100)")
-    finally:
-        proc.stdout.close()
-        t.join(timeout=2)
 
 
 def test_pump_logs_sets_error_state_with_last_error_tail_on_nonzero_exit():
     chan = _make_channel()
     proc = _FakeChildProc(rc=1)
     chan._proc = proc
-    t = threading.Thread(target=chan._pump_logs, args=(proc,), daemon=True)
-    t.start()
     lines = [
         "booting",
         "ERROR: something broke",
@@ -177,13 +177,10 @@ def test_pump_logs_sets_error_state_with_last_error_tail_on_nonzero_exit():
         "  File x, line 1",
         "RuntimeError: boom",
     ]
-    try:
+    with _pumping(chan, proc):
         for line in lines:
             proc.stdout.push(line)
         _wait_until(lambda: len(chan.log) == len(lines))
-    finally:
-        proc.stdout.close()
-        t.join(timeout=2)
 
     assert chan.info["state"] == "error"
     assert chan.info["last_error"] == " | ".join(lines)
@@ -196,10 +193,8 @@ def test_pump_logs_falls_back_to_exit_code_message_when_log_is_empty():
     chan = _make_channel()
     proc = _FakeChildProc(rc=17)
     chan._proc = proc
-    t = threading.Thread(target=chan._pump_logs, args=(proc,), daemon=True)
-    t.start()
-    proc.stdout.close()
-    t.join(timeout=2)
+    with _pumping(chan, proc):
+        pass  # push nothing — the child "exits" without a single log line
     assert chan.info["state"] == "error"
     assert chan.info["last_error"] == "exited with code 17"
 
@@ -215,14 +210,11 @@ def test_pump_logs_skips_info_update_when_proc_was_replaced():
     chan._proc = old_proc
     chan.info["state"] = "running"
 
-    t = threading.Thread(target=chan._pump_logs, args=(old_proc,), daemon=True)
-    t.start()
-    # Simulate a fresh start() swapping in a new proc while the stale
-    # pump is still draining the old child's tail.
-    chan._proc = new_proc
-    old_proc.stdout.close()  # old child "exits" with rc=1
-    t.join(timeout=2)
-    assert not t.is_alive()
+    with _pumping(chan, old_proc):
+        # Simulate a fresh start() swapping in a new proc while the stale
+        # pump is still draining the old child's tail; the EOF at `with`
+        # exit is the old child "exiting" with rc=1.
+        chan._proc = new_proc
 
     assert chan.info["state"] == "running"
 
@@ -234,30 +226,20 @@ def test_pump_logs_skips_info_update_when_proc_was_replaced():
 
 def test_start_wires_a_background_pump_that_promotes_state_to_running():
     chan = _make_channel()
-    fake_stdout = _QueueStdout()
-
-    class _FakeProc:
-        pid = 24680
-        stdout = fake_stdout
-
-        def poll(self):
-            return None
-
-        def wait(self, timeout=None):
-            return 0
+    proc = _FakeChildProc(pid=24680, rc=0)
 
     with (
         patch.object(WhisperLiveKitChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
-        patch("tapscribe.live.subprocess.Popen", return_value=_FakeProc()),
+        patch("tapscribe.live.subprocess.Popen", return_value=proc),
     ):
         ok, _msg = chan.start()
     assert ok is True
     assert chan.info["state"] == "starting"
 
-    fake_stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000")
+    proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000")
     _wait_until(lambda: chan.info["state"] == "running")
 
-    fake_stdout.close()
+    proc.stdout.close()
     _wait_until(lambda: chan.info["state"] == "stopped")
 
 
@@ -302,13 +284,13 @@ def test_begin_transition_applies_every_knob_and_flips_to_starting():
 
 def test_begin_transition_leaves_unspecified_knobs_at_their_prior_values():
     chan = _make_channel(gate_kind="tapscribe")
+    before = chan.config
     chan.begin_transition(gate_speech_threshold=0.9)
-    assert chan.config.gate_speech_threshold == 0.9
-    assert chan.config.gate_kind == "tapscribe"
-    assert chan.config.confidence_validation is True
-    assert chan.config.gate_hangover_ms == 400
-    assert chan.config.gate_pre_roll_ms == 300
-    assert chan.config.gate_min_speech_ms == 0
+    # Every field except the one supplied knob must be untouched —
+    # compared against a snapshot, not hardcoded defaults, so this test
+    # keeps pinning the "leave unspecified knobs alone" property even if
+    # LiveConfig's defaults change.
+    assert chan.config == replace(before, gate_speech_threshold=0.9)
 
 
 def test_begin_transition_clears_a_prior_last_error():
@@ -521,8 +503,8 @@ def test_stop_reports_failure_message_when_signal_delivery_raises(monkeypatch):
 
 
 def test_stop_uses_terminate_and_kill_directly_on_non_posix(monkeypatch):
+    chan = _make_channel()  # construct BEFORE faking os.name: __init__ must not run under it
     monkeypatch.setattr(live_mod.os, "name", "nt")
-    chan = _make_channel()
     proc = _FakeStoppableProc(pid=1, obeys_sigterm=False)
     chan._proc = proc
 
@@ -535,8 +517,8 @@ def test_stop_uses_terminate_and_kill_directly_on_non_posix(monkeypatch):
 
 
 def test_stop_on_non_posix_does_not_escalate_when_child_obeys_terminate(monkeypatch):
+    chan = _make_channel()  # construct BEFORE faking os.name: __init__ must not run under it
     monkeypatch.setattr(live_mod.os, "name", "nt")
-    chan = _make_channel()
     proc = _FakeStoppableProc(pid=1, obeys_sigterm=True)
     chan._proc = proc
 
