@@ -2,7 +2,7 @@
 backends to install, persisted across runs.
 
 Called by `start.sh` / `start.ps1` after the venv exists and pip has been
-upgraded. For each model family (Whisper / Voxtral / Parakeet)
+upgraded. For each model family (Whisper / Voxtral / Parakeet / Moonshine)
 the operator picks:
 
   - whether to install it at all (Space toggle), AND
@@ -161,6 +161,19 @@ FAMILIES: tuple[FamilyDef, ...] = (
         backends=(
             BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("parakeet-cpu",)),
             BackendDef(key=BACKEND_MLX, label="MLX", extras=("parakeet-mlx",)),
+        ),
+    ),
+    FamilyDef(
+        key="moonshine",
+        label="Moonshine (Useful Sensors)",
+        description=(
+            "Lightweight, low-latency live-captioning engine. English only. Live only "
+            "(no batch adapter) — see MoonshineLiveChannel."
+        ),
+        size_hint="~200 MB CPU (onnxruntime) / ~50 MB MLX",
+        backends=(
+            BackendDef(key=BACKEND_CPU, label="CPU", extras=("moonshine-cpu",)),
+            BackendDef(key=BACKEND_MLX, label="MLX", extras=("moonshine-mlx",)),
         ),
     ),
 )

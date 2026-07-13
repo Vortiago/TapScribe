@@ -142,14 +142,16 @@ kind is added by widening the union, adding a renderer in
 discriminator value in `to_mapping()` — all in the same PR as the
 model that actually declares it.
 
-## LiveChannel · WhisperLiveKitChannel
+## LiveChannel · WhisperLiveKitChannel · MoonshineLiveChannel
 
 `LiveChannel` is now a runtime-checkable Protocol declared in
 `tapscribe/live.py`. The Recorder holds one `LiveChannel` instance
-(typed by Protocol); the concrete implementation today is
-`WhisperLiveKitChannel`, which encapsulates the supervised
+(typed by Protocol); the concrete implementations today are
+`WhisperLiveKitChannel` (encapsulates the supervised
 `whisperlivekit-server` child process — same code that used to live
-in the unsuffixed `LiveChannel` class.
+in the unsuffixed `LiveChannel` class) and `MoonshineLiveChannel`
+(see below, PRD #120) — the Recorder never touches the concrete class
+directly.
 
 A follow-up PR will add `ParakeetLiveChannel` (rolling-chunk
 pseudo-streaming on `parakeet-mlx` / `transformers`) without touching
@@ -157,8 +159,8 @@ the Recorder. That's the whole point of the seam.
 
 The dashboard's live-channel picker reads `/api/models?context=live`,
 which excludes Parakeet and Voxtral (both batch-only — `build_live_cmd`
-has no backend for either) while only the true-streaming Whisper
-families (Whisper, NB-Whisper) light up.
+has no backend for either) while the true-streaming Whisper families
+(Whisper, NB-Whisper) and Moonshine light up.
 
 Each `LiveChannel` declares a class attribute
 `supports_native_vad: bool` so the dashboard (and the `/api/live/start`
@@ -176,6 +178,27 @@ device. The label is seeded with a prediction from the same
 same observe-the-child pattern that promotes `state` to "running".
 Future `LiveChannel` adapters must keep this semantic: report the
 device you observed, not the one you hope for.
+
+`MoonshineLiveChannel` (`tapscribe/moonshine_live.py`, PRD #120) is the
+first `LiveChannel` besides WhisperLiveKit: a lightweight, low-latency
+engine (Useful Sensors / Moonshine AI), English-only, MLX on Apple
+Silicon or ONNX-CPU everywhere else. No subprocess — it's an in-process
+`websockets.serve()` server exposing `/asr` that speaks `WlKRelay`'s
+existing wire contract verbatim (the same cumulative `lines` snapshot
+JSON WhisperLiveKit sends), backed by `MoonshineWindow`
+(`tapscribe/transcribers/_moonshine_window.py`), a rolling-chunk
+pseudo-streaming state machine that re-transcribes a growing buffer at
+a short cadence and rolls over into a new line once a window would
+exceed Moonshine's recommended sub-30s clip length. Consequence: the
+Recorder, `TapFanOut`, `SpeechGate`, `WlKRelay`, and `LiveTranscripts`
+are unmodified — `MoonshineLiveChannel` is a peer implementation of the
+same Protocol, not a new pipeline. `supports_native_vad = False` (no
+built-in VAC; TapScribe's own `SpeechGate` is always the gate).
+Picking a Moonshine model swaps which concrete `LiveChannel`
+`recorder.live` holds (`moonshine_live.resolve_live_channel_for_model`,
+applied by both `/api/live/start` and the `AUTO_START_LIVE` boot path)
+— the Recorder's own construction still always starts with
+`WhisperLiveKitChannel`.
 
 ## SpeechGate · gate_kind
 

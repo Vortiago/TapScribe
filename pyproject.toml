@@ -103,6 +103,28 @@ parakeet-mlx = [
     "parakeet-mlx>=0.5,<0.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
+# --- Moonshine (Useful Sensors / Moonshine AI) — live-only, see PRD #120 ----
+# Two independent runtimes behind `tapscribe.moonshine_live.MoonshineLiveChannel`;
+# no shared piece between them (same shape as the Voxtral/Parakeet pairs).
+moonshine-mlx = [
+    # Upper bound: `tapscribe.transcribers.moonshine_mlx` relies on
+    # `mlx_audio.stt.load` + `Model.generate(array) -> STTOutput` — the
+    # Moonshine port landed around v0.4.1 and is young/drift-prone (same
+    # library this repo already uses for Canary). Bump the cap deliberately
+    # after auditing the upstream changelog.
+    "mlx-audio>=0.4.1,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+moonshine-cpu = [
+    # `useful-moonshine-onnx` (top-level module `moonshine_onnx`) — the
+    # ONNX-CPU runtime `tapscribe.transcribers.moonshine_onnx` drives via
+    # `MoonshineOnnxModel(...).generate(audio)` + `load_tokenizer().decode_batch(...)`.
+    # Pure ONNX/numpy, no torch. Date-based upstream versioning (the only
+    # releases as of writing are 20251120/20251121); the upper bound is a
+    # calendar-year window rather than a semver cap for the same reason —
+    # bump deliberately after auditing the upstream changelog.
+    "useful-moonshine-onnx>=20251120,<20270101",
+]
+
 # --- CUDA runtime libs (faster-whisper / CTranslate2 GPU path) --------------
 # CUDA runtime libs for the faster-whisper / CTranslate2 GPU path. CTranslate2
 # does NOT bundle cuBLAS/cuDNN (unlike Torch, which ships its own), so the
@@ -173,6 +195,10 @@ parakeet = [
     # comparisons), so the "everywhere except Apple Silicon" condition
     # is expressed via De Morgan: not (A and B) ≡ (¬A or ¬B).
     "tapscribe[parakeet-cpu]; sys_platform != 'darwin' or platform_machine != 'arm64'",
+]
+moonshine = [
+    "tapscribe[moonshine-mlx]; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "tapscribe[moonshine-cpu]; sys_platform != 'darwin' or platform_machine != 'arm64'",
 ]
 dev = [
     "pytest>=8",

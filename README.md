@@ -205,7 +205,7 @@ session, Person/Identity/Roster).
 | NB-Whisper | `nb-whisper-tiny`/`base`/`small`/`medium`/`large` | faster-whisper on CT2 weights | Norwegian | Pulled from `NbAiLab/nb-whisper-*/ct2/`. No MLX. |
 | Voxtral | `voxtral-mini` | mlx-voxtral (AS) / HF transformers | EN/ES/FR/PT/HI/DE/NL/IT | Batch-only (no live channel yet). First load downloads ~6 GB. |
 | Parakeet | `parakeet-tdt-0.6b-v3` | parakeet-mlx (AS) / HF transformers | 25 EU languages, no Norwegian | Batch-only (no live channel yet); replaced Canary (ADR-0006). |
-| Moonshine | `moonshine-tiny`/`base` | MLX / ONNX | English | Live-only; catalog-registered but the runtime isn't wired yet (#122/#123). |
+| Moonshine | `moonshine-tiny`/`base` | mlx-audio (AS) / ONNX-CPU (`useful-moonshine-onnx`) | English | Live-only, lightweight low-latency captions — `MoonshineLiveChannel`. Install via `[moonshine-mlx]` / `[moonshine-cpu]` (picker: "Moonshine"). |
 
 On Apple Silicon, live and batch both route through mlx-whisper by default.
 Pass `--no-mlx` to opt out.

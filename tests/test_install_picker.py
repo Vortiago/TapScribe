@@ -1064,6 +1064,7 @@ def test_pyproject_whisper_mlx_admits_a_real_release():
     [
         ("whisper-mlx", "mlx-whisper"),
         ("parakeet-mlx", "parakeet-mlx"),
+        ("moonshine-mlx", "mlx-audio"),
     ],
 )
 def test_pyproject_mlx_extras_stay_platform_gated(extra_name, pkg):
@@ -1114,6 +1115,46 @@ def test_pyproject_parakeet_alias_is_mlx_only_on_apple_silicon():
         "would drag transformers onto a mac where MLX is the path. The atom "
         f"must be MLX-only on darwin+arm64. Got: {darwin_line!r}"
     )
+
+
+def test_pyproject_moonshine_alias_is_mlx_only_on_apple_silicon():
+    """Same split as Parakeet: `tapscribe[moonshine]` resolves to
+    moonshine-mlx alone on Apple Silicon, moonshine-cpu everywhere else."""
+    moonshine_lines = atomic_extras("moonshine")
+    assert len(moonshine_lines) == 2, (
+        f"moonshine alias must declare two marker-gated entries; got: {moonshine_lines}"
+    )
+    darwin_line = next((line for line in moonshine_lines if "moonshine-mlx" in line), None)
+    other_line = next((line for line in moonshine_lines if "moonshine-cpu" in line), None)
+    assert darwin_line is not None, f"missing moonshine-mlx entry; got: {moonshine_lines}"
+    assert other_line is not None, f"missing moonshine-cpu entry; got: {moonshine_lines}"
+    assert "moonshine-cpu" not in darwin_line
+
+
+def test_picker_moonshine_family_registered_with_cpu_and_mlx_backends():
+    moonshine = next(f for f in FAMILIES if f.key == "moonshine")
+    assert {b.key for b in moonshine.backends} == {BACKEND_CPU, BACKEND_MLX}
+    assert moonshine.default_selected is False  # opt-in, not part of the recommended baseline
+
+
+def test_picker_moonshine_disabled_by_default_does_not_appear_in_extras():
+    sel = Selection.defaults_for(_apple_caps())
+    extras = install_picker.resolve_extras(sel, _apple_caps())
+    assert not any("moonshine" in e for e in extras)
+
+
+def test_picker_moonshine_resolves_to_mlx_extra_on_apple_silicon():
+    sel = Selection()
+    _enable(sel, "moonshine", BACKEND_MLX)
+    extras = install_picker.resolve_extras(sel, _apple_caps())
+    assert extras == ["moonshine-mlx"]
+
+
+def test_picker_moonshine_resolves_to_cpu_extra_on_linux():
+    sel = Selection()
+    _enable(sel, "moonshine", BACKEND_CPU)
+    extras = install_picker.resolve_extras(sel, install_picker.MachineCaps(os_name="Linux", arch="x86_64", mlx=False, cuda=False))
+    assert extras == ["moonshine-cpu"]
 
 
 def test_picker_apple_silicon_mlx_only_matches_failing_invocation_atoms():

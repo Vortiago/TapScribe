@@ -21,6 +21,7 @@ export const FAMILY_LABELS = Object.freeze([
   ["nb-whisper", "NB-Whisper (Norwegian)"],
   ["voxtral", "Voxtral (Mistral)"],
   ["parakeet", "Parakeet (NVIDIA)"],
+  ["moonshine", "Moonshine"],
 ]);
 
 // Families with at least one live-eligible model today, sliced from
@@ -29,7 +30,7 @@ export const FAMILY_LABELS = Object.freeze([
 // added here as well. A key with no matching FAMILY_LABELS entry would
 // otherwise silently vanish from LIVE_FAMILY_LABELS instead of erroring, so
 // membership is checked at load time.
-const LIVE_ELIGIBLE_FAMILIES = new Set(["whisper", "nb-whisper", "voxtral"]);
+const LIVE_ELIGIBLE_FAMILIES = new Set(["whisper", "nb-whisper", "voxtral", "moonshine"]);
 for (const fam of LIVE_ELIGIBLE_FAMILIES) {
   if (!FAMILY_LABELS.some(([f]) => f === fam)) {
     throw new Error(`model-select: LIVE_ELIGIBLE_FAMILIES has "${fam}", which is not in FAMILY_LABELS`);

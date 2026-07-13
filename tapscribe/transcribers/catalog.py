@@ -361,20 +361,30 @@ def _load_parakeet_hf(model_id: str, kind: BackendKind) -> Transcriber:
     return ParakeetTranscriber.load(model_id, kind=kind)
 
 
-# ── Moonshine placeholder loaders (issue #121 — real inference in #122/#123) ──────────
+# ── Moonshine (live-only — see PRD #120) ─────────────────────────────────────
+# Moonshine is deliberately NOT a batch Transcriber (see PRD #120 "Out of
+# Scope") — its value is low-latency LIVE captioning via
+# `tapscribe.moonshine_live.MoonshineLiveChannel`, which builds its own
+# engine directly (`transcribers.moonshine_mlx` / `transcribers.moonshine_onnx`)
+# rather than going through this registry's Transcriber-shaped loaders. These
+# two bindings exist only so `resolve()` / `is_installed()` (backend
+# availability, `/api/models?context=live` surfacing) work uniformly across
+# every family; a stray `/api/transcribe` request naming a Moonshine model
+# hits one of these and gets a clear, permanent refusal rather than a batch
+# adapter that doesn't exist.
 
 
 def _load_moonshine_mlx(model_id: str, kind: BackendKind) -> Transcriber:  # noqa: ARG001
     raise NotImplementedError(
-        "Moonshine MLX backend not yet implemented (see issue #122). "
-        "Install `pip install tapscribe[moonshine-mlx]` once available."
+        "Moonshine has no batch Transcriber adapter — it's a live-only engine "
+        "(see tapscribe.moonshine_live.MoonshineLiveChannel and PRD #120)."
     )
 
 
 def _load_moonshine_onnx(model_id: str, kind: BackendKind) -> Transcriber:  # noqa: ARG001
     raise NotImplementedError(
-        "Moonshine ONNX (CPU/CUDA) backend not yet implemented (see issue #123). "
-        "Install `pip install tapscribe[moonshine-onnx]` once available."
+        "Moonshine has no batch Transcriber adapter — it's a live-only engine "
+        "(see tapscribe.moonshine_live.MoonshineLiveChannel and PRD #120)."
     )
 
 
@@ -646,11 +656,20 @@ _PARAKEET_BACKENDS: tuple[BackendBinding, ...] = (
 
 
 _MOONSHINE_BACKENDS: tuple[BackendBinding, ...] = (
-    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_moonshine_mlx, probe_module="moonshine"),
+    # `mlx_audio`: the same MLX-audio library this repo already uses for
+    # Canary — its `mlx_audio.stt.models.moonshine` port is what
+    # `transcribers.moonshine_mlx` imports lazily.
+    BackendBinding(kinds=frozenset({"mlx"}), loader=_load_moonshine_mlx, probe_module="mlx_audio"),
+    # `moonshine_onnx`: the actual top-level module `useful-moonshine-onnx`
+    # installs (NOT `optimum`, a generic HF companion package many
+    # transformers installs carry for unrelated reasons — probing it would
+    # falsely advertise Moonshine as ready on installs that never asked for
+    # it, the exact trap the Voxtral binding's probe-selection rationale
+    # above documents avoiding).
     BackendBinding(
         kinds=frozenset({"cuda", "cpu"}),
         loader=_load_moonshine_onnx,
-        probe_module="optimum",
+        probe_module="moonshine_onnx",
     ),
 )
 
@@ -665,7 +684,9 @@ def _moonshine(model_id: str, display: str, description: str) -> ModelEntry:
         contexts=_LIVE_ONLY,
         backends=_MOONSHINE_BACKENDS,
         inputs=NO_INPUTS,
-        available=False,
+        # Real inference lands via MoonshineLiveChannel (PRD #120) — no
+        # longer a "coming soon" placeholder. `is_installed()` now gates
+        # purely on the probe modules above, same as every other family.
     )
 
 
@@ -750,7 +771,7 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
         backends=_PARAKEET_BACKENDS,
         inputs=NO_INPUTS,
     ),
-    # ── Moonshine (live-only, English) — issue #121; inference lands in #122/#123 ──
+    # ── Moonshine (live-only, English) — MoonshineLiveChannel, see PRD #120 ──
     _moonshine("moonshine-tiny", "moonshine-tiny", "Moonshine Tiny · English · ultra-fast live"),
     _moonshine("moonshine-base", "moonshine-base", "Moonshine Base · English · fast live"),
 )

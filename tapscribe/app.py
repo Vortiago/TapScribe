@@ -81,6 +81,7 @@ from .batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
+from .moonshine_live import resolve_live_channel_for_model
 from .name_resolution import attach_people
 from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
@@ -293,6 +294,18 @@ async def _lifespan(app: FastAPI):
 
     recorder: Recorder | None = getattr(app.state, "recorder", None)
     if recorder is not None and config.AUTO_START_LIVE:
+        # The Recorder always constructs a WhisperLiveKitChannel at boot
+        # (see Recorder.__init__); if the operator's persisted default
+        # live model (config/live-model.txt) names a Moonshine model, the
+        # SAME family-swap the /api/live/start route applies must run
+        # here too — otherwise auto-start would try to spawn
+        # whisperlivekit-server with an unsupported --model and fail
+        # exactly the way issue #259 originally described.
+        new_channel = resolve_live_channel_for_model(
+            recorder.live, target_model=recorder.live.config.model, use_mlx=recorder.use_mlx
+        )
+        if new_channel is not None:
+            recorder.live = new_channel
         ok, msg = recorder.live.start()
         if not ok:
             print(f"[tapscribe] live auto-start skipped: {msg}", flush=True)
@@ -923,6 +936,24 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     model = (body.get("model") or "").strip() or None
     language = (body.get("language") or "").strip() or None
     conf = body.get("confidence_validation")
+
+    # Swap the concrete LiveChannel implementation when the requested
+    # model belongs to a different family than the one currently
+    # installed (Whisper/NB-Whisper <-> Moonshine — see PRD #120). The
+    # Recorder holds `live` typed as the `LiveChannel` Protocol
+    # specifically so this works with no Recorder change: picking a
+    # Moonshine model swaps in a `MoonshineLiveChannel`; picking any
+    # other live-eligible model swaps back to `WhisperLiveKitChannel`.
+    # `model is None` means "restart with whatever's already selected",
+    # so the target family always matches the current one and this is a
+    # no-op in that case.
+    new_channel = resolve_live_channel_for_model(
+        recorder.live, target_model=model or recorder.live.config.model, use_mlx=recorder.use_mlx
+    )
+    if new_channel is not None:
+        if recorder.live.running():
+            await asyncio.to_thread(recorder.live.stop)
+        recorder.live = new_channel
 
     # Boundary validation. CodeQL treats Request.json() as untrusted
     # input; the dashboard's HTML min/max attributes are only client-
