@@ -68,8 +68,7 @@ class OnnxMoonshineEngine:
             )
         if importlib.util.find_spec("moonshine_onnx") is None:
             raise RuntimeError(
-                "useful-moonshine-onnx is not installed. "
-                "Install `pip install tapscribe[moonshine-cpu]`."
+                "useful-moonshine-onnx is not installed. Install `pip install tapscribe[moonshine-cpu]`."
             )
         import moonshine_onnx
 

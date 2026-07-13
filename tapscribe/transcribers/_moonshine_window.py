@@ -64,7 +64,9 @@ _REFRESH_S_BOUNDS = (0.05, 10.0)
 
 
 def chunk_s_from_env() -> float:
-    return env_float(ENV_CHUNK_S, _DEFAULT_CHUNK_S, min_value=_CHUNK_S_BOUNDS[0], max_value=_CHUNK_S_BOUNDS[1])
+    return env_float(
+        ENV_CHUNK_S, _DEFAULT_CHUNK_S, min_value=_CHUNK_S_BOUNDS[0], max_value=_CHUNK_S_BOUNDS[1]
+    )
 
 
 def overlap_s_from_env() -> float:

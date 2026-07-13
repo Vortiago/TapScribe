@@ -1153,7 +1153,9 @@ def test_picker_moonshine_resolves_to_mlx_extra_on_apple_silicon():
 def test_picker_moonshine_resolves_to_cpu_extra_on_linux():
     sel = Selection()
     _enable(sel, "moonshine", BACKEND_CPU)
-    extras = install_picker.resolve_extras(sel, install_picker.MachineCaps(os_name="Linux", arch="x86_64", mlx=False, cuda=False))
+    extras = install_picker.resolve_extras(
+        sel, install_picker.MachineCaps(os_name="Linux", arch="x86_64", mlx=False, cuda=False)
+    )
     assert extras == ["moonshine-cpu"]
 
 

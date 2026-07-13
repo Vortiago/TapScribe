@@ -56,13 +56,9 @@ class MlxMoonshineEngine:
         same convention as every other MLX adapter."""
         repo = _MODEL_REPOS.get(model_id)
         if repo is None:
-            raise ValueError(
-                f"{model_id!r} is not a known Moonshine model. Known: {sorted(_MODEL_REPOS)!r}"
-            )
+            raise ValueError(f"{model_id!r} is not a known Moonshine model. Known: {sorted(_MODEL_REPOS)!r}")
         if importlib.util.find_spec("mlx_audio") is None:
-            raise RuntimeError(
-                "mlx-audio is not installed. Install `pip install tapscribe[moonshine-mlx]`."
-            )
+            raise RuntimeError("mlx-audio is not installed. Install `pip install tapscribe[moonshine-mlx]`.")
         from mlx_audio.stt import load as mlx_audio_load
 
         model = mlx_audio_load(repo)

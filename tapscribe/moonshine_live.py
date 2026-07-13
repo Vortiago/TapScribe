@@ -360,7 +360,9 @@ class MoonshineLiveChannel:
                 self.info["last_error"] = msg
                 return False, msg
 
-            server = MoonshineAsrServer(host=self.config.host, port=self.config.port, generate_fn=engine.generate)
+            server = MoonshineAsrServer(
+                host=self.config.host, port=self.config.port, generate_fn=engine.generate
+            )
             loop = asyncio.new_event_loop()
             ready = threading.Event()
             errors: list[BaseException] = []
