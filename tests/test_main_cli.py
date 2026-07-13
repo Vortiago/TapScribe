@@ -34,7 +34,7 @@ from conftest import (
 )
 
 from tapscribe import config as _config
-from tapscribe.transcribers import catalog
+from tapscribe import runtime_probe
 
 
 @pytest.fixture
@@ -58,9 +58,9 @@ def fixed_backends(monkeypatch: pytest.MonkeyPatch):
     """Pin `available_backends()` to a deterministic set for the duration
     of the test so backend resolution doesn't depend on what's actually
     importable on the machine running the suite."""
-    catalog.set_available_backends_for_testing(frozenset({"cpu"}))
+    runtime_probe.set_available_backends_for_testing(frozenset({"cpu"}))
     yield
-    catalog.set_available_backends_for_testing(None)
+    runtime_probe.set_available_backends_for_testing(None)
 
 
 @pytest.fixture
@@ -263,11 +263,11 @@ def test_main_no_mlx_forces_cpu_when_backend_is_auto(
     it forces cpu even on a machine where mlx is available."""
     from tapscribe.app import app
 
-    catalog.set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
+    runtime_probe.set_available_backends_for_testing(frozenset({"mlx", "cpu"}))
     try:
         _run_main(["--no-mlx"], monkeypatch)
     finally:
-        catalog.set_available_backends_for_testing(None)
+        runtime_probe.set_available_backends_for_testing(None)
 
     assert app.state.recorder.backend == "cpu"
 
@@ -282,11 +282,11 @@ def test_main_no_mlx_does_not_override_explicit_backend(
     different explicit choice such as `cuda`."""
     from tapscribe.app import app
 
-    catalog.set_available_backends_for_testing(frozenset({"mlx", "cuda", "cpu"}))
+    runtime_probe.set_available_backends_for_testing(frozenset({"mlx", "cuda", "cpu"}))
     try:
         _run_main(["--no-mlx", "--backend", "cuda"], monkeypatch)
     finally:
-        catalog.set_available_backends_for_testing(None)
+        runtime_probe.set_available_backends_for_testing(None)
 
     assert app.state.recorder.backend == "cuda"
 
@@ -300,12 +300,12 @@ def test_main_backend_unavailable_exits_with_code_2(
     """Picking a backend kind that isn't available on this machine fails
     loudly before uvicorn starts, instead of surfacing on the first
     transcribe call."""
-    catalog.set_available_backends_for_testing(frozenset({"cpu"}))
+    runtime_probe.set_available_backends_for_testing(frozenset({"cpu"}))
     try:
         with pytest.raises(SystemExit) as exc_info:
             _run_main(["--backend", "cuda"], monkeypatch)
     finally:
-        catalog.set_available_backends_for_testing(None)
+        runtime_probe.set_available_backends_for_testing(None)
 
     assert exc_info.value.code == 2
     assert uvicorn_spy == []  # never reached uvicorn.run
