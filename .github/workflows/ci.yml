@@ -233,23 +233,36 @@ jobs:
 
       - name: Install runtime + test harness + faster-whisper + silero-vad
         run: |
+          # CPU torch/torchaudio FIRST, so silero-vad's torch dependency is
+          # already satisfied and pip never downloads the default CUDA build
+          # (~7 GB installed with its nvidia libs). The old order installed
+          # CUDA torch and then --force-reinstall'd the CPU build on top,
+          # leaving the runner with ~1 GB free disk — the real-audio test's
+          # 1.6 GB model download then failed mid-test ("Internal Server
+          # Error"), and the disk-starved runner made unrelated browser
+          # tests flake at random. --no-cache-dir keeps the wheels out of
+          # pip's cache for the same reason.
+          pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
           # httpx is the real-audio pipeline E2E's HTTP client (websockets is a
           # core dep already); the rest of that test reads the committed WAV
           # fixtures via stdlib wave, so no soundfile/scipy needed at runtime.
-          pip install -e ".[whisper-cpu,vad]" playwright pytest pytest-asyncio httpx
-          # silero-vad pulls torch/torchaudio from PyPI whose native libs can
-          # mismatch; pin the CPU build last so torchaudio's extension loads.
-          pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-cache-dir -e ".[whisper-cpu,vad]" playwright pytest pytest-asyncio httpx
 
       - name: Install Chromium + xvfb
         run: |
           python -m playwright install --with-deps chromium
           sudo apt-get update && sudo apt-get install -y xvfb
 
-      - name: Pre-fetch the ASR models (keep downloads out of the meeting test's budget)
+      - name: Pre-fetch the ASR models (keep downloads out of the tests' budget)
         run: |
           python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8'); WhisperModel('base', device='cpu', compute_type='int8')"
           python -c "from tapscribe.nb_whisper import download_nb_whisper_ct2_dir as d; d('nb-whisper-tiny')"
+          # test_da_no_routing_benchmark transcribes with large-v3-turbo
+          # (1.6 GB). Fetching it here means a download problem fails this
+          # clearly-labelled step instead of surfacing as an opaque 500 from
+          # the recorder mid-test.
+          python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8')"
+          df -h / | tail -1
 
       - name: Run bridge extension E2E (headed, under xvfb)
         run: xvfb-run -a pytest tests/e2e/test_bridge_extension_e2e.py -m browser_e2e -q

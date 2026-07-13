@@ -522,7 +522,9 @@ async def test_room_disconnect_cleans_up_audio_and_presence_only_taps(
     # Generous ceiling: the close is correct but the cross-world round-trip
     # can be slow under a loaded headed browser in CI; wait_until returns the
     # instant it closes, so a high timeout only buys headroom, never latency.
-    assert await wait_until(sam_closed, timeout=15.0), "Sam's /tap WS must close on room disconnect"
+    # (30s: a disk-starved runner once blew the old 15s ceiling — the runner
+    # is fixed in ci.yml, the headroom stays.)
+    assert await wait_until(sam_closed, timeout=30.0), "Sam's /tap WS must close on room disconnect"
 
     # The popup-side snapshot (bridgeStatus in chrome.storage.local) is
     # the most reliable proxy for "did Lee's row get cleared?" — the
@@ -823,7 +825,10 @@ async def test_window_room_cleared_without_disconnect_closes_taps(
         c = fake_tap_server.connection_for("ghost-id")
         return c is not None and c.closed
 
-    assert await wait_until(ghost_closed, timeout=15.0), (
+    # 30s ceiling for the same reason as the room-disconnect test above:
+    # wait_until returns the instant the WS closes, the headroom only pays
+    # on failure, and a disk-starved CI runner once blew a 15s ceiling.
+    assert await wait_until(ghost_closed, timeout=30.0), (
         "clearing window.room (orphan room still 'connected') must close the "
         "/tap WS — without the maybeAttach room-lost teardown it leaks forever"
     )
