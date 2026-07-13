@@ -3125,7 +3125,7 @@ def test_api_models_live_excludes_moonshine_when_probes_absent(client, monkeypat
     """Without either probe module importable, Moonshine drops out of the
     `only_installed=True` listing `/api/models` serves — same behavior as
     every other family, now that it's no longer a hard-coded placeholder."""
-    from tapscribe.transcribers.catalog import set_installed_modules_for_testing
+    from tapscribe.runtime_probe import set_installed_modules_for_testing
 
     set_installed_modules_for_testing(frozenset())
     try:
