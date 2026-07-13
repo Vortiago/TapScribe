@@ -4768,7 +4768,9 @@ async def test_settings_connect_a_bridge_card_reveals_and_hides_tap_token(runnin
             page = await context.new_page()
 
             tap_token_requests = []
-            page.on("request", lambda req: tap_token_requests.append(req) if "/api/tap-token" in req.url else None)
+            page.on(
+                "request", lambda req: tap_token_requests.append(req) if "/api/tap-token" in req.url else None
+            )
 
             await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
 
@@ -4779,7 +4781,9 @@ async def test_settings_connect_a_bridge_card_reveals_and_hides_tap_token(runnin
             # Host/port render immediately (not sensitive, no reveal needed);
             # the token stays masked and unfetched until the operator asks.
             assert real_token not in (await page.content()), "tap token must not be in the DOM before reveal"
-            assert len(tap_token_requests) == 0, "GET /api/tap-token must not fire before an explicit reveal click"
+            assert len(tap_token_requests) == 0, (
+                "GET /api/tap-token must not fire before an explicit reveal click"
+            )
             masked_before = await token_el.text_content()
             assert masked_before and real_token not in masked_before
 
