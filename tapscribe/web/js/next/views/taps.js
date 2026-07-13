@@ -13,9 +13,11 @@
 // Built once for the page; `update(j, session)` re-runs the live-data
 // components each poll tick — live-channel renders through renderRegion
 // (focus-guarded, per-host signature), so an in-progress gate edit survives
-// the tick and this view's host caches independently of Capture's. Only one
-// view is mounted at a time, so reusing live-channel's fixed element ids here
-// doesn't collide with Capture's.
+// the tick and this view's host caches independently of Capture's.
+// live-channel reads its form back out of the bodyEl it was rendered into
+// (not the global document — see #254), so this view's instance and
+// Capture's don't collide even though both host elements can be alive in
+// main.js's viewCache at once.
 
 import { tpl, pick } from "../../templates.js";
 import { header, strong, inline, wireRecPill, paintRecPill } from "../shell.js";
@@ -25,7 +27,7 @@ import * as liveChannel from "../../components/live-channel.js";
 /**
  * @param {{
  *   liveCatalog: import('../../types.js').ModelCatalog,
- *   onLiveStart: () => void,
+ *   onLiveStart: (host: HTMLElement) => void,
  *   onLiveStop: () => void,
  *   afterMutate: () => void,
  * }} ctx

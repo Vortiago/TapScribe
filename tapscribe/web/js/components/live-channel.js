@@ -82,7 +82,7 @@ export function render(j, ctx) {
  * @param {import('../types.js').LiveChannelCtx} ctx
  * @returns {DocumentFragment}
  */
-function buildBody(j, { onAction, liveCatalog }) {
+function buildBody(j, { onAction, liveCatalog, bodyEl }) {
   const li = j.live_info || {};
   const state = li.state || "stopped";
   const supportsNativeVad = j.live_supports_native_vad !== false;
@@ -90,8 +90,8 @@ function buildBody(j, { onAction, liveCatalog }) {
   const sup = j.inputs_support || { live_prompt: true };
 
   const frag = tpl("tpl-live-channel");
-  const sel = /** @type {HTMLSelectElement} */ (frag.querySelector("#liveModelSelect"));
-  const langInput = /** @type {HTMLInputElement} */ (frag.querySelector("#liveLangInput"));
+  const sel = /** @type {HTMLSelectElement} */ (pick(frag, "modelSelect"));
+  const langInput = /** @type {HTMLInputElement} */ (pick(frag, "langInput"));
   const currentModel = li.model || "tiny.en";
 
   // Group live-eligible models by family (Whisper / NB-Whisper / …), shared
@@ -111,7 +111,7 @@ function buildBody(j, { onAction, liveCatalog }) {
   // option is greyed out (disabled) when the current LiveChannel has
   // no native VAD — picking it would be a no-op since there's nothing
   // backend-side to defer gating to.
-  const gateSel = /** @type {HTMLSelectElement | null} */ (frag.querySelector("#liveGateKindSelect"));
+  const gateSel = /** @type {HTMLSelectElement | null} */ (frag.querySelector('[data-slot="gateKindSelect"]'));
   if (gateSel) {
     gateSel.value = li.gate_kind || "tapscribe";
     const backendOpt = /** @type {HTMLOptionElement | null} */ (gateSel.querySelector('option[value="backend"]'));
@@ -122,13 +122,13 @@ function buildBody(j, { onAction, liveCatalog }) {
         : "Backend native VAD (not supported)";
     }
   }
-  const threshEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGateThreshold"));
+  const threshEl = /** @type {HTMLInputElement | null} */ (frag.querySelector('[data-slot="gateThreshold"]'));
   if (threshEl) threshEl.value = li.gate_speech_threshold || "0.50";
-  const hangEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGateHangover"));
+  const hangEl = /** @type {HTMLInputElement | null} */ (frag.querySelector('[data-slot="gateHangover"]'));
   if (hangEl) hangEl.value = li.gate_hangover_ms || "400";
-  const prerollEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGatePreRoll"));
+  const prerollEl = /** @type {HTMLInputElement | null} */ (frag.querySelector('[data-slot="gatePreRoll"]'));
   if (prerollEl) prerollEl.value = li.gate_pre_roll_ms || "300";
-  const minSpeechEl = /** @type {HTMLInputElement | null} */ (frag.querySelector("#liveGateMinSpeech"));
+  const minSpeechEl = /** @type {HTMLInputElement | null} */ (frag.querySelector('[data-slot="gateMinSpeech"]'));
   if (minSpeechEl) minSpeechEl.value = li.gate_min_speech_ms || "0";
 
   const starting = state === "starting";
@@ -181,9 +181,12 @@ function buildBody(j, { onAction, liveCatalog }) {
 
   // Wire actions against the fragment's nodes (they survive the mount swap).
   // The handlers capture element references at build time — querying at event
-  // time would miss, because mounting empties the fragment.
-  frag.querySelector("#liveStartBtn")?.addEventListener("click", onAction.start);
-  frag.querySelector("#liveApplyBtn")?.addEventListener("click", onAction.start);
+  // time would miss, because mounting empties the fragment. `start` is handed
+  // `bodyEl` (the host this instance was rendered into — see render()) so it
+  // can read the form back out of THIS instance's own DOM rather than the
+  // whole document; see formValues() below.
+  frag.querySelector("#liveStartBtn")?.addEventListener("click", () => onAction.start(bodyEl));
+  frag.querySelector("#liveApplyBtn")?.addEventListener("click", () => onAction.start(bodyEl));
   frag.querySelector("#liveStopBtn")?.addEventListener("click", onAction.stop);
   frag.querySelector("#liveLogBtn")?.addEventListener("click", openLogDialog);
   // Nudge language to "no" when an nb-whisper model is picked and lang is
@@ -210,26 +213,38 @@ function buildBody(j, { onAction, liveCatalog }) {
   return frag;
 }
 
-export const formValues = () => {
+/**
+ * Read the live-channel form back out of the host it was rendered into
+ * (`ctx.bodyEl` from render()/buildBody() — see the "Wire actions" comment
+ * above) rather than `document.getElementById`. live-channel renders into two
+ * different views' hosts (Capture + Taps), both of which stay alive in
+ * main.js's viewCache, so a global-document lookup would silently read
+ * whichever instance happened to hold that id rather than the one the click
+ * actually came from — see #254. Scoping to `host` also makes the field
+ * lookups agree with the rest of the codebase's data-slot convention instead
+ * of the fixed ids this component used to key off.
+ * @param {ParentNode} host
+ */
+export const formValues = (host) => {
   // Read the gate knobs only when they have a value (so "Apply" with
   // untouched sliders doesn't force a restart over identical numbers).
   // The server-side `matches()` check uses the same null-means-unchanged
   // semantics for these fields.
-  /** @param {string} id */
-  const numOrNull = (id) => {
-    const el = /** @type {HTMLInputElement | null} */ (document.getElementById(id));
+  /** @param {string} name */
+  const numOrNull = (name) => {
+    const el = /** @type {HTMLInputElement | null} */ (host.querySelector(`[data-slot="${name}"]`));
     if (!el || el.value === "") return null;
     const n = Number(el.value);
     return Number.isFinite(n) ? n : null;
   };
   return {
-    model: /** @type {HTMLSelectElement | null} */ (document.getElementById("liveModelSelect"))?.value ?? null,
-    language: /** @type {HTMLInputElement | null} */ (document.getElementById("liveLangInput"))?.value.trim() ?? null,
-    gate_kind: /** @type {HTMLSelectElement | null} */ (document.getElementById("liveGateKindSelect"))?.value ?? null,
-    gate_speech_threshold: numOrNull("liveGateThreshold"),
-    gate_hangover_ms: numOrNull("liveGateHangover"),
-    gate_pre_roll_ms: numOrNull("liveGatePreRoll"),
-    gate_min_speech_ms: numOrNull("liveGateMinSpeech"),
+    model: /** @type {HTMLSelectElement | null} */ (host.querySelector('[data-slot="modelSelect"]'))?.value ?? null,
+    language: /** @type {HTMLInputElement | null} */ (host.querySelector('[data-slot="langInput"]'))?.value.trim() ?? null,
+    gate_kind: /** @type {HTMLSelectElement | null} */ (host.querySelector('[data-slot="gateKindSelect"]'))?.value ?? null,
+    gate_speech_threshold: numOrNull("gateThreshold"),
+    gate_hangover_ms: numOrNull("gateHangover"),
+    gate_pre_roll_ms: numOrNull("gatePreRoll"),
+    gate_min_speech_ms: numOrNull("gateMinSpeech"),
   };
 };
 
