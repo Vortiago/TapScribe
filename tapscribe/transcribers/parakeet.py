@@ -48,10 +48,14 @@ from ._parakeet_tdt import build_segments_from_tdt_tokens
 from .base import TranscriptionSegment
 
 # Catalog model_id → Hugging Face repo. Other Parakeet variants can be
-# added by extending this table and registering them in catalog.py.
-_MODEL_REPO_TABLE: dict[str, str] = {
-    "parakeet-tdt-0.6b-v3": "nvidia/parakeet-tdt-0.6b-v3",
-}
+# added by extending the registry entry's `repos` field.
+
+
+def _resolve_repo(model_name: str) -> str:
+    from .catalog import repo_for
+
+    return repo_for(model_name, "parakeet-hf") or f"nvidia/{model_name}"
+
 
 # Upper bound on generated tokens per window, derived from the window's
 # audio length. Without it, `generate` falls back to the model-agnostic
@@ -69,10 +73,6 @@ _MAX_TOKENS_PAD = 16
 def _max_new_tokens_for(n_samples: int, sample_rate: int) -> int:
     """Generous per-window token ceiling sized to the audio length."""
     return int(n_samples / sample_rate * _MAX_TOKENS_PER_S) + _MAX_TOKENS_PAD
-
-
-def _resolve_repo(model_name: str) -> str:
-    return _MODEL_REPO_TABLE.get(model_name, f"nvidia/{model_name}")
 
 
 class ParakeetTranscriber(ChunkedTranscriber):

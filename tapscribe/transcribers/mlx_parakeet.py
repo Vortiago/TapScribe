@@ -46,15 +46,14 @@ from .base import (
 
 # Default repo on Hugging Face — `from_pretrained` resolves the catalog
 # model_id `parakeet-tdt-0.6b-v3` to this repo. Additional variants can
-# be added by extending `_MODEL_REPO_TABLE`.
-_MODEL_REPO_TABLE: dict[str, str] = {
-    "parakeet-tdt-0.6b-v3": "mlx-community/parakeet-tdt-0.6b-v3",
-}
+# be added by extending the registry entry's `repos` field.
 
 
 def _resolve_repo(model_name: str) -> str:
     """Map a catalog model_id to its Hugging Face repo string."""
-    return _MODEL_REPO_TABLE.get(model_name, f"mlx-community/{model_name}")
+    from .catalog import repo_for
+
+    return repo_for(model_name, "parakeet-mlx") or f"mlx-community/{model_name}"
 
 
 def _tokens_to_words(tokens: Any, *, offset_s: float) -> tuple[Word, ...] | None:

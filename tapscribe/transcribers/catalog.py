@@ -309,6 +309,7 @@ class ModelEntry:
     backends: tuple[BackendBinding, ...]
     inputs: tuple[ModelInput, ...] = field(default_factory=tuple)
     available: bool = True
+    repos: dict[str, str] = field(default_factory=dict, compare=False)
 
     def supports_context(self, context: Context) -> bool:
         return context in self.contexts
@@ -518,6 +519,7 @@ def _moonshine(model_id: str, display: str, description: str) -> ModelEntry:
         backends=_MOONSHINE_BACKENDS,
         inputs=NO_INPUTS,
         available=False,
+        repos={"moonshine-mlx": f"moonshine/{model_id}", "moonshine-onnx": f"moonshine/{model_id}"},
     )
 
 
@@ -526,7 +528,9 @@ _BATCH_ONLY = frozenset({"batch"})
 _LIVE_ONLY = frozenset({"live"})
 
 
-def _whisper(model_id: str, display: str, description: str, *, en_only: bool) -> ModelEntry:
+def _whisper(
+    model_id: str, display: str, description: str, *, en_only: bool, repos: dict[str, str] | None = None
+) -> ModelEntry:
     return ModelEntry(
         model_id=model_id,
         family="whisper",
@@ -536,10 +540,11 @@ def _whisper(model_id: str, display: str, description: str, *, en_only: bool) ->
         contexts=_BATCH_AND_LIVE,
         backends=_WHISPER_BACKENDS,
         inputs=WHISPER_INPUTS,
+        repos=repos or {},
     )
 
 
-def _nb(model_id: str, display: str, description: str) -> ModelEntry:
+def _nb(model_id: str, display: str, description: str, *, repos: dict[str, str] | None = None) -> ModelEntry:
     return ModelEntry(
         model_id=model_id,
         family="nb-whisper",
@@ -549,32 +554,113 @@ def _nb(model_id: str, display: str, description: str) -> ModelEntry:
         contexts=_BATCH_AND_LIVE,
         backends=_NB_WHISPER_BACKENDS,
         inputs=WHISPER_INPUTS,
+        repos=repos or {},
     )
 
 
 _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
     # ── Whisper variants (English-only suffixes first, then multilingual) ──
-    _whisper("tiny.en", "tiny.en", "Whisper · English · fastest", en_only=True),
-    _whisper("base.en", "base.en", "Whisper · English · fast", en_only=True),
-    _whisper("small.en", "small.en", "Whisper · English · balanced", en_only=True),
-    _whisper("medium.en", "medium.en", "Whisper · English · better", en_only=True),
-    _whisper("tiny", "tiny", "Whisper · multilingual · fastest", en_only=False),
-    _whisper("base", "base", "Whisper · multilingual · fast", en_only=False),
-    _whisper("small", "small", "Whisper · multilingual · balanced", en_only=False),
-    _whisper("medium", "medium", "Whisper · multilingual · better", en_only=False),
-    _whisper("large-v3", "large-v3", "Whisper · multilingual · slow but accurate", en_only=False),
+    _whisper(
+        "tiny.en",
+        "tiny.en",
+        "Whisper · English · fastest",
+        en_only=True,
+        repos={"mlx-whisper": "mlx-community/whisper-tiny.en-mlx"},
+    ),
+    _whisper(
+        "base.en",
+        "base.en",
+        "Whisper · English · fast",
+        en_only=True,
+        repos={"mlx-whisper": "mlx-community/whisper-base.en-mlx"},
+    ),
+    _whisper(
+        "small.en",
+        "small.en",
+        "Whisper · English · balanced",
+        en_only=True,
+        repos={"mlx-whisper": "mlx-community/whisper-small.en-mlx"},
+    ),
+    _whisper(
+        "medium.en",
+        "medium.en",
+        "Whisper · English · better",
+        en_only=True,
+        repos={"mlx-whisper": "mlx-community/whisper-medium.en-mlx"},
+    ),
+    _whisper(
+        "tiny",
+        "tiny",
+        "Whisper · multilingual · fastest",
+        en_only=False,
+        repos={"mlx-whisper": "mlx-community/whisper-tiny-mlx"},
+    ),
+    _whisper(
+        "base",
+        "base",
+        "Whisper · multilingual · fast",
+        en_only=False,
+        repos={"mlx-whisper": "mlx-community/whisper-base-mlx"},
+    ),
+    _whisper(
+        "small",
+        "small",
+        "Whisper · multilingual · balanced",
+        en_only=False,
+        repos={"mlx-whisper": "mlx-community/whisper-small-mlx"},
+    ),
+    _whisper(
+        "medium",
+        "medium",
+        "Whisper · multilingual · better",
+        en_only=False,
+        repos={"mlx-whisper": "mlx-community/whisper-medium-mlx"},
+    ),
+    _whisper(
+        "large-v3",
+        "large-v3",
+        "Whisper · multilingual · slow but accurate",
+        en_only=False,
+        repos={"mlx-whisper": "mlx-community/whisper-large-v3-mlx"},
+    ),
     _whisper(
         "large-v3-turbo",
         "large-v3-turbo",
         "Whisper · multilingual · turbo (faster than large-v3)",
         en_only=False,
+        repos={"mlx-whisper": "mlx-community/whisper-large-v3-turbo"},
     ),
     # ── NB-Whisper (Nasjonalbiblioteket — Norwegian) ──
-    _nb("nb-whisper-tiny", "nb-whisper-tiny", "NB-AiLab · Norwegian-tuned · fastest"),
-    _nb("nb-whisper-base", "nb-whisper-base", "NB-AiLab · Norwegian-tuned · fast"),
-    _nb("nb-whisper-small", "nb-whisper-small", "NB-AiLab · Norwegian-tuned · balanced"),
-    _nb("nb-whisper-medium", "nb-whisper-medium", "NB-AiLab · Norwegian-tuned · better"),
-    _nb("nb-whisper-large", "nb-whisper-large", "NB-AiLab · Norwegian-tuned · slow"),
+    _nb(
+        "nb-whisper-tiny",
+        "nb-whisper-tiny",
+        "NB-AiLab · Norwegian-tuned · fastest",
+        repos={"nb-whisper": "NbAiLab/nb-whisper-tiny"},
+    ),
+    _nb(
+        "nb-whisper-base",
+        "nb-whisper-base",
+        "NB-AiLab · Norwegian-tuned · fast",
+        repos={"nb-whisper": "NbAiLab/nb-whisper-base"},
+    ),
+    _nb(
+        "nb-whisper-small",
+        "nb-whisper-small",
+        "NB-AiLab · Norwegian-tuned · balanced",
+        repos={"nb-whisper": "NbAiLab/nb-whisper-small"},
+    ),
+    _nb(
+        "nb-whisper-medium",
+        "nb-whisper-medium",
+        "NB-AiLab · Norwegian-tuned · better",
+        repos={"nb-whisper": "NbAiLab/nb-whisper-medium"},
+    ),
+    _nb(
+        "nb-whisper-large",
+        "nb-whisper-large",
+        "NB-AiLab · Norwegian-tuned · slow",
+        repos={"nb-whisper": "NbAiLab/nb-whisper-large"},
+    ),
     # ── Voxtral (Mistral) — audio LLM, no prompt/hotwords; batch-only ──
     # batch-only because `build_live_cmd` (live.py) only spawns
     # whisperlivekit-server with `--backend faster-whisper|mlx-whisper` (plus the
@@ -601,6 +687,10 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
         contexts=_BATCH_ONLY,
         backends=_PARAKEET_BACKENDS,
         inputs=NO_INPUTS,
+        repos={
+            "parakeet-mlx": "mlx-community/parakeet-tdt-0.6b-v3",
+            "parakeet-hf": "nvidia/parakeet-tdt-0.6b-v3",
+        },
     ),
     # ── Moonshine (live-only, English) — issue #121; inference lands in #122/#123 ──
     _moonshine("moonshine-tiny", "moonshine-tiny", "Moonshine Tiny · English · ultra-fast live"),
@@ -609,6 +699,17 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
 
 
 REGISTRY: TranscriberRegistry = TranscriberRegistry(_DEFAULT_ENTRIES)
+
+
+def repo_for(model_name: str, backend: str) -> str | None:
+    """The registry-carried HF repo for `model_name` on `backend`, or None when
+    the model has no registry entry or the entry carries no repo for that
+    backend. The single lookup seam the per-adapter resolvers share, each
+    supplying its own construct-by-convention fallback via `repo_for(...) or …`.
+    """
+    entry = REGISTRY.get(model_name)
+    return entry.repos.get(backend) if entry is not None else None
+
 
 # The bundled fallback batch model — what a transcribe runs with when neither
 # the request body nor the operator's batch-model.txt default names one. The

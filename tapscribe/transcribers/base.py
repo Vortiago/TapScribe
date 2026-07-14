@@ -272,13 +272,14 @@ def build_transcription_result(
 
 
 def default_language_for(model_name: str) -> str | None:
-    """Pick a language hint from the model name.
+    """Pick a language hint for a model using name heuristics.
 
-    `.en` suffix → English-only Whisper checkpoint.
-    `nb-*` → Norwegian-tuned (NB-Whisper).
-    Everything else returns None so the model runs language detection.
+    This helper intentionally avoids importing the registry/catalog module
+    so base protocol/types remain decoupled from catalog wiring.
     """
-    n = (model_name or "").lower()
+    if not model_name:
+        return None
+    n = model_name.lower()
     if n.endswith(".en"):
         return "en"
     if n.startswith("nb-"):
