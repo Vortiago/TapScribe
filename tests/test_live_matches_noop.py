@@ -1,30 +1,35 @@
-"""Contract for issue #238 — WhisperLiveKitChannel.matches() must treat a
-supplied gate/confidence value that EQUALS the running child's config as
-"already satisfied" (no restart), and force a restart only when a supplied
-value DIFFERS.
+"""Contract for issue #238 (refined by #224) — WhisperLiveKitChannel.matches()
+must treat a supplied CHILD-side value that EQUALS the running child's config
+as "already satisfied" (no restart), and force a restart only when a supplied
+CHILD-side value DIFFERS.
 
-Today matches() forces a restart whenever conf or any gate_* knob is non-None
-(it requires `is None`), so the dashboard — which pre-fills every gate input
-with the current value and always POSTs concrete numbers (live-channel.js
-formValues) — can never reach api_live_start's "already running with
-requested config -> no-op" branch (app.py). Every start/apply click respawns
-the WhisperLiveKit child (10-30 s caption outage + reconnect churn) even when
-nothing changed. The equality comparison already exists for model / language
-/ gate_kind; the fix extends it to conf + the four gate_* numerics, which also
-makes the route docstring and the client comment true.
+#238 fixed a spurious restart: matches() used to force a restart whenever conf
+or any gate_* knob was non-None (it required `is None`), so the dashboard —
+which pre-fills every gate input with the current value and always POSTs
+concrete numbers (live-channel.js formValues) — could never reach
+api_live_start's "already running -> no-op" branch. Every start/apply click
+respawned the WhisperLiveKit child (10-30 s caption outage + reconnect churn)
+even when nothing changed.
 
-RED drivers (matches() returns False on origin/main today):
-  every "<knob> equal to config -> matches() True" case, including the
-  all-knobs-equal dashboard scenario.
-Green controls (must STAY green after the fix):
-  every "<knob> differs -> False", not-running -> False, and model /
-  language / gate_kind differ -> False (the pre-existing equality checks
-  must not be loosened).
+#224 then relocated the FOUR gate_* knobs (gate_speech_threshold /
+gate_hangover_ms / gate_pre_roll_ms / gate_min_speech_ms) Recorder-side: they
+configure the per-tap SpeechGate, not the supervised child, so a differing gate
+knob no longer forces a restart — matches() ignores them and the change is
+applied via apply_gate_knobs on the no-restart path. `conf`
+(confidence_validation) is CHILD-side and STAYS in matches(): a differing conf
+still restarts. So matches() now compares exactly model / language / gate_kind /
+conf.
 
-This file is the pinned contract — do NOT weaken it. (The corrected
-semantics also make the deliberately-opt-in assertion + comment in
-tests/test_live_cmd.py obsolete; that stale assertion is updated by the fix,
-not this file.)
+What this file pins (must STAY green):
+  * a supplied value EQUAL to config -> matches() True (any knob);
+  * a differing CHILD-side value (conf) -> False (restart);
+  * a differing gate_* knob -> True (#224: no restart, Recorder-side);
+  * not-running -> False; model / language / gate_kind differ -> False (the
+    pre-existing equality checks must not be loosened).
+
+This file is the pinned contract — do NOT weaken it. (The corrected semantics
+also make the deliberately-opt-in assertion + comment in tests/test_live_cmd.py
+obsolete; that stale assertion is updated by the fix, not this file.)
 """
 
 from __future__ import annotations
@@ -85,12 +90,32 @@ def test_supplied_value_equal_to_config_is_a_noop(knob, equal, _differ):
     assert chan.matches(**{**BASE, knob: equal}) is True
 
 
-@pytest.mark.parametrize("knob, _equal, differ", KNOBS)
-def test_supplied_value_differing_from_config_forces_restart(knob, _equal, differ):
-    """A supplied knob whose value DIFFERS from config forces a restart
-    (matches() False). Control — green today and after the fix."""
+@pytest.mark.parametrize(
+    "knob, _equal, differ",
+    [
+        ("conf", True, False),
+    ],
+)
+def test_child_side_knob_differs_forces_restart(knob, _equal, differ):
+    """A supplied child-side knob (conf) that differs forces a restart."""
     chan = _running_channel()
     assert chan.matches(**{**BASE, knob: differ}) is False
+
+
+@pytest.mark.parametrize(
+    "knob, _equal, differ",
+    [
+        ("gate_speech_threshold", 0.6, 0.9),
+        ("gate_hangover_ms", 450, 600),
+        ("gate_pre_roll_ms", 250, 500),
+        ("gate_min_speech_ms", 80, 200),
+    ],
+)
+def test_gate_knob_differs_does_not_force_restart(knob, _equal, differ):
+    """Gate knobs are Recorder-side — a differing value no longer forces
+    a restart (matches returns True)."""
+    chan = _running_channel()
+    assert chan.matches(**{**BASE, knob: differ}) is True
 
 
 def test_all_knobs_supplied_equal_is_the_dashboard_noop():
