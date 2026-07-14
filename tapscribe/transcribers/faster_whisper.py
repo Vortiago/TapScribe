@@ -25,10 +25,15 @@ class FasterWhisperTranscriber:
     name: ClassVar[str] = "faster-whisper"
     backend: ClassVar[str] = "faster-whisper"
 
-    def __init__(self, *, model_name: str, model: Any, device: str):
+    def __init__(self, *, model_name: str, model: Any, device: str, fixed_language: str | None = None):
         self.model_name = model_name
         self._model = model
         self.device = device
+        # Registry-declared fixed language, threaded in by `load()` at
+        # construction (catalog.fixed_language_for). None (the default for
+        # direct constructions, e.g. tests) falls back to the catalog-free
+        # name heuristic at the use sites below.
+        self.fixed_language = fixed_language
 
     @classmethod
     def load(cls, model_name: str, *, kind: str = "cpu") -> FasterWhisperTranscriber:
@@ -41,6 +46,11 @@ class FasterWhisperTranscriber:
         never reach this loader — the registry routes them elsewhere.
         """
         from faster_whisper import WhisperModel  # type: ignore
+
+        # Lazy import (same shape as the adapters' repo resolvers): catalog
+        # imports this module only inside its loader thunks, so neither
+        # direction is a module-level import edge — no import cycle.
+        from .catalog import fixed_language_for
 
         if kind == "cuda":
             ct_device = "cuda"
@@ -68,6 +78,7 @@ class FasterWhisperTranscriber:
             model_name=model_name,
             model=model,
             device=device_label,
+            fixed_language=fixed_language_for(model_name),
         )
 
     def detect_constrained_language(self, path: Path, candidate_languages: tuple[str, ...]) -> str | None:
@@ -80,14 +91,14 @@ class FasterWhisperTranscriber:
         Runs a cheap detect-only pass (one mel window) over the pre-decoded
         recorder PCM — the same no-ffmpeg decode path the MLX adapters use —
         and restricts the argmax to the set. A fixed-language checkpoint
-        (`.en` / `nb-*`) skips the pass entirely and answers from its name
-        hint."""
+        skips the pass entirely and answers from its registry-declared
+        language (name heuristic for checkpoints not in the catalog)."""
         cands = tuple(c for c in candidate_languages if c and c != "auto")
         if not cands:
             return None
         # A fixed-language checkpoint can only ever emit its own language —
         # don't waste a detect pass, and don't claim a candidate it can't produce.
-        hint = default_language_for(self.model_name)
+        hint = self.fixed_language or default_language_for(self.model_name)
         if hint is not None:
             return hint if hint in cands else None
 
@@ -117,10 +128,11 @@ class FasterWhisperTranscriber:
         hotwords: str | None = None,
         source_lang: str | None = None,
     ) -> TranscriptionResult:
-        # An explicit source_lang (the language pin, ADR-0010)
-        # overrides the model-name heuristic; `default_language_for` remains
-        # the fallback so callers that pass no language keep working.
-        language = source_lang or default_language_for(self.model_name)
+        # An explicit source_lang (the language pin, ADR-0010) overrides the
+        # model's own fixed language; that in turn is the registry-declared
+        # one threaded in at load() (#206), with `default_language_for`'s
+        # name heuristic covering directly-constructed adapters.
+        language = source_lang or self.fixed_language or default_language_for(self.model_name)
         common = dict(
             language=language,
             beam_size=5,

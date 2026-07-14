@@ -55,18 +55,28 @@ class MlxWhisperTranscriber:
         model_name: str,
         hf_repo: str,
         transcribe_fn: Callable[..., dict[str, Any]] | None = None,
+        fixed_language: str | None = None,
     ):
         self.model_name = model_name
         self._hf_repo = hf_repo
         self._transcribe_fn = transcribe_fn
+        # Registry-declared fixed language, threaded in by `load()` at
+        # construction (catalog.fixed_language_for). None (direct
+        # constructions, e.g. tests) falls back to the catalog-free name
+        # heuristic in `transcribe`.
+        self.fixed_language = fixed_language
 
     @classmethod
     def load(cls, model_name: str) -> MlxWhisperTranscriber:
-        # Just resolves the HF repo and remembers it. mlx-whisper does its
-        # own lazy fetch/cache on first call.
+        # Just resolves the HF repo + registry language and remembers them.
+        # mlx-whisper does its own lazy fetch/cache on first call. Lazy
+        # catalog import (same shape as the repo resolvers): catalog only
+        # imports this module inside its loader thunks — no import cycle.
+        from .catalog import fixed_language_for
+
         repo = mlx_whisper_repo(model_name)
         print(f"[tapscribe] using mlx-whisper for batch model: {repo}", flush=True)
-        return cls(model_name=model_name, hf_repo=repo)
+        return cls(model_name=model_name, hf_repo=repo, fixed_language=fixed_language_for(model_name))
 
     def unload(self) -> None:
         """Free the weights mlx-whisper cached for this repo.
@@ -119,7 +129,7 @@ class MlxWhisperTranscriber:
 
         kwargs: dict[str, Any] = dict(
             path_or_hf_repo=self._hf_repo,
-            language=source_lang or default_language_for(self.model_name),
+            language=source_lang or self.fixed_language or default_language_for(self.model_name),
             initial_prompt=prompt_arg,
             condition_on_previous_text=False,
             word_timestamps=True,

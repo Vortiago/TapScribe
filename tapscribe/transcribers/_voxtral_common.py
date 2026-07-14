@@ -131,16 +131,22 @@ class VoxtralTranscriberBase:
     - `initial_prompt` / `hotwords`: the transcription-request call has
       no hook for either — dropped at the model call, echoed onto the
       result for protocol parity.
-    - `source_lang`: used to build the `language` request kwarg via
-      `default_language_for()` when unset. Voxtral doesn't echo a
-      detected language, so the hint we sent (or "auto" when there was
-      none) is what gets recorded.
+    - `source_lang`: used to build the `language` request kwarg; when
+      unset, the adapter's registry-declared `fixed_language` (threaded
+      in at `load()`) applies, then `default_language_for()`'s name
+      heuristic. Voxtral doesn't echo a detected language, so the hint we
+      sent (or "auto" when there was none) is what gets recorded.
     """
 
     name: ClassVar[str] = "voxtral"
     backend: ClassVar[str]
     device: str
     model_name: str
+    # Registry-declared fixed language (catalog.fixed_language_for), set by
+    # each adapter's `load()` at construction. The class-level None default
+    # keeps directly-constructed instances (tests' fakes) on the name-
+    # heuristic fallback in `transcribe`.
+    fixed_language: str | None = None
 
     def _repo_id(self) -> str:
         raise NotImplementedError
@@ -171,7 +177,7 @@ class VoxtralTranscriberBase:
         # takes language + audio only, so initial_prompt and hotwords have
         # nowhere to go and are dropped. They're still recorded on the result
         # for parity with other transcribers' bookkeeping.
-        language = source_lang or default_language_for(self.model_name)
+        language = source_lang or self.fixed_language or default_language_for(self.model_name)
         request_kwargs: dict[str, Any] = {"audio": str(path), "model_id": self._repo_id()}
         if language:
             request_kwargs["language"] = language

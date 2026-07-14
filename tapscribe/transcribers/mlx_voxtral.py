@@ -36,10 +36,12 @@ class MlxVoxtralTranscriber(VoxtralTranscriberBase):
     backend: ClassVar[str] = "mlx-voxtral"
     device: ClassVar[str] = "Apple Silicon GPU"
 
-    def __init__(self, *, model_name: str, processor: Any, model: Any):
+    def __init__(self, *, model_name: str, processor: Any, model: Any, fixed_language: str | None = None):
         self.model_name = model_name
         self._processor = processor
         self._model = model
+        # Registry-declared fixed language (see VoxtralTranscriberBase).
+        self.fixed_language = fixed_language
 
     @classmethod
     def load(cls, model_name: str) -> MlxVoxtralTranscriber:
@@ -60,10 +62,19 @@ class MlxVoxtralTranscriber(VoxtralTranscriberBase):
             VoxtralProcessor,
         )
 
+        # Lazy catalog import (same shape as the adapters' repo resolvers):
+        # catalog imports this module only inside its loader thunk — no cycle.
+        from .catalog import fixed_language_for
+
         print(f"[tapscribe] loading mlx-voxtral model: {_MLX_VOXTRAL_REPO}", flush=True)
         processor = VoxtralProcessor.from_pretrained(_MLX_VOXTRAL_REPO)
         model = VoxtralForConditionalGeneration.from_pretrained(_MLX_VOXTRAL_REPO)
-        return cls(model_name=model_name, processor=processor, model=model)
+        return cls(
+            model_name=model_name,
+            processor=processor,
+            model=model,
+            fixed_language=fixed_language_for(model_name),
+        )
 
     def _repo_id(self) -> str:
         return _MLX_VOXTRAL_REPO
