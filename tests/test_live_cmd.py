@@ -111,28 +111,6 @@ def test_matches_ignores_gate_knob_differences():
     assert chan.matches(**BASE, gate_speech_threshold=0.5) is True
 
 
-def test_matches_threshold_survives_dashboard_display_rounding():
-    """Gate knobs are Recorder-side and no longer participate in matches()
-    (#224). A threshold change (rounded or not) does not affect the
-    restart decision."""
-    cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_speech_threshold=0.567)
-    chan = LiveChannel(config=cfg, use_mlx=False)
-    chan._proc = FakeAliveProc()
-
-    resubmitted = float(f"{0.567:.2f}")  # 0.57
-    assert chan.matches(**BASE, gate_speech_threshold=resubmitted) is True
-    assert chan.matches(**BASE, gate_speech_threshold=0.62) is True
-
-
-def test_matches_gate_knob_int_equals_float_config_is_a_noop():
-    """Gate knobs are Recorder-side and don't affect the restart
-    decision (#224). A type-mismatched value still returns True."""
-    cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_speech_threshold=1.0)
-    chan = LiveChannel(config=cfg, use_mlx=False)
-    chan._proc = FakeAliveProc()
-    assert chan.matches(**BASE, gate_speech_threshold=1) is True
-
-
 def test_whisper_live_kit_channel_supports_native_vad():
     """The dashboard reads `supports_native_vad` to decide whether to
     surface the "backend" gate_kind option. WhisperLiveKit has --vac

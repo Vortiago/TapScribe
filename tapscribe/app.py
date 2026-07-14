@@ -970,7 +970,7 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
         )
         return {
             "ok": True,
-            "msg": "already running with requested config",
+            "msg": "already running; any gate-knob change applied without restart",
             "state": recorder.live.info["state"],
         }
 

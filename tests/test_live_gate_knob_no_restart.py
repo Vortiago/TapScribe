@@ -47,6 +47,7 @@ from pathlib import Path
 
 import pytest
 from conftest import (  # type: ignore[import-not-found]  # pytest puts tests/ on sys.path
+    GATE_KNOB_TEST_VALUES,
     FakeAliveProc,
     repoint_config_files,
 )
@@ -103,13 +104,9 @@ def _running_child(recorder, monkeypatch) -> dict[str, list]:
 
 # (gate-knob JSON field, a value that DIFFERS from the LiveConfig default) — one
 # per knob so the discriminator pins EVERY relocated site, not just one (a fix
-# that drops one knob from matches() but leaves another must still fail).
-_GATE_KNOBS = [
-    ("gate_speech_threshold", 0.9),  # default 0.5
-    ("gate_hangover_ms", 650),  # default 400
-    ("gate_pre_roll_ms", 500),  # default 300
-    ("gate_min_speech_ms", 175),  # default 0
-]
+# that drops one knob from matches() but leaves another must still fail). Values
+# shared with the apply test via conftest.GATE_KNOB_TEST_VALUES so they can't drift.
+_GATE_KNOBS = list(GATE_KNOB_TEST_VALUES.items())
 
 
 @pytest.mark.parametrize("knob, changed", _GATE_KNOBS)
