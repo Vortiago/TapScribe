@@ -639,7 +639,6 @@ _TAP_BYTES_BUCKET = 64 * 1024
 
 def _build_state_blob(
     current_session: str,
-    open_wavs: set[str],
     active: list[dict[str, Any]],
     sessions_list: list[dict[str, Any]],
     registry: PeopleRegistry,
@@ -652,12 +651,12 @@ def _build_state_blob(
     recording_enabled: bool,
     backend: str,
     available_backends: list[str],
-) -> tuple[list[dict[str, Any]], bytes, str]:
+) -> tuple[bytes, str]:
     """Config reads, pure people joins, payload assembly, and ETag serialization.
 
     `sessions_list` is pre-gathered; the registry is pre-synced (mutation ran on
     the event loop). All recorder-owned inputs are snapshotted. Returns
-    (people_view_rows, body_bytes, etag_string)."""
+    (body_bytes, etag_string)."""
     prompt = read_config("prompt")
     live_prompt = read_config("live-prompt")
     live_model_default = read_config("live-model")
@@ -728,7 +727,7 @@ def _build_state_blob(
     }
     body = json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode("utf-8")
     etag = 'W/"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'
-    return people, body, etag
+    return body, etag
 
 
 @app.get("/api/state")
@@ -764,10 +763,9 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     registry, occs = attach_people_mutation(sessions_list, live_identities=live_identities)
 
     # Thread hop 2: config reads + people joins + payload build + serialize + ETag
-    people, body, etag = await asyncio.to_thread(
+    body, etag = await asyncio.to_thread(
         _build_state_blob,
         recorder.session_start,
-        open_wavs,
         active,
         sessions_list,
         registry,
