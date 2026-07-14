@@ -164,7 +164,8 @@ def test_no_audio_fed_close_returns_no_lines():
         raise AssertionError("generate_fn must not be called with no audio")
 
     win = MoonshineWindow(generate_fn=stub_generate, chunk_s=25.0, overlap_s=3.0, refresh_s=0.5)
-    assert win.close() == []
+    lines = win.close()
+    assert lines == []
 
 
 # ---------------------------------------------------------------------------

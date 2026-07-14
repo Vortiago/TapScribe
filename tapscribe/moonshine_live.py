@@ -37,6 +37,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import socket
 import threading
 from collections import deque
 from dataclasses import replace
@@ -146,6 +148,28 @@ def resolve_live_channel_for_model(
     return WhisperLiveKitChannel(config=carried_config, use_mlx=use_mlx)
 
 
+def _bound_socket(host: str, port: int) -> socket.socket:
+    """One listening-ready socket bound to the FIRST address `host`
+    resolves to. See `MoonshineAsrServer.start` for why serve() must get
+    a pre-bound socket instead of host+port. Clients that resolve `host`
+    to multiple addresses still connect: asyncio tries each resolved
+    address in turn, so the unbound family's refusal falls through to
+    the bound one."""
+    family, type_, proto, _, addr = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0]
+    sock = socket.socket(family, type_, proto)
+    try:
+        if os.name == "posix":
+            # Same TIME_WAIT-rebind allowance asyncio's create_server
+            # applies by default on POSIX; deliberately NOT set on
+            # Windows, where SO_REUSEADDR permits port hijacking.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(addr)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
 # ---------------------------------------------------------------------------
 # MoonshineAsrServer — the /asr WebSocket server, one MoonshineWindow per
 # connection.
@@ -172,12 +196,16 @@ class MoonshineAsrServer:
         return self._port
 
     async def start(self) -> None:
-        # port=0 binds a kernel-assigned ephemeral port, read back below.
-        # This is deliberately NOT a pick-a-free-port-then-bind helper:
-        # picking and binding as two steps leaves a window where another
-        # process grabs the picked port first ("address already in use"
-        # at start — a race this repo has been bitten by in tests).
-        self._server = await websockets.serve(self._handle, self._host, self._port)
+        # Bind exactly ONE pre-created socket and hand it to the server.
+        # Two traps this sidesteps: (a) a pick-a-free-port-then-bind
+        # helper leaves a window where another process grabs the picked
+        # port first ("address already in use"); (b) passing host+port=0
+        # straight to serve() binds one socket PER resolved address
+        # family, each with its OWN kernel-assigned port — on Windows
+        # "localhost" resolves to ::1 and 127.0.0.1, so sockets[0]'s port
+        # disagrees with where half the clients connect (the Windows-CI
+        # failure mode of the first attempt at this).
+        self._server = await websockets.serve(self._handle, sock=_bound_socket(self._host, self._port))
         self._port = self._server.sockets[0].getsockname()[1]
 
     async def stop(self) -> None:

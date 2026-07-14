@@ -25,17 +25,32 @@ from tapscribe.moonshine_live import (
 )
 
 
-class _SignalList(list):
+class _SignalList:
     """Same event-backed collector `test_live_relay.py` uses — lets a test
-    `await wait_count(n)` instead of a fixed sleep."""
+    `await wait_count(n)` instead of a fixed sleep. Composition over a
+    list subclass: adding `_event` to a list subclass without `__eq__`
+    trips CodeQL's py/missing-equals, and the tests only need append/len/
+    iter/bool/indexing."""
 
     def __init__(self) -> None:
-        super().__init__()
+        self._items: list = []
         self._event = asyncio.Event()
 
-    def append(self, item) -> None:  # type: ignore[override]
-        super().append(item)
+    def append(self, item) -> None:
+        self._items.append(item)
         self._event.set()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __getitem__(self, i):
+        return self._items[i]
+
+    def __bool__(self) -> bool:
+        return bool(self._items)
 
     async def wait_count(self, n: int, *, timeout: float = 2.0) -> None:
         async def _wait() -> None:

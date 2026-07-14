@@ -391,7 +391,14 @@ class FakeWlkThread:
             loop.close()
 
     async def _serve(self) -> None:
-        self._server = await websockets.serve(self._handler, "localhost", 0)
+        # One pre-bound socket (first resolved address): host+port=0
+        # binds one socket PER address family, each with its OWN
+        # ephemeral port — on Windows "localhost" is ::1 AND 127.0.0.1,
+        # so sockets[0]'s port disagrees with where half the clients
+        # connect. Mirrors tapscribe.moonshine_live._bound_socket.
+        from tapscribe.moonshine_live import _bound_socket
+
+        self._server = await websockets.serve(self._handler, sock=_bound_socket("localhost", 0))
         self._port = self._server.sockets[0].getsockname()[1]
         self._stop_event = asyncio.Event()
         self._ready.set()

@@ -96,9 +96,12 @@ class _FakeWlk:
         return self._port
 
     async def start(self) -> None:
-        # Bind port 0 and read the kernel's pick back - pick-then-bind
-        # races anything else grabbing ports on this host.
-        self._server = await websockets.serve(self._handler, "localhost", self._port)
+        # One pre-bound socket via the production helper: kills both the
+        # pick-then-bind race AND the Windows multi-family port mismatch
+        # (see _bound_socket's docstring).
+        from tapscribe.moonshine_live import _bound_socket
+
+        self._server = await websockets.serve(self._handler, sock=_bound_socket("localhost", self._port))
         self._port = self._server.sockets[0].getsockname()[1]
 
     async def stop(self) -> None:
