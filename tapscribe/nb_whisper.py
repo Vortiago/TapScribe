@@ -20,16 +20,20 @@ import shutil
 from pathlib import Path
 
 # faster-whisper accepts a HuggingFace repo name as `model_size_or_path` and
-# downloads/converts via huggingface_hub. NbAiLab publishes the canonical
-# Norwegian-tuned Whisper checkpoints; for batch CPU transcription this is
-# the path.
-NB_WHISPER_REPO_TABLE: dict[str, str] = {
-    "nb-whisper-tiny": "NbAiLab/nb-whisper-tiny",
-    "nb-whisper-base": "NbAiLab/nb-whisper-base",
-    "nb-whisper-small": "NbAiLab/nb-whisper-small",
-    "nb-whisper-medium": "NbAiLab/nb-whisper-medium",
-    "nb-whisper-large": "NbAiLab/nb-whisper-large",
-}
+# downloads/converts via huggingface_hub. NB-Whisper repos are resolved from
+# the registry at call time.
+
+
+def _resolve_nb_whisper_repo(model_name: str) -> str:
+    """Resolve an NB-Whisper model_id to its HF repo via the registry."""
+    from .transcribers.catalog import REGISTRY
+
+    entry = REGISTRY.get(model_name)
+    if entry is not None:
+        repo = entry.repos.get("nb-whisper")
+        if repo:
+            return repo
+    return model_name
 
 
 def download_nb_whisper_ct2_dir(model_name: str) -> Path:
@@ -44,7 +48,7 @@ def download_nb_whisper_ct2_dir(model_name: str) -> Path:
     """
     from huggingface_hub import snapshot_download
 
-    repo = NB_WHISPER_REPO_TABLE.get(model_name, model_name)
+    repo = _resolve_nb_whisper_repo(model_name)
     print(f"[tapscribe] fetching ct2/ subdir of {repo} via huggingface_hub…", flush=True)
     # Also pull the root-level preprocessor_config.json — faster-whisper reads
     # `feature_size` (n_mels) from it. NB-Whisper-large is based on Whisper
