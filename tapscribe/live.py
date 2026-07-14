@@ -36,10 +36,8 @@ from .nb_whisper import download_nb_whisper_ct2_dir
 from .text import read_config
 
 # Decimals the dashboard mirrors the gate speech threshold at (see
-# `_mirror_gate_info`). `matches()` compares supplied thresholds at the SAME
-# precision so a re-POST of the displayed value is a no-op rather than a
-# spurious #238 restart — one knob keeps the display and the comparator in
-# lockstep.
+# `_mirror_gate_info`). Display formatting ensures a >2-decimal config
+# (e.g. 0.567) renders consistently across /api/state round-trips.
 GATE_THRESHOLD_DECIMALS = 2
 
 
@@ -447,6 +445,33 @@ class WhisperLiveKitChannel:
         self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
         self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
 
+    def apply_gate_knobs(
+        self,
+        *,
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
+    ) -> None:
+        """Apply Recorder-side gate-knob changes to config without announcing a
+        child transition. Replaces only the non-None gate knobs on `self.config`
+        and mirrors the updated gate info into `info`. Leaves `info["state"]`,
+        `info["last_error"]`, `info["model"]`, and `info["language"]` untouched —
+        the child process is not affected by these knobs. Used on the no-restart
+        path in `api_live_start` when only gate knobs changed."""
+        replacements: dict[str, Any] = {}
+        if gate_speech_threshold is not None:
+            replacements["gate_speech_threshold"] = float(gate_speech_threshold)
+        if gate_hangover_ms is not None:
+            replacements["gate_hangover_ms"] = int(gate_hangover_ms)
+        if gate_pre_roll_ms is not None:
+            replacements["gate_pre_roll_ms"] = int(gate_pre_roll_ms)
+        if gate_min_speech_ms is not None:
+            replacements["gate_min_speech_ms"] = int(gate_min_speech_ms)
+        if replacements:
+            self.config = replace(self.config, **replacements)
+            self._mirror_gate_info()
+
     supports_native_vad: bool = True  # --vac / --no-vac flag exists
 
     def running(self) -> bool:
@@ -474,20 +499,6 @@ class WhisperLiveKitChannel:
             and (not language or language == self.config.language)
             and (gate_kind is None or gate_kind == self.config.gate_kind)
             and (conf is None or conf == self.config.confidence_validation)
-            # Compare the threshold at the dashboard's display precision
-            # (GATE_THRESHOLD_DECIMALS): `_mirror_gate_info` renders it at that
-            # precision and the UI re-POSTs the rounded value, so a >2-decimal
-            # config (e.g. 0.567, shown as "0.57") must not read as "changed"
-            # on an unchanged re-submit — an exact `==` there would respawn the
-            # child and reintroduce the exact #238 spurious-restart this slice fixes.
-            and (
-                gate_speech_threshold is None
-                or round(gate_speech_threshold, GATE_THRESHOLD_DECIMALS)
-                == round(self.config.gate_speech_threshold, GATE_THRESHOLD_DECIMALS)
-            )
-            and (gate_hangover_ms is None or gate_hangover_ms == self.config.gate_hangover_ms)
-            and (gate_pre_roll_ms is None or gate_pre_roll_ms == self.config.gate_pre_roll_ms)
-            and (gate_min_speech_ms is None or gate_min_speech_ms == self.config.gate_min_speech_ms)
         )
 
     def begin_transition(

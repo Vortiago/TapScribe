@@ -88,11 +88,9 @@ def test_gate_kind_default_is_tapscribe():
     assert "--no-vac" in build_live_cmd(EXE, cfg, use_mlx=False)
 
 
-def test_matches_returns_false_when_only_a_gate_knob_differs():
-    """`matches()` is the request-coalescing fast path on /api/live/start
-    — if a operator nudges only `gate_hangover_ms`, we MUST restart
-    the channel rather than no-op'ing back "already running with
-    requested config". Otherwise sliders look broken from the UI."""
+def test_matches_ignores_gate_knob_differences():
+    """matches() only compares child-side fields. A differing gate knob
+    no longer forces a restart — the gate is Recorder-side (#224)."""
     cfg = LiveConfig(
         model="tiny.en",
         language="en",
@@ -106,38 +104,29 @@ def test_matches_returns_false_when_only_a_gate_knob_differs():
     chan._proc = FakeAliveProc()
 
     assert chan.matches(**BASE) is True
-    assert chan.matches(**BASE, gate_speech_threshold=0.7) is False
-    assert chan.matches(**BASE, gate_hangover_ms=600) is False
-    assert chan.matches(**BASE, gate_pre_roll_ms=500) is False
-    assert chan.matches(**BASE, gate_min_speech_ms=120) is False
-    # Knob equal to current config is a no-op (issue #238).
+    assert chan.matches(**BASE, gate_speech_threshold=0.7) is True
+    assert chan.matches(**BASE, gate_hangover_ms=600) is True
+    assert chan.matches(**BASE, gate_pre_roll_ms=500) is True
+    assert chan.matches(**BASE, gate_min_speech_ms=120) is True
     assert chan.matches(**BASE, gate_speech_threshold=0.5) is True
 
 
 def test_matches_threshold_survives_dashboard_display_rounding():
-    """The dashboard mirrors the threshold as `:.2f` and re-POSTs that rounded
-    value. A config that carries >2 decimals (0.567, set via the direct API)
-    would round-trip through the display as 0.57 — if `matches()` compared the
-    raw float with `==`, the unchanged re-submit would read as "changed" and
-    respawn the child, reintroducing the exact #238 spurious-restart. So a
-    supplied value equal to the config *at display precision* must be a no-op,
-    while a genuine (display-visible) change must still force a restart."""
+    """Gate knobs are Recorder-side and no longer participate in matches()
+    (#224). A threshold change (rounded or not) does not affect the
+    restart decision."""
     cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_speech_threshold=0.567)
     chan = LiveChannel(config=cfg, use_mlx=False)
     chan._proc = FakeAliveProc()
 
-    # The dashboard re-submits the `:.2f`-rounded value for the unchanged field.
     resubmitted = float(f"{0.567:.2f}")  # 0.57
     assert chan.matches(**BASE, gate_speech_threshold=resubmitted) is True
-    # A display-visible change still restarts.
-    assert chan.matches(**BASE, gate_speech_threshold=0.62) is False
+    assert chan.matches(**BASE, gate_speech_threshold=0.62) is True
 
 
 def test_matches_gate_knob_int_equals_float_config_is_a_noop():
-    """A gate knob supplied as an int equal to the float config value (JSON
-    clients may send `1` where config holds `1.0`) must not force a restart —
-    `1 == 1.0` in Python, so the equality path already coalesces it; pin that
-    the boundary type mismatch stays a no-op rather than a spurious respawn."""
+    """Gate knobs are Recorder-side and don't affect the restart
+    decision (#224). A type-mismatched value still returns True."""
     cfg = LiveConfig(model="tiny.en", language="en", host="h", port=8000, gate_speech_threshold=1.0)
     chan = LiveChannel(config=cfg, use_mlx=False)
     chan._proc = FakeAliveProc()

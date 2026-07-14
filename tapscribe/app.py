@@ -959,11 +959,15 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
         language=language,
         gate_kind=gate_kind,
         conf=conf,
-        gate_speech_threshold=gate_speech_threshold,
-        gate_hangover_ms=gate_hangover_ms,
-        gate_pre_roll_ms=gate_pre_roll_ms,
-        gate_min_speech_ms=gate_min_speech_ms,
     ):
+        # Child-side config matches — no restart needed. Apply any gate-knob
+        # changes to the config so the next /tap open's SpeechGate uses them.
+        recorder.live.apply_gate_knobs(
+            gate_speech_threshold=gate_speech_threshold,
+            gate_hangover_ms=gate_hangover_ms,
+            gate_pre_roll_ms=gate_pre_roll_ms,
+            gate_min_speech_ms=gate_min_speech_ms,
+        )
         return {
             "ok": True,
             "msg": "already running with requested config",

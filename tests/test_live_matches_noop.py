@@ -85,12 +85,32 @@ def test_supplied_value_equal_to_config_is_a_noop(knob, equal, _differ):
     assert chan.matches(**{**BASE, knob: equal}) is True
 
 
-@pytest.mark.parametrize("knob, _equal, differ", KNOBS)
-def test_supplied_value_differing_from_config_forces_restart(knob, _equal, differ):
-    """A supplied knob whose value DIFFERS from config forces a restart
-    (matches() False). Control — green today and after the fix."""
+@pytest.mark.parametrize(
+    "knob, _equal, differ",
+    [
+        ("conf", True, False),
+    ],
+)
+def test_child_side_knob_differs_forces_restart(knob, _equal, differ):
+    """A supplied child-side knob (conf) that differs forces a restart."""
     chan = _running_channel()
     assert chan.matches(**{**BASE, knob: differ}) is False
+
+
+@pytest.mark.parametrize(
+    "knob, _equal, differ",
+    [
+        ("gate_speech_threshold", 0.6, 0.9),
+        ("gate_hangover_ms", 450, 600),
+        ("gate_pre_roll_ms", 250, 500),
+        ("gate_min_speech_ms", 80, 200),
+    ],
+)
+def test_gate_knob_differs_does_not_force_restart(knob, _equal, differ):
+    """Gate knobs are Recorder-side — a differing value no longer forces
+    a restart (matches returns True)."""
+    chan = _running_channel()
+    assert chan.matches(**{**BASE, knob: differ}) is True
 
 
 def test_all_knobs_supplied_equal_is_the_dashboard_noop():
