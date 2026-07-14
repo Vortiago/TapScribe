@@ -519,7 +519,7 @@ def _moonshine(model_id: str, display: str, description: str) -> ModelEntry:
         backends=_MOONSHINE_BACKENDS,
         inputs=NO_INPUTS,
         available=False,
-        repos={"moonshine-mlx": "moonshine/moonshine-tiny", "moonshine-onnx": "moonshine/moonshine-tiny"},
+        repos={"moonshine-mlx": f"moonshine/{model_id}", "moonshine-onnx": f"moonshine/{model_id}"},
     )
 
 
@@ -528,7 +528,9 @@ _BATCH_ONLY = frozenset({"batch"})
 _LIVE_ONLY = frozenset({"live"})
 
 
-def _whisper(model_id: str, display: str, description: str, *, en_only: bool, repos=None) -> ModelEntry:
+def _whisper(
+    model_id: str, display: str, description: str, *, en_only: bool, repos: dict[str, str] | None = None
+) -> ModelEntry:
     return ModelEntry(
         model_id=model_id,
         family="whisper",
@@ -542,7 +544,7 @@ def _whisper(model_id: str, display: str, description: str, *, en_only: bool, re
     )
 
 
-def _nb(model_id: str, display: str, description: str, *, repos=None) -> ModelEntry:
+def _nb(model_id: str, display: str, description: str, *, repos: dict[str, str] | None = None) -> ModelEntry:
     return ModelEntry(
         model_id=model_id,
         family="nb-whisper",
@@ -697,6 +699,17 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
 
 
 REGISTRY: TranscriberRegistry = TranscriberRegistry(_DEFAULT_ENTRIES)
+
+
+def repo_for(model_name: str, backend: str) -> str | None:
+    """The registry-carried HF repo for `model_name` on `backend`, or None when
+    the model has no registry entry or the entry carries no repo for that
+    backend. The single lookup seam the per-adapter resolvers share, each
+    supplying its own construct-by-convention fallback via `repo_for(...) or …`.
+    """
+    entry = REGISTRY.get(model_name)
+    return entry.repos.get(backend) if entry is not None else None
+
 
 # The bundled fallback batch model — what a transcribe runs with when neither
 # the request body nor the operator's batch-model.txt default names one. The

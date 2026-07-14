@@ -31,14 +31,9 @@ def mlx_whisper_repo(name: str) -> str:
     """Map an OpenAI-style Whisper model name to its mlx-community HF repo.
     Reads from the registry; falls back to the construction pattern for
     unknown models."""
-    from .catalog import REGISTRY
+    from .catalog import repo_for
 
-    entry = REGISTRY.get(name)
-    if entry is not None:
-        repo = entry.repos.get("mlx-whisper")
-        if repo:
-            return repo
-    return f"mlx-community/whisper-{name}-mlx"
+    return repo_for(name, "mlx-whisper") or f"mlx-community/whisper-{name}-mlx"
 
 
 class MlxWhisperTranscriber:

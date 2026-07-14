@@ -130,3 +130,14 @@ def test_parakeet_repos_still_resolve_after_move() -> None:
     # by the incumbent tests/test_transcribers_mlx_whisper.py, kept in the gate.)
     assert mlx_parakeet._resolve_repo("parakeet-tdt-0.6b-v3") == "mlx-community/parakeet-tdt-0.6b-v3"
     assert parakeet._resolve_repo("parakeet-tdt-0.6b-v3") == "nvidia/parakeet-tdt-0.6b-v3"
+
+
+def test_nb_whisper_repo_still_resolves_after_move() -> None:
+    # REPO guardrail (green -> green) for the fourth swept site: nb_whisper's
+    # resolver is one of the four re-homed onto the registry, but nothing else in
+    # the gate pins it (test_nb_whisper.py only covers ensure_nb_whisper_lang_ids).
+    # Catches a re-homing that drops or corrupts the NbAiLab repo string.
+    assert nb_whisper._resolve_nb_whisper_repo("nb-whisper-large") == "NbAiLab/nb-whisper-large"
+    # A miss (no registry entry) degrades to the raw name, never raises — the
+    # nb_whisper fallback returns the name as-is, unlike the constructed parakeet one.
+    assert nb_whisper._resolve_nb_whisper_repo("not-a-registered-model-xyz") == "not-a-registered-model-xyz"

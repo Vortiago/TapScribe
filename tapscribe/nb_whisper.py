@@ -26,14 +26,9 @@ from pathlib import Path
 
 def _resolve_nb_whisper_repo(model_name: str) -> str:
     """Resolve an NB-Whisper model_id to its HF repo via the registry."""
-    from .transcribers.catalog import REGISTRY
+    from .transcribers.catalog import repo_for
 
-    entry = REGISTRY.get(model_name)
-    if entry is not None:
-        repo = entry.repos.get("nb-whisper")
-        if repo:
-            return repo
-    return model_name
+    return repo_for(model_name, "nb-whisper") or model_name
 
 
 def download_nb_whisper_ct2_dir(model_name: str) -> Path:

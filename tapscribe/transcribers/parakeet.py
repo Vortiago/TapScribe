@@ -52,14 +52,9 @@ from .base import TranscriptionSegment
 
 
 def _resolve_repo(model_name: str) -> str:
-    from .catalog import REGISTRY
+    from .catalog import repo_for
 
-    entry = REGISTRY.get(model_name)
-    if entry is not None:
-        repo = entry.repos.get("parakeet-hf")
-        if repo:
-            return repo
-    return f"nvidia/{model_name}"
+    return repo_for(model_name, "parakeet-hf") or f"nvidia/{model_name}"
 
 
 # Upper bound on generated tokens per window, derived from the window's

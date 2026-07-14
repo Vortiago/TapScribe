@@ -51,14 +51,9 @@ from .base import (
 
 def _resolve_repo(model_name: str) -> str:
     """Map a catalog model_id to its Hugging Face repo string."""
-    from .catalog import REGISTRY
+    from .catalog import repo_for
 
-    entry = REGISTRY.get(model_name)
-    if entry is not None:
-        repo = entry.repos.get("parakeet-mlx")
-        if repo:
-            return repo
-    return f"mlx-community/{model_name}"
+    return repo_for(model_name, "parakeet-mlx") or f"mlx-community/{model_name}"
 
 
 def _tokens_to_words(tokens: Any, *, offset_s: float) -> tuple[Word, ...] | None:
