@@ -11,7 +11,6 @@ ever loads: `generate_fn` is an injected stub.
 from __future__ import annotations
 
 import asyncio
-import socket
 
 import numpy as np
 import pytest
@@ -49,12 +48,6 @@ class _SignalList(list):
         await asyncio.wait_for(_wait(), timeout=timeout)
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("localhost", 0))
-        return s.getsockname()[1]
-
-
 def _pcm_seconds(seconds: float, *, sample_rate: int = 16000) -> bytes:
     n = int(seconds * sample_rate)
     return np.zeros(n, dtype=np.int16).tobytes()
@@ -75,9 +68,9 @@ async def running_server():
         calls["n"] += 1
         return texts[i]
 
-    port = _free_port()
-    server = MoonshineAsrServer(host="localhost", port=port, generate_fn=stub_generate)
+    server = MoonshineAsrServer(host="localhost", port=0, generate_fn=stub_generate)
     await server.start()
+    port = server.port
     try:
         yield server, port, calls
     finally:
@@ -129,9 +122,9 @@ async def test_two_connections_get_independent_windows():
         seen_lengths.append(arr.shape[0])
         return "ok"
 
-    port = _free_port()
-    server = MoonshineAsrServer(host="localhost", port=port, generate_fn=length_reporting_generate)
+    server = MoonshineAsrServer(host="localhost", port=0, generate_fn=length_reporting_generate)
     await server.start()
+    port = server.port
     try:
         relay1 = WlKRelay(host="localhost", port=port, language="en", on_settled_line=lambda _t: None)
         await relay1.connect()
@@ -352,3 +345,272 @@ def test_auto_start_swaps_to_moonshine_before_starting(tmp_path, monkeypatch):
         app.dependency_overrides.clear()
         if recorder.live.running():
             recorder.live.stop()
+
+
+async def test_burst_tail_fed_after_last_refresh_reaches_the_relay(running_server):
+    """Finding #5: audio that arrives after the last cadence refresh is
+    only ever decoded by the close-time flush. That flush must actually
+    REACH the relay — the server delivers the final snapshot in response
+    to the end-of-audio signal (`b""`, the same wire signal
+    whisperlivekit's own web client sends on stop), BEFORE the close
+    handshake cuts off its send path. Pre-fix the final send raced the
+    already-initiated WS close and lost the words on essentially every
+    utterance end."""
+    server, port, _calls = running_server
+    settled = _SignalList()
+    relay = WlKRelay(host="localhost", port=port, language="en", on_settled_line=settled.append)
+    assert await relay.connect() is True
+
+    # One refresh-worth of audio ("hello"), then a sub-cadence tail that
+    # only the close-time decode will ever see.
+    await relay.send(_pcm_seconds(0.6))
+    await asyncio.sleep(0.05)
+    await relay.send(_pcm_seconds(0.3))
+
+    await relay.close()
+    # The stub's later decodes say "hello there" / "hello there friend";
+    # whatever the close-time decode produced, the final words must be in
+    # the settled output — not truncated at the last mid-stream snapshot.
+    assert settled, "no settled lines at all"
+    full_text = " ".join(settled)
+    assert full_text.endswith("friend") or full_text.endswith("there"), full_text
+    assert full_text != "hello", "tail words were truncated at close"
+
+
+async def test_inference_runs_off_the_asr_server_event_loop():
+    """Finding #7: `generate_fn` is synchronous model inference over up to
+    ~25s of audio — run on the /asr server's event loop it stalls every
+    other connection on that loop. Structural proof (no wall-clock
+    thresholds, house pattern from test_tap_relay.py): a genuinely
+    thread-blocking generate_fn records whether a loop-side coroutine got
+    to run WHILE it was blocked. Pre-fix the loop is blocked for the
+    whole call, so the release can only fire after the factory has given
+    up on its own bounded timeout — `released_in_time` reads False."""
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    outcome: dict = {}
+
+    def blocking_generate(arr: np.ndarray) -> str:
+        started.set()
+        outcome["released_in_time"] = release.wait(timeout=3.0)
+        return "slow words"
+
+    server = MoonshineAsrServer(host="localhost", port=0, generate_fn=blocking_generate)
+    await server.start()
+    port = server.port
+    try:
+        relay = WlKRelay(host="localhost", port=port, language="en", on_settled_line=lambda _t: None)
+        assert await relay.connect() is True
+
+        async def release_while_blocked() -> None:
+            # Resumes only if the loop is alive while generate blocks.
+            await asyncio.to_thread(started.wait, 3.0)
+            for _ in range(5):
+                await asyncio.sleep(0)
+            release.set()
+
+        releaser = asyncio.create_task(release_while_blocked())
+        await relay.send(_pcm_seconds(0.6))  # crosses the refresh cadence -> one decode
+        await asyncio.wait_for(releaser, timeout=6.0)
+        await asyncio.to_thread(lambda: wait_for_sync(lambda: "released_in_time" in outcome))
+        await relay.close()
+    finally:
+        await server.stop()
+
+    assert outcome.get("released_in_time") is True, (
+        "the loop never ran concurrently with inference — generate_fn is stalling the /asr event loop"
+    )
+
+
+def wait_for_sync(predicate, *, timeout: float = 3.0) -> None:
+    """Tiny thread-side poll helper for the off-loop test above."""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while not predicate():
+        if _time.monotonic() > deadline:
+            raise TimeoutError("condition not met in time")
+        _time.sleep(0.01)
+
+
+# ---------------------------------------------------------------------------
+# Config roundtrip + gate-tuning contract (PR #334 findings 3/8/9).
+# ---------------------------------------------------------------------------
+
+
+def test_operator_config_survives_a_moonshine_roundtrip():
+    """Finding #3: swapping whisper(no) -> moonshine -> whisper must carry
+    the operator's language and gate_kind through unchanged. Moonshine
+    IGNORES language at inference time (English-only) — reflected in
+    `info` for the dashboard — but must not mutate the persisted/carried
+    LiveConfig."""
+    whisper = WhisperLiveKitChannel(
+        config=LiveConfig(
+            model="nb-whisper-small",
+            language="no",
+            host="localhost",
+            port=0,
+            gate_kind="backend",
+            gate_speech_threshold=0.7,
+        ),
+        use_mlx=False,
+    )
+    moonshine = resolve_live_channel_for_model(whisper, target_model="moonshine-tiny", use_mlx=False)
+    assert isinstance(moonshine, MoonshineLiveChannel)
+    # The carried config is preserved verbatim (bar the ephemeral port)...
+    assert moonshine.config.language == "no"
+    assert moonshine.config.gate_kind == "backend"
+    assert moonshine.config.gate_speech_threshold == 0.7
+    # ...while the dashboard-facing info reflects the engine's actual
+    # (English-only, TapScribe-gated) behaviour.
+    assert moonshine.info["language"] == "en"
+    assert moonshine.info["gate_kind"] == "tapscribe"
+
+    back = resolve_live_channel_for_model(moonshine, target_model="nb-whisper-small", use_mlx=False)
+    assert isinstance(back, WhisperLiveKitChannel)
+    assert back.config.language == "no"
+    assert back.config.gate_kind == "backend"
+    assert back.config.gate_speech_threshold == 0.7
+
+
+def test_matches_ignores_language_because_start_does():
+    """Finding #9: start() deliberately ignores language (English-only
+    engine), so a language mismatch must not force a pointless full
+    engine-reload restart — matches() treats language as always-matching."""
+    ch = _channel()
+    ch.start()
+    try:
+        assert ch.matches(model=None, language="no", gate_kind=None, conf=None) is True
+        assert ch.matches(model="moonshine-tiny", language="da", gate_kind=None, conf=None) is True
+    finally:
+        ch.stop()
+
+
+def test_gate_knob_change_is_honored_without_an_engine_reload():
+    """Finding #8: the tapscribe SpeechGate is Moonshine's ONLY gate and
+    each /tap builds it from live.config — so differing gate knobs must
+    make matches() report a mismatch (the route then applies them), and
+    begin_transition must write them into config. The apply flow's
+    stop->start must NOT reload the inference engine for a knob-only
+    change (model unchanged)."""
+    factory_calls: list[str] = []
+
+    def engine_factory(model_id: str, *, use_mlx: bool):
+        factory_calls.append(model_id)
+        return _FakeEngine()
+
+    config = LiveConfig(model="moonshine-tiny", language="en", host="localhost", port=0)
+    ch = MoonshineLiveChannel(config=config, use_mlx=False, engine_factory=engine_factory)
+    ch.start()
+    try:
+        # Identical knobs -> no restart (the #238 spurious-restart guard).
+        assert (
+            ch.matches(
+                model=None,
+                language=None,
+                gate_kind=None,
+                conf=None,
+                gate_speech_threshold=config.gate_speech_threshold,
+                gate_hangover_ms=config.gate_hangover_ms,
+            )
+            is True
+        )
+        # A genuinely different knob must NOT read as "already running
+        # with requested config" — that's what made gate tuning inert.
+        assert (
+            ch.matches(model=None, language=None, gate_kind=None, conf=None, gate_speech_threshold=0.9)
+            is False
+        )
+
+        # The route's apply flow: begin_transition writes the knobs, then
+        # stop -> start. The engine must be reused (model unchanged).
+        ch.begin_transition(gate_speech_threshold=0.9, gate_hangover_ms=750)
+        assert ch.config.gate_speech_threshold == 0.9
+        assert ch.config.gate_hangover_ms == 750
+        ch.stop()
+        ok, _msg = ch.start()
+        assert ok is True
+        assert factory_calls == ["moonshine-tiny"], "knob-only apply must not reload the engine"
+        # The dashboard sliders read live_info — it must mirror the knobs.
+        assert ch.info["gate_speech_threshold"] == "0.90"
+        assert ch.info["gate_hangover_ms"] == "750"
+    finally:
+        ch.stop()
+
+
+def test_rejected_live_start_leaves_running_channel_untouched(tmp_path, monkeypatch):
+    """PR #334 finding #2: a request the route rejects with 400 must leave
+    the running live channel exactly as it was — pre-fix the family swap
+    (stop + reassign recorder.live) executed BEFORE boundary validation,
+    so a bad knob killed the operator's healthy channel. The
+    gate_kind='backend' rejection must also be judged against the TARGET
+    channel (Moonshine: no native VAD), not the pre-swap one."""
+    from conftest import repoint_config_files  # type: ignore[import-not-found]
+    from starlette.testclient import TestClient
+
+    from tapscribe import config as _config
+    from tapscribe.app import app, get_recorder
+    from tapscribe.recorder import Recorder
+
+    monkeypatch.setattr(_config, "AUTH_ENABLED", False)
+    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    repoint_config_files(monkeypatch, cfg)
+    (tmp_path / "recordings").mkdir()
+
+    recorder = Recorder(
+        recordings_dir=tmp_path / "recordings",
+        config_dir=tmp_path / "config",
+        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=0),
+        use_mlx=False,
+        auth_password_file=tmp_path / ".auth-password",
+    )
+    # A running fake in place of the whisperlivekit child: the route only
+    # consults running()/matches()/config/info, and the point is that NONE
+    # of stop()/begin_transition()/start() runs on a rejected request.
+    whisper_live = recorder.live
+
+    class _RunningFake:
+        config = whisper_live.config
+        info = dict(whisper_live.info, state="running")
+        supports_native_vad = True
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def running(self) -> bool:
+            return True
+
+        def stop(self, *, timeout: float = 5.0):
+            self.stopped = True
+            return True, "stopped"
+
+    fake = _RunningFake()
+    recorder.live = fake
+
+    app.dependency_overrides[get_recorder] = lambda: recorder
+    try:
+        with TestClient(app) as client:
+            # Out-of-bounds knob alongside a family-swapping model.
+            r = client.post(
+                "/api/live/start",
+                json={"model": "moonshine-tiny", "gate_hangover_ms": 99999},
+            )
+            assert r.status_code == 400
+            assert recorder.live is fake, "400 must not swap the channel"
+            assert fake.stopped is False, "400 must not stop the running channel"
+
+            # gate_kind='backend' is judged against the TARGET (Moonshine,
+            # no native VAD) — rejected, again with no side effects.
+            r = client.post(
+                "/api/live/start",
+                json={"model": "moonshine-tiny", "gate_kind": "backend"},
+            )
+            assert r.status_code == 400
+            assert recorder.live is fake
+            assert fake.stopped is False
+    finally:
+        app.dependency_overrides.clear()

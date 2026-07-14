@@ -37,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import socket
 import threading
 from collections import deque
 from dataclasses import replace
@@ -48,7 +47,7 @@ import numpy as np
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from .live import LiveChannel, LiveConfig
+from .live import GATE_THRESHOLD_DECIMALS, LiveChannel, LiveConfig
 from .transcribers._moonshine_window import MoonshineWindow
 
 # Model ids this channel knows how to run — kept in sync with the catalog's
@@ -147,20 +146,6 @@ def resolve_live_channel_for_model(
     return WhisperLiveKitChannel(config=carried_config, use_mlx=use_mlx)
 
 
-def _pick_ephemeral_port(host: str) -> int:
-    """Same ephemeral-port pattern `live.py` uses for whisperlivekit-server
-    — ask the kernel for a free port and release it immediately. A fresh
-    pick on every `start()` avoids colliding with the previous spawn's
-    port while it's sitting in TIME_WAIT."""
-    fam = socket.AF_INET6 if ":" in host else socket.AF_INET
-    s = socket.socket(fam, socket.SOCK_STREAM)
-    try:
-        s.bind((host, 0))
-        return s.getsockname()[1]
-    finally:
-        s.close()
-
-
 # ---------------------------------------------------------------------------
 # MoonshineAsrServer — the /asr WebSocket server, one MoonshineWindow per
 # connection.
@@ -180,8 +165,20 @@ class MoonshineAsrServer:
         self._generate_fn = generate_fn
         self._server: Any = None
 
+    @property
+    def port(self) -> int:
+        """The ACTUAL bound port — differs from the constructor arg when
+        it was 0 (kernel-assigned). Read after `start()` returns."""
+        return self._port
+
     async def start(self) -> None:
+        # port=0 binds a kernel-assigned ephemeral port, read back below.
+        # This is deliberately NOT a pick-a-free-port-then-bind helper:
+        # picking and binding as two steps leaves a window where another
+        # process grabs the picked port first ("address already in use"
+        # at start — a race this repo has been bitten by in tests).
         self._server = await websockets.serve(self._handle, self._host, self._port)
+        self._port = self._server.sockets[0].getsockname()[1]
 
     async def stop(self) -> None:
         if self._server is not None:
@@ -191,40 +188,73 @@ class MoonshineAsrServer:
 
     async def _handle(self, ws: Any) -> None:
         window = MoonshineWindow(generate_fn=self._generate_fn)
+        finalized = False
         try:
             async for message in ws:
                 if not isinstance(message, (bytes, bytearray)):
                     continue  # /asr is PCM-only; ignore stray text frames
+                if len(message) == 0:
+                    # End-of-audio marker — the same wire signal
+                    # whisperlivekit's own web client sends on stop
+                    # (`audio_processor.process_audio` treats an empty
+                    # message as "initiate stop sequence" and replies
+                    # `ready_to_stop` after the final results). Decode
+                    # everything still buffered and deliver the final
+                    # snapshot NOW, while the peer is still listening —
+                    # once the close handshake starts, `ws.send()` can
+                    # only fail. This is what makes utterance tails
+                    # reliable (PR #334 finding #5).
+                    lines = await asyncio.to_thread(window.close)
+                    await self._send_snapshot(ws, lines, buffer_text="", final=True)
+                    finalized = True
+                    break
                 window.feed_pcm(bytes(message))
-                lines = window.maybe_refresh()
-                if lines is not None:
-                    await self._send_snapshot(ws, lines)
+                # Inference is synchronous CPU work over up to ~chunk_s of
+                # audio — run it on a worker thread so this shared event
+                # loop keeps serving every other /asr connection. The
+                # cheap `refresh_due` pre-check keeps the per-frame path
+                # free of thread dispatch; awaiting inline preserves
+                # per-connection ordering (never two concurrent decodes
+                # for one window).
+                if window.refresh_due:
+                    lines = await asyncio.to_thread(window.maybe_refresh)
+                    if lines is not None:
+                        await self._send_snapshot(ws, lines, buffer_text=window.buffer_text)
         except ConnectionClosed:
+            # The peer (WlKRelay) tore the WS down without the end-of-audio
+            # marker — a relay death, a cancelled reconnect, or an abrupt
+            # /tap drop. Normal connection end for this server, nothing to
+            # answer to; the `finally` below still runs the best-effort
+            # final push. What's lost by swallowing: only the distinction
+            # between a clean and an abrupt peer close, which this server
+            # has no consumer for.
             pass
         finally:
-            # Best-effort final push for the trailing words of a burst that
-            # ends less than refresh_s after the last frame arrived. This
-            # races the close handshake (the client may already be gone),
-            # hence the broad suppress — WlKRelay's own close-time
-            # `_flush_tail` already covers the common case from the
-            # LAST snapshot it actually received, so a lost final push
-            # here is a rare, small-window edge case, not silent data loss.
-            lines = window.close()
-            if lines:
-                with contextlib.suppress(Exception):
-                    await self._send_snapshot(ws, lines)
+            if not finalized:
+                # Abrupt close (no end-of-audio marker): best-effort final
+                # push. This races the close handshake (the peer may
+                # already be gone), hence the suppress — the marker path
+                # above is the reliable delivery; this fallback only
+                # exists for peers that vanished mid-utterance, where the
+                # audio tail is best-effort by nature.
+                lines = await asyncio.to_thread(window.close)
+                if lines:
+                    with contextlib.suppress(Exception):
+                        await self._send_snapshot(ws, lines, buffer_text="")
 
     @staticmethod
-    async def _send_snapshot(ws: Any, lines: list[dict]) -> None:
-        await ws.send(
-            json.dumps(
-                {
-                    "lines": lines,
-                    "buffer_transcription": "",
-                    "remaining_time_transcription": 0.0,
-                }
-            )
-        )
+    async def _send_snapshot(ws: Any, lines: list[dict], *, buffer_text: str, final: bool = False) -> None:
+        payload: dict[str, Any] = {
+            "lines": lines,
+            "buffer_transcription": buffer_text,
+            "remaining_time_transcription": 0.0,
+        }
+        if final:
+            # Same shape whisperlivekit's basic_server sends when the
+            # results generator finishes; WlKRelay treats it as "the peer
+            # has nothing more to say" and ends its drain immediately.
+            payload["type"] = "ready_to_stop"
+        await ws.send(json.dumps(payload))
 
 
 def _initial_moonshine_info() -> dict[str, str]:
@@ -269,10 +299,25 @@ class MoonshineLiveChannel:
         use_mlx: bool,
         engine_factory=None,
     ) -> None:
-        self.config = replace(config, gate_kind="tapscribe", language="en")
+        # The carried config is preserved VERBATIM (PR #334 finding #3):
+        # Moonshine ignores `language` at inference time (English-only)
+        # and has no native VAD to honour `gate_kind="backend"` with, but
+        # rewriting those fields here would permanently clobber the
+        # operator's choices on the whisper->moonshine->whisper roundtrip
+        # (resolve_live_channel_for_model carries `current.config`
+        # forward). The engine's ACTUAL behaviour is reflected in `info`
+        # (see `_seed_info`) instead of mutating the config.
+        self.config = config
         self.use_mlx = use_mlx
         self._engine_factory = engine_factory if engine_factory is not None else default_engine_factory
         self._ephemeral_port = config.port == 0
+        # Loaded-engine cache, keyed by model id: the route's apply flow
+        # is stop()->start(), and a gate-knob-only apply (finding #8)
+        # must not pay a model reload for a restart the engine doesn't
+        # need. Deliberately survives stop() — Moonshine engines are tens
+        # of MB, and dropping the cache there would defeat the point.
+        self._engine: MoonshineEngine | None = None
+        self._engine_model_id: str = ""
         self.info: dict[str, str] = _initial_moonshine_info()
         self.log: deque[str] = deque(maxlen=200)
         self._lock = threading.Lock()
@@ -283,11 +328,28 @@ class MoonshineLiveChannel:
 
     def _seed_info(self) -> None:
         self.info["model"] = self.config.model
-        self.info["language"] = self.config.language
+        # `info` reports what the engine actually DOES, not what the
+        # carried config says: Moonshine is English-only regardless of
+        # config.language, and TapScribe's SpeechGate is its only gate
+        # regardless of a carried-forward gate_kind="backend" (TapRelay
+        # runs the gate for any channel without native VAD). The config
+        # itself stays untouched so the operator's choices survive the
+        # roundtrip back to Whisper.
+        self.info["language"] = "en"
+        self.info["gate_kind"] = "tapscribe"
         self.info["host"] = self.config.host
         self.info["port"] = str(self.config.port)
         self.info["backend"] = "mlx-audio" if self.use_mlx else "moonshine-onnx"
         self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
+        # Mirror the gate knobs the per-tap SpeechGate reads from config —
+        # the dashboard's sliders seed from these (same contract as
+        # WhisperLiveKitChannel._mirror_gate_info).
+        self.info["gate_speech_threshold"] = (
+            f"{self.config.gate_speech_threshold:.{GATE_THRESHOLD_DECIMALS}f}"
+        )
+        self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
+        self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
+        self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
 
     def running(self) -> bool:
         return self._loop is not None and self._thread is not None and self._thread.is_alive()
@@ -305,15 +367,30 @@ class MoonshineLiveChannel:
         gate_min_speech_ms: int | None = None,
     ) -> bool:
         """Same "no requested field differs from current config" contract
-        `WhisperLiveKitChannel.matches` implements. Moonshine ignores
-        `conf`/gate-tuning knobs (no confidence-validation flag, no native
-        VAD to tune) — only `model` (and `gate_kind`, which must stay
-        "tapscribe") can force a restart here."""
+        `WhisperLiveKitChannel.matches` implements, with one deliberate
+        divergence: `language` never forces a restart, because `start()`
+        deliberately ignores it (English-only engine — restarting for a
+        language change would reload the engine and change nothing, PR
+        #334 finding #9). The gate-tuning knobs DO count (finding #8):
+        the tapscribe SpeechGate is Moonshine's only gate and every /tap
+        builds it from this config, so a differing knob must read as
+        "not already satisfied" for the route's apply flow to write it."""
         return (
             self.running()
             and (not model or model == self.config.model)
-            and (not language or language == self.config.language)
-            and (gate_kind is None or gate_kind == "tapscribe")
+            and (gate_kind is None or gate_kind == self.config.gate_kind)
+            and (conf is None or conf == self.config.confidence_validation)
+            # Same display-precision comparison as WhisperLiveKitChannel —
+            # the UI re-POSTs the rounded value it was shown, and an exact
+            # `==` would respawn on every unchanged re-submit (#238).
+            and (
+                gate_speech_threshold is None
+                or round(gate_speech_threshold, GATE_THRESHOLD_DECIMALS)
+                == round(self.config.gate_speech_threshold, GATE_THRESHOLD_DECIMALS)
+            )
+            and (gate_hangover_ms is None or gate_hangover_ms == self.config.gate_hangover_ms)
+            and (gate_pre_roll_ms is None or gate_pre_roll_ms == self.config.gate_pre_roll_ms)
+            and (gate_min_speech_ms is None or gate_min_speech_ms == self.config.gate_min_speech_ms)
         )
 
     def begin_transition(
@@ -328,6 +405,28 @@ class MoonshineLiveChannel:
         gate_pre_roll_ms: int | None = None,
         gate_min_speech_ms: int | None = None,
     ) -> None:
+        """Same contract as `WhisperLiveKitChannel.begin_transition`:
+        write the supplied knobs into `config` so the imminent restart
+        (and every per-tap SpeechGate built from this config — PR #334
+        finding #8) picks them up, and flip `info` to "starting" so
+        dashboards polling mid-transition see the new selection."""
+        replacements: dict[str, Any] = {}
+        if gate_kind is not None:
+            if gate_kind not in ("tapscribe", "backend"):
+                raise ValueError(f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
+            replacements["gate_kind"] = gate_kind
+        if conf is not None:
+            replacements["confidence_validation"] = bool(conf)
+        if gate_speech_threshold is not None:
+            replacements["gate_speech_threshold"] = float(gate_speech_threshold)
+        if gate_hangover_ms is not None:
+            replacements["gate_hangover_ms"] = int(gate_hangover_ms)
+        if gate_pre_roll_ms is not None:
+            replacements["gate_pre_roll_ms"] = int(gate_pre_roll_ms)
+        if gate_min_speech_ms is not None:
+            replacements["gate_min_speech_ms"] = int(gate_min_speech_ms)
+        if replacements:
+            self.config = replace(self.config, **replacements)
         self.info["state"] = "starting"
         self.info["last_error"] = ""
         if model is not None:
@@ -335,7 +434,9 @@ class MoonshineLiveChannel:
         # Moonshine is English-only regardless of what the operator's
         # candidate-language set names; reflect that rather than the
         # requested language, so the dashboard never implies a
-        # multilingual capability this engine doesn't have.
+        # multilingual capability this engine doesn't have. The requested
+        # language is deliberately NOT written to config either — see
+        # `__init__`'s verbatim-carry rationale (finding #3).
         self.info["language"] = "en"
 
     def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]:
@@ -350,15 +451,21 @@ class MoonshineLiveChannel:
             # stays "en" no matter what the caller passes.
 
             if self._ephemeral_port:
-                self.config = replace(self.config, port=_pick_ephemeral_port(self.config.host))
+                # Bind port 0 and read the kernel's pick back from the
+                # server after it's up (below) — never pick-then-bind,
+                # which races anything else grabbing ports on this host.
+                self.config = replace(self.config, port=0)
 
-            try:
-                engine = self._engine_factory(self.config.model, use_mlx=self.use_mlx)
-            except Exception as e:
-                msg = f"failed to load Moonshine engine: {e}"
-                self.info["state"] = "error"
-                self.info["last_error"] = msg
-                return False, msg
+            if self._engine is None or self._engine_model_id != self.config.model:
+                try:
+                    self._engine = self._engine_factory(self.config.model, use_mlx=self.use_mlx)
+                    self._engine_model_id = self.config.model
+                except Exception as e:
+                    msg = f"failed to load Moonshine engine: {e}"
+                    self.info["state"] = "error"
+                    self.info["last_error"] = msg
+                    return False, msg
+            engine = self._engine
 
             server = MoonshineAsrServer(
                 host=self.config.host, port=self.config.port, generate_fn=engine.generate
@@ -407,6 +514,8 @@ class MoonshineLiveChannel:
             self._thread = thread
             self._loop = loop
             self._server = server
+            if self._ephemeral_port:
+                self.config = replace(self.config, port=server.port)
             self._seed_info()
             self.info["state"] = "running"
             self.info["last_error"] = ""

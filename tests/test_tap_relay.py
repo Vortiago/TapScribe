@@ -576,3 +576,46 @@ async def test_reconnect_does_not_feed_through_the_stale_gate_while_rebuilding(
 
     fed2 = await relay.feed(PCM_FRAME)
     assert fed2 == FedFrames(frames=(PCM_FRAME,), gate_open=True)
+
+
+async def test_relay_follows_a_live_channel_object_swap(monkeypatch: pytest.MonkeyPatch):
+    """PR #334 finding #1: `/api/live/start` can now REPLACE `recorder.live`
+    with a different concrete channel (Whisper <-> Moonshine family swap).
+    A TapRelay built before the swap must follow it — resolving the
+    channel through a provider at use time, not holding the object it was
+    constructed with — or every open tap's captions silently die against
+    the stopped old channel."""
+    monkeypatch.setattr(tr, "RELAY_RECONNECT_BACKOFF_S", 0.0)
+    old_live = _FakeLive(_FakeConfig(port=9100, language="en"))
+    holder = {"live": old_live}
+    factory = _RecordingFactory(connect_ok=True)
+    relay = TapRelay(
+        lambda: holder["live"],  # the recorder.live resolver TapFanOut passes
+        do_live=True,
+        handlers=_handlers(),
+        label="alice",
+        relay_factory=factory,
+        gate_factory=(lambda _cfg: None),
+    )
+    await relay.open()
+    assert relay.connected == ("127.0.0.1", 9100, "en")
+
+    # The family swap: old channel stopped, its server gone (next send
+    # fails), and recorder.live now points at a NEW running channel on a
+    # fresh port.
+    old_live._running = False
+    factory.relays[0].alive = False
+    holder["live"] = _FakeLive(_FakeConfig(port=9300, language="en"))
+
+    # feed (death) → disconnected; feed (schedule) → reconnect against
+    # the channel the provider NOW resolves.
+    await relay.feed(PCM_FRAME)
+    await relay.feed(PCM_FRAME)
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if relay.connected is not None:
+            break
+
+    assert relay.connected == ("127.0.0.1", 9300, "en"), (
+        "relay stayed bound to the stopped pre-swap channel — captions would be dead"
+    )

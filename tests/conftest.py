@@ -12,7 +12,6 @@ import asyncio
 import contextlib
 import json
 import shlex
-import socket
 import sys
 import threading
 import tomllib
@@ -187,7 +186,13 @@ class FakeWlkThread:
         self.connections: list = []
         self.received_by_connection: list[list[bytes]] = []
         self._lines_acc_by_connection: list[list[dict]] = []
-        self._port = _free_port()
+        # Assigned by `_serve()` when the kernel binds port 0 — a
+        # pick-then-bind via `_free_port()` here leaves a window where
+        # another process (or a parallel test run) grabs the picked port
+        # before `_serve()` binds it, failing `start()` with "address
+        # already in use". Every consumer reads `.port` after `start()`
+        # returns, which waits on `_ready` — set only after the bind.
+        self._port = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server = None
         self._stop_event: asyncio.Event | None = None
@@ -369,7 +374,8 @@ class FakeWlkThread:
             loop.close()
 
     async def _serve(self) -> None:
-        self._server = await websockets.serve(self._handler, "localhost", self._port)
+        self._server = await websockets.serve(self._handler, "localhost", 0)
+        self._port = self._server.sockets[0].getsockname()[1]
         self._stop_event = asyncio.Event()
         self._ready.set()
         try:
@@ -399,12 +405,6 @@ class FakeWlkThread:
                 self.connections.pop(idx)
                 self.received_by_connection.pop(idx)
                 self._lines_acc_by_connection.pop(idx)
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("localhost", 0))
-        return s.getsockname()[1]
 
 
 @pytest.fixture

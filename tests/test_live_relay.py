@@ -81,8 +81,12 @@ class _FakeWlk:
 
     def __init__(self) -> None:
         self.received: list[bytes] = []
+        self.eos_count: int = 0
+        # When set, the EOS reply carries these lines in the SAME message
+        # as ready_to_stop — the Moonshine server's final-snapshot shape.
+        self.final_lines_on_eos: list[dict[str, Any]] | None = None
         self._connections: list[Any] = []
-        self._port = _free_port()
+        self._port = 0  # kernel-assigned at start(); read via .port after
         self._server: Any = None
         self._stop_event = asyncio.Event()
         self._committed_lines: list[dict[str, Any]] = []
@@ -92,7 +96,10 @@ class _FakeWlk:
         return self._port
 
     async def start(self) -> None:
+        # Bind port 0 and read the kernel's pick back - pick-then-bind
+        # races anything else grabbing ports on this host.
         self._server = await websockets.serve(self._handler, "localhost", self._port)
+        self._port = self._server.sockets[0].getsockname()[1]
 
     async def stop(self) -> None:
         for c in list(self._connections):
@@ -147,6 +154,23 @@ class _FakeWlk:
         try:
             async for msg in ws:
                 if isinstance(msg, bytes):
+                    if len(msg) == 0:
+                        # End-of-audio signal (the relay sends it on
+                        # close, mirroring whisperlivekit's web client):
+                        # the real server flushes remaining results and
+                        # replies ready_to_stop. The fake has nothing
+                        # buffered, so it replies immediately — without
+                        # this every relay.close() in the suite waits out
+                        # the full drain timeout.
+                        self.eos_count += 1
+                        reply: dict[str, Any] = {"type": "ready_to_stop"}
+                        if self.final_lines_on_eos is not None:
+                            reply["lines"] = self.final_lines_on_eos
+                            reply["buffer_transcription"] = ""
+                            reply["remaining_time_transcription"] = 0
+                        with contextlib.suppress(Exception):
+                            await ws.send(json.dumps(reply))
+                        continue
                     self.received.append(msg)
         finally:
             if ws in self._connections:
@@ -676,3 +700,24 @@ async def test_relay_emits_finalized_lines_immediately_not_just_on_close(fake_wl
     # Without close: "one" and "two" are finalized, "three" is the tail.
     assert list(lines) == ["one", "two"]
     await relay.close()
+
+
+async def test_relay_close_signals_end_of_audio_and_consumes_the_final_snapshot(fake_wlk: _FakeWlk):
+    """The close protocol (PR #334 finding #5): `close()` sends the
+    empty-frame end-of-audio signal BEFORE the WS close — the same signal
+    whisperlivekit's own web client sends on stop — and consumes the
+    peer's final results delivered in response (the Moonshine `/asr`
+    server ships them in the same `ready_to_stop` message). Words that
+    only exist in that final snapshot must reach the settled output."""
+    settled = _SignalList()
+    relay = WlKRelay(
+        host="localhost",
+        port=fake_wlk.port,
+        language="en",
+        on_settled_line=settled.append,
+    )
+    fake_wlk.final_lines_on_eos = [{"text": "the very last words", "speaker": 1, "start": 0.0, "end": 1.0}]
+    assert await relay.connect() is True
+    await relay.close()
+    assert fake_wlk.eos_count == 1, "close() must signal end-of-audio before closing the WS"
+    assert list(settled) == ["the very last words"]
