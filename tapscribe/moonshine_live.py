@@ -47,7 +47,7 @@ import numpy as np
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from .live import GATE_THRESHOLD_DECIMALS, LiveChannel, LiveConfig
+from .live import GATE_THRESHOLD_DECIMALS, LiveChannel, LiveConfig, _gate_knob_replacements
 from .transcribers._moonshine_window import MoonshineWindow
 
 # Model ids this channel knows how to run — kept in sync with the catalog's
@@ -341,9 +341,13 @@ class MoonshineLiveChannel:
         self.info["port"] = str(self.config.port)
         self.info["backend"] = "mlx-audio" if self.use_mlx else "moonshine-onnx"
         self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
+        self._mirror_gate_info()
+
+    def _mirror_gate_info(self) -> None:
         # Mirror the gate knobs the per-tap SpeechGate reads from config —
         # the dashboard's sliders seed from these (same contract as
-        # WhisperLiveKitChannel._mirror_gate_info).
+        # WhisperLiveKitChannel._mirror_gate_info). Called from _seed_info
+        # and from apply_gate_knobs' no-restart path.
         self.info["gate_speech_threshold"] = (
             f"{self.config.gate_speech_threshold:.{GATE_THRESHOLD_DECIMALS}f}"
         )
@@ -371,27 +375,48 @@ class MoonshineLiveChannel:
         divergence: `language` never forces a restart, because `start()`
         deliberately ignores it (English-only engine — restarting for a
         language change would reload the engine and change nothing, PR
-        #334 finding #9). The gate-tuning knobs DO count (finding #8):
-        the tapscribe SpeechGate is Moonshine's only gate and every /tap
-        builds it from this config, so a differing knob must read as
-        "not already satisfied" for the route's apply flow to write it."""
+        #334 finding #9). The four `gate_*` kwargs are Recorder-side per
+        #224 — accepted-but-IGNORED here, exactly like the WlK channel: a
+        differing knob does NOT force a restart; the route applies it via
+        `apply_gate_knobs` on the no-restart path (finding #8)."""
         return (
             self.running()
             and (not model or model == self.config.model)
             and (gate_kind is None or gate_kind == self.config.gate_kind)
             and (conf is None or conf == self.config.confidence_validation)
-            # Same display-precision comparison as WhisperLiveKitChannel —
-            # the UI re-POSTs the rounded value it was shown, and an exact
-            # `==` would respawn on every unchanged re-submit (#238).
-            and (
-                gate_speech_threshold is None
-                or round(gate_speech_threshold, GATE_THRESHOLD_DECIMALS)
-                == round(self.config.gate_speech_threshold, GATE_THRESHOLD_DECIMALS)
-            )
-            and (gate_hangover_ms is None or gate_hangover_ms == self.config.gate_hangover_ms)
-            and (gate_pre_roll_ms is None or gate_pre_roll_ms == self.config.gate_pre_roll_ms)
-            and (gate_min_speech_ms is None or gate_min_speech_ms == self.config.gate_min_speech_ms)
         )
+
+    def apply_gate_knobs(
+        self,
+        *,
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
+    ) -> None:
+        """Apply Recorder-side gate-knob changes to config without a server
+        restart — the /asr server never reads these; every per-tap
+        SpeechGate is built from `live.config` at attach time (#224). Same
+        changed-only + display-precision semantics as
+        `WhisperLiveKitChannel.apply_gate_knobs` (the #238 guarantee)."""
+        replacements = _gate_knob_replacements(
+            gate_speech_threshold=gate_speech_threshold,
+            gate_hangover_ms=gate_hangover_ms,
+            gate_pre_roll_ms=gate_pre_roll_ms,
+            gate_min_speech_ms=gate_min_speech_ms,
+        )
+        changed: dict[str, Any] = {}
+        for field, value in replacements.items():
+            current = getattr(self.config, field)
+            if field == "gate_speech_threshold":
+                if round(value, GATE_THRESHOLD_DECIMALS) == round(current, GATE_THRESHOLD_DECIMALS):
+                    continue
+            elif value == current:
+                continue
+            changed[field] = value
+        if changed:
+            self.config = replace(self.config, **changed)
+            self._mirror_gate_info()
 
     def begin_transition(
         self,
@@ -410,21 +435,18 @@ class MoonshineLiveChannel:
         (and every per-tap SpeechGate built from this config — PR #334
         finding #8) picks them up, and flip `info` to "starting" so
         dashboards polling mid-transition see the new selection."""
-        replacements: dict[str, Any] = {}
+        replacements = _gate_knob_replacements(
+            gate_speech_threshold=gate_speech_threshold,
+            gate_hangover_ms=gate_hangover_ms,
+            gate_pre_roll_ms=gate_pre_roll_ms,
+            gate_min_speech_ms=gate_min_speech_ms,
+        )
         if gate_kind is not None:
             if gate_kind not in ("tapscribe", "backend"):
                 raise ValueError(f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
             replacements["gate_kind"] = gate_kind
         if conf is not None:
             replacements["confidence_validation"] = bool(conf)
-        if gate_speech_threshold is not None:
-            replacements["gate_speech_threshold"] = float(gate_speech_threshold)
-        if gate_hangover_ms is not None:
-            replacements["gate_hangover_ms"] = int(gate_hangover_ms)
-        if gate_pre_roll_ms is not None:
-            replacements["gate_pre_roll_ms"] = int(gate_pre_roll_ms)
-        if gate_min_speech_ms is not None:
-            replacements["gate_min_speech_ms"] = int(gate_min_speech_ms)
         if replacements:
             self.config = replace(self.config, **replacements)
         self.info["state"] = "starting"

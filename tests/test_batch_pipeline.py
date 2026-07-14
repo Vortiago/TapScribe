@@ -319,6 +319,50 @@ async def test_pipeline_zero_speech_session_fails_at_transcribe_stage(recorder_u
     assert recorder_under_test.jobs.get("s") is None
 
 
+async def test_run_transcribe_stage_selection_runs_off_the_event_loop(recorder_under_test, monkeypatch):
+    """Issue #214: the transcribe stage's `select_session_wavs(...,
+    source="stripped")` call is the same disk-heavy per-WAV RMS scan as the
+    manual transcribe path (test_batch_transcribe.py's sibling test) — it
+    must be offloaded via `asyncio.to_thread` so the pipeline's transcribe
+    stage doesn't stall the loop before the model is even loaded."""
+    import threading
+
+    from conftest import TranscriberStub  # type: ignore[import-not-found]
+    from wav_builders import seed_session, seed_wav  # type: ignore[import-not-found]
+
+    from tapscribe.batch_pipeline import run_transcribe_stage
+    from tapscribe.session_merge import select_session_wavs as real_select
+
+    stub = TranscriberStub(backend="fake-be", model="fake-m", text="hi")
+    monkeypatch.setattr(
+        "tapscribe.transcribers.load_transcriber",
+        lambda *a, **kw: stub,  # noqa: ARG005
+    )
+
+    wav_name = "2026-01-01T01-00-00Z__alice__abc.wav"
+    sd = seed_session(recorder_under_test.recordings_dir, "s", [wav_name])
+    stripped_dir = sd / "stripped"
+    stripped_dir.mkdir()
+    seed_wav(stripped_dir / wav_name)
+
+    seen_is_main: list[bool] = []
+
+    def _spy(*a, **kw):
+        seen_is_main.append(threading.current_thread() is threading.main_thread())
+        return real_select(*a, **kw)
+
+    monkeypatch.setattr("tapscribe.batch_pipeline.select_session_wavs", _spy)
+
+    await run_transcribe_stage(
+        PipelineRequest(session="s"),
+        job=recorder_under_test.jobs.handle("s"),
+        model="fake-m",
+        backend="cpu",
+    )
+
+    assert seen_is_main == [False], seen_is_main
+
+
 # ---------------------------------------------------------------------------
 # run_summarize_stage × effective_summarizer_config (#84) — the summarize
 # stage resolves session override → global default → built-ins; the tap

@@ -488,13 +488,13 @@ def test_matches_ignores_language_because_start_does():
         ch.stop()
 
 
-def test_gate_knob_change_is_honored_without_an_engine_reload():
-    """Finding #8: the tapscribe SpeechGate is Moonshine's ONLY gate and
-    each /tap builds it from live.config — so differing gate knobs must
-    make matches() report a mismatch (the route then applies them), and
-    begin_transition must write them into config. The apply flow's
-    stop->start must NOT reload the inference engine for a knob-only
-    change (model unchanged)."""
+def test_gate_knob_change_is_honored_without_any_restart():
+    """Finding #8, post-#224/#338 contract: the tapscribe SpeechGate is
+    Moonshine's ONLY gate and each /tap builds it from live.config — so a
+    knob change must land in config. Per #338, gate knobs are
+    Recorder-side: matches() accepts-but-ignores them (no restart at
+    all), and the route applies them via apply_gate_knobs on the
+    no-restart path."""
     factory_calls: list[str] = []
 
     def engine_factory(model_id: str, *, use_mlx: bool):
@@ -505,37 +505,30 @@ def test_gate_knob_change_is_honored_without_an_engine_reload():
     ch = MoonshineLiveChannel(config=config, use_mlx=False, engine_factory=engine_factory)
     ch.start()
     try:
-        # Identical knobs -> no restart (the #238 spurious-restart guard).
-        assert (
-            ch.matches(
-                model=None,
-                language=None,
-                gate_kind=None,
-                conf=None,
-                gate_speech_threshold=config.gate_speech_threshold,
-                gate_hangover_ms=config.gate_hangover_ms,
-            )
-            is True
-        )
-        # A genuinely different knob must NOT read as "already running
-        # with requested config" — that's what made gate tuning inert.
+        # Gate knobs never force a restart — matches() ignores them, same
+        # as WhisperLiveKitChannel post-#338.
         assert (
             ch.matches(model=None, language=None, gate_kind=None, conf=None, gate_speech_threshold=0.9)
-            is False
+            is True
         )
 
-        # The route's apply flow: begin_transition writes the knobs, then
-        # stop -> start. The engine must be reused (model unchanged).
-        ch.begin_transition(gate_speech_threshold=0.9, gate_hangover_ms=750)
+        # The route's no-restart path: apply_gate_knobs writes changed
+        # knobs into config + info, with NO stop/start and NO engine load.
+        ch.apply_gate_knobs(gate_speech_threshold=0.9, gate_hangover_ms=750)
         assert ch.config.gate_speech_threshold == 0.9
         assert ch.config.gate_hangover_ms == 750
-        ch.stop()
-        ok, _msg = ch.start()
-        assert ok is True
-        assert factory_calls == ["moonshine-tiny"], "knob-only apply must not reload the engine"
+        assert ch.running() is True
+        assert ch.info["state"] == "running"
+        assert factory_calls == ["moonshine-tiny"], "knob apply must not reload the engine"
         # The dashboard sliders read live_info — it must mirror the knobs.
         assert ch.info["gate_speech_threshold"] == "0.90"
         assert ch.info["gate_hangover_ms"] == "750"
+
+        # The #238 guard: a display-rounded re-submit of the SAME threshold
+        # must not churn the frozen config object.
+        before = ch.config
+        ch.apply_gate_knobs(gate_speech_threshold=0.9, gate_hangover_ms=750)
+        assert ch.config is before
     finally:
         ch.stop()
 

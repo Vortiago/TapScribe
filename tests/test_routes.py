@@ -459,6 +459,35 @@ def test_recording_toggle_with_explicit_enabled(client, recorder_under_test):
 
 
 # ---------------------------------------------------------------------------
+# /api/tap-token (#190) — bridge onboarding reveal
+# ---------------------------------------------------------------------------
+
+
+def test_tap_token_returns_the_recorders_tap_token(client, recorder_under_test):
+    r = client.get("/api/tap-token")
+    assert r.status_code == 200
+    assert r.json() == {"token": recorder_under_test.tap.value}
+
+
+def test_tap_token_is_basic_gated_not_tap_bearer_gated(client, recorder_under_test, monkeypatch):
+    """Despite sharing a path prefix with the /api/tap/* TAP-BEARER control
+    plane, /api/tap-token does NOT start with config.TAP_PREFIX + "/" so the
+    auth middleware routes it through dashboard BASIC auth instead — a tap
+    token alone (no dashboard password) must not be enough to read it."""
+    monkeypatch.setattr(_config, "AUTH_ENABLED", True)
+    r = client.get("/api/tap-token")
+    assert r.status_code == 401
+    r = client.get(
+        "/api/tap-token",
+        headers={"Authorization": f"Bearer {recorder_under_test.tap.value}"},
+    )
+    assert r.status_code == 401
+    r = client.get("/api/tap-token", auth=(_config.AUTH_USER, recorder_under_test.auth.value))
+    assert r.status_code == 200
+    assert r.json() == {"token": recorder_under_test.tap.value}
+
+
+# ---------------------------------------------------------------------------
 # /api/new-session
 # ---------------------------------------------------------------------------
 

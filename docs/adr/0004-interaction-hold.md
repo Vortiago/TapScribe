@@ -82,6 +82,6 @@ plus one exported predicate replaced all of them.
   sweep (`test_next_poll_render_does_not_clobber_open_controls`) and
   the selection guard test
   (`test_live_log_dialog_refresh_preserves_text_selection`).
-- The People editor's bespoke focus guard predates the primitive and is
-  grandfathered (CLAUDE.md); it should adopt `renderRegion` if it is
-  ever reworked.
+- The People editor has since adopted `renderRegion` too (`web/js/next/views/people.js`)
+  — the exception this section originally left open is closed; there is no
+  remaining bespoke-guard carve-out.

@@ -29,9 +29,16 @@ from typing import Any
 from uuid import uuid4
 
 from . import config
-from .text import atomic_write_text
+from .text import atomic_write_text, file_stat_sig
 
 PEOPLE_JSON = "people.json"
+
+# Single-slot memoisation cache for `load()`. Stores `(sig, raw_data)` where
+# `raw_data` is the raw dict from `json.loads`. On a hit, `_coerce_people`
+# builds a fresh PeopleRegistry from the cached snapshot — independence is
+# inherent, zero `deepcopy` needed (a caller's mutation touches the output,
+# never the cached raw data).
+_PEOPLE_CACHE: dict[str, tuple[tuple | None, Any]] = {}
 
 
 def _new_person_id() -> str:
@@ -79,12 +86,16 @@ class PeopleRegistry:
     @classmethod
     def load(cls) -> PeopleRegistry:
         path = config.RECORDINGS_DIR / PEOPLE_JSON
+        sig = file_stat_sig(path, include_path=True)
+        hit = _PEOPLE_CACHE.get("_slot")
+        if hit is not None and hit[0] == sig and sig is not None:
+            cached_data = hit[1]
+            return cls(_coerce_people(cached_data))
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            # Missing or torn → empty registry; it is rebuildable from the
-            # rosters via `sync`, so a read failure is never fatal.
             data = None
+        _PEOPLE_CACHE["_slot"] = (sig, data)
         return cls(_coerce_people(data))
 
     def save(self) -> None:

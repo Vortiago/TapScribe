@@ -71,8 +71,15 @@ about. Lives in `tapscribe/transcribers/catalog.py` as the module-level
 
 Each entry (`ModelEntry`) declares:
 - `model_id` — canonical short name (e.g. `parakeet-tdt-0.6b-v3`)
-- `family` — one of `whisper`, `nb-whisper`, `voxtral`, `parakeet`.
-  Drives `<optgroup>` labelling in the dashboard.
+- `family` — one of `whisper`, `nb-whisper`, `voxtral`, `parakeet`,
+  `moonshine`. Drives `<optgroup>` labelling in the dashboard. Moonshine
+  (issue #121) is registered live-only-ahead-of-inference: its two
+  entries (`moonshine-tiny`/`moonshine-base`) have `available=False` (the
+  "coming soon" placeholder flag, so the factory refuses to load them and
+  `/api/models` never lists them regardless of whether the `moonshine` /
+  `optimum` probe modules happen to be installed) and their loaders raise
+  `NotImplementedError` pending the real MLX (#122) and ONNX CPU/CUDA
+  (#123) backends.
 - `languages` — ISO codes, or `("auto",)` for auto-detecting models
 - `contexts` — frozenset of `"batch"` / `"live"` — gates which
   picker shows the model

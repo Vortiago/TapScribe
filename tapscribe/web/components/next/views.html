@@ -263,6 +263,41 @@
 
     <div class="spacer"></div>
 
+    <!-- CONNECT A BRIDGE (#190) — host + port (read off window.location,
+         plaintext) and the /tap bearer token (masked; explicit
+         reveal/copy). Static card built ONCE, like Models above: the
+         token itself is fetched from GET /api/tap-token only on an
+         explicit reveal or copy click, never on page load or a poll
+         tick, so there is no renderRegion here — there is nothing
+         rebuilt per-tick to guard. -->
+    <div class="panel panel--accent">
+      <div class="panel__head">
+        <div class="panel__title"><span class="ic">🔌</span>Connect a bridge</div>
+        <div class="panel__hint">paste these into the bridge popup</div>
+      </div>
+      <div class="panel__body">
+        <div class="field" style="margin-bottom:9px">
+          <label>recorder host</label>
+          <div class="mono" data-slot="bridgeHost">…</div>
+        </div>
+        <div class="field" style="margin-bottom:9px">
+          <label>port</label>
+          <div class="mono" data-slot="bridgePort">…</div>
+        </div>
+        <div class="field">
+          <label>/tap bearer token <span class="dim">— printed once at first boot; also in .tap-token</span></label>
+          <div class="field__row">
+            <span class="mono" data-slot="bridgeToken">••••••••••••</span>
+            <button class="act act--sm" type="button" data-slot="bridgeReveal">👁 reveal</button>
+            <button class="act act--sm" type="button" data-slot="bridgeCopy">📋 copy</button>
+          </div>
+          <div class="dim mono" data-slot="bridgeStatus" style="margin-top:4px"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+
     <!-- LIVE engine — streaming model + initial prompt. renderRegion-guarded: it
          holds a <select> + <textarea> rebuilt each poll tick. -->
     <div class="panel panel--accent">

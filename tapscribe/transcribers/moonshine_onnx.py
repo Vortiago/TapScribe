@@ -61,7 +61,10 @@ class OnnxMoonshineEngine:
         """Load Moonshine via `useful-moonshine-onnx`. Raises a clear,
         actionable `RuntimeError` if the optional dependency isn't
         installed — same convention as every other adapter."""
-        upstream_name = _UPSTREAM_MODEL_NAMES.get(model_id)
+        from .catalog import repo_for
+
+        # Registry-first per #206, module mapping as the convention fallback.
+        upstream_name = repo_for(model_id, "moonshine-onnx") or _UPSTREAM_MODEL_NAMES.get(model_id)
         if upstream_name is None:
             raise ValueError(
                 f"{model_id!r} is not a known Moonshine model. Known: {sorted(_UPSTREAM_MODEL_NAMES)!r}"

@@ -29,6 +29,23 @@ if str(REPO_ROOT) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
+# Shared #224 gate-knob test values
+# ---------------------------------------------------------------------------
+#
+# The four relocated SpeechGate knobs, each with a value that DIFFERS from the
+# LiveConfig defaults (0.5 / 400 / 300 / 0) — so a fix that drops any one from
+# the apply/no-restart path can't ship green. Single source-of-truth shared by
+# the #224 route contract (test_live_gate_knob_no_restart.py) and the apply
+# behaviour test (test_live_gate_knob_apply.py) so the two can't silently drift.
+GATE_KNOB_TEST_VALUES: dict[str, float] = {
+    "gate_speech_threshold": 0.9,
+    "gate_hangover_ms": 650,
+    "gate_pre_roll_ms": 500,
+    "gate_min_speech_ms": 175,
+}
+
+
+# ---------------------------------------------------------------------------
 # Silero stub for strip-silence tests
 # ---------------------------------------------------------------------------
 #
