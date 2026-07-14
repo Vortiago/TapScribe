@@ -18,23 +18,30 @@ model knowledge still live scattered outside it:
      NB_WHISPER_REPO_TABLE) map model_id -> HuggingFace repo, duplicating
      knowledge the registry row should own.
 
-The fix makes the registry the single source: `default_language_for` reads the
-entry's declared `languages`; the repo resolvers read a registry-carried repo
-and the four table dicts are deleted. The public resolver FUNCTIONS
-(`mlx_whisper_repo`, the adapters' `_resolve_repo`) keep their signatures and
-stay green — this file plus the incumbent tests
-(tests/test_transcribers_mlx_whisper.py, tests/test_transcribers_base.py, in the
-gate) pin that the repos still resolve correctly after the move.
+The fix makes the registry the single source. LANGUAGE lives at the catalog
+level — `ModelEntry.fixed_language()` (a pure function of the frozen row) and
+`TranscriberRegistry.fixed_language_for(model_name)` — and the loader thunks
+thread it onto each adapter at construction as `adapter.fixed_language`, the
+exact shape #206 used for HF repos (`ModelEntry.repos` + `catalog.repo_for`).
+`base.default_language_for` stays the catalog-free NAME-HEURISTIC fallback for
+names with no registry entry, so `base` never imports the catalog (the CodeQL
+cyclic-import finding that desynced this contract from `main`). REPO: the
+resolvers read a registry-carried repo and the four table dicts are deleted.
+The public resolver FUNCTIONS (`mlx_whisper_repo`, the adapters'
+`_resolve_repo`) keep their signatures and stay green — this file plus the
+incumbent tests (tests/test_transcribers_mlx_whisper.py,
+tests/test_transcribers_base.py, in the gate) pin that the repos still resolve
+correctly after the move.
 
 What this file pins:
 
-  * DISCRIMINATOR (RED at base): `moonshine-tiny` / `moonshine-base` are declared
-    languages=("en",) but their ids match NEITHER `.en` nor `nb-`, so the OLD
-    name heuristic returns None while the registry says "en". This is the one
-    real input where old != new — the pin that proves the language source
-    actually moved to the registry rather than staying name-derived. (Moonshine
-    is an available=False placeholder, so the registry lookup MUST consult
-    unfiltered entries, not the installed-only view.)
+  * DISCRIMINATOR: `moonshine-tiny` / `moonshine-base` are declared
+    languages=("en",) but their ids match NEITHER `.en` nor `nb-`, so the name
+    heuristic returns None while the registry says "en". This is the one real
+    input where name-derived != registry — the pin that proves the language
+    source is the registry row. (Moonshine is an available=False placeholder,
+    so the resolution MUST consult unfiltered entries, not the installed-only
+    view.)
   * GUARDRAILS (green -> green): every existing language branch keeps its answer
     (name-matching fixed-language models still resolve; multilingual/auto models
     still return None, i.e. the registry must not hand a multi-language model a
@@ -51,10 +58,20 @@ What this file pins:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tapscribe import nb_whisper
-from tapscribe.transcribers import base, mlx_parakeet, mlx_whisper, parakeet
+from tapscribe.transcribers import base, faster_whisper, mlx_parakeet, mlx_whisper, parakeet
+
+# Bound BY VALUE at import time, before any test runs: even if another test
+# module swaps the `catalog.REGISTRY` attribute (test_transcribers_factory
+# rebuilds it around stub loaders), this name keeps pointing at the immutable
+# production registry. The language assertions below are therefore immune to
+# collection order — the fragility that broke the previous, attribute-reading
+# incarnation of this contract on CI.
+from tapscribe.transcribers.catalog import REGISTRY
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. LANGUAGE — the registry's declared `languages`, not the name, is the source
@@ -65,37 +82,58 @@ from tapscribe.transcribers import base, mlx_parakeet, mlx_whisper, parakeet
 def test_offpattern_fixed_language_model_resolves_from_registry(model_id: str) -> None:
     # THE discriminator. moonshine-* is declared languages=("en",) in the
     # catalog, but its id ends in neither ".en" nor starts with "nb-", so the
-    # OLD name heuristic returns None. A registry-sourced lookup returns "en".
-    # RED at base (None != "en"); green once the language reads the entry.
-    assert base.default_language_for(model_id) == "en", (
+    # name heuristic can never know its language — only the registry row can.
+    assert REGISTRY.fixed_language_for(model_id) == "en", (
         f"{model_id!r} is declared languages=('en',) in the catalog; its fixed language "
         "must come from that registry row, not from a name-prefix heuristic its id doesn't match"
     )
+    # And the catalog-free name heuristic alone indeed cannot answer this —
+    # proof the discriminator discriminates (registry != name-derived here).
+    assert base.default_language_for(model_id) is None
 
 
 def test_name_matching_fixed_language_models_unchanged() -> None:
-    # Guardrail: models whose name DID match the old heuristic keep their answer.
-    assert base.default_language_for("tiny.en") == "en"
-    assert base.default_language_for("medium.en") == "en"
-    assert base.default_language_for("nb-whisper-medium") == "no"
-    assert base.default_language_for("nb-whisper-large") == "no"
+    # Guardrail: models whose name matched the old heuristic keep their answer
+    # under the registry-sourced resolution.
+    assert REGISTRY.fixed_language_for("tiny.en") == "en"
+    assert REGISTRY.fixed_language_for("medium.en") == "en"
+    assert REGISTRY.fixed_language_for("nb-whisper-medium") == "no"
+    assert REGISTRY.fixed_language_for("nb-whisper-large") == "no"
 
 
 def test_multilingual_models_get_no_fixed_language() -> None:
     # Guardrail: an auto/multi-language model must NOT be handed a spurious fixed
     # language (catches a naive "return languages[0]" registry lookup). Only a
     # single concrete language code -> that code; anything else -> None.
-    assert base.default_language_for("large-v3") is None  # ("auto",)
-    assert base.default_language_for("small") is None  # multilingual whisper -> ("auto",)
-    assert base.default_language_for("voxtral-mini") is None  # 8 languages
-    assert base.default_language_for("parakeet-tdt-0.6b-v3") is None  # 25 languages
+    assert REGISTRY.fixed_language_for("large-v3") is None  # ("auto",)
+    assert REGISTRY.fixed_language_for("small") is None  # multilingual whisper -> ("auto",)
+    assert REGISTRY.fixed_language_for("voxtral-mini") is None  # 8 languages
+    assert REGISTRY.fixed_language_for("parakeet-tdt-0.6b-v3") is None  # 25 languages
 
 
 def test_unknown_and_empty_names_resolve_to_none() -> None:
     # Guardrail: a name with no registry entry (or empty) stays None — the
-    # lookup miss must degrade to auto-detect, never raise.
-    assert base.default_language_for("") is None
-    assert base.default_language_for("not-a-registered-model-xyz") is None
+    # lookup miss must degrade to the name heuristic / auto-detect, never raise.
+    assert REGISTRY.fixed_language_for("") is None
+    assert REGISTRY.fixed_language_for("not-a-registered-model-xyz") is None
+    # ... and a heuristic-matching name with no registry entry keeps its hint
+    # (ad-hoc checkpoints outside the catalog still resolve).
+    assert REGISTRY.fixed_language_for("nb-someones-finetune") == "no"
+
+
+def test_adapter_carries_registry_language_from_construction() -> None:
+    # The loader thunks resolve `catalog.fixed_language_for(model_name)` at
+    # construction and the adapter answers from that stored value — no mutable
+    # module state read at transcribe time. With the fixed language threaded
+    # in, the detect shortcut resolves without touching a model or a file
+    # (off-pattern name, so the answer can only have come from the threaded
+    # registry value).
+    t = faster_whisper.FasterWhisperTranscriber(
+        model_name="moonshine-tiny", model=None, device="CPU", fixed_language="en"
+    )
+    assert t.detect_constrained_language(Path("unused.wav"), ("en", "no")) == "en"
+    # A fixed-language model can't produce a candidate outside its language.
+    assert t.detect_constrained_language(Path("unused.wav"), ("no", "da")) is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -48,6 +48,7 @@ from .base import (
     ModelInput,
     TextInput,
     Transcriber,
+    default_language_for,
 )
 
 # ---------------------------------------------------------------------------
@@ -320,6 +321,17 @@ class ModelEntry:
             out |= b.kinds
         return frozenset(out)
 
+    def fixed_language(self) -> str | None:
+        """The one concrete language this model is pinned to (#206: the
+        registry row, not the model's name, is the source), or None when
+        the entry is multilingual or auto-detecting — a multi-language
+        model must never be handed a spurious fixed language. Pure
+        function of the frozen row, no module state: a test swapping the
+        module-level `REGISTRY` can never change an entry's answer."""
+        if len(self.languages) == 1 and self.languages[0] != "auto":
+            return self.languages[0]
+        return None
+
     def is_installed(self) -> bool:
         """True iff at least one of this entry's bindings has an importable
         adapter AND a kind this machine can serve. Drives the `/api/models`
@@ -394,6 +406,23 @@ class TranscriberRegistry:
         if only_installed:
             out = tuple(e for e in out if e.is_installed())
         return out
+
+    def fixed_language_for(self, model_name: str) -> str | None:
+        """This registry's declared fixed language for `model_name`.
+
+        An entry that declares exactly one concrete language returns it —
+        including `available=False` placeholders (a "coming soon" model's
+        metadata is still authoritative), which is why this consults the
+        unfiltered entries, never the installed-only view. A multilingual /
+        auto entry returns None. Names with no entry fall back to the
+        catalog-free name heuristic (`base.default_language_for`) so ad-hoc
+        checkpoints (e.g. `nb-*` finetunes not in the catalog) keep their
+        hint.
+        """
+        entry = self.get(model_name)
+        if entry is not None:
+            return entry.fixed_language()
+        return default_language_for(model_name)
 
     def resolve(self, model_id: str, preference: BackendPreference) -> ResolvedBinding:
         """Pick the loader for `model_id` given a backend preference.
@@ -709,6 +738,15 @@ def repo_for(model_name: str, backend: str) -> str | None:
     """
     entry = REGISTRY.get(model_name)
     return entry.repos.get(backend) if entry is not None else None
+
+
+def fixed_language_for(model_name: str) -> str | None:
+    """The registry-carried fixed language for `model_name` — the language
+    twin of `repo_for`. The single lookup seam the adapters' `load()`s
+    resolve through at CONSTRUCTION time (mirroring how they resolve their
+    HF repo), so a loaded adapter carries its registry language on itself
+    instead of re-reading mutable module state on every transcribe."""
+    return REGISTRY.fixed_language_for(model_name)
 
 
 # The bundled fallback batch model — what a transcribe runs with when neither

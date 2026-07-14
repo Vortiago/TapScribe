@@ -272,10 +272,15 @@ def build_transcription_result(
 
 
 def default_language_for(model_name: str) -> str | None:
-    """Pick a language hint for a model using name heuristics.
+    """Name-heuristic language hint — the catalog-free fallback.
 
-    This helper intentionally avoids importing the registry/catalog module
-    so base protocol/types remain decoupled from catalog wiring.
+    The authoritative source of a model's fixed language is its registry row
+    (`ModelEntry.fixed_language` / `TranscriberRegistry.fixed_language_for`,
+    #206); the loaders thread that answer onto each adapter at construction
+    as `adapter.fixed_language`. This helper covers names with no registry
+    entry (ad-hoc checkpoints, e.g. a local `nb-*` finetune) and deliberately
+    knows nothing about the catalog package, keeping `base` a leaf module
+    (no `base <-> catalog` cycle).
     """
     if not model_name:
         return None
