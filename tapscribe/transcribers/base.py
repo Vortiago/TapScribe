@@ -274,21 +274,10 @@ def build_transcription_result(
 def default_language_for(model_name: str) -> str | None:
     """Pick a language hint for a model.
 
-    Registry-first: consult the catalog entry's declared languages; if it
-    declares exactly one concrete language (not "auto"), that is the fixed
-    language. For names not in the registry (or multi-language entries),
-    fall back to the name-prefix heuristic for backwards compatibility.
+    Uses name-prefix/suffix heuristics for backwards compatibility.
     """
     if not model_name:
         return None
-    from .catalog import REGISTRY
-
-    entry = REGISTRY.get(model_name)
-    if entry is not None:
-        langs = entry.languages
-        if len(langs) == 1 and langs[0] != "auto":
-            return langs[0]
-    # Registry miss, multi-language, or "auto" — fall back to name heuristic.
     n = model_name.lower()
     if n.endswith(".en"):
         return "en"
