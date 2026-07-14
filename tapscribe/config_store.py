@@ -46,17 +46,25 @@ def read_text_file(path: Path) -> str:
 
 
 def file_stat_sig(path: Path, *, include_path: bool = False) -> tuple | None:
-    """A cheap change-detection signature for `path`: `(mtime_ns, size)`, or
-    `(str(path), mtime_ns, size)` when `include_path` is set — for a single-slot
-    cache that must tell different files apart. None when the file is
-    missing/unreadable."""
+    """A cheap change-detection signature for `path`: `(mtime_ns, size, ino)`,
+    or `(str(path), mtime_ns, size, ino)` when `include_path` is set — for a
+    single-slot cache that must tell different files apart. None when the file
+    is missing/unreadable. Shared by the /api/state poll caches so they
+    recompute only when a file actually changes. The inode is part of the
+    signature because mtime alone is NOT enough: on a coarse-mtime filesystem
+    (FAT/exFAT ~2s, some NFS) a same-size rewrite inside one granularity
+    bucket keeps (mtime_ns, size) identical — but writes go through an atomic
+    tempfile + os.replace, which lands a new inode, so the signature still
+    moves. Callers comparing against PERSISTED (mtime, size) pairs must slice
+    (see sessions.read_strip_meta's caller) — the inode is only stable within
+    a process's view of the live file, never something to store."""
     try:
         st = path.stat()
     except OSError:
         return None
     if include_path:
-        return (str(path), st.st_mtime_ns, st.st_size)
-    return (st.st_mtime_ns, st.st_size)
+        return (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +217,12 @@ def write_config(key: str, content: str) -> None:
         content = content.strip()
     if spec.check is not None:
         spec.check(content)
-    _write_text_file_atomic(getattr(config, spec.attr), validate_config_text(content))
+    path = getattr(config, spec.attr)
+    _write_text_file_atomic(path, validate_config_text(content))
+    # Structural invalidation: our own write must never be served stale, even
+    # if the filesystem's stat signature failed to move — the next read
+    # re-reads what we just wrote.
+    _CONFIG_TEXT_CACHE.pop(str(path), None)
 
 
 # Cap pasted prompts/hotwords at 4000 chars. Whisper's init_prompt is

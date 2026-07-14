@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import os.path
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -318,7 +319,10 @@ def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
     entry = meta["files"].get(name)
     if not isinstance(entry, dict) or not entry.get("spans"):
         return None
-    if file_stat_sig(wav_path) != (entry.get("wav_mtime_ns"), entry.get("wav_size")):
+    # The sidecar persists only (mtime_ns, size) — slice the inode off the
+    # live signature; inodes are never stored (they don't survive a copy).
+    sig = file_stat_sig(wav_path)
+    if sig is None or sig[:2] != (entry.get("wav_mtime_ns"), entry.get("wav_size")):
         return None
     return {"spans": entry["spans"], "stripped_at": meta.get("stripped_at"), "knobs": meta.get("knobs")}
 
@@ -848,7 +852,12 @@ def search_transcripts(query: str) -> list[dict[str, Any]]:
 
     root = config.RECORDINGS_DIR
     results: list[dict[str, Any]] = []
-    term = query.lower()
+    # Case-insensitive matching via regex, NOT str.lower(): lower() can change
+    # a string's length ("İ".lower() is two codepoints), so indices found in
+    # the lowered text misalign against the original when slicing the snippet.
+    # The regex searches `plain` directly — match spans are always valid
+    # snippet-window anchors.
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
 
     for sd in sorted(root.glob("*"), reverse=True):
         if not sd.is_dir():
@@ -861,18 +870,17 @@ def search_transcripts(query: str) -> list[dict[str, Any]]:
         if not isinstance(plain, str) or not plain:
             continue
 
-        text_lower = plain.lower()
-        if term not in text_lower:
+        first_match = pattern.search(plain)
+        if first_match is None:
             continue
 
         meta = _coerce_session_meta(_read_session_json_cached(sd / FILENAME_META_JSON))
         label = meta.get("label", "")
 
-        count = text_lower.count(term)
+        count = sum(1 for _ in pattern.finditer(plain))
 
-        first = text_lower.find(term)
-        win_start = max(0, first - 100)
-        win_end = min(len(plain), first + len(term) + 100)
+        win_start = max(0, first_match.start() - 100)
+        win_end = min(len(plain), first_match.end() + 100)
         snippet = plain[win_start:win_end]
         left_clipped = win_start > 0
         right_clipped = win_end < len(plain)

@@ -28,6 +28,7 @@ import { postJson, putJson, sessionTranscript, loadSessionFiles, wireSave } from
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
+import { makeStatusFlasher, clipboardAvailable } from "../ui.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 
@@ -426,17 +427,7 @@ export function build(ctx) {
     return lines.join("\n") || full.plain_text || "";
   };
 
-  /** @type {ReturnType<typeof setTimeout> | null} */
-  let copyStatusTimer = null;
-  /** @param {string} msg */
-  const flashCopyStatus = (msg) => {
-    if (copyStatusTimer != null) clearTimeout(copyStatusTimer);
-    txCopyStatus.textContent = msg;
-    copyStatusTimer = setTimeout(() => {
-      if (txCopyStatus.textContent === msg) txCopyStatus.textContent = "";
-      copyStatusTimer = null;
-    }, 1500);
-  };
+  const flashCopyStatus = makeStatusFlasher(txCopyStatus);
 
   /** Render the transcript text into a blank tab for manual select-copy.
    * @param {Window} w @param {string} text */
@@ -452,15 +443,12 @@ export function build(ctx) {
     if (!copyTxFull || !copyMeta) return;
     const out = buildCopyText(copyTxFull, copyMeta);
     if (!out) { flashCopyStatus("nothing to copy"); return; }
-    // TapScribe's documented multi-machine mode is plain http over LAN
-    // (start.sh --lan; TLS is opt-in) — a NON-SECURE context where
-    // navigator.clipboard doesn't exist. The await below would reject and a
-    // window.open in the catch would be past the user-gesture window (popup
-    // blocked), so open the fallback tab SYNCHRONOUSLY inside the click
-    // handler instead — same design as the classic dashboard's copy.
-    const haveClipboard = window.isSecureContext
-      && typeof navigator.clipboard?.writeText === "function";
-    if (!haveClipboard) {
+    // Non-secure context (see ui.js clipboardAvailable): the await below
+    // would reject and a window.open in the catch would be past the
+    // user-gesture window (popup blocked), so open the fallback tab
+    // SYNCHRONOUSLY inside the click handler instead — same design as the
+    // classic dashboard's copy.
+    if (!clipboardAvailable()) {
       const w = window.open("", "_blank");
       if (w) {
         populateTranscriptTab(w, out);
