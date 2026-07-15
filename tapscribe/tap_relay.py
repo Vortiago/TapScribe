@@ -200,7 +200,7 @@ class TapRelay:
         after the channel comes up schedules the first connect."""
         live = self._live
         if self._do_live and live.running():
-            await self._attach(live, live.config)
+            await self._attach(live)
 
     async def feed(self, buf: bytes) -> FedFrames:
         """Run one PCM frame through the gate and forward the survivors to
@@ -273,23 +273,23 @@ class TapRelay:
             with suppress(Exception):
                 await stale.close()
         live = self._live
-        cfg = live.config
-        if await self._attach(live, cfg):
+        cfg = live.config  # for the log line below; _attach snapshots its own
+        if await self._attach(live):
             print(
                 f"[tapscribe] /tap relay reconnected{self._label_suffix} "
                 f"-> {cfg.host}:{cfg.port} (model={cfg.model}, lang={cfg.language})",
                 flush=True,
             )
 
-    async def _attach(self, live: LiveChannel, cfg: LiveConfig) -> bool:
-        """Build the relay + (optional) gate against `cfg`, judging the
-        gate-kind against `live` — the SAME channel object the caller
-        snapshotted `cfg` from, so a family swap landing during the awaits
-        below can't pair one channel's config with another's VAD
-        capability. Sets the relay, `connected`, and the gate on success
-        and returns True; returns False if the relay fails to connect. The
-        gate is only built (and only paid for) once the relay is actually
-        going to be fed.
+    async def _attach(self, live: LiveChannel) -> bool:
+        """Build the relay + (optional) gate against `live`'s config,
+        snapshotted HERE at entry (before any await) — taking the channel
+        rather than a config makes it structurally impossible to pair one
+        channel's config with another channel's VAD capability when a
+        family swap lands mid-connect. Sets the relay, `connected`, and
+        the gate on success and returns True; returns False if the relay
+        fails to connect. The gate is only built (and only paid for) once
+        the relay is actually going to be fed.
 
         Gate-construction failures (Silero load error, etc.) don't kill
         the tap — we log and fall through with `gate=None`, so the bridge
@@ -311,6 +311,7 @@ class TapRelay:
         than continuing to run through a gate built for a config that may
         have just changed (a reconnect can follow an operator swapping the
         gate's own threshold/hangover/pre-roll knobs)."""
+        cfg = live.config  # snapshot before any await — atomic with `live`
         candidate = self._relay_factory(cfg, self._handlers)
         if not await candidate.connect():
             return False

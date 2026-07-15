@@ -225,6 +225,11 @@ test("trailing pcm after tap-stop does not resurrect the tap", async () => {
   assert.equal(ws1.closed.code, 1000, "WS closed cleanly before the tombstone");
   const socketsAfterStop = b.openSockets().length;
 
+  // LiveKit's async teardown can fire a trailing trackMuted AFTER the
+  // unsubscribe: it lands on the tombstone. The rejoin below must still
+  // start clean — the re-arm reset, not tap-stop-time state, owns that.
+  b.post({ kind: "mute", identity: "u1", muted: true });
+
   // The trailing frame from the tearing-down pipeline.
   b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
 
@@ -252,6 +257,34 @@ test("trailing pcm after tap-stop does not resurrect the tap", async () => {
   assert.equal(ch.muted, false, "stale mute not inherited");
   assert.equal(ch.error, null, "stale error not inherited");
   assert.equal(ch.bytesSent, 0, "counters reset for the rejoin");
+});
+
+test("tombstones are bounded: oldest evicted past the cap", async () => {
+  // In the no-meeting workflow nothing else prunes tombstones, and
+  // platforms that mint per-connection identities never re-arm old ones
+  // — tap-stop keeps only the newest MAX_TOMBSTONES (16). An evicted
+  // identity's (long-gone) trailing frame is treated as a new speaker;
+  // a recent tombstone still absorbs its trailing frames.
+  const b = createBridge();
+  await ready(b);
+
+  for (let i = 0; i < 17; i++) {
+    const identity = "u" + i;
+    b.post({ kind: "tap-start", identity, name: "P" + i });
+    b.post({ kind: "pcm", identity, name: "P" + i, buffer: pcmFrame() });
+    b.lastSocket().triggerOpen();
+    b.post({ kind: "tap-stop", identity });
+  }
+  const socketsAfterChurn = b.openSockets().length;
+
+  // u16 (newest tombstone) still absorbs its trailing frame...
+  b.post({ kind: "pcm", identity: "u16", name: "P16", buffer: pcmFrame() });
+  assert.equal(b.openSockets().length, socketsAfterChurn, "recent tombstone drops the frame");
+
+  // ...while u0 was evicted past the cap: its frame reads as a brand-new
+  // speaker and opens a tap (the accepted trade-off for boundedness).
+  b.post({ kind: "pcm", identity: "u0", name: "P0", buffer: pcmFrame() });
+  assert.equal(b.openSockets().length, socketsAfterChurn + 1, "evicted identity starts fresh");
 });
 
 test("drain resets reconnectAttempt for a fresh fast retry", async () => {

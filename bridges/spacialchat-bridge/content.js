@@ -315,6 +315,32 @@
     return Array.from(channels.entries()).filter(([, ch]) => !ch.stopped);
   }
 
+  // The one list of per-presence stats a "clean channel" has zeroed —
+  // shared by finishEndMeeting's channel reset and the tap-start re-arm
+  // (which additionally clears `muted`; finishEndMeeting deliberately
+  // preserves the platform mute mirror).
+  function resetChannelStats(ch) {
+    ch.error = null;
+    ch.framesSent = 0;
+    ch.bytesSent = 0;
+  }
+
+  // Tombstones exist only to absorb the milliseconds-scale trailing
+  // events of a departing presence (see activeChannels()); in the
+  // no-meeting workflow nothing else prunes them, and platforms that
+  // mint per-connection identities never re-arm old ones — so without a
+  // bound the map grows for the tab's lifetime. Keep the newest few and
+  // evict the oldest (map iteration order = insertion order): an evicted
+  // identity's trailing frame would just be treated as a new speaker,
+  // acceptable once that many departures have happened in between.
+  const MAX_TOMBSTONES = 16;
+  function pruneTombstones() {
+    const stopped = Array.from(channels.entries()).filter(([, ch]) => ch.stopped);
+    for (let i = 0; i < stopped.length - MAX_TOMBSTONES; i++) {
+      channels.delete(stopped[i][0]);
+    }
+  }
+
   function ensureChannel(identity, name) {
     let ch = channels.get(identity);
     if (ch) {
@@ -749,9 +775,7 @@
         continue;
       }
       resetUtteranceState(ch); // clears utteranceId/sessionId(→global)/buffer/timers
-      ch.framesSent = 0;
-      ch.bytesSent = 0;
-      ch.error = null;
+      resetChannelStats(ch);
       // ch.muted (true platform state) and ch.name are deliberately preserved.
     }
     // Routing falls back to the global Session now: clear the IN-MEMORY id so
@@ -795,7 +819,19 @@
       case "tap-start": {
         console.log("[tapscribe-bridge] tap-start " + d.identity + " (" + (d.name || "?") + ")");
         const ch = ensureChannel(d.identity, d.name);
-        ch.stopped = false;
+        if (ch.stopped) {
+          // Re-arming a tombstone: reset the dead presence's mutable
+          // state HERE, not at tap-stop — trailing teardown events (a
+          // late trackMuted, the async onclose of a CONNECTING WS) land
+          // on the tombstone after tap-stop and would survive into the
+          // rejoin otherwise (the rejoin paths only post setMute when
+          // the publication IS muted, so a stale muted=true would
+          // silently drop every frame). Resetting at re-arm makes
+          // "rejoin starts clean" hold regardless of event ordering.
+          resetChannelStats(ch);
+          ch.muted = false;
+          ch.stopped = false;
+        }
         publishStatus();
         break;
       }
@@ -807,16 +843,10 @@
           // track unsubscribed). There's no point draining trailing
           // PCM: even if we landed a WS, the operator doesn't expect a
           // late transcript from a departed speaker. Force close, and
-          // tombstone rather than delete — see activeChannels().
+          // tombstone rather than delete — see activeChannels(). The
+          // tombstone's remaining dirt is wiped at the tap-start re-arm.
           endUtteranceImmediate(d.identity, ch, "tap stopped");
-          // The tombstone is identity-only: reset the dead presence's
-          // mutable state so a tap-start re-arm gets the same clean
-          // channel the old delete-then-remint gave ("rejoin starts
-          // clean"). Both rejoin paths re-seed the true mute state.
-          ch.muted = false;
-          ch.error = null;
-          ch.framesSent = 0;
-          ch.bytesSent = 0;
+          pruneTombstones();
           console.log("[tapscribe-bridge] tap-stop " + d.identity);
           publishStatus();
         }
