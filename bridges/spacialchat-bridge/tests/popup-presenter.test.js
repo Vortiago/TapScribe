@@ -125,3 +125,52 @@ test("polling continues only for the in-flight phases", () => {
     assert.equal(shouldKeepPolling(p), false, `stops on ${p}`);
   }
 });
+
+// ---- live-tab End request: pending → unresponsive (#219) -------------------
+// The stale-tab End path completes directly; these cover the LIVE path where
+// the nonce is out and the content script may be hung. `endRequestedAt`
+// mirrors storage meetingEndRequestedAt; `now` is the shell's clock.
+
+const activeMeeting = { ...base, meetingSessionId: "s", meetingActive: true };
+
+test("a fresh pending End renders 'Ending meeting…' and disables End", async () => {
+  const { END_UNRESPONSIVE_MS } = await import("../popup-presenter.js");
+  const t0 = 1_750_000_000_000;
+  const v = meetingView({ ...activeMeeting, endRequestedAt: t0, now: t0 + END_UNRESPONSIVE_MS - 1 });
+  assert.match(v.status.text, /Ending meeting/);
+  assert.equal(v.status.tone, "");
+  assert.equal(v.endDisabled, true, "a re-click would only re-bump the nonce");
+  assert.equal(v.startDisabled, true);
+});
+
+test("an End request unacknowledged past the timeout surfaces the unresponsive-tab line and re-enables End", async () => {
+  const { END_UNRESPONSIVE_MS } = await import("../popup-presenter.js");
+  const t0 = 1_750_000_000_000;
+  const v = meetingView({ ...activeMeeting, endRequestedAt: t0, now: t0 + END_UNRESPONSIVE_MS });
+  assert.match(v.status.text, /SpatialChat tab isn't responding/);
+  assert.equal(v.status.tone, "err");
+  assert.equal(v.endDisabled, false, "the operator must be able to retry End");
+});
+
+test("the content script acknowledging (meetingEnd written) supersedes the pending/unresponsive derivation", async () => {
+  const { END_UNRESPONSIVE_MS } = await import("../popup-presenter.js");
+  const t0 = 1_750_000_000_000;
+  // Even long past the timeout: an acknowledged End is the content script's
+  // story now ("ending" drain line), never the unresponsive warning.
+  const v = meetingView({
+    ...activeMeeting,
+    endRequestedAt: t0,
+    now: t0 + 10 * END_UNRESPONSIVE_MS,
+    lastEnd: { phase: "ending" },
+  });
+  assert.match(v.status.text, /Ending meeting/);
+  assert.equal(v.status.tone, "");
+});
+
+test("a stale nonce with no active meeting derives nothing", () => {
+  // startMeeting/dismissMeeting clear the nonce, but even if one lingered
+  // (e.g. hand-edited storage) an inactive meeting must not show End states.
+  const v = meetingView({ ...base, endRequestedAt: 1, now: 10 ** 15 });
+  assert.equal(v.status, null);
+  assert.equal(v.endDisabled, true);
+});

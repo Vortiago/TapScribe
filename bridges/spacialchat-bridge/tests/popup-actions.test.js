@@ -33,6 +33,9 @@ test("startMeeting mints a detached session and persists the durable meeting sta
   assert.equal(storage.writes.length, 1);
   assert.deepEqual(storage.writes[0], {
     meetingSessionId: "2026-06-19T10-00-00Z", meetingActive: true, meetingEnd: null,
+    // A leftover End nonce from the PREVIOUS meeting must not make the new
+    // one render as "Ending meeting…" (#219 pending-End derivation).
+    meetingEndRequestedAt: null,
   });
 });
 
@@ -70,5 +73,7 @@ test("requestEndMeeting bumps the meetingEndRequestedAt nonce", async () => {
 test("dismissMeeting clears the durable meeting state", async () => {
   const storage = fakeStorage();
   await actions.dismissMeeting({ storage });
-  assert.deepEqual(storage.writes[0], { meetingSessionId: null, meetingActive: false, meetingEnd: null });
+  assert.deepEqual(storage.writes[0], {
+    meetingSessionId: null, meetingActive: false, meetingEnd: null, meetingEndRequestedAt: null,
+  });
 });

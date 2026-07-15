@@ -263,3 +263,30 @@ test("a trigger error surfaces 'failed' (and still clears the meeting)", async (
   b.post({ kind: "pcm", identity: "u2", name: "Bob", buffer: pcmFrame() });
   assert.equal(sessionParam(b.lastSocket()), null, "routing fell back to global after a failed trigger");
 });
+
+test("a null nonce reset (startMeeting/dismissMeeting) does NOT end the meeting", async () => {
+  // The popup resets meetingEndRequestedAt to null when a meeting starts or
+  // is dismissed, so a stale request can't haunt the next meeting (#219).
+  // That reset fires the same storage.onChanged — only a NUMERIC newValue is
+  // a real End request; the regression here ended the meeting the popup had
+  // just started.
+  const b = createBridge({
+    settings: { meetingSessionId: "sess-1", recorderHost: "localhost", recorderPort: 9999, tapToken: "tok" },
+  });
+  await ready(b);
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  const ws = b.lastSocket();
+  ws.triggerOpen();
+
+  b.resetEndRequest();
+  await ready(b);
+
+  assert.equal(ws.closed, null, "the open tap must stay open across a nonce reset");
+  assert.equal(triggerCalls(b).length, 0, "no pipeline trigger on a nonce reset");
+
+  // Control: a real (numeric) nonce still ends the meeting afterwards.
+  b.requestEndMeeting();
+  assert.ok(ws.closed, "a real End request still closes the tap");
+  assert.equal(triggerCalls(b).length, 1, "and still fires exactly one trigger");
+});

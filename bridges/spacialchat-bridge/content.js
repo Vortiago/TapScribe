@@ -127,10 +127,14 @@
         meetingSessionId = (typeof v === "string" && v) ? v : null;
         publishStatus();
       }
-      if (changes.meetingEndRequestedAt) {
+      if (changes.meetingEndRequestedAt && typeof changes.meetingEndRequestedAt.newValue === "number") {
         // The popup clicked "End meeting": drain + close every open tap, then
         // trigger the end-of-meeting pipeline. Gated on settingsReady so the
-        // trigger uses the real recorder config (not boot defaults).
+        // trigger uses the real recorder config (not boot defaults). Only a
+        // REAL nonce (a number) is a request — startMeeting/dismissMeeting
+        // RESET the key to null so a stale request can't haunt the next
+        // meeting (#219 popup timeout), and that reset must not end the
+        // meeting it just started.
         if (settingsReady) endMeeting();
       }
       if (!touched) return;
