@@ -26,13 +26,17 @@ class VoxtralTranscriber(VoxtralTranscriberBase):
     name: ClassVar[str] = "voxtral"
     backend: ClassVar[str] = "hf-transformers"
 
-    def __init__(self, *, model_name: str, processor: Any, model: Any, device: str):
+    def __init__(
+        self, *, model_name: str, processor: Any, model: Any, device: str, fixed_language: str | None = None
+    ):
         self.model_name = model_name
         self._processor = processor
         self._model = model
         self._raw_device = device
         # Hardware-only label; the library name lives on `backend`.
         self.device = "CPU" if device == "cpu" else device.upper()
+        # Registry-declared fixed language (see VoxtralTranscriberBase).
+        self.fixed_language = fixed_language
 
     @classmethod
     def load(cls, model_name: str, *, kind: str = "auto") -> VoxtralTranscriber:
@@ -80,7 +84,17 @@ class VoxtralTranscriber(VoxtralTranscriberBase):
         processor = AutoProcessor.from_pretrained(_VOXTRAL_REPO)
         model = VoxtralForConditionalGeneration.from_pretrained(_VOXTRAL_REPO, torch_dtype=dtype).to(device)
         model.eval()
-        return cls(model_name=model_name, processor=processor, model=model, device=device)
+        # Lazy catalog import (same shape as the adapters' repo resolvers):
+        # catalog imports this module only inside its loader thunk — no cycle.
+        from .catalog import fixed_language_for
+
+        return cls(
+            model_name=model_name,
+            processor=processor,
+            model=model,
+            device=device,
+            fixed_language=fixed_language_for(model_name),
+        )
 
     def _repo_id(self) -> str:
         return _VOXTRAL_REPO
