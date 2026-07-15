@@ -472,6 +472,21 @@ async def test_pill_transitions_idle_to_ok_to_warn_on_tap_drop(
     assert pill["kind"] in ("warn", "err"), f"post-drop pill must be warn/err, got {pill}"
 
 
+def _capture_console(page) -> list[str]:
+    """Collect the page's console messages for failure diagnosis.
+
+    The room-teardown chain is console-logged at every hop — page-script's
+    "room lost … cleaning up taps" / "untap <id>", then content.js's
+    "tap-stop <id>" — so when a teardown wait times out, the captured tail
+    says exactly which hop stalled. Added after the ghost-room teardown
+    flaked twice in CI (once post-#333, i.e. NOT the disk-starvation mode)
+    with nothing in the report but the timeout itself.
+    """
+    lines: list[str] = []
+    page.on("console", lambda msg: lines.append(msg.text))
+    return lines
+
+
 async def test_room_disconnect_cleans_up_audio_and_presence_only_taps(
     loaded_bridge: LoadedExtension,
     fake_tap_server: FakeTapServer,
@@ -492,6 +507,7 @@ async def test_room_disconnect_cleans_up_audio_and_presence_only_taps(
     keep showing those phantom rows forever.
     """
     page = loaded_bridge.page
+    console = _capture_console(page)
 
     # An audio-tapped speaker and a presence-only one.
     await add_speaker(page, "speaker-id", "Sam")
@@ -524,7 +540,9 @@ async def test_room_disconnect_cleans_up_audio_and_presence_only_taps(
     # instant it closes, so a high timeout only buys headroom, never latency.
     # (30s: a disk-starved runner once blew the old 15s ceiling — the runner
     # is fixed in ci.yml, the headroom stays.)
-    assert await wait_until(sam_closed, timeout=30.0), "Sam's /tap WS must close on room disconnect"
+    assert await wait_until(sam_closed, timeout=30.0), (
+        "Sam's /tap WS must close on room disconnect — page console tail: " + " | ".join(console[-15:])
+    )
 
     # The popup-side snapshot (bridgeStatus in chrome.storage.local) is
     # the most reliable proxy for "did Lee's row get cleared?" — the
@@ -802,6 +820,7 @@ async def test_window_room_cleared_without_disconnect_closes_taps(
     cross-world channel + a real WS server.
     """
     page = loaded_bridge.page
+    console = _capture_console(page)
 
     # Bring up a tapped speaker; frames must be flowing on a live WS.
     await add_speaker(page, "ghost-id", "Ghost")
@@ -830,7 +849,8 @@ async def test_window_room_cleared_without_disconnect_closes_taps(
     # on failure, and a disk-starved CI runner once blew a 15s ceiling.
     assert await wait_until(ghost_closed, timeout=30.0), (
         "clearing window.room (orphan room still 'connected') must close the "
-        "/tap WS — without the maybeAttach room-lost teardown it leaks forever"
+        "/tap WS — without the maybeAttach room-lost teardown it leaks forever."
+        " Page console tail: " + " | ".join(console[-15:])
     )
 
 
