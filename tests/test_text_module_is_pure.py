@@ -37,6 +37,7 @@ import ast
 import importlib
 from pathlib import Path
 
+import tapscribe.config_store
 import tapscribe.text
 
 
@@ -99,3 +100,85 @@ def test_api_key_redaction_seam_survives_the_move() -> None:
     # And an unset key reports key_set False (still no api_key leak).
     cleared = summarizer_default_public({"source": "api", "api_key": "", "base_url": "http://llm.local"})
     assert cleared["key_set"] is False and "api_key" not in cleared
+
+
+def _text_imports(source: str) -> list[tuple[int, str]]:
+    """Every import in `source` that reaches into tapscribe.text — the relative
+    `from .text import …` / `from . import text`, the absolute
+    `from tapscribe.text import …`, or `import tapscribe.text`. AST-based, so
+    only real imports count (a comment naming text.py is fine)."""
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "text" and node.level == 1:
+                hits.append((node.lineno, ".text"))
+            elif node.module == "tapscribe.text":
+                hits.append((node.lineno, "tapscribe.text"))
+            elif node.module is None and node.level == 1:
+                for alias in node.names:
+                    if alias.name == "text":
+                        hits.append((node.lineno, ". import text"))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "tapscribe.text" or alias.name.endswith(".text"):
+                    hits.append((node.lineno, alias.name))
+    return hits
+
+
+def test_config_store_imports_nothing_from_text() -> None:
+    """Symmetric leaf pin (the other half of the split's acyclic module graph):
+    config_store must NOT import back from tapscribe.text.
+
+    The purity pin above fixes text.py's direction (catalog-free, so it can only
+    depend on config_store, never the reverse). This pins the return edge. It is
+    not incidental: the build's first cut had config_store importing the pure
+    helpers back FROM text.py — a text ↔ config_store cycle that still passed the
+    green gate, caught only by self-review. Pinning both edges makes the acyclic
+    graph enforced, not accidental."""
+    source = Path(tapscribe.config_store.__file__).read_text(encoding="utf-8")
+    hits = _text_imports(source)
+    assert hits == [], (
+        f"config_store must not import from tapscribe.text (found {hits}). config_store is the leaf "
+        "that owns the config-store layer; text.py re-exports FROM it. An import back into text.py "
+        "re-introduces the circular dependency the split exists to remove."
+    )
+
+
+# Every symbol the text.py re-export block promises stays importable from
+# tapscribe.text — its comment: "Existing callers (from .text import X) keep
+# working without change". Consumers (app.py, sessions.py, batch_transcribe.py,
+# and many tests) rely on this surface, currently guarded only incidentally by
+# the full suite; pin it so API preservation is stated, not accidental.
+_RE_EXPORTED = (
+    "_CONFIG_TEXT_CACHE",
+    "CONFIG_KEYS",
+    "MAX_CONFIG_TEXT_LEN",
+    "SUMMARY_SOURCES",
+    "atomic_write_text",
+    "file_stat_sig",
+    "parse_language_codes",
+    "read_config",
+    "read_languages",
+    "read_summarizer_config",
+    "read_text_file",
+    "summarizer_default_public",
+    "validate_config_text",
+    "write_config",
+    "write_languages",
+    "write_summarizer_config",
+)
+
+
+def test_config_store_public_surface_is_re_exported_from_text() -> None:
+    missing = [name for name in _RE_EXPORTED if not hasattr(tapscribe.text, name)]
+    assert missing == [], (
+        f"tapscribe.text must re-export {missing} from config_store — the split promises existing "
+        "`from tapscribe.text import X` callers keep working. A dropped re-export silently breaks "
+        "a consumer import."
+    )
+    # Each re-export is the SAME object as config_store's (a genuine re-export,
+    # not an accidental shadowing definition that could drift).
+    for name in _RE_EXPORTED:
+        assert getattr(tapscribe.text, name) is getattr(tapscribe.config_store, name), (
+            f"tapscribe.text.{name} must be the same object as tapscribe.config_store.{name}"
+        )

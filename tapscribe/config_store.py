@@ -72,7 +72,7 @@ def file_stat_sig(path: Path, *, include_path: bool = False) -> tuple | None:
 _CONFIG_TEXT_CACHE: dict[str, tuple[tuple | None, str]] = {}
 
 
-def _read_config_text_cached(path) -> str:
+def _read_config_text_cached(path: Path) -> str:
     pathkey = str(path)
     sig = file_stat_sig(path)
     if sig is None:
@@ -100,6 +100,54 @@ class _ConfigSpec:
     check: Callable[[str], None] | None = None
 
 
+# WRITE-time check functions for the catalog-validated config keys. Defined
+# before CONFIG_KEYS so the dict literal can reference them directly; each
+# imports its catalog dependency lazily in-body, so this module stays a leaf
+# (no module-level catalog import) for every other caller.
+
+
+def _check_hallucinations(content: str) -> None:
+    """WRITE-time check for the "hallucinations" key: iterate lines, skip
+    blank/comment/non-`re:` lines, and for `re:` lines validate the pattern via
+    the shared `hallucinations.regex_rule_ok` authority (empty / ReDoS-shape /
+    oversize / uncompilable). When it returns False raise
+    `ValueError(f"invalid rule on line {n}: {line!r}")`.
+
+    Non-`re:` lines (substr, `exact:`) pass through — always valid at write time.
+    STRICT at write, LENIENT at runtime: the runtime parser
+    (`hallucinations._parse_rules_uncached`) calls the SAME `regex_rule_ok`
+    but SKIPS a bad rule instead of raising, so a legacy hand-edited file can't
+    wedge a transcribe job. The hallucinations import is lazy to keep this
+    module free of that dependency for every other caller."""
+    from . import hallucinations
+
+    for n, line in enumerate(content.splitlines(), start=1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.lower().startswith("re:"):
+            pat = s[3:].strip()
+            if not hallucinations.regex_rule_ok(pat):
+                raise ValueError(f"invalid rule on line {n}: {line!r}")
+
+
+def _check_batch_model(model_id: str) -> None:
+    """WRITE-time check for the "batch-model" key: the batch default feeds
+    the end-of-meeting pipeline's model loader with no operator in the loop,
+    so an unknown id must never land on disk (`ValueError` → the config PUT's
+    400). Empty clears the override (back to the bundled default). The
+    catalog import is lazy to keep this module free of the transcribers
+    dependency for every other caller.
+
+    Deliberately NOT applied to "live-model": there an unknown id surfaces
+    as a clear error at /api/live/start time, not silently."""
+    if model_id:
+        from .transcribers.catalog import REGISTRY
+
+        if REGISTRY.get(model_id) is None:
+            raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
+
+
 # The editable config files behind read_config / write_config, keyed by the
 # same key the dashboard PUTs to /api/config/{key}. The richer shapes
 # (languages.txt's catalog-validated set, summarizer.json) keep their own
@@ -121,14 +169,14 @@ CONFIG_KEYS: dict[str, _ConfigSpec] = {
     # The live-model's batch twin (batch-model.txt): the end-of-meeting
     # pipeline resolves its transcribe stage from it — the tap trigger
     # carries no model field by design (operator defaults only).
-    "batch-model": _ConfigSpec("BATCH_MODEL_FILE", strip=True, check=None),
+    "batch-model": _ConfigSpec("BATCH_MODEL_FILE", strip=True, check=_check_batch_model),
     # faster-whisper `hotwords` (hotwords.txt) — comma- or space-separated
     # proper nouns / tricky vocabulary.
     "hotwords": _ConfigSpec("HOTWORDS_FILE"),
     # Hallucination filter rules (hallucinations.txt) — one rule per line:
     # plain substring, `exact:...`, or `re:...`. Write-time check validates
     # regex safety so a bad rule never lands on disk.
-    "hallucinations": _ConfigSpec("HALLUCINATIONS_FILE", check=None),
+    "hallucinations": _ConfigSpec("HALLUCINATIONS_FILE", check=_check_hallucinations),
 }
 
 # A candidate-language set is a small comma/space-separated bag of ISO codes.
@@ -184,7 +232,7 @@ def validate_config_text(content: str) -> str:
     return content
 
 
-def atomic_write_text(path, content: str) -> None:
+def atomic_write_text(path: Path, content: str) -> None:
     """Write `content` to `path` via tempfile + os.replace so a crashed
     write never leaves a half-written file on disk. Caller is responsible
     for whatever serialisation produced `content` (raw text, JSON, …).
@@ -212,7 +260,7 @@ def atomic_write_text(path, content: str) -> None:
         raise
 
 
-def _write_text_file_atomic(path, content: str) -> None:
+def _write_text_file_atomic(path: Path, content: str) -> None:
     """Atomic write of a config text file. CRLF is normalised to LF so
     the Whisper CLI doesn't see literal `\r` in the prompt."""
     normalised = content.replace("\r\n", "\n").replace("\r", "\n")
@@ -264,60 +312,6 @@ def summarizer_default_public(cfg: dict) -> dict:
 # is a single-tuple change that covers both write paths. "" means unset (no
 # global default) / cleared (no per-session override).
 SUMMARY_SOURCES: tuple[str, ...] = ("", "local", "command", "api")
-
-
-# ---------------------------------------------------------------------------
-# Catalog-dependent functions — import the catalog inside, not at module level
-# ---------------------------------------------------------------------------
-
-
-def _check_hallucinations(content: str) -> None:
-    """WRITE-time check for the "hallucinations" key: iterate lines, skip
-    blank/comment/non-`re:` lines, and for `re:` lines validate the pattern via
-    the shared `hallucinations.regex_rule_ok` authority (empty / ReDoS-shape /
-    oversize / uncompilable). When it returns False raise
-    `ValueError(f"invalid rule on line {n}: {line!r}")`.
-
-    Non-`re:` lines (substr, `exact:`) pass through — always valid at write time.
-    STRICT at write, LENIENT at runtime: the runtime parser
-    (`hallucinations._parse_rules_uncached`) calls the SAME `regex_rule_ok`
-    but SKIPS a bad rule instead of raising, so a legacy hand-edited file can't
-    wedge a transcribe job. The hallucinations import is lazy to keep this
-    module free of that dependency for every other caller."""
-    from . import hallucinations
-
-    for n, line in enumerate(content.splitlines(), start=1):
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        if s.lower().startswith("re:"):
-            pat = s[3:].strip()
-            if not hallucinations.regex_rule_ok(pat):
-                raise ValueError(f"invalid rule on line {n}: {line!r}")
-
-
-def _check_batch_model(model_id: str) -> None:
-    """WRITE-time check for the "batch-model" key: the batch default feeds
-    the end-of-meeting pipeline's model loader with no operator in the loop,
-    so an unknown id must never land on disk (`ValueError` → the config PUT's
-    400). Empty clears the override (back to the bundled default). The
-    catalog import is lazy to keep this module free of the transcribers
-    dependency for every other caller.
-
-    Deliberately NOT applied to "live-model": there an unknown id surfaces
-    as a clear error at /api/live/start time, not silently."""
-    if not model_id:
-        return
-    from .transcribers.catalog import REGISTRY
-
-    if REGISTRY.get(model_id) is None:
-        raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
-
-
-# Patch CONFIG_KEYS with the real check functions now that the lazy
-# imports are defined above.
-CONFIG_KEYS["batch-model"] = _ConfigSpec("BATCH_MODEL_FILE", strip=True, check=_check_batch_model)
-CONFIG_KEYS["hallucinations"] = _ConfigSpec("HALLUCINATIONS_FILE", check=_check_hallucinations)
 
 
 def write_summarizer_config(cfg: dict) -> dict:

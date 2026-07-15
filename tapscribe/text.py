@@ -1,10 +1,12 @@
-"""Pure text helpers — slug parsing, sanitizers, parse_iso.
+"""Pure text helpers — slug parsing, sanitisers, parse_iso.
 
-Everything in here is side-effect-free and depends on nothing in TapScribe.
-
-The operator-config persistence layer (CONFIG_KEYS, read_config, write_config,
-summarizer config, languages) moved to `config_store` so text.py stays
-dependency-free and catalog-pure.
+The helpers DEFINED here are side-effect-free and depend on nothing in
+TapScribe. For back-compat this module also re-exports the operator-config
+persistence layer (CONFIG_KEYS, read_config / write_config, summarizer config,
+languages) from `config_store` — those re-exported symbols carry config_store's
+own dependencies (and its catalog-validated, disk-writing helpers), so the
+"pure" guarantee covers text.py's own helpers, not the re-exports. text.py
+itself imports no catalog package (pinned by tests/test_text_module_is_pure.py).
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from .config_store import (  # noqa: F401
     SUMMARY_SOURCES,
     atomic_write_text,
     file_stat_sig,
+    parse_language_codes,
     read_config,
     read_languages,
     read_summarizer_config,
