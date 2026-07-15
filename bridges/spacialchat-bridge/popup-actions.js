@@ -38,7 +38,15 @@ export async function startMeeting({ control, storage, cfg }) {
     return { ok: false, kind: errKind(e), message: errText(e) };
   }
   try {
-    await storage.set({ meetingSessionId: sessionId, meetingActive: true, meetingEnd: null });
+    // meetingEndRequestedAt is reset here too: a leftover End nonce from the
+    // PREVIOUS meeting must not make the new one render as "Ending meeting…"
+    // (the presenter derives the pending-End state from it).
+    await storage.set({
+      meetingSessionId: sessionId,
+      meetingActive: true,
+      meetingEnd: null,
+      meetingEndRequestedAt: null,
+    });
   } catch (e) {
     return { ok: false, kind: "storage", message: errText(e) };
   }
@@ -99,5 +107,10 @@ export async function endMeeting({ control, storage, cfg, sessionId, snapshot, n
  * @param {{ storage: StorageArea }} deps
  */
 export async function dismissMeeting({ storage }) {
-  await storage.set({ meetingSessionId: null, meetingActive: false, meetingEnd: null });
+  await storage.set({
+    meetingSessionId: null,
+    meetingActive: false,
+    meetingEnd: null,
+    meetingEndRequestedAt: null,
+  });
 }

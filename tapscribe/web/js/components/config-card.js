@@ -84,7 +84,7 @@ export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOv
 
   const p = j.prompt || { path: "", content: "", length: 0 };
   const h = j.hotwords || { path: "", content: "", length: 0 };
-  const hl = j.hallucinations || { path: "", content: "", rules: [], count: 0 };
+  const hl = j.hallucinations || { path: "", content: "", count: 0 };
   // Editor gating. By default we use the registry-wide inputs_support (any
   // installed batch model declaring the input) — that's the classic dashboard.
   // The Stages Settings view passes `supportOverride` so the prompt/hotwords
@@ -111,9 +111,9 @@ export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOv
   ].join("§");
 
   const hotwordList = (h.content || "").split(",").map((s) => s.trim()).filter(Boolean);
-  // count === hl.rules.length by construction (server sets count = len(rules));
-  // the card renders the raw content textarea, not per-rule chips, so the label
-  // reads the count directly rather than keeping a live dep on the rules array.
+  // The server derives count via parse_rules() (comments/blanks excluded), so
+  // it is NOT client-derivable from content — the card renders the raw content
+  // textarea and reads the parsed-rule count from this one field.
   const halCount = hl.count || 0;
 
   const build = () => {

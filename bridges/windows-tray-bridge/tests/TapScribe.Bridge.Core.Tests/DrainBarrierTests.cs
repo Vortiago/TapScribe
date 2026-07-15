@@ -163,6 +163,41 @@ public class DrainBarrierTests
             sentAtBarrier,
             transport.Connections.Sum(c => c.SentCount)); // capture is stopped → no post-barrier frames
     }
+
+    [Fact]
+    public async Task EndMeetingAsync_MintsNoNewUtterance_WhileTheTailDrainIsHeld()
+    {
+        // Regression pin for the drain-WINDOW leak (the sibling test above only
+        // emits AFTER EndMeetingAsync returns, when capture is already disposed):
+        // EndMeetingAsync awaits the un-capped tail drain BEFORE DisposeAsync
+        // detaches capture. With capture events still attached during that
+        // window, a gate close → re-open (silence past the hangover, then
+        // speech) mints a NEW TapStream and streams post-End PCM into the
+        // session — the harm the barrier exists to prevent. DrainAllAsync must
+        // detach capture events up front, so speech during the held drain
+        // opens nothing.
+        var transport = new HeldDrainTransport();
+        var capture = new FakeAudioCapture(RecorderFormat);
+        await using var orchestrator = CaptureOrchestrator.StartAll(
+            [Spec(capture, "mic")],
+            onConnected: _ => { }, onFailed: (_, _) => { },
+            FastGate(), HeldDrainStream(), transport.Create);
+
+        capture.Emit(Loud(40));                       // utterance #1; its send blocks on the hold
+        await transport.SendReached.WaitAsync(Wait);
+        int connectionsAtEnd = transport.ConnectionsCreated;
+
+        Task ending = orchestrator.EndMeetingAsync(); // held on utterance #1's tail flush
+        Assert.False(ending.IsCompleted, "End returned while the tail was still flushing");
+
+        capture.Emit(Silence(4));                     // FastGate hangover (3 silent frames) → gate would close
+        capture.Emit(Loud(4));                        // speech again → would re-open a still-attached gate
+        Assert.Equal(connectionsAtEnd, transport.ConnectionsCreated); // no post-End utterance minted
+
+        transport.ReleaseDrain();
+        await ending.WaitAsync(Wait);
+        Assert.Equal(connectionsAtEnd, transport.ConnectionsCreated); // still exactly the pre-End tap
+    }
 }
 
 /// <summary>
@@ -187,7 +222,16 @@ internal sealed class HeldDrainTransport
     /// <summary>Unblock every held (and future) send, letting each tap flush its tail.</summary>
     public void ReleaseDrain() => _release.TrySetResult();
 
-    public ITapConnection Create(TapConnectionOptions options) => new Conn(this);
+    /// <summary>Connections minted so far — one per <see cref="TapStream"/>. A SECOND one
+    /// appearing during a held End drain means a post-End utterance was opened.</summary>
+    public int ConnectionsCreated => Volatile.Read(ref _connections);
+    private int _connections;
+
+    public ITapConnection Create(TapConnectionOptions options)
+    {
+        Interlocked.Increment(ref _connections);
+        return new Conn(this);
+    }
 
     private sealed class Conn(HeldDrainTransport owner) : ITapConnection
     {

@@ -173,21 +173,21 @@ def test_parse_rules_caches_and_invalidates(tmp_path: Path, monkeypatch: pytest.
 
 
 # ---------------------------------------------------------------------------
-# runtime_probe._is_module_available memoisation
+# runtime_probe.is_module_available memoisation
 # ---------------------------------------------------------------------------
 
 
-def test_is_module_available_memoises_and_clears_on_override():
-    assert runtime_probe._is_module_available("os") is True
+def testis_module_available_memoises_and_clears_on_override():
+    assert runtime_probe.is_module_available("os") is True
     assert runtime_probe._FIND_SPEC_CACHE.get("os") is True
-    assert runtime_probe._is_module_available("definitely_not_a_real_module_xyz") is False
+    assert runtime_probe.is_module_available("definitely_not_a_real_module_xyz") is False
     assert runtime_probe._FIND_SPEC_CACHE.get("definitely_not_a_real_module_xyz") is False
 
     runtime_probe.set_installed_modules_for_testing(frozenset({"os"}))
     try:
         assert runtime_probe._FIND_SPEC_CACHE == {}  # setting the override clears the memo
-        assert runtime_probe._is_module_available("os") is True
-        assert runtime_probe._is_module_available("anything") is False
+        assert runtime_probe.is_module_available("os") is True
+        assert runtime_probe.is_module_available("anything") is False
         assert runtime_probe._FIND_SPEC_CACHE == {}  # the override path never populates it
     finally:
         runtime_probe.set_installed_modules_for_testing(None)

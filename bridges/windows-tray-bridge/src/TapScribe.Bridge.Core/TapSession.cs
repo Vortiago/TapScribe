@@ -253,6 +253,16 @@ public sealed class TapSession : IAsyncDisposable
     /// </summary>
     public async Task DrainAllAsync()
     {
+        // Detach capture events FIRST: the tail drain below is awaited
+        // un-capped (up to each stream's DrainBudget), and with OnData still
+        // attached a gate close→reopen during that window would mint a NEW
+        // utterance streaming post-End PCM into the session — the exact harm
+        // the End barrier exists to prevent. DisposeAsync (which follows on
+        // the End path) unsubscribes again; removing an already-removed
+        // handler is a no-op.
+        _capture.DataAvailable -= OnData;
+        _capture.MuteChanged -= OnMuteChanged;
+
         List<Task> draining;
         lock (_lock)
         {

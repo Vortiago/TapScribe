@@ -144,6 +144,12 @@ export function build(ctx) {
   let lastSearchResults = null;
   /** The filter value that produced `lastSearchResults`. */
   let lastSearchQuery = "";
+  /** Query waiting on the search debounce timer ("" = none). */
+  let pendingSearch = "";
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let searchTimer;
+  /** Last fireSearch failed — show "unavailable, retrying" instead of "searching…". */
+  let searchFailed = false;
 
   /** Effective label for a session = local overlay (if any) else server meta. */
   /** @param {import('../../types.js').Session} s */
@@ -156,13 +162,33 @@ export function build(ctx) {
   /** Fire a transcript-search query when the local filter yields no results.
     * Results are cached per query string. */
   const fireSearch = async (/** @type {string} */ q) => {
+    pendingSearch = "";
+    if (q !== filter) return; // filter moved on while the debounce timer ran
     lastSearchQuery = q;
     lastSearchResults = null;
+    searchFailed = false;
     try {
       const data = await getJson(`/api/search?q=${encodeURIComponent(q)}`);
       if (lastSearchQuery !== q) return; // filter moved on during the fetch — this result is stale
       lastSearchResults = Array.isArray(data) ? data : [];
-    } catch { /* search unavailable — fall back to "searching…" */ }
+      syncRows(); // paint the hits now instead of waiting out the poll tick
+    } catch {
+      if (lastSearchQuery !== q) return; // a newer query owns the state
+      // Transient /api/search failure (network, 5xx): forget the query so the
+      // next tick re-fires it, and flag the failure so the counts line says
+      // "unavailable — retrying" instead of a forever-"searching…" wedge.
+      lastSearchQuery = "";
+      searchFailed = true;
+    }
+  };
+
+  /** Debounce fireSearch so per-keystroke syncRows calls don't each hit
+    * GET /api/search (a full-corpus transcript scan server-side). Mirrors the
+    * saveTimers debounce used for label persistence above. */
+  const scheduleSearch = (/** @type {string} */ q) => {
+    pendingSearch = q;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => fireSearch(q), 250);
   };
 
   /** @param {string} sid @param {HTMLElement} statusEl */
@@ -298,11 +324,13 @@ export function build(ctx) {
 
   /**
    * @param {import('../../types.js').Session} s
-   * @param {import('../../types.js').Session[]} absorbTargets — archived
-   *   sessions this row could be folded INTO (excludes this row + the current
-   *   session). Empty → the absorb picker is hidden.
+   * @param {import('../../types.js').Session[]} archived — ALL archived
+   *   sessions (shared per-tick array; the picker skips this row itself).
+   *   A row can absorb into any OTHER archived session.
+   * @param {string} targetsSig — per-tick content signature of `archived`
+   *   (ids · labels · wav counts), shared by every row's fillRow sig.
    */
-  const sessionRow = (s, absorbTargets) => {
+  const sessionRow = (s, archived, targetsSig) => {
     const node = tpl("tpl-next-sessrow");
     const row = /** @type {HTMLElement} */ (node.firstElementChild);
     row.dataset.sid = s.session; // stable per-row hook (e2e + debugging)
@@ -377,7 +405,9 @@ export function build(ctx) {
     // session as a source, so we drop the picker entirely on the current row
     // (and when there is no other session to absorb into).
     const absorbSel = /** @type {HTMLSelectElement} */ (pick(node, "absorb"));
-    if (s.is_current || !absorbTargets.length) {
+    if (s.is_current || archived.length <= 1) {
+      // No target: the current session can't be a source, and an archived
+      // row needs at least one OTHER archived session to fold into.
       absorbSel.remove();
     } else {
       // Options are filled (and label-refreshed) by fillRow below.
@@ -406,7 +436,7 @@ export function build(ctx) {
 
     // Mutable content (label, counts, tx status, size, absorb options…) is
     // owned by fillRow — shared with the per-tick reconcile update path.
-    fillRow(row, s, absorbTargets);
+    fillRow(row, s, archived, targetsSig);
     return node;
   };
 
@@ -420,9 +450,13 @@ export function build(ctx) {
    * point of the in-place path (ADR-0004).
    * @param {HTMLElement} row
    * @param {import('../../types.js').Session} s
-   * @param {import('../../types.js').Session[]} absorbTargets
+   * @param {import('../../types.js').Session[]} archived — shared per-tick
+   *   array of all archived sessions; the options loop skips this row itself.
+   * @param {string} targetsSig — per-tick content signature of `archived`
+   *   (ids · labels · wav counts — ids too, so a target-set change with
+   *   identical labels still repaints the option VALUES).
    */
-  const fillRow = (row, s, absorbTargets) => {
+  const fillRow = (row, s, archived, targetsSig) => {
     const rowSig = [
       labelFor(s),
       s.session === focusedId ? 1 : 0,
@@ -431,7 +465,7 @@ export function build(ctx) {
       s.session_transcript ? s.session_transcript.segment_count || 0 : -1,
       totalBytes(s),
       s.progress ? 1 : 0,
-      absorbTargets.map((t) => `${labelFor(t)}·${t.wav_count || 0}`).join(","),
+      targetsSig,
     ].join("§");
     if (row.dataset.rowSig === rowSig) return;
     row.dataset.rowSig = rowSig;
@@ -461,7 +495,8 @@ export function build(ctx) {
     const absorbSel = /** @type {HTMLSelectElement | null} */ (row.querySelector('[data-slot="absorb"]'));
     if (absorbSel && document.activeElement !== absorbSel) {
       while (absorbSel.options.length > 1) absorbSel.remove(1);
-      for (const t of absorbTargets) {
+      for (const t of archived) {
+        if (t.session === s.session) continue; // a row can't absorb into itself
         const lbl = displayName(t);
         absorbSel.add(new Option(`${lbl} (${t.wav_count || 0}w)`, t.session));
       }
@@ -517,9 +552,9 @@ export function build(ctx) {
    * falls over to cross-session transcript search instead (#315): that's a
    * COLD, discrete mode switch (not a per-tick content update), so it swaps
    * the body directly rather than through reconcileList's keyed hot path.
-   * reconcileList picks the body back up cleanly once normal rows return —
-   * its bookkeeping lives in a WeakMap keyed by node identity, not by reading
-   * prior host state, so a raw swap in between is invisible to it.
+   * On the way BACK from search mode the normal path clears the body first:
+   * reconcileList only removes nodes it created (keyed in its WeakMap), so
+   * the keyless search nodes would otherwise dangle below the real rows.
    */
   const syncRows = () => {
     const body = /** @type {HTMLElement | null} */ (listHost.querySelector('[data-slot="rows"]'));
@@ -529,19 +564,25 @@ export function build(ctx) {
     const counts = listHost.querySelector('[data-slot="shownCount"]');
     const ph = /** @type {HTMLElement | null} */ (listHost.querySelector('[data-slot="rowsEmpty"]'));
 
-    if (!filter && lastSearchQuery) {
+    if (!filter && (lastSearchQuery || pendingSearch)) {
       // Leaving search mode — drop the cached result so a later, identical
-      // query re-fires against current data instead of replaying a stale hit.
+      // query re-fires against current data instead of replaying a stale hit,
+      // and cancel any still-debouncing query so it can't fire after the fact.
+      clearTimeout(searchTimer);
+      pendingSearch = "";
       lastSearchResults = null;
       lastSearchQuery = "";
+      searchFailed = false;
     }
 
     if (filter && !shown.length) {
       if (ph) ph.hidden = true;
-      if (lastSearchQuery !== filter) fireSearch(filter);
+      if (lastSearchQuery !== filter && pendingSearch !== filter) scheduleSearch(filter);
       if (counts) {
         if (lastSearchResults === null) {
-          counts.textContent = `${sessions.length} total · searching transcripts…`;
+          counts.textContent = searchFailed
+            ? `${sessions.length} total · transcript search unavailable — retrying…`
+            : `${sessions.length} total · searching transcripts…`;
         } else if (!lastSearchResults.length) {
           counts.textContent = "0 search results";
         } else {
@@ -593,22 +634,38 @@ export function build(ctx) {
 
     if (deferIfSelectionInside(body)) return;
 
+    // The search branch above raw-swaps keyless nodes (search-hit rows,
+    // snippets, the no-match placeholder) into the body. reconcileList only
+    // tracks and removes nodes it created itself, so returning from search
+    // mode must clear those foreign nodes first or they dangle below the
+    // real rows forever. Normal rows all carry data-sid (sessionRow), so
+    // "no [data-sid] child" ⇔ the body holds only foreign nodes (or nothing).
+    // Same guard as recordings.js / transcript.js keep on their WAV lists.
+    if (!body.querySelector("[data-sid]")) body.replaceChildren(); // gate-allow: raw-swap — clears the search branch's keyless nodes so reconcileList owns the host (same guard as the WAV lists)
+
     // Absorb targets: archived sessions only — the current (recording) one is
     // never a merge endpoint, and a row can't absorb into itself. Computed
     // over the FULL list (not just the filtered `shown`) so a filtered-out
-    // session is still a valid target. The target ID SET is structural (it
-    // changes the row's wiring) → folded into the key; target LABELS are
-    // content → refreshed by fillRow.
+    // session is still a valid target. Only the picker's EXISTENCE is
+    // structural (sessionRow drops the <select> when there are no targets) →
+    // a has-targets bit in the key; the target ids/labels/counts are content
+    // → refreshed in place by fillRow. Keying on the full target-id set would
+    // re-key EVERY row whenever any session is added/archived/deleted,
+    // tearing a focused rename input out mid-edit (ADR-0004).
     const archived = sessions.filter((s) => !s.is_current);
-    const targetsSig = archived.map((t) => t.session).join(",");
-    const targetsFor = (/** @type {import('../../types.js').Session} */ s) =>
-      archived.filter((t) => t.session !== s.session);
+    // ONE shared target-content signature per tick — a per-row exclude-self
+    // copy would be O(rows × targets) allocation churn every poll. Including
+    // a row's own entry in its sig is harmless (its own label/wav-count terms
+    // already re-fill it); the options loop skips self when painting. The
+    // key's has-targets bit is arithmetic, not an allocation: a non-current
+    // row has targets iff some OTHER archived session exists.
+    const targetsSig = archived.map((t) => `${t.session}·${labelFor(t)}·${t.wav_count || 0}`).join(",");
     reconcileList(
       body,
       shown,
-      (s) => `${s.session}·c${s.is_current ? 1 : 0}·w${(s.wav_count || 0) > 0 ? 1 : 0}·t${targetsSig}`,
-      (s) => /** @type {HTMLElement} */ (sessionRow(s, targetsFor(s)).firstElementChild),
-      (row, s) => fillRow(/** @type {HTMLElement} */ (row), s, targetsFor(s)),
+      (s) => `${s.session}·c${s.is_current ? 1 : 0}·w${(s.wav_count || 0) > 0 ? 1 : 0}·t${!s.is_current && archived.length > 1 ? 1 : 0}`,
+      (s) => /** @type {HTMLElement} */ (sessionRow(s, archived, targetsSig).firstElementChild),
+      (row, s) => fillRow(/** @type {HTMLElement} */ (row), s, archived, targetsSig),
     );
   };
 

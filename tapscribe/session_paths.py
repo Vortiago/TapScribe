@@ -8,9 +8,11 @@ guard:
 
 1. `_safe_part` rejects path separators, `.`/`..`, NUL, empty, and
    platform-absolute parts at the lowest path-building level.
-2. each `resolve_*` then realpaths the candidate and confirms it stays under
-   `RECORDINGS_DIR` (the canonical `realpath(x).startswith(root + os.sep)`
-   idiom CodeQL's `py/path-injection` query recognises intraprocedurally).
+2. each `resolve_*` then realpaths the candidate via `_assert_contained` and
+   confirms it stays under `RECORDINGS_DIR`. (CodeQL's `py/path-injection`
+   query is excluded repo-wide with a written justification — see
+   `.github/codeql/codeql-config.yml` — so the check's shape answers to this
+   module's tests, not to the analyser.)
 
 Callers receive a `Path` proven contained, so downstream filesystem ops don't
 re-check. New code that turns request input into a recordings path goes through
@@ -78,23 +80,29 @@ def _safe_part(part: object, what: str = "session") -> str:
     return part
 
 
-def _assert_contained(candidate: Path, message: str = "session not found") -> None:
-    """Layer 2: confirm `candidate` stays under RECORDINGS_DIR after
-    symlink resolution. Raises `SessionNotFound` on escape."""
+def _assert_contained(
+    candidate: Path | str,
+    message: str = "session not found",
+    *,
+    exc: type[SessionPathError] = SessionNotFound,
+) -> str:
+    """Layer 2: confirm `candidate` stays under RECORDINGS_DIR after symlink
+    resolution. Raises `exc` on escape; returns the realpathed candidate so
+    resolvers that hand out symlink-resolved paths reuse the same walk. The
+    ONE copy of the containment check — every resolver crosses this, none
+    re-derives the idiom."""
     root = os.path.realpath(config.RECORDINGS_DIR)
     real = os.path.realpath(candidate)
     if real != root and not real.startswith(root + os.sep):
-        raise SessionNotFound(message)
+        raise exc(message)
+    return real
 
 
 def _contained_path(*parts: str, message: str = "session not found") -> Path:
     """Join already-`_safe_part`-validated `parts` under RECORDINGS_DIR and
-    apply layer 2, returning the joined Path. The single realpath check follows
-    a symlink in ANY component, so it refuses both a session-level and a
-    name-level escape in one shot. The ONE shared build+assert for the
-    helper-side resolvers; the inlined-idiom siblings (`stripped_dir`,
-    `resolve_session_dir`, `resolve_wav`) keep the check inline so CodeQL's
-    `py/path-injection` query recognises the sanitiser intraprocedurally."""
+    apply layer 2, returning the joined (NOT realpathed) Path. The single
+    realpath check follows a symlink in ANY component, so it refuses both a
+    session-level and a name-level escape in one shot."""
     path = config.RECORDINGS_DIR.joinpath(*parts)
     _assert_contained(path, message)
     return path
@@ -124,30 +132,18 @@ def session_meta_path(session: str) -> Path:
 
 def stripped_dir(session: str) -> Path:
     """Build `<RECORDINGS_DIR>/<session>/stripped` after validating the
-    session id against path traversal. The realpath+startswith check is
-    inlined (the canonical CodeQL-recognised idiom for `py/path-injection`)
-    so callers receive a Path that downstream filesystem operations can
-    use without re-checking."""
+    session id against path traversal. Returns the realpathed Path so
+    downstream filesystem operations can use it without re-checking."""
     session = _safe_part(session, "session")
-    root = os.path.realpath(config.RECORDINGS_DIR)
-    real = os.path.realpath(os.path.join(root, session, DIRNAME_STRIPPED))
-    if real != root and not real.startswith(root + os.sep):
-        raise SessionNotFound("session not found")
-    return Path(real)
+    return Path(_assert_contained(config.RECORDINGS_DIR / session / DIRNAME_STRIPPED))
 
 
 def resolve_session_dir(session: str) -> Path:
-    """Return `<RECORDINGS_DIR>/<session>` after validating it exists and
-    doesn't escape RECORDINGS_DIR. Raises `SessionNotFound` otherwise.
-
-    Uses the canonical `os.path.realpath(x).startswith(root + os.sep)`
-    sanitiser pattern that CodeQL's `py/path-injection` query recognises
-    intraprocedurally."""
+    """Return `<RECORDINGS_DIR>/<session>` (realpathed) after validating it
+    exists and doesn't escape RECORDINGS_DIR. Raises `SessionNotFound`
+    otherwise."""
     session = _safe_part(session, "session")
-    root = os.path.realpath(config.RECORDINGS_DIR)
-    real = os.path.realpath(os.path.join(root, session))
-    if real != root and not real.startswith(root + os.sep):
-        raise SessionNotFound("session not found")
+    real = _assert_contained(config.RECORDINGS_DIR / session)
     if not os.path.isdir(real):
         raise SessionNotFound("session not found")
     return Path(real)
@@ -194,16 +190,10 @@ def resolve_original_wav(session: str, name: str) -> Path:
 def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     """Return the resolved WAV path under `<RECORDINGS_DIR>/<session>/...`
     after validating extension, existence, and that the resolved path
-    can't escape RECORDINGS_DIR. 404 on any failure.
-
-    Uses the canonical `os.path.realpath(x).startswith(root + os.sep)`
-    sanitiser pattern recognised by CodeQL's `py/path-injection` query."""
+    can't escape RECORDINGS_DIR. 404 on any failure."""
     name = _safe_part(name, "file")
     source_dir = resolve_source_dir(session, source)
-    root = os.path.realpath(config.RECORDINGS_DIR)
-    real = os.path.realpath(os.path.join(str(source_dir), name))
-    if real != root and not real.startswith(root + os.sep):
-        raise WavNotFound("not found")
+    real = _assert_contained(source_dir / name, "not found", exc=WavNotFound)
     if not os.path.isfile(real) or not real.lower().endswith(".wav"):
         raise WavNotFound("not found")
     return Path(real)

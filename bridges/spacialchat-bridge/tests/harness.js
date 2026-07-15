@@ -343,6 +343,15 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     });
   }
 
+  // Simulate the popup RESETTING the nonce (startMeeting/dismissMeeting write
+  // meetingEndRequestedAt: null so a stale request can't haunt the next
+  // meeting) — a change event whose newValue is not a number.
+  function resetEndRequest() {
+    chrome._fireChange({
+      meetingEndRequestedAt: { newValue: null, oldValue: endNonce },
+    });
+  }
+
   // The in-page status pill lives in a shadow root attached to a host
   // element appended to documentElement. The harness mocks documentElement
   // and createElement above, so we can find the host by its id and dig
@@ -405,6 +414,7 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     startMeeting,
     endMeeting,
     requestEndMeeting,
+    resetEndRequest,
     indicator,
     detachIndicator,
     // Fire the content script's interval tick(s) on demand (the harness never

@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from tapscribe.transcribers._voxtral_common import VoxtralTranscriberBase, _inputs_kwargs
+from tapscribe.transcribers._voxtral_common import VoxtralTranscriberBase, inputs_kwargs
 
 
 def _one_second_wav(path: Path) -> Path:
@@ -191,19 +191,19 @@ def test_unimplemented_hooks_raise_not_implemented_error():
         b._decode(None, 0)
 
 
-def test_inputs_kwargs_dict_unpacks_a_mapping():
-    assert _inputs_kwargs({"input_ids": [1, 2, 3]}) == {"input_ids": [1, 2, 3]}
+def testinputs_kwargs_dict_unpacks_a_mapping():
+    assert inputs_kwargs({"input_ids": [1, 2, 3]}) == {"input_ids": [1, 2, 3]}
 
 
-def test_inputs_kwargs_falls_back_to_input_ids_attribute_for_unmappable_object():
+def testinputs_kwargs_falls_back_to_input_ids_attribute_for_unmappable_object():
     class _Obj:
         input_ids = "IDS"
 
-    assert _inputs_kwargs(_Obj()) == {"input_ids": "IDS"}
+    assert inputs_kwargs(_Obj()) == {"input_ids": "IDS"}
 
 
-def test_inputs_kwargs_returns_empty_dict_when_neither_mapping_nor_input_ids():
+def testinputs_kwargs_returns_empty_dict_when_neither_mapping_nor_input_ids():
     class _Obj:
         pass
 
-    assert _inputs_kwargs(_Obj()) == {}
+    assert inputs_kwargs(_Obj()) == {}

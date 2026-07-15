@@ -25,13 +25,40 @@
 
 /**
  * The popup's durable meeting state + the latest poll, all the presenter needs.
+ * `endRequestedAt` mirrors storage's `meetingEndRequestedAt` (the live-tab End
+ * nonce); `now` is the shell-supplied clock so this module stays pure.
  * @typedef {{
  *   meetingSessionId: string | null,
  *   meetingActive: boolean,
  *   lastEnd: { phase: string, error?: string | null } | null,
  *   pollView: PollView | null,
+ *   endRequestedAt?: number | null,
+ *   now?: number,
  * }} MeetingState
  */
+
+/**
+ * How long a live-tab End request may sit unacknowledged (`meetingEnd` never
+ * written; `startMeeting` nulls it, so null == untouched) before the popup
+ * stops trusting the tab (#219). Generous vs the content script's own
+ * budgets: an alive one flips `meetingEnd` to "ending" as soon as its
+ * storage.onChanged fires — seconds, not tens of seconds — so crossing this
+ * means hung/reloading, not slow.
+ */
+export const END_UNRESPONSIVE_MS = 10_000;
+
+/**
+ * The live-tab End-request lifecycle: `pending` while the nonce is out and
+ * the content script hasn't acknowledged (no `meetingEnd` yet);
+ * `unresponsive` once that pending state has outlived END_UNRESPONSIVE_MS.
+ * @param {MeetingState} st
+ */
+function endRequestState(st) {
+  const pending = !!(st.meetingActive && st.endRequestedAt != null && !st.lastEnd);
+  const unresponsive =
+    pending && (st.now ?? 0) - /** @type {number} */ (st.endRequestedAt) >= END_UNRESPONSIVE_MS;
+  return { pending, unresponsive };
+}
 
 /**
  * @typedef {{
@@ -66,6 +93,21 @@ function summaryMeta(s) {
  */
 function headline(st) {
   const end = st.lastEnd;
+  // A live-tab End request the content script hasn't acknowledged yet also
+  // takes precedence over "active" — and once it has sat unacknowledged past
+  // END_UNRESPONSIVE_MS, the operator gets an actionable line instead of a
+  // forever-"Ending meeting…" wedge (#219: a live-but-HUNG tab; the
+  // stale/absent-tab case never gets here — endMeeting completes it directly).
+  const req = endRequestState(st);
+  if (req.unresponsive) {
+    return {
+      text:
+        "The SpatialChat tab isn't responding to the End request — reload the tab "
+        + "and press End again, or close it and press End to finish without it.",
+      tone: "err",
+    };
+  }
+  if (req.pending) return { text: "Ending meeting…", tone: "" };
   // An in-progress End takes precedence over "active": the taps are draining,
   // so showing "Meeting active" would contradict the card's ending line.
   if (end && end.phase === "ending") return { text: "Ending meeting…", tone: "" };
@@ -137,9 +179,15 @@ export function shouldKeepPolling(phase) {
  * @returns {MeetingView}
  */
 export function meetingView(st) {
+  const req = endRequestState(st);
   return {
     startDisabled: st.meetingActive,
-    endDisabled: !st.meetingActive,
+    // End stays clickable on an active meeting EXCEPT while a request is
+    // pending-and-fresh (a re-click would only re-bump the nonce). Once
+    // unresponsive it re-enables so the operator can retry: with the tab
+    // reloaded the fresh content script picks the new nonce up; with the tab
+    // closed the snapshot goes stale and End completes directly (#219).
+    endDisabled: !st.meetingActive || (req.pending && !req.unresponsive),
     status: headline(st),
     card: cardView(st),
   };

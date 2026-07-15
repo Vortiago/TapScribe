@@ -37,9 +37,9 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ..runtime_probe import (
-    _AUTO_RESOLUTION_ORDER,
-    _is_module_available,
+    AUTO_RESOLUTION_ORDER,
     available_backends,
+    is_module_available,
     resolve_backend_preference,
 )
 from .base import (
@@ -281,7 +281,7 @@ class BackendBinding:
         `find_spec` so the heavy adapter module never actually loads."""
         if not self.probe_module:
             return True
-        return _is_module_available(self.probe_module)
+        return is_module_available(self.probe_module)
 
 
 @dataclass(frozen=True)
@@ -438,7 +438,7 @@ class TranscriberRegistry:
         """Pick the loader for `model_id` given a backend preference.
 
         Resolution semantics:
-          * preference == "auto": walk `_AUTO_RESOLUTION_ORDER` (mlx, cuda,
+          * preference == "auto": walk `AUTO_RESOLUTION_ORDER` (mlx, cuda,
             cpu). For each candidate kind, return the first model binding
             that supports it AND is available on this machine. This is
             why NB-Whisper on an Apple Silicon Mac with no public MLX
@@ -460,7 +460,7 @@ class TranscriberRegistry:
 
         if preference == "auto":
             avail = available_backends()
-            for kind in _AUTO_RESOLUTION_ORDER:
+            for kind in AUTO_RESOLUTION_ORDER:
                 if kind not in avail:
                     continue
                 for binding in entry.backends:
@@ -685,9 +685,16 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
         "large-v3-turbo",
         "Whisper · multilingual · turbo (faster than large-v3)",
         en_only=False,
+        # NO `-mlx` suffix — mlx-community publishes turbo without it, so the
+        # construct-by-convention `whisper-<name>-mlx` pattern would 404 here.
         repos={"mlx-whisper": "mlx-community/whisper-large-v3-turbo"},
     ),
     # ── NB-Whisper (Nasjonalbiblioteket — Norwegian) ──
+    # Deliberately NO `mlx-whisper` repo on any NB entry: there are no public
+    # MLX conversions (NbAiLabBeta/*-mlx and mlx-community/nb-whisper-*-mlx
+    # all 404 when probed). NB-Whisper runs via faster-whisper on the CT2
+    # weights inside NbAiLab/nb-whisper-<size>/, even on Apple Silicon —
+    # adding an mlx repo here would 404 at load time.
     _nb(
         "nb-whisper-tiny",
         "nb-whisper-tiny",
@@ -733,6 +740,10 @@ _DEFAULT_ENTRIES: tuple[ModelEntry, ...] = (
         contexts=_BATCH_ONLY,
         backends=_VOXTRAL_BACKENDS,
         inputs=NO_INPUTS,
+        repos={
+            "voxtral-hf": "mistralai/Voxtral-Mini-3B-2507",
+            "voxtral-mlx": "mlx-community/Voxtral-Mini-3B-2507-bf16",
+        },
     ),
     # ── Parakeet (NVIDIA via parakeet-mlx OR transformers) — batch-only ──
     ModelEntry(

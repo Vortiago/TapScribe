@@ -261,7 +261,7 @@ body::before { display: none; }
   gap: 3px 8px;
   padding: 8px 12px 9px;
 }
-.rail .taps .stream-row > .dot.rec { grid-area: dot; margin-top: 4px; }
+.rail .taps .stream-row > .dot.tone-rec { grid-area: dot; margin-top: 4px; }
 .rail .taps .stream-row > .who { grid-area: who; gap: 2px; }
 .rail .taps .stream-row > .tap-toggles { grid-area: toggles; flex-direction: row; align-self: start; gap: 4px; }
 /* The volume bar is redundant with the buffer status line in this dense rail;
@@ -605,7 +605,7 @@ body::before { display: none; }
   display: grid; grid-template-columns: 10px 1fr auto auto; gap: 9px; align-items: center;
   padding: 7px 11px;
 }
-.taps .stream-row .dot.rec { width: 7px; height: 7px; border-radius: 50%; background: var(--rec); }
+.taps .stream-row .dot.tone-rec { width: 7px; height: 7px; border-radius: 50%; background: var(--rec); }
 .taps .who { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .taps .who .name { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 11.5px; color: var(--text); }
 .taps .who .spk-marker { font-size: 9px; }

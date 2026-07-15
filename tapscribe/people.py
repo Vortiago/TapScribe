@@ -37,7 +37,10 @@ PEOPLE_JSON = "people.json"
 # `raw_data` is the raw dict from `json.loads`. On a hit, `_coerce_people`
 # builds a fresh PeopleRegistry from the cached snapshot — independence is
 # inherent, zero `deepcopy` needed (a caller's mutation touches the output,
-# never the cached raw data).
+# never the cached raw data). A dict slot (the shape every cache in this
+# repo uses — _CONFIG_TEXT_CACHE, _RULES_CACHE, _FIND_SPEC_CACHE) rather
+# than a rebindable module global: mutation needs no `global` statement and
+# CodeQL's unused-global query false-positives on function-rebound globals.
 _PEOPLE_CACHE: dict[str, tuple[tuple | None, Any]] = {}
 
 
@@ -94,6 +97,8 @@ class PeopleRegistry:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            # Missing or torn file → empty registry; nothing is lost, the
+            # people list is rebuildable from session rosters via sync().
             data = None
         _PEOPLE_CACHE["_slot"] = (sig, data)
         return cls(_coerce_people(data))
@@ -103,6 +108,12 @@ class PeopleRegistry:
             config.RECORDINGS_DIR / PEOPLE_JSON,
             json.dumps({"people": self._people}, indent=2, ensure_ascii=False),
         )
+        # Structural invalidation: our own write must never be served stale.
+        # load() would normally see a new stat signature anyway (os.replace →
+        # new inode), but the route handlers read back within the same request
+        # (load → mutate → save → _people_view), so don't bank on the
+        # filesystem — force the next load() to re-read what we wrote.
+        _PEOPLE_CACHE.pop("_slot", None)
 
     # ---- queries ----------------------------------------------------------
 

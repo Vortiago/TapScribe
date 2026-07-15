@@ -19,12 +19,22 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from ._voxtral_common import VoxtralTranscriberBase, _inputs_kwargs
+from ._voxtral_common import VoxtralTranscriberBase, inputs_kwargs
 
 # Quantised MLX builds live under mlx-community. Default to bf16 — full
-# quality with the MLX speedup; users on tight RAM can swap to 4bit/8bit
-# by editing the constant below or routing through a config knob later.
+# quality with the MLX speedup; users on tight RAM can swap to 4bit/8bit on
+# the registry row (or this fallback) / a config knob later. The registry is
+# the real source (see _resolve_repo); this constant is the
+# construct-by-convention fallback for off-registry model names.
 _MLX_VOXTRAL_REPO = "mlx-community/Voxtral-Mini-3B-2507-bf16"
+
+
+def _resolve_repo(model_name: str) -> str:
+    # Registry-carried repo (single source, #206/#337). Lazy import: the
+    # catalog imports this module's class through its loader hooks.
+    from .catalog import repo_for
+
+    return repo_for(model_name, "voxtral-mlx") or _MLX_VOXTRAL_REPO
 
 
 class MlxVoxtralTranscriber(VoxtralTranscriberBase):
@@ -62,13 +72,14 @@ class MlxVoxtralTranscriber(VoxtralTranscriberBase):
             VoxtralProcessor,
         )
 
-        # Lazy catalog import (same shape as the adapters' repo resolvers):
-        # catalog imports this module only inside its loader thunk — no cycle.
+        # Lazy catalog import (same shape as _resolve_repo below): catalog
+        # imports this module only inside its loader thunk — no cycle.
         from .catalog import fixed_language_for
 
-        print(f"[tapscribe] loading mlx-voxtral model: {_MLX_VOXTRAL_REPO}", flush=True)
-        processor = VoxtralProcessor.from_pretrained(_MLX_VOXTRAL_REPO)
-        model = VoxtralForConditionalGeneration.from_pretrained(_MLX_VOXTRAL_REPO)
+        repo = _resolve_repo(model_name)
+        print(f"[tapscribe] loading mlx-voxtral model: {repo}", flush=True)
+        processor = VoxtralProcessor.from_pretrained(repo)
+        model = VoxtralForConditionalGeneration.from_pretrained(repo)
         return cls(
             model_name=model_name,
             processor=processor,
@@ -77,7 +88,7 @@ class MlxVoxtralTranscriber(VoxtralTranscriberBase):
         )
 
     def _repo_id(self) -> str:
-        return _MLX_VOXTRAL_REPO
+        return _resolve_repo(self.model_name)
 
     def _apply_request(self, request_kwargs: dict[str, Any]) -> Any:
         # apply_transcrition_request mirrors HF's apply_transcription_request
@@ -93,7 +104,7 @@ class MlxVoxtralTranscriber(VoxtralTranscriberBase):
         )
 
     def _generate(self, inputs: Any, gen_kwargs: dict[str, Any]) -> Any:
-        return self._model.generate(**_inputs_kwargs(inputs), **gen_kwargs)
+        return self._model.generate(**inputs_kwargs(inputs), **gen_kwargs)
 
     def _decode(self, outputs: Any, prompt_len: int) -> str:
         # mlx-voxtral's processor.decode takes a single token sequence and

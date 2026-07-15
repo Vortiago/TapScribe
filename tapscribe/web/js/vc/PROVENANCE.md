@@ -17,8 +17,9 @@ prints the exact re-copy command for stale ones. Layout:
 - `lib/` — `templates.js`, `component.js`, `tone.js`, `element.js`
   (the vanilla-web engine; `element.js` backs the optional `<vc-*>`
   element faces the component sidecars ship)
-- `components/<name>/` — the components the setup page composes
-  (panel, button, field, chip, alert, spinner)
+- `components/<name>/` — the components the setup page and the dashboard
+  compose (panel, button, field, chip, alert, spinner, plus the
+  dashboard-only progress and empty-state added with the #306 alignment)
 
 The design tokens + tone mixin (`tokens.css`, `tones.css`) live at
 `tapscribe/web/` — ONE vendored copy shared by this page and the dashboard

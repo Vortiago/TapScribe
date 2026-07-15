@@ -398,7 +398,7 @@ def backend_module_available(backend: str) -> bool:
     """True iff the python package powering `backend` is importable — a cheap
     `find_spec` probe (no heavy import, no torch/Metal init). A module-level
     function so a test can force it without touching the real environment, the
-    same shape as the runtime probe's `_is_module_available`."""
+    same shape as the runtime probe's `is_module_available`."""
     b = BACKENDS.get(backend)
     return b is not None and importlib.util.find_spec(b.module) is not None
 

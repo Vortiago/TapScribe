@@ -37,6 +37,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from functools import partial
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -780,9 +781,9 @@ def _build_state_blob(
     registry: PeopleRegistry,
     occs: list[dict[str, Any]],
     live_identities: set[str],
-    live_feed: list,
-    live_info: dict,
-    live_log: list,
+    live_feed: list[dict[str, Any]],
+    live_info: dict[str, Any],
+    live_log: list[str],
     live_supports_native_vad: bool,
     recording_enabled: bool,
     backend: str,
@@ -854,10 +855,12 @@ def _build_state_blob(
             "default": languages_default,
         },
         "summarizer_default": summarizer_default,
+        # No "rules" list here: the config card renders the raw content
+        # textarea and reads only content + count — shipping every raw rule
+        # string per poll tick was dead payload weight (#303 follow-up).
         "hallucinations": {
             "path": str(config.HALLUCINATIONS_FILE),
             "content": hallucinations_content,
-            "rules": [r["raw"] for r in halluc_rules],
             "count": len(halluc_rules),
         },
     }
@@ -2058,32 +2061,33 @@ async def setup_page():
         raise HTTPException(404, f"setup.html missing at {SETUP_HTML_PATH}") from None
 
 
+def _css_response(path: Path, name: str) -> FileResponse:
+    """The one is_file → 404 → FileResponse(text/css) body the four top-level
+    stylesheet routes share. One decorated handler per route stays (explicit
+    routing table); only the body is deduplicated."""
+    if not path.is_file():
+        raise HTTPException(404, f"{name} not found")
+    return FileResponse(path, media_type="text/css")
+
+
 @app.get("/dashboard.css")
 async def dashboard_css():
-    if not DASHBOARD_CSS_PATH.is_file():
-        raise HTTPException(404, "dashboard.css not found")
-    return FileResponse(DASHBOARD_CSS_PATH, media_type="text/css")
+    return _css_response(DASHBOARD_CSS_PATH, "dashboard.css")
 
 
 @app.get("/next.css")
 async def next_css():
-    if not NEXT_CSS_PATH.is_file():
-        raise HTTPException(404, "next.css not found")
-    return FileResponse(NEXT_CSS_PATH, media_type="text/css")
+    return _css_response(NEXT_CSS_PATH, "next.css")
 
 
 @app.get("/tokens.css")
 async def tokens_css():
-    if not TOKENS_CSS_PATH.is_file():
-        raise HTTPException(404, "tokens.css not found")
-    return FileResponse(TOKENS_CSS_PATH, media_type="text/css")
+    return _css_response(TOKENS_CSS_PATH, "tokens.css")
 
 
 @app.get("/tones.css")
 async def tones_css():
-    if not TONES_CSS_PATH.is_file():
-        raise HTTPException(404, "tones.css not found")
-    return FileResponse(TONES_CSS_PATH, media_type="text/css")
+    return _css_response(TONES_CSS_PATH, "tones.css")
 
 
 # Dashboard JS modules and HTML component templates. StaticFiles handles

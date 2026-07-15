@@ -57,16 +57,16 @@ def test_available_backend_strs_mirrors_available_backends_as_plain_strs():
 
 def test_set_installed_modules_for_testing_forces_a_fixed_set():
     runtime_probe.set_installed_modules_for_testing(frozenset({"faster_whisper"}))
-    assert runtime_probe._is_module_available("faster_whisper") is True
-    assert runtime_probe._is_module_available("definitely_not_a_real_module_xyz") is False
+    assert runtime_probe.is_module_available("faster_whisper") is True
+    assert runtime_probe.is_module_available("definitely_not_a_real_module_xyz") is False
 
 
 def test_set_installed_modules_for_testing_none_restores_real_probing():
     runtime_probe.set_installed_modules_for_testing(frozenset())
-    assert runtime_probe._is_module_available("os") is False  # forced empty set
+    assert runtime_probe.is_module_available("os") is False  # forced empty set
 
     runtime_probe.set_installed_modules_for_testing(None)
-    assert runtime_probe._is_module_available("os") is True  # real find_spec
+    assert runtime_probe.is_module_available("os") is True  # real find_spec
 
 
 def test_refresh_backend_probes_clears_the_override_free_caches():

@@ -16,7 +16,7 @@ import { warmPanel, createPanelSync } from "./components/panel/panel.js";
 import { warmTableShell, createTableShellSync } from "./components/table-shell/table-shell.js";
 import { warmEmptyState, createEmptyStateSync } from "./components/empty-state/empty-state.js";
 import { map as mapPipeline } from "./pipeline-view.js";
-import { meetingView, shouldKeepPolling } from "./popup-presenter.js";
+import { END_UNRESPONSIVE_MS, meetingView, shouldKeepPolling } from "./popup-presenter.js";
 import { snapshotIsLive, tapStateLabel } from "./taps-view.js";
 import {
   startMeeting as actStart,
@@ -61,6 +61,12 @@ function cfg() {
 /** @type {string | null} */ let currentMeetingSessionId = null;
 let currentMeetingActive = false;
 /** @type {{ phase: string, error?: string | null } | null} */ let lastMeetingEnd = null;
+/** The live-tab End nonce (storage meetingEndRequestedAt) — the presenter
+ * derives "Ending meeting…" and the #219 unresponsive-tab state from it. */
+/** @type {number | null} */ let currentEndRequestedAt = null;
+/** One-shot re-render timer for the moment a pending End crosses
+ * END_UNRESPONSIVE_MS (nothing else changes state at that instant). */
+/** @type {ReturnType<typeof setTimeout> | null} */ let endTimeoutTimer = null;
 /** @type {import("./pipeline-view.js").PipelineView | null} */ let latestPollView = null;
 /** @type {any} */ let latestStatus = null;
 
@@ -146,7 +152,7 @@ function buildCard() {
 async function load() {
   const s = await storage.get([
     "recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId", "meetingActive", "meetingEnd",
-    "bridgeStatus",
+    "meetingEndRequestedAt", "bridgeStatus",
   ]);
   // Seed latestStatus from the initial read BEFORE applyMeeting() enables End,
   // so an End click in the load-time gap (before refresh() populates it) sees
@@ -163,6 +169,7 @@ async function load() {
   currentMeetingActive =
     typeof s.meetingActive === "boolean" ? s.meetingActive : !!currentMeetingSessionId;
   lastMeetingEnd = s.meetingEnd || null;
+  currentEndRequestedAt = typeof s.meetingEndRequestedAt === "number" ? s.meetingEndRequestedAt : null;
   input("host").value = currentHost;
   input("port").value = String(currentPort);
   input("tapToken").value = currentTapToken;
@@ -341,6 +348,8 @@ function applyMeeting() {
     meetingActive: currentMeetingActive,
     lastEnd: lastMeetingEnd,
     pollView: latestPollView,
+    endRequestedAt: currentEndRequestedAt,
+    now: Date.now(),
   });
   btnStart.setDisabled(view.startDisabled);
   btnEnd.setDisabled(view.endDisabled);
@@ -348,6 +357,23 @@ function applyMeeting() {
   // feedback ("Starting meeting…") set by the handlers is left otherwise.
   if (view.status) setStatus("meetingStatus", view.status.text, view.status.tone);
   applyCard(view.card);
+  armEndUnresponsiveTimer();
+}
+
+/**
+ * While a live-tab End request is pending (nonce out, meetingEnd untouched),
+ * schedule one re-render for the instant it becomes unresponsive — no storage
+ * event fires at that moment, so without this the "tab isn't responding" line
+ * (#219) would only appear on the next unrelated re-render. Idempotent: every
+ * applyMeeting() re-arms or clears it from current state, and a meetingEnd
+ * arrival clears it via the pending check.
+ */
+function armEndUnresponsiveTimer() {
+  if (endTimeoutTimer != null) { clearTimeout(endTimeoutTimer); endTimeoutTimer = null; }
+  if (!(currentMeetingActive && currentEndRequestedAt != null && !lastMeetingEnd)) return;
+  const remaining = currentEndRequestedAt + END_UNRESPONSIVE_MS - Date.now();
+  if (remaining <= 0) return; // already rendered as unresponsive
+  endTimeoutTimer = setTimeout(() => { endTimeoutTimer = null; applyMeeting(); }, remaining + 50);
 }
 
 /** @param {import("./popup-presenter.js").MeetingView["card"]} card */
@@ -431,6 +457,7 @@ async function onStart() {
     currentMeetingSessionId = out.sessionId;
     currentMeetingActive = true;
     lastMeetingEnd = null;
+    currentEndRequestedAt = null; // actStart also cleared the durable nonce
     resetCard();
     applyMeeting();
   } else {
@@ -467,6 +494,7 @@ async function onDismiss() {
   currentMeetingSessionId = null;
   currentMeetingActive = false;
   lastMeetingEnd = null;
+  currentEndRequestedAt = null; // actDismiss also cleared the durable nonce
   resetCard();
   setStatus("meetingStatus", "", "");
   applyMeeting();
@@ -514,6 +542,11 @@ const onStorageChanged = (changes, area) => {
     if (phase === "ending" || phase === "started" || phase === "busy") pollCardOnce();
     applyMeeting();
   }
+  if (changes.meetingEndRequestedAt) {
+    const v = changes.meetingEndRequestedAt.newValue;
+    currentEndRequestedAt = typeof v === "number" ? v : null;
+    applyMeeting(); // renders "Ending meeting…" and arms the #219 unresponsive timer
+  }
 };
 chrome.storage.onChanged.addListener(onStorageChanged);
 
@@ -527,6 +560,7 @@ const pollTimer = setInterval(async () => {
 
 window.addEventListener("unload", () => {
   clearInterval(pollTimer);
+  if (endTimeoutTimer != null) clearTimeout(endTimeoutTimer);
   stopCardPolling();
   ac.abort();
   try { chrome.storage.onChanged.removeListener(onStorageChanged); } catch (e) { /* ignore */ }

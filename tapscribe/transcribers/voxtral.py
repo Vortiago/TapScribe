@@ -11,13 +11,23 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from ._voxtral_common import VoxtralTranscriberBase, _inputs_kwargs, split_voxtral_text_into_segments
+from ._voxtral_common import VoxtralTranscriberBase, inputs_kwargs, split_voxtral_text_into_segments
 
 __all__ = ["VoxtralTranscriber", "split_voxtral_text_into_segments"]
 
-# Currently only Voxtral Mini is realistic for local CPU use; other Voxtral
-# sizes can be added later by branching on model_name in load().
+# Construct-by-convention fallback for off-registry model names; the
+# registry row is the real source (see _resolve_repo). Other Voxtral sizes
+# are added as registry entries with their own `repos`.
 _VOXTRAL_REPO = "mistralai/Voxtral-Mini-3B-2507"
+
+
+def _resolve_repo(model_name: str) -> str:
+    # Registry-carried repo (single source, #206/#337), falling back to the
+    # canonical Voxtral-Mini repo for off-registry names. Lazy import: the
+    # catalog imports this module's class through its loader hooks.
+    from .catalog import repo_for
+
+    return repo_for(model_name, "voxtral-hf") or _VOXTRAL_REPO
 
 
 class VoxtralTranscriber(VoxtralTranscriberBase):
@@ -69,7 +79,8 @@ class VoxtralTranscriber(VoxtralTranscriberBase):
             VoxtralForConditionalGeneration,
         )
 
-        print(f"[tapscribe] loading Voxtral model from HuggingFace: {_VOXTRAL_REPO}", flush=True)
+        repo = _resolve_repo(model_name)
+        print(f"[tapscribe] loading Voxtral model from HuggingFace: {repo}", flush=True)
         if kind == "cuda":
             device, dtype = "cuda", torch.bfloat16
         elif kind == "cpu":
@@ -81,8 +92,8 @@ class VoxtralTranscriber(VoxtralTranscriberBase):
             else:
                 device, dtype = "cpu", torch.float32
 
-        processor = AutoProcessor.from_pretrained(_VOXTRAL_REPO)
-        model = VoxtralForConditionalGeneration.from_pretrained(_VOXTRAL_REPO, torch_dtype=dtype).to(device)
+        processor = AutoProcessor.from_pretrained(repo)
+        model = VoxtralForConditionalGeneration.from_pretrained(repo, torch_dtype=dtype).to(device)
         model.eval()
         # Lazy catalog import (same shape as the adapters' repo resolvers):
         # catalog imports this module only inside its loader thunk — no cycle.
@@ -97,7 +108,7 @@ class VoxtralTranscriber(VoxtralTranscriberBase):
         )
 
     def _repo_id(self) -> str:
-        return _VOXTRAL_REPO
+        return _resolve_repo(self.model_name)
 
     def _apply_request(self, request_kwargs: dict[str, Any]) -> Any:
         return self._processor.apply_transcription_request(**request_kwargs).to(self._raw_device)
@@ -117,9 +128,9 @@ class VoxtralTranscriber(VoxtralTranscriberBase):
             import torch  # type: ignore
 
             with torch.no_grad():
-                return self._model.generate(**_inputs_kwargs(inputs), **gen_kwargs)
+                return self._model.generate(**inputs_kwargs(inputs), **gen_kwargs)
         except ImportError:
-            return self._model.generate(**_inputs_kwargs(inputs), **gen_kwargs)
+            return self._model.generate(**inputs_kwargs(inputs), **gen_kwargs)
 
     def _decode(self, outputs: Any, prompt_len: int) -> str:
         gen_ids = outputs[:, prompt_len:]

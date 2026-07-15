@@ -46,7 +46,7 @@ FAMILY_META: tuple[tuple[str, str, str], ...] = (
     ("parakeet", "Parakeet (NVIDIA)", "~1.5–2.5 GB"),
 )
 # Display order for backend chips (preferred first). Mirrors the runtime
-# probe's _AUTO_RESOLUTION_ORDER by intent, but kept a separate local constant
+# probe's AUTO_RESOLUTION_ORDER by intent, but kept a separate local constant
 # — display order and auto-resolution priority are distinct concerns that
 # needn't move together (and the probe's is private).
 _BACKEND_DISPLAY_ORDER: tuple[str, ...] = ("mlx", "cuda", "cpu")

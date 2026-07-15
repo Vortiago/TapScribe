@@ -348,9 +348,10 @@ vanilla-web skill (`reference/testing.md`, `testing/`).
 `.claude/hooks/pre-push.sh` (wired into `.claude/settings.json` as a
 `PreToolUse` hook on `Bash`) inspects every Bash command Claude is
 about to run. When the command actually invokes `git push`, the hook
-runs the same two checks CI's `tests` job runs — `ruff check
-tapscribe tools tests bridges/local-test-bridge` and `pytest tests` —
-and exits **2** if either is red, blocking the push and feeding the
+runs the same three checks CI's `tests` job runs — `ruff check` and
+`ruff format --check` over `tapscribe tools tests benchmarks
+bridges/local-test-bridge`, plus `pytest tests` —
+and exits **2** if any is red, blocking the push and feeding the
 failure back to Claude. Anything that isn't a `git push` is passed
 through with exit 0, so the rest of the session pays no overhead.
 

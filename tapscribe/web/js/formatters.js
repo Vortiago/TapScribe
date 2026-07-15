@@ -1,13 +1,12 @@
 // @ts-check
-// Pure formatters used across the dashboard — the APP layer over the vendored
-// toolkit formatters (lib/format.js): fmtClock delegates to the viewer-zone
-// time(); the dense terminal-style number/duration forms (fmtDur, fmtMs,
-// fmtMmSs, fmtBytes) are a deliberate Stages aesthetic and stay hand-rolled.
+// Pure formatters used across the dashboard — the APP layer next to the
+// vendored toolkit formatters (lib/format.js): fmtClock renders viewer-zone
+// wall clock via its own module-scope Intl formatter (see its docstring); the
+// dense terminal-style number/duration forms (fmtDur, fmtMs, fmtMmSs,
+// fmtBytes) are a deliberate Stages aesthetic and stay hand-rolled.
 // No DOM dependency, no shared state — safe to unit-test in isolation.
 // (escapeHtml/cssEscape/fmtElapsed* were removed with the classic dashboard —
 // their only callers were classic main.js / ribbon.js / session-detail.js.)
-
-import { time } from "./lib/format.js";
 
 /** @param {number | null | undefined} b */
 export function fmtBytes(b) {
@@ -30,16 +29,25 @@ export function fmtMs(ms) {
 }
 
 /** Wall-clock hh:mm:ss for an absolute instant (ISO-with-offset), rendered in
- * the VIEWER's timezone via the vendored toolkit formatter (lib/format.js) —
- * the old version sliced the ISO string, which showed every viewer the
- * origin-encoded (UTC) wall time. The instant is unambiguous; the viewer's
- * zone is the right display zone (toolkit browser-timezone rule).
+ * the VIEWER's timezone (toolkit browser-timezone rule) — the old version
+ * sliced the ISO string, which showed every viewer the origin-encoded (UTC)
+ * wall time. The instant is unambiguous; the viewer's zone is the right
+ * display zone. Uses a module-scope Intl formatter instead of lib/format.js's
+ * `time()`: fmtClock runs once per merged-transcript segment (thousands per
+ * rebuild), and dfmt() only reference-caches its own two singletons — a
+ * custom options object pays a JSON.stringify cache-key per call.
  * @param {string | null | undefined} iso */
 export function fmtClock(iso) {
   if (!iso) return "?";
-  return time(iso, CLOCK_OPTS);
+  // Guard unparseable timestamps: Intl's format() throws RangeError on an
+  // Invalid Date, and fmtClock runs inside whole-transcript row loops — a
+  // single corrupt sidecar value must garble one cell ("?"), never abort the
+  // entire render/copy (the old slice(11,19) form never threw either).
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "?";
+  return CLOCK_FMT.format(d);
 }
-const CLOCK_OPTS = /** @type {Intl.DateTimeFormatOptions} */ ({
+const CLOCK_FMT = new Intl.DateTimeFormat(undefined, {
   hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
 });
 

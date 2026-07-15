@@ -88,7 +88,7 @@ def split_voxtral_text_into_segments(text: str, *, duration: float) -> tuple[Tra
     return tuple(segments)
 
 
-def _inputs_kwargs(inputs: Any) -> dict[str, Any]:
+def inputs_kwargs(inputs: Any) -> dict[str, Any]:
     """Best-effort: convert the processor output into kwargs for `.generate()`.
 
     The transformers/mlx-voxtral processor returns a `BatchEncoding`/

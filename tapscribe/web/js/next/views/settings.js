@@ -25,6 +25,7 @@ import { getJson, putJson, wireConfigSave, wireSave } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 import { header } from "../shell.js";
+import { makeStatusFlasher, clipboardAvailable } from "../ui.js";
 import * as configCard from "../../components/config-card.js";
 import { LIVE_FAMILY_LABELS, buildModelSelect } from "../../model-select.js";
 
@@ -85,18 +86,7 @@ export function build(ctx) {
   /** @type {string | null} */
   let cachedTapToken = null;
   let tokenRevealed = false;
-  /** @type {ReturnType<typeof setTimeout> | null} */
-  let bridgeStatusTimer = null;
-
-  /** @param {string} msg */
-  const flashBridgeStatus = (msg) => {
-    if (bridgeStatusTimer != null) clearTimeout(bridgeStatusTimer);
-    bridgeStatus.textContent = msg;
-    bridgeStatusTimer = setTimeout(() => {
-      if (bridgeStatus.textContent === msg) bridgeStatus.textContent = "";
-      bridgeStatusTimer = null;
-    }, 1500);
-  };
+  const flashBridgeStatus = makeStatusFlasher(bridgeStatus);
 
   /** Fetch the tap token once and cache it; every subsequent reveal/copy
    * reuses the cached value instead of hitting the endpoint again.
@@ -140,11 +130,9 @@ export function build(ctx) {
       flashBridgeStatus(`couldn't load token: ${String(e).replace(/^Error:\s*/, "")}`);
       return;
     }
-    // Same non-secure-context fallback as the transcript pane's copy button:
-    // start.sh --lan is plain http, where navigator.clipboard doesn't exist.
-    const haveClipboard = window.isSecureContext
-      && typeof navigator.clipboard?.writeText === "function";
-    if (!haveClipboard) {
+    // Same non-secure-context fallback as the transcript pane's copy button
+    // (the probe is shared — see ui.js).
+    if (!clipboardAvailable()) {
       window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t);
       return;
     }

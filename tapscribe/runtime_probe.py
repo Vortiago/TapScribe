@@ -115,7 +115,7 @@ _INSTALLED_MODULES_OVERRIDE: frozenset[str] | None = None
 _FIND_SPEC_CACHE: dict[str, bool] = {}
 
 
-def _is_module_available(name: str) -> bool:
+def is_module_available(name: str) -> bool:
     """True iff `name` is importable. The test override hook
     (`set_installed_modules_for_testing`) replaces the probe with a
     fixed set so tests can pretend e.g. `parakeet_mlx` is uninstalled
@@ -133,7 +133,7 @@ def _is_module_available(name: str) -> bool:
 
 
 def set_installed_modules_for_testing(names: frozenset[str] | None) -> None:
-    """Override what `_is_module_available` reports. `None` re-enables
+    """Override what `is_module_available` reports. `None` re-enables
     real probing. Use `frozenset()` to simulate "nothing installed"."""
     global _INSTALLED_MODULES_OVERRIDE
     _INSTALLED_MODULES_OVERRIDE = names
@@ -165,7 +165,7 @@ def refresh_backend_probes() -> None:
 
 # `auto` resolves to the first kind in this list that's available. MLX first
 # (cheapest, lowest-latency on Apple Silicon), then CUDA, then CPU.
-_AUTO_RESOLUTION_ORDER: tuple[BackendKind, ...] = ("mlx", "cuda", "cpu")
+AUTO_RESOLUTION_ORDER: tuple[BackendKind, ...] = ("mlx", "cuda", "cpu")
 
 
 def resolve_backend_preference(preference: BackendPreference) -> BackendKind:
@@ -179,7 +179,7 @@ def resolve_backend_preference(preference: BackendPreference) -> BackendKind:
     """
     avail = available_backends()
     if preference == "auto":
-        for kind in _AUTO_RESOLUTION_ORDER:
+        for kind in AUTO_RESOLUTION_ORDER:
             if kind in avail:
                 return kind
         # avail always contains "cpu", so this is unreachable, but the
