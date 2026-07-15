@@ -156,6 +156,22 @@ def _check_batch_model(model_id: str) -> None:
             raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
 
 
+def _check_idle_ttl(content: str) -> None:
+    """WRITE-time check for the "model-idle-ttl" key: value must parse as float
+    within _IDLE_TTL_BOUNDS. Empty clears the override."""
+    if not content:
+        return
+    try:
+        v = float(content)
+    except ValueError:
+        raise ValueError(f"idle TTL must be a number, got {content!r}") from None
+    from .transcribers import _IDLE_TTL_BOUNDS  # lazy — avoids cycle
+
+    if not (_IDLE_TTL_BOUNDS[0] <= v <= _IDLE_TTL_BOUNDS[1]):
+        lo, hi = _IDLE_TTL_BOUNDS
+        raise ValueError(f"idle TTL must be between {lo} and {hi}, got {v}")
+
+
 # The editable config files behind read_config / write_config, keyed by the
 # same key the dashboard PUTs to /api/config/{key}. The richer shapes
 # (languages.txt's catalog-validated set, summarizer.json) keep their own
@@ -185,6 +201,10 @@ CONFIG_KEYS: dict[str, _ConfigSpec] = {
     # plain substring, `exact:...`, or `re:...`. Write-time check validates
     # regex safety so a bad rule never lands on disk.
     "hallucinations": _ConfigSpec("HALLUCINATIONS_FILE", check=_check_hallucinations),
+    # Model idle-TTL knob (model-idle-ttl.txt): seconds of idle before
+    # eviction. Dashboard writes via config-store; _idle_ttl_s() reads at
+    # use-time when env var is unset.
+    "model-idle-ttl": _ConfigSpec("MODEL_IDLE_TTL_FILE", strip=True, check=_check_idle_ttl),
 }
 
 # A candidate-language set is a small comma/space-separated bag of ISO codes.

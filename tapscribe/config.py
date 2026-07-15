@@ -64,6 +64,10 @@ HALLUCINATIONS_FILE: Path = CONFIG_DIR / "hallucinations.txt"
 # Empty/missing = the bundled catch-all default
 # (transcribers.catalog.DEFAULT_CANDIDATE_LANGUAGES).
 LANGUAGES_FILE: Path = CONFIG_DIR / "languages.txt"
+# Operator's model idle-TTL knob: seconds of idle before eviction.
+# Dashboard writes here via config-store key `model-idle-ttl`;
+# `_idle_ttl_s()` reads it at use-time when the env var is unset.
+MODEL_IDLE_TTL_FILE: Path = CONFIG_DIR / "model-idle-ttl.txt"
 
 # Top-level dirs are created lazily on first use rather than at import
 # time, so unit tests and offline tooling don't litter the worktree

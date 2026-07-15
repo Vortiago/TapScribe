@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import gc
+import os
 import sys
 import threading
 import time
@@ -52,6 +53,7 @@ from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 from .. import config
+from .. import config_store as _config_store
 from .base import (
     BackendKind,
     BackendPreference,
@@ -150,13 +152,30 @@ _lock = threading.Lock()
 
 
 def _idle_ttl_s() -> float:
-    """Current eviction policy in seconds (see module docstring)."""
-    return config.env_float(
-        ENV_IDLE_TTL_S,
-        _DEFAULT_IDLE_TTL_S,
-        min_value=_IDLE_TTL_BOUNDS[0],
-        max_value=_IDLE_TTL_BOUNDS[1],
-    )
+    """Current eviction policy in seconds (see module docstring).
+
+    Resolution: env var (set + valid) > config file (set + valid) > default (0.0).
+    """
+    if ENV_IDLE_TTL_S in os.environ:
+        # Env explicitly set — use it (valid → value, invalid → default, NOT file)
+        return config.env_float(
+            ENV_IDLE_TTL_S,
+            _DEFAULT_IDLE_TTL_S,
+            min_value=_IDLE_TTL_BOUNDS[0],
+            max_value=_IDLE_TTL_BOUNDS[1],
+        )
+
+    # Env unset — try config file, read fresh each call (use-time)
+    raw = _config_store.read_text_file(config.MODEL_IDLE_TTL_FILE)
+    if raw:
+        try:
+            v = float(raw)
+        except (ValueError, TypeError):
+            return _DEFAULT_IDLE_TTL_S
+        if _IDLE_TTL_BOUNDS[0] <= v <= _IDLE_TTL_BOUNDS[1]:
+            return v
+
+    return _DEFAULT_IDLE_TTL_S
 
 
 def _free_framework_memory() -> None:
