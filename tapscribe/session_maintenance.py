@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -67,28 +68,42 @@ def session_is_empty(session_dir: Path) -> bool:
     return True
 
 
-def prune_empty_sessions(current_session: str) -> dict[str, Any]:
-    """Delete every session folder under RECORDINGS_DIR that `session_is_empty`
-    (no WAVs, no merged transcript, no operator label). Never deletes
-    `current_session`. Returns ``{"pruned": [...], "count": N, "failed": [...]}``.
+def _iter_candidate_session_dirs(current_session: str) -> Iterator[Path]:
+    """Yield each real session directory under ``RECORDINGS_DIR`` that is not
+    ``current_session`` — the shared walk-safety guard for the destructive bulk
+    ops (``prune_empty_sessions``, ``reclaim_audio_older_than``). Each caller
+    layers its own tail filter (empty / age) on the yielded dirs.
+
+    Skips symlinks BEFORE ``is_dir()`` (which follows them): a symlink planted
+    in ``RECORDINGS_DIR`` must never let a delete escape to an out-of-tree
+    target. (``shutil.rmtree`` also refuses symlinks, but don't rely on that
+    internal.) This symlink-before-is_dir ordering is the security invariant the
+    shared iterator keeps in one place.
 
     Pure filesystem walk over the ``RECORDINGS_DIR`` glob (a constant): no path
     is built from request input, so the path-injection guard doesn't apply here.
-    Shared by the manual `/api/sessions/prune-empty` endpoint and the
-    rotate-then-prune flow behind every new-session trigger.
     """
-    pruned: list[str] = []
-    failed: list[dict[str, str]] = []
     for sd in config.RECORDINGS_DIR.glob("*"):
-        # Skip symlinks BEFORE is_dir() (which follows them): a symlink planted
-        # in RECORDINGS_DIR must never let this delete an out-of-tree target.
-        # (shutil.rmtree also refuses symlinks, but don't rely on that internal.)
         if sd.is_symlink():
             continue
         if not sd.is_dir():
             continue
         if sd.name == current_session:
             continue
+        yield sd
+
+
+def prune_empty_sessions(current_session: str) -> dict[str, Any]:
+    """Delete every session folder under RECORDINGS_DIR that `session_is_empty`
+    (no WAVs, no merged transcript, no operator label). Never deletes
+    `current_session`. Returns ``{"pruned": [...], "count": N, "failed": [...]}``.
+
+    Shared by the manual `/api/sessions/prune-empty` endpoint and the
+    rotate-then-prune flow behind every new-session trigger.
+    """
+    pruned: list[str] = []
+    failed: list[dict[str, str]] = []
+    for sd in _iter_candidate_session_dirs(current_session):
         if not session_is_empty(sd):
             continue
         try:
@@ -138,10 +153,15 @@ def _dir_size(d: Path) -> int:
     return sum(_safe_size(f) for f in d.rglob("*"))
 
 
-def _delete_wav_with_sidecars(wav: Path) -> int:
+def _delete_wav_with_sidecars(wav: Path, *, dry_run: bool = False) -> int:
     """Delete one WAV plus whichever transcript-cache layout it carries —
     the legacy `<wav>.json` file, the new `<wav>.transcripts/` directory,
     or both. Returns the bytes reclaimed (WAV + sidecars).
+
+    With `dry_run=True` nothing is unlinked — it only SUMS the same bytes it
+    would free. That makes this the single sidecar-layout enumeration the
+    bulk-reclaim PREVIEW reuses (via `delete_session_audio`), so a preview
+    total can never drift from what an execute actually frees.
 
     The destructive analog of `_move_sidecars_with_wav` above: both
     enumerate the SAME two sidecar layouts, so if a third layout is ever
@@ -156,14 +176,17 @@ def _delete_wav_with_sidecars(wav: Path) -> int:
     legacy = wav.with_suffix(".json")
     if legacy.is_file():
         freed += _safe_size(legacy)
-        legacy.unlink(missing_ok=True)
+        if not dry_run:
+            legacy.unlink(missing_ok=True)
     transcripts = wav.with_suffix(".transcripts")
     if transcripts.is_dir():
         freed += _dir_size(transcripts)
-        # Best-effort: a locked cache dir shouldn't block reclaiming the
-        # WAV; an orphaned cache dir is harmless and re-cleanable.
-        shutil.rmtree(transcripts, ignore_errors=True)
-    wav.unlink(missing_ok=True)
+        if not dry_run:
+            # Best-effort: a locked cache dir shouldn't block reclaiming the
+            # WAV; an orphaned cache dir is harmless and re-cleanable.
+            shutil.rmtree(transcripts, ignore_errors=True)
+    if not dry_run:
+        wav.unlink(missing_ok=True)
     return freed
 
 
@@ -341,13 +364,18 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def delete_session_audio(session: str) -> dict[str, Any]:
+def delete_session_audio(session: str, *, dry_run: bool = False) -> dict[str, Any]:
     """Delete ALL of a session's audio to reclaim disk: every original WAV
     in `<session>/`, the entire `<session>/stripped/` folder, and each
     WAV's per-WAV transcript-cache sidecars. KEEPS the merged
     `session-transcript.json` / `.txt` and `session-meta.json`, so the
     session survives `prune-empty` and the operator's result + label are
     preserved.
+
+    With `dry_run=True` nothing is deleted — it returns the same
+    `{session, wavs_deleted, bytes_freed}` it WOULD free. This is the one
+    size-walk the bulk-reclaim preview reuses, so its reported total always
+    matches what an execute frees (no duplicated sidecar-layout enumeration).
 
     Route-level guards (current-session refusal, in-flight-job refusal)
     live in the handler; this is purely the filesystem op. Returns
@@ -358,15 +386,16 @@ def delete_session_audio(session: str) -> dict[str, Any]:
     wavs_deleted = 0
     bytes_freed = 0
     for w in sorted(session_dir.glob("*.wav")):
-        bytes_freed += _delete_wav_with_sidecars(w)
+        bytes_freed += _delete_wav_with_sidecars(w, dry_run=dry_run)
         wavs_deleted += 1
     stripped = session_dir / DIRNAME_STRIPPED
     if stripped.is_dir():
         bytes_freed += _dir_size(stripped)
-        try:
-            shutil.rmtree(stripped)
-        except OSError as e:
-            raise SessionDeleteError(f"delete failed: {e}") from None
+        if not dry_run:
+            try:
+                shutil.rmtree(stripped)
+            except OSError as e:
+                raise SessionDeleteError(f"delete failed: {e}") from None
     return {"session": session, "wavs_deleted": wavs_deleted, "bytes_freed": bytes_freed}
 
 
@@ -397,6 +426,7 @@ def reclaim_audio_older_than(
     older_than_days: int,
     *,
     execute: bool = False,
+    exclude_sessions: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Walk the recordings archive and reclaim audio from sessions older than
     ``older_than_days`` days that also have a merged transcript.
@@ -404,75 +434,81 @@ def reclaim_audio_older_than(
     Eligibility: a session is eligible iff ALL of:
 
       * NOT the ``current_session`` (live session is NEVER touched)
+      * NOT in ``exclude_sessions`` — the caller passes the sessions that have
+        a transcribe/strip job in flight (``recorder.jobs``) or a live tap
+        writing to them (``recorder.streams``); this recorder-free function
+        can't see that state itself, so without the set a bulk reclaim could
+        delete a session's WAVs out from under a running job/tap
       * Has at least one ``*.wav`` file
       * Has a ``session-transcript.json`` (audio backed by a transcript)
       * Its latest WAV start timestamp is older than the cutoff
 
     Age derivation: the session's ``latest_iso`` is the maximum WAV start
-    timestamp across all WAVs (mirroring ``_describe_session`` in ``sessions.py``).
-    A session whose WAVs can't be parsed is skipped — no timestamp means
-    no way to determine "older than".
+    timestamp across all WAVs (mirroring ``_describe_session`` in ``sessions.py``)
+    — a session mixing old and recent WAVs reads as recent (kept) so we never
+    reclaim one still being appended to. A session whose WAVs can't be parsed
+    is skipped — no timestamp means no way to determine "older than".
 
     ``execute=False`` (preview): reports eligible sessions and their
     reclaimable byte counts without deleting anything.
 
     ``execute=True``: calls ``delete_session_audio`` for each eligible
-    session, preserving the merged transcript + meta.
+    session, preserving the merged transcript + meta. A session whose delete
+    fails (a locked ``stripped/`` dir, etc.) is collected into ``failed`` and
+    the walk continues, so one bad session never aborts the whole bulk op or
+    strands the operator in an unknown partial state (mirrors
+    ``prune_empty_sessions``).
 
-    Returns ``{"sessions": [{"session": str, "bytes_freed": int}], "total_bytes": int}``.
+    Returns ``{"sessions": [{"session": str, "bytes_freed": int}],
+    "total_bytes": int, "failed": [{"session": str, "error": str}]}``.
     """
+    # Defense in depth: the sole route caller already rejects <= 0, but a
+    # non-positive cutoff reaches into the future and would reclaim even
+    # near-current sessions — never let a stray/future caller trigger a
+    # delete-everything.
+    if older_than_days <= 0:
+        return {"sessions": [], "total_bytes": 0, "failed": []}
+
     cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
     sessions: list[dict[str, Any]] = []
+    failed: list[dict[str, str]] = []
     total_bytes = 0
 
-    for sd in config.RECORDINGS_DIR.glob("*"):
-        # Reuse the exact walk guards from ``prune_empty_sessions``.
-        if sd.is_symlink():
-            continue
-        if not sd.is_dir():
-            continue
-        if sd.name == current_session:
-            continue
-        # Must have audio to reclaim.
-        if not any(sd.glob("*.wav")):
+    for sd in _iter_candidate_session_dirs(current_session):
+        # Busy (job in flight) or live-tap sessions the caller flagged.
+        if sd.name in exclude_sessions:
             continue
         # Must have a merged transcript (audio backed).
         if not (sd / FILENAME_TRANSCRIPT_JSON).exists():
             continue
-        # Derive age from the latest WAV timestamp.
-        wav_starts = []
-        for w in sd.glob("*.wav"):
-            ts = parse_wav_start(w.name)
-            if ts is not None:
-                wav_starts.append(ts)
+        # Materialize WAV list once to avoid triple glob per session.
+        wavs = list(sd.glob("*.wav"))
+        if not wavs:
+            continue
+        # Derive age from the latest WAV timestamp. No parseable WAV → no age
+        # → skip (nothing to reclaim by age anyway).
+        wav_starts = [ts for w in wavs if (ts := parse_wav_start(w.name)) is not None]
         if not wav_starts:
-            # No parseable WAV → no age → skip (nothing to reclaim anyway).
             continue
         latest_iso = max(wav_starts)
         if latest_iso >= cutoff:
             # Inside the cutoff window → too young.
             continue
 
-        # Eligible.
+        # Eligible. Both branches route through delete_session_audio so the
+        # preview's byte total is the SAME walk an execute frees.
         if execute:
-            summary = delete_session_audio(sd.name)
-            bytes_freed = summary["bytes_freed"]
+            try:
+                bytes_freed = delete_session_audio(sd.name)["bytes_freed"]
+            except SessionDeleteError as e:
+                # Log the raw cause server-side, surface a generic marker, and
+                # keep going — a locked stripped/ dir must not abort the op.
+                print(f"[tapscribe] bulk reclaim failed for {sd.name}: {e}", flush=True)
+                failed.append({"session": sd.name, "error": "delete failed"})
+                continue
         else:
-            # Compute reclaimable bytes the same way ``delete_session_audio``
-            # would: all WAVs + sidecars + stripped/ — without deleting.
-            bytes_freed = 0
-            for w in sd.glob("*.wav"):
-                bytes_freed += _safe_size(w)
-                wav_legacy = w.with_suffix(".json")
-                if wav_legacy.is_file():
-                    bytes_freed += _safe_size(wav_legacy)
-                wav_transcripts = w.with_suffix(".transcripts")
-                if wav_transcripts.is_dir():
-                    bytes_freed += _dir_size(wav_transcripts)
-            stripped = sd / DIRNAME_STRIPPED
-            if stripped.is_dir():
-                bytes_freed += _dir_size(stripped)
+            bytes_freed = delete_session_audio(sd.name, dry_run=True)["bytes_freed"]
         sessions.append({"session": sd.name, "bytes_freed": bytes_freed})
         total_bytes += bytes_freed
 
-    return {"sessions": sessions, "total_bytes": total_bytes}
+    return {"sessions": sessions, "total_bytes": total_bytes, "failed": failed}

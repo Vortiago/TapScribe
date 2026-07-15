@@ -1463,31 +1463,51 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
 
 
 @app.post("/api/sessions/bulk-reclaim-audio")
-async def api_bulk_reclaim_audio(
-    older_than_days: int,
-    execute: bool = False,
-    recorder: Recorder = Depends(get_recorder),
-):
+async def api_bulk_reclaim_audio(req: Request, recorder: Recorder = Depends(get_recorder)):
     """Bulk reclaim audio from old sessions. Walks the recordings archive
     and, for every session older than ``older_than_days`` with a merged
     transcript, reclaims its audio (originals + ``stripped/`` go; the
     merged transcript + meta stay).
 
-    ``execute=False`` (preview): lists eligible sessions and their
-    reclaimable byte counts without deleting anything.
+    Body (JSON), like the sibling ``absorb`` route — NOT query params — so a
+    dashboard POSTing ``{older_than_days, execute}`` can't silently arrive as
+    a no-op ``execute=False`` (a bare-annotated scalar would resolve as a
+    Query param and drop a JSON body):
 
-    ``execute=True``: performs the reclaim across all eligible sessions.
+        ``{"older_than_days": <int > 0>, "execute": <bool>}``
 
-    Refuses ``older_than_days <= 0``. The current session is always
-    excluded (the function skips it), so the live session is never touched.
+    ``execute`` absent/false (preview): lists eligible sessions and their
+    reclaimable byte counts without deleting anything. ``execute: true``
+    performs the reclaim across all eligible sessions.
+
+    Returns ``{ok, sessions, total_bytes, failed}``. Refuses
+    ``older_than_days <= 0`` (400). The current session, any session with a
+    transcribe/strip job in flight, and any session with a live tap are all
+    excluded, so live/busy audio is never touched.
     """
-    if older_than_days <= 0:
-        raise HTTPException(400, "older_than_days must be positive")
+    body = await _json_body(req)
+    older_than_days = body.get("older_than_days")
+    if not isinstance(older_than_days, int) or isinstance(older_than_days, bool) or older_than_days <= 0:
+        raise HTTPException(400, "older_than_days must be a positive integer")
+    # Strict: only a literal JSON `true` triggers a real delete — `bool("false")`
+    # is True, so never coerce an arbitrary body value on a destructive flag.
+    execute = body.get("execute") is True
+
+    # Exclude what the recorder-free reclaim fn can't see: a session with a
+    # transcribe/strip job in flight (recorder.jobs) or a live tap writing to
+    # it (recorder.streams). Deleting their WAVs mid-job would corrupt output;
+    # the current session is excluded inside the fn. Mirrors the single-item
+    # DELETE route's _refuse_current_or_busy, but as an EXCLUSION (skip the
+    # busy ones) rather than refusing the whole bulk op.
+    busy = set(recorder.jobs.snapshot())
+    busy |= {s.session for s in await recorder.streams.snapshot()}
+
     result = await asyncio.to_thread(
         reclaim_audio_older_than,
         recorder.session_start,
         older_than_days,
         execute=execute,
+        exclude_sessions=frozenset(busy),
     )
     return {"ok": True, **result}
 
