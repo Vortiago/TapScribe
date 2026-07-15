@@ -33,9 +33,14 @@ from .runtime_probe import available_backend_strs
 from .transcribers.catalog import REGISTRY, TranscriberRegistry
 
 # Curated per-family display metadata, in matrix order: (catalog family, label,
-# rough size hint). An allowlist (like SUMMARY_MODELS) so unimplemented families
-# (e.g. moonshine) don't surface until deliberately added. Labels + sizes are
-# setup-facing display data, intentionally independent of
+# rough size hint). An allowlist (like SUMMARY_MODELS): only families that make
+# sense as a FIRST-RUN install surface here. Moonshine (PRD #120, shipped in
+# #334) is implemented but live-only — it can't be an operator's only
+# transcriber, so the first-run flow deliberately doesn't offer it; it installs
+# via the terminal picker (`tools/install_picker.py`) or
+# `pip install "tapscribe[moonshine]"` once a batch family is in place.
+# Surfacing live-only extras in /setup as an add-on section is a follow-up.
+# Labels + sizes are setup-facing display data, intentionally independent of
 # tools/install_picker.py's FamilyDef list (which can't import this package).
 # Sizes are approximate (vary by backend/host) — expectation-setting, not a
 # contract.

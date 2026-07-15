@@ -176,6 +176,10 @@ def test_nb_whisper_repo_still_resolves_after_move() -> None:
     # the gate pins it (test_nb_whisper.py only covers ensure_nb_whisper_lang_ids).
     # Catches a re-homing that drops or corrupts the NbAiLab repo string.
     assert nb_whisper._resolve_nb_whisper_repo("nb-whisper-large") == "NbAiLab/nb-whisper-large"
-    # A miss (no registry entry) degrades to the raw name, never raises — the
-    # nb_whisper fallback returns the name as-is, unlike the constructed parakeet one.
-    assert nb_whisper._resolve_nb_whisper_repo("not-a-registered-model-xyz") == "not-a-registered-model-xyz"
+    # A miss (no registry entry) RAISES — it must never degrade to the raw
+    # name, because the resolved value flows straight into an HF Hub
+    # snapshot_download(repo_id=...) and the name can arrive from a request
+    # body (PRD #120 story 23: the catalog is the allowlist; same rule as
+    # the summarizer SUMMARY_MODELS gate).
+    with pytest.raises(RuntimeError, match="not-a-registered-model-xyz"):
+        nb_whisper._resolve_nb_whisper_repo("not-a-registered-model-xyz")

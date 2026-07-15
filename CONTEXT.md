@@ -73,13 +73,14 @@ Each entry (`ModelEntry`) declares:
 - `model_id` — canonical short name (e.g. `parakeet-tdt-0.6b-v3`)
 - `family` — one of `whisper`, `nb-whisper`, `voxtral`, `parakeet`,
   `moonshine`. Drives `<optgroup>` labelling in the dashboard. Moonshine
-  (issue #121) is registered live-only-ahead-of-inference: its two
-  entries (`moonshine-tiny`/`moonshine-base`) have `available=False` (the
-  "coming soon" placeholder flag, so the factory refuses to load them and
-  `/api/models` never lists them regardless of whether the `moonshine` /
-  `optimum` probe modules happen to be installed) and their loaders raise
-  `NotImplementedError` pending the real MLX (#122) and ONNX CPU/CUDA
-  (#123) backends.
+  (PRD #120, shipped in #334) is registered live-only
+  (`contexts={"live"}`): its two entries
+  (`moonshine-tiny`/`moonshine-base`) carry real loaders gated on
+  per-runtime probe modules (`mlx_audio` on Apple Silicon,
+  `moonshine_onnx` elsewhere), so `/api/models?context=live` lists them
+  exactly when the matching runtime is installed. There is deliberately
+  no batch adapter (PRD #120 Out of Scope) — resolving a Moonshine id
+  for batch raises `NotImplementedError`.
 - `languages` — ISO codes, or `("auto",)` for auto-detecting models
 - `contexts` — frozenset of `"batch"` / `"live"` — gates which
   picker shows the model
@@ -197,15 +198,27 @@ JSON WhisperLiveKit sends), backed by `MoonshineWindow`
 pseudo-streaming state machine that re-transcribes a growing buffer at
 a short cadence and rolls over into a new line once a window would
 exceed Moonshine's recommended sub-30s clip length. Consequence: the
-Recorder, `TapFanOut`, `SpeechGate`, `WlKRelay`, and `LiveTranscripts`
-are unmodified — `MoonshineLiveChannel` is a peer implementation of the
-same Protocol, not a new pipeline. `supports_native_vad = False` (no
-built-in VAC; TapScribe's own `SpeechGate` is always the gate).
+Recorder, `SpeechGate`, and `LiveTranscripts` are unmodified —
+`MoonshineLiveChannel` is a peer implementation of the same Protocol,
+not a new pipeline. Two downstream pieces were *generalized* (not
+forked) for it in #334: `WlKRelay.close()` sends the end-of-audio empty
+binary frame and drains until `ready_to_stop` (the same wire signal
+real WhisperLiveKit speaks) so close-time tail lines survive, and
+`TapRelay`/`TapFanOut` hold the live channel through a resolver
+(`lambda: recorder.live`) so already-open taps follow a family swap
+mid-stream. `supports_native_vad = False` (no built-in VAC; TapScribe's
+own `SpeechGate` is always the gate — a carried-forward
+`gate_kind="backend"` is coerced to `"tapscribe"` at the tap's own gate
+construction, never persisted into the operator's config).
 Picking a Moonshine model swaps which concrete `LiveChannel`
 `recorder.live` holds (`moonshine_live.resolve_live_channel_for_model`,
 applied by both `/api/live/start` and the `AUTO_START_LIVE` boot path)
 — the Recorder's own construction still always starts with
-`WhisperLiveKitChannel`.
+`WhisperLiveKitChannel`. The forward plan for Moonshine v2 "Voice"
+(true incremental streaming) lives in PRD #120's Further Notes:
+additive `ModelEntry` rows + a streaming channel variant when an MLX
+port exists; the `LiveChannel` seam and the `/asr` snapshot contract
+don't change.
 
 ## SpeechGate · gate_kind
 

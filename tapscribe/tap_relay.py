@@ -31,7 +31,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from .live_relay import WlKRelay
@@ -311,8 +311,21 @@ class TapRelay:
         self._relay = candidate
         self._connected = (cfg.host, cfg.port, cfg.language)
         self._gate = None
+        gate_cfg = cfg
+        if getattr(cfg, "gate_kind", "tapscribe") == "backend" and not getattr(
+            self._live, "supports_native_vad", True
+        ):
+            # A channel with no backend-side VAD (Moonshine) cannot honor
+            # gate_kind="backend": build_gate_for_config would return None
+            # and this tap would feed raw UNGATED PCM (silence included)
+            # to the engine. The operator's persisted preference stays
+            # untouched in live.config — it must survive the swap back to
+            # a native-VAD channel — so the coercion happens here, at this
+            # tap's own gate construction, which is also what such a
+            # channel's info["gate_kind"] already reports.
+            gate_cfg = replace(cfg, gate_kind="tapscribe")
         try:
-            self._gate = await asyncio.to_thread(self._gate_factory, cfg)
+            self._gate = await asyncio.to_thread(self._gate_factory, gate_cfg)
         except Exception as e:
             print(
                 f"[tapscribe] /tap gate construction failed{self._label_suffix}: {e}; falling back to passthrough",

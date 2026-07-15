@@ -25,10 +25,23 @@ from pathlib import Path
 
 
 def _resolve_nb_whisper_repo(model_name: str) -> str:
-    """Resolve an NB-Whisper model_id to its HF repo via the registry."""
+    """Resolve an NB-Whisper model_id to its HF repo via the registry.
+
+    Raises `RuntimeError` for a name with no registry entry: the result
+    flows straight into `snapshot_download(repo_id=...)`, and the name can
+    arrive from a request body — falling back to the raw name would turn
+    an unvalidated string into an arbitrary Hub fetch (PRD #120 story 23:
+    the catalog is the allowlist)."""
     from .transcribers.catalog import repo_for
 
-    return repo_for(model_name, "nb-whisper") or model_name
+    repo = repo_for(model_name, "nb-whisper")
+    if repo is None:
+        raise RuntimeError(
+            f"{model_name!r} is not a registered NB-Whisper model — refusing to "
+            f"download an unlisted repo from the HF Hub. Add a catalog entry "
+            f"(transcribers/catalog.py) to allow it."
+        )
+    return repo
 
 
 def download_nb_whisper_ct2_dir(model_name: str) -> Path:

@@ -112,7 +112,11 @@ def test_only_curated_families_surface_no_moonshine():
     curated = {k for k, _, _ in FAMILY_META}
     assert keys <= curated
     assert keys == {"whisper", "nb-whisper", "voxtral", "parakeet"}
-    assert "moonshine" not in keys  # live-only, inference not implemented yet
+    # Moonshine is implemented (PRD #120/#334) but live-only — it can't be a
+    # first-run operator's ONLY transcriber, so /setup deliberately doesn't
+    # offer it (see FAMILY_META's rationale); the terminal picker and the
+    # pip extras are its install paths.
+    assert "moonshine" not in keys
 
 
 def test_each_family_carries_a_size_hint_and_models():

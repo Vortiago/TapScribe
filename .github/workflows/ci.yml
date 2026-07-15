@@ -314,6 +314,36 @@ jobs:
       - name: Run the transformers-family upstream-contract smoke tests
         run: pytest tests/test_transcribers_parakeet.py tests/test_transcribers_voxtral.py -k upstream -q
 
+  # Same rationale, different runtime: the Moonshine ONNX adapter imports
+  # `moonshine_onnx` symbols that only the real `useful-moonshine-onnx`
+  # package can verify. Without a lane that actually installs it, the
+  # importorskip'd contract smoke skips on every runner and an upstream
+  # rename ships silently (PRD #120 story 18). This job runs the WHOLE
+  # ONNX-adapter test file — the stub-injected tests plus, with the real
+  # package importable, the upstream-contract smoke. The MLX twin
+  # (mlx-audio) stays Apple-only and out of Linux CI scope, same as the
+  # other MLX-family smokes above.
+  upstream-contract-moonshine-onnx:
+    name: upstream-contract smoke (moonshine-onnx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the Moonshine ONNX runtime
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[moonshine-cpu]" pytest pytest-asyncio
+
+      - name: Run the Moonshine ONNX adapter + upstream-contract tests
+        run: pytest tests/test_transcribers_onnx_moonshine.py -q
+
   # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:
   # a cross-platform bridge-core class library, a Windows WASAPI capture
   # backend, and a WinForms tray runner. This job builds the whole solution on

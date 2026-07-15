@@ -959,6 +959,22 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
         body.get("gate_min_speech_ms"), "gate_min_speech_ms", lo=0, hi=5_000
     )
 
+    # The catalog is the allowlist (PRD #120 story 23 — the same rule as
+    # the summarizer SUMMARY_MODELS gate): a model id from the request
+    # body must resolve to a registered live-context entry before it can
+    # reach a channel spawn, an engine loader, or an HF Hub download
+    # (nb-whisper models resolve their HF repo from this same registry).
+    # `None` (key absent / blank) means "reuse the channel's current
+    # model" — operator-persisted state, not external input.
+    if model is not None:
+        entry = REGISTRY.get(model)
+        if entry is None or not entry.supports_context("live"):
+            raise HTTPException(
+                400,
+                f"unknown live model {model!r} — not a live-context entry in the "
+                f"model catalog (see GET /api/models?context=live)",
+            )
+
     # Compute (but don't yet apply) the family swap: whether the requested
     # model needs a DIFFERENT concrete LiveChannel than the one currently
     # installed (Whisper/NB-Whisper <-> Moonshine — see PRD #120). The

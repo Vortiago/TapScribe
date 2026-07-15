@@ -15,11 +15,14 @@ speaks the exact same JSON shape WhisperLiveKit does, backed by a
 `MoonshineWindow` (rolling-chunk pseudo-streaming, see
 `transcribers/_moonshine_window.py`) per connection instead of a subprocess.
 
-Consequence: the Recorder, `TapFanOut`, `SpeechGate`, `WlKRelay`, and
-`LiveTranscripts` are NOT modified by this module at all — selecting
-Moonshine is purely a matter of which concrete `LiveChannel` the Recorder
-holds (see `tapscribe.app`'s `/api/live/start` route, which swaps
-`recorder.live` based on the requested model's catalog family).
+Consequence: this module touches nothing downstream — selecting Moonshine
+is purely a matter of which concrete `LiveChannel` the Recorder holds
+(see `tapscribe.app`'s `/api/live/start` route, which swaps
+`recorder.live` based on the requested model's catalog family). The
+Recorder, `SpeechGate`, and `LiveTranscripts` are untouched repo-wide;
+`WlKRelay` and `TapRelay`/`TapFanOut` were *generalized* (not forked) for
+the family swap — the end-of-audio/`ready_to_stop` close handshake and
+the `lambda: recorder.live` channel resolver (see their docstrings).
 
 No subprocess here — unlike `WhisperLiveKitChannel`, there is no child
 process to spawn/supervise/pump logs from. Instead `start()` spins up a
