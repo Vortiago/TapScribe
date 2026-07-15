@@ -164,14 +164,30 @@ class WlKRelay:
             return False
 
     async def close(self) -> None:
-        """Close the WS and drain the consumer so any tail settled-lines
-        for audio we already sent get appended before we return.
+        """Signal end-of-audio, drain the consumer, close the WS — in that
+        order, so tail settled-lines for audio we already sent get
+        appended before we return.
 
-        After the consumer task has drained, we flush the in-flight tail
-        from the most-recent snapshot — the line that was being held
-        because no newer line had appeared after it. Without this, a
-        short utterance that produced exactly one line would never reach
-        the dashboard.
+        The end-of-audio signal is an empty binary frame — the same wire
+        signal whisperlivekit's own web client sends on stop: the server
+        flushes its remaining PCM, sends the final results, and replies
+        `{"type": "ready_to_stop"}` (see whisperlivekit's
+        `audio_processor.process_audio` / `basic_server`). TapScribe's
+        Moonshine `/asr` server speaks the same protocol. Sending it
+        BEFORE the WS close is what lets the peer deliver its close-time
+        final snapshot at all — once the close handshake starts, the
+        peer's sends can only fail, which used to truncate the tail of
+        essentially every Moonshine utterance (PR #334 finding #5). The
+        consumer ends on `ready_to_stop` (or the peer's own close); the
+        `drain_timeout` bounds the wait against a peer that never
+        answers, in which case we fall back to cancelling — exactly the
+        pre-signal behaviour.
+
+        After the consumer has drained, we flush the in-flight tail from
+        the most-recent snapshot — the line that was being held because
+        no newer line had appeared after it. Without this, a short
+        utterance that produced exactly one line would never reach the
+        dashboard.
 
         The tail flush is wrapped in a `finally` so that even if the
         outer task is being cancelled mid-close (TestClient does this on
@@ -180,8 +196,7 @@ class WlKRelay:
         try:
             if self._ws is not None:
                 with contextlib.suppress(Exception):
-                    await self._ws.close()
-                self._ws = None
+                    await self._ws.send(b"")  # end-of-audio: request the final snapshot
             if self._consumer is not None:
                 try:
                     await asyncio.wait_for(self._consumer, timeout=self._drain_timeout)
@@ -190,6 +205,10 @@ class WlKRelay:
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await self._consumer
                 self._consumer = None
+            if self._ws is not None:
+                with contextlib.suppress(Exception):
+                    await self._ws.close()
+                self._ws = None
         finally:
             self._flush_tail()
 
@@ -242,27 +261,35 @@ class WlKRelay:
                         with contextlib.suppress(Exception):
                             self._on_buffer(raw_buf)
                 snapshot = data.get("lines")
-                if not isinstance(snapshot, list):
-                    continue
-                self._last_snapshot = snapshot
-                # Emit every newly-non-tail entry. Non-tail positions
-                # are immutable in WlK's wire format, so we only need
-                # to scan from the last upto we processed. The dedup
-                # in `_consider_emit_line` covers a tail-becoming-
-                # non-tail whose text already settled (no re-emit) and
-                # the rare same-key text-change case (emits the diff).
-                upto = max(0, len(snapshot) - 1)
-                for i in range(self._last_emit_scan_upto, upto):
-                    self._consider_emit_line(snapshot[i])
-                if upto > self._last_emit_scan_upto:
-                    self._last_emit_scan_upto = upto
-                # Tail-stability flush: once the tail text has held
-                # steady (with the in-flight buffer empty) for enough
-                # consecutive snapshots, WlK has nothing more to
-                # commit into it and we can flush without losing
-                # context — short utterances reach the LiveFeed
-                # without waiting for the bridge to disconnect.
-                self._maybe_flush_stable_tail(snapshot)
+                if isinstance(snapshot, list):
+                    self._last_snapshot = snapshot
+                    # Emit every newly-non-tail entry. Non-tail positions
+                    # are immutable in WlK's wire format, so we only need
+                    # to scan from the last upto we processed. The dedup
+                    # in `_consider_emit_line` covers a tail-becoming-
+                    # non-tail whose text already settled (no re-emit) and
+                    # the rare same-key text-change case (emits the diff).
+                    upto = max(0, len(snapshot) - 1)
+                    for i in range(self._last_emit_scan_upto, upto):
+                        self._consider_emit_line(snapshot[i])
+                    if upto > self._last_emit_scan_upto:
+                        self._last_emit_scan_upto = upto
+                    # Tail-stability flush: once the tail text has held
+                    # steady (with the in-flight buffer empty) for enough
+                    # consecutive snapshots, WlK has nothing more to
+                    # commit into it and we can flush without losing
+                    # context — short utterances reach the LiveFeed
+                    # without waiting for the bridge to disconnect.
+                    self._maybe_flush_stable_tail(snapshot)
+                # `ready_to_stop` is the peer's answer to our end-of-audio
+                # signal (see `close()`): everything is delivered, so end
+                # the drain immediately instead of waiting out
+                # drain_timeout. Checked AFTER the snapshot handling above
+                # — the Moonshine server ships its final lines in the same
+                # message (real WlK sends it as a bare, lines-less
+                # message; either shape ends the drain).
+                if data.get("type") == "ready_to_stop":
+                    break
         except (ConnectionClosed, asyncio.CancelledError):
             pass
         except Exception as e:

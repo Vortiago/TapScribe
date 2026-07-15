@@ -706,6 +706,49 @@ def test_api_state_exposes_live_supports_native_vad(client):
     assert body.get("live_supports_native_vad") is True
 
 
+def test_live_start_swaps_to_moonshine_live_channel(client, recorder_under_test, monkeypatch):
+    """Requesting a Moonshine model swaps `recorder.live` from the default
+    WhisperLiveKitChannel to a MoonshineLiveChannel — the routing PRD #120
+    documents ("selecting Moonshine swaps the concrete channel with no
+    Recorder change"). No real inference engine loads: the module-level
+    factory is monkeypatched to a stub."""
+    from tapscribe.moonshine_live import MoonshineLiveChannel
+
+    class _FakeEngine:
+        def generate(self, audio):
+            return "ok"
+
+    monkeypatch.setattr(
+        "tapscribe.moonshine_live.default_engine_factory",
+        lambda model_id, *, use_mlx: _FakeEngine(),
+    )
+
+    r = client.post("/api/live/start", json={"model": "moonshine-tiny"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert isinstance(recorder_under_test.live, MoonshineLiveChannel)
+    assert recorder_under_test.live.info["model"] == "moonshine-tiny"
+    assert recorder_under_test.live.info["state"] == "running"
+    assert recorder_under_test.live.supports_native_vad is False
+
+    # Cleanup: stop the background /asr server thread this test spawned.
+    recorder_under_test.live.stop()
+
+
+def test_live_start_moonshine_rejects_backend_gate_kind(client, recorder_under_test, monkeypatch):
+    """A Moonshine channel has no native VAD — the existing
+    gate_kind='backend' guard must reject it for the NEWLY swapped-in
+    channel, not just the channel that was running before the swap."""
+    monkeypatch.setattr(
+        "tapscribe.moonshine_live.default_engine_factory",
+        lambda model_id, *, use_mlx: pytest.fail("engine should not load — request must 400 first"),
+    )
+    r = client.post("/api/live/start", json={"model": "moonshine-tiny", "gate_kind": "backend"})
+    assert r.status_code == 400, r.text
+    assert "native" in r.text.lower() or "supports" in r.text.lower()
+
+
 def test_live_start_rejects_invalid_gate_kind(client):
     """The dashboard is the only sanctioned source for gate_kind, but
     a stale or hand-crafted POST that doesn't pass "tapscribe" /
@@ -3093,25 +3136,37 @@ def test_api_summarizer_config_key_cleared_via_empty_string(client):
     assert body["base_url"] == "http://h:1/v1"
 
 
-# ── Moonshine live surfacing — issue #121 ────────────────────────────────────
+# ── Moonshine live surfacing — PRD #120 ──────────────────────────────────────
 
 
-def test_api_models_live_excludes_moonshine_placeholders(client):
-    # autouse `_force_all_probes_installed` marks moonshine's probes importable
+def test_api_models_live_includes_moonshine_when_probes_installed(client):
+    # autouse `_force_all_probes_installed` marks moonshine's probes (mlx_audio /
+    # moonshine_onnx) importable. Real inference now backs both models (see
+    # tapscribe.moonshine_live), so `available=True` + an importable probe is
+    # enough for them to surface — no more permanent placeholder exclusion.
     r = client.get("/api/models?context=live")
     assert r.status_code == 200
     ids = {m["model_id"] for m in r.json()["models"]}
-    # available=False short-circuits is_installed → excluded even with probes
+    assert {"moonshine-tiny", "moonshine-base"} <= ids
+
+
+def test_api_models_live_excludes_moonshine_when_probes_absent(client, monkeypatch):
+    """Without either probe module importable, Moonshine drops out of the
+    `only_installed=True` listing `/api/models` serves — same behavior as
+    every other family, now that it's no longer a hard-coded placeholder."""
+    from tapscribe.runtime_probe import set_installed_modules_for_testing
+
+    set_installed_modules_for_testing(frozenset())
+    try:
+        r = client.get("/api/models?context=live")
+    finally:
+        set_installed_modules_for_testing(all_probe_modules())
+    assert r.status_code == 200
+    ids = {m["model_id"] for m in r.json()["models"]}
     assert ids.isdisjoint({"moonshine-tiny", "moonshine-base"})
 
 
 def test_api_models_live_includes_a_real_installed_model(client):
-    # Positive control for the exclusion pin above: its `isdisjoint` passes
-    # trivially if the listing is empty, so anchor that a genuine available live
-    # model DOES surface. (moonshine can no longer exercise the install-probe
-    # filter — available=False short-circuits is_installed before the probe — so
-    # a probe-absent moonshine test is now indistinguishable from the placeholder
-    # guard the sibling already pins; this positive control is the meaningful pin.)
     r = client.get("/api/models?context=live")
     assert r.status_code == 200
     ids = {m["model_id"] for m in r.json()["models"]}

@@ -81,6 +81,7 @@ from .batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
+from .moonshine_live import resolve_live_channel_for_model
 from .name_resolution import attach_people, attach_people_mutation, attach_people_view
 from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
@@ -292,6 +293,18 @@ async def _lifespan(app: FastAPI):
 
     recorder: Recorder | None = getattr(app.state, "recorder", None)
     if recorder is not None and config.AUTO_START_LIVE:
+        # The Recorder always constructs a WhisperLiveKitChannel at boot
+        # (see Recorder.__init__); if the operator's persisted default
+        # live model (config/live-model.txt) names a Moonshine model, the
+        # SAME family-swap the /api/live/start route applies must run
+        # here too — otherwise auto-start would try to spawn
+        # whisperlivekit-server with an unsupported --model and fail
+        # exactly the way issue #259 originally described.
+        new_channel = resolve_live_channel_for_model(
+            recorder.live, target_model=recorder.live.config.model, use_mlx=recorder.use_mlx
+        )
+        if new_channel is not None:
+            recorder.live = new_channel
         ok, msg = recorder.live.start()
         if not ok:
             print(f"[tapscribe] live auto-start skipped: {msg}", flush=True)
@@ -928,23 +941,12 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     language = (body.get("language") or "").strip() or None
     conf = body.get("confidence_validation")
 
-    # Boundary validation. CodeQL treats Request.json() as untrusted
-    # input; the dashboard's HTML min/max attributes are only client-
-    # side hints. Anything that fails the checks here returns 400 —
-    # don't let it surface deeper as a ValueError 500.
-    gate_kind_raw = body.get("gate_kind")
-    gate_kind = (gate_kind_raw or "").strip() or None
-    if gate_kind is not None and gate_kind not in ("tapscribe", "backend"):
-        raise HTTPException(400, f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
-    if gate_kind == "backend" and not getattr(recorder.live, "supports_native_vad", False):
-        # Stale-dashboard guard: a future Parakeet live channel
-        # has no native VAD, so "backend" gating would silently leave
-        # no gate at all. UI auto-greys this, but old clients won't.
-        raise HTTPException(
-            400,
-            "current live channel has no native VAD; gate_kind='backend' is not supported",
-        )
-
+    # Boundary validation FIRST — before the family swap below stops or
+    # replaces anything. CodeQL treats Request.json() as untrusted input;
+    # the dashboard's HTML min/max attributes are only client-side hints.
+    # Anything that fails the checks here returns 400, and a 400 must
+    # leave the running channel exactly as it was — pre-#334 the swap ran
+    # first and a rejected request killed the operator's healthy channel.
     gate_speech_threshold = _parse_bounded_float(
         body.get("gate_speech_threshold"), "gate_speech_threshold", lo=0.0, hi=1.0
     )
@@ -953,6 +955,38 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     gate_min_speech_ms = _parse_bounded_int(
         body.get("gate_min_speech_ms"), "gate_min_speech_ms", lo=0, hi=5_000
     )
+
+    # Compute (but don't yet apply) the family swap: whether the requested
+    # model needs a DIFFERENT concrete LiveChannel than the one currently
+    # installed (Whisper/NB-Whisper <-> Moonshine — see PRD #120). The
+    # Recorder holds `live` typed as the `LiveChannel` Protocol
+    # specifically so this works with no Recorder change. Construction is
+    # side-effect-free (no engine load, no bind); the returned instance is
+    # also what gate_kind validation must be judged against — the TARGET
+    # channel's capabilities, not the pre-swap one's.
+    new_channel = resolve_live_channel_for_model(
+        recorder.live, target_model=model or recorder.live.config.model, use_mlx=recorder.use_mlx
+    )
+    target_channel = new_channel if new_channel is not None else recorder.live
+
+    gate_kind_raw = body.get("gate_kind")
+    gate_kind = (gate_kind_raw or "").strip() or None
+    if gate_kind is not None and gate_kind not in ("tapscribe", "backend"):
+        raise HTTPException(400, f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
+    if gate_kind == "backend" and not getattr(target_channel, "supports_native_vad", False):
+        # Stale-dashboard guard: a channel with no native VAD (Moonshine
+        # today, a future Parakeet) means "backend" gating would silently
+        # leave no gate at all. UI auto-greys this, but old clients won't.
+        raise HTTPException(
+            400,
+            "requested live channel has no native VAD; gate_kind='backend' is not supported",
+        )
+
+    # Validation passed — now the swap may actually touch the recorder.
+    if new_channel is not None:
+        if recorder.live.running():
+            await asyncio.to_thread(recorder.live.stop)
+        recorder.live = new_channel
 
     if recorder.live.matches(
         model=model,

@@ -337,7 +337,10 @@ class TapFanOut:
         # feed() unconditionally with no do_live branch of its own.
         if self._tap_relay is None:
             self._tap_relay = TapRelay(
-                self._recorder.live,
+                # Resolver, not the channel object: /api/live/start swaps
+                # recorder.live wholesale on a Whisper<->Moonshine family
+                # change, and this relay must follow the swap mid-tap.
+                lambda: self._recorder.live,
                 do_live=self._do_live,
                 handlers=RelayHandlers(
                     on_settled_line=self._on_settled_line,

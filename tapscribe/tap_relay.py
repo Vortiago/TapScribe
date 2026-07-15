@@ -118,7 +118,7 @@ class TapRelay:
 
     def __init__(
         self,
-        live: LiveChannel,
+        live: LiveChannel | Callable[[], LiveChannel],
         *,
         do_live: bool,
         handlers: RelayHandlers,
@@ -126,7 +126,14 @@ class TapRelay:
         relay_factory: RelayFactory | None = None,
         gate_factory: GateFactory | None = None,
     ) -> None:
-        self._live = live
+        # `live` may be a channel or a zero-arg resolver. `/api/live/start`
+        # REPLACES `recorder.live` wholesale on a family swap (Whisper <->
+        # Moonshine, PRD #120), so a relay that captured the channel object
+        # at construction would stay bound to the stopped pre-swap instance
+        # forever — captions silently dead for every open tap (PR #334
+        # finding #1). TapFanOut passes `lambda: recorder.live`; tests and
+        # single-channel callers can keep passing the channel directly.
+        self._live_resolver: Callable[[], LiveChannel] = live if callable(live) else (lambda: live)
         self._do_live = do_live
         self._handlers = handlers
         self._label = label
@@ -157,6 +164,13 @@ class TapRelay:
         # CLOCK_MONOTONIC is seconds since boot on Linux).
         self._last_attempt_at: float | None = None
         self._reconnect_attempts: int = 0
+
+    @property
+    def _live(self) -> LiveChannel:
+        """The CURRENT live channel — resolved per read so a
+        `recorder.live` family swap is picked up mid-stream (the whole
+        point of the resolver, see `__init__`)."""
+        return self._live_resolver()
 
     # ------------------------------------------------------------------
     # Read-surface (was: private fields poked by tests)
