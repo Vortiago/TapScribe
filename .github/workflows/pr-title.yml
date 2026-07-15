@@ -1,0 +1,57 @@
+name: PR title
+
+# Squash-merge makes the PR title the commit subject on `main`, so this gate
+# enforces the same Conventional-Commits grammar the local commit-msg hook
+# checks on individual commits. It does NOT enforce a non-empty body or the
+# breaking-change footer — those checks need commit/diff access this
+# `pull_request_target` event doesn't have; they stay with the local hooks.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Conventional-Commit title
+        env:
+          # Passed via env and referenced as "$PR_TITLE" below -- NEVER
+          # interpolate ${{ github.event.pull_request.title }} directly into
+          # the script body. The title is untrusted (attacker-controllable)
+          # input under pull_request_target; inlining it would be a shell-
+          # injection / CodeQL finding.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          allowed_types="feat, fix, perf, refactor, docs, test, build, ci, style, chore, revert"
+          conventional_re='^(feat|fix|perf|refactor|docs|test|build|ci|style|chore|revert)(\([a-z0-9._-]+\))?(!)?: .+'
+
+          # Auto-generated titles (merge commits, reverts, fixup/squash
+          # commits) never go through a human's Conventional-Commit intent --
+          # allow-list them so they never trip the gate.
+          case "$PR_TITLE" in
+            "Merge "*|"Revert "*|"fixup! "*|"squash! "*)
+              echo "Allow-listed title prefix ('Merge '/'Revert '/'fixup! '/'squash! ') -- skipping."
+              exit 0
+              ;;
+          esac
+
+          if [[ "$PR_TITLE" =~ $conventional_re ]]; then
+            echo "PR title is a valid Conventional Commit: $PR_TITLE"
+            exit 0
+          fi
+
+          echo "::error::PR title is not a valid Conventional Commit."
+          echo "Offending title: $PR_TITLE"
+          echo "Allowed types: $allowed_types"
+          echo "Format: <type>[(scope)][!]: <subject>"
+          echo "Example: feat(bridges): add download endpoint"
+          exit 1
