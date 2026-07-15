@@ -206,6 +206,54 @@ test("tap-stop force-closes even with buffered PCM (no drain)", async () => {
   assert.equal(snap.channels.length, 0, "channel removed");
 });
 
+test("trailing pcm after tap-stop does not resurrect the tap", async () => {
+  // The room-teardown e2e flake (PR #344 CI): the page's audio pipeline
+  // tears down asynchronously, so a pcm frame can trail the tap-stop.
+  // When tap-stop DELETED the channel, ensureChannel resurrected it
+  // (stopped: false) on that trailing frame and opened a brand-new /tap
+  // with a fresh utterance id for a speaker who had left. The channel
+  // now tombstones (stopped: true, kept in the map) and pcm drops.
+  const b = createBridge();
+  await ready(b);
+  setupChannel(b);
+
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  const ws1 = b.lastSocket();
+  ws1.triggerOpen();
+
+  b.post({ kind: "tap-stop", identity: "u1" });
+  assert.equal(ws1.closed.code, 1000, "tap-stop closed the live WS");
+  const socketsAfterStop = b.openSockets().length;
+
+  // The trailing frame from the tearing-down pipeline.
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+
+  assert.equal(
+    b.openSockets().length,
+    socketsAfterStop,
+    "no new /tap WS for a departed speaker",
+  );
+  assert.equal(b.clock.pending(), 0, "no reconnect timer armed by the trailing frame");
+  const snap = b.status();
+  assert.equal(
+    snap.channels.find((c) => c.identity === "u1"),
+    undefined,
+    "tombstone stays hidden from the status snapshot",
+  );
+
+  // A genuine rejoin re-arms via tap-start, and the next frame opens a
+  // fresh tap — the tombstone must not brick the identity forever.
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  assert.equal(
+    b.openSockets().length,
+    socketsAfterStop + 1,
+    "rejoin opens a fresh /tap",
+  );
+  const ws2 = b.lastSocket();
+  assert.notEqual(ws2.url, ws1.url, "rejoin minted a new utterance_id");
+});
+
 test("drain resets reconnectAttempt for a fresh fast retry", async () => {
   // Regression: without this reset, if the reconnect ladder had climbed
   // to attempt N before mute, the next attempt would still be at delay
