@@ -49,6 +49,11 @@ dependencies = [
     "torch>=2.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Vortiago/TapScribe"
+Repository = "https://github.com/Vortiago/TapScribe"
+Issues = "https://github.com/Vortiago/TapScribe/issues"
+
 [project.optional-dependencies]
 # The actual model backends are heavy and platform-dependent; keep them
 # optional so a CI / docs install doesn't pull in PyTorch + CUDA.
