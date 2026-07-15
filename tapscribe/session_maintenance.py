@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ from .session_paths import (
     stripped_dir,
 )
 from .sessions import read_session_meta, read_strip_meta, write_session_meta
-from .text import atomic_write_text
+from .text import atomic_write_text, parse_wav_start
 
 # ---------------------------------------------------------------------------
 # Domain errors — FastAPI-free maintenance exceptions.
@@ -384,3 +385,94 @@ def delete_session_wav(session: str, name: str, source: str = "original") -> dic
     if source == "stripped":
         _prune_strip_meta_clip(session, name)
     return {"session": session, "name": name, "source": source, "bytes_freed": bytes_freed}
+
+
+# ---------------------------------------------------------------------------
+# Bulk audio reclaim (operator-triggered, #207)
+# ---------------------------------------------------------------------------
+
+
+def reclaim_audio_older_than(
+    current_session: str,
+    older_than_days: int,
+    *,
+    execute: bool = False,
+) -> dict[str, Any]:
+    """Walk the recordings archive and reclaim audio from sessions older than
+    ``older_than_days`` days that also have a merged transcript.
+
+    Eligibility: a session is eligible iff ALL of:
+
+      * NOT the ``current_session`` (live session is NEVER touched)
+      * Has at least one ``*.wav`` file
+      * Has a ``session-transcript.json`` (audio backed by a transcript)
+      * Its latest WAV start timestamp is older than the cutoff
+
+    Age derivation: the session's ``latest_iso`` is the maximum WAV start
+    timestamp across all WAVs (mirroring ``_describe_session`` in ``sessions.py``).
+    A session whose WAVs can't be parsed is skipped — no timestamp means
+    no way to determine "older than".
+
+    ``execute=False`` (preview): reports eligible sessions and their
+    reclaimable byte counts without deleting anything.
+
+    ``execute=True``: calls ``delete_session_audio`` for each eligible
+    session, preserving the merged transcript + meta.
+
+    Returns ``{"sessions": [{"session": str, "bytes_freed": int}], "total_bytes": int}``.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+    sessions: list[dict[str, Any]] = []
+    total_bytes = 0
+
+    for sd in config.RECORDINGS_DIR.glob("*"):
+        # Reuse the exact walk guards from ``prune_empty_sessions``.
+        if sd.is_symlink():
+            continue
+        if not sd.is_dir():
+            continue
+        if sd.name == current_session:
+            continue
+        # Must have audio to reclaim.
+        if not any(sd.glob("*.wav")):
+            continue
+        # Must have a merged transcript (audio backed).
+        if not (sd / FILENAME_TRANSCRIPT_JSON).exists():
+            continue
+        # Derive age from the latest WAV timestamp.
+        wav_starts = []
+        for w in sd.glob("*.wav"):
+            ts = parse_wav_start(w.name)
+            if ts is not None:
+                wav_starts.append(ts)
+        if not wav_starts:
+            # No parseable WAV → no age → skip (nothing to reclaim anyway).
+            continue
+        latest_iso = max(wav_starts)
+        if latest_iso >= cutoff:
+            # Inside the cutoff window → too young.
+            continue
+
+        # Eligible.
+        if execute:
+            summary = delete_session_audio(sd.name)
+            bytes_freed = summary["bytes_freed"]
+        else:
+            # Compute reclaimable bytes the same way ``delete_session_audio``
+            # would: all WAVs + sidecars + stripped/ — without deleting.
+            bytes_freed = 0
+            for w in sd.glob("*.wav"):
+                bytes_freed += _safe_size(w)
+                wav_legacy = w.with_suffix(".json")
+                if wav_legacy.is_file():
+                    bytes_freed += _safe_size(wav_legacy)
+                wav_transcripts = w.with_suffix(".transcripts")
+                if wav_transcripts.is_dir():
+                    bytes_freed += _dir_size(wav_transcripts)
+            stripped = sd / DIRNAME_STRIPPED
+            if stripped.is_dir():
+                bytes_freed += _dir_size(stripped)
+        sessions.append({"session": sd.name, "bytes_freed": bytes_freed})
+        total_bytes += bytes_freed
+
+    return {"sessions": sessions, "total_bytes": total_bytes}

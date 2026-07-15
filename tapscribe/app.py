@@ -94,6 +94,7 @@ from .session_maintenance import (
     delete_session_audio,
     delete_session_wav,
     prune_empty_sessions,
+    reclaim_audio_older_than,
     session_is_empty,
 )
 from .session_merge import InvalidRange, NoUsableWavs
@@ -1459,6 +1460,36 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
         flush=True,
     )
     return {"ok": True, **summary}
+
+
+@app.post("/api/sessions/bulk-reclaim-audio")
+async def api_bulk_reclaim_audio(
+    older_than_days: int,
+    execute: bool = False,
+    recorder: Recorder = Depends(get_recorder),
+):
+    """Bulk reclaim audio from old sessions. Walks the recordings archive
+    and, for every session older than ``older_than_days`` with a merged
+    transcript, reclaims its audio (originals + ``stripped/`` go; the
+    merged transcript + meta stay).
+
+    ``execute=False`` (preview): lists eligible sessions and their
+    reclaimable byte counts without deleting anything.
+
+    ``execute=True``: performs the reclaim across all eligible sessions.
+
+    Refuses ``older_than_days <= 0``. The current session is always
+    excluded (the function skips it), so the live session is never touched.
+    """
+    if older_than_days <= 0:
+        raise HTTPException(400, "older_than_days must be positive")
+    result = await asyncio.to_thread(
+        reclaim_audio_older_than,
+        recorder.session_start,
+        older_than_days,
+        execute=execute,
+    )
+    return {"ok": True, **result}
 
 
 @app.post("/api/sessions/{target}/absorb")
