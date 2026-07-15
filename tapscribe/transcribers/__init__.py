@@ -52,6 +52,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
+from .. import config
 from .. import config_store as _config_store
 from ..config import _parse_bounded_ttl
 from .base import (
@@ -158,15 +159,16 @@ def _idle_ttl_s() -> float:
     shadow a valid config file: it falls through to the file, then the default,
     exactly like an unset env var. Otherwise an empty env var would silently
     discard the dashboard-set keep-warm value and evict every model on release.
-    The config file is read at use-time (stat-signature cached via `read_config`,
-    like the other /api/state config values) so a dashboard edit applies without
-    a restart."""
+    The config file is read FRESH (uncached) at use-time so a dashboard edit
+    applies without a restart — the stat-cached `read_config` would miss a
+    same-size rewrite (e.g. "100" -> "200") whose (mtime, size) can be
+    unchanged on a coarse-mtime filesystem, stranding the old value."""
     raw_env = os.environ.get(ENV_IDLE_TTL_S)
     if raw_env:
         v = _parse_bounded_ttl(raw_env)
         if v is not None:
             return v
-    v = _parse_bounded_ttl(_config_store.read_config("model-idle-ttl"))
+    v = _parse_bounded_ttl(_config_store.read_text_file(config.MODEL_IDLE_TTL_FILE))
     return v if v is not None else _DEFAULT_IDLE_TTL_S
 
 
