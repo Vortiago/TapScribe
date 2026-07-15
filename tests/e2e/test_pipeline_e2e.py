@@ -1230,7 +1230,10 @@ BENCH_GENERALIST = os.environ.get("TAPSCRIBE_BENCH_GENERALIST", "large-v3-turbo"
 # This routine benchmark verifies the routing MECHANISM on the committed
 # fixtures, so it defaults to the lighter nb-whisper-medium (the production
 # default is nb-whisper-large — see the FLEURS comparison harness). Override with
-# TAPSCRIBE_BENCH_NB to benchmark a specific specialist.
+# TAPSCRIBE_BENCH_NB to benchmark a specific specialist. Catalog ids only:
+# the NB weight download resolves its HF repo through the registry and
+# refuses unregistered names (the allowlist rule) — to benchmark an
+# unlisted checkpoint, add a catalog row for it first.
 BENCH_NB = os.environ.get("TAPSCRIBE_BENCH_NB", "nb-whisper-medium")
 # The winning transcript must recover at least this fraction of the reference's
 # ≥4-char content words — i.e. it actually transcribed the region's language,

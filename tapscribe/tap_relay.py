@@ -31,11 +31,11 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from .live_relay import WlKRelay
-from .speech_gate import SpeechGate, build_gate_for_config
+from .speech_gate import SpeechGate, build_gate_for_config, effective_gate_config
 
 if TYPE_CHECKING:
     from .live import LiveChannel, LiveConfig
@@ -198,8 +198,14 @@ class TapRelay:
         but only when this is a live tap and the channel is running. A
         record-only or live-down tap stays dormant; the first `feed`
         after the channel comes up schedules the first connect."""
-        if self._do_live and self._live.running():
-            await self._attach(self._live.config)
+        live = self._live
+        if self._do_live and live.running():
+            # Channel + config snapshotted together, and the gate-kind
+            # coercion (effective_gate_config) applied at the same moment
+            # — resolving `self._live` again after `_attach`'s awaits
+            # could pair this config with a DIFFERENT channel's VAD
+            # capability if a family swap lands mid-connect.
+            await self._attach(effective_gate_config(live, live.config))
 
     async def feed(self, buf: bytes) -> FedFrames:
         """Run one PCM frame through the gate and forward the survivors to
@@ -271,7 +277,9 @@ class TapRelay:
         if stale is not None:
             with suppress(Exception):
                 await stale.close()
-        cfg = self._live.config
+        # Same atomic channel+config snapshot as open() — see there.
+        live = self._live
+        cfg = effective_gate_config(live, live.config)
         if await self._attach(cfg):
             print(
                 f"[tapscribe] /tap relay reconnected{self._label_suffix} "
@@ -311,21 +319,13 @@ class TapRelay:
         self._relay = candidate
         self._connected = (cfg.host, cfg.port, cfg.language)
         self._gate = None
-        gate_cfg = cfg
-        if getattr(cfg, "gate_kind", "tapscribe") == "backend" and not getattr(
-            self._live, "supports_native_vad", True
-        ):
-            # A channel with no backend-side VAD (Moonshine) cannot honor
-            # gate_kind="backend": build_gate_for_config would return None
-            # and this tap would feed raw UNGATED PCM (silence included)
-            # to the engine. The operator's persisted preference stays
-            # untouched in live.config — it must survive the swap back to
-            # a native-VAD channel — so the coercion happens here, at this
-            # tap's own gate construction, which is also what such a
-            # channel's info["gate_kind"] already reports.
-            gate_cfg = replace(cfg, gate_kind="tapscribe")
         try:
-            self._gate = await asyncio.to_thread(self._gate_factory, gate_cfg)
+            # `cfg` already carries the effective gate kind — both callers
+            # pass it through `effective_gate_config` (speech_gate.py) at
+            # the moment they snapshot the channel, so a no-native-VAD
+            # channel's carried-forward gate_kind="backend" never reaches
+            # the gate factory as-is.
+            self._gate = await asyncio.to_thread(self._gate_factory, cfg)
         except Exception as e:
             print(
                 f"[tapscribe] /tap gate construction failed{self._label_suffix}: {e}; falling back to passthrough",

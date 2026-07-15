@@ -286,3 +286,33 @@ def build_gate_for_config(config) -> SpeechGate | None:  # config: LiveConfig
         pre_roll_ms=int(config.gate_pre_roll_ms),
         min_speech_ms=int(getattr(config, "gate_min_speech_ms", 0) or 0),
     )
+
+
+def effective_gate_config(channel, config):  # channel: LiveChannel, config: LiveConfig
+    """The config the per-tap gate must actually be BUILT from (and the
+    gate_kind a channel's `info` must REPORT) for `channel`.
+
+    The one seam for the capability rule "a channel with no backend-side
+    VAD cannot honor gate_kind='backend'": for such a channel a carried-
+    forward "backend" is coerced to "tapscribe" — `build_gate_for_config`
+    would otherwise return None and the tap would feed raw UNGATED PCM
+    (silence included) to the engine. The operator's persisted config
+    stays untouched (it must survive the swap back to a native-VAD
+    channel); every consumer derives the effective value from here:
+    `TapRelay` when building a tap's gate, and channels' info-seeding
+    when reporting `gate_kind`. (`/api/live/start` shares the predicate
+    but REJECTS an explicit gate_kind="backend" request with a 400
+    instead of coercing — see the route.)
+
+    `supports_native_vad` deliberately defaults to False when absent —
+    a channel that forgets to declare it gets a gate built (the safe
+    direction), matching the route's conservative default. Same duck
+    typing as `build_gate_for_config` above.
+    """
+    if getattr(config, "gate_kind", "tapscribe") == "backend" and not getattr(
+        channel, "supports_native_vad", False
+    ):
+        from dataclasses import replace  # noqa: PLC0415 — keep module import-light like the Silero imports
+
+        return replace(config, gate_kind="tapscribe")
+    return config

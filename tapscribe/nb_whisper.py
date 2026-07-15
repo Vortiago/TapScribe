@@ -36,6 +36,17 @@ def _resolve_nb_whisper_repo(model_name: str) -> str:
 
     repo = repo_for(model_name, "nb-whisper")
     if repo is None:
+        from .transcribers.catalog import REGISTRY
+
+        if REGISTRY.get(model_name) is not None:
+            # Registered, but the entry lacks the repo mapping — a
+            # contributor mistake, not an operator one; don't tell them
+            # to add an entry that already exists.
+            raise RuntimeError(
+                f"{model_name!r} is registered but its catalog entry has no "
+                f"'nb-whisper' repo mapping — add repos={{'nb-whisper': ...}} "
+                f"to the entry in transcribers/catalog.py."
+            )
         raise RuntimeError(
             f"{model_name!r} is not a registered NB-Whisper model — refusing to "
             f"download an unlisted repo from the HF Hub. Add a catalog entry "

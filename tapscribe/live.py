@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from .nb_whisper import download_nb_whisper_ct2_dir
+from .speech_gate import effective_gate_config
 from .text import read_config
 
 # Decimals the dashboard mirrors the gate speech threshold at. Two live uses:
@@ -470,7 +471,12 @@ class WhisperLiveKitChannel:
         """Push the current `config`'s gate + confidence fields into
         `info`. Called from `__init__` (boot) and `start()` (after a
         config-swap) so the dashboard never reads a stale value."""
-        self.info["gate_kind"] = self.config.gate_kind
+        # Derived through the same seam TapRelay builds tap gates from
+        # (identity for this channel — it HAS native VAD — but every
+        # LiveChannel reporting through the one helper means a future
+        # no-native-VAD channel can't report "backend" while the tap
+        # actually runs the tapscribe gate).
+        self.info["gate_kind"] = effective_gate_config(self, self.config).gate_kind
         self.info["gate_speech_threshold"] = (
             f"{self.config.gate_speech_threshold:.{GATE_THRESHOLD_DECIMALS}f}"
         )

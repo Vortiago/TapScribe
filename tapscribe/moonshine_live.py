@@ -18,11 +18,10 @@ speaks the exact same JSON shape WhisperLiveKit does, backed by a
 Consequence: this module touches nothing downstream — selecting Moonshine
 is purely a matter of which concrete `LiveChannel` the Recorder holds
 (see `tapscribe.app`'s `/api/live/start` route, which swaps
-`recorder.live` based on the requested model's catalog family). The
-Recorder, `SpeechGate`, and `LiveTranscripts` are untouched repo-wide;
-`WlKRelay` and `TapRelay`/`TapFanOut` were *generalized* (not forked) for
-the family swap — the end-of-audio/`ready_to_stop` close handshake and
-the `lambda: recorder.live` channel resolver (see their docstrings).
+`recorder.live` based on the requested model's catalog family). What was
+generalized downstream to make that swap seamless is documented in
+CONTEXT.md's `MoonshineLiveChannel` section — the single home for that
+architectural note.
 
 No subprocess here — unlike `WhisperLiveKitChannel`, there is no child
 process to spawn/supervise/pump logs from. Instead `start()` spins up a
@@ -53,17 +52,8 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from .live import GATE_THRESHOLD_DECIMALS, LiveChannel, LiveConfig, _gate_knob_replacements
+from .speech_gate import effective_gate_config
 from .transcribers._moonshine_window import MoonshineWindow
-
-# Model ids this channel knows how to run — kept in sync with the catalog's
-# `moonshine` family (transcribers/catalog.py). Duplicated as a frozenset
-# here (rather than importing REGISTRY at module scope) so importing this
-# module never triggers a catalog import cycle; `_validate_model` below
-# double-checks against the live REGISTRY at engine-construction time,
-# which is the actual security boundary (PRD #120 user story #23 — a
-# model id from a request body must resolve only against the curated
-# catalog before any loader/Hub download runs).
-_KNOWN_MODEL_IDS = frozenset({"moonshine-tiny", "moonshine-base"})
 
 
 class MoonshineEngine(Protocol):
@@ -76,12 +66,12 @@ class MoonshineEngine(Protocol):
 
 def validate_moonshine_model(model_id: str) -> None:
     """The allowlist gate (PRD #120 user story #23, mirrors the summarizer
-    `SUMMARY_MODELS` rule): a model id must resolve against the curated
-    catalog — as BOTH a known Moonshine id here AND a real, current
-    `family="moonshine"` registry entry — before any engine-load / Hub
-    download can happen. Raises `ValueError` on any mismatch."""
-    if model_id not in _KNOWN_MODEL_IDS:
-        raise ValueError(f"{model_id!r} is not a known Moonshine model. Known: {sorted(_KNOWN_MODEL_IDS)!r}")
+    `SUMMARY_MODELS` rule): a model id must resolve to a current
+    `family="moonshine"` registry entry before any engine-load / Hub
+    download can happen — the catalog is the ONE allowlist, so adding
+    `moonshine-small` there is the whole change. Imported lazily (not at
+    module scope) to avoid a catalog import cycle. Raises `ValueError`
+    on any mismatch."""
     from .transcribers.catalog import REGISTRY
 
     entry = REGISTRY.get(model_id)
@@ -361,13 +351,13 @@ class MoonshineLiveChannel:
         self.info["model"] = self.config.model
         # `info` reports what the engine actually DOES, not what the
         # carried config says: Moonshine is English-only regardless of
-        # config.language, and TapScribe's SpeechGate is its only gate
-        # regardless of a carried-forward gate_kind="backend" (TapRelay
-        # runs the gate for any channel without native VAD). The config
-        # itself stays untouched so the operator's choices survive the
-        # roundtrip back to Whisper.
+        # config.language, and the reported gate_kind derives from the
+        # same `effective_gate_config` seam TapRelay builds the tap gate
+        # from, so report and behavior can't diverge. The config itself
+        # stays untouched so the operator's choices survive the roundtrip
+        # back to Whisper.
         self.info["language"] = "en"
-        self.info["gate_kind"] = "tapscribe"
+        self.info["gate_kind"] = effective_gate_config(self, self.config).gate_kind
         self.info["host"] = self.config.host
         self.info["port"] = str(self.config.port)
         self.info["backend"] = "mlx-audio" if self.use_mlx else "moonshine-onnx"
