@@ -599,7 +599,7 @@ async def api_bridges():
     other read `/api/*` route."""
     return [
         {
-            **a.to_mapping(),
+            **a._asdict(),
             "download_url": (
                 f"https://github.com/{config.GITHUB_REPO}/releases/latest/download/{a.filename}"
             ),

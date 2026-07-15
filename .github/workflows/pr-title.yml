@@ -34,12 +34,15 @@ jobs:
           allowed_types="feat, fix, perf, refactor, docs, test, build, ci, style, chore, revert"
           conventional_re='^(feat|fix|perf|refactor|docs|test|build|ci|style|chore|revert)(\([a-z0-9._-]+\))?(!)?: .+'
 
-          # Auto-generated titles (merge commits, reverts, fixup/squash
-          # commits) never go through a human's Conventional-Commit intent --
-          # allow-list them so they never trip the gate.
+          # Auto-generated titles (merge commits, reverts, autosquash markers)
+          # never go through a human's Conventional-Commit intent -- allow-list
+          # them so they never trip the gate. These prefixes mirror the
+          # canonical cc_is_exempt() in the conventional-commits skill's
+          # validate.sh; Vortiago/Verktoykasse#71 tracks sharing that grammar so
+          # this copy cannot drift from the local commit-msg / pr-title hooks.
           case "$PR_TITLE" in
-            "Merge "*|"Revert "*|"fixup! "*|"squash! "*)
-              echo "Allow-listed title prefix ('Merge '/'Revert '/'fixup! '/'squash! ') -- skipping."
+            "Merge "*|"Revert "*|"fixup! "*|"squash! "*|"amend! "*)
+              echo "Allow-listed auto-generated title prefix -- skipping."
               exit 0
               ;;
           esac

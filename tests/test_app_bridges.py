@@ -46,14 +46,14 @@ def client(recorder_under_test):
     app.dependency_overrides.clear()
 
 
-def test_api_bridges_returns_two_items_with_full_shape(client):
+def test_api_bridges_returns_two_items_with_expected_shape(client):
     r = client.get("/api/bridges")
     assert r.status_code == 200
     body = r.json()
     assert isinstance(body, list)
     assert len(body) == 2
     for row in body:
-        assert set(row) == {"id", "label", "filename", "kind", "notes", "download_url"}
+        assert set(row) == {"id", "filename", "download_url"}
         assert all(isinstance(row[k], str) and row[k] for k in row)
 
 
