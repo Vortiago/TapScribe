@@ -522,13 +522,19 @@ class MoonshineLiveChannel:
             )
             loop = asyncio.new_event_loop()
             ready = threading.Event()
-            errors: list[BaseException] = []
+            errors: list[Exception] = []
 
             def _run() -> None:
                 asyncio.set_event_loop(loop)
                 try:
                     loop.run_until_complete(server.start())
-                except BaseException as e:  # noqa: BLE001 — surfaced to the caller via `errors`
+                except Exception as e:  # noqa: BLE001 — surfaced to the caller via `errors`
+                    # Exception, not BaseException: bind/OS failures are what
+                    # start() must report ("failed to bind /asr server …");
+                    # a BaseException here (nothing realistic raises one in
+                    # this daemon thread) should kill the thread visibly —
+                    # running() then reads False — not masquerade as a
+                    # bind-failure message.
                     errors.append(e)
                 finally:
                     ready.set()
