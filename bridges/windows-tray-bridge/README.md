@@ -28,16 +28,22 @@ End meeting / Quit, and a **3-tab Settings dialog** — Connection (host / port 
 tap token + Test connection), **Devices** (capture the mic and/or system audio, each
 with one Name, its own sensitivity slider **and a live input-level meter** for tuning,
 plus an Advanced expander to pin
-specific endpoints), and **Level gate** (the shared hangover/pre-roll in ms) — all persisted to
+specific endpoints), **Level gate** (the shared hangover/pre-roll in ms), and **Meeting**
+(whether End meeting auto-transcribes/summarizes, or just saves the recordings) — all persisted to
 `%APPDATA%`, with the token protected at rest by Windows DPAPI. Start meeting **resolves** the saved selection against the devices present now
 (follow-default binds to the current default), so a bad token or unreachable Recorder
 fails with a clear, classified message *before* any device opens.
 
-**End meeting** (#107) closes every open tap (gate close + Drain) and then triggers the
+**End meeting** (#107) closes every open tap (gate close + Drain) and then — when the
+**Meeting** tab's *auto-transcribe/summarize* is on (the default) — triggers the
 Recorder's [end-of-meeting pipeline](../../CONTEXT.md) (strip → transcribe → summarize),
 polling per-stage progress into the status line and popping the finished summary up in a
 window with copy-to-clipboard — a busy Recorder (409) or a failed stage is surfaced
-clearly. The active session id is persisted to `%APPDATA%`, so a restarted tray resumes
+clearly. Turn that setting **off** for *record-only*: End meeting still drains and closes
+every tap (so the recordings are fully written) but fires no pipeline — the session and its
+WAVs are left on the Recorder to strip / transcribe / summarize from the dashboard whenever
+you want. Record-only ends silently back to idle (no summary window, no resume state, no
+Past-meetings entry — there is no summary to re-open). The active session id is persisted to `%APPDATA%`, so a restarted tray resumes
 showing an in-flight pipeline or the finished summary. The depth lives in the
 cross-platform core (`MeetingController`, `PipelineView`, `CaptureOrchestrator`,
 `DeviceSelection`, `StatusView`, `GateTuning`) so a future macOS/Linux shell builds on it.
@@ -88,7 +94,7 @@ windows-tray-bridge/
 │       ├── TrayIcons.cs                 # the 3 status icons, drawn at runtime (idle/streaming/error)
 │       ├── LevelMeterBar.cs             # the live input-level meter control (paints level + threshold marker)
 │       ├── SummaryForm.cs              # the finished-summary window + copy-to-clipboard (#107)
-│       └── SettingsForm.cs              # 3-tab dialog: Connection / Devices / Level gate
+│       └── SettingsForm.cs              # 4-tab dialog: Connection / Devices / Level gate / Meeting
 └── tests/
     ├── TapScribe.Bridge.Core.Tests/     # net10.0 xUnit — cross-platform (most of the suite, incl. CaptureOrchestrator)
     └── TapScribe.Bridge.Windows.Tests/  # net10.0-windows xUnit — DPAPI / settings + NAudio upstream-contract smoke test
@@ -228,6 +234,16 @@ opens on quieter sound). This tab holds the two knobs shared across every device
 **Pre-roll** (ms) is how much leading audio is replayed when it opens so the first
 consonants aren't clipped. An old settings file's single global tuning migrates into
 each device's default on upgrade (no reset — ADR-0007).
+
+### Meeting tab
+
+One checkbox: **Transcribe and summarize automatically when the meeting ends** (on by
+default). On, **End meeting** runs the Recorder's strip → transcribe → summarize pipeline
+and pops up the finished summary (the flow described above). Off (*record-only*), End
+meeting only drains and closes the taps: the detached session and its recordings are saved
+on the Recorder untouched, and you strip / transcribe / summarize them from the dashboard
+later. A settings file written before this option existed defaults to **on**, so upgrading
+keeps the original behaviour.
 
 On first run the **Connection** fields are pre-seeded from the legacy `TAPSCRIBE_HOST` /
 `TAPSCRIBE_PORT` / `TAPSCRIBE_TLS` / `TAPSCRIBE_TLS_ALLOW_SELF_SIGNED` /

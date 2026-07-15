@@ -2,9 +2,10 @@ namespace TapScribe.Bridge.Core;
 
 /// <summary>The meeting card's lifecycle phase. <see cref="Running"/>/<see cref="Done"/>/
 /// <see cref="Failed"/> are derived from the Recorder's poll state; <see cref="Ending"/>/
-/// <see cref="Recording"/>/<see cref="Idle"/> are the tray's local pre- and post-pipeline
-/// lifecycle the poll can't express. An enum (not a string) so the Core↔shell seam — the
-/// <c>RenderPipeline</c> switch — can't silently mis-handle a typo'd phase.</summary>
+/// <see cref="Recording"/>/<see cref="Idle"/>/<see cref="Saved"/> are the tray's local pre-
+/// and post-pipeline lifecycle the poll can't express. An enum (not a string) so the
+/// Core↔shell seam — the <c>RenderPipeline</c> switch — can't silently mis-handle a typo'd
+/// phase.</summary>
 public enum PipelinePhase
 {
     Idle,
@@ -13,6 +14,13 @@ public enum PipelinePhase
     Running,
     Done,
     Failed,
+
+    /// <summary>Terminal: the meeting was ended in record-only mode
+    /// (<c>BridgeSettings.ProcessOnEnd == false</c>) — the taps drained and the recordings
+    /// were saved, but no pipeline was triggered. Emitted directly by
+    /// <see cref="MeetingController"/>, never derived from a poll, so like
+    /// <see cref="PipelineView.Unavailable"/> it doesn't come out of <see cref="PipelineView.Map"/>.</summary>
+    Saved,
 }
 
 /// <summary>
@@ -84,6 +92,11 @@ public sealed record PipelineView(
     /// poll loop must STOP on it, not self-heal. Surfaced when re-opening a past meeting
     /// the Recorder has since pruned (#168).</summary>
     public static PipelineView Unavailable(string reason) => Of(PipelinePhase.Failed, failureReason: reason);
+
+    /// <summary>The terminal view for a record-only End (<c>ProcessOnEnd == false</c>): the taps
+    /// drained and the recordings are saved, but no pipeline ran. Carries no summary/failure —
+    /// the tray shows a brief "saved" cue and returns to idle. Not <see cref="KeepPolling"/>.</summary>
+    public static PipelineView Saved() => Of(PipelinePhase.Saved);
 
     private static PipelineView Of(PipelinePhase phase, string? progress = null, string? stage = null,
         string? currentFile = null, PipelineSummary? summary = null, string? summaryText = null,

@@ -121,7 +121,7 @@ public class RealRecorderMeetingE2ETests
         controller.Updated += view => { lock (views) views.Add(view); };
 
         using var cts = new CancellationTokenSource(PipelineBudget);
-        await controller.EndAsync(cts.Token);
+        await controller.EndAsync(cancellationToken: cts.Token);
 
         // The pipeline reached Done.
         PipelineView last = views[^1];

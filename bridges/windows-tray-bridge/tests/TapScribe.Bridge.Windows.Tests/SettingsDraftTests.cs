@@ -261,6 +261,21 @@ public class SettingsDraftTests
     }
 
     [Fact]
+    public void ProcessOnEnd_DefaultsTrue_AndRoundTripsThroughTheDraft()
+    {
+        // Default: a settings object that never set the flag seeds a ticked box.
+        Assert.True(SettingsDraft.Seed(new BridgeSettings()).ProcessOnEnd);
+
+        // Unticking it (record-only) survives Seed -> ToSettings.
+        SettingsDraft draft = SettingsDraft.Seed(new BridgeSettings { ProcessOnEnd = false });
+        Assert.False(draft.ProcessOnEnd);
+        Assert.False(draft.ToSettings().ProcessOnEnd);
+
+        // And an untouched Save keeps the on value on.
+        Assert.True(SettingsDraft.Seed(new BridgeSettings { ProcessOnEnd = true }).ToSettings().ProcessOnEnd);
+    }
+
+    [Fact]
     public void HasSavedPins_TrueOnlyWhenASavedSelectionPinnedADevice()
     {
         Assert.False(SettingsDraft.Seed(new BridgeSettings()).HasSavedPins);

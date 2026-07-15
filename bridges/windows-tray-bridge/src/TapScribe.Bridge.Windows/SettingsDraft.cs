@@ -33,6 +33,10 @@ public sealed class SettingsDraft
     public int HangoverMs { get; set; }
     public int PreRollMs { get; set; }
 
+    // Meeting behaviour: whether End meeting auto-runs the strip/transcribe/summarize pipeline
+    // (true) or just saves the session + recordings for later dashboard processing (false).
+    public bool ProcessOnEnd { get; set; } = true;
+
     // The Advanced pin grid, as plain rows the form renders and the user edits in place.
     public IReadOnlyList<PinnedDeviceRow> DeviceRows { get; private set; } = [];
 
@@ -66,6 +70,7 @@ public sealed class SettingsDraft
             Tls = current.Tls,
             AllowSelfSignedCert = current.AllowSelfSignedCert,
             Token = current.Token,
+            ProcessOnEnd = current.ProcessOnEnd,
             _baseIdentity = current.Identity,
             _baseName = current.Name,
             _savedDevices = current.Devices,
@@ -188,6 +193,7 @@ public sealed class SettingsDraft
             Identity = _baseIdentity,
             Name = _baseName,
             Token = Token.Trim(),
+            ProcessOnEnd = ProcessOnEnd,
             Devices = selections,
         };
     }

@@ -72,6 +72,30 @@ public class BridgeSettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void SaveThenLoad_RoundTripsProcessOnEnd_WhenTurnedOff()
+    {
+        var original = new BridgeSettings { ProcessOnEnd = false };
+
+        BridgeSettingsStore.Save(original, _path);
+        BridgeSettings loaded = BridgeSettingsStore.Load(_path);
+
+        Assert.False(loaded.ProcessOnEnd); // the record-only opt-out survives %APPDATA%
+    }
+
+    [Fact]
+    public void Load_FileWithoutProcessOnEnd_DefaultsToTrue()
+    {
+        // A settings file written before ProcessOnEnd existed has no such key. The default
+        // must be true so upgrading keeps the original auto-process-on-End behaviour.
+        File.WriteAllText(_path, "{ \"Host\": \"rec.example\", \"Port\": 8001 }");
+
+        BridgeSettings loaded = BridgeSettingsStore.Load(_path);
+
+        Assert.Equal("rec.example", loaded.Host); // proves the file parsed (not the corrupt fallback)
+        Assert.True(loaded.ProcessOnEnd);
+    }
+
+    [Fact]
     public void Load_CorruptFile_FallsBackToSeededDefaults_WithoutThrowing()
     {
         File.WriteAllText(_path, "{ this is not valid json at all ");

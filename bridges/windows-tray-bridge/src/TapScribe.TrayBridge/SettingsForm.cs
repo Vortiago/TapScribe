@@ -6,7 +6,7 @@ using TapScribe.Bridge.Windows;
 namespace TapScribe.TrayBridge;
 
 /// <summary>
-/// The modal settings dialog, in three tabs (issue #106):
+/// The modal settings dialog, in four tabs (issue #106):
 /// <list type="bullet">
 /// <item><b>Connection</b> — Recorder host/port/TLS/allow-self-signed/identity/name/token + Test connection.</item>
 /// <item><b>Devices</b> — which devices to tap: the two follow-default rows (mic + system
@@ -16,6 +16,9 @@ namespace TapScribe.TrayBridge;
 /// <item><b>Level gate</b> — the shared bridge-side gate knobs that apply to every device:
 /// hangover (silence-to-close) and pre-roll in ms. Sensitivity is per device on the
 /// Devices tab.</item>
+/// <item><b>Meeting</b> — whether End meeting auto-runs the strip/transcribe/summarize
+/// pipeline (<c>ProcessOnEnd</c>), or just saves the session + recordings for later
+/// dashboard processing.</item>
 /// </list>
 /// On Save it returns the edited <see cref="BridgeSettings"/> via <see cref="Result"/>;
 /// the caller persists them. The device list is supplied by a delegate so the dialog
@@ -85,6 +88,14 @@ internal sealed class SettingsForm : Form
     private readonly NumericUpDown _hangover = new() { Minimum = 0, Maximum = 5000, Increment = 50, Width = 90 };
     private readonly NumericUpDown _preRoll = new() { Minimum = 0, Maximum = 2000, Increment = 50, Width = 90 };
 
+    // Meeting tab — what End meeting does. On: run the recorder's strip/transcribe/summarize
+    // pipeline and show the summary. Off: just save the session + recordings for the dashboard.
+    private readonly CheckBox _processOnEnd = new()
+    {
+        Text = "Transcribe and summarize automatically when the meeting ends",
+        AutoSize = true,
+    };
+
     public BridgeSettings Result { get; private set; }
 
     public SettingsForm(
@@ -121,6 +132,7 @@ internal sealed class SettingsForm : Form
         tabs.TabPages.Add(BuildConnectionTab());
         tabs.TabPages.Add(BuildDevicesTab());
         tabs.TabPages.Add(BuildLevelGateTab());
+        tabs.TabPages.Add(BuildMeetingTab());
         Controls.Add(tabs);
 
         var save = new Button { Text = "Save", DialogResult = DialogResult.OK, Width = 80 };
@@ -377,6 +389,30 @@ internal sealed class SettingsForm : Form
         return page;
     }
 
+    private TabPage BuildMeetingTab()
+    {
+        var page = new TabPage("Meeting");
+        int y = 16;
+
+        _processOnEnd.Checked = _draft.ProcessOnEnd;
+        _processOnEnd.Location = new Point(12, y);
+        page.Controls.Add(_processOnEnd);
+        y += 30;
+
+        page.Controls.Add(new Label
+        {
+            Text = "When on, End meeting runs the recorder's strip -> transcribe -> summarize "
+                 + "pipeline and pops up the finished summary. When off, End meeting only saves "
+                 + "the session and its recordings on the recorder — open them on the dashboard "
+                 + "to transcribe or summarize whenever you want.",
+            Location = new Point(12, y),
+            Size = new Size(_contentW - 24, 72),
+            ForeColor = SystemColors.GrayText,
+        });
+
+        return page;
+    }
+
     private static void UpdateSensitivityLabel(TrackBar slider, Label valueLabel) =>
         valueLabel.Text = SettingsDraft.SensitivityLabel(slider.Value);
 
@@ -548,6 +584,7 @@ internal sealed class SettingsForm : Form
         _draft.SystemSensitivity = _systemSensitivity.Value;
         _draft.HangoverMs = (int)_hangover.Value;
         _draft.PreRollMs = (int)_preRoll.Value;
+        _draft.ProcessOnEnd = _processOnEnd.Checked;
 
         // Indexer (not ToDictionary) so a duplicate device id from the injected enumerator
         // doesn't throw into the WinForms message loop — last row wins, as it did before.

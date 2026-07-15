@@ -278,15 +278,25 @@ internal sealed class TrayContext : ApplicationContext
     private Task EndAsync(BridgeSettings settings, string sessionId, DateTimeOffset startedAt,
         CaptureOrchestrator orchestrator, WasapiDeviceEnumerator? enumerator, SynchronizationContext ui)
     {
-        // Persist the session so a tray restart mid-pipeline resumes showing it; cleared
-        // when the flow reaches a terminal state (RunPipelineFlowAsync's finally).
-        MeetingStateStore.Save(new MeetingState { SessionId = sessionId });
-        // Record the meeting in the local Past-meetings history (#168), beside the resume
-        // state, at End time — best-effort: a failed history write never breaks the pipeline.
-        MeetingHistoryStore.Append(new MeetingRecord { SessionId = sessionId, StartedAt = startedAt });
+        bool process = settings.ProcessOnEnd;
+        // Only persist the resume state + the Past-meetings entry when a pipeline will actually
+        // run: a record-only meeting (ProcessOnEnd == false) has no pipeline to resume across a
+        // restart and no summary to re-open, so it stays out of both. Both writes are
+        // best-effort — a failed write never breaks the drain.
+        if (process)
+        {
+            // Persist the session so a tray restart mid-pipeline resumes showing it; cleared
+            // when the flow reaches a terminal state (RunPipelineFlowAsync's finally).
+            MeetingStateStore.Save(new MeetingState { SessionId = sessionId });
+            // Record the meeting in the local Past-meetings history (#168), beside the resume
+            // state, at End time.
+            MeetingHistoryStore.Append(new MeetingRecord { SessionId = sessionId, StartedAt = startedAt });
+        }
         return RunPipelineFlowAsync(
             settings, sessionId, ui,
-            run: controller => controller.EndAsync(),
+            // Record-only (ProcessOnEnd == false) still drains below but skips the trigger/poll,
+            // ending at a terminal Saved view; the default runs the full pipeline (issue #107).
+            run: controller => controller.EndAsync(triggerPipeline: process),
             // Close every open tap (gate close + Drain) BEFORE the pipeline strips; the
             // controller awaits this to completion before it triggers the pipeline.
             drainAsync: async () =>
@@ -378,6 +388,14 @@ internal sealed class TrayContext : ApplicationContext
                 break;
             case PipelinePhase.Failed:
                 FailPipeline(view.FailureReason ?? "The end-of-meeting pipeline failed.", view.FailureStage);
+                break;
+            case PipelinePhase.Saved:
+                // Record-only End (ProcessOnEnd == false): the taps drained and the recordings
+                // are saved on the Recorder, but nothing was transcribed/summarized. A brief cue
+                // and straight back to idle — no summary window (there is none).
+                ShowInfoBalloon("Recording saved",
+                    "The meeting was recorded. Transcribe or summarize it from the dashboard.");
+                ResetIdleUi();
                 break;
             default:
                 // Idle / Recording — a resumed session that has no live pipeline; back to idle.
