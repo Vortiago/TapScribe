@@ -18,7 +18,7 @@ from uuid import uuid4
 # Re-exports — the config-store layer moved to tapscribe.config_store so
 # text.py stays catalog-free. Existing callers (from .text import X) keep
 # working without change.
-from .config_store import (  # noqa: F401
+from .config_store import (
     _CONFIG_TEXT_CACHE,
     CONFIG_KEYS,
     MAX_CONFIG_TEXT_LEN,
@@ -36,6 +36,39 @@ from .config_store import (  # noqa: F401
     write_languages,
     write_summarizer_config,
 )
+
+# Public surface — text.py's own pure helpers plus the config_store symbols it
+# re-exports for back-compat. Declared explicitly so ruff AND CodeQL see the
+# re-exports as intentional exports rather than "unused imports" (the latter's
+# autofix would delete them and break every `from .text import X` caller).
+__all__ = [
+    # text.py's own pure helpers
+    "normalise_for_exact",
+    "clean_meta_tokens",
+    "safe_name",
+    "parse_iso",
+    "parse_wav_start",
+    "parse_wav_speaker_slug",
+    "parse_wav_speaker_ident",
+    "build_recorder_wav_name",
+    # re-exported from config_store (operator-config persistence layer)
+    "CONFIG_KEYS",
+    "MAX_CONFIG_TEXT_LEN",
+    "SUMMARY_SOURCES",
+    "atomic_write_text",
+    "file_stat_sig",
+    "parse_language_codes",
+    "read_config",
+    "read_languages",
+    "read_summarizer_config",
+    "read_text_file",
+    "summarizer_default_public",
+    "validate_config_text",
+    "write_config",
+    "write_languages",
+    "write_summarizer_config",
+    "_CONFIG_TEXT_CACHE",
+]
 
 # Whisper's internal special tokens occasionally leak through as literal text
 # ("[BLANK_AUDIO]", "[BLANK_AUDIO/BLANK_AUDIO", "[BLANK_") on near-silent or
