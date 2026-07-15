@@ -32,12 +32,10 @@ def _resolve_nb_whisper_repo(model_name: str) -> str:
     arrive from a request body — falling back to the raw name would turn
     an unvalidated string into an arbitrary Hub fetch (PRD #120 story 23:
     the catalog is the allowlist)."""
-    from .transcribers.catalog import repo_for
+    from .transcribers.catalog import REGISTRY, repo_for
 
     repo = repo_for(model_name, "nb-whisper")
     if repo is None:
-        from .transcribers.catalog import REGISTRY
-
         if REGISTRY.get(model_name) is not None:
             # Registered, but the entry lacks the repo mapping — a
             # contributor mistake, not an operator one; don't tell them

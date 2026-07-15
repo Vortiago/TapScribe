@@ -696,9 +696,10 @@
     if (!meetingSessionId || endingSessionId) return;
     endingSessionId = meetingSessionId;
     publishMeetingEnd("ending", endingSessionId);
+    const active = activeChannels();
     console.log("[tapscribe-bridge] end meeting " + endingSessionId +
-      "; draining " + channels.size + " channel(s)");
-    for (const [identity, ch] of channels) {
+      "; draining " + active.length + " channel(s)");
+    for (const [identity, ch] of active) {
       // Don't force ch.muted here: it mirrors the platform's TRUE mute state,
       // and finishEndMeeting preserves that mirror so a still-muted speaker
       // stays gated after End (forcing it true would also gate a speaker who
@@ -805,11 +806,17 @@
           // Tap-stop means the speaker is gone entirely (left the room,
           // track unsubscribed). There's no point draining trailing
           // PCM: even if we landed a WS, the operator doesn't expect a
-          // late transcript from a departed speaker. Force close.
-          // The channel deliberately stays in the map as a tombstone —
-          // see activeChannels() for why deleting it here would let a
-          // trailing pcm frame resurrect the tap.
+          // late transcript from a departed speaker. Force close, and
+          // tombstone rather than delete — see activeChannels().
           endUtteranceImmediate(d.identity, ch, "tap stopped");
+          // The tombstone is identity-only: reset the dead presence's
+          // mutable state so a tap-start re-arm gets the same clean
+          // channel the old delete-then-remint gave ("rejoin starts
+          // clean"). Both rejoin paths re-seed the true mute state.
+          ch.muted = false;
+          ch.error = null;
+          ch.framesSent = 0;
+          ch.bytesSent = 0;
           console.log("[tapscribe-bridge] tap-stop " + d.identity);
           publishStatus();
         }
@@ -859,10 +866,8 @@
         if (endingSessionId) return;
         const ch = ensureChannel(d.identity, d.name);
         if (d.name && d.name !== ch.name) ch.name = d.name;
-        // Trailing frame from a departed speaker's tearing-down pipeline
-        // (tap-stop already fired): drop it. Re-opening here would leak a
-        // fresh /tap with a new utterance id. A rejoin re-arms via
-        // tap-start before its first frame.
+        // Tombstoned (tap-stop already fired): drop the trailing frame —
+        // see activeChannels() for the resurrect-leak this prevents.
         if (ch.stopped) return;
         if (ch.muted) return;
 
@@ -1079,14 +1084,14 @@
       );
       return;
     }
+    const active = activeChannels();
+    const total = active.length;
     let openTaps = 0;
-    let total = 0;
     let firstError = null;
     let anyReconnecting = false;
     let anyDraining = false;
     let anyMuted = false;
-    for (const [, ch] of activeChannels()) {
-      total++;
+    for (const [, ch] of active) {
       if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) openTaps++;
       if (ch.error && !firstError) firstError = ch.error;
       if (ch.reconnectTimer !== null) anyReconnecting = true;
@@ -1236,13 +1241,12 @@
     }
     if (origTitle === null) origTitle = stripSuffix(document.title);
 
+    const total = active.length;
     let totalBytes = 0;
     let openTaps = 0;
-    let total = 0;
     let firstError = null;
     let anyReconnecting = false;
     for (const [id, ch] of active) {
-      total++;
       totalBytes += ch.bytesSent;
       if (ch.error && !firstError) firstError = id;
       if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) openTaps++;

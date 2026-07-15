@@ -86,7 +86,11 @@ def test_mlx_audio_moonshine_upstream_contract():
     AND `Model.generate(audio) -> STTOutput.text` (verified against
     upstream v0.4.1, the bottom of the pyproject pin range) — the
     original smoke pinned only `load`, so a `generate` rename or an
-    STTOutput field change would have shipped silently."""
+    STTOutput field change would have shipped silently (the adapter's
+    `str(result)` fallback would turn it into garbage captions, not a
+    crash). The deep module path (`stt.models.moonshine.moonshine`) is
+    DELIBERATELY part of the pinned contract: an upstream file reorg
+    should red the bump-PR lane for a human look, not slide through."""
     import inspect
 
     pytest.importorskip("mlx_audio")

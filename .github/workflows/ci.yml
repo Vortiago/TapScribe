@@ -312,14 +312,17 @@ jobs:
           - lane: transformers
             os: ubuntu-latest
             extras: parakeet-cpu,voxtral-cpu
+            probe: transformers
             tests: tests/test_transcribers_parakeet.py tests/test_transcribers_voxtral.py -k upstream
           - lane: moonshine-onnx
             os: ubuntu-latest
             extras: moonshine-cpu
+            probe: moonshine_onnx
             tests: tests/test_transcribers_onnx_moonshine.py
           - lane: moonshine-mlx
             os: macos-latest
             extras: moonshine-mlx
+            probe: mlx_audio
             tests: tests/test_transcribers_mlx_moonshine.py
     steps:
       - uses: actions/checkout@v7
@@ -335,6 +338,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[${{ matrix.extras }}]" pytest pytest-asyncio
+
+      # The smokes are importorskip-gated, so an unimportable runtime would
+      # otherwise skip them and leave the lane GREEN — the exact silent-skip
+      # this job exists to close. Probe the import so that fails RED.
+      - name: Verify the ${{ matrix.lane }} runtime actually imports
+        run: python -c "import ${{ matrix.probe }}"
 
       - name: Run the ${{ matrix.lane }} upstream-contract smoke tests
         run: pytest ${{ matrix.tests }} -q

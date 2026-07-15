@@ -251,6 +251,18 @@ def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
     return value
 
 
+def _parse_opt_str(raw, field: str) -> str | None:
+    """Optional string body field: absent/blank → None; a non-string JSON
+    value 400s like every other malformed field in the _parse_* family —
+    the `(body.get(x) or "").strip()` idiom 500s with an AttributeError
+    before any validation runs."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise HTTPException(400, f"{field} must be a string, got {type(raw).__name__}")
+    return raw.strip() or None
+
+
 # ---------------------------------------------------------------------------
 # Logging — silence the per-second poll spam
 # ---------------------------------------------------------------------------
@@ -940,20 +952,8 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     offload to a worker thread to keep /api/state polling responsive.
     """
     body = await _json_body(req)
-
-    def _opt_str(field: str) -> str | None:
-        # A non-string JSON value must 400 like every other malformed
-        # field in this route — `(123 or "").strip()` would 500 with an
-        # AttributeError before any validation ran.
-        raw = body.get(field)
-        if raw is None:
-            return None
-        if not isinstance(raw, str):
-            raise HTTPException(400, f"{field} must be a string, got {type(raw).__name__}")
-        return raw.strip() or None
-
-    model = _opt_str("model")
-    language = _opt_str("language")
+    model = _parse_opt_str(body.get("model"), "model")
+    language = _parse_opt_str(body.get("language"), "language")
     conf = body.get("confidence_validation")
 
     # Boundary validation FIRST — before the family swap below stops or
@@ -1008,7 +1008,7 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     )
     target_channel = new_channel if new_channel is not None else recorder.live
 
-    gate_kind = _opt_str("gate_kind")
+    gate_kind = _parse_opt_str(body.get("gate_kind"), "gate_kind")
     if gate_kind is not None and gate_kind not in ("tapscribe", "backend"):
         raise HTTPException(400, f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
     if gate_kind == "backend" and not getattr(target_channel, "supports_native_vad", False):

@@ -208,11 +208,9 @@ test("tap-stop force-closes even with buffered PCM (no drain)", async () => {
 
 test("trailing pcm after tap-stop does not resurrect the tap", async () => {
   // The room-teardown e2e flake (PR #344 CI): the page's audio pipeline
-  // tears down asynchronously, so a pcm frame can trail the tap-stop.
-  // When tap-stop DELETED the channel, ensureChannel resurrected it
-  // (stopped: false) on that trailing frame and opened a brand-new /tap
-  // with a fresh utterance id for a speaker who had left. The channel
-  // now tombstones (stopped: true, kept in the map) and pcm drops.
+  // tears down asynchronously, so a pcm frame can trail the tap-stop —
+  // it must be dropped, not re-open a /tap for the departed speaker.
+  // Mechanism documented at content.js activeChannels().
   const b = createBridge();
   await ready(b);
   setupChannel(b);
@@ -220,9 +218,11 @@ test("trailing pcm after tap-stop does not resurrect the tap", async () => {
   b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
   const ws1 = b.lastSocket();
   ws1.triggerOpen();
+  // Leave while muted: the tombstone must not carry this into a rejoin.
+  b.post({ kind: "mute", identity: "u1", muted: true });
 
   b.post({ kind: "tap-stop", identity: "u1" });
-  assert.equal(ws1.closed.code, 1000, "tap-stop closed the live WS");
+  assert.equal(ws1.closed.code, 1000, "WS closed cleanly before the tombstone");
   const socketsAfterStop = b.openSockets().length;
 
   // The trailing frame from the tearing-down pipeline.
@@ -234,24 +234,24 @@ test("trailing pcm after tap-stop does not resurrect the tap", async () => {
     "no new /tap WS for a departed speaker",
   );
   assert.equal(b.clock.pending(), 0, "no reconnect timer armed by the trailing frame");
-  const snap = b.status();
-  assert.equal(
-    snap.channels.find((c) => c.identity === "u1"),
-    undefined,
-    "tombstone stays hidden from the status snapshot",
-  );
+  assert.equal(b.status().channels.length, 0, "tombstone hidden from status");
 
-  // A genuine rejoin re-arms via tap-start, and the next frame opens a
-  // fresh tap — the tombstone must not brick the identity forever.
+  // A genuine rejoin re-arms via tap-start and starts CLEAN — the next
+  // frame opens a fresh tap even though the speaker left muted (the
+  // rejoin paths re-seed the true mute state), with reset counters.
   b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
   b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
   assert.equal(
     b.openSockets().length,
     socketsAfterStop + 1,
-    "rejoin opens a fresh /tap",
+    "rejoin opens a fresh /tap despite leaving muted",
   );
   const ws2 = b.lastSocket();
   assert.notEqual(ws2.url, ws1.url, "rejoin minted a new utterance_id");
+  const ch = b.status().channels.find((c) => c.identity === "u1");
+  assert.equal(ch.muted, false, "stale mute not inherited");
+  assert.equal(ch.error, null, "stale error not inherited");
+  assert.equal(ch.bytesSent, 0, "counters reset for the rejoin");
 });
 
 test("drain resets reconnectAttempt for a fresh fast retry", async () => {

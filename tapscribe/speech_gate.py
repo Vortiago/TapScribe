@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from dataclasses import replace
 
 # PCM frame contract — matches the Bridge → /tap wire format. 20 ms of
 # 16 kHz mono int16 = 320 samples = 640 bytes per frame. Don't reuse
@@ -312,7 +313,5 @@ def effective_gate_config(channel, config):  # channel: LiveChannel, config: Liv
     if getattr(config, "gate_kind", "tapscribe") == "backend" and not getattr(
         channel, "supports_native_vad", False
     ):
-        from dataclasses import replace  # noqa: PLC0415 — keep module import-light like the Silero imports
-
         return replace(config, gate_kind="tapscribe")
     return config
