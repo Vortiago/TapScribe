@@ -24,11 +24,13 @@ must read), so RED shows as clean assertion failures, not a missing-key error.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
 from conftest import repoint_config_files  # type: ignore[import-not-found]  # tests/ on sys.path
 
+from tapscribe.text import read_config, write_config
 from tapscribe.transcribers import _idle_ttl_s
 
 _ENV = "TAPSCRIBE_MODEL_IDLE_TTL_S"
@@ -87,3 +89,106 @@ def test_out_of_bounds_config_falls_back_to_default(cfg: Path) -> None:
     # just like a bad env var (never lands unbounded at the consumer).
     _set_ttl_file(cfg, 999_999_999)
     assert _idle_ttl_s() == 0.0, "an out-of-bounds config value must fall back to the default"
+
+
+# ---------------------------------------------------------------------------
+# Precedence fall-through: a set-but-INVALID env var must NOT shadow a valid
+# config file. The env branch keys on presence, but an empty / non-numeric /
+# out-of-bounds env value is not a real override — it falls through to the file
+# (the systemd EnvironmentFile leaves `TAPSCRIBE_MODEL_IDLE_TTL_S=`, the operator
+# set the dashboard knob). Without this, the empty env wins the env branch and
+# resolves to 0.0 (evict-now), silently discarding the keep-warm value.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_env", ["", "abc", "999999999", "-2", "nan", "inf"])
+def test_invalid_env_falls_through_to_config_file(
+    cfg: Path, monkeypatch: pytest.MonkeyPatch, bad_env: str
+) -> None:
+    # DISCRIMINATOR: env set-but-invalid + a valid config file → the FILE value,
+    # not the default. Base (env-branch keyed on `in os.environ`) returns 0.0.
+    _set_ttl_file(cfg, 300)
+    monkeypatch.setenv(_ENV, bad_env)
+    assert _idle_ttl_s() == 300.0, (
+        f"a set-but-invalid env var ({bad_env!r}) must fall through to a valid config file, "
+        "not shadow it with the evict-now default"
+    )
+
+
+@pytest.mark.parametrize("bad_env", ["", "abc", "999999999", "-2", "nan", "inf"])
+def test_invalid_env_without_config_falls_back_to_default(
+    cfg: Path, monkeypatch: pytest.MonkeyPatch, bad_env: str
+) -> None:
+    # Guardrail: env invalid AND no config file → the module default, finite.
+    monkeypatch.setenv(_ENV, bad_env)
+    v = _idle_ttl_s()
+    assert v == 0.0
+    # NaN pitfall (a NaN env would make `== 0` False AND `> 0` False → the model
+    # is never evicted, a silent leak). `float("nan")` parses without error and
+    # slips past a naive range check (`lo <= nan <= hi` is False), so an
+    # unguarded resolver would return NaN and disable eviction entirely — the
+    # `bad_env="nan"` case above pins it to the finite default. The resolver
+    # must never return NaN.
+    assert math.isfinite(v)
+
+
+# ---------------------------------------------------------------------------
+# File-value round-trip at the consumer boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_config_file_zero_is_evict_now(cfg: Path) -> None:
+    # File "0" → evict-now (the release path compares `== 0.0`); a valid in-bounds
+    # value, not a fall-back to the default that merely happens to also be 0.0.
+    _set_ttl_file(cfg, 0)
+    assert _idle_ttl_s() == 0.0
+
+
+def test_config_file_whitespace_value_resolves(cfg: Path) -> None:
+    # A trailing-newline / surrounding-whitespace file value must still resolve —
+    # the read strips, and the parser strips again defensively.
+    (cfg / _TTL_FILE).write_text("  300\n", encoding="utf-8")
+    assert _idle_ttl_s() == 300.0
+
+
+def test_config_file_negative_sentinel_keeps_warm(cfg: Path) -> None:
+    # -1 is the in-bounds "never evict" sentinel — it must resolve to -1.0, not
+    # degrade to the default (which would flip never-evict into evict-now).
+    _set_ttl_file(cfg, -1)
+    assert _idle_ttl_s() == -1.0
+
+
+# ---------------------------------------------------------------------------
+# The write-time validator, exercised DIRECTLY through write_config (the path
+# the dashboard PUT takes). Also the only coverage of config_store._check_idle_ttl's
+# use of `config._parse_bounded_ttl` / `config._IDLE_TTL_BOUNDS` — a rename there
+# would break config writes at runtime, and this catches it.
+# ---------------------------------------------------------------------------
+
+
+def test_write_config_rejects_non_numeric(cfg: Path) -> None:
+    with pytest.raises(ValueError):
+        write_config("model-idle-ttl", "abc")
+
+
+@pytest.mark.parametrize("bad", ["999999999", "-2", "nan", "inf"])
+def test_write_config_rejects_out_of_bounds_or_nonfinite(cfg: Path, bad: str) -> None:
+    # Hits the reject branch, which is what executes `lo, hi = config._IDLE_TTL_BOUNDS`
+    # in config_store._check_idle_ttl.
+    with pytest.raises(ValueError):
+        write_config("model-idle-ttl", bad)
+
+
+def test_write_config_empty_clears_override(cfg: Path) -> None:
+    write_config("model-idle-ttl", "600")
+    assert read_config("model-idle-ttl") == "600"
+    write_config("model-idle-ttl", "")  # empty clears the override
+    assert read_config("model-idle-ttl") == ""
+
+
+def test_write_config_accepts_valid_and_resolver_reads_it(cfg: Path) -> None:
+    # End-to-end: a dashboard write lands on disk AND the use-time resolver picks
+    # it up (env unset in the `cfg` fixture), closing the write→read round-trip.
+    write_config("model-idle-ttl", "600")
+    assert read_config("model-idle-ttl") == "600"
+    assert _idle_ttl_s() == 600.0

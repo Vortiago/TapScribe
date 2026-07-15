@@ -9,6 +9,7 @@ the codebase and don't change after boot.
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
@@ -176,6 +177,39 @@ def env_float(
         )
         return default
     return v
+
+
+# Bounds for the model idle-TTL knob (MODEL_IDLE_TTL_FILE / env ENV_IDLE_TTL_S,
+# both resolved in tapscribe.transcribers). Negative is the "never evict"
+# sentinel (floored at -1); the upper bound is a day, far past any sane
+# keep-warm window. Out-of-range and non-finite values are rejected by
+# `_parse_bounded_ttl` below.
+_IDLE_TTL_BOUNDS = (-1.0, 86_400.0)
+
+
+def _parse_bounded_ttl(raw: str) -> float | None:
+    """Parse an idle-TTL string to a finite float within `_IDLE_TTL_BOUNDS`,
+    or None when it is empty, unparseable, non-finite (NaN/inf), or out of
+    range. The single source of truth shared by the config-file branch of
+    `transcribers._idle_ttl_s()` (read-time) and `config_store._check_idle_ttl`
+    (write-time) so the two can never diverge on the same input. Lives here
+    beside the sibling numeric-knob parsers (`env_float`/`env_int`) and the
+    knob's file path (`MODEL_IDLE_TTL_FILE`) so both callers import it plainly
+    instead of reaching into the heavy transcribers package. The explicit
+    `isfinite` makes the NaN/inf reject intent unmistakable — `lo <= NaN <= hi`
+    is silently False, so a range check alone would drop NaN for the
+    wrong-looking reason."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        v = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(v):
+        return None
+    lo, hi = _IDLE_TTL_BOUNDS
+    return v if lo <= v <= hi else None
 
 
 def env_int(

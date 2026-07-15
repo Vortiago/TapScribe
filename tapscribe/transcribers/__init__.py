@@ -52,8 +52,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
-from .. import config
 from .. import config_store as _config_store
+from ..config import _parse_bounded_ttl
 from .base import (
     BackendKind,
     BackendPreference,
@@ -80,6 +80,7 @@ __all__ = [
     "TranscriptionSegment",
     "Word",
     "clear_cache",
+    "current_idle_ttl_s",
     "evict_idle_now",
     "lease_transcriber",
     "load_transcriber",
@@ -123,10 +124,6 @@ async def run_on_model_thread(func: Callable[..., _T], /, *args: Any, **kwargs: 
 # as the chunk-size knobs on the MLX adapters.
 ENV_IDLE_TTL_S = "TAPSCRIBE_MODEL_IDLE_TTL_S"
 _DEFAULT_IDLE_TTL_S = 0.0
-# Bounds for the knob. Negative is the "never evict" sentinel (floored at
-# -1); the upper bound is a day, far past any sane keep-warm window. Out-of-
-# range values fall back to the default via `env_float`.
-_IDLE_TTL_BOUNDS = (-1.0, 86_400.0)
 
 
 _Key = tuple[str, BackendKind]
@@ -155,27 +152,29 @@ def _idle_ttl_s() -> float:
     """Current eviction policy in seconds (see module docstring).
 
     Resolution: env var (set + valid) > config file (set + valid) > default (0.0).
-    """
-    if ENV_IDLE_TTL_S in os.environ:
-        # Env explicitly set — use it (valid → value, invalid → default, NOT file)
-        return config.env_float(
-            ENV_IDLE_TTL_S,
-            _DEFAULT_IDLE_TTL_S,
-            min_value=_IDLE_TTL_BOUNDS[0],
-            max_value=_IDLE_TTL_BOUNDS[1],
-        )
 
-    # Env unset — try config file, read fresh each call (use-time)
-    raw = _config_store.read_text_file(config.MODEL_IDLE_TTL_FILE)
-    if raw:
-        try:
-            v = float(raw)
-        except (ValueError, TypeError):
-            return _DEFAULT_IDLE_TTL_S
-        if _IDLE_TTL_BOUNDS[0] <= v <= _IDLE_TTL_BOUNDS[1]:
+    A set-but-INVALID env var — empty (a systemd `EnvironmentFile` that leaves
+    `TAPSCRIBE_MODEL_IDLE_TTL_S=`), non-numeric, or out of bounds — does NOT
+    shadow a valid config file: it falls through to the file, then the default,
+    exactly like an unset env var. Otherwise an empty env var would silently
+    discard the dashboard-set keep-warm value and evict every model on release.
+    The config file is read at use-time (stat-signature cached via `read_config`,
+    like the other /api/state config values) so a dashboard edit applies without
+    a restart."""
+    raw_env = os.environ.get(ENV_IDLE_TTL_S)
+    if raw_env:
+        v = _parse_bounded_ttl(raw_env)
+        if v is not None:
             return v
+    v = _parse_bounded_ttl(_config_store.read_config("model-idle-ttl"))
+    return v if v is not None else _DEFAULT_IDLE_TTL_S
 
-    return _DEFAULT_IDLE_TTL_S
+
+def current_idle_ttl_s() -> float:
+    """Public accessor for the resolved idle-TTL policy (env > file > default) —
+    the /api/state display value. Wraps `_idle_ttl_s()` so callers outside this
+    package don't reach across the boundary for a private name."""
+    return _idle_ttl_s()
 
 
 def _free_framework_memory() -> None:
@@ -371,9 +370,11 @@ def load_transcriber(
 def release_transcriber(transcriber: Transcriber) -> None:
     """Release one use of `transcriber` acquired via `load_transcriber`.
 
-    When the last in-flight job for the key finishes, the configured
-    `TAPSCRIBE_MODEL_IDLE_TTL_S` policy decides its fate: ``0`` unloads it
-    now, ``>0`` leaves it warm for the idle sweep, ``<0`` keeps it forever.
+    When the last in-flight job for the key finishes, the configured idle-TTL
+    policy decides its fate — the `TAPSCRIBE_MODEL_IDLE_TTL_S` env var, or the
+    dashboard-written `model-idle-ttl` config file when the env var is unset or
+    invalid (see `_idle_ttl_s`): ``0`` unloads it now, ``>0`` leaves it warm for
+    the idle sweep, ``<0`` keeps it forever.
 
     A no-op when the instance isn't in the cache — the canonical case is a
     test that monkeypatched `load_transcriber` to hand back a fake, so the

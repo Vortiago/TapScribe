@@ -157,19 +157,16 @@ def _check_batch_model(model_id: str) -> None:
 
 
 def _check_idle_ttl(content: str) -> None:
-    """WRITE-time check for the "model-idle-ttl" key: value must parse as float
-    within _IDLE_TTL_BOUNDS. Empty clears the override."""
+    """WRITE-time check for the "model-idle-ttl" key: value must parse as a
+    finite number within config._IDLE_TTL_BOUNDS. Empty clears the override.
+    Reuses the read-time parser (config._parse_bounded_ttl) so write acceptance
+    and use-time resolution can't diverge on the same input; both parser and
+    bounds live in the leaf config module, so this stays a plain import."""
     if not content:
         return
-    try:
-        v = float(content)
-    except ValueError:
-        raise ValueError(f"idle TTL must be a number, got {content!r}") from None
-    from .transcribers import _IDLE_TTL_BOUNDS  # lazy — avoids cycle
-
-    if not (_IDLE_TTL_BOUNDS[0] <= v <= _IDLE_TTL_BOUNDS[1]):
-        lo, hi = _IDLE_TTL_BOUNDS
-        raise ValueError(f"idle TTL must be between {lo} and {hi}, got {v}")
+    if config._parse_bounded_ttl(content) is None:
+        lo, hi = config._IDLE_TTL_BOUNDS
+        raise ValueError(f"idle TTL must be a finite number between {lo} and {hi}, got {content!r}")
 
 
 # The editable config files behind read_config / write_config, keyed by the
