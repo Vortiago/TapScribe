@@ -146,6 +146,33 @@ export function build(ctx) {
     }
   });
 
+  // ---- Get-a-bridge card ------------------------------------------------------
+  // static-render: built ONCE here, never touched by `update`. The two download
+  // anchors point at GitHub-Release assets (releases/latest/download/<asset>),
+  // so they are plain cross-origin hrefs — NOT same-origin triggerDownload
+  // targets. The hrefs are filled from a single best-effort GET /api/bridges on
+  // build (mirroring the Models card's /api/setup/state fetch), matched by id;
+  // on failure the hint line degrades gracefully. The latest/download URLs 404
+  // until the first tagged release, so the hint always names that caveat.
+  const bridgeDlSpatial = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlSpatial"));
+  const bridgeDlTray = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlTray"));
+  const bridgeDlHint = pick(frag, "bridgeDlHint");
+  /** @type {Record<string, HTMLAnchorElement>} */
+  const bridgeAnchors = { spacialchat: bridgeDlSpatial, "windows-tray": bridgeDlTray };
+  getJson("/api/bridges")
+    .then((/** @type {{ id: string, download_url: string }[]} */ bridges) => {
+      for (const b of bridges || []) {
+        const a = bridgeAnchors[b.id];
+        if (a && b.download_url) {
+          a.href = b.download_url;
+          a.rel = "noopener";
+          a.setAttribute("download", "");
+        }
+      }
+      bridgeDlHint.textContent = "Links resolve to the newest tagged release — available after the first one is cut.";
+    })
+    .catch(() => { bridgeDlHint.textContent = "Couldn't load bridge downloads — see the repo's Releases page."; });
+
   // BATCH card hosts (reused engine selector + config-card).
   const engineHost = pick(frag, "engineHost");
   const configCardCtx = {
