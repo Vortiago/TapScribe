@@ -77,9 +77,16 @@ def test_load_fails_fast_when_mlx_audio_missing(monkeypatch):
 def test_mlx_audio_moonshine_upstream_contract():
     """If mlx-audio is installed, its Moonshine load/generate entry
     points must exist with the expected shape — an upstream rename fails
-    here (CI, on the dependency-bump PR) rather than in production. Self-
-    skips off macOS-arm64 / without the package, per CLAUDE.md's
-    importorskip convention for MLX adapters."""
+    here (the macos-arm64 `upstream-contract` CI lane, on the
+    dependency-bump PR) rather than in production. Self-skips without
+    the package (Linux/Windows), per CLAUDE.md's importorskip
+    convention for MLX adapters.
+
+    Pins BOTH halves the adapter depends on: `mlx_audio.stt.load(repo)`
+    AND `Model.generate(audio) -> STTOutput.text` (verified against
+    upstream v0.4.1, the bottom of the pyproject pin range) — the
+    original smoke pinned only `load`, so a `generate` rename or an
+    STTOutput field change would have shipped silently."""
     import inspect
 
     pytest.importorskip("mlx_audio")
@@ -89,4 +96,18 @@ def test_mlx_audio_moonshine_upstream_contract():
     sig = inspect.signature(load)
     assert "model_path" in sig.parameters, (
         f"mlx_audio.stt.load signature changed; expected model_path, saw {sorted(sig.parameters)}"
+    )
+
+    from mlx_audio.stt.models.moonshine import moonshine as moonshine_mod  # type: ignore[import-not-found]
+
+    model_cls = getattr(moonshine_mod, "Model", None)
+    assert model_cls is not None, "mlx_audio moonshine no longer defines Model"
+    gen_params = list(inspect.signature(model_cls.generate).parameters)
+    assert gen_params[:2] == ["self", "audio"], (
+        f"Model.generate signature changed; the adapter calls generate(audio) positionally, saw {gen_params}"
+    )
+    out_cls = getattr(moonshine_mod, "STTOutput", None)
+    assert out_cls is not None, "moonshine module namespace no longer carries STTOutput"
+    assert "text" in getattr(out_cls, "__dataclass_fields__", {}) or hasattr(out_cls, "text"), (
+        "STTOutput lost the .text field the adapter unwraps"
     )
