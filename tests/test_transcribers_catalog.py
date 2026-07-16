@@ -555,6 +555,30 @@ def test_moonshine_resolve_auto_raises_when_nothing_installed():
         REGISTRY.resolve("moonshine-tiny", preference="auto")
 
 
+def test_resolve_explicit_pick_of_machine_unavailable_kind_raises_through_registry():
+    """PRD #120 story 20 / #121 checkbox, asserted THROUGH
+    `REGISTRY.resolve` — the helper-level test
+    (test_resolve_explicit_kind_raises_when_unavailable) would keep
+    passing even if resolve() stopped consulting
+    `resolve_backend_preference`, so this pins the route the API
+    actually takes."""
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset({"moonshine_onnx"}))
+    with pytest.raises(RuntimeError, match="mlx"):
+        REGISTRY.resolve("moonshine-tiny", preference="mlx")
+
+
+def test_resolve_explicit_pick_returns_loader_when_installed():
+    """The positive pair for the raise above: an explicit machine-
+    available pick with the adapter installed resolves to the ONNX
+    loader."""
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset({"moonshine_onnx"}))
+    resolved = REGISTRY.resolve("moonshine-tiny", preference="cpu")
+    assert resolved.kind == "cpu"
+    assert resolved.loader is _load_moonshine_onnx
+
+
 def test_moonshine_batch_loader_permanently_refuses():
     """Resolving an explicit backend now succeeds (no placeholder guard) —
     but invoking the returned loader (what `load_transcriber` does for a

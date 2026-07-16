@@ -305,3 +305,52 @@ def test_close_without_new_audio_commits_the_volatile_tail_without_redecoding():
     assert calls["n"] == 1  # no redundant re-decode of unchanged audio
     assert final[0]["text"] == "only decode"
     assert win.buffer_text == ""
+
+
+# ---------------------------------------------------------------------------
+# Env-tunable knobs (PRD #120 story 21) — the operator's only tuning surface
+# until the dashboard wiring lands, so the override must demonstrably change
+# the windowing, not just parse.
+# ---------------------------------------------------------------------------
+
+
+def test_env_knobs_override_the_window_defaults(monkeypatch):
+    """A knob-less MoonshineWindow must pick up TAPSCRIBE_MOONSHINE_*:
+    0.3s of audio is past an overridden 0.25s refresh cadence (under the
+    0.5s default it would still be a no-op), and decodes roll over at the
+    overridden chunk_s=1.0 (under the 25s default the whole feed would
+    ride in one growing buffer). Renaming the ENV_* constants — an env
+    override becoming a silent no-op — goes red on the first assert."""
+    monkeypatch.setenv("TAPSCRIBE_MOONSHINE_CHUNK_S", "1.0")
+    monkeypatch.setenv("TAPSCRIBE_MOONSHINE_OVERLAP_S", "0.2")
+    monkeypatch.setenv("TAPSCRIBE_MOONSHINE_REFRESH_S", "0.25")
+
+    seen_lens: list[float] = []
+
+    def stub_generate(arr: np.ndarray) -> str:
+        seen_lens.append(arr.shape[0] / 16000)
+        return "text"
+
+    win = MoonshineWindow(generate_fn=stub_generate)  # no knobs — env only
+
+    win.feed_pcm(_pcm_seconds(0.3))
+    assert win.maybe_refresh() is not None  # > 0.25s override, < 0.5s default
+
+    for _ in range(4):
+        win.feed_pcm(_pcm_seconds(0.3))
+        win.maybe_refresh()
+    win.close()
+    # Rollover enforced at the overridden chunk_s: every decode stays
+    # under 1.0s + one 0.3s feed past the boundary.
+    assert all(length <= 1.0 + 0.3 + 1e-9 for length in seen_lens), seen_lens
+
+
+def test_env_chunk_override_past_the_clip_ceiling_is_ignored(monkeypatch):
+    """Moonshine's documented single-clip ceiling is ~30s; an operator
+    override past the 29s bound is IGNORED (warned + default applied,
+    the repo's env_float convention) — it must never push a decode
+    window past the ceiling."""
+    from tapscribe.transcribers._moonshine_window import chunk_s_from_env
+
+    monkeypatch.setenv("TAPSCRIBE_MOONSHINE_CHUNK_S", "500")
+    assert chunk_s_from_env() == 25.0  # the default, not 500

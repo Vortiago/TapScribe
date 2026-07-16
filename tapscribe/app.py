@@ -251,6 +251,18 @@ def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
     return value
 
 
+def _parse_opt_str(raw, field: str) -> str | None:
+    """Optional string body field: absent/blank → None; a non-string JSON
+    value 400s like every other malformed field in the _parse_* family —
+    the `(body.get(x) or "").strip()` idiom 500s with an AttributeError
+    before any validation runs."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise HTTPException(400, f"{field} must be a string, got {type(raw).__name__}")
+    return raw.strip() or None
+
+
 # ---------------------------------------------------------------------------
 # Logging — silence the per-second poll spam
 # ---------------------------------------------------------------------------
@@ -940,8 +952,8 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     offload to a worker thread to keep /api/state polling responsive.
     """
     body = await _json_body(req)
-    model = (body.get("model") or "").strip() or None
-    language = (body.get("language") or "").strip() or None
+    model = _parse_opt_str(body.get("model"), "model")
+    language = _parse_opt_str(body.get("language"), "language")
     conf = body.get("confidence_validation")
 
     # Boundary validation FIRST — before the family swap below stops or
@@ -959,6 +971,30 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
         body.get("gate_min_speech_ms"), "gate_min_speech_ms", lo=0, hi=5_000
     )
 
+    # The catalog is the allowlist (PRD #120 story 23 — the same rule as
+    # the summarizer SUMMARY_MODELS gate): a model id from the request
+    # body must resolve to a registered live-context entry before it can
+    # reach a channel spawn, an engine loader, or an HF Hub download
+    # (nb-whisper models resolve their HF repo from this same registry).
+    # Two operator-state exemptions, mirroring the summarizer rule's
+    # "operator-controlled, not external input" carve-out: `None` (key
+    # absent / blank) means "reuse the channel's current model", and
+    # re-sending the CURRENT model verbatim is allowed even when it's
+    # uncataloged — the operator can pin an arbitrary WhisperLiveKit name
+    # via `--live-model` / live-model.txt, and the dashboard echoes the
+    # running selection back on every Apply (live-channel.js keeps it
+    # selectable via unregisteredFallback), so gate-knob/language tweaks
+    # on a pinned model must not 400. Only a CHANGED id must be in the
+    # catalog. `available` guards future "coming soon" placeholders.
+    if model is not None and model != recorder.live.config.model:
+        entry = REGISTRY.get(model)
+        if entry is None or not entry.available or not entry.supports_context("live"):
+            raise HTTPException(
+                400,
+                f"unknown live model {model!r} — not a live-context entry in the "
+                f"model catalog (see GET /api/models?context=live)",
+            )
+
     # Compute (but don't yet apply) the family swap: whether the requested
     # model needs a DIFFERENT concrete LiveChannel than the one currently
     # installed (Whisper/NB-Whisper <-> Moonshine — see PRD #120). The
@@ -972,8 +1008,7 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     )
     target_channel = new_channel if new_channel is not None else recorder.live
 
-    gate_kind_raw = body.get("gate_kind")
-    gate_kind = (gate_kind_raw or "").strip() or None
+    gate_kind = _parse_opt_str(body.get("gate_kind"), "gate_kind")
     if gate_kind is not None and gate_kind not in ("tapscribe", "backend"):
         raise HTTPException(400, f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
     if gate_kind == "backend" and not getattr(target_channel, "supports_native_vad", False):

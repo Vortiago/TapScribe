@@ -302,6 +302,45 @@
   // notices instead of staring at a stuck "0 frames" counter.
   let audioContextState = null;
 
+  // Channels that still represent a present speaker. A tap-stopped channel
+  // stays in the map as a tombstone (stopped: true) rather than being
+  // deleted: the page's audio pipeline tears down asynchronously, so a
+  // trailing "pcm" message can arrive AFTER tap-stop — with the channel
+  // deleted, ensureChannel would mint a fresh channel (stopped: false) and
+  // open a brand-new /tap for the departed speaker (the room-teardown e2e
+  // flake). Tombstones are excluded from every operator-facing count/list;
+  // a genuine rejoin re-arms via tap-start (stopped = false), and
+  // finishEndMeeting prunes them at meeting end.
+  function activeChannels() {
+    return Array.from(channels.entries()).filter(([, ch]) => !ch.stopped);
+  }
+
+  // The one list of per-presence stats a "clean channel" has zeroed —
+  // shared by finishEndMeeting's channel reset and the tap-start re-arm
+  // (which additionally clears `muted`; finishEndMeeting deliberately
+  // preserves the platform mute mirror).
+  function resetChannelStats(ch) {
+    ch.error = null;
+    ch.framesSent = 0;
+    ch.bytesSent = 0;
+  }
+
+  // Tombstones exist only to absorb the milliseconds-scale trailing
+  // events of a departing presence (see activeChannels()); in the
+  // no-meeting workflow nothing else prunes them, and platforms that
+  // mint per-connection identities never re-arm old ones — so without a
+  // bound the map grows for the tab's lifetime. Keep the newest few and
+  // evict the oldest (map iteration order = insertion order): an evicted
+  // identity's trailing frame would just be treated as a new speaker,
+  // acceptable once that many departures have happened in between.
+  const MAX_TOMBSTONES = 16;
+  function pruneTombstones() {
+    const stopped = Array.from(channels.entries()).filter(([, ch]) => ch.stopped);
+    for (let i = 0; i < stopped.length - MAX_TOMBSTONES; i++) {
+      channels.delete(stopped[i][0]);
+    }
+  }
+
   function ensureChannel(identity, name) {
     let ch = channels.get(identity);
     if (ch) {
@@ -683,9 +722,10 @@
     if (!meetingSessionId || endingSessionId) return;
     endingSessionId = meetingSessionId;
     publishMeetingEnd("ending", endingSessionId);
+    const active = activeChannels();
     console.log("[tapscribe-bridge] end meeting " + endingSessionId +
-      "; draining " + channels.size + " channel(s)");
-    for (const [identity, ch] of channels) {
+      "; draining " + active.length + " channel(s)");
+    for (const [identity, ch] of active) {
       // Don't force ch.muted here: it mirrors the platform's TRUE mute state,
       // and finishEndMeeting preserves that mirror so a still-muted speaker
       // stays gated after End (forcing it true would also gate a speaker who
@@ -735,9 +775,7 @@
         continue;
       }
       resetUtteranceState(ch); // clears utteranceId/sessionId(→global)/buffer/timers
-      ch.framesSent = 0;
-      ch.bytesSent = 0;
-      ch.error = null;
+      resetChannelStats(ch);
       // ch.muted (true platform state) and ch.name are deliberately preserved.
     }
     // Routing falls back to the global Session now: clear the IN-MEMORY id so
@@ -781,7 +819,19 @@
       case "tap-start": {
         console.log("[tapscribe-bridge] tap-start " + d.identity + " (" + (d.name || "?") + ")");
         const ch = ensureChannel(d.identity, d.name);
-        ch.stopped = false;
+        if (ch.stopped) {
+          // Re-arming a tombstone: reset the dead presence's mutable
+          // state HERE, not at tap-stop — trailing teardown events (a
+          // late trackMuted, the async onclose of a CONNECTING WS) land
+          // on the tombstone after tap-stop and would survive into the
+          // rejoin otherwise (the rejoin paths only post setMute when
+          // the publication IS muted, so a stale muted=true would
+          // silently drop every frame). Resetting at re-arm makes
+          // "rejoin starts clean" hold regardless of event ordering.
+          resetChannelStats(ch);
+          ch.muted = false;
+          ch.stopped = false;
+        }
         publishStatus();
         break;
       }
@@ -792,9 +842,11 @@
           // Tap-stop means the speaker is gone entirely (left the room,
           // track unsubscribed). There's no point draining trailing
           // PCM: even if we landed a WS, the operator doesn't expect a
-          // late transcript from a departed speaker. Force close.
+          // late transcript from a departed speaker. Force close, and
+          // tombstone rather than delete — see activeChannels(). The
+          // tombstone's remaining dirt is wiped at the tap-start re-arm.
           endUtteranceImmediate(d.identity, ch, "tap stopped");
-          channels.delete(d.identity);
+          pruneTombstones();
           console.log("[tapscribe-bridge] tap-stop " + d.identity);
           publishStatus();
         }
@@ -844,6 +896,9 @@
         if (endingSessionId) return;
         const ch = ensureChannel(d.identity, d.name);
         if (d.name && d.name !== ch.name) ch.name = d.name;
+        // Tombstoned (tap-stop already fired): drop the trailing frame —
+        // see activeChannels() for the resurrect-leak this prevents.
+        if (ch.stopped) return;
         if (ch.muted) return;
 
         // Defer the first WS open until settings have loaded, so we don't
@@ -1059,14 +1114,14 @@
       );
       return;
     }
+    const active = activeChannels();
+    const total = active.length;
     let openTaps = 0;
-    let total = 0;
     let firstError = null;
     let anyReconnecting = false;
     let anyDraining = false;
     let anyMuted = false;
-    for (const [, ch] of channels) {
-      total++;
+    for (const [, ch] of active) {
       if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) openTaps++;
       if (ch.error && !firstError) firstError = ch.error;
       if (ch.reconnectTimer !== null) anyReconnecting = true;
@@ -1144,7 +1199,7 @@
       // into a detached Session rather than the global one.
       meetingActive: !!meetingSessionId,
       meetingSessionId,
-      channels: Array.from(channels.entries()).map(([id, ch]) => ({
+      channels: activeChannels().map(([id, ch]) => ({
         identity: id,
         name: ch.name,
         muted: ch.muted,
@@ -1207,7 +1262,8 @@
   setInterval(() => {
     publishStatus();
 
-    if (channels.size === 0) {
+    const active = activeChannels();
+    if (active.length === 0) {
       if (origTitle !== null && document.title !== origTitle) {
         document.title = origTitle;
       }
@@ -1215,13 +1271,12 @@
     }
     if (origTitle === null) origTitle = stripSuffix(document.title);
 
+    const total = active.length;
     let totalBytes = 0;
     let openTaps = 0;
-    let total = 0;
     let firstError = null;
     let anyReconnecting = false;
-    for (const [id, ch] of channels) {
-      total++;
+    for (const [id, ch] of active) {
       totalBytes += ch.bytesSent;
       if (ch.error && !firstError) firstError = id;
       if (ch.tapWs && ch.tapWs.readyState === WebSocket.OPEN) openTaps++;

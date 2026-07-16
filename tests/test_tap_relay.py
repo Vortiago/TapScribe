@@ -194,6 +194,51 @@ async def test_gate_filters_frames_and_reports_open_state():
 
 
 # --------------------------------------------------------------------------
+# Gate-kind coercion for channels with no native VAD (PRD #120 stories 6/15)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class _GateKindConfig(_FakeConfig):
+    gate_kind: str = "backend"
+
+
+@pytest.mark.parametrize(
+    ("native_vad", "expected_gate_kind"),
+    [(False, "tapscribe"), (True, "backend")],
+    ids=["no-native-vad-coerces", "native-vad-keeps-backend"],
+)
+async def test_gate_kind_backend_coercion_is_keyed_on_native_vad(native_vad, expected_gate_kind):
+    """A carried-forward gate_kind="backend" on a channel with no native
+    VAD (Moonshine after a family swap — the config deliberately keeps
+    the operator's preference for the swap back to Whisper) must NOT
+    produce a gate-less tap: there is no backend VAD to hand off to, so
+    `build_gate_for_config` returning None would feed raw UNGATED PCM
+    (silence included) to the engine. The gate construction coerces to
+    "tapscribe" via `effective_gate_config` — matching what such a
+    channel's info["gate_kind"] reports (same seam). A channel WITH
+    native VAD (WhisperLiveKit's --vac child) keeps the operator's
+    "backend" pick — gate=None is then correct, the backend gates."""
+    captured: list = []
+
+    def gate_factory(cfg):
+        captured.append(cfg)
+        return None
+
+    live = _FakeLive(_GateKindConfig())
+    live.supports_native_vad = native_vad
+    relay = TapRelay(
+        live,
+        do_live=True,
+        handlers=_handlers(),
+        relay_factory=_RecordingFactory(),
+        gate_factory=gate_factory,
+    )
+    await relay.open()
+    assert [c.gate_kind for c in captured] == [expected_gate_kind]
+
+
+# --------------------------------------------------------------------------
 # Reconnect + backoff (the headline behaviour, now at the interface)
 # --------------------------------------------------------------------------
 

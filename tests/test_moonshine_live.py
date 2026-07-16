@@ -21,6 +21,7 @@ from tapscribe.live_relay import WlKRelay
 from tapscribe.moonshine_live import (
     MoonshineAsrServer,
     MoonshineLiveChannel,
+    default_engine_factory,
     resolve_live_channel_for_model,
 )
 
@@ -305,6 +306,57 @@ def test_resolve_unknown_model_id_treated_as_not_moonshine():
     assert isinstance(new_channel, WhisperLiveKitChannel)
 
 
+def test_info_reports_backend_for_both_runtimes():
+    """PRD #120 story 13: live_info must say WHICH engine actually runs.
+    Positive value assertions on both runtime labels — the verification
+    pass found blanking info["backend"] tripped nothing."""
+    assert _channel(use_mlx=False).info["backend"] == "moonshine-onnx"
+    assert _channel(use_mlx=True).info["backend"] == "mlx-audio"
+
+
+def test_start_with_failing_engine_factory_fails_loudly():
+    """PRD #120 story 14: a misconfigured/unavailable install surfaces as
+    (False, actionable message) + info state "error" + last_error — never
+    a silent success with no captions. A swallow-and-claim-success
+    mutation in start()'s except branch must go red here."""
+
+    def exploding_factory(model_id: str, *, use_mlx: bool):
+        raise RuntimeError(
+            "useful-moonshine-onnx is not installed. Install `pip install tapscribe[moonshine-cpu]`."
+        )
+
+    ch = MoonshineLiveChannel(
+        config=LiveConfig(model="moonshine-tiny", language="en", host="localhost", port=0),
+        use_mlx=False,
+        engine_factory=exploding_factory,
+    )
+    ok, msg = ch.start()
+    assert ok is False
+    assert "failed to load Moonshine engine" in msg
+    assert "moonshine-cpu" in msg  # the actionable install hint travels
+    assert ch.info["state"] == "error"
+    assert "moonshine-cpu" in ch.info["last_error"]
+    assert ch.running() is False
+
+
+def test_default_engine_factory_validates_before_any_adapter_load(monkeypatch):
+    """PRD #120 story 23, the defence-in-depth layer under the route's
+    allowlist: `validate_moonshine_model` must reject an uncataloged id
+    BEFORE either adapter's `load()` can reach a loader / Hub download."""
+    monkeypatch.setattr(
+        "tapscribe.transcribers.moonshine_mlx.MlxMoonshineEngine.load",
+        classmethod(lambda cls, model_id: pytest.fail("MLX load() must not run for a rejected id")),
+    )
+    monkeypatch.setattr(
+        "tapscribe.transcribers.moonshine_onnx.OnnxMoonshineEngine.load",
+        classmethod(lambda cls, model_id: pytest.fail("ONNX load() must not run for a rejected id")),
+    )
+    with pytest.raises(ValueError, match="evil-model"):
+        default_engine_factory("evil-model", use_mlx=False)
+    with pytest.raises(ValueError, match="evil-model"):
+        default_engine_factory("evil-model", use_mlx=True)
+
+
 # ---------------------------------------------------------------------------
 # Boot-time auto-start (config.AUTO_START_LIVE) must apply the SAME swap —
 # otherwise a persisted Moonshine default live model would try to spawn
@@ -475,6 +527,10 @@ def test_operator_config_survives_a_moonshine_roundtrip():
     moonshine = resolve_live_channel_for_model(whisper, target_model="moonshine-tiny", use_mlx=False)
     assert isinstance(moonshine, MoonshineLiveChannel)
     # The carried config is preserved verbatim (bar the ephemeral port)...
+    # The carried "backend" never yields a gate-less Moonshine tap:
+    # TapRelay._attach coerces gate construction to "tapscribe" for
+    # channels with no native VAD (see test_tap_relay.py::
+    # test_gate_kind_backend_coerced_to_tapscribe_when_channel_has_no_native_vad).
     assert moonshine.config.language == "no"
     assert moonshine.config.gate_kind == "backend"
     assert moonshine.config.gate_speech_threshold == 0.7

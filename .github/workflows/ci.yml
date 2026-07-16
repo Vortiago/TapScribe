@@ -275,9 +275,9 @@ jobs:
       # safety net actually runs. Elsewhere these self-skip (no backend), so a
       # real transcription-path regression would ship green. Not a browser test →
       # no xvfb. The transformers/MLX real_audio cases self-skip here (deps
-      # absent); the transformers-family contract smokes are gated in the
-      # `upstream-contract-transformers` job below instead (MLX stays
-      # Apple-only, out of Linux CI scope).
+      # absent); the transformers-family and moonshine contract smokes are
+      # gated in the `upstream-contract` matrix job below instead (its
+      # moonshine-mlx lane runs on a macos-arm64 runner).
       - name: Run real-audio transcription pipeline E2E (faster-whisper + NB-Whisper)
         run: pytest tests/e2e/test_pipeline_e2e.py -m real_audio -q
 
@@ -290,12 +290,40 @@ jobs:
   # `AutoModelForTDT` / `ParakeetProcessor.decode(durations=...)` or
   # `VoxtralProcessor.apply_transcription_request` signature drift) fails
   # CI on the pin-bump PR instead of shipping silently skipped everywhere
-  # — see CLAUDE.md "Upstream adapter symbols". The MLX-family contract
-  # smokes (mlx-whisper, mlx-voxtral, parakeet-mlx, mlx-lm) stay Apple-only
-  # and out of Linux CI scope; they self-skip here (deps absent).
-  upstream-contract-transformers:
-    name: upstream-contract smoke (transformers)
-    runs-on: ubuntu-latest
+  # — see CLAUDE.md "Upstream adapter symbols".
+  # One matrix lane per real-runtime family so each contract regression
+  # surfaces as its own red check (same rationale as bridge-js /
+  # frontend-typecheck) without duplicating the job skeleton per lane.
+  # The moonshine lanes exist because the importorskip'd smokes would
+  # otherwise skip on every runner and an upstream rename would ship
+  # silently (PRD #120 story 18); they run their WHOLE adapter file —
+  # the stub tests are seconds, and running them with the real package
+  # importable is the only automated real-runtime pass. The moonshine-mlx
+  # lane runs on macos-latest (arm64/Apple Silicon — mlx installs and
+  # imports only there); the other MLX smokes (mlx-whisper, parakeet-mlx,
+  # mlx-lm) remain lane-less for now and self-skip everywhere.
+  upstream-contract:
+    name: upstream-contract smoke (${{ matrix.lane }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: transformers
+            os: ubuntu-latest
+            extras: parakeet-cpu,voxtral-cpu
+            probe: transformers
+            tests: tests/test_transcribers_parakeet.py tests/test_transcribers_voxtral.py -k upstream
+          - lane: moonshine-onnx
+            os: ubuntu-latest
+            extras: moonshine-cpu
+            probe: moonshine_onnx
+            tests: tests/test_transcribers_onnx_moonshine.py
+          - lane: moonshine-mlx
+            os: macos-latest
+            extras: moonshine-mlx
+            probe: mlx_audio
+            tests: tests/test_transcribers_mlx_moonshine.py
     steps:
       - uses: actions/checkout@v7
 
@@ -306,13 +334,19 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install transformers-family runtime deps (Parakeet + Voxtral)
+      - name: Install the ${{ matrix.lane }} runtime deps
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[parakeet-cpu,voxtral-cpu]" pytest pytest-asyncio
+          pip install -e ".[${{ matrix.extras }}]" pytest pytest-asyncio
 
-      - name: Run the transformers-family upstream-contract smoke tests
-        run: pytest tests/test_transcribers_parakeet.py tests/test_transcribers_voxtral.py -k upstream -q
+      # The smokes are importorskip-gated, so an unimportable runtime would
+      # otherwise skip them and leave the lane GREEN — the exact silent-skip
+      # this job exists to close. Probe the import so that fails RED.
+      - name: Verify the ${{ matrix.lane }} runtime actually imports
+        run: python -c "import ${{ matrix.probe }}"
+
+      - name: Run the ${{ matrix.lane }} upstream-contract smoke tests
+        run: pytest ${{ matrix.tests }} -q
 
   # The Windows tray Bridge (bridges/windows-tray-bridge/) is a .NET solution:
   # a cross-platform bridge-core class library, a Windows WASAPI capture

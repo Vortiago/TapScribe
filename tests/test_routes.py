@@ -706,6 +706,20 @@ def test_api_state_exposes_live_supports_native_vad(client):
     assert body.get("live_supports_native_vad") is True
 
 
+class _FakeMoonshineEngine:
+    """Shared stub for the moonshine route tests — no real weights load."""
+
+    def generate(self, audio):
+        return "ok"
+
+
+def _stub_moonshine_factory(monkeypatch):
+    monkeypatch.setattr(
+        "tapscribe.moonshine_live.default_engine_factory",
+        lambda model_id, *, use_mlx: _FakeMoonshineEngine(),
+    )
+
+
 def test_live_start_swaps_to_moonshine_live_channel(client, recorder_under_test, monkeypatch):
     """Requesting a Moonshine model swaps `recorder.live` from the default
     WhisperLiveKitChannel to a MoonshineLiveChannel — the routing PRD #120
@@ -714,14 +728,7 @@ def test_live_start_swaps_to_moonshine_live_channel(client, recorder_under_test,
     factory is monkeypatched to a stub."""
     from tapscribe.moonshine_live import MoonshineLiveChannel
 
-    class _FakeEngine:
-        def generate(self, audio):
-            return "ok"
-
-    monkeypatch.setattr(
-        "tapscribe.moonshine_live.default_engine_factory",
-        lambda model_id, *, use_mlx: _FakeEngine(),
-    )
+    _stub_moonshine_factory(monkeypatch)
 
     r = client.post("/api/live/start", json={"model": "moonshine-tiny"})
     assert r.status_code == 200, r.text
@@ -749,6 +756,38 @@ def test_live_start_moonshine_rejects_backend_gate_kind(client, recorder_under_t
     assert "native" in r.text.lower() or "supports" in r.text.lower()
 
 
+def test_api_state_surfaces_moonshine_model_backend_and_vad_flag(client, recorder_under_test, monkeypatch):
+    """PRD #120 story 13 (+ the /api/state half of story 15): with a
+    Moonshine channel swapped in, live_info reports the model AND the
+    backend, and live_supports_native_vad flips to False — the exact bit
+    the dashboard greys the backend gate option off. The verification
+    pass found the False case unguarded (hardcoding True stayed green)."""
+    _stub_moonshine_factory(monkeypatch)
+    r = client.post("/api/live/start", json={"model": "moonshine-tiny"})
+    assert r.status_code == 200, r.text
+    try:
+        body = client.get("/api/state").json()
+        assert body["live_info"]["model"] == "moonshine-tiny"
+        assert body["live_info"]["backend"] == "moonshine-onnx"
+        assert body["live_supports_native_vad"] is False
+    finally:
+        recorder_under_test.live.stop()
+
+
+def test_live_start_engine_load_failure_surfaces_as_500(client, recorder_under_test, monkeypatch):
+    """PRD #120 story 14 at the route: an engine that can't load must
+    surface the actionable message as an HTTP 500 — not a 200 with
+    silently-dead captions."""
+
+    def exploding_factory(model_id, *, use_mlx):
+        raise RuntimeError("useful-moonshine-onnx is not installed")
+
+    monkeypatch.setattr("tapscribe.moonshine_live.default_engine_factory", exploding_factory)
+    r = client.post("/api/live/start", json={"model": "moonshine-tiny"})
+    assert r.status_code == 500, r.text
+    assert "useful-moonshine-onnx" in r.text
+
+
 def test_live_start_rejects_invalid_gate_kind(client):
     """The dashboard is the only sanctioned source for gate_kind, but
     a stale or hand-crafted POST that doesn't pass "tapscribe" /
@@ -757,6 +796,58 @@ def test_live_start_rejects_invalid_gate_kind(client):
     r = client.post("/api/live/start", json={"gate_kind": "backendd"})
     assert r.status_code == 400, r.text
     assert "gate_kind" in r.text
+
+
+@pytest.mark.parametrize(
+    "bad_model",
+    ["totally-bogus-model-xyz", "voxtral-mini"],
+    ids=["uncataloged-id", "batch-only-id"],
+)
+def test_live_start_rejects_model_id_not_in_live_catalog(client, recorder_under_test, monkeypatch, bad_model):
+    """PRD #120 story 23: the catalog is the allowlist. A model id from
+    a request body that isn't a registered LIVE-context entry — unknown
+    entirely, or registered batch-only (voxtral-mini) — must 400 BEFORE
+    any swap/stop/spawn. Pre-fix the raw string reached
+    WhisperLiveKitChannel.start (and an `nb-whisper-*` one flowed all
+    the way into a Hub snapshot_download)."""
+    before = recorder_under_test.live
+    monkeypatch.setattr(
+        type(recorder_under_test.live),
+        "start",
+        lambda self, **kw: pytest.fail("start() must not run for a rejected model id"),
+    )
+    r = client.post("/api/live/start", json={"model": bad_model})
+    assert r.status_code == 400, r.text
+    assert "catalog" in r.text.lower()
+    # A 400 must leave the running channel exactly as it was (same
+    # contract as the gate-kind validation above).
+    assert recorder_under_test.live is before
+
+
+def test_live_start_allows_resending_the_current_uncataloged_model(client, recorder_under_test, monkeypatch):
+    """The operator can pin an arbitrary WhisperLiveKit name via
+    `--live-model` / live-model.txt, and the dashboard echoes the running
+    selection back on every Apply (live-channel.js keeps it selectable
+    via unregisteredFallback + formValues always sends the model). Re-
+    sending the CURRENT model verbatim is operator state, not new
+    external input — gate-knob/language tweaks on a pinned model must
+    not 400; only a CHANGED id must be in the catalog."""
+    from dataclasses import replace
+
+    recorder_under_test.live.config = replace(recorder_under_test.live.config, model="pinned-wlk-only-model")
+    monkeypatch.setattr(type(recorder_under_test.live), "start", lambda self, **kw: (True, "ok"))
+    r = client.post("/api/live/start", json={"model": "pinned-wlk-only-model", "gate_hangover_ms": 900})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("field", ["model", "language", "gate_kind"])
+def test_live_start_rejects_non_string_body_values(client, field):
+    """A non-string JSON value for the string fields must 400 like every
+    other malformed field in this route — `(123 or "").strip()` used to
+    500 with an AttributeError before any validation ran."""
+    r = client.post("/api/live/start", json={field: 123})
+    assert r.status_code == 400, r.text
+    assert "must be a string" in r.text
 
 
 def test_live_start_rejects_backend_gate_kind_when_unsupported(client, recorder_under_test, monkeypatch):

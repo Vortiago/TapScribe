@@ -477,6 +477,11 @@ class TranscriberRegistry:
         resolved_kind = resolve_backend_preference(preference)
         for binding in entry.backends:
             if resolved_kind in binding.kinds:
+                # Deliberately NOT install-gated (unlike the auto walk):
+                # an explicit pick of an uninstalled adapter resolves and
+                # fails loudly at load time with the adapter's own
+                # actionable error — see
+                # test_explicit_preference_returns_uninstalled_binding_unchanged.
                 return ResolvedBinding(kind=resolved_kind, loader=binding.loader)
         supported = sorted(entry.supported_backend_kinds())
         raise RuntimeError(

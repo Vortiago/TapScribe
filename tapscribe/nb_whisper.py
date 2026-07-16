@@ -25,10 +25,32 @@ from pathlib import Path
 
 
 def _resolve_nb_whisper_repo(model_name: str) -> str:
-    """Resolve an NB-Whisper model_id to its HF repo via the registry."""
-    from .transcribers.catalog import repo_for
+    """Resolve an NB-Whisper model_id to its HF repo via the registry.
 
-    return repo_for(model_name, "nb-whisper") or model_name
+    Raises `RuntimeError` for a name with no registry entry: the result
+    flows straight into `snapshot_download(repo_id=...)`, and the name can
+    arrive from a request body — falling back to the raw name would turn
+    an unvalidated string into an arbitrary Hub fetch (PRD #120 story 23:
+    the catalog is the allowlist)."""
+    from .transcribers.catalog import REGISTRY, repo_for
+
+    repo = repo_for(model_name, "nb-whisper")
+    if repo is None:
+        if REGISTRY.get(model_name) is not None:
+            # Registered, but the entry lacks the repo mapping — a
+            # contributor mistake, not an operator one; don't tell them
+            # to add an entry that already exists.
+            raise RuntimeError(
+                f"{model_name!r} is registered but its catalog entry has no "
+                f"'nb-whisper' repo mapping — add repos={{'nb-whisper': ...}} "
+                f"to the entry in transcribers/catalog.py."
+            )
+        raise RuntimeError(
+            f"{model_name!r} is not a registered NB-Whisper model — refusing to "
+            f"download an unlisted repo from the HF Hub. Add a catalog entry "
+            f"(transcribers/catalog.py) to allow it."
+        )
+    return repo
 
 
 def download_nb_whisper_ct2_dir(model_name: str) -> Path:
