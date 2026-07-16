@@ -5012,6 +5012,70 @@ async def test_settings_connect_a_bridge_card_reveals_and_hides_tap_token(runnin
             await browser.close()
 
 
+async def test_settings_get_a_bridge_card_links_to_release_assets(running_recorder: RunningRecorder):
+    """PR-C: the Settings stage's "Get a bridge" card gives an operator a
+    one-click path to the SpatialChat extension zip + Windows tray exe instead
+    of a repo clone + manual build.
+
+    The two download anchors' hrefs are filled once from a single best-effort
+    GET /api/bridges on render (no per-tick work), and point at the permanent
+    `releases/latest/download/<asset>` URLs (ADR-0012) — the browser downloads
+    straight from GitHub, so these are plain cross-origin hrefs, not
+    same-origin download triggers. The card is static: exactly ONE /api/bridges
+    fetch fires on render, and none on a subsequent poll tick."""
+    rr = running_recorder
+
+    async with playwright_session() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"Chromium not available: {e}")
+            return
+        try:
+            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            page = await context.new_page()
+
+            bridges_requests = []
+            page.on(
+                "request", lambda req: bridges_requests.append(req) if "/api/bridges" in req.url else None
+            )
+
+            await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
+
+            spatial = page.locator('[data-slot="bridgeDlSpatial"]')
+            tray = page.locator('[data-slot="bridgeDlTray"]')
+            await spatial.wait_for(timeout=6000)
+
+            # The hrefs are filled asynchronously from GET /api/bridges; wait for
+            # both to carry the composed release URL.
+            await page.wait_for_function(
+                """() => {
+                  const s = document.querySelector('[data-slot="bridgeDlSpatial"]');
+                  const t = document.querySelector('[data-slot="bridgeDlTray"]');
+                  return s && t && s.href && t.href
+                    && s.href.includes('releases/latest/download/')
+                    && t.href.includes('releases/latest/download/');
+                }""",
+                timeout=8000,
+            )
+
+            spatial_href = await spatial.get_attribute("href")
+            tray_href = await tray.get_attribute("href")
+            assert "releases/latest/download/tapscribe-spacialchat-bridge.zip" in (spatial_href or "")
+            assert "releases/latest/download/TapScribe.TrayBridge-win-x64.zip" in (tray_href or "")
+
+            # Static card: exactly one /api/bridges fetch on render.
+            assert len(bridges_requests) == 1, (
+                f"GET /api/bridges must fire exactly once on render, saw {len(bridges_requests)}"
+            )
+
+            # Cross a poll tick and confirm the card does no further fetching.
+            await page.wait_for_timeout(1200)
+            assert len(bridges_requests) == 1, "the Get-a-bridge card must not re-fetch on a poll tick"
+        finally:
+            await browser.close()
+
+
 # Shared layout-reachability probe used by the Settings stack guard AND the
 # cross-view sweep below. Returns the granular per-`.work__inner .panel` signals
 # both reason over — is the card clipped (an overflow:hidden box shorter than its

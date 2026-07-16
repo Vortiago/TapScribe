@@ -62,7 +62,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, config
+from . import auth, bridges_catalog, config
 from . import hallucinations as hallucinations_mod
 from .audio import compute_peaks
 from .batch_pipeline import PipelineRequest, start_pipeline
@@ -595,6 +595,30 @@ async def api_tap_token(recorder: Recorder = Depends(get_recorder)):
     startswith check does not route it into the TAP-BEARER scheme — see
     `auth.basic_auth_middleware`. Never logged."""
     return {"token": recorder.tap.value}
+
+
+@app.get("/api/bridges")
+async def api_bridges():
+    """List the downloadable Bridges for the Settings "Get a bridge" card.
+
+    Each entry carries the static catalog metadata plus a `download_url`
+    composed from `config.GITHUB_REPO` — a permanent
+    `releases/latest/download/<asset>` link the browser follows straight to
+    GitHub (no FileResponse, no server-side proxy). The `latest/download`
+    URLs 404 until the first `vX.Y.Z` tag is cut; the card renders the links
+    unconditionally plus an "available after the first tagged release" hint
+    rather than probing the GitHub API (which would add a network dependency
+    and break airgapped servers — see ADR-0012). Basic-auth gated like any
+    other read `/api/*` route."""
+    return [
+        {
+            **a.to_mapping(),
+            "download_url": (
+                f"https://github.com/{config.GITHUB_REPO}/releases/latest/download/{a.filename}"
+            ),
+        }
+        for a in bridges_catalog.BRIDGE_ARTIFACTS
+    ]
 
 
 @app.post("/api/new-session")

@@ -63,9 +63,106 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  extension:
+    name: package spacialchat extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Package the extension
+        run: python tools/package_bridge.py spacialchat --out dist-bridge
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-extension
+          path: dist-bridge/tapscribe-spacialchat-bridge.zip
+          if-no-files-found: error
+
+  tray:
+    name: publish windows tray bridge
+    # WinForms `net10.0-windows` self-contained publish is unreliable
+    # cross-OS, so this MUST run on windows-latest (matching ci.yml's
+    # `dotnet-build` job).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: bridges/windows-tray-bridge/global.json
+
+      - name: Derive version from tag
+        shell: bash
+        run: echo "VER=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      - name: Publish self-contained single-file exe
+        shell: pwsh
+        run: >
+          dotnet publish bridges/windows-tray-bridge/src/TapScribe.TrayBridge
+          -c Release -r win-x64 --self-contained
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ env.VER }}
+          -p:InformationalVersion=${{ env.VER }}
+
+      - name: Zip the published exe
+        shell: pwsh
+        run: >
+          Compress-Archive
+          -Path "bridges/windows-tray-bridge/src/TapScribe.TrayBridge/bin/Release/net10.0-windows/win-x64/publish/TapScribe.TrayBridge.exe"
+          -DestinationPath "TapScribe.TrayBridge-win-x64.zip" -Force
+
+      - name: Upload tray artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bridge-tray
+          path: TapScribe.TrayBridge-win-x64.zip
+          if-no-files-found: error
+
+  # Docker→GHCR is deliberately NOT a `needs` of `github-release`: a GHCR
+  # hiccup must not hold back the Release (notes + wheel + sdist + both
+  # bridge zips). This job runs in parallel and publishes the image
+  # independently; a failure here leaves a complete GitHub Release intact.
+  docker:
+    name: build + push docker image (ghcr)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive version from tag
+        run: echo "VER=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Owner is lowercased (`Vortiago` -> `vortiago`) — GHCR requires
+          # a lowercase repository path.
+          tags: |
+            ghcr.io/vortiago/tapscribe:v${{ env.VER }}
+            ghcr.io/vortiago/tapscribe:latest
+
   github-release:
     name: github release
-    needs: build
+    needs: [build, extension, tray]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -77,6 +174,18 @@ jobs:
         with:
           name: dist
           path: dist/
+
+      - name: Download extension artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: bridge-extension
+          path: bridge-artifacts/
+
+      - name: Download tray artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: bridge-tray
+          path: bridge-artifacts/
 
       - name: Draft release notes (release-drafter)
         id: drafter
@@ -93,7 +202,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          files: dist/*
+          files: |
+            dist/*
+            bridge-artifacts/tapscribe-spacialchat-bridge.zip
+            bridge-artifacts/TapScribe.TrayBridge-win-x64.zip
           fail_on_unmatched_files: true
 
   # TODO(havso): enable PyPI Trusted Publishing once the `tapscribe` project

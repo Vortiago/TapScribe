@@ -65,6 +65,7 @@ autolabeler:
   - label: "deps"
     title:
       - '/^deps(\(.*\))?:/i'
+      - '/^build(\(.*\))?:/i'
   - label: "ci"
     title:
       - '/^ci(\(.*\))?:/i'

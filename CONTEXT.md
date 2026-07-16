@@ -422,6 +422,10 @@ These HTTP control calls are the only thing a Bridge sends besides PCM over
 `/tap`; the surface is create / trigger / poll / rotate / probe, never
 delete or prune, so a leaked tap token's blast radius stays bounded.
 
+Bridges are distributed as GitHub-Release artifacts (built by CI on a tagged
+release), downloadable straight from the dashboard's Settings "Get a bridge"
+card — see [ADR-0012](docs/adr/0012-bridge-artifacts-on-tagged-releases.md).
+
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
 
 ## HTTP auth gate · auth schemes

@@ -125,6 +125,12 @@ TAP_PREFIX: str = "/api/tap"
 # and spending memory when nobody wants captions).
 AUTO_START_LIVE: bool = False
 
+# Canonical repo slug used to compose GitHub Release download URLs for the
+# dashboard's "Get a bridge" card (`GET /api/bridges` builds
+# https://github.com/{GITHUB_REPO}/releases/latest/download/<asset>). ONE
+# source of truth so the UI stays dumb — see ADR-0012.
+GITHUB_REPO: str = "Vortiago/TapScribe"
+
 
 # ---------------------------------------------------------------------------
 # Env helpers — shared parsers for operator-tunable numeric knobs

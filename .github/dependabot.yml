@@ -32,7 +32,7 @@ updates:
           - "torch"
           - "silero-vad"
     commit-message:
-      prefix: "deps"
+      prefix: "build"
       include: "scope"
 
   - package-ecosystem: "github-actions"
@@ -52,5 +52,5 @@ updates:
       day: "monday"
     open-pull-requests-limit: 3
     commit-message:
-      prefix: "deps(bridge)"
+      prefix: "build"
       include: "scope"
