@@ -137,7 +137,7 @@ from .text import (
     write_languages,
     write_summarizer_config,
 )
-from .transcribers import evict_idle_now, run_on_model_thread
+from .transcribers import current_idle_ttl_s, evict_idle_now, run_on_model_thread
 from .transcribers.catalog import (
     REGISTRY,
     SPECIALIST_MODELS,
@@ -900,6 +900,7 @@ def _build_state_blob(
             "content": hallucinations_content,
             "count": len(halluc_rules),
         },
+        "idle_ttl_s": current_idle_ttl_s(),
     }
     body = json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode("utf-8")
     etag = 'W/"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'
