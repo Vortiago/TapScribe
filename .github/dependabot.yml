@@ -46,7 +46,11 @@ updates:
       include: "scope"
 
   - package-ecosystem: "npm"
-    directory: "/bridges/spacialchat-bridge"
+    # Dev-only typecheck/e2e manifests; the bridge itself ships no npm deps.
+    directories:
+      - "/frontend"
+      - "/bridges/spacialchat-bridge/e2e"
+      - "/bridges/spacialchat-bridge/typecheck"
     schedule:
       interval: "weekly"
       day: "monday"
