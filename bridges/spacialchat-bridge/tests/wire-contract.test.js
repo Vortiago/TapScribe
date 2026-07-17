@@ -210,7 +210,11 @@ test("flipping Use TLS on clears the sticky tls-required error so the bridge red
 // Wraps client.wouldBlockCleartext with a call-recording spy that still
 // delegates to the real predicate, so behavior is unaffected — only used to
 // pin WHICH function the ws:// guard consults, not its blocked/allowed
-// outcome (already covered by the guard tests above).
+// outcome (already covered by the guard tests above). Scope caveat: the spy
+// observes content.js's property-path call ONLY. control-client.js's own HTTP
+// guard (controlFetch) invokes wouldBlockCleartext through a private closure
+// binding inside the IIFE, which no property patch can see — the HTTP side is
+// pinned behaviorally in the test below, not by this spy.
 function spyOnWouldBlockCleartext(bridge) {
   const client = bridge.controlClient();
   const calls = [];
@@ -222,13 +226,20 @@ function spyOnWouldBlockCleartext(bridge) {
   return calls;
 }
 
-test("the WS mixed-content guard shares TapscribeControlClient.wouldBlockCleartext — no private duplicate predicate", async () => {
+test("the WS pre-flight shares the exported wouldBlockCleartext, and the HTTP guard blocks the same cfg", async () => {
   // #251 shared the inner isTrustworthyHost; content.js still hand-rolled
   // the surrounding three-step cleartext predicate (TLS off + https page +
-  // non-trustworthy host) as its own wouldBeMixedContentBlocked. Pin that
-  // content.js's ws:// pre-flight now calls through the SAME exported
-  // predicate the HTTP control plane's guard uses — spying on it, not on
-  // private content.js internals — rather than keeping a private duplicate.
+  // non-trustworthy host) as its own wouldBeMixedContentBlocked. Two pins:
+  //   1. Identity, WS side: the spy proves content.js's ws:// pre-flight
+  //      calls through the exported TapscribeControlClient.wouldBlockCleartext
+  //      rather than keeping a private duplicate predicate.
+  //   2. Behavior, HTTP side: the spy CANNOT prove the same for the HTTP
+  //      control plane — controlFetch reaches the predicate via a closure
+  //      binding a property patch can't observe — so pin its observable
+  //      contract instead: the SAME blocked cfg makes a control call reject
+  //      as mixed-content-blocked carrying the shared display copy, with
+  //      nothing reaching fetch. A fork of the HTTP guard that diverges from
+  //      the WS verdict on this cfg trips this half.
   const blocked = createBridge({
     settings: { recorderHost: "macmini", recorderPort: 8001, useTls: false, tapToken: "tok" },
   });
@@ -236,11 +247,22 @@ test("the WS mixed-content guard shares TapscribeControlClient.wouldBlockClearte
   setupChannel(blocked);
   const blockedCalls = spyOnWouldBlockCleartext(blocked);
 
+  // (1) WS side — predicate identity via the spy.
   blocked.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
   assert.ok(
     blockedCalls.some((cfg) => cfg && cfg.host === "macmini"),
     "the ws:// guard consulted TapscribeControlClient.wouldBlockCleartext with the recorder cfg",
   );
+
+  // (2) HTTP side — observable blocking behavior under the same cfg. The
+  // error is built inside the vm realm, so validate fields, not instanceof.
+  const client = blocked.controlClient();
+  await assert.rejects(
+    client.triggerPipeline({ host: "macmini", port: 8001, useTls: false, token: "tok" }, "sess-http"),
+    (e) => e.kind === "mixed-content-blocked" && e.message === client.MIXED_CONTENT_BLOCKED_TEXT,
+    "the HTTP control plane must block the same cfg with the shared display copy",
+  );
+  assert.equal(blocked.fetches().length, 0, "the blocked control call never reached fetch");
 });
 
 test("forwarded frame body is the same bytes the page-script sent", async () => {

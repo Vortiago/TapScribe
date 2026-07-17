@@ -31,6 +31,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
 
 let actions;
 test.before(async () => { actions = await import("../popup-actions.js"); });
@@ -144,4 +147,60 @@ test("endMeeting surfaces a failed trigger as meetingEnd.phase 'failed' and stil
   assert.equal(m.meetingEnd.phase, "failed", "a trigger failure must be a terminal 'failed', not a wedge");
   assert.ok(m.meetingEnd.error, "the failure reason must be recorded for the card");
   assert.equal(m.meetingActive, false, "even on trigger failure the meeting is no longer active");
+});
+
+// --- guardrail: mixed-content failure surfaces the shared display copy --------
+//
+// endMeeting renders the thrown message verbatim (no kind-keyed remap), so the
+// operator-facing parity between this stale-tab card and content.js's live-tab
+// card rests entirely on control-client.js throwing MIXED_CONTENT_BLOCKED_TEXT
+// as the ControlError's *message*. Pin that end-to-end through the REAL
+// client: a mixed-content config (https page, cleartext non-trustworthy host)
+// must land the exported constant — not some reworded throw text — in
+// meetingEnd.error. If control-client.js ever rewords the thrown message away
+// from the exported constant, this fails on the spot instead of the two cards
+// silently drifting from the copy popup.js composes with.
+
+function loadRealControlClient() {
+  const sandbox = {
+    // Model the content-script world: an https:// page, so the client's own
+    // wouldBlockCleartext guard fires for a cleartext non-trustworthy host.
+    location: { protocol: "https:", origin: "https://app.spatial.chat" },
+    // The guard throws BEFORE any network I/O; reaching fetch is a failure.
+    fetch: () => { throw new Error("a mixed-content-blocked call must not reach fetch"); },
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    console: { log() {}, warn() {}, error() {} },
+  };
+  sandbox.self = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(
+    fs.readFileSync(path.join(__dirname, "..", "control-client.js"), "utf8"),
+    sandbox,
+    { filename: "control-client.js" },
+  );
+  return sandbox.TapscribeControlClient;
+}
+
+test("endMeeting surfaces MIXED_CONTENT_BLOCKED_TEXT on a mixed-content trigger failure (real client)", async () => {
+  const storage = fakeStorage();
+  const client = loadRealControlClient();
+  const blockedCfg = { host: "macmini", port: 8001, useTls: false, token: "tok" };
+
+  await actions.endMeeting({
+    control: client, storage, cfg: blockedCfg, sessionId: SID, snapshot: STALE, now: NOW,
+  });
+
+  // Field-wise asserts (not deepEqual): the ControlError originates inside the
+  // vm realm, so cross-realm prototypes would trip strict deep-equal.
+  const m = merged(storage.writes);
+  assert.equal(m.meetingActive, false, "the meeting is cleared even on a blocked trigger");
+  assert.equal(m.meetingEnd.phase, "failed", "a blocked trigger is a terminal 'failed'");
+  assert.equal(
+    m.meetingEnd.error,
+    client.MIXED_CONTENT_BLOCKED_TEXT,
+    "the card must render the client's shared mixed-content copy, matching the live-tab card",
+  );
 });

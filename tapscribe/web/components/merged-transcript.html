@@ -45,8 +45,12 @@
 <template id="tpl-merged-seg-lowconf"><span class="seg lowconf" data-slot="lc"><span data-slot="text"></span><span class="conf-chip" data-slot="pct"></span></span></template>
 
 <template id="tpl-audit-wrapper">
+  <!-- Static heading, not a button: the classic dashboard's collapse toggle
+       lost its click wiring in the Stages rewrite and the list is now always
+       visible, so the ▾/▸ affordance was a dead control. .audit-toggle keeps
+       the flush full-width dim-text metrics. -->
   <div class="rule-top">
-    <button class="btn ghost tiny audit-toggle" data-toggle-audit data-slot="toggle"></button>
+    <div class="tiny audit-toggle" data-slot="auditHead"></div>
     <div data-slot="table"></div>
   </div>
 </template>

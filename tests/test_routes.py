@@ -1421,6 +1421,47 @@ def test_delete_session_audio_refuses_inflight_job(client, recorder_under_test):
     assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # untouched
 
 
+def test_delete_session_audio_holds_job_slot_during_walk(client, recorder_under_test, monkeypatch):
+    """The inverse of the refuses-inflight-job pin: while the delete walk runs,
+    the session's job slot is CLAIMED (kind="delete"), so a transcribe/strip
+    arriving mid-delete gets the standard SessionBusy 409 instead of racing
+    the unlink walk (the old pre-flight was check-then-act)."""
+    from tapscribe import app as app_module
+    from tapscribe.recorder import JobState
+
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+
+    observed: dict[str, bool] = {}
+
+    def probing_delete(session: str):
+        # Runs inside the route's asyncio.to_thread — the slot must already
+        # be held, so a foreign claim attempt must be refused.
+        import anyio.from_thread
+
+        with anyio.from_thread.start_blocking_portal() as portal:
+            observed["claim_refused"] = not portal.call(
+                recorder_under_test.jobs.claim,
+                JobState(
+                    session=session,
+                    kind="transcribe",
+                    current=0,
+                    total=1,
+                    started_at=datetime.now(UTC),
+                    status="running",
+                ),
+            )
+        return {"wavs_deleted": 0, "bytes_freed": 0, "sidecars_deleted": 0}
+
+    monkeypatch.setattr(app_module, "delete_session_audio", probing_delete)
+    r = client.delete("/api/sessions/s/audio")
+    assert r.status_code == 200
+    assert observed["claim_refused"] is True
+    # And the slot is released again afterwards: a fresh delete succeeds.
+    r2 = client.delete("/api/sessions/s/audio")
+    assert r2.status_code == 200
+
+
 def test_delete_session_audio_missing_session_404(client, recorder_under_test):  # noqa: ARG001
     r = client.delete("/api/sessions/does-not-exist/audio")
     assert r.status_code == 404

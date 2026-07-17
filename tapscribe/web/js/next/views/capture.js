@@ -141,10 +141,11 @@ export function build(ctx) {
       eyebrow: "Session · 1 Capture",
       title: "Capture",
       sub: {
-        // Read session_meta.label directly (== metaFor(sess).label) so the
-        // per-tick sig doesn't allocate a throwaway EffectiveMeta; build() still
-        // uses metaFor(), but that only runs past the gate on a real change.
-        sig: `${recEnabled ? 1 : 0}§${sess ? sess.session_meta?.label || sess.session : ""}`,
+        // sessionLabel reads session_meta.label raw (== metaFor(sess).label —
+        // the shell.js labelSigFor doc owns that equivalence), so the per-tick
+        // sig allocates no throwaway EffectiveMeta and mirrors exactly what
+        // build() renders below.
+        sig: `${recEnabled ? 1 : 0}§${sess ? sessionLabel(sess) : ""}`,
         build: () =>
           inline(
             "live IRC captions · recorder ",

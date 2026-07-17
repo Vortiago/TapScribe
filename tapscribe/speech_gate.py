@@ -203,31 +203,40 @@ class SpeechGate:
 # Silero VAD wiring (production path)
 # ---------------------------------------------------------------------------
 #
-# Lazy module-level model load: the silero-vad model is ~1 MB and ~100 ms
-# to load — fine at recorder startup, expensive per /tap. Each gate gets
-# its own VADIterator (which holds streaming state), but they all share
-# the same loaded model.
-
-_silero_model = None
+# One model PER GATE, never a shared instance: silero's streaming RNN
+# state lives ON the model object, so sharing one across gates would
+# interleave concurrent taps' audio through a single LSTM state. See
+# `load_silero_model`.
 
 
-def _get_silero_model() -> object:
-    """Load (and cache) the Silero VAD model. Imports are inside the
-    function so a TapScribe install without the `vad` extra doesn't
-    fail at import time — the gate is constructible without Silero,
-    used by tests, and only `make_silero_vad` reaches for the model.
+def load_silero_model() -> object:
+    """Load a FRESH Silero VAD model instance — deliberately UNCACHED.
+
+    The streaming recurrent state lives ON the model object (silero's
+    OnnxWrapper keeps `_state`/`_context` there; `VADIterator` holds only
+    trigger bookkeeping and its `reset_states` delegates to
+    `model.reset_states`), so a process-wide cached instance is a
+    correctness bug, not an optimisation: concurrent /tap gates would
+    interleave their audio through one LSTM state, every new gate
+    construction would zero the state under every other open tap, and a
+    `get_speech_timestamps` run (strip-preview / batch strip, on worker
+    threads) would corrupt a live gate's state mid-utterance. Every
+    consumer owns its instance: per-gate via `make_silero_vad` below,
+    per-worker-thread via `strip_silence._local_silero_model`.
+
+    Imports are inside the function so a TapScribe install without
+    silero doesn't fail at import time — the gate is constructible
+    without Silero (tests pass a fake analyzer), and only the production
+    wiring reaches for the model.
 
     `onnx=True` loads the ONNX build via onnxruntime rather than the
     TorchScript `.jit` via `torch.jit.load`, which PyTorch deprecated and
     flags as unsupported on Python 3.14+ ("may break"). Same model, same
     results; silero still uses torch tensors for I/O so torch stays a
     dependency — we just don't ride the deprecated loader."""
-    global _silero_model
-    if _silero_model is None:
-        from silero_vad import load_silero_vad  # noqa: PLC0415
+    from silero_vad import load_silero_vad  # noqa: PLC0415
 
-        _silero_model = load_silero_vad(onnx=True)
-    return _silero_model
+    return load_silero_vad(onnx=True)
 
 
 def make_silero_vad(*, threshold: float, hangover_ms: int) -> VadAnalyzer:
@@ -242,12 +251,19 @@ def make_silero_vad(*, threshold: float, hangover_ms: int) -> VadAnalyzer:
     the burst ended — operators dial this up if their conversations
     have lots of mid-sentence breath pauses they don't want chopped
     apart, down if they want tighter sentence boundaries.
+
+    Loads a FRESH model per call (= per gate): the streaming state lives
+    on the model, not the VADIterator (see `load_silero_model`). The
+    ~1 MB / ~100 ms load cost is paid off the event loop — production
+    gate construction runs via `asyncio.to_thread` in `TapRelay._attach`
+    (#249), so a per-gate load can't stall other taps' frames or the
+    /api/state poll.
     """
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
     from silero_vad import VADIterator  # noqa: PLC0415
 
-    model = _get_silero_model()
+    model = load_silero_model()
     it = VADIterator(
         model,
         threshold=threshold,

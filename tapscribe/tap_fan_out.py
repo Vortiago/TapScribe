@@ -480,13 +480,19 @@ class TapFanOut:
         # before it was built) or its teardown raises/cancels; remove() no-ops on
         # an unregistered conn_id.
         try:
-            # Flush any bytes/level the frame-path throttle still holds
-            # locally, so the row reads the exact final byte count while the
-            # relay drains tail captions below (the row itself is removed in
-            # the finally). Also what keeps short-lived taps (< one flush
-            # window) from never reporting their bytes at all.
-            await self._flush_stream_counters()
+            # Relay close MUST stay the first await here: TapRelay.close()
+            # issues its cancel-in-flight-reconnect synchronously before any
+            # suspension, so even a CancelledError delivered at this task's
+            # next suspension point can't let a pending reconnect land a
+            # fresh WS after teardown. (Flushing counters first would open
+            # exactly that gap — the flush awaits the shared ActiveStreams
+            # lock.)
             if self._tap_relay is not None:
                 await self._tap_relay.close()
+            # Flush any bytes/level the frame-path throttle still holds
+            # locally, so the row reads the exact final byte count while
+            # short-lived taps (< one flush window) still report their
+            # bytes at least once before the row is removed in the finally.
+            await self._flush_stream_counters()
         finally:
             await self._recorder.streams.remove(self._conn_id)

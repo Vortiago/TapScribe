@@ -1,5 +1,5 @@
 // @ts-check
-// Adaptive cadence for the /api/state poll loop (issue #247, ADR-0011).
+// Adaptive cadence for the /api/state poll loop (issue #247, ADR-0013).
 //
 // The dashboard polls every FAST_MS. That's the right cadence while anything is
 // moving, but a dashboard left open on an idle meeting fires a 304 twice a

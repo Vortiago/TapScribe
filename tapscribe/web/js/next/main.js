@@ -43,7 +43,7 @@ const $ = (id) => {
 /** @type {import('../types.js').AppState | null} */
 let lastJson = null;
 
-// Adaptive /api/state cadence (issue #247, ADR-0011): fast while anything moves,
+// Adaptive /api/state cadence (issue #247, ADR-0013): fast while anything moves,
 // back off to 2s when idle-and-unchanged, snap back on change/interaction.
 // Declared here (module init) so refresh() and the visibility handler — both
 // defined before the poll loop — reference an already-constructed pacer.

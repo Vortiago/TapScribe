@@ -47,7 +47,7 @@
 import { tpl, pick, mount, reconcileList, deferIfSelectionInside } from "../../templates.js";
 import { putJson, postJson, del, getJson, errText } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
-import { header, strong, inline, newestFirst } from "../shell.js";
+import { header, strong, inline, newestFirst, labelSigFor } from "../shell.js";
 
 /**
  * A session's total original-WAV bytes. Precomputed server-side as
@@ -159,15 +159,12 @@ export function build(ctx) {
     return metaFor(s).label;
   };
 
-  /** `labelFor` for PER-TICK sig/filter computations: the same overlay-then-
-   * meta value, read directly off `session_meta.label` (the documented
-   * equivalence with `metaFor(s).label` — see capture.js) so no throwaway
-   * EffectiveMeta (alias-map spread) is allocated per session per tick. MUST
-   * stay value-identical to labelFor — the rename overlay included — or a sig
-   * drifts from what the render paints and the region goes stale after a
-   * rename. Render paths keep labelFor/metaFor. */
+  /** `labelFor` for PER-TICK sig/filter computations — the shared shell.js
+   * helper bound to THIS view's rename overlay. Its doc carries the
+   * metaFor-equivalence rationale (value-identical to labelFor, no throwaway
+   * EffectiveMeta per session per tick). Render paths keep labelFor/metaFor. */
   /** @param {import('../../types.js').Session} s */
-  const labelSig = (s) => localLabels.get(s.session) ?? (s.session_meta?.label || "");
+  const labelSig = (s) => labelSigFor(localLabels, s);
 
   /** Fire a transcript-search query when the local filter yields no results.
     * Results are cached per query string. */
@@ -690,6 +687,20 @@ export function build(ctx) {
     // Newest first (shared shell.js comparator — same ordering as the spine picker).
     const sessions = [...(j.sessions || [])].sort(newestFirst);
     lastSessions = sessions;
+    // Drop a rename overlay once the server's label has caught up to it —
+    // for EVERY session, every tick (people.js's catch-up sweep). Without
+    // this the overlay was only dropped on delete/absorb, so labelSig kept
+    // preferring the stale typed value forever and a later rename made
+    // elsewhere (the spine card, another tab) never repainted this list.
+    // The debounce window is safe: an entry the operator just typed differs
+    // from the server label until its PUT lands (so it survives), and when
+    // it EQUALS the server label there is nothing left to save — persistLabel
+    // re-reads the overlay when the timer fires and no-ops once it's gone.
+    for (const s of sessions) {
+      if (localLabels.get(s.session) === (s.session_meta?.label || "")) {
+        localLabels.delete(s.session);
+      }
+    }
     const total = sessions.length;
     const transcribed = sessions.filter((s) => s.session_transcript).length;
 

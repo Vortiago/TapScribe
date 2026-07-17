@@ -783,9 +783,10 @@
         }
       })
       .catch((e) => {
-        const reason = (e && e.kind === "mixed-content-blocked")
-          ? TapscribeControlClient.MIXED_CONTENT_BLOCKED_TEXT
-          : String((e && e.message) || e);
+        // The thrown message verbatim: a mixed-content ControlError carries
+        // MIXED_CONTENT_BLOCKED_TEXT as its message (control-client.js throws
+        // the constant), so no kind-keyed remap is needed for card parity.
+        const reason = String((e && e.message) || e);
         console.warn("[tapscribe-bridge] pipeline trigger failed for " + sessionId + ": " + reason);
         publishMeetingEnd("failed", sessionId, reason);
       });

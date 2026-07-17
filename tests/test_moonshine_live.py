@@ -678,3 +678,97 @@ def test_rejected_live_start_leaves_running_channel_untouched(tmp_path, monkeypa
             assert fake.stopped is False
     finally:
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# start() ready-timeout — a late-completing bind must be torn down, and
+# model-thread affinity — load + decodes on ONE dedicated thread.
+# ---------------------------------------------------------------------------
+
+
+def test_start_ready_timeout_tears_down_a_late_binding_server(monkeypatch):
+    """A bind completing AFTER start()'s ready deadline used to leave a
+    running /asr server + event loop that no channel field referenced —
+    an orphan stop() could never reach, listening for the process
+    lifetime (and retry-blocking a fixed port). The timeout branch now
+    flags the spawn abandoned and stops the loop, so `_run` unwinds:
+    server closed, loop closed, and stop() stays a safe no-op."""
+    import time as _time
+
+    import tapscribe.moonshine_live as ml
+
+    monkeypatch.setattr(ml, "_READY_TIMEOUT_S", 0.05)
+    real_bound = ml._bound_socket
+
+    def slow_bound(host: str, port: int):
+        _time.sleep(0.4)  # block the loop thread well past the deadline
+        return real_bound(host, port)
+
+    monkeypatch.setattr(ml, "_bound_socket", slow_bound)
+
+    # Record the loop the channel spins up so the test can observe its
+    # teardown — the channel deliberately never stores it on a timeout.
+    created: dict = {}
+    real_new_loop = asyncio.new_event_loop
+
+    def recording_new_event_loop():
+        loop = real_new_loop()
+        created["loop"] = loop
+        return loop
+
+    monkeypatch.setattr(ml.asyncio, "new_event_loop", recording_new_event_loop)
+
+    ch = _channel()
+    ok, msg = ch.start()
+
+    assert ok is False
+    assert "timed out" in msg
+    assert ch.info["state"] == "error"
+    assert ch.running() is False
+    # The late bind must be unwound: _run's teardown tail closes the
+    # server and THEN the loop, so a closed loop proves the whole tail ran.
+    wait_for_sync(lambda: created["loop"].is_closed(), timeout=5.0)
+    # And stop() after a timed-out start is a clean idempotent no-op.
+    assert ch.stop() == (True, "not running")
+
+
+def test_engine_load_and_all_decodes_share_one_dedicated_model_thread():
+    """Decodes used to run via asyncio.to_thread (the loop's multi-worker
+    default executor) while the engine was loaded on a different thread —
+    violating the MLX thread-affinity rule transcribers/__init__.py pins
+    (weights created on one thread can't be evaluated from another) and
+    allowing concurrent generate() calls with 2+ taps. The channel now
+    routes the engine load AND every window decode through one dedicated
+    single-worker executor; pin it via the executor's thread-name prefix."""
+    import threading as _threading
+
+    thread_names: list[str] = []
+
+    class _RecordingEngine:
+        def __init__(self) -> None:
+            thread_names.append(_threading.current_thread().name)  # load site
+
+        def generate(self, audio: np.ndarray) -> str:
+            thread_names.append(_threading.current_thread().name)  # decode site
+            return "recorded"
+
+    config = LiveConfig(model="moonshine-tiny", language="en", host="localhost", port=0)
+    ch = MoonshineLiveChannel(config=config, use_mlx=False, engine_factory=lambda *a, **k: _RecordingEngine())
+    ok, _msg = ch.start()
+    assert ok is True
+    try:
+
+        async def drive_one_utterance() -> None:
+            relay = WlKRelay(
+                host="localhost", port=ch.config.port, language="en", on_settled_line=lambda _t: None
+            )
+            assert await relay.connect() is True
+            await relay.send(_pcm_seconds(0.6))  # crosses the refresh cadence
+            await relay.close()  # end-of-audio marker -> window.close() decode
+
+        asyncio.run(drive_one_utterance())
+    finally:
+        ch.stop()
+
+    assert len(thread_names) >= 2, "expected the load plus at least one decode"
+    assert all(n.startswith("tapscribe-moonshine-model") for n in thread_names), thread_names

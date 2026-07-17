@@ -84,11 +84,15 @@ def _generate_pair(cert_path: Path, key_path: Path, host: str) -> None:
     cert_path.parent.mkdir(parents=True, exist_ok=True)
     cert_path.write_bytes(cert_pem)
     key_path.write_bytes(key_pem)
-    # Best-effort 0600 on the key; harmless on Windows.
     for p in (cert_path, key_path):
         try:
             os.chmod(p, 0o600)
         except (OSError, NotImplementedError):
+            # Best-effort 0600 tightening only: chmod is a no-op concept on
+            # Windows/ACL filesystems (some raise NotImplementedError) and
+            # can fail on exotic mounts. The pair is still fully usable —
+            # what's lost is only the restrictive permission bits, matching
+            # SecretFile's best-effort chmod in recorder.py.
             pass
 
 

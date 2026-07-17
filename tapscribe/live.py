@@ -30,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 
 from .nb_whisper import download_nb_whisper_ct2_dir
 from .speech_gate import effective_gate_config
@@ -44,12 +44,65 @@ from .text import read_config
 GATE_THRESHOLD_DECIMALS = 2
 
 # The valid `gate_kind` values — which layer runs speech gating (see
-# `LiveConfig.gate_kind` for what each means). The ONE membership
-# allowlist shared by every validation site: `_transition_replacements`
-# (both channels' `begin_transition`) and `/api/live/start`'s boundary
-# check in `tapscribe.app`. Must stay in sync with the `Literal` type on
-# `LiveConfig.gate_kind`.
-GATE_KINDS: tuple[str, ...] = ("tapscribe", "backend")
+# `LiveConfig.gate_kind` for what each means). `GateKind` is the ONE
+# authority: the runtime allowlist tuple is derived from the Literal via
+# `get_args`, so the type checker's view and every membership check
+# (`_transition_replacements` for both channels' `begin_transition`, and
+# `/api/live/start`'s boundary check in `tapscribe.app`) can't drift.
+GateKind = Literal["tapscribe", "backend"]
+GATE_KINDS: tuple[str, ...] = get_args(GateKind)
+
+
+def gate_kind_error(got: object) -> str:
+    """The single wording for a `gate_kind` outside `GATE_KINDS` — used by
+    `_transition_replacements`' ValueError and imported by
+    `tapscribe.app`'s `/api/live/start` 400, so the HTTP boundary and the
+    channels' own validation can't drift apart."""
+    return f"gate_kind must be {' or '.join(repr(k) for k in GATE_KINDS)}, got {got!r}"
+
+
+class TailLog(deque):
+    """A bounded log deque whose mutation AND iteration are serialised by
+    one internal lock — the `log` attribute type both live channels use.
+
+    Why: the channel's pump thread appends log lines from a plain
+    `threading.Thread` while `/api/state` (`islice(log, …)`) and
+    `/api/live/log` (`list(log)`) iterate the same deque on the event
+    loop. A CPython deque iterator raises
+    `RuntimeError("deque mutated during iteration")` when an append lands
+    between iterator creation and consumption, 500ing the poll.
+
+    Marshalling appends onto the event loop
+    (`loop.call_soon_threadsafe(log.append, line)`) is structurally
+    awkward here: `start()` runs on a `asyncio.to_thread` worker (or the
+    pre-loop boot path), so there is no running loop to capture at the
+    writer's spawn point. Locking inside the log type instead makes the
+    guarantee structural: `__iter__` snapshots under the lock, so EVERY
+    reader that iterates (`list()`, `islice()`, a `for` loop — including
+    tests appending from foreign threads) is safe with no bespoke copies
+    or locking at any call site. Readers pay one O(maxlen≤200) copy.
+
+    Only the operations the channels use are overridden (`append`,
+    `clear`, `__iter__`); give any other mutator the same lock treatment
+    before calling it from a second thread.
+    """
+
+    def __init__(self, maxlen: int | None = None) -> None:
+        super().__init__(maxlen=maxlen)
+        self._lock = threading.Lock()
+
+    def append(self, item) -> None:
+        with self._lock:
+            super().append(item)
+
+    def clear(self) -> None:
+        with self._lock:
+            super().clear()
+
+    def __iter__(self):
+        with self._lock:
+            snapshot = list(super().__iter__())
+        return iter(snapshot)
 
 
 def resolve_live_init_prompt() -> str | None:
@@ -156,9 +209,9 @@ class LiveConfig:
     #                 No pre-roll, no leading-word recovery — kept as an
     #                 escape hatch for A/B comparison and for backends
     #                 whose native VAD is good enough.
-    # The Literal must list exactly the module-level GATE_KINDS values —
-    # runtime validation checks membership against that tuple.
-    gate_kind: Literal["tapscribe", "backend"] = "tapscribe"
+    # Runtime validation checks membership against GATE_KINDS, which is
+    # derived from this same GateKind Literal — one authority, no drift.
+    gate_kind: GateKind = "tapscribe"
     # Operator-tunable thresholds for the TapScribe gate. Consumed by
     # SpeechGate (NOT by build_live_cmd / WlK).
     gate_speech_threshold: float = 0.5  # Silero speech probability gate
@@ -498,9 +551,7 @@ def _transition_replacements(
     )
     if gate_kind is not None:
         if gate_kind not in GATE_KINDS:
-            raise ValueError(
-                f"gate_kind must be {' or '.join(repr(k) for k in GATE_KINDS)}, got {gate_kind!r}"
-            )
+            raise ValueError(gate_kind_error(gate_kind))
         replacements["gate_kind"] = gate_kind
     if conf is not None:
         replacements["confidence_validation"] = bool(conf)
@@ -530,7 +581,9 @@ class WhisperLiveKitChannel:
         # exact bug ephemeral defaults were meant to fix.
         self._ephemeral_port = config.port == 0
         self.info: dict[str, str] = _initial_info()
-        self.log: deque[str] = deque(maxlen=200)
+        # TailLog, not a bare deque: the pump thread appends while the
+        # /api/state and /api/live/log routes iterate on the event loop.
+        self.log: deque[str] = TailLog(maxlen=200)
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         # Seed info with the boot-time config so the dashboard renders
@@ -790,6 +843,13 @@ class WhisperLiveKitChannel:
                 try:
                     os.killpg(proc.pid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
+                    # ProcessLookupError: the group already exited (child died
+                    # between the poll() above and this signal) — nothing to
+                    # terminate. PermissionError: the pgid was reused by a
+                    # process we may not signal (macOS can also raise it for
+                    # zombies). Either way the escalation ladder below still
+                    # runs: wait() reaps a dead child, SIGKILL covers a live
+                    # one, so nothing is lost by continuing.
                     pass
             else:
                 proc.terminate()
@@ -800,21 +860,38 @@ class WhisperLiveKitChannel:
                     try:
                         os.killpg(proc.pid, signal.SIGKILL)
                     except (ProcessLookupError, PermissionError):
+                        # Same as the SIGTERM branch: the group vanished (it
+                        # finally honoured SIGTERM) or the pgid isn't ours to
+                        # signal. The wait() below still reaps/observes the
+                        # child; suppressing here loses nothing.
                         pass
                 else:
                     proc.kill()
                 try:
                     proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
+                    # SIGKILLed but not reaped within 2s — the child is stuck
+                    # in uninterruptible kernel state (rare). Report "stopped"
+                    # anyway: SIGKILL cannot be refused, and the pump thread's
+                    # blocking proc.wait() reaps the corpse whenever the
+                    # kernel releases it. What's lost: the dashboard may say
+                    # "stopped" a moment before the process table agrees.
                     pass
         except Exception as e:
             return False, f"stop failed: {e}"
 
         with self._lock:
-            if self._proc is proc:
-                self._proc = None
-        self.info["state"] = "stopped"
-        self.info["pid"] = ""
+            if self._proc is not proc:
+                # A concurrent start() replaced the child while we waited for
+                # the old one to die — info now describes the NEW child
+                # ("starting", its pid). Stamping "stopped"/"" here would
+                # clobber that fresh state; same ownership guard _pump_logs
+                # applies to its exit-path info writes. Our proc IS dead, so
+                # still report success.
+                return True, "stopped"
+            self._proc = None
+            self.info["state"] = "stopped"
+            self.info["pid"] = ""
         return True, "stopped"
 
     @staticmethod

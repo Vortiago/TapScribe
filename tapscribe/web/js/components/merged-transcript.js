@@ -1,7 +1,7 @@
 // @ts-check
 // Merged session transcript: one chronological flow of segments (including
 // suppressed lines as strikethrough) plus the speaking-time stacked bar,
-// meta strip, and a collapsible hallucination-audit table.
+// meta strip, and the (always-expanded) hallucination-audit table.
 
 import { tpl, slot, pick } from "../templates.js";
 import { aliasOf } from "../speakers.js";
@@ -169,28 +169,29 @@ function buildLine(it, speakers, aliases) {
 }
 
 /**
+ * The hallucination-audit table, always expanded under its heading. (The
+ * classic dashboard's ▾/▸ collapse toggle lost its delegated click wiring in
+ * the Stages rewrite — the collapsed branch had become unreachable dead code,
+ * so the affordance and its `showAudit` plumbing were removed.)
  * @param {HTMLElement} host
  * @param {import('../types.js').MergedTranscript} t
- * @param {boolean} showAudit
  */
-function buildAudit(host, t, showAudit) {
+function buildAudit(host, t) {
   const wrapper = tpl("tpl-audit-wrapper");
-  pick(wrapper, "toggle").textContent =
-    `${showAudit ? "▾" : "▸"} hallucination audit · ${t.suppressed_count} segment${t.suppressed_count === 1 ? "" : "s"} dropped`;
-  if (showAudit) {
-    const tbl = tpl("tpl-audit-table");
-    const rows = pick(tbl, "rows");
-    for (const sup of t.suppressed) {
-      rows.appendChild(slot(tpl("tpl-audit-row"), {
-        time: fmtClock(sup.abs_start),
-        speaker: sup.speaker || "",
-        text: sup.text || "",
-        rule: sup.matched_rule || "",
-        from: truncMid(sup.source_wav || "", 28),
-      }));
-    }
-    pick(wrapper, "table").appendChild(tbl);
+  pick(wrapper, "auditHead").textContent =
+    `hallucination audit · ${t.suppressed_count} segment${t.suppressed_count === 1 ? "" : "s"} dropped`;
+  const tbl = tpl("tpl-audit-table");
+  const rows = pick(tbl, "rows");
+  for (const sup of t.suppressed) {
+    rows.appendChild(slot(tpl("tpl-audit-row"), {
+      time: fmtClock(sup.abs_start),
+      speaker: sup.speaker || "",
+      text: sup.text || "",
+      rule: sup.matched_rule || "",
+      from: truncMid(sup.source_wav || "", 28),
+    }));
   }
+  pick(wrapper, "table").appendChild(tbl);
   host.hidden = false;
   host.appendChild(wrapper);
 }
@@ -198,10 +199,9 @@ function buildAudit(host, t, showAudit) {
 /**
  * @param {import('../types.js').MergedTranscript} t
  * @param {import('../types.js').EffectiveMeta | null | undefined} meta
- * @param {{ showAudit: boolean }} opts
  * @returns {DocumentFragment}
  */
-export function render(t, meta, { showAudit }) {
+export function render(t, meta) {
   const items = buildItems(t);
   const speakers = t.speakers || [];
   const aliases = meta?.aliases || {};
@@ -223,7 +223,7 @@ export function render(t, meta, { showAudit }) {
   for (const it of items) linesHost.appendChild(buildLine(it, speakers, aliases));
 
   if (t.suppressed_count > 0 && Array.isArray(t.suppressed)) {
-    buildAudit(pick(frag, "auditWrapper"), t, showAudit);
+    buildAudit(pick(frag, "auditWrapper"), t);
   }
   return frag;
 }

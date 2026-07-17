@@ -693,8 +693,8 @@ button.box-hd {
   text-align: left;
 }
 
-/* Hallucination-audit toggle: a flush full-width .btn under the merged
-   transcript that opens/closes the audit table. */
+/* Hallucination-audit header: the flush full-width row under the merged
+   transcript introducing the always-visible audit table. */
 .audit-toggle {
   width: 100%;
   border: 0;

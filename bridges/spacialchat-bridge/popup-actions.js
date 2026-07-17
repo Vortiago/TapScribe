@@ -12,7 +12,7 @@ import { snapshotIsLive } from "./taps-view.js";
 /**
  * @typedef {{ host: string, port: number | string, useTls?: boolean, token?: string }} Cfg
  * @typedef {{ set(items: Record<string, unknown>): Promise<void> }} StorageArea
- * @typedef {{ createDetachedSession(cfg: Cfg, opts?: { timeoutMs?: number }): Promise<{ sessionId: string }>, triggerPipeline(cfg: Cfg, sessionId: string, opts?: { timeoutMs?: number }): Promise<{ outcome: string }>, MIXED_CONTENT_BLOCKED_TEXT: string }} Control
+ * @typedef {{ createDetachedSession(cfg: Cfg, opts?: { timeoutMs?: number }): Promise<{ sessionId: string }>, triggerPipeline(cfg: Cfg, sessionId: string, opts?: { timeoutMs?: number }): Promise<{ outcome: string }> }} Control
  */
 
 /** @param {unknown} e */
@@ -80,10 +80,12 @@ export async function endMeeting({ control, storage, cfg, sessionId, snapshot, n
   // this try (mirroring startMeeting) so a post-trigger storage failure can't be
   // caught here and mislabel an already-successful trigger as phase:"failed"
   // (it rejects instead, so onEnd re-enables the buttons — no wedge, no
-  // duplicate trigger on retry). Mixed-content is keyed off e.kind (as
-  // content.js's finishEndMeeting does) and renders the control client's own
-  // MIXED_CONTENT_BLOCKED_TEXT, so the stale-tab failed card matches the
-  // live-tab card by construction.
+  // duplicate trigger on retry). The failure text is the thrown message
+  // verbatim: a mixed-content ControlError carries the client's
+  // MIXED_CONTENT_BLOCKED_TEXT as its message (control-client.js throws the
+  // constant), so the stale-tab failed card matches content.js's live-tab card
+  // without a kind-keyed remap here — end-meeting-stale-tab.test.js pins that
+  // parity against the real client.
   /** @type {string} */ let phase;
   /** @type {string | null} */ let error;
   try {
@@ -92,9 +94,7 @@ export async function endMeeting({ control, storage, cfg, sessionId, snapshot, n
     error = null;
   } catch (e) {
     phase = "failed";
-    error = errKind(e) === "mixed-content-blocked"
-      ? control.MIXED_CONTENT_BLOCKED_TEXT
-      : errText(e);
+    error = errText(e);
   }
   await storage.set({
     meetingActive: false,

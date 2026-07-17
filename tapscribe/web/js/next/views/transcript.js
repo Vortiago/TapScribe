@@ -182,6 +182,15 @@ export function build(ctx) {
   // lazy merged-transcript fetch lands — dedupes repeated misses.
   /** @type {Set<string>} */
   const txRerenderPending = new Set();
+  /** Keys (session@stamp) whose merged-body fetch REJECTED — the failure
+   * memory that paces retries at the poll cadence (same discipline as
+   * api.js loadSessionFiles / recordings.js failedWave). A rejection evicts
+   * the resource cache key, so without the memory the next resolve would
+   * refetch immediately; a remembered key skips exactly one resolve (this
+   * runs once per poll tick) so the retry fires on a later tick. A
+   * re-transcribe changes the stamp — a different key — and fetches at once.
+   * @type {Set<string>} */
+  const failedMerged = new Set();
   /** Per-session last-good merged body — the stale-while-revalidate hold that
    * keeps a re-transcribe (a new transcribed_at) from blanking the merged pane
    * to "loading transcript…" while the new body refetches. Show the previous
@@ -220,11 +229,21 @@ export function build(ctx) {
       return cached;
     }
     const key = `${sid}@${stamp}`;
-    if (!txRerenderPending.has(key)) {
+    // `failedMerged.delete(key)` is check-AND-consume: a key whose last fetch
+    // failed skips this one resolve, and the next poll tick's resolve retries.
+    if (!txRerenderPending.has(key) && !failedMerged.delete(key)) {
       txRerenderPending.add(key);
       sessionTranscript.fetch(sid, stamp)
-        .catch(() => { /* transient failure — next poll retries */ })
-        .finally(() => { txRerenderPending.delete(key); markRegionStale(mergedHost); afterMutate(); });
+        .then(
+          // Landed: force the merged pane past its sig gate and re-render now.
+          () => { markRegionStale(mergedHost); afterMutate(); },
+          // Failed: remember it and stay quiet — no afterMutate (nothing
+          // changed to render, and the failure's own synchronous re-render
+          // refiring the evicted fetch was the unpaced retry storm). The
+          // remembered key defers the retry to a later poll tick.
+          () => { failedMerged.add(key); },
+        )
+        .finally(() => { txRerenderPending.delete(key); });
     }
     // Stale-while-revalidate: hold the previous merged body during the refetch
     // so a re-transcribe refreshes the pane in place instead of blanking it to
@@ -656,7 +675,7 @@ export function build(ctx) {
           const segCount = txFull ? (txFull.segments || []).length : (tx.segment_count || 0);
           const model = txFull?.model || "?";
           txHint.textContent = `${segCount} seg · model ${model} · took ${fmtMs(txFull?.transcribe_ms)}`;
-          if (txFull) return mergedTranscript.render(txFull, metaFor(sess), { showAudit: true });
+          if (txFull) return mergedTranscript.render(txFull, metaFor(sess));
           const loading = document.createElement("div");
           loading.className = "empty";
           loading.textContent = "loading transcript…";

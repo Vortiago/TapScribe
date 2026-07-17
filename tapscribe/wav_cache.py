@@ -84,8 +84,8 @@ def _entry_key(backend: str, model: str) -> str:
 def transcripts_dir(wav_path: Path) -> Path:
     """The WAV's new-layout `<wav>.transcripts/` sidecar directory (one
     entry per cached backend+model). The canonical definition of the
-    layout — `session_maintenance`'s move/delete helpers derive the
-    sidecar locations from here too."""
+    layout — `session_maintenance`'s move/delete helpers consume it via
+    `sidecar_paths` below."""
     return wav_path.with_suffix(".transcripts")
 
 
@@ -93,6 +93,29 @@ def legacy_sidecar(wav_path: Path) -> Path:
     """The WAV's legacy single-transcript `<wav>.json` sidecar. See
     `transcripts_dir` for the one-owner rationale."""
     return wav_path.with_suffix(".json")
+
+
+def sidecar_paths(wav_path: Path) -> tuple[tuple[str, Path], ...]:
+    """EVERY sidecar location `wav_path` MAY carry, as `(kind, path)`
+    pairs — the single enumeration of "all of a WAV's sidecars".
+
+    `kind` is the entry's filesystem shape, `"file"` or `"dir"`, which is
+    exactly what a consumer needs to pick its per-entry action (stat+unlink
+    vs walk+rmtree; a move handles both). Entries may be absent on disk —
+    callers check existence per their kind. Order is stable, so a caller
+    mapping source→destination (`_move_sidecars_with_wav`) can zip two
+    calls together.
+
+    This is the seam that keeps the layout extendable in ONE file:
+    `session_maintenance._move_sidecars_with_wav` and
+    `_delete_wav_with_sidecars` iterate this tuple, so a THIRD cache
+    layout added here is automatically carried on absorb-move and
+    counted + removed on delete / bulk-reclaim — nothing to wire by hand
+    in another module."""
+    return (
+        ("file", legacy_sidecar(wav_path)),
+        ("dir", transcripts_dir(wav_path)),
+    )
 
 
 def cache_signature(wav_path: Path) -> tuple:

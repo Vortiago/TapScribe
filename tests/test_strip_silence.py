@@ -70,6 +70,51 @@ def test_detect_speech_silero_without_silero_raises_runtime_error(monkeypatch):
         ss.detect_speech_silero(np.zeros(16000, dtype=np.int16), min_silence_ms=500, pad_ms=200)
 
 
+def test_strip_model_is_per_thread_and_never_the_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The strip detector's Silero model is a per-worker-thread instance:
+    stable within a thread (loads amortize across strip-preview knob
+    drags), distinct across threads, and NEVER an instance a live gate
+    holds — silero's streaming state lives on the MODEL object, so a
+    shared instance would let a strip run zero a live gate's RNN state
+    mid-utterance from another thread."""
+    import threading
+
+    import tapscribe.speech_gate as sg
+
+    loaded: list[object] = []
+
+    class _FakeModel:
+        def reset_states(self) -> None:
+            pass
+
+    def _fresh() -> object:
+        m = _FakeModel()
+        loaded.append(m)
+        return m
+
+    monkeypatch.setattr(sg, "load_silero_model", _fresh)
+    # Fresh thread-local so an instance cached by another test can't leak in.
+    monkeypatch.setattr(ss, "_SILERO_LOCAL", threading.local())
+
+    a = ss._local_silero_model()
+    b = ss._local_silero_model()
+    assert a is b, "within one thread the instance must be reused (amortized load)"
+
+    other_thread: list[object] = []
+    t = threading.Thread(target=lambda: other_thread.append(ss._local_silero_model()))
+    t.start()
+    t.join()
+    assert other_thread[0] is not a, "each thread must own its own instance"
+
+    # And a gate built afterwards loads yet another instance — strip's
+    # models and the gates' models are disjoint by construction.
+    pytest.importorskip("silero_vad")
+    sg.make_silero_vad(threshold=0.5, hangover_ms=400)
+    gate_model = loaded[-1]
+    assert gate_model is not a
+    assert gate_model is not other_thread[0]
+
+
 def _speech_silence_samples(bursts: int = 2, burst_s: float = 0.5, gap_s: float = 0.8) -> np.ndarray:
     """Int16 samples alternating loud square-wave bursts and zero gaps —
     the same shape the e2e builder writes, kept inline so the planner tests

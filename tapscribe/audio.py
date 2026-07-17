@@ -31,9 +31,11 @@ def read_recorder_frames(path: Path) -> tuple[bytes, int]:
     `tapscribe.wav_predecode`'s module docstring): the error is the
     operator's signal to convert the file. `wave.Error` / `OSError` /
     `EOFError` from an unreadable file propagate for the caller to
-    wrap or forward. Shared by `compute_peaks` and
-    `wav_predecode.load_recorder_wav_as_pcm` so the guard (and its
-    message) can't drift between the two."""
+    wrap or forward. Shared by `compute_peaks`,
+    `wav_predecode.load_recorder_wav_as_pcm`, and
+    `strip_silence.read_wav_int16` (which translates the RuntimeError
+    to ValueError for the strip routes' 422 contract) so the guard (and
+    its message) can't drift between them."""
     with wave.open(str(path), "rb") as wf:
         rate = wf.getframerate()
         channels = wf.getnchannels()

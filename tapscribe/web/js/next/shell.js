@@ -112,6 +112,7 @@ export const JOB_LABELS = {
   strip: "Stripping silence",
   summarize: "Summarizing",
   pipeline: "Pipeline",
+  delete: "Deleting audio",
 };
 
 /**
@@ -290,14 +291,36 @@ export function newestFirst(a, b) {
 }
 
 /**
+ * The label term for a PER-TICK render signature: the optimistic rename
+ * overlay (when the caller keeps one and it holds an entry for this session)
+ * over the raw `session_meta.label`, empty-string-normalized. This is THE
+ * one owner of the metaFor-equivalence rationale the sig sites lean on:
+ * main.js's `metaFor(s).label` derives from `session_meta.label` alone, so
+ * reading the raw field here is value-identical to what the render paints
+ * via metaFor (+ the same overlay) while allocating no throwaway
+ * EffectiveMeta (alias-map spread) per session per tick. It MUST stay
+ * value-identical — if metaFor's label resolution ever changes (trim, a
+ * People-name fallback, an auto-label), this helper is the single place the
+ * sig side follows, or every sig-gated region using it goes stale after a
+ * rename (CLAUDE.md render-signature hygiene). Render paths keep using
+ * metaFor/labelFor; sig, filter, and overlay comparisons use this.
+ * Pass `overlay: null` when the caller has no rename overlay.
+ * @param {Map<string, string> | null} overlay
+ * @param {import('../types.js').Session} s
+ */
+export function labelSigFor(overlay, s) {
+  return overlay?.get(s.session) ?? (s.session_meta?.label || "");
+}
+
+/**
  * A session's display label: its meta label, falling back to the raw id.
- * Reads `session_meta.label` directly — the documented equivalence with
- * `metaFor(sess).label` (see capture.js), which comes only from
- * `session_meta.label` — so views needn't thread main.js's metaFor (and this
- * module stays importable side-effect-free under node --test). Lives here,
- * not main.js: a view importing main.js would execute its boot code.
+ * The raw `session_meta.label` read routes through `labelSigFor` (no
+ * overlay), whose doc carries the metaFor-equivalence rationale — so views
+ * needn't thread main.js's metaFor (and this module stays importable
+ * side-effect-free under node --test). Lives here, not main.js: a view
+ * importing main.js would execute its boot code.
  * @param {import('../types.js').Session} sess
  */
 export function sessionLabel(sess) {
-  return sess.session_meta?.label || sess.session;
+  return labelSigFor(null, sess) || sess.session;
 }

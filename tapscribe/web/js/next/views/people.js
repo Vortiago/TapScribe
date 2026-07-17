@@ -23,7 +23,7 @@
 import { tpl, pick, renderRegion } from "../../templates.js";
 import { putJson, postJson, errText } from "../../api.js";
 import { speakerIndex } from "../../speakers.js";
-import { header, strong, inline } from "../shell.js";
+import { header, strong, inline, sessionLabel } from "../shell.js";
 
 /** spk palette index → the avatar class suffix next.css `.av.spk-N` paints. */
 /** @param {number} spk */
@@ -213,8 +213,8 @@ export function build(ctx) {
             // Sig mirrors the FULL rendered text (prefix included), like the old
             // textContent key did — a bare-label sig could equal the sess-null
             // fallback string below and wrongly skip the rebuild on sess → null.
-            sig: `highlighting people in ${sess.session_meta?.label || sess.session}`,
-            build: () => inline("highlighting people in ", strong(sess.session_meta?.label || sess.session)),
+            sig: `highlighting people in ${sessionLabel(sess)}`,
+            build: () => inline("highlighting people in ", strong(sessionLabel(sess))),
           }
         : "everyone you've recorded, across every session",
     });

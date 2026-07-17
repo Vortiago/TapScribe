@@ -72,7 +72,7 @@ export async function fetchState() {
 // transcribed_at) pairs over its lifetime doesn't grow unbounded. Map
 // preserves insertion order, so dropping `keys().next()` evicts the oldest.
 const _TX_CACHE_MAX = 64;
-/** @param {Map<string, unknown>} cache */
+/** @param {Map<string, unknown> | Set<string>} cache */
 function _capCache(cache) {
   while (cache.size > _TX_CACHE_MAX) {
     const oldest = cache.keys().next().value;
@@ -212,6 +212,20 @@ export const sessionFiles = _resource(
 const _lastGoodFiles = new Map();
 
 /**
+ * Keys (`session@files_sig`) whose last /files fetch REJECTED — the failure
+ * memory that paces retries at the poll cadence (mirrors the `failedWave` /
+ * `failedCutMeta` discipline in recordings.js). Without it, a rejection
+ * evicted the cache key (api.js `_resource`) and the settle callback's
+ * re-render re-entered here synchronously with `pending` already cleared, so
+ * a persistently-failing endpoint was refetched in a tight unpaced loop at
+ * HTTP-response rate (plus a full re-render per iteration). A remembered key
+ * skips exactly one call — the caller invokes this once per poll tick — so
+ * the retry fires on a LATER tick; a sig change is a different key and
+ * fetches immediately. Capped like the sibling caches.
+ * @type {Set<string>} */
+const _failedFiles = new Set();
+
+/**
  * Resolve a focused session's WAV listing for a per-tick render, the shape both
  * the Recordings and Transcript views need: returns the cached array when it's
  * in hand, `[]` when there's nothing to fetch (empty `filesSig` → no folder /
@@ -220,12 +234,15 @@ const _lastGoodFiles = new Map();
  * only on a genuine COLD load (a session with no last-good listing yet → the
  * caller shows a loading placeholder). On a cache miss it fires the fetch ONCE
  * (deduped via the caller's `pending` set across the ticks before it lands) and
- * calls `onLand` when it settles so the view can drop its render gates and
- * reconcile the fresh list in place.
+ * calls `onLand` when it SUCCEEDS so the view can drop its render gates and
+ * reconcile the fresh list in place. A rejected fetch never calls `onLand`
+ * (nothing changed to re-render — the stale hold stays up) and is remembered
+ * per key (`_failedFiles`), so the retry is paced by the poll instead of the
+ * failure's own re-render refiring it synchronously.
  * @param {string} session
  * @param {string} filesSig
  * @param {Set<string>} pending - per-view in-flight (session@filesSig) keys
- * @param {() => void} onLand - run after the fetch settles (success or failure)
+ * @param {() => void} onLand - run after a SUCCESSFUL fetch lands
  * @returns {import('./types.js').WavFile[] | null}
  */
 export function loadSessionFiles(session, filesSig, pending, onLand) {
@@ -246,11 +263,20 @@ export function loadSessionFiles(session, filesSig, pending, onLand) {
     return cached;
   }
   const k = `${session}@${filesSig}`;
-  if (!pending.has(k)) {
+  // `_failedFiles.delete(k)` is check-AND-consume: a key whose last fetch
+  // failed skips this one call, and the next call — the next poll tick —
+  // retries (see `_failedFiles`' doc for why the skip is load-bearing).
+  if (!pending.has(k) && !_failedFiles.delete(k)) {
     pending.add(k);
     sessionFiles.fetch(session, filesSig)
-      .catch(() => { /* transient — the next poll refetches */ })
-      .finally(() => { pending.delete(k); onLand(); });
+      .then(onLand, () => {
+        // Transient failure: remember it (paces the retry to a later poll
+        // tick) and do NOT call onLand — nothing changed to re-render, and
+        // the failure's own re-render refiring the fetch was the retry storm.
+        _failedFiles.add(k);
+        _capCache(_failedFiles);
+      })
+      .finally(() => { pending.delete(k); });
   }
   // Stale-while-revalidate: hold this session's last-good listing during the
   // refetch; `null` only on a cold load (a session that never resolved yet).
@@ -355,6 +381,25 @@ export function getSummaryCatalog() {
     _summaryCatalog.catch(() => { _summaryCatalog = null; });
   }
   return _summaryCatalog;
+}
+
+// ONE memoized fetch of the bridge-download catalog (GET /api/bridges): the
+// Settings "Get a bridge" card fills its release-asset hrefs from it on
+// build, and the boot-time view rebuild (loadModelCatalogs → viewCache
+// clear + re-render, when the first /api/state tick lands before the model
+// catalogs) would otherwise re-fetch — this dedupes to one request per page,
+// same shape as getSummaryCatalog above (and what the "exactly ONE
+// /api/bridges fetch" e2e pins). A rejection clears the memo so the next
+// view build retries instead of inheriting a poisoned promise.
+/** @type {Promise<{ id: string, download_url: string }[]> | null} */
+let _bridgeCatalog = null;
+/** @returns {Promise<{ id: string, download_url: string }[]>} */
+export function getBridgeCatalog() {
+  if (!_bridgeCatalog) {
+    _bridgeCatalog = getJson("/api/bridges");
+    _bridgeCatalog.catch(() => { _bridgeCatalog = null; });
+  }
+  return _bridgeCatalog;
 }
 
 // The disable/await-mutate/catch-alert/finally-reenable core shared by

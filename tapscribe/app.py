@@ -83,7 +83,7 @@ from .batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
-from .live import GATE_KINDS
+from .live import GATE_KINDS, gate_kind_error
 from .moonshine_live import resolve_live_channel_for_model
 from .name_resolution import attach_people, attach_people_mutation, attach_people_view
 from .people import PeopleRegistry
@@ -254,28 +254,35 @@ def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
     return value
 
 
-def _parse_opt_str(raw, field: str) -> str | None:
-    """Optional string body field: absent/blank → None; a non-string JSON
-    value 400s like every other malformed field in the _parse_* family —
-    the `(body.get(x) or "").strip()` idiom 500s with an AttributeError
-    before any validation runs."""
+def _require_opt_str(raw, field: str) -> str | None:
+    """The type boundary for optional string body fields — the ONE owner of
+    the non-string 400 (a non-string JSON value 400s like every other
+    malformed field in the _parse_* family; the `(body.get(x) or
+    "").strip()` idiom 500s with an AttributeError before any validation
+    runs). Returns the string VERBATIM — strip/blank policy belongs to the
+    thin wrappers below (or the call site, for fields where whitespace is
+    meaningful, e.g. the summarize route's prompt/api_key)."""
     if raw is None:
         return None
     if not isinstance(raw, str):
         raise HTTPException(400, f"{field} must be a string, got {type(raw).__name__}")
-    return raw.strip() or None
+    return raw
+
+
+def _parse_opt_str(raw, field: str) -> str | None:
+    """Optional string body field: absent/blank → None, non-string → 400,
+    otherwise the stripped value."""
+    value = _require_opt_str(raw, field)
+    return None if value is None else (value.strip() or None)
 
 
 def _parse_opt_str_keep_empty(raw, field: str) -> str | None:
     """`_parse_opt_str` for fields where the EMPTY string is meaningful
-    (an explicit clear — e.g. the summarize route's command/prompt/base_url
+    (an explicit clear — e.g. the summarize route's command/base_url
     overrides): absent → None, non-string → 400, otherwise the stripped
     value — "" included."""
-    if raw is None:
-        return None
-    if not isinstance(raw, str):
-        raise HTTPException(400, f"{field} must be a string, got {type(raw).__name__}")
-    return raw.strip()
+    value = _require_opt_str(raw, field)
+    return None if value is None else value.strip()
 
 
 def _parse_opt_bool(raw, field: str) -> bool | None:
@@ -1064,10 +1071,7 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
 
     gate_kind = _parse_opt_str(body.get("gate_kind"), "gate_kind")
     if gate_kind is not None and gate_kind not in GATE_KINDS:
-        raise HTTPException(
-            400,
-            f"gate_kind must be {' or '.join(repr(k) for k in GATE_KINDS)}, got {gate_kind!r}",
-        )
+        raise HTTPException(400, gate_kind_error(gate_kind))
     if gate_kind == "backend" and not getattr(target_channel, "supports_native_vad", False):
         # Stale-dashboard guard: a channel with no native VAD (Moonshine
         # today, a future Parakeet) means "backend" gating would silently
@@ -1453,7 +1457,8 @@ async def api_session_summarize(
     # 400s instead of being silently ignored. source/model/api_key treat
     # blank as "not supplied" (fall through to the saved config);
     # command/prompt/base_url keep the empty string — an explicit clear of
-    # the saved value is meaningful for them.
+    # the saved value is meaningful for them. prompt and api_key values are
+    # passed VERBATIM (see their call sites below); the rest are stripped.
     source = _parse_opt_str(body.get("source"), "source")
     if source is not None:
         overrides["source"] = source
@@ -1471,14 +1476,20 @@ async def api_session_summarize(
     )
     if max_tokens is not None:
         overrides["max_tokens"] = max_tokens
-    prompt = _parse_opt_str_keep_empty(body.get("prompt"), "prompt")
+    # prompt is deliberately VERBATIM (no strip): leading/trailing whitespace
+    # in an operator-authored prompt template is meaningful, and "" is an
+    # explicit clear. Only the type boundary applies.
+    prompt = _require_opt_str(body.get("prompt"), "prompt")
     if prompt is not None:
         overrides["prompt"] = prompt
     base_url = _parse_opt_str_keep_empty(body.get("base_url"), "base_url")
     if base_url is not None:
         overrides["base_url"] = base_url
-    api_key = _parse_opt_str(body.get("api_key"), "api_key")
-    if api_key is not None:
+    # api_key: blank means "not supplied" (fall through to saved config) but
+    # the ACCEPTED value is passed verbatim — keys are opaque tokens and a
+    # strip could corrupt one that legitimately contains edge whitespace.
+    api_key = _require_opt_str(body.get("api_key"), "api_key")
+    if api_key is not None and api_key.strip():
         overrides["api_key"] = api_key
     return await summarize_session(recorder, SummarizeSessionRequest(session=session, **overrides))
 
@@ -1548,11 +1559,17 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
     tap writing to it."""
     await _refuse_current_or_busy(recorder, session, current=session, action="delete audio from")
     resolve_session_dir(session)
-    # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
-    # ~1 Hz /api/state poll stays responsive — same as strip-silence.
-    summary = await asyncio.to_thread(delete_session_audio, session)
-    # NB: do NOT release jobs here — unlike whole-session delete, the
-    # session survives, and the guard above already ensures none is running.
+    # Hold the session's job slot for the walk's duration: the pre-flight
+    # above is check-then-act (a transcribe/strip could claim the freed slot
+    # between the check and the thread hop and race the unlink walk), so the
+    # delete claims the SAME slot the batch jobs use — a job arriving
+    # mid-delete gets the standard SessionBusy 409, and vice versa. run()
+    # releases on every exit path, so unlike whole-session delete the
+    # surviving session's slot is always freed again.
+    async with recorder.jobs.run(session, kind="delete", total=1):
+        # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
+        # ~1 Hz /api/state poll stays responsive — same as strip-silence.
+        summary = await asyncio.to_thread(delete_session_audio, session)
     print(
         f"[tapscribe] deleted audio from session {session}: "
         f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed",

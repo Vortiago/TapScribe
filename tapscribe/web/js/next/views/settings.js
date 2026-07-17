@@ -21,7 +21,7 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { getJson, putJson, wireConfigSave, wireSave, errText } from "../../api.js";
+import { getJson, putJson, wireConfigSave, wireSave, errText, getBridgeCatalog } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 import { header } from "../shell.js";
@@ -130,13 +130,12 @@ export function build(ctx) {
       flashBridgeStatus(`couldn't load token: ${errText(e)}`);
       return;
     }
-    const token = t;
     // Shared copy flow (ui.js copyToClipboard) — the fallback here is a
     // prompt() the operator can select-copy from, covering both the
     // non-secure context and a rejected clipboard write.
-    await copyToClipboard(token, {
+    await copyToClipboard(t, {
       onOk: () => flashBridgeStatus("✓ copied"),
-      onFallback: () => { window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", token); },
+      onFallback: () => { window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t); },
     });
   });
 
@@ -144,17 +143,18 @@ export function build(ctx) {
   // static-render: built ONCE here, never touched by `update`. The two download
   // anchors point at GitHub-Release assets (releases/latest/download/<asset>),
   // so they are plain cross-origin hrefs — NOT same-origin triggerDownload
-  // targets. The hrefs are filled from a single best-effort GET /api/bridges on
-  // build (mirroring the Models card's /api/setup/state fetch), matched by id;
-  // on failure the hint line degrades gracefully. The latest/download URLs 404
-  // until the first tagged release, so the hint always names that caveat.
+  // targets. The hrefs are filled from the memoized bridge catalog
+  // (api.js getBridgeCatalog — ONE best-effort GET /api/bridges per page,
+  // even across the boot-time view rebuild), matched by id; on failure the
+  // hint line degrades gracefully. The latest/download URLs 404 until the
+  // first tagged release, so the hint always names that caveat.
   const bridgeDlSpatial = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlSpatial"));
   const bridgeDlTray = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlTray"));
   const bridgeDlHint = pick(frag, "bridgeDlHint");
   /** @type {Record<string, HTMLAnchorElement>} */
   const bridgeAnchors = { spacialchat: bridgeDlSpatial, "windows-tray": bridgeDlTray };
-  getJson("/api/bridges")
-    .then((/** @type {{ id: string, download_url: string }[]} */ bridges) => {
+  getBridgeCatalog()
+    .then((bridges) => {
       for (const b of bridges || []) {
         const a = bridgeAnchors[b.id];
         if (a && b.download_url) {
