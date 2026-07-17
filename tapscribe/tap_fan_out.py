@@ -41,6 +41,16 @@ LEVEL_DECAY_PER_FRAME: float = 0.92
 # auto-bound Person in people.json).
 PROBE_IDENTITY = "__probe__"
 
+# How many 20 ms frames write_frame accumulates locally before flushing the
+# byte counter + level to the ActiveStream row. The only consumer is the
+# ≤2 Hz /api/state poll — which buckets bytes to 64 KiB and rounds level to
+# 2 decimals — so flushing every frame (50×/s/tap) just churned the
+# ActiveStreams asyncio.Lock for readings the poll never saw. 10 frames =
+# 200 ms, comfortably fresher than the fastest poll tick. Gate open/close
+# transitions and _close flush unconditionally so those edges (and the final
+# byte count) are exact regardless of where the frame counter sits.
+STREAM_FLUSH_EVERY_FRAMES: int = 10
+
 
 class TapFanOut:
     """One open `/tap` WebSocket worth of fan-out state. Built by
@@ -100,6 +110,9 @@ class TapFanOut:
         # per frame (see LEVEL_DECAY_PER_FRAME). Mirrored onto the
         # ActiveStream row via update_bytes so /api/state surfaces it.
         self._level: float = 0.0
+        # Frames accumulated since the last update_bytes flush — see
+        # STREAM_FLUSH_EVERY_FRAMES for why the flush is throttled.
+        self._frames_since_flush: int = 0
 
     @classmethod
     async def open(
@@ -174,7 +187,8 @@ class TapFanOut:
         # Surface gate transitions to the dashboard. Skip the lock acquire
         # when the value hasn't changed — otherwise we'd hit the
         # ActiveStreams mutex 50× per second per /tap.
-        if fed.gate_open != self._gate_open_last:
+        gate_transition = fed.gate_open != self._gate_open_last
+        if gate_transition:
             self._gate_open_last = fed.gate_open
             await self._recorder.streams.update_gate_open(self._conn_id, fed.gate_open)
 
@@ -187,6 +201,23 @@ class TapFanOut:
         peak = max(int16_peak_norm(f) for f in fed.frames) if fed.frames else 0.0
         decayed = self._level * LEVEL_DECAY_PER_FRAME
         self._level = peak if peak > decayed else decayed
+
+        # Flush the byte counter + level to the ActiveStream row every
+        # STREAM_FLUSH_EVERY_FRAMES frames (~200 ms) rather than per frame —
+        # the same mutex-churn rationale as the gate-transition guard above;
+        # /api/state polls at ≤2 Hz and rounds harder than this anyway. Gate
+        # transitions flush immediately so the row's bytes/level are exact at
+        # the edges the dashboard actually renders; _close flushes the final
+        # count.
+        self._frames_since_flush += 1
+        if gate_transition or self._frames_since_flush >= STREAM_FLUSH_EVERY_FRAMES:
+            await self._flush_stream_counters()
+
+    async def _flush_stream_counters(self) -> None:
+        """Push the locally-accumulated byte count + level to this tap's
+        ActiveStream row and reset the flush window. No-ops harmlessly on
+        an unregistered conn_id (probe taps, already-removed rows)."""
+        self._frames_since_flush = 0
         await self._recorder.streams.update_bytes(
             self._conn_id,
             self._bytes_received,
@@ -449,6 +480,12 @@ class TapFanOut:
         # before it was built) or its teardown raises/cancels; remove() no-ops on
         # an unregistered conn_id.
         try:
+            # Flush any bytes/level the frame-path throttle still holds
+            # locally, so the row reads the exact final byte count while the
+            # relay drains tail captions below (the row itself is removed in
+            # the finally). Also what keeps short-lived taps (< one flush
+            # window) from never reporting their bytes at all.
+            await self._flush_stream_counters()
             if self._tap_relay is not None:
                 await self._tap_relay.close()
         finally:

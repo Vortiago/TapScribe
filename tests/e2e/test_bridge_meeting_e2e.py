@@ -43,11 +43,9 @@ if importlib.util.find_spec("playwright") is None:  # pragma: no cover
 if importlib.util.find_spec("faster_whisper") is None:  # pragma: no cover
     pytest.skip("faster-whisper not installed (real ASR needed)", allow_module_level=True)
 
-from playwright.async_api import async_playwright  # noqa: E402
-
 from tapscribe.text import build_recorder_wav_name  # noqa: E402
 
-from .harness import WAIT_POLLING_MS, launch_bridge_context, word_tokens  # noqa: E402
+from .harness import WAIT_POLLING_MS, launch_bridge_context, playwright_session, word_tokens  # noqa: E402
 
 pytestmark = [pytest.mark.browser_e2e, pytest.mark.real_audio]
 
@@ -279,7 +277,7 @@ async def test_full_meeting_flow_produces_a_summary_in_the_popup_card(recorder):
     fixture_mock = (FIXTURE_DIR / "mock-room.js").read_text(encoding="utf-8")
     speech_b64 = _speech_pcm_b64()
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         with tempfile.TemporaryDirectory() as udd:
             ctx = await launch_bridge_context(pw, EXT_DIR, udd)
 
@@ -362,7 +360,7 @@ async def test_multi_person_multi_language_meeting_produces_a_summary(recorder_m
     fixture_mock = (FIXTURE_DIR / "mock-room.js").read_text(encoding="utf-8")
     speech_b64 = _speech_pcm_b64()
 
-    async with async_playwright() as pw:
+    async with playwright_session() as pw:
         with tempfile.TemporaryDirectory() as udd:
             ctx = await launch_bridge_context(pw, EXT_DIR, udd)
             try:

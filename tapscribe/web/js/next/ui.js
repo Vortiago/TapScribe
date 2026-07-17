@@ -36,3 +36,43 @@ export function makeStatusFlasher(el, ms = 1500) {
  */
 export const clipboardAvailable = () =>
   window.isSecureContext && typeof navigator.clipboard?.writeText === "function";
+
+/**
+ * Copy `text` via the async Clipboard API when it's usable, else run the
+ * caller's fallback UX. `onOk` fires only on a successful clipboard write;
+ * `onFallback` runs both when the API is unavailable (non-secure context —
+ * called SYNCHRONOUSLY, still inside the user-gesture window, so a fallback
+ * window.open isn't popup-blocked) and when the write is rejected (permission
+ * denied — past the gesture by then, so popup-dependent fallbacks should
+ * degrade to a prompt()). Callers own the fallback because its UX differs
+ * (a prompt vs a populated new tab).
+ * @param {string} text
+ * @param {{ onOk: () => void, onFallback: () => void }} handlers
+ */
+export async function copyToClipboard(text, { onOk, onFallback }) {
+  if (!clipboardAvailable()) {
+    onFallback();
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    onOk();
+  } catch {
+    // Clipboard write rejected (permission denied). The text isn't lost —
+    // the fallback surfaces it for manual copy.
+    onFallback();
+  }
+}
+
+/**
+ * Set a stat/health tile's text, dimming empty/em-dash placeholders so a
+ * missing metric recedes (the `.is-empty` styling in next.css) while real
+ * values stay bright. Shared by the Capture health tiles and the Recordings
+ * wave-stat quartet.
+ * @param {HTMLElement} el
+ * @param {string} value
+ */
+export function setDimmable(el, value) {
+  el.textContent = value;
+  el.classList.toggle("is-empty", value === "" || value === "—");
+}

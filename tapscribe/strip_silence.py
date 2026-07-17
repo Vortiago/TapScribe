@@ -82,27 +82,15 @@ def filter_low_energy_regions(samples_int16: np.ndarray, regions, floor_dbfs: fl
     return out
 
 
-_silero_model = None
-
-
-def _get_silero_model():
-    """Load (and cache) the Silero VAD model once per process — mirrors
-    `speech_gate._get_silero_model`. The strip-preview route runs the
-    detector per knob pause, so reloading the model from disk on every
-    call would put its deserialisation cost on every slider drag.
-
-    `onnx=True` for the same reason as `speech_gate._get_silero_model`:
-    avoid the `torch.jit.load` PyTorch deprecated / 3.14-flagged as unsupported."""
-    global _silero_model
-    if _silero_model is None:
-        from silero_vad import load_silero_vad
-
-        _silero_model = load_silero_vad(onnx=True)
-    return _silero_model
-
-
 def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms: int):
     """Returns list of (start_sample, end_sample) speech regions.
+
+    The model comes from `speech_gate._get_silero_model` — ONE per-process
+    cache shared with the live SpeechGate (and the onnx=True rationale
+    lives there). The strip-preview route runs this detector per knob
+    pause, so a per-call reload would put the model's deserialisation
+    cost on every slider drag. Imported lazily so importing this module
+    never pulls silero/onnx.
 
     silero-vad + torch are core dependencies (pyproject.toml). If the
     import below ever fails, the install is broken — reinstall TapScribe.
@@ -112,6 +100,8 @@ def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms:
     try:
         import torch
         from silero_vad import get_speech_timestamps
+
+        from .speech_gate import _get_silero_model
 
         model = _get_silero_model()
     except ImportError as e:

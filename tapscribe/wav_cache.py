@@ -81,11 +81,17 @@ def _entry_key(backend: str, model: str) -> str:
     return f"{_safe(backend)}__{_safe(model)}"
 
 
-def _transcripts_dir(wav_path: Path) -> Path:
+def transcripts_dir(wav_path: Path) -> Path:
+    """The WAV's new-layout `<wav>.transcripts/` sidecar directory (one
+    entry per cached backend+model). The canonical definition of the
+    layout — `session_maintenance`'s move/delete helpers derive the
+    sidecar locations from here too."""
     return wav_path.with_suffix(".transcripts")
 
 
-def _legacy_sidecar(wav_path: Path) -> Path:
+def legacy_sidecar(wav_path: Path) -> Path:
+    """The WAV's legacy single-transcript `<wav>.json` sidecar. See
+    `transcripts_dir` for the one-owner rationale."""
     return wav_path.with_suffix(".json")
 
 
@@ -110,12 +116,12 @@ def cache_signature(wav_path: Path) -> tuple:
     far longer than any filesystem's mtime granularity (~15 ms on Windows)
     before writing the sidecar.
     """
-    d = _transcripts_dir(wav_path)
+    d = transcripts_dir(wav_path)
     try:
         dir_mtime = d.stat().st_mtime_ns
     except OSError:
         try:
-            return ("legacy", _legacy_sidecar(wav_path).stat().st_mtime_ns)
+            return ("legacy", legacy_sidecar(wav_path).stat().st_mtime_ns)
         except OSError:
             return ("none",)
     try:
@@ -192,7 +198,7 @@ def read_primary_marker(wav_path: Path) -> dict[str, Any] | None:
 def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
     """Every cached transcript for `wav_path`, one per (backend, model).
     Unparseable sidecars are silently dropped. Order is unspecified."""
-    d = _transcripts_dir(wav_path)
+    d = transcripts_dir(wav_path)
     if d.is_dir():
         out: list[CachedTranscription] = []
         for entry in sorted(d.glob("*.json")):
@@ -200,7 +206,7 @@ def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
             if cached is not None:
                 out.append(cached)
         return out
-    legacy = _read_entry(_legacy_sidecar(wav_path))
+    legacy = _read_entry(legacy_sidecar(wav_path))
     return [legacy] if legacy is not None else []
 
 
@@ -212,7 +218,7 @@ def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
     dashboard's set-primary needs it to resolve the file's directory, since a
     stripped clip lives in <session>/stripped/. Single-sidecar legacy WAVs
     return a one-element list with `is_primary=True`."""
-    d = _transcripts_dir(wav_path)
+    d = transcripts_dir(wav_path)
     if d.is_dir():
         sidecars = sorted(d.glob("*.json"))
         if not sidecars:
@@ -233,7 +239,7 @@ def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
                 item["transcribe_ms"] = entry.transcribe_ms
             out.append(item)
         return out
-    legacy = _read_entry(_legacy_sidecar(wav_path))
+    legacy = _read_entry(legacy_sidecar(wav_path))
     if legacy is None:
         return []
     item: dict[str, Any] = {
@@ -254,7 +260,7 @@ def set_primary_transcript(wav_path: Path, *, backend: str, model: str) -> None:
     Implicitly migrates the legacy sidecar layout into the new one if
     necessary so the pointer has somewhere to live."""
     _migrate_legacy_if_needed(wav_path)
-    d = _transcripts_dir(wav_path)
+    d = transcripts_dir(wav_path)
     key = _entry_key(backend, model)
     target = d / f"{key}.json"
     if not target.is_file():
@@ -387,10 +393,10 @@ def _read_entry_for(wav_path: Path, *, backend: str, model: str) -> CachedTransc
     """Return the cached entry for this specific `(backend, model)`,
     or None. Looks first in the new-layout directory; falls back to the
     legacy `<wav>.json` only if its embedded backend+model match."""
-    d = _transcripts_dir(wav_path)
+    d = transcripts_dir(wav_path)
     if d.is_dir():
         return _read_entry(d / f"{_entry_key(backend, model)}.json")
-    legacy = _read_entry(_legacy_sidecar(wav_path))
+    legacy = _read_entry(legacy_sidecar(wav_path))
     if legacy is None:
         return None
     if legacy.result.backend == backend and legacy.result.model == model:
@@ -403,11 +409,11 @@ def _primary_sidecar_path(wav_path: Path) -> Path | None:
     if no transcript is cached. Picks the new-layout primary when the
     `<wav>.transcripts/` directory exists, otherwise the legacy
     `<wav>.json`."""
-    d = _transcripts_dir(wav_path)
+    d = transcripts_dir(wav_path)
     if d.is_dir():
         name = _primary_filename(d)
         return d / name if name else None
-    legacy = _legacy_sidecar(wav_path)
+    legacy = legacy_sidecar(wav_path)
     return legacy if legacy.is_file() else None
 
 
@@ -445,7 +451,7 @@ def _write_entry(
     model: str,
 ) -> None:
     _migrate_legacy_if_needed(wav_path)
-    d = _transcripts_dir(wav_path)
+    d = transcripts_dir(wav_path)
     key = _entry_key(backend, model)
     atomic_write_text(
         d / f"{key}.json",
@@ -463,10 +469,10 @@ def _migrate_legacy_if_needed(wav_path: Path) -> None:
     for the same WAV. No-op if the directory already exists or no
     legacy file is present. Unparseable legacy files are removed so
     they can't shadow the new layout on subsequent reads."""
-    d = _transcripts_dir(wav_path)
+    d = transcripts_dir(wav_path)
     if d.exists():
         return
-    legacy = _legacy_sidecar(wav_path)
+    legacy = legacy_sidecar(wav_path)
     if not legacy.is_file():
         return
     parsed = _read_entry(legacy)

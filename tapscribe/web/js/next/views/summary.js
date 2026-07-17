@@ -33,19 +33,18 @@
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
-import { postJson, putJson, wireSave, sessionSummary } from "../../api.js";
+import { postJson, putJson, wireSave, sessionSummary, errText } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
-import { header, strong, inline, renderJobBar } from "../shell.js";
+import { header, strong, inline, renderJobBar, sessionLabel } from "../shell.js";
 
 /**
  * @param {{
- *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
  *   afterMutate: () => void,
  * }} ctx
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { metaFor, afterMutate } = ctx;
+  const { afterMutate } = ctx;
   const frag = tpl("tpl-next-view-summary");
 
   const headHost = pick(frag, "head");
@@ -266,7 +265,7 @@ export function build(ctx) {
       summarySession = sid;
       markRegionStale(sumOut); // force the output pane to re-render with the new summary
     } catch (e) {
-      errorMsg = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+      errorMsg = `failed: ${errText(e)}`;
     } finally {
       generating = false;
       lastCtlSig = " ";
@@ -417,7 +416,7 @@ export function build(ctx) {
         eyebrow: "Session · 4 Summary",
         title: "Summary",
         sub: sess
-          ? inline("summarize ", strong(metaFor(sess).label || sess.session))
+          ? inline("summarize ", strong(sessionLabel(sess)))
           : "no session selected — pick one from the spine",
       });
     }

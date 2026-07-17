@@ -43,6 +43,14 @@ from .text import read_config
 # the display-rounded re-submit — the #238 display-precision guarantee.
 GATE_THRESHOLD_DECIMALS = 2
 
+# The valid `gate_kind` values — which layer runs speech gating (see
+# `LiveConfig.gate_kind` for what each means). The ONE membership
+# allowlist shared by every validation site: `_transition_replacements`
+# (both channels' `begin_transition`) and `/api/live/start`'s boundary
+# check in `tapscribe.app`. Must stay in sync with the `Literal` type on
+# `LiveConfig.gate_kind`.
+GATE_KINDS: tuple[str, ...] = ("tapscribe", "backend")
+
 
 def resolve_live_init_prompt() -> str | None:
     """Read the live-channel init prompt (config/live-prompt.txt) and
@@ -148,6 +156,8 @@ class LiveConfig:
     #                 No pre-roll, no leading-word recovery — kept as an
     #                 escape hatch for A/B comparison and for backends
     #                 whose native VAD is good enough.
+    # The Literal must list exactly the module-level GATE_KINDS values —
+    # runtime validation checks membership against that tuple.
     gate_kind: Literal["tapscribe", "backend"] = "tapscribe"
     # Operator-tunable thresholds for the TapScribe gate. Consumed by
     # SpeechGate (NOT by build_live_cmd / WlK).
@@ -429,6 +439,74 @@ def _gate_knob_replacements(
     return replacements
 
 
+def _changed_gate_knobs(
+    config: LiveConfig,
+    *,
+    gate_speech_threshold: float | None,
+    gate_hangover_ms: int | None,
+    gate_pre_roll_ms: int | None,
+    gate_min_speech_ms: int | None,
+) -> dict[str, Any]:
+    """The `_gate_knob_replacements` coercions filtered down to knobs whose
+    value actually DIFFERS from `config` — the no-restart `apply_gate_knobs`
+    diff both channels share. The dashboard pre-fills + re-POSTs every gate
+    value on each Apply, so a no-op re-submit must not churn the frozen
+    dataclass/info — and, for the threshold, must not quantize a >2-decimal
+    stored value (0.567) down to the display-rounded re-POST (0.57). The
+    threshold is compared at the dashboard's display precision
+    (GATE_THRESHOLD_DECIMALS), the ints exactly — the #238 precision
+    guarantee."""
+    replacements = _gate_knob_replacements(
+        gate_speech_threshold=gate_speech_threshold,
+        gate_hangover_ms=gate_hangover_ms,
+        gate_pre_roll_ms=gate_pre_roll_ms,
+        gate_min_speech_ms=gate_min_speech_ms,
+    )
+    changed: dict[str, Any] = {}
+    for field, value in replacements.items():
+        current = getattr(config, field)
+        if field == "gate_speech_threshold":
+            if round(value, GATE_THRESHOLD_DECIMALS) == round(current, GATE_THRESHOLD_DECIMALS):
+                continue
+        elif value == current:
+            continue
+        changed[field] = value
+    return changed
+
+
+def _transition_replacements(
+    *,
+    gate_kind: str | None,
+    conf: bool | None,
+    gate_speech_threshold: float | None,
+    gate_hangover_ms: int | None,
+    gate_pre_roll_ms: int | None,
+    gate_min_speech_ms: int | None,
+) -> dict[str, Any]:
+    """The `dataclasses.replace` kwargs a `begin_transition` writes into
+    `LiveConfig` — the gate knobs (applied unconditionally: the child
+    respawns regardless, so no diff-guard, unlike `_changed_gate_knobs`)
+    plus the validated `gate_kind` and the bool-coerced
+    `confidence_validation`. Shared by both channels' `begin_transition`
+    so the allowlist check and coercions stay in lockstep. Raises
+    `ValueError` on a gate_kind outside GATE_KINDS."""
+    replacements = _gate_knob_replacements(
+        gate_speech_threshold=gate_speech_threshold,
+        gate_hangover_ms=gate_hangover_ms,
+        gate_pre_roll_ms=gate_pre_roll_ms,
+        gate_min_speech_ms=gate_min_speech_ms,
+    )
+    if gate_kind is not None:
+        if gate_kind not in GATE_KINDS:
+            raise ValueError(
+                f"gate_kind must be {' or '.join(repr(k) for k in GATE_KINDS)}, got {gate_kind!r}"
+            )
+        replacements["gate_kind"] = gate_kind
+    if conf is not None:
+        replacements["confidence_validation"] = bool(conf)
+    return replacements
+
+
 class WhisperLiveKitChannel:
     """Owns one supervised whisperlivekit-server child process.
     Concrete `LiveChannel` (Protocol) implementation backing the existing
@@ -498,30 +576,16 @@ class WhisperLiveKitChannel:
         and mirrors the updated gate info into `info`. Leaves `info["state"]`,
         `info["last_error"]`, `info["model"]`, and `info["language"]` untouched —
         the child process is not affected by these knobs. Used on the no-restart
-        path in `api_live_start` when only gate knobs changed."""
-        replacements = _gate_knob_replacements(
+        path in `api_live_start` when only gate knobs changed. The changed-only
+        diff (and its #238 display-precision compare) lives in
+        `_changed_gate_knobs`, shared with `MoonshineLiveChannel`."""
+        changed = _changed_gate_knobs(
+            self.config,
             gate_speech_threshold=gate_speech_threshold,
             gate_hangover_ms=gate_hangover_ms,
             gate_pre_roll_ms=gate_pre_roll_ms,
             gate_min_speech_ms=gate_min_speech_ms,
         )
-        # Keep only knobs whose value actually differs from the current config.
-        # The dashboard pre-fills + re-POSTs every gate value on each Apply, so a
-        # no-op re-submit must not churn the frozen dataclass/info — and, for the
-        # threshold, must not quantize a >2-decimal stored value (0.567) down to
-        # the display-rounded re-POST (0.57). The threshold is compared at the
-        # dashboard's display precision (GATE_THRESHOLD_DECIMALS), the ints
-        # exactly — the #238 precision guarantee the removed `matches()`
-        # round-compare used to hold on this no-restart path.
-        changed: dict[str, Any] = {}
-        for field, value in replacements.items():
-            current = getattr(self.config, field)
-            if field == "gate_speech_threshold":
-                if round(value, GATE_THRESHOLD_DECIMALS) == round(current, GATE_THRESHOLD_DECIMALS):
-                    continue
-            elif value == current:
-                continue
-            changed[field] = value
         if changed:
             self.config = replace(self.config, **changed)
             self._mirror_gate_info()
@@ -583,22 +647,13 @@ class WhisperLiveKitChannel:
         see the previous selection. `start()` will overwrite `state`
         again on success; this method ensures the transition itself is
         observable."""
-        replacements: dict[str, Any] = {}
-        if gate_kind is not None:
-            if gate_kind not in ("tapscribe", "backend"):
-                raise ValueError(f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
-            replacements["gate_kind"] = gate_kind
-        if conf is not None:
-            replacements["confidence_validation"] = bool(conf)
-        # Restart path: apply every supplied gate knob unconditionally (the
-        # child respawns regardless, so no diff-guard — unlike apply_gate_knobs).
-        replacements.update(
-            _gate_knob_replacements(
-                gate_speech_threshold=gate_speech_threshold,
-                gate_hangover_ms=gate_hangover_ms,
-                gate_pre_roll_ms=gate_pre_roll_ms,
-                gate_min_speech_ms=gate_min_speech_ms,
-            )
+        replacements = _transition_replacements(
+            gate_kind=gate_kind,
+            conf=conf,
+            gate_speech_threshold=gate_speech_threshold,
+            gate_hangover_ms=gate_hangover_ms,
+            gate_pre_roll_ms=gate_pre_roll_ms,
+            gate_min_speech_ms=gate_min_speech_ms,
         )
         if replacements:
             self.config = replace(self.config, **replacements)

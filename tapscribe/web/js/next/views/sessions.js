@@ -45,9 +45,9 @@
 // panel head, wired once.
 
 import { tpl, pick, mount, reconcileList, deferIfSelectionInside } from "../../templates.js";
-import { putJson, postJson, del, getJson } from "../../api.js";
+import { putJson, postJson, del, getJson, errText } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
-import { header, strong, inline } from "../shell.js";
+import { header, strong, inline, newestFirst } from "../shell.js";
 
 /**
  * A session's total original-WAV bytes. Precomputed server-side as
@@ -114,7 +114,7 @@ export function build(ctx) {
       }, 2600);
     } catch (e) {
       pruneStatus.textContent = "";
-      alert(`Prune empty failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Prune empty failed: ${errText(e)}`);
     } finally {
       pruneBtn.disabled = false;
       afterMutate();
@@ -158,6 +158,16 @@ export function build(ctx) {
     if (local != null) return local;
     return metaFor(s).label;
   };
+
+  /** `labelFor` for PER-TICK sig/filter computations: the same overlay-then-
+   * meta value, read directly off `session_meta.label` (the documented
+   * equivalence with `metaFor(s).label` — see capture.js) so no throwaway
+   * EffectiveMeta (alias-map spread) is allocated per session per tick. MUST
+   * stay value-identical to labelFor — the rename overlay included — or a sig
+   * drifts from what the render paints and the region goes stale after a
+   * rename. Render paths keep labelFor/metaFor. */
+  /** @param {import('../../types.js').Session} s */
+  const labelSig = (s) => localLabels.get(s.session) ?? (s.session_meta?.label || "");
 
   /** Fire a transcript-search query when the local filter yields no results.
     * Results are cached per query string. */
@@ -206,7 +216,7 @@ export function build(ctx) {
           setTimeout(() => { if (statusEl.textContent === "saved") statusEl.textContent = ""; }, 1400);
         }
       } catch (e) {
-        statusEl.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+        statusEl.textContent = `failed: ${errText(e)}`;
       } finally {
         afterMutate();
       }
@@ -230,7 +240,7 @@ export function build(ctx) {
     try {
       await del(`/api/sessions/${encodeURIComponent(s.session)}/audio`);
     } catch (e) {
-      alert(`Delete audio failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Delete audio failed: ${errText(e)}`);
       return;
     } finally {
       afterMutate();
@@ -256,7 +266,7 @@ export function build(ctx) {
     try {
       await del(`/api/sessions/${encodeURIComponent(s.session)}`);
     } catch (e) {
-      alert(`Delete session failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Delete session failed: ${errText(e)}`);
       return;
     } finally {
       // Drop any optimistic label / pending save for the gone session so a
@@ -274,7 +284,7 @@ export function build(ctx) {
     try {
       await postJson(`/api/sessions/${encodeURIComponent(s.session)}/pipeline`);
     } catch (e) {
-      alert(`Process failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Process failed: ${errText(e)}`);
       return;
     } finally {
       afterMutate();
@@ -305,7 +315,7 @@ export function build(ctx) {
     try {
       await postJson(`/api/sessions/${encodeURIComponent(targetId)}/absorb`, { source: source.session });
     } catch (e) {
-      alert(`Absorb failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Absorb failed: ${errText(e)}`);
       return;
     } finally {
       // The source folder is gone — forget its optimistic label + pending
@@ -458,7 +468,7 @@ export function build(ctx) {
    */
   const fillRow = (row, s, archived, targetsSig) => {
     const rowSig = [
-      labelFor(s),
+      labelSig(s),
       s.session === focusedId ? 1 : 0,
       s.wav_count || 0,
       s.stripped ? 1 : 0,
@@ -511,7 +521,7 @@ export function build(ctx) {
   const matches = (s) => {
     if (!filter) return true;
     const hay = [
-      labelFor(s),
+      labelSig(s), // per-tick filter — same value as labelFor, no metaFor allocation
       s.session,
       fmtSessionLabel(s.session),
     ].join(" ").toLowerCase();
@@ -659,7 +669,7 @@ export function build(ctx) {
     // already re-fill it); the options loop skips self when painting. The
     // key's has-targets bit is arithmetic, not an allocation: a non-current
     // row has targets iff some OTHER archived session exists.
-    const targetsSig = archived.map((t) => `${t.session}·${labelFor(t)}·${t.wav_count || 0}`).join(",");
+    const targetsSig = archived.map((t) => `${t.session}·${labelSig(t)}·${t.wav_count || 0}`).join(",");
     reconcileList(
       body,
       shown,
@@ -677,9 +687,8 @@ export function build(ctx) {
    */
   const update = (j, sess) => {
     focusedId = sess?.session || "";
-    // Newest first — session ids are ISO-ish timestamps, so a string sort
-    // descending is chronological (same ordering the spine picker uses).
-    const sessions = [...(j.sessions || [])].sort((a, b) => (a.session < b.session ? 1 : -1));
+    // Newest first (shared shell.js comparator — same ordering as the spine picker).
+    const sessions = [...(j.sessions || [])].sort(newestFirst);
     lastSessions = sessions;
     const total = sessions.length;
     const transcribed = sessions.filter((s) => s.session_transcript).length;

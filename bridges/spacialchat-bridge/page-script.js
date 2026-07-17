@@ -190,15 +190,24 @@
     // reference here would silently pick that up and break the label
     // all the way through to the dashboard.
     const name = getDisplayName(participant);
-    const entry = { source, worklet, silentGain, name, resolvedName: name || "" };
+    const entry = { source, worklet, silentGain, name, resolvedName: name || "", nextNameRetryAtMs: 0 };
 
     worklet.port.onmessage = (ev) => {
       const buf = ev.data.buffer;
       // The sidebar may not have rendered the user yet at tap time; retry
       // until it gives us a non-empty name, then stop querying the DOM.
+      // Throttled to ~1/s: this handler fires per 20 ms PCM chunk (50x/s)
+      // and getDisplayName is an O(document) sidebar scan, so an
+      // unthrottled retry against a name that never resolves would scan
+      // the MAIN-world DOM 50x/s for the tap's lifetime. The name is
+      // cosmetic (content.js re-reads it per frame), so ~1 s lag is fine.
       if (!entry.resolvedName) {
-        const n = getDisplayName(participant);
-        if (n) entry.resolvedName = n;
+        const now = performance.now();
+        if (now >= entry.nextNameRetryAtMs) {
+          entry.nextNameRetryAtMs = now + 1000;
+          const n = getDisplayName(participant);
+          if (n) entry.resolvedName = n;
+        }
       }
       postToContent({
         kind: "pcm",

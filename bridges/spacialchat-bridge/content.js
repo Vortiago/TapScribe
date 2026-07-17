@@ -46,7 +46,6 @@
   // and reopened against the new settings; if the operator rotates the tap
   // token while a speaker is in a 4401-retry loop, the next retry uses the
   // fresh token without a SpatialChat tab reload.
-  const TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap.";
   let recorderHost = "localhost";
   let recorderPort = 8001;
   let recorderUseTls = false;
@@ -201,28 +200,10 @@
   });
 
   // Construct the WebSocket with the tap-token carried via subprotocol
-  // when the operator set one. With --no-auth the recorder ignores
-  // subprotocols entirely; we omit it so the upgrade succeeds without
-  // server-side echo.
-  const openWs = (url) => {
-    if (tapToken) return new WebSocket(url, [TAP_SUBPROTOCOL_PREFIX + tapToken]);
-    return new WebSocket(url);
-  };
-
-  // ws:// to a "potentially trustworthy" host (Chrome/Edge's term) is
-  // allowed from an https:// page; anything else gets blocked by mixed-
-  // content policy — `new WebSocket(ws://...)` throws SecurityError
-  // synchronously, which would otherwise escape out of the PCM handler on
-  // every frame and leave /tap stuck at "idle". The host predicate itself
-  // lives in control-client.js's TapscribeControlClient.isTrustworthyHost —
-  // shared with the HTTP control plane's mixed-content guard so the two
-  // never drift apart (#251).
-  function wouldBeMixedContentBlocked() {
-    if (recorderUseTls) return false;
-    if (typeof location === "undefined") return false;
-    if (location.protocol !== "https:") return false;
-    return !TapscribeControlClient.isTrustworthyHost(recorderHost);
-  }
+  // when the operator set one. subprotocolsFor (control-client.js) owns
+  // the prefix and omits the slot entirely with --no-auth so the upgrade
+  // succeeds without server-side echo.
+  const openWs = (url) => new WebSocket(url, TapscribeControlClient.subprotocolsFor(tapToken));
 
   // Backoff: jittered exponential, capped. Indexed by ch.reconnectAttempt
   // (0 = first retry). The cap matches what feels reasonable for an
@@ -491,7 +472,9 @@
     // throws SecurityError synchronously here, so detect-and-surface
     // before we dial. Retrying is pointless until the operator either
     // enables TLS on the recorder or points the bridge at localhost.
-    if (wouldBeMixedContentBlocked()) {
+    // The predicate is control-client.js's wouldBlockCleartext — shared
+    // with the HTTP control plane's guard so the two never drift (#251).
+    if (TapscribeControlClient.wouldBlockCleartext(recorderCfg())) {
       if (ch.error !== "tls-required") {
         ch.error = "tls-required";
         console.error(
@@ -801,7 +784,7 @@
       })
       .catch((e) => {
         const reason = (e && e.kind === "mixed-content-blocked")
-          ? "recorder is http:// on a non-trustworthy host — enable TLS"
+          ? TapscribeControlClient.MIXED_CONTENT_BLOCKED_TEXT
           : String((e && e.message) || e);
         console.warn("[tapscribe-bridge] pipeline trigger failed for " + sessionId + ": " + reason);
         publishMeetingEnd("failed", sessionId, reason);

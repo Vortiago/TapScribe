@@ -17,22 +17,15 @@
 // stream survives scroll across ticks.
 
 import { tpl, pick } from "../../templates.js";
-import { putJson, del } from "../../api.js";
-import { header, strong, inline, wireRecPill, paintRecPill } from "../shell.js";
+import { putJson, del, wireSave } from "../../api.js";
+import { header, strong, inline, wireRecPill, paintRecPill, sessionLabel } from "../shell.js";
+import { setDimmable } from "../ui.js";
 import * as liveFeed from "../../components/live-feed.js";
 import * as liveChannel from "../../components/live-channel.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 
 /** @param {string} s */
 const clip = (s) => (s.length > 60 ? s.slice(0, 60) + "…" : s);
-
-/** Set a capture-health tile value, dimming empty/em-dash placeholders so a
- * missing metric recedes while real values stay bright. */
-/** @param {HTMLElement} el @param {string} value */
-const setHealth = (el, value) => {
-  el.textContent = value;
-  el.classList.toggle("is-empty", value === "" || value === "—");
-};
 
 /**
  * @param {{
@@ -105,26 +98,25 @@ export function build(ctx) {
   });
 
   // Per-session override saves → PUT /api/session-meta/{id}. Empty value clears
-  // the override (falls back to the global default). Bound once; the target
-  // session id is read from the `session` closure var at click time. `getValue`
-  // returns the field's payload — a textarea string for prompt/hotwords, the
-  // selected codes array for languages (write_session_meta accepts both).
+  // the override (falls back to the global default). Wired once through the
+  // shared save-button lifecycle (wireSave); the target session id is read from
+  // the `session` closure var at click time, and the buttons are disabled
+  // whenever there's no session (the no-session reject is belt-and-braces).
+  // afterSettle re-polls on success AND failure, matching the old finally.
+  // `getValue` returns the field's payload — a textarea string for
+  // prompt/hotwords, the selected codes array for languages
+  // (write_session_meta accepts both).
   /** @param {"prompt"|"hotwords"|"languages"} key @param {() => unknown} getValue @param {HTMLButtonElement} btn @param {HTMLElement} status */
-  const wireOverride = (key, getValue, btn, status) => {
-    btn.addEventListener("click", async () => {
-      if (!session) return;
-      const sid = session.session;
-      btn.disabled = true;
-      status.textContent = "saving…";
-      try {
-        await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { [key]: getValue() });
-        status.textContent = "saved";
-        setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
-      } catch (e) {
-        status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
-      } finally { btn.disabled = false; afterMutate(); }
+  const wireOverride = (key, getValue, btn, status) =>
+    wireSave({
+      btn,
+      status,
+      put: () => {
+        if (!session) return Promise.reject(new Error("no session selected"));
+        return putJson(`/api/session-meta/${encodeURIComponent(session.session)}`, { [key]: getValue() });
+      },
+      afterSettle: afterMutate,
     });
-  };
   wireOverride("prompt", () => promptTa.value, promptSave, promptStatus);
   wireOverride("hotwords", () => hotwordsTa.value, hotwordsSave, hotwordsStatus);
   wireOverride("languages", () => selectedLanguages(languagesSel), languagesSave, languagesStatus);
@@ -158,7 +150,7 @@ export function build(ctx) {
             "live IRC captions · recorder ",
             strong(recEnabled ? "armed" : "paused"),
             sess ? " · " : "",
-            sess ? strong(metaFor(sess).label || sess.session) : "",
+            sess ? strong(sessionLabel(sess)) : "",
           ),
       },
     });
@@ -179,11 +171,11 @@ export function build(ctx) {
       onAction: { start: onLiveStart, stop: onLiveStop },
     });
 
-    setHealth(healthHosts.hLive, `${liveCount} / ${active.length}`);
-    setHealth(healthHosts.hRec, `${active.filter((a) => a.record !== false).length} / ${active.length}`);
+    setDimmable(healthHosts.hLive, `${liveCount} / ${active.length}`);
+    setDimmable(healthHosts.hRec, `${active.filter((a) => a.record !== false).length} / ${active.length}`);
     const lags = /** @type {number[]} */ (active.map((a) => a.lag_s).filter((l) => typeof l === "number"));
-    setHealth(healthHosts.hLag, lags.length ? `${Math.max(...lags).toFixed(1)}s` : "—");
-    setHealth(healthHosts.hChan, li.state || "stopped");
+    setDimmable(healthHosts.hLag, lags.length ? `${Math.max(...lags).toFixed(1)}s` : "—");
+    setDimmable(healthHosts.hChan, li.state || "stopped");
 
     paintRecPill(recPill, recEnabled);
 

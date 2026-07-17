@@ -32,6 +32,7 @@ from .session_paths import (
 )
 from .sessions import read_session_meta, read_strip_meta, write_session_meta
 from .text import atomic_write_text, parse_wav_start
+from .wav_cache import legacy_sidecar, transcripts_dir
 
 # ---------------------------------------------------------------------------
 # Domain errors — FastAPI-free maintenance exceptions.
@@ -128,13 +129,15 @@ def prune_empty_sessions(current_session: str) -> dict[str, Any]:
 def _move_sidecars_with_wav(src_wav: Path, dst_wav: Path) -> None:
     """Carry whichever cache layout the source uses to the WAV's new
     home — the legacy `<wav>.json` file, the new `<wav>.transcripts/`
-    directory, or both. Either may be absent."""
-    legacy = src_wav.with_suffix(".json")
+    directory, or both. Either may be absent. The sidecar locations come
+    from `wav_cache` (`legacy_sidecar` / `transcripts_dir`), the layout's
+    one owner."""
+    legacy = legacy_sidecar(src_wav)
     if legacy.is_file():
-        shutil.move(str(legacy), str(dst_wav.with_suffix(".json")))
-    transcripts = src_wav.with_suffix(".transcripts")
+        shutil.move(str(legacy), str(legacy_sidecar(dst_wav)))
+    transcripts = transcripts_dir(src_wav)
     if transcripts.is_dir():
-        shutil.move(str(transcripts), str(dst_wav.with_suffix(".transcripts")))
+        shutil.move(str(transcripts), str(transcripts_dir(dst_wav)))
 
 
 def _safe_size(p: Path) -> int:
@@ -163,9 +166,10 @@ def _delete_wav_with_sidecars(wav: Path, *, dry_run: bool = False) -> int:
     bulk-reclaim PREVIEW reuses (via `delete_session_audio`), so a preview
     total can never drift from what an execute actually frees.
 
-    The destructive analog of `_move_sidecars_with_wav` above: both
-    enumerate the SAME two sidecar layouts, so if a third layout is ever
-    added, update both functions.
+    The destructive analog of `_move_sidecars_with_wav` above: both derive
+    the sidecar locations from `wav_cache`'s canonical `legacy_sidecar` /
+    `transcripts_dir` helpers, so the paths can't drift — but a THIRD cache
+    layout added in `wav_cache` still needs wiring into both functions here.
 
     `wav` is a Path discovered by globbing a `resolve_session_dir`-checked
     folder (or returned by `resolve_wav`), not a path BUILT from a parsed
@@ -173,12 +177,12 @@ def _delete_wav_with_sidecars(wav: Path, *, dry_run: bool = False) -> int:
     construction against `py/path-injection`) does not apply here; deleting
     an already-validated Path is safe."""
     freed = _safe_size(wav)
-    legacy = wav.with_suffix(".json")
+    legacy = legacy_sidecar(wav)
     if legacy.is_file():
         freed += _safe_size(legacy)
         if not dry_run:
             legacy.unlink(missing_ok=True)
-    transcripts = wav.with_suffix(".transcripts")
+    transcripts = transcripts_dir(wav)
     if transcripts.is_dir():
         freed += _dir_size(transcripts)
         if not dry_run:

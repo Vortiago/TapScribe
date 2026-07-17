@@ -116,10 +116,12 @@ function loadPageScript({
       },
     });
   }
+  let sidebarScanCount = 0;
+  let nowMs = 0;
   const doc = {
     head: { appendChild: () => {} },
     addEventListener: () => {},
-    querySelectorAll: () => sidebarEls,
+    querySelectorAll: () => { sidebarScanCount++; return sidebarEls; },
     visibilityState: "visible",
   };
 
@@ -167,6 +169,9 @@ function loadPageScript({
     clearInterval: () => {},
     setTimeout: (fn, _ms) => { fn(); return 0; },
     clearTimeout: () => {},
+    // Virtual monotonic clock for the display-name retry throttle; tests
+    // advance it via env.setNow(ms).
+    performance: { now: () => nowMs },
   };
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
@@ -175,7 +180,16 @@ function loadPageScript({
     filename: "page-script.js",
   });
 
-  return { room, audio, posted, eventListeners, sandbox };
+  return {
+    room,
+    audio,
+    posted,
+    eventListeners,
+    sandbox,
+    sidebarEls,
+    setNow: (ms) => { nowMs = ms; },
+    sidebarScans: () => sidebarScanCount,
+  };
 }
 
 function makeAudioPublication({ track, isMuted = false, source = "microphone" }) {
@@ -338,6 +352,46 @@ test("PCM frames forwarded from the worklet include the resolved name", async ()
     pcmMsg.name, "Carol",
     "pcm carries the participant's name so /tap is dialed with name=Carol",
   );
+});
+
+test("an unresolved display name is retried at most ~1x/s, not per 20 ms PCM frame", async () => {
+  // getDisplayName runs an O(document) sidebar querySelectorAll. The worklet
+  // message handler fires per 20 ms PCM chunk (50x/s), so for a participant
+  // whose name never resolves an unthrottled retry would scan the MAIN-world
+  // DOM 50x/s for the tap's lifetime. Pin the per-entry throttle: one second
+  // of frames triggers at most a couple of scans — and the retry still
+  // resolves the name once the sidebar renders the user.
+  const env = loadPageScript(); // no sidebar entry, participant.name is ""
+  const track = makeTrack();
+  const participant = { identity: "nameless", name: "", audioTrackPublications: new Map() };
+
+  env.room.fire("trackSubscribed", track, makeAudioPublication({ track }), participant);
+  await flush();
+  const worklet = env.audio.AudioWorkletNode._last;
+
+  const before = env.sidebarScans();
+  for (let i = 0; i < 50; i++) {
+    env.setNow(i * 20); // one second of 20 ms PCM chunks
+    worklet.port.onmessage({ data: new Int16Array(320) });
+  }
+  const scans = env.sidebarScans() - before;
+  assert.ok(
+    scans <= 2,
+    "50 frames across 1 s must trigger at most 2 sidebar scans, got " + scans,
+  );
+  assert.equal(
+    findMessages(env.posted, "pcm", "nameless").length, 50,
+    "throttling the name retry must not throttle the PCM frames themselves",
+  );
+
+  // The sidebar finally renders the user; the next due retry picks it up.
+  env.sidebarEls.push({
+    __vue__: { _props: { user: { id: "nameless", name: "Now Named" } } },
+  });
+  env.setNow(2000); // past the throttle window
+  worklet.port.onmessage({ data: new Int16Array(320) });
+  const last = findMessages(env.posted, "pcm", "nameless").pop();
+  assert.equal(last.name, "Now Named", "a due retry still resolves the name");
 });
 
 test("local participant's mic is tapped and named the same as remote taps", async () => {

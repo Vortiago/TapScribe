@@ -21,7 +21,7 @@
 // selection holds the swap (Interaction hold; templates.js).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson, postJson } from "../../api.js";
+import { putJson, postJson, errText } from "../../api.js";
 import { speakerIndex } from "../../speakers.js";
 import { header, strong, inline } from "../shell.js";
 
@@ -85,7 +85,7 @@ export function build(ctx) {
         }
       } catch (e) {
         for (const el of statusEls) {
-          if (el instanceof HTMLElement) el.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+          if (el instanceof HTMLElement) el.textContent = `failed: ${errText(e)}`;
         }
       } finally {
         afterMutate();
@@ -127,7 +127,7 @@ export function build(ctx) {
       try {
         await req();
       } catch (e) {
-        status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+        status.textContent = `failed: ${errText(e)}`;
       } finally {
         afterMutate();
       }

@@ -2,15 +2,27 @@
 // Thin wrappers over the backend's HTTP API. Each helper returns the
 // parsed JSON / text or throws an Error with status + server-provided detail.
 
+/** The Error a non-OK response throws: `${status} ${detail}`, detail from the
+ * JSON body when the server provided one, else the statusText. Async — it
+ * reads the body. Shared by _unwrap and fetchState so the two fetch paths
+ * can't drift.
+ * @param {Response} r */
+async function _httpError(r) {
+  let detail = r.statusText;
+  try { detail = (await r.json()).detail || detail; } catch { /* not JSON */ }
+  return new Error(`${r.status} ${detail}`);
+}
+
+/** Human-readable message for a caught error — String() minus the "Error: " prefix. @param {unknown} e */
+export const errText = (e) => String(e).replace(/^Error:\s*/, "");
+
 /** @param {Response} r */
 async function _unwrap(r) {
   if (r.ok) {
     const ct = r.headers.get("content-type") || "";
     return ct.includes("application/json") ? r.json() : r.text();
   }
-  let detail = r.statusText;
-  try { detail = (await r.json()).detail || detail; } catch { /* not JSON */ }
-  throw new Error(`${r.status} ${detail}`);
+  throw await _httpError(r);
 }
 
 /** @param {unknown} body */
@@ -33,11 +45,7 @@ export async function fetchState() {
     headers: _stateEtag ? { "If-None-Match": _stateEtag } : undefined,
   });
   if (r.status === 304 && _lastState !== null) return _lastState;
-  if (!r.ok) {
-    let detail = r.statusText;
-    try { detail = (await r.json()).detail || detail; } catch { /* not JSON */ }
-    throw new Error(`${r.status} ${detail}`);
-  }
+  if (!r.ok) throw await _httpError(r);
   _stateEtag = r.headers.get("ETag");
   _lastState = /** @type {import('./types.js').AppState} */ (await r.json());
   return _lastState;
@@ -374,14 +382,18 @@ export function mutateButton(btn, mutate, { afterMutate, failMessage }) {
 // card, the Summary view's per-session override) call it with their own
 // `put` instead of the /api/config/{key} content shape.
 /**
+ * `onSuccess` fires only on a successful put; `afterSettle` runs in the
+ * finally (success OR failure) — for callers that re-poll either way (e.g.
+ * the Capture view's per-session override saves).
  * @param {{
  *   btn: HTMLButtonElement,
  *   status: HTMLElement | null,
  *   put: () => Promise<unknown>,
  *   onSuccess?: (() => void) | undefined,
+ *   afterSettle?: (() => void) | undefined,
  * }} opts
  */
-export function wireSave({ btn, status, put, onSuccess }) {
+export function wireSave({ btn, status, put, onSuccess, afterSettle }) {
   btn.addEventListener("click", async () => { // gate-allow: signal-listener — wireSave wires the button once when the caller builds it; the listener dies with the button
     if (!status) return;
     btn.disabled = true;
@@ -392,9 +404,10 @@ export function wireSave({ btn, status, put, onSuccess }) {
       onSuccess?.();
       setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
     } catch (e) {
-      status.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+      status.textContent = `failed: ${errText(e)}`;
     } finally {
       btn.disabled = false;
+      afterSettle?.();
     }
   });
 }

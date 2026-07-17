@@ -7,9 +7,9 @@
 // real data where we have it.
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson } from "../../api.js";
+import { putJson, errText } from "../../api.js";
 import { fmtSessionLabel, fmtDur } from "../../formatters.js";
-import { GLOBAL_VIEWS } from "../shell.js";
+import { GLOBAL_VIEWS, newestFirst } from "../shell.js";
 
 // Optimistic rename overlay (sid → edited label) so a rename typed in the
 // Session Information card shows instantly in the name field AND the session
@@ -39,7 +39,7 @@ function persistLabel(sid, statusEl) {
         setTimeout(() => { if (statusEl.textContent === "saved") statusEl.textContent = ""; }, 1400);
       }
     } catch (e) {
-      statusEl.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+      statusEl.textContent = `failed: ${errText(e)}`;
     }
   }, 600));
 }
@@ -273,7 +273,7 @@ export function render(host, j, ctx) {
 
     // Session picker — real sessions from /api/state, newest first.
     const pickSel = /** @type {HTMLSelectElement} */ (pick(frag, "sessionPick"));
-    const sessions = [...(j.sessions || [])].sort((a, b) => (a.session < b.session ? 1 : -1));
+    const sessions = [...(j.sessions || [])].sort(newestFirst);
     if (!sessions.length) {
       pickSel.add(new Option("no sessions yet", "", true, true));
       pickSel.disabled = true;
@@ -346,7 +346,12 @@ export function render(host, j, ctx) {
     // The People chip's count reads the ADR-0009 registry directly (not a
     // per-session walk), so ONE scalar covers it here.
     peopleCount(j),
-    sessions.map((s) => `${s.session}~${(localLabels.get(s.session) ?? metaFor(s).label) || ""}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
+    // The label term reads session_meta.label directly (== metaFor(s).label —
+    // the documented equivalence, see capture.js) with the SAME rename overlay
+    // buildFrag applies, so the per-tick sig allocates no throwaway
+    // EffectiveMeta (alias-map spread) per session; buildFrag itself keeps
+    // metaFor and only runs past the gate.
+    sessions.map((s) => `${s.session}~${(localLabels.get(s.session) ?? s.session_meta?.label) || ""}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
     session
       ? `${session.session}~${session.wav_count || 0}~${tx ? 1 : 0}~${tx?.suppressed_count || 0}~${session.stripped ? 1 : 0}~${session.is_current ? 1 : 0}~${session.session_summary?.summarized_at || ""}`
       : "",

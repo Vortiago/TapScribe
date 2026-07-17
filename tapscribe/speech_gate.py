@@ -35,8 +35,11 @@ from dataclasses import replace
 
 # PCM frame contract — matches the Bridge → /tap wire format. 20 ms of
 # 16 kHz mono int16 = 320 samples = 640 bytes per frame. Don't reuse
-# constants from bridges/ — those are JS — but they MUST agree.
-SAMPLE_RATE = 16_000
+# constants from bridges/ — those are JS — but they MUST agree. The
+# sample rate is the recorder's canonical one (tapscribe.audio), same
+# aliasing as strip_silence / wav_predecode.
+from .audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
+
 FRAME_SAMPLES = 320
 FRAME_BYTES = FRAME_SAMPLES * 2  # int16 little-endian
 # Silero VAD v5 takes exactly 512 samples per inference at 16 kHz. That's

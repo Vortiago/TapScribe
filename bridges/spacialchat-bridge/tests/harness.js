@@ -398,7 +398,7 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     // fresh on every call rather than capturing a reference at load time. A
     // test can therefore wrap one of its members with a spy AFTER the bridge
     // is constructed and still observe content.js calling through it (e.g.
-    // pinning that content.js's mixed-content guard shares isTrustworthyHost
+    // pinning that content.js's mixed-content guard shares wouldBlockCleartext
     // with the HTTP control plane instead of hand-rolling its own copy).
     controlClient: () => sandbox.TapscribeControlClient,
     // Every chrome.storage.local.set the content script made, in order — lets

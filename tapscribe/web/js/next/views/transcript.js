@@ -24,11 +24,11 @@
 
 import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside, selectionInside } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
-import { postJson, putJson, sessionTranscript, loadSessionFiles, wireSave } from "../../api.js";
+import { postJson, putJson, sessionTranscript, loadSessionFiles, wireSave, errText } from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
-import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
-import { makeStatusFlasher, clipboardAvailable } from "../ui.js";
+import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
+import { makeStatusFlasher, copyToClipboard } from "../ui.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 
@@ -234,21 +234,15 @@ export function build(ctx) {
     return lastGoodMerged.get(sid) ?? null;
   };
 
-  /** Effective source for the focused session — falls back to original when no
-   * stripped/ folder exists, so a stale "stripped" toggle can't transcribe
-   * nothing after the clips were cleared. */
-  const effectiveSource = () => {
-    const want = sourcePick.get(session?.session || "") || "original";
-    return (want === "stripped" && !session?.stripped) ? "original" : want;
-  };
-
   /** The WAVs the picker + per-WAV transcribe operate on: the originals, or the
-   * flattened silence-stripped region clips when the source toggle is stripped.
+   * flattened silence-stripped region clips when the source toggle is stripped
+   * (effectiveSource — shared with Recordings — falls back to original when no
+   * stripped/ folder exists, so a stale toggle can't transcribe nothing).
    * Reads the lazily-fetched `currentFiles`, not session.files (which /api/state
    * no longer ships). */
   /** @returns {(import('../../types.js').WavFile | import('../../types.js').WavRegion)[]} */
   const sourceFiles = () =>
-    effectiveSource() === "stripped" ? currentFiles.flatMap((f) => f.regions || []) : currentFiles;
+    effectiveSource(session, sourcePick) === "stripped" ? currentFiles.flatMap((f) => f.regions || []) : currentFiles;
 
   /** In-flight key for a (name, source) — matches transcribeWav's key shape so
    * the row "⟳ tx" busy state lines up with the optimistic set. */
@@ -341,7 +335,7 @@ export function build(ctx) {
       await saveLanguages();
       return true;
     } catch (e) {
-      alert(`Saving languages failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Saving languages failed: ${errText(e)}`);
       return false;
     }
   };
@@ -368,7 +362,7 @@ export function build(ctx) {
       if (!(await saveLanguagesOrAlert())) return;
       await postJson("/api/transcribe", { session: sid, name, source: src });
     } catch (e) {
-      alert(`Transcribe failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Transcribe failed: ${errText(e)}`);
     } finally {
       txInflight.delete(key);
       afterMutate();
@@ -377,7 +371,7 @@ export function build(ctx) {
 
   txOneBtn.addEventListener("click", () => {
     const sel = selectedFor();
-    if (sel) transcribeWav(sel.name, effectiveSource());
+    if (sel) transcribeWav(sel.name, effectiveSource(session, sourcePick));
   });
 
   txRangeBtn.addEventListener("click", async () => {
@@ -388,13 +382,13 @@ export function build(ctx) {
       if (!(await saveLanguagesOrAlert())) return;
       await postJson("/api/transcribe-session", {
         session: sid,
-        source: effectiveSource(),
+        source: effectiveSource(session, sourcePick),
         from_iso: rangeFrom.value.trim(),
         to_iso: rangeTo.value.trim(),
         force: forceBox.checked,
       });
     } catch (e) {
-      alert(`Session transcribe failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Session transcribe failed: ${errText(e)}`);
     } finally {
       txRangeBtn.disabled = false;
       afterMutate();
@@ -439,40 +433,27 @@ export function build(ctx) {
 
   // Bound ONCE at build time; reads the captured copyTxFull/copyMeta (the body
   // currently in the pane), not per-tick DOM. Disabled until a body has loaded.
+  // The copy flow is the shared copyToClipboard (ui.js); this view's fallback
+  // is the styled new-tab variant — window.open succeeds when the fallback
+  // runs synchronously in the gesture (non-secure context), and degrades to a
+  // prompt() when blocked (post-await clipboard rejection) — same design as
+  // the classic dashboard's copy.
   txCopyBtn.addEventListener("click", async () => {
     if (!copyTxFull || !copyMeta) return;
     const out = buildCopyText(copyTxFull, copyMeta);
     if (!out) { flashCopyStatus("nothing to copy"); return; }
-    // Non-secure context (see ui.js clipboardAvailable): the await below
-    // would reject and a window.open in the catch would be past the
-    // user-gesture window (popup blocked), so open the fallback tab
-    // SYNCHRONOUSLY inside the click handler instead — same design as the
-    // classic dashboard's copy.
-    if (!clipboardAvailable()) {
-      const w = window.open("", "_blank");
-      if (w) {
-        populateTranscriptTab(w, out);
-        flashCopyStatus("↗ opened in new tab");
-      } else {
-        window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", out);
-      }
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(out);
-      flashCopyStatus("✓ copied");
-    } catch {
-      // Clipboard write rejected (permission denied). Past the user gesture —
-      // a popup will likely be blocked; try once, then fall back to a
-      // prompt() the operator can select-copy from.
-      const w = window.open("", "_blank");
-      if (w) {
-        populateTranscriptTab(w, out);
-        flashCopyStatus("↗ opened in new tab");
-      } else {
-        window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", out);
-      }
-    }
+    await copyToClipboard(out, {
+      onOk: () => flashCopyStatus("✓ copied"),
+      onFallback: () => {
+        const w = window.open("", "_blank");
+        if (w) {
+          populateTranscriptTab(w, out);
+          flashCopyStatus("↗ opened in new tab");
+        } else {
+          window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", out);
+        }
+      },
+    });
   });
 
   // ---- Set primary (REAL — moved from recordings.js) ------------------------
@@ -485,7 +466,7 @@ export function build(ctx) {
       await putJson(`/api/wav/${encodeURIComponent(sid)}/${encodeURIComponent(name)}/primary`,
         { backend, model, source: src });
     } catch (e) {
-      alert(`Set primary failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Set primary failed: ${errText(e)}`);
     } finally {
       markRegionStale(mergedHost);
       lastCtlSig = " ";
@@ -651,7 +632,7 @@ export function build(ctx) {
           eyebrow: "Session · 3 Transcript",
           title: "Transcript",
           sub: tx && sess
-            ? inline("merged result for ", strong(metaFor(sess).label || sess.session))
+            ? inline("merged result for ", strong(sessionLabel(sess)))
             : (sess ? "not transcribed yet — declare languages and transcribe below" : "no session selected — pick one from the spine"),
         });
 
@@ -700,7 +681,7 @@ export function build(ctx) {
     // session doesn't replaceChildren on every selection / poll tick. Skip the
     // chrome rebuild when nothing it depends on changed, or while a range box is
     // mid-edit (so an in-progress ISO edit isn't wiped).
-    const src = effectiveSource();
+    const src = effectiveSource(session, sourcePick);
     const srcFiles = sourceFiles();
     const sel = selectedFor(srcFiles);
     const ctlSig = [

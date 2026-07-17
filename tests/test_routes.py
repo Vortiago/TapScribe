@@ -2834,6 +2834,19 @@ def test_summarize_empty_command_returns_400(client, recorder_under_test):
     assert r.status_code == 400, r.text
 
 
+def test_summarize_non_string_body_field_returns_400(client, recorder_under_test):
+    """Boundary validation via the _parse_* family: a non-string value for a
+    string field 400s instead of being silently ignored (the old isinstance
+    guards would just drop {"model": 123} and summarize with the default)."""
+    seed_merged_transcript(recorder_under_test.recordings_dir, "s")
+    r = client.post("/api/sessions/s/summarize", json={"model": 123})
+    assert r.status_code == 400, r.text
+    assert "model" in r.json()["detail"]
+    r = client.post("/api/sessions/s/summarize", json={"prompt": ["not", "a", "string"]})
+    assert r.status_code == 400, r.text
+    assert "prompt" in r.json()["detail"]
+
+
 def test_summarize_failed_command_returns_502(client, recorder_under_test):
     seed_merged_transcript(recorder_under_test.recordings_dir, "s")
     failing = py_cmd("import sys; sys.exit(1)")

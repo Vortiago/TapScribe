@@ -51,7 +51,13 @@ import numpy as np
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from .live import GATE_THRESHOLD_DECIMALS, LiveChannel, LiveConfig, _gate_knob_replacements
+from .live import (
+    GATE_THRESHOLD_DECIMALS,
+    LiveChannel,
+    LiveConfig,
+    _changed_gate_knobs,
+    _transition_replacements,
+)
 from .speech_gate import effective_gate_config
 from .transcribers._moonshine_window import MoonshineWindow
 
@@ -419,22 +425,15 @@ class MoonshineLiveChannel:
         restart — the /asr server never reads these; every per-tap
         SpeechGate is built from `live.config` at attach time (#224). Same
         changed-only + display-precision semantics as
-        `WhisperLiveKitChannel.apply_gate_knobs` (the #238 guarantee)."""
-        replacements = _gate_knob_replacements(
+        `WhisperLiveKitChannel.apply_gate_knobs` (the #238 guarantee) —
+        both go through the shared `live._changed_gate_knobs` diff."""
+        changed = _changed_gate_knobs(
+            self.config,
             gate_speech_threshold=gate_speech_threshold,
             gate_hangover_ms=gate_hangover_ms,
             gate_pre_roll_ms=gate_pre_roll_ms,
             gate_min_speech_ms=gate_min_speech_ms,
         )
-        changed: dict[str, Any] = {}
-        for field, value in replacements.items():
-            current = getattr(self.config, field)
-            if field == "gate_speech_threshold":
-                if round(value, GATE_THRESHOLD_DECIMALS) == round(current, GATE_THRESHOLD_DECIMALS):
-                    continue
-            elif value == current:
-                continue
-            changed[field] = value
         if changed:
             self.config = replace(self.config, **changed)
             self._mirror_gate_info()
@@ -455,19 +454,17 @@ class MoonshineLiveChannel:
         write the supplied knobs into `config` so the imminent restart
         (and every per-tap SpeechGate built from this config — PR #334
         finding #8) picks them up, and flip `info` to "starting" so
-        dashboards polling mid-transition see the new selection."""
-        replacements = _gate_knob_replacements(
+        dashboards polling mid-transition see the new selection. The
+        gate_kind allowlist + conf coercion live in the shared
+        `live._transition_replacements`."""
+        replacements = _transition_replacements(
+            gate_kind=gate_kind,
+            conf=conf,
             gate_speech_threshold=gate_speech_threshold,
             gate_hangover_ms=gate_hangover_ms,
             gate_pre_roll_ms=gate_pre_roll_ms,
             gate_min_speech_ms=gate_min_speech_ms,
         )
-        if gate_kind is not None:
-            if gate_kind not in ("tapscribe", "backend"):
-                raise ValueError(f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
-            replacements["gate_kind"] = gate_kind
-        if conf is not None:
-            replacements["confidence_validation"] = bool(conf)
         if replacements:
             self.config = replace(self.config, **replacements)
         self.info["state"] = "starting"

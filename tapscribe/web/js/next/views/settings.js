@@ -21,11 +21,11 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { getJson, putJson, wireConfigSave, wireSave } from "../../api.js";
+import { getJson, putJson, wireConfigSave, wireSave, errText } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 import { header } from "../shell.js";
-import { makeStatusFlasher, clipboardAvailable } from "../ui.js";
+import { makeStatusFlasher, copyToClipboard } from "../ui.js";
 import * as configCard from "../../components/config-card.js";
 import { LIVE_FAMILY_LABELS, buildModelSelect } from "../../model-select.js";
 
@@ -116,7 +116,7 @@ export function build(ctx) {
       bridgeToken.textContent = t;
       bridgeReveal.textContent = "🙈 hide";
     } catch (e) {
-      flashBridgeStatus(`couldn't load token: ${String(e).replace(/^Error:\s*/, "")}`);
+      flashBridgeStatus(`couldn't load token: ${errText(e)}`);
     } finally {
       bridgeReveal.disabled = false;
     }
@@ -127,23 +127,17 @@ export function build(ctx) {
     try {
       t = await loadTapToken();
     } catch (e) {
-      flashBridgeStatus(`couldn't load token: ${String(e).replace(/^Error:\s*/, "")}`);
+      flashBridgeStatus(`couldn't load token: ${errText(e)}`);
       return;
     }
-    // Same non-secure-context fallback as the transcript pane's copy button
-    // (the probe is shared — see ui.js).
-    if (!clipboardAvailable()) {
-      window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t);
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(t);
-      flashBridgeStatus("✓ copied");
-    } catch {
-      // Clipboard write rejected (permission denied) — fall back to a
-      // prompt() the operator can select-copy from.
-      window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t);
-    }
+    const token = t;
+    // Shared copy flow (ui.js copyToClipboard) — the fallback here is a
+    // prompt() the operator can select-copy from, covering both the
+    // non-secure context and a rejected clipboard write.
+    await copyToClipboard(token, {
+      onOk: () => flashBridgeStatus("✓ copied"),
+      onFallback: () => { window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", token); },
+    });
   });
 
   // ---- Get-a-bridge card ------------------------------------------------------
@@ -282,7 +276,7 @@ export function build(ctx) {
   /** @param {string} modelId */
   const saveLiveModel = async (modelId) => {
     try { await putJson("/api/config/live-model", { content: modelId }); }
-    catch (e) { alert(`Save live model failed: ${String(e).replace(/^Error:\s*/, "")}`); }
+    catch (e) { alert(`Save live model failed: ${errText(e)}`); }
     finally { afterMutate(); }
   };
 

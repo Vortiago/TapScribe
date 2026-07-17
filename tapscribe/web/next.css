@@ -431,16 +431,12 @@ body::before { display: none; }
    bottoms out there and the overflow falls to `.work__inner`'s scroll instead
    (the documented `.noshrink` contract), keeping the aside fully clickable. */
 .grid.cols-cap.fillcol { min-height: min-content; }
-/* Settings board — balanced columns (engine | prompts+rules) that fill the
-   workspace width, not the 1.9/0.9 transcript split. The config column is a
-   touch wider since it carries the prompt + hotwords editors + the rules. */
-.cols-settings { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
 .aside { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
 .spacer { height: 11px; }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 
 @container (max-width: 760px) {
-  .cols-tx, .cols-cap, .cols-settings { grid-template-columns: 1fr; }
+  .cols-tx, .cols-cap { grid-template-columns: 1fr; }
   /* When a fill-grid stacks to one column its rows must NOT all stretch to the
      viewport (two full-height panels would each demand 100%); fall back to
      content height so the page scrolls normally on a narrow workspace. */
@@ -1014,17 +1010,12 @@ button.wavrow {
   border: 1px dashed color-mix(in srgb, var(--info) 40%, transparent);
   border-radius: var(--next-r-sm); padding: 2px 7px;
 }
-.mocknote { font-size: 10.5px; color: var(--text-dim); line-height: 1.6; margin-bottom: 13px; }
-.mocknote b { color: var(--text); font-weight: 600; }
 .mockblk {
   display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
   padding: 9px 0; border-top: 1px solid var(--hairline-2);
 }
 .mockblk--col { flex-direction: column; align-items: stretch; gap: 7px; }
-.mockblk--persist { color: var(--fg-3); }
 .cfgblk__k { font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-3); font-weight: 600; font-family: var(--mono); flex: none; }
-.mock-hint { font-size: 9.5px; }
-.mock-hint b { color: var(--fg-1); }
 
 /* single / multi segmented control (mock, disabled). Named .segctl — NOT
    .seg — because merged-transcript.html uses .seg for transcript segments
@@ -1071,27 +1062,6 @@ button.wavrow {
 /* Sharp / dense, same :root tokens as Phase 1–2.                           */
 /* ====================================================================== */
 
-/* REAL: per-session participants — identity + editable display name */
-.partlist { display: flex; flex-direction: column; gap: 1px; }
-.partrow {
-  display: grid; grid-template-columns: 17px minmax(0, 1fr) auto minmax(140px, 1.2fr) auto;
-  gap: 9px; align-items: center;
-  padding: 6px 2px; border-top: 1px solid var(--hairline-2);
-}
-.partrow:first-child { border-top: 0; }
-.partrow__id { font-size: 10.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.partrow__src { flex: none; }
-.partrow__src.is-live { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 35%, transparent); background: var(--rec-bg); }
-.partrow__src.is-recorded { color: var(--fg-3); }
-.partrow__name {
-  width: 100%; background: var(--bg); color: var(--text);
-  border: 1px solid var(--hairline); border-radius: var(--next-r);
-  padding: 4px 8px; font-size: 11.5px;
-  &::placeholder { color: var(--fg-3); }
-  &:focus { outline: none; border-color: var(--info); }
-}
-.partrow__status { font-size: 9px; min-width: 44px; text-align: right; white-space: nowrap; }
-
 /* shared avatar (initials chip) — palette-coloured per speaker slot */
 .av {
   display: grid; place-items: center; flex: none;
@@ -1099,7 +1069,6 @@ button.wavrow {
   font-family: var(--mono);
 }
 .av.sm { width: 17px; height: 17px; font-size: 7.5px; }
-.av.lg { width: 28px; height: 28px; font-size: 11px; }
 .av.spk-0 { background: var(--info); }
 .av.spk-1 { background: var(--magenta); }
 .av.spk-2 { background: var(--warn); }
@@ -1150,7 +1119,7 @@ button.wavrow {
 }
 .idchip__x:hover { color: var(--rec); background: color-mix(in srgb, var(--rec) 20%, transparent); }
 
-/* small tag chip — used for input badges + the partrow source badge */
+/* small tag chip — used for input badges */
 .next-app .tag {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: 9px; font-family: var(--mono);

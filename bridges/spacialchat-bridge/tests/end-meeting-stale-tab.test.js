@@ -145,23 +145,3 @@ test("endMeeting surfaces a failed trigger as meetingEnd.phase 'failed' and stil
   assert.ok(m.meetingEnd.error, "the failure reason must be recorded for the card");
   assert.equal(m.meetingActive, false, "even on trigger failure the meeting is no longer active");
 });
-
-// --- guardrail: a mixed-content-blocked End renders the SAME failed card ------
-// content.js's finishEndMeeting keys the failed reason off e.kind and emits the
-// hardcoded TLS message, NOT the raw error text. The stale path must match that
-// literal by construction so the two End cards can't silently drift on a future
-// control-client message reword. The thrown message here deliberately DIFFERS
-// from the expected literal — if endMeeting used raw errText(e) this would fail.
-test("endMeeting maps a mixed-content-blocked throw to content.js's exact failed-card text (parity, not raw message)", async () => {
-  const storage = fakeStorage();
-  const control = fakeControl({
-    throws: Object.assign(new Error("some future reworded control-client message"), { kind: "mixed-content-blocked" }),
-  });
-
-  await actions.endMeeting({ control, storage, cfg: CFG, sessionId: SID, snapshot: STALE, now: NOW });
-
-  const m = merged(storage.writes);
-  assert.equal(m.meetingEnd.phase, "failed");
-  assert.equal(m.meetingEnd.error, "recorder is http:// on a non-trustworthy host — enable TLS",
-    "must emit content.js's hardcoded TLS literal keyed off e.kind, not the raw thrown message");
-});
