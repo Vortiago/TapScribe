@@ -158,10 +158,11 @@ async def launch_bridge_context(pw, ext_dir: Path, user_data_dir: str):
 
 
 def free_port() -> int:
-    """Borrow an unused localhost port. There's a tiny race vs the bind
-    below; `RecorderServer.start()` retries on collision to absorb it."""
+    """Borrow an unused localhost port (reserved on IPv4). uvicorn later binds
+    the dual-stack `localhost` name, so the port can still collide on ::1;
+    `RecorderServer.start()` retries on a fresh port to absorb that."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("localhost", 0))
+        s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
@@ -207,19 +208,25 @@ class RecorderServer:
         return f"ws://{self.host}:{self.port}"
 
     def _run_server(self) -> None:
-        """Thread target: wrap server.run() so an OSError during bind
-        (port collision) becomes a recoverable signal for `start()`
-        rather than an uncatchable exception in a daemon thread."""
+        """Thread target: wrap server.run() so a bind failure (port collision)
+        becomes a recoverable signal for `start()` rather than an uncatchable
+        exception in a daemon thread. uvicorn catches the bind OSError
+        internally and re-raises it as SystemExit(STARTUP_FAILURE), so we catch
+        that too -- otherwise the retry in start() never fires and the caller
+        just times out."""
         assert self._server is not None
         try:
             self._server.run()
-        except OSError as e:
+        except (OSError, SystemExit) as e:
             self._bind_error = e
 
     def start(self, *, ready_timeout: float = 5.0) -> None:
-        # free_port() can race with another process grabbing the same
-        # port between release and uvicorn's bind. Retry on OSError with
-        # a fresh port — caller-supplied ports skip the retry loop.
+        # free_port() reserves the port on IPv4 only, but uvicorn binds the
+        # dual-stack `localhost` name, so it can still collide on ::1 (and any
+        # process can grab the port in the free-then-bind window). Retry with a
+        # fresh port on ANY startup failure -- a captured bind error, a thread
+        # that exited before startup, or a ready timeout. A caller-supplied port
+        # disables retry (we honour it as-is).
         attempts = 1 if self._fixed_port else _PORT_RETRY_ATTEMPTS
         last_error: BaseException | None = None
         for _ in range(attempts):
@@ -229,22 +236,22 @@ class RecorderServer:
             self._thread.start()
             deadline = time.time() + ready_timeout
             while time.time() < deadline:
-                if self._bind_error is not None:
+                if self._bind_error is not None or not self._thread.is_alive():
                     break
                 if getattr(self._server, "started", False):
                     return
-                if not self._thread.is_alive():
-                    break
                 time.sleep(0.02)
-            if self._bind_error is not None:
-                last_error = self._bind_error
-                self._thread.join(timeout=1.0)
-                if self._fixed_port:
-                    raise last_error
-                self._build_server(free_port())
-                continue
-            raise RuntimeError("uvicorn didn't report started within timeout")
-        raise RuntimeError(f"uvicorn failed to bind after {attempts} port-retry attempts: {last_error!r}")
+            if getattr(self._server, "started", False):
+                return
+            # Not started: a captured bind error, a thread that exited before
+            # startup, or a timeout. Stop the old server, then retry fresh.
+            last_error = self._bind_error or RuntimeError("uvicorn didn't report started within timeout")
+            self._server.should_exit = True
+            self._thread.join(timeout=1.0)
+            if self._fixed_port:
+                raise last_error
+            self._build_server(free_port())
+        raise RuntimeError(f"uvicorn failed to start after {attempts} attempts: {last_error!r}")
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._server is not None:
