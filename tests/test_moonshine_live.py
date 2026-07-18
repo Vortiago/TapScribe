@@ -695,7 +695,7 @@ def test_start_ready_timeout_tears_down_a_late_binding_server(monkeypatch):
     server closed, loop closed, and stop() stays a safe no-op."""
     import time as _time
 
-    import tapscribe.moonshine_live as ml
+    from tapscribe import moonshine_live as ml
 
     monkeypatch.setattr(ml, "_READY_TIMEOUT_S", 0.05)
     real_bound = ml._bound_socket

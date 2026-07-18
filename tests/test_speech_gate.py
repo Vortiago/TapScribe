@@ -379,7 +379,7 @@ def test_every_gate_gets_its_own_silero_model(monkeypatch: pytest.MonkeyPatch) -
     construction would zero the state under every other open tap. Each
     `make_silero_vad` call (= each SpeechGate) must load its OWN model."""
     pytest.importorskip("silero_vad")
-    import tapscribe.speech_gate as sg
+    from tapscribe import speech_gate as sg
 
     loaded: list[object] = []
 
