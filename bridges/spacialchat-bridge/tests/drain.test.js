@@ -15,7 +15,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { createBridge, FakeWebSocket } = require("./harness");
+const { createBridge } = require("./harness");
 
 // A 20ms int16 mono 16kHz frame = 640 bytes. Tests send small ArrayBuffers
 // that don't have to be real audio — the bridge treats them as opaque PCM.

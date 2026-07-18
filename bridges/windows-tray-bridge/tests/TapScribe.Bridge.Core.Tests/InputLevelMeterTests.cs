@@ -70,12 +70,16 @@ public class InputLevelMeterTests
     public void Lifecycle_ForwardsStartAndDispose_ToTheCapture()
     {
         var capture = new FakeAudioCapture(Fixtures.RecorderFormat);
-        var meter = new InputLevelMeter(capture);
 
-        meter.Start();
-        Assert.True(capture.Started);
+        // using-statement so Dispose runs on every exit — including a throw from
+        // Start()/the assert — without a manual finally: satisfies both
+        // cs/dispose-not-called-on-throw and cs/missed-using-statement.
+        using (var meter = new InputLevelMeter(capture))
+        {
+            meter.Start();
+            Assert.True(capture.Started);
+        }
 
-        meter.Dispose();
         Assert.True(capture.Stopped);  // Dispose stops and releases the underlying capture
         Assert.True(capture.Disposed);
     }
@@ -89,8 +93,14 @@ public class InputLevelMeterTests
         // volatile flag but isn't reproducible against the synchronous FakeAudioCapture.
         var capture = new FakeAudioCapture(Fixtures.RecorderFormat);
         var meter = new InputLevelMeter(capture);
-        meter.Start();
-        meter.Dispose();
+        // using-statement over the existing local: disposes on block exit (and
+        // on throw) while keeping `meter` in scope so we can read Level after
+        // disposal — the post-dispose delivery this test exercises. Satisfies
+        // both cs/dispose-not-called-on-throw and cs/missed-using-statement.
+        using (meter)
+        {
+            meter.Start();
+        }
 
         capture.Emit(Fixtures.Loud(20));
 

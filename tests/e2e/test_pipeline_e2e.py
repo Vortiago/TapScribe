@@ -207,6 +207,10 @@ async def test_two_bridges_stream_then_session_is_transcribed(
                 frame_interval_s=0.025,
             )
         except websockets.ConnectionClosed:
+            # Recording is toggled off, so the recorder closes the tap instead
+            # of accepting frames; streaming into a paused recorder surfaces as
+            # ConnectionClosed. That's the expected path — the assertion that no
+            # new WAV was written is what this test verifies.
             pass
         assert len(list(rec.session_dir.glob("*.wav"))) == before
 
