@@ -4,5 +4,5 @@
   "private": true,
   "description": "Playwright popup E2E for the SpatialChat Bridge. Dev-only; never shipped.",
   "scripts": { "test": "playwright test" },
-  "devDependencies": { "@playwright/test": "1.56.x" }
+  "devDependencies": { "@playwright/test": "1.61.x" }
 }
