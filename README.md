@@ -37,8 +37,10 @@ navigates the global views (Taps · Sessions · People · Settings) and the
 per-session journey (Capture → Recordings → Transcript → Summary); the
 active-taps rail on the right follows you across views. Live captions
 stream in Capture; silence-stripping and the per-WAV files live in
-Recordings; the engine picker, **▶ transcribe range** button, and the
-merged transcript live in Transcript.
+Recordings; the **▶ transcribe range** button, the meeting-languages
+declaration (you declare the meeting's languages, not a model — ADR-0011),
+and the merged transcript live in Transcript; the global live and batch
+engine pickers live in Settings.
 
 ![Merged session transcript](docs/dashboard-shots/06-real-audio-transcript.png)
 
@@ -57,9 +59,12 @@ bash start.sh --lan       # bind 0.0.0.0
 
 The script finds Python 3.12+, creates `.venv`, installs dependencies
 (`whisperlivekit`, `python-multipart`, `transformers`, plus `mlx-whisper` on
-Apple Silicon), and launches TapScribe on port 8001 with
-`whisperlivekit-server` as a child on port 8000. Child logs are prefixed
-`[wlk]`. Ctrl+C stops both.
+Apple Silicon), and launches the TapScribe recorder on port 8001. Live
+captions are **off by default**: start `whisperlivekit-server` from the
+dashboard (or boot with it running via `--auto-live`). When live is running,
+the recorder supervises it as a child on an ephemeral internal port (pin one
+with `SX_PORT_WLK`); child logs are prefixed `[wlk]`. Ctrl+C stops the
+recorder and any child.
 
 On first run, pick transcription models in the **browser setup screen**: open
 `http://localhost:8001/setup` (`/` redirects there until a model is installed)
@@ -121,7 +126,7 @@ flowchart LR
 
     subgraph Host["TapScribe host"]
         Backend["TapScribe backend<br/>FastAPI :8001<br/>/tap · /api · dashboard"]
-        WLK["whisperlivekit-server<br/>:8000 (child process)"]
+        WLK["whisperlivekit-server<br/>(supervised child, internal port)"]
         WAVs[("recordings/<br/>&lt;session&gt;/*.wav")]
     end
 

@@ -335,8 +335,13 @@ Concerns the fan-out owns (the route knows none of these):
 - WAV-file open / resume-via-`UtteranceIndex.try_resume` / writeframes /
   finalize / unlink-when-empty.
 - UtteranceIndex `register_new` / `release` bookkeeping.
-- ActiveStream registration and per-frame `bytes_received` updates,
-  plus the post-gate level meter and the gate-open transition push.
+- ActiveStream registration and the `bytes_received`/level updates —
+  throttled to a flush every `STREAM_FLUSH_EVERY_FRAMES` (10) frames
+  (~200 ms) rather than per frame, flushing unconditionally on each
+  gate open/close transition and once at close (after the relay
+  teardown, so the row reads the exact final byte count before it is
+  removed) — plus the post-gate level meter and the gate-open
+  transition push.
 - The **live leg** — but only by holding one **TapRelay** (below) and
   feeding each frame through it. The relay/gate/reconnect machinery
   itself is no longer TapFanOut's concern.

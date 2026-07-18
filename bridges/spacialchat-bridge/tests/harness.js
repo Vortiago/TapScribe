@@ -398,8 +398,11 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     // fresh on every call rather than capturing a reference at load time. A
     // test can therefore wrap one of its members with a spy AFTER the bridge
     // is constructed and still observe content.js calling through it (e.g.
-    // pinning that content.js's mixed-content guard shares isTrustworthyHost
-    // with the HTTP control plane instead of hand-rolling its own copy).
+    // pinning that content.js's ws:// pre-flight consults the exported
+    // wouldBlockCleartext). Scope caveat: such a spy sees only property-path
+    // callers like content.js — control-client.js's own internals reach
+    // sibling functions via closure bindings a property patch can't observe,
+    // so the HTTP guard must be pinned behaviorally, not by spying.
     controlClient: () => sandbox.TapscribeControlClient,
     // Every chrome.storage.local.set the content script made, in order — lets
     // a test assert on the durable meeting state (id kept, meetingActive

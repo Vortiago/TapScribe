@@ -30,13 +30,20 @@ _NESTED_QUANTIFIER_RE = re.compile(r"[+*]\)[+*]")
 
 
 # Single-slot cache of the parsed/compiled rules, keyed on the rules file's
-# (path, mtime_ns, size). parse_rules runs on every /api/state poll AND once
-# per transcribe; re-reading the file and recompiling every regex each time is
-# pure CPU waste when the operator-edited file rarely changes. Any write goes
-# through an atomic replace, which moves the stat signature and invalidates.
+# (path, mtime_ns, size). parse_rules runs on every /api/state poll (a
+# to_thread worker) AND once per transcribe (the event loop); re-reading the
+# file and recompiling every regex each time is pure CPU waste when the
+# operator-edited file rarely changes. Any write goes through an atomic
+# replace, which moves the stat signature and invalidates.
+# Because those callers run on different threads, the slot is published as
+# ONE assignment of a (sig, rules) tuple — atomic under the GIL — never two
+# separate key writes, which would let a reader interleave between them
+# (KeyError on the first-ever populate, or the old rules paired with a new
+# sig right after an operator edit). Same single-(sig, value)-slot shape as
+# people._PEOPLE_CACHE / config_store._CONFIG_TEXT_CACHE.
 # A mutated dict (rather than a rebound scalar global) so it follows the same
 # shape as the other poll caches and avoids a dead-store on the `global` write.
-_RULES_CACHE: dict[str, Any] = {}
+_RULES_CACHE: dict[str, tuple[tuple | None, list[dict[str, Any]]]] = {}
 
 
 def _rules_file_sig() -> tuple | None:
@@ -65,11 +72,14 @@ def parse_rules() -> list[dict[str, Any]]:
     that need to own it (e.g. the batch invocation) copy it themselves.
     """
     sig = _rules_file_sig()
-    if sig is not None and _RULES_CACHE.get("sig") == sig:
-        return _RULES_CACHE["rules"]
+    # ONE slot read: the (sig, rules) pair is immutable once published, so a
+    # concurrent re-populate can never be observed half-written (see the
+    # _RULES_CACHE comment).
+    hit = _RULES_CACHE.get("_slot")
+    if sig is not None and hit is not None and hit[0] == sig:
+        return hit[1]
     rules = _parse_rules_uncached()
-    _RULES_CACHE["sig"] = sig
-    _RULES_CACHE["rules"] = rules
+    _RULES_CACHE["_slot"] = (sig, rules)
     return rules
 
 

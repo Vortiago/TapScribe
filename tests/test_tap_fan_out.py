@@ -29,11 +29,17 @@ from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest
 )
 
 from tapscribe.recorder import Recorder
-from tapscribe.tap_fan_out import TapFanOut
+from tapscribe.tap_fan_out import STREAM_FLUSH_EVERY_FRAMES, TapFanOut
 
 # A 20 ms frame of audible-ish PCM at 16 kHz mono int16 — 320 samples / 640 bytes.
 # Real bridges send frames this size (see CONTEXT.md "Bridge" wire contract).
 PCM_FRAME = b"\x10\x00" * 320
+
+# The bytes/level flush cadence: write_frame accumulates locally and pushes to
+# the ActiveStream row every FLUSH frames (~200 ms), plus on gate transitions
+# and close. Tests that read the row must feed a full flush window (or cross a
+# flush point) before snapshotting.
+FLUSH = STREAM_FLUSH_EVERY_FRAMES
 
 
 @pytest.fixture
@@ -170,8 +176,11 @@ async def test_do_record_false_skips_wav_but_registers_active_stream(recorder: R
 
 async def test_write_frame_advances_active_stream_bytes_received(recorder: Recorder):
     """The dashboard's /api/state poll reads ActiveStream.bytes_received
-    to draw the in-flight progress bar — that counter must advance per
-    frame so the operator sees the WS is alive and ingesting audio."""
+    to draw the in-flight progress bar — the counter must advance at the
+    flush cadence (every FLUSH frames ≈ 200 ms, faster than the ≤2 Hz
+    poll) so the operator sees the WS is alive and ingesting audio. A
+    single frame must NOT flush — that per-frame mutex churn is exactly
+    what the throttle removes."""
     async with await TapFanOut.open(
         recorder,
         identity="alice",
@@ -181,13 +190,19 @@ async def test_write_frame_advances_active_stream_bytes_received(recorder: Recor
         do_live=False,
     ) as fan_out:
         await fan_out.write_frame(PCM_FRAME)
+        snap_single = await recorder.streams.snapshot()
+        for _ in range(FLUSH - 1):
+            await fan_out.write_frame(PCM_FRAME)
         snap1 = await recorder.streams.snapshot()
-        await fan_out.write_frame(PCM_FRAME)
-        await fan_out.write_frame(PCM_FRAME)
+        for _ in range(FLUSH):
+            await fan_out.write_frame(PCM_FRAME)
         snap2 = await recorder.streams.snapshot()
 
-    assert snap1[0].bytes_received == len(PCM_FRAME)
-    assert snap2[0].bytes_received == len(PCM_FRAME) * 3
+    # One frame sits inside the flush window — the row still reads 0.
+    assert snap_single[0].bytes_received == 0
+    # Each completed window lands the exact accumulated count.
+    assert snap1[0].bytes_received == len(PCM_FRAME) * FLUSH
+    assert snap2[0].bytes_received == len(PCM_FRAME) * FLUSH * 2
 
 
 async def test_write_frame_updates_active_stream_level(recorder: Recorder):
@@ -200,6 +215,9 @@ async def test_write_frame_updates_active_stream_level(recorder: Recorder):
     full_scale = b"\xff\x7f" * 320  # 32767 → ~1.0
     silence = b"\x00\x00" * 320
 
+    # One full flush window per amplitude, so each snapshot reads the level
+    # the throttle just pushed. Rising amplitudes mean the peak-hold equals
+    # the newest frame's peak at each flush point.
     async with await TapFanOut.open(
         recorder,
         identity="alice",
@@ -208,18 +226,21 @@ async def test_write_frame_updates_active_stream_level(recorder: Recorder):
         do_record=True,
         do_live=False,
     ) as fan_out:
-        await fan_out.write_frame(silence)
+        for _ in range(FLUSH):
+            await fan_out.write_frame(silence)
         snap_silent = await recorder.streams.snapshot()
-        await fan_out.write_frame(half_scale)
+        for _ in range(FLUSH):
+            await fan_out.write_frame(half_scale)
         snap_half = await recorder.streams.snapshot()
-        await fan_out.write_frame(full_scale)
+        for _ in range(FLUSH):
+            await fan_out.write_frame(full_scale)
         snap_full = await recorder.streams.snapshot()
 
-    # A frame of pure silence yields zero peak — the meter stays dark
+    # Frames of pure silence yield zero peak — the meter stays dark
     # when the WS is open but nobody is speaking.
     assert snap_silent[0].level == pytest.approx(0.0)
     # Half-scale lands at 0.5; the peak-hold is max(peak, decayed prior),
-    # and prior was 0, so we get exactly the new peak.
+    # and every frame in the window peaks at 0.5, so the flush reads 0.5.
     assert snap_half[0].level == pytest.approx(0.5, abs=1e-4)
     # Full-scale int16 normalised by 32768 is 0.99997…; rounding to 1.0
     # for the renderer is a frontend choice, not a server-side one.
@@ -243,15 +264,19 @@ async def test_write_frame_level_decays_between_loud_frames(recorder: Recorder):
         do_record=True,
         do_live=False,
     ) as fan_out:
-        await fan_out.write_frame(loud)
+        # A full flush window of loud frames pegs the meter (peak-hold keeps
+        # it at ~1.0 across the window) and lands it on the row.
+        for _ in range(FLUSH):
+            await fan_out.write_frame(loud)
         first = (await recorder.streams.snapshot())[0].level
-        # 30 frames of silence ≈ 600 ms — well past the ~165 ms half-life,
-        # so the meter must have decayed close to zero by now.
-        for _ in range(30):
+        # 3 flush windows of silence ≈ 600 ms — well past the ~165 ms
+        # half-life, so by the last flush (which lands exactly on the
+        # final silent frame) the meter must have decayed close to zero.
+        for _ in range(3 * FLUSH):
             await fan_out.write_frame(silence)
         decayed = (await recorder.streams.snapshot())[0].level
 
-    assert first > 0.9, "loud frame should peg the meter near full scale"
+    assert first > 0.9, "loud frames should peg the meter near full scale"
     assert decayed < 0.1, "long silence should drain the peak-hold"
 
 
@@ -275,18 +300,22 @@ async def test_write_frame_level_tracks_real_speech_wav(recorder: Recorder):
     TapFanOut frame by frame and verify the per-tap volume meter
     behaves like a real-world meter would.
 
-    Properties pinned:
-      - level stays in [0.0, 1.0] for every frame (renderer contract).
+    Properties pinned (observed at the flush cadence — the row updates
+    every FLUSH frames, so snapshots land on flush boundaries):
+      - level stays in [0.0, 1.0] at every flush (renderer contract).
       - level exceeds 0.3 at some point (real speech is loud enough
         to light the meter; if it never did, the dashboard's bar would
         never leave the silent zone for a perfectly normal speaker).
-      - peak-hold is monotonic w.r.t. raw peak: at every frame the
-        held value is >= the instantaneous peak of that frame (a
-        peak-hold meter never dips below the current sample's peak).
+      - peak-hold is monotonic w.r.t. raw peak: at every flush the
+        held value is >= the instantaneous peak of the frame that
+        triggered the flush (a peak-hold meter never dips below the
+        current sample's peak).
     """
     fixture = FIXTURES_AUDIO / "armstrong-en.wav"
     frames = _wav_to_frames(fixture)
     assert len(frames) > 500, "expected ~600 frames from a 12 s WAV"
+    # Full flush windows only, so every snapshot below reads a fresh flush.
+    groups = [frames[i : i + FLUSH] for i in range(0, len(frames) - FLUSH + 1, FLUSH)]
 
     levels: list[float] = []
     async with await TapFanOut.open(
@@ -297,12 +326,13 @@ async def test_write_frame_level_tracks_real_speech_wav(recorder: Recorder):
         do_record=True,
         do_live=False,
     ) as fan_out:
-        for f in frames:
-            await fan_out.write_frame(f)
+        for group in groups:
+            for f in group:
+                await fan_out.write_frame(f)
             snap = await recorder.streams.snapshot()
             levels.append(snap[0].level)
 
-    assert len(levels) == len(frames)
+    assert len(levels) == len(groups)
     assert all(0.0 <= L <= 1.0 for L in levels), "level outside [0,1] would break the renderer"
     assert max(levels) > 0.3, "real speech should peg the meter above the silent zone"
 
@@ -310,9 +340,9 @@ async def test_write_frame_level_tracks_real_speech_wav(recorder: Recorder):
     # dependency at module load.
     from tapscribe.audio import int16_peak_norm
 
-    for idx, (frame, held) in enumerate(zip(frames, levels, strict=True)):
-        raw = int16_peak_norm(frame)
-        assert held >= raw - 1e-9, f"peak-hold {held:.4f} below instantaneous peak {raw:.4f} at frame {idx}"
+    for idx, (group, held) in enumerate(zip(groups, levels, strict=True)):
+        raw = int16_peak_norm(group[-1])  # the frame whose write flushed
+        assert held >= raw - 1e-9, f"peak-hold {held:.4f} below instantaneous peak {raw:.4f} at flush {idx}"
 
 
 async def test_write_frame_level_decays_through_silence_after_real_audio(recorder: Recorder, tmp_path: Path):
@@ -325,7 +355,11 @@ async def test_write_frame_level_decays_through_silence_after_real_audio(recorde
     fixture = FIXTURES_AUDIO / "armstrong-en.wav"
     frames = _wav_to_frames(fixture)
     silence_frame = b"\x00" * 640
-    silent_tail = [silence_frame] * 30  # 30 * 20 ms = 600 ms — well past half-life
+    # 60 * 20 ms = 1.2 s — the flush cadence means the last row update can
+    # trail the final frame by up to a full window, so the tail is sized so
+    # even the worst-case last flush sits ≥ 50 silent frames deep (0.92^50
+    # ≈ 0.015, safely under the 0.05 assertion).
+    silent_tail = [silence_frame] * 60
 
     peak_during_speech = 0.0
 
@@ -353,8 +387,8 @@ async def test_write_frame_level_decays_through_silence_after_real_audio(recorde
 
 async def test_write_frame_level_against_synthesised_half_scale_tone(recorder: Recorder, tmp_path: Path):
     """Numeric pin: a known half-scale 440 Hz sine, written to a WAV and
-    streamed through the recorder, must produce a level near 0.5 on
-    every frame (each 20 ms frame contains ~8.8 sine cycles, so the
+    streamed through the recorder, must produce a level near 0.5 at
+    every flush (each 20 ms frame contains ~8.8 sine cycles, so the
     peak is well-defined). Catches regressions where the meter would
     average instead of peak-detect, or where normalisation drifts."""
     import numpy as np
@@ -371,6 +405,8 @@ async def test_write_frame_level_against_synthesised_half_scale_tone(recorder: R
         w.writeframes(samples.tobytes())
 
     frames = _wav_to_frames(wav_path)
+    groups = [frames[i : i + FLUSH] for i in range(0, len(frames) - FLUSH + 1, FLUSH)]
+    assert len(groups) >= 2, "0.4 s of tone should span at least two flush windows"
     levels: list[float] = []
     async with await TapFanOut.open(
         recorder,
@@ -380,12 +416,13 @@ async def test_write_frame_level_against_synthesised_half_scale_tone(recorder: R
         do_record=True,
         do_live=False,
     ) as fan_out:
-        for f in frames:
-            await fan_out.write_frame(f)
+        for group in groups:
+            for f in group:
+                await fan_out.write_frame(f)
             snap = await recorder.streams.snapshot()
             levels.append(snap[0].level)
 
-    # After the very first frame the peak-hold should be at ~0.5 and
+    # From the very first flush the peak-hold should be at ~0.5 and
     # stay there for the rest of the tone (every frame's instantaneous
     # peak is also ~0.5, so the hold never decays below it).
     assert levels[0] == pytest.approx(0.5, abs=0.01)
@@ -418,21 +455,24 @@ async def test_concurrent_streams_have_independent_level_meters(recorder: Record
             do_record=True,
             do_live=False,
         ) as bob:
-            await alice.write_frame(loud)
-            await bob.write_frame(silence)
+            # One flush window each so both rows carry a fresh reading.
+            for _ in range(FLUSH):
+                await alice.write_frame(loud)
+                await bob.write_frame(silence)
 
             snap = {s.identity: s for s in await recorder.streams.snapshot()}
             # Cross-talk would show as Bob's level rising along with Alice's.
-            assert snap["alice"].level > 0.9, "Alice's loud frame should peg her meter"
+            assert snap["alice"].level > 0.9, "Alice's loud frames should peg her meter"
             assert snap["bob"].level == 0.0, (
-                "Bob received a silent frame; his meter must be 0 regardless of Alice"
+                "Bob received silent frames; his meter must be 0 regardless of Alice"
             )
 
             # Now the reverse: loud for Bob, silent for Alice. Alice's
-            # meter should decay (one frame of decay only — still ~92%
+            # meter should decay (a window of decay — 0.92^FLUSH ≈ 0.43
             # of the prior 1.0), Bob's should jump.
-            await alice.write_frame(silence)
-            await bob.write_frame(loud)
+            for _ in range(FLUSH):
+                await alice.write_frame(silence)
+                await bob.write_frame(loud)
 
             snap = {s.identity: s for s in await recorder.streams.snapshot()}
             assert snap["bob"].level > 0.9
@@ -464,8 +504,10 @@ async def test_overlapping_same_utterance_id_taps_do_not_clobber_each_other(
         do_record=True,
         do_live=False,
     )
-    await a.write_frame(PCM_FRAME)
-    await b.write_frame(PCM_FRAME)
+    # A full flush window each so both rows carry a non-zero byte count.
+    for _ in range(FLUSH):
+        await a.write_frame(PCM_FRAME)
+        await b.write_frame(PCM_FRAME)
 
     # Two live taps → two independent rows, even though they share the id.
     assert len(await recorder.streams.snapshot()) == 2
@@ -478,9 +520,11 @@ async def test_overlapping_same_utterance_id_taps_do_not_clobber_each_other(
     surviving = snap[0]
     assert surviving.identity == "alice"
     before = surviving.bytes_received
+    assert before == len(PCM_FRAME) * FLUSH
 
     # b's counter must still advance — it wasn't frozen by a's close.
-    await b.write_frame(PCM_FRAME)
+    for _ in range(FLUSH):
+        await b.write_frame(PCM_FRAME)
     after = (await recorder.streams.snapshot())[0].bytes_received
     assert after > before, "the surviving tap's byte counter must keep advancing"
 
@@ -498,10 +542,10 @@ async def test_level_starts_fresh_on_resume_but_bytes_received_persists(
     from the next frame rather than inheriting a stale peak from
     before the blip.
 
-    Reaching this requires: open utterance with a loud frame, close
-    (level ends near 1.0 on the OLD stream), reopen with the same
-    utterance_id, snapshot before any new frames lands. The meter
-    should read 0.0 even though bytes_received is non-zero."""
+    Reaching this requires: open utterance with a flush window of loud
+    frames, close (level ends near 1.0 on the OLD stream), reopen with
+    the same utterance_id, snapshot before any new frames land. The
+    meter should read 0.0 even though bytes_received is non-zero."""
     loud = b"\xff\x7f" * 320
     utt = "utt-resume-level"
 
@@ -513,7 +557,8 @@ async def test_level_starts_fresh_on_resume_but_bytes_received_persists(
         do_record=True,
         do_live=False,
     ) as fan_out:
-        await fan_out.write_frame(loud)
+        for _ in range(FLUSH):
+            await fan_out.write_frame(loud)
         first_snap = (await recorder.streams.snapshot())[0]
         assert first_snap.level > 0.9
 
@@ -530,10 +575,10 @@ async def test_level_starts_fresh_on_resume_but_bytes_received_persists(
         # Snapshot BEFORE any new frame arrives.
         resumed_snap = (await recorder.streams.snapshot())[0]
 
-    # bytes_received survives the resume (we wrote one frame previously);
-    # level does NOT — stale loudness from before the blip must not
-    # be displayed against fresh audio.
-    assert resumed_snap.bytes_received == len(loud), "resume preserves byte count"
+    # bytes_received survives the resume (we wrote a window of frames
+    # previously); level does NOT — stale loudness from before the blip
+    # must not be displayed against fresh audio.
+    assert resumed_snap.bytes_received == len(loud) * FLUSH, "resume preserves byte count"
     assert resumed_snap.level == 0.0, "resume must reset the level meter"
 
 
@@ -551,7 +596,8 @@ async def test_write_frame_updates_level_even_when_record_off(recorder: Recorder
         do_record=False,
         do_live=False,
     ) as fan_out:
-        await fan_out.write_frame(half_scale)
+        for _ in range(FLUSH):
+            await fan_out.write_frame(half_scale)
         snap = await recorder.streams.snapshot()
 
     assert snap[0].bytes_received == 0  # record off → no bytes counted
@@ -830,6 +876,10 @@ async def test_gate_open_state_propagates_to_active_stream(
         await fan_out.write_frame(PCM_FRAME)
         snap = await recorder_with_relay.streams.snapshot()
         assert snap[0].gate_open is True
+        # A gate transition flushes the throttled byte counter immediately
+        # (mid-window — only 2 frames in), so the edge the dashboard renders
+        # carries exact bytes alongside the flipped gate_open.
+        assert snap[0].bytes_received == len(PCM_FRAME) * 2
 
         # Frames 3, 4 keep it open (VAD call #2 returns None).
         await fan_out.write_frame(PCM_FRAME)

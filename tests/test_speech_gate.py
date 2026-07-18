@@ -359,3 +359,47 @@ def test_silero_vad_analyzer_accepts_pcm_chunks() -> None:
     silence_chunk = b"\x00" * VAD_CHUNK_BYTES
     out = analyze(silence_chunk)
     assert out is None or isinstance(out, dict)
+
+
+class _FakeSileroModel:
+    """Stands in for silero's OnnxWrapper: `VADIterator.__init__` calls
+    `self.reset_states()` which delegates to `model.reset_states()` — the
+    exact delegation that proves the streaming state lives on the MODEL."""
+
+    def reset_states(self) -> None:
+        pass
+
+
+def test_every_gate_gets_its_own_silero_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression pin for the shared-stateful-model bug: silero's
+    OnnxWrapper carries the streaming RNN state ON the model object
+    (`_state`/`_context`; `VADIterator.reset_states` delegates to
+    `model.reset_states`), so two gates sharing one model would interleave
+    two taps' audio through a single LSTM state, and every new gate
+    construction would zero the state under every other open tap. Each
+    `make_silero_vad` call (= each SpeechGate) must load its OWN model."""
+    pytest.importorskip("silero_vad")
+    from tapscribe import speech_gate as sg
+
+    loaded: list[object] = []
+
+    def _fresh() -> object:
+        m = _FakeSileroModel()
+        loaded.append(m)
+        return m
+
+    monkeypatch.setattr(sg, "load_silero_model", _fresh)
+    sg.make_silero_vad(threshold=0.5, hangover_ms=400)
+    sg.make_silero_vad(threshold=0.5, hangover_ms=400)
+    assert len(loaded) == 2, "each gate must trigger its own model load"
+    assert loaded[0] is not loaded[1]
+
+
+def test_load_silero_model_is_uncached() -> None:
+    """`load_silero_model` must hand out a FRESH instance every call —
+    a cached instance is exactly the shared-state bug the per-gate /
+    per-thread ownership exists to prevent."""
+    pytest.importorskip("silero_vad")
+    from tapscribe.speech_gate import load_silero_model
+
+    assert load_silero_model() is not load_silero_model()

@@ -23,6 +23,9 @@ interface ControlClient {
   probeTapToken(cfg: RecorderCfg, opts?: { timeoutMs?: number }): Promise<{ ok: boolean; error?: string }>;
   httpBase(cfg: RecorderCfg): string;
   isTrustworthyHost(host: string | null | undefined): boolean;
+  wouldBlockCleartext(cfg: RecorderCfg): boolean;
+  subprotocolsFor(token: string | null | undefined): string[] | undefined;
+  MIXED_CONTENT_BLOCKED_TEXT: string;
 }
 
 declare const TapscribeControlClient: ControlClient;

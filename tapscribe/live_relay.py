@@ -291,6 +291,14 @@ class WlKRelay:
                 if data.get("type") == "ready_to_stop":
                     break
         except (ConnectionClosed, asyncio.CancelledError):
+            # Both are normal ends of the drain, not faults: ConnectionClosed
+            # when the peer (WlK child / Moonshine server) tears the WS down
+            # under us, CancelledError when `close()` cancels this consumer
+            # task after the drain window. Swallowing CancelledError is safe
+            # here — the coroutine ends immediately after this handler, so
+            # cancellation still completes. What's lost: only the distinction
+            # between a clean and an abrupt end, which has no consumer;
+            # settled lines already flushed keep flowing via on_settled_line.
             pass
         except Exception as e:
             print(f"[tapscribe] WlK relay consumer error: {e}", flush=True)

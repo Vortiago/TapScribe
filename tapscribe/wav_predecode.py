@@ -36,10 +36,9 @@ exactly what's on disk.
 
 from __future__ import annotations
 
-import wave
 from pathlib import Path
 
-from .audio import RECORDER_CHANNELS, RECORDER_SAMPLE_RATE, RECORDER_SAMPLE_WIDTH
+from .audio import read_recorder_frames
 
 
 def load_recorder_wav_as_pcm(path: Path):
@@ -48,30 +47,16 @@ def load_recorder_wav_as_pcm(path: Path):
     `mlx_whisper.transcribe(array, …)` or to
     `parakeet_mlx.audio.get_logmel(mx.array(array), preproc)`.
 
-    Raises `RuntimeError` if the WAV isn't in the recorder's expected
-    format. The error names the file, the actual format, and the
-    expected format, plus a one-line ffmpeg recipe so the operator
-    can convert the file. There is no in-process fallback — callers
-    propagate the error.
+    Raises `RuntimeError` (from `audio.read_recorder_frames`, the shared
+    format guard) if the WAV isn't in the recorder's expected format.
+    The error names the file, the actual format, and the expected
+    format, plus a one-line ffmpeg recipe so the operator can convert
+    the file. There is no in-process fallback — callers propagate the
+    error.
 
     See the module docstring for why this exists.
     """
     import numpy as np  # transitive dep via faster-whisper / mlx-whisper
 
-    with wave.open(str(path), "rb") as wf:
-        rate = wf.getframerate()
-        channels = wf.getnchannels()
-        sampwidth = wf.getsampwidth()
-        if (
-            rate != RECORDER_SAMPLE_RATE
-            or channels != RECORDER_CHANNELS
-            or sampwidth != RECORDER_SAMPLE_WIDTH
-        ):
-            raise RuntimeError(
-                f"unexpected WAV format for {path.name}: "
-                f"{rate}Hz/{channels}ch/{sampwidth * 8}-bit "
-                "(expected 16kHz/mono/16-bit — TapScribe writes that natively). "
-                "Convert with: ffmpeg -i in.wav -ar 16000 -ac 1 -sample_fmt s16 out.wav"
-            )
-        frames = wf.readframes(wf.getnframes())
+    frames, _ = read_recorder_frames(path)
     return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0

@@ -112,6 +112,7 @@ export const JOB_LABELS = {
   strip: "Stripping silence",
   summarize: "Summarizing",
   pipeline: "Pipeline",
+  delete: "Deleting audio",
 };
 
 /**
@@ -189,6 +190,21 @@ export function buildSourceToggle({ active, hasStripped, onPick }) {
 }
 
 /**
+ * The effective audio source for a session given the operator's per-session
+ * toggle pick: falls back to "original" when "stripped" is picked but the
+ * session has no stripped/ folder, so a stale toggle can't operate on nothing
+ * after the clips were cleared. Shared by the Recordings and Transcript views
+ * (each keeps its own sourcePick map), next to the source-toggle seam above.
+ * @param {import('../types.js').Session | null} session
+ * @param {Map<string, "original" | "stripped">} sourcePick
+ * @returns {"original" | "stripped"}
+ */
+export function effectiveSource(session, sourcePick) {
+  const want = sourcePick.get(session?.session || "") || "original";
+  return want === "stripped" && !session?.stripped ? "original" : want;
+}
+
+/**
  * Build the "Coming in a later phase" placeholder for a stubbed view.
  * @param {Element} root
  * @param {{ eyebrow: string, title: string, sub?: string, icon: string, heading: string, detail: string }} opts
@@ -261,4 +277,50 @@ export function resolveSession(sessions, selectedId) {
   }
   const current = sessions.find((s) => s.is_current);
   return current ?? sessions[0] ?? null;
+}
+
+/**
+ * Newest-first session comparator — ids are ISO-ish timestamps, so a
+ * descending string sort is chronological. Shared by the spine's session
+ * picker and the Sessions listing so their ordering can't drift.
+ * @param {import('../types.js').Session} a
+ * @param {import('../types.js').Session} b
+ */
+export function newestFirst(a, b) {
+  return a.session < b.session ? 1 : -1;
+}
+
+/**
+ * The label term for a PER-TICK render signature: the optimistic rename
+ * overlay (when the caller keeps one and it holds an entry for this session)
+ * over the raw `session_meta.label`, empty-string-normalized. This is THE
+ * one owner of the metaFor-equivalence rationale the sig sites lean on:
+ * main.js's `metaFor(s).label` derives from `session_meta.label` alone, so
+ * reading the raw field here is value-identical to what the render paints
+ * via metaFor (+ the same overlay) while allocating no throwaway
+ * EffectiveMeta (alias-map spread) per session per tick. It MUST stay
+ * value-identical — if metaFor's label resolution ever changes (trim, a
+ * People-name fallback, an auto-label), this helper is the single place the
+ * sig side follows, or every sig-gated region using it goes stale after a
+ * rename (CLAUDE.md render-signature hygiene). Render paths keep using
+ * metaFor/labelFor; sig, filter, and overlay comparisons use this.
+ * Pass `overlay: null` when the caller has no rename overlay.
+ * @param {Map<string, string> | null} overlay
+ * @param {import('../types.js').Session} s
+ */
+export function labelSigFor(overlay, s) {
+  return overlay?.get(s.session) ?? (s.session_meta?.label || "");
+}
+
+/**
+ * A session's display label: its meta label, falling back to the raw id.
+ * The raw `session_meta.label` read routes through `labelSigFor` (no
+ * overlay), whose doc carries the metaFor-equivalence rationale — so views
+ * needn't thread main.js's metaFor (and this module stays importable
+ * side-effect-free under node --test). Lives here, not main.js: a view
+ * importing main.js would execute its boot code.
+ * @param {import('../types.js').Session} sess
+ */
+export function sessionLabel(sess) {
+  return labelSigFor(null, sess) || sess.session;
 }

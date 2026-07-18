@@ -194,7 +194,7 @@ describe("loadSessionFiles: stale-while-revalidate", () => {
   });
 });
 
-describe("loadSessionFiles: empty guards + swallowed transient error", () => {
+describe("loadSessionFiles: empty guards + failure pacing", () => {
   it("returns [] without fetching for an empty session or empty files_sig", async () => {
     await withFetch(() => jsonRes({ files: [] }), async (calls) => {
       assert.deepEqual(loadSessionFiles("", "sig", new Set(), () => {}), []);
@@ -203,19 +203,37 @@ describe("loadSessionFiles: empty guards + swallowed transient error", () => {
     });
   });
 
-  it("swallows a failed refetch: no throw, onLand still runs, pending clears for a retry", async () => {
+  it("paces a failed fetch: no throw, no onLand, the retry waits for a later call", async () => {
+    // The retry-storm guard (`_failedFiles`): a rejection used to evict the
+    // cache key AND fire onLand, whose re-render synchronously re-entered
+    // loadSessionFiles and refired the fetch at HTTP-response rate. Now a
+    // failure is remembered per key: onLand stays silent, the NEXT call (the
+    // one the failure's own re-render would have been) skips the refetch,
+    // and only a later call — the next poll tick — retries.
     await withFetch(
-      () => { throw new Error("net down"); },
-      async () => {
+      (_url, n) => {
+        if (n === 1) throw new Error("net down");
+        return jsonRes({ files: [{ name: "ok.wav" }] });
+      },
+      async (calls) => {
         const pending = new Set();
         let landed = 0;
+        const onLand = () => { landed++; };
         // A cold load whose fetch will reject — must not throw to the caller.
-        const r = loadSessionFiles("swallow-s", "sig1", pending, () => { landed++; });
-        assert.equal(r, null); // nothing last-good yet
+        assert.equal(loadSessionFiles("swallow-s", "sig1", pending, onLand), null);
         assert.equal(pending.size, 1); // one in-flight fetch guarded
         await flush();
-        assert.equal(landed, 1); // onLand ran despite the failure
-        assert.equal(pending.size, 0); // freed so the next tick refetches
+        assert.equal(landed, 0); // a failure never fires onLand (nothing changed to render)
+        assert.equal(pending.size, 0); // guard freed
+        // Failure remembered: the immediate next call skips the refetch…
+        assert.equal(loadSessionFiles("swallow-s", "sig1", pending, onLand), null);
+        assert.equal(calls.length, 1); // no unpaced refire
+        // …and the call after that (a later poll tick) retries for real.
+        assert.equal(loadSessionFiles("swallow-s", "sig1", pending, onLand), null);
+        assert.equal(calls.length, 2);
+        await flush();
+        assert.equal(landed, 1); // the successful retry lands via onLand
+        assert.deepEqual(loadSessionFiles("swallow-s", "sig1", pending, onLand), [{ name: "ok.wav" }]);
       },
     );
   });

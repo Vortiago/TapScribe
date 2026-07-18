@@ -32,9 +32,10 @@
 // selected inside the list.
 
 import { tpl, mount, pick, reconcileList, deferIfSelectionInside } from "../../templates.js";
-import { postJson, del, loadSessionFiles, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview } from "../../api.js";
+import { postJson, del, loadSessionFiles, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, errText } from "../../api.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
-import { header, strong, inline, buildSourceToggle, renderJobBar } from "../shell.js";
+import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
+import { setDimmable } from "../ui.js";
 import { createWaveform } from "../components/waveform.js";
 
 /** Strip-silence knob defaults — mirror STRIP_OPT_DEFAULTS / the server-side
@@ -45,13 +46,12 @@ const STRIP_DEFAULTS = Object.freeze({ min_silence_ms: 500, pad_ms: 200, speech_
 
 /**
  * @param {{
- *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
  *   afterMutate: () => void,
  * }} ctx
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { metaFor, afterMutate } = ctx;
+  const { afterMutate } = ctx;
   const frag = tpl("tpl-next-view-recordings");
 
   const headHost = pick(frag, "head");
@@ -82,8 +82,6 @@ export function build(ctx) {
   const wavList = pick(frag, "wavList");
 
   // ---- View-local state -----------------------------------------------------
-  /** @type {import('../../types.js').AppState | null} */
-  let latest = null;
   /** @type {import('../../types.js').Session | null} */
   let session = null;
   /** @type {StripKnobs} */
@@ -164,21 +162,6 @@ export function build(ctx) {
   /** @param {string} sid @param {string} name @param {number} size */
   const waveKey = (sid, name, size) => `${sid}/${name}@original@${size}`;
 
-  /** @param {string} sid @returns {"original" | "stripped"} */
-  const effectiveSource = (sid) => {
-    const s = latest?.sessions?.find((x) => x.session === sid) || null;
-    const want = sourcePick.get(sid) || "original";
-    return (want === "stripped" && !s?.stripped) ? "original" : want;
-  };
-
-  /** Set a wave-stat value, dimming empty/em-dash placeholders so they recede
-   * while real numbers (clips/speech accent + good) stay bright. */
-  /** @param {HTMLElement} el @param {string} value */
-  const setStat = (el, value) => {
-    el.textContent = value;
-    el.classList.toggle("is-empty", value === "" || value === "—");
-  };
-
   /** Resolve the selected original WAV for the focused session (first if
    * unset). Reads the lazily-fetched `currentFiles`, not session.files (which
    * /api/state no longer ships). */
@@ -239,7 +222,7 @@ export function build(ctx) {
           pendingWave.add(key);
           wavePeaks.fetch(sid, sel.name, "original", fileSig)
             .then(() => { failedWave.delete(key); })
-            .catch((e) => { failedWave.set(key, String(e).replace(/^Error:\s*/, "")); })
+            .catch((e) => { failedWave.set(key, errText(e)); })
             .finally(() => {
               pendingWave.delete(key);
               // Redraw the canvas ONLY (the body didn't change) now that the
@@ -308,10 +291,10 @@ export function build(ctx) {
   /** @param {number} clips @param {number} speechS @param {number} inS */
   const paintCutStats = (clips, speechS, inS) => {
     const kept = inS > 0 ? Math.round(100 * speechS / inS) : 0;
-    setStat(stats.clips, String(clips));
-    setStat(stats.speech, `${Math.round(speechS)}s`);
-    setStat(stats.in, `${Math.round(inS)}s`);
-    setStat(stats.kept, `${kept}%`);
+    setDimmable(stats.clips, String(clips));
+    setDimmable(stats.speech, `${Math.round(speechS)}s`);
+    setDimmable(stats.in, `${Math.round(inS)}s`);
+    setDimmable(stats.kept, `${kept}%`);
   };
 
   /** @param {import('../../types.js').StripPreview} p */
@@ -324,7 +307,7 @@ export function build(ctx) {
     if (!session) return;
     const sid = session.session;
     const sel = selectedFor();
-    if (!sel || effectiveSource(sid) !== "original") return;
+    if (!sel || effectiveSource(session, sourcePick) !== "original") return;
     const token = ++previewToken;
     const key = waveKey(sid, sel.name, sel.size);
     fetchStripPreview(sid, sel.name, { ...knobs })
@@ -335,7 +318,7 @@ export function build(ctx) {
         // paint another WAV's preview (the next drawWaveform tick would
         // only reconcile it up to a poll later).
         const cur = selectedFor();
-        if (!session || !cur || effectiveSource(session.session) !== "original") return;
+        if (!session || !cur || effectiveSource(session, sourcePick) !== "original") return;
         if (waveKey(session.session, cur.name, cur.size) !== key) return;
         livePreview = { key, p };
         waveform.setPreview({ spans: p.spans, speech_floor_db: p.knobs.speech_floor_db });
@@ -390,7 +373,7 @@ export function build(ctx) {
       // Flip to the cleaned audio on success so the operator can act on it.
       if ((res.files_written || 0) > 0) sourcePick.set(sid, "stripped");
     } catch (e) {
-      alert(`Strip silence failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Strip silence failed: ${errText(e)}`);
     } finally {
       stripInflight.delete(sid);
       stripBtn.disabled = false;
@@ -407,7 +390,7 @@ export function build(ctx) {
     const sid = session.session;
     if (!confirm("Delete the stripped/ folder for this session?\n\nOriginals are kept; you can rerun strip silence later.")) return;
     try { await del(`/api/sessions/${encodeURIComponent(sid)}/stripped`); }
-    catch (e) { alert(`Clear stripped failed: ${String(e).replace(/^Error:\s*/, "")}`); return; }
+    catch (e) { alert(`Clear stripped failed: ${errText(e)}`); return; }
     lastStrip.delete(sid);
     dropPreview();
     if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
@@ -546,7 +529,7 @@ export function build(ctx) {
     try {
       await del(`/api/wav/${encodeURIComponent(sid)}/${encodeURIComponent(name)}${qs}`);
     } catch (e) {
-      alert(`Delete failed: ${String(e).replace(/^Error:\s*/, "")}`);
+      alert(`Delete failed: ${errText(e)}`);
       return;
     }
     // The next /api/state poll carries a new files_sig (the digest drops the
@@ -752,12 +735,12 @@ export function build(ctx) {
     } else if (ls) {
       paintCutStats(ls.files_written ?? 0, ls.speech_seconds, ls.in_seconds);
     } else if (stripped) {
-      setStat(stats.clips, String(stripped.count));
-      setStat(stats.speech, `${Math.round(stripped.speech_seconds)}s`);
-      setStat(stats.in, "—");
-      setStat(stats.kept, "—");
+      setDimmable(stats.clips, String(stripped.count));
+      setDimmable(stats.speech, `${Math.round(stripped.speech_seconds)}s`);
+      setDimmable(stats.in, "—");
+      setDimmable(stats.kept, "—");
     } else {
-      for (const v of Object.values(stats)) setStat(v, "—");
+      for (const v of Object.values(stats)) setDimmable(v, "—");
     }
   };
 
@@ -766,10 +749,9 @@ export function build(ctx) {
    * @param {import('../../types.js').Session | null} sess
    */
   const update = (j, sess) => {
-    latest = j;
     session = sess;
     const sid = sess?.session || "";
-    const src = effectiveSource(sid);
+    const src = effectiveSource(sess, sourcePick);
     const filesSig = sess?.files_sig || "";
     const stripped = sess?.stripped || null;
     const job = sess?.progress || null;
@@ -810,7 +792,7 @@ export function build(ctx) {
         eyebrow: "Session · 2 Recordings",
         title: "Recordings",
         sub: sess
-          ? inline(`${files.length} WAV${files.length === 1 ? "" : "s"} in `, strong(metaFor(sess).label || sess.session), " · strip silence, then transcribe")
+          ? inline(`${files.length} WAV${files.length === 1 ? "" : "s"} in `, strong(sessionLabel(sess)), " · strip silence, then transcribe")
           : "no session selected — pick one from the spine",
         actions: sess && files.length ? buildSourceToggle({
           active: src,
@@ -833,7 +815,7 @@ export function build(ctx) {
 
       if (!sess || (!files.length && !filesLoading)) {
         waveName.textContent = sess ? "no WAVs recorded yet" : "no session selected";
-        for (const v of Object.values(stats)) setStat(v, "—");
+        for (const v of Object.values(stats)) setDimmable(v, "—");
         wavHint.textContent = "0 files";
         stripBtn.disabled = !sess;
         stripBtn.textContent = "✂ strip all";
@@ -842,7 +824,7 @@ export function build(ctx) {
       } else if (filesLoading) {
         // files_sig is set but the listing fetch hasn't landed yet.
         waveName.textContent = "loading…";
-        for (const v of Object.values(stats)) setStat(v, "—");
+        for (const v of Object.values(stats)) setDimmable(v, "—");
         wavHint.textContent = "loading…";
         stripBtn.disabled = true;
         stripBtn.textContent = "✂ strip all";

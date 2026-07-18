@@ -14,7 +14,7 @@
 // re-renders; we mirror it into location.hash so a reload lands on the same
 // view. window.gotoView(name) is exposed for screenshot/automation driving.
 
-import { fetchState, postJson, putJson } from "../api.js";
+import { fetchState, postJson, putJson, errText } from "../api.js";
 import { loadTemplates, mount, pick, consumeDeferredRender, interactionHeld, wireErrorBar } from "../templates.js";
 import { warmProgress } from "../vc/components/progress/progress.js";
 import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
@@ -43,7 +43,7 @@ const $ = (id) => {
 /** @type {import('../types.js').AppState | null} */
 let lastJson = null;
 
-// Adaptive /api/state cadence (issue #247, ADR-0011): fast while anything moves,
+// Adaptive /api/state cadence (issue #247, ADR-0013): fast while anything moves,
 // back off to 2s when idle-and-unchanged, snap back on change/interaction.
 // Declared here (module init) so refresh() and the visibility handler — both
 // defined before the poll loop — reference an already-constructed pacer.
@@ -224,7 +224,7 @@ function renderDefaultEngine(host) {
       // …and persists as the operator default (batch-model.txt) — the same
       // value the end-of-meeting pipeline resolves its transcribe stage from.
       putJson("/api/config/batch-model", { content: next.model }).catch((e) => {
-        alert(`Save batch model failed: ${String(e).replace(/^Error:\s*/, "")}`);
+        alert(`Save batch model failed: ${errText(e)}`);
       });
       const v = viewCache.get("settings");
       v?.rebuildEngine?.();
@@ -428,14 +428,12 @@ function buildView(view, session) {
   }
   if (view === "summary") {
     const b = summaryView.build({
-      metaFor,
       afterMutate: () => { refresh(); },
     });
     return { ...b, key: "summary" };
   }
   if (view === "recordings") {
     const b = recordingsView.build({
-      metaFor,
       afterMutate: () => { refresh(); },
     });
     return { ...b, key: "recordings" };

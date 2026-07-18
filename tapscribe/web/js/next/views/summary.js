@@ -33,19 +33,18 @@
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
-import { postJson, putJson, wireSave, sessionSummary } from "../../api.js";
+import { postJson, putJson, wireSave, sessionSummary, errText } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
-import { header, strong, inline, renderJobBar } from "../shell.js";
+import { header, strong, inline, renderJobBar, sessionLabel } from "../shell.js";
 
 /**
  * @param {{
- *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
  *   afterMutate: () => void,
  * }} ctx
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { metaFor, afterMutate } = ctx;
+  const { afterMutate } = ctx;
   const frag = tpl("tpl-next-view-summary");
 
   const headHost = pick(frag, "head");
@@ -129,6 +128,14 @@ export function build(ctx) {
 
   /** In-flight lazy summary fetches, keyed `${sid}@${stamp}` (dedup). */
   const sumPending = new Set();
+  /** Keys (`${sid}@${stamp}`) whose summary fetch REJECTED — failure memory
+   * pacing retries at the poll cadence, same discipline as transcript.js's
+   * failedMerged / api.js loadSessionFiles: a rejection evicts the resource
+   * cache key, so without the memory the next resolve would refetch
+   * immediately; a remembered key skips exactly one resolve (this runs once
+   * per poll tick) so the retry fires on a later tick. A re-generate changes
+   * the stamp — a different key — and fetches at once. @type {Set<string>} */
+  const failedStored = new Set();
 
   /**
    * Resolve the persisted summary behind the session's slim marker: the cached
@@ -145,15 +152,20 @@ export function build(ctx) {
     const cached = sessionSummary.peek(sid, stamp);
     if (cached !== undefined) return cached;
     const key = `${sid}@${stamp}`;
-    if (!sumPending.has(key)) {
+    // `failedStored.delete(key)` is check-AND-consume: a key whose last fetch
+    // failed skips this one resolve, and the next poll tick's resolve retries.
+    if (!sumPending.has(key) && !failedStored.delete(key)) {
       sumPending.add(key);
       sessionSummary.fetch(sid, stamp)
-        .catch(() => {})
-        .finally(() => {
-          sumPending.delete(key);
-          markRegionStale(sumOut);
-          afterMutate();
-        });
+        .then(
+          // Landed: force the output pane past its sig gate and render now.
+          () => { markRegionStale(sumOut); afterMutate(); },
+          // Failed: remember it and stay quiet — no afterMutate (nothing
+          // changed to render; the failure's own synchronous re-render
+          // refiring the evicted fetch was the unpaced retry storm).
+          () => { failedStored.add(key); },
+        )
+        .finally(() => { sumPending.delete(key); });
     }
     return null;
   };
@@ -266,7 +278,7 @@ export function build(ctx) {
       summarySession = sid;
       markRegionStale(sumOut); // force the output pane to re-render with the new summary
     } catch (e) {
-      errorMsg = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+      errorMsg = `failed: ${errText(e)}`;
     } finally {
       generating = false;
       lastCtlSig = " ";
@@ -417,7 +429,7 @@ export function build(ctx) {
         eyebrow: "Session · 4 Summary",
         title: "Summary",
         sub: sess
-          ? inline("summarize ", strong(metaFor(sess).label || sess.session))
+          ? inline("summarize ", strong(sessionLabel(sess)))
           : "no session selected — pick one from the spine",
       });
     }

@@ -35,51 +35,48 @@ from tapscribe import strip_silence as ss  # noqa: E402
 def process_one(
     path: Path, mode: str, min_silence_ms: int, pad_ms: int, speech_floor_db: float = ss.SPEECH_RMS_DBFS_FLOOR
 ) -> None:
+    """Detection goes through `plan_strip_regions` — the ONE shared
+    detect → filter → stats path (extracted in #89) — so this CLI applies
+    the exact pipeline the dashboard's strip button does, including the
+    whole-file-silence gate (`config.SILENT_RMS_DBFS_FLOOR`) a hand-rolled
+    detect-then-filter would miss. Only the trim/split WRITING lives here."""
     samples = ss.read_wav_int16(path)
-    total = len(samples)
-    if total == 0:
-        print(f"[strip-silence] {path.name}: empty file, skipping")
+    plan = ss.plan_strip_regions(
+        samples,
+        min_silence_ms=min_silence_ms,
+        pad_ms=pad_ms,
+        speech_floor_db=speech_floor_db,
+    )
+
+    if not plan.regions:
+        # Empty file / whole-file silent / no speech / all regions below the
+        # floor — the plan's reason says which.
+        print(f"[strip-silence] {path.name}: {plan.reason}, no output written")
         return
 
-    regions = ss.detect_speech_silero(samples, min_silence_ms=min_silence_ms, pad_ms=pad_ms)
-
-    in_secs = total / ss.SAMPLE_RATE
-    if not regions:
-        print(f"[strip-silence] {path.name}: no speech detected in {in_secs:.1f}s, no output written")
-        return
-
-    pre_filter_count = len(regions)
-    regions = ss.filter_low_energy_regions(samples, regions, floor_dbfs=speech_floor_db)
-    if not regions:
-        print(
-            f"[strip-silence] {path.name}: all {pre_filter_count} regions below "
-            f"{speech_floor_db:.1f} dBFS speech floor, no output written"
-        )
-        return
-
-    speech_secs = sum(e - s for s, e in regions) / ss.SAMPLE_RATE
-    pct = 100.0 * speech_secs / in_secs
+    pct = 100.0 * plan.speech_seconds / plan.in_seconds if plan.in_seconds else 0.0
     dropped_note = (
         ""
-        if len(regions) == pre_filter_count
-        else f" (filtered {pre_filter_count - len(regions)} below floor)"
+        if not plan.segments_filtered_below_floor
+        else f" (filtered {plan.segments_filtered_below_floor} below floor)"
     )
     print(
-        f"[strip-silence] {path.name}: {speech_secs:.1f}s speech of {in_secs:.1f}s ({pct:.0f}%), {len(regions)} segments{dropped_note}"
+        f"[strip-silence] {path.name}: {plan.speech_seconds:.1f}s speech of "
+        f"{plan.in_seconds:.1f}s ({pct:.0f}%), {len(plan.regions)} segments{dropped_note}"
     )
 
     if mode == "trim":
         out_path = path.with_suffix(".stripped.wav")
-        out_samples = np.concatenate([samples[s:e] for s, e in regions])
+        out_samples = np.concatenate([samples[s:e] for s, e in plan.regions])
         ss.write_wav_int16(out_path, out_samples)
         print(f"  -> {out_path.name} ({len(out_samples) / ss.SAMPLE_RATE:.1f}s)")
     elif mode == "split":
         out_dir = path.parent / (path.stem + "_split")
         out_dir.mkdir(exist_ok=True)
-        for idx, (s, e) in enumerate(regions, start=1):
+        for idx, (s, e) in enumerate(plan.regions, start=1):
             out_path = out_dir / f"{idx:03d}.wav"
             ss.write_wav_int16(out_path, samples[s:e])
-        print(f"  -> {out_dir.name}/ ({len(regions)} files)")
+        print(f"  -> {out_dir.name}/ ({len(plan.regions)} files)")
 
 
 def collect_targets(input_path: Path, recursive: bool) -> list[Path]:

@@ -33,6 +33,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import replace
+from itertools import islice
 from unittest.mock import patch
 
 import pytest
@@ -530,3 +531,96 @@ def test_stop_on_non_posix_does_not_escalate_when_child_obeys_terminate(monkeypa
     assert proc.terminate_calls == 1
     assert proc.kill_calls == 0
     assert chan._proc is None
+
+
+# ---------------------------------------------------------------------------
+# stop() vs a concurrent start() — ownership of the info dict
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name != "posix", reason="exercises the killpg path")
+def test_stop_does_not_clobber_a_concurrently_started_replacement_child(monkeypatch):
+    """A stop() racing a fresh start(): stop() releases the channel lock
+    while it waits (up to ~7s) for the old child to die, and a concurrent
+    start() can spawn a replacement in that window. Once stop()'s
+    lock-guarded ownership check sees its proc was superseded, it must NOT
+    stamp state='stopped'/pid='' over the new child's dashboard info — the
+    same ownership rule `_pump_logs` applies to its exit-path writes."""
+    chan = _make_channel()
+    monkeypatch.setattr(live_mod.os, "killpg", lambda pid, sig: None, raising=False)
+
+    new_proc = object()  # stands in for the freshly-spawned child
+
+    class _SwappedProc:
+        pid = 111
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            # The moment stop() waits (outside the channel lock), a
+            # concurrent start() lands: new child handle, fresh info.
+            chan._proc = new_proc
+            chan.info["state"] = "starting"
+            chan.info["pid"] = "222"
+            return 0
+
+    chan._proc = _SwappedProc()
+    ok, msg = chan.stop(timeout=1.0)
+
+    assert (ok, msg) == (True, "stopped")  # the OLD child did die
+    assert chan._proc is new_proc  # the replacement handle survives
+    assert chan.info["state"] == "starting"  # ...and so does its info
+    assert chan.info["pid"] == "222"
+
+
+# ---------------------------------------------------------------------------
+# TailLog — log iteration vs the pump thread's appends
+# ---------------------------------------------------------------------------
+
+
+def test_log_iteration_is_safe_while_a_thread_appends():
+    """/api/state islices `live.log` and /api/live/log list()s it on the
+    event loop while `_pump_logs` appends from a plain thread — a bare
+    deque intermittently raises 'deque mutated during iteration' and 500s
+    the poll. TailLog snapshots under a lock, so both reader shapes the
+    routes use must survive a concurrent append storm."""
+    chan = _make_channel()
+    stop = threading.Event()
+
+    def writer() -> None:
+        n = 0
+        while not stop.is_set():
+            chan.log.append(f"line {n}")
+            n += 1
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            # The exact two reader forms tapscribe.app uses.
+            list(islice(chan.log, max(0, len(chan.log) - 30), None))
+            list(chan.log)
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+    assert len(chan.log) == 200  # maxlen still enforced through the lock
+
+
+# ---------------------------------------------------------------------------
+# gate_kind_error — the one message both validation surfaces share
+# ---------------------------------------------------------------------------
+
+
+def test_gate_kind_error_is_the_single_message_source():
+    """`tapscribe.app` imports `gate_kind_error` for /api/live/start's 400
+    and `_transition_replacements` raises it — pin the exported name, the
+    wording, and that begin_transition's ValueError IS that message."""
+    expected = "gate_kind must be 'tapscribe' or 'backend', got 'bogus'"
+    assert live_mod.gate_kind_error("bogus") == expected
+
+    chan = _make_channel()
+    with pytest.raises(ValueError) as excinfo:
+        chan.begin_transition(gate_kind="bogus")
+    assert str(excinfo.value) == live_mod.gate_kind_error("bogus")

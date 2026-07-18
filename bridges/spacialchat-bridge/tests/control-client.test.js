@@ -358,6 +358,18 @@ test("probeTapToken uses wss:// under TLS and omits the subprotocol with no toke
   assert.equal(created[0].protocols, undefined);
 });
 
+test("subprotocolsFor builds the prefixed tap subprotocol and omits the slot with no token", () => {
+  // content.js's openWs and probeTapToken both hand this straight to
+  // `new WebSocket(url, …)`: a prefixed one-element list with a token,
+  // undefined (slot omitted, no server-side echo) without one.
+  const { client } = loadClient({});
+  const protos = client.subprotocolsFor("tok-abc");
+  assert.equal(protos.length, 1);
+  assert.equal(protos[0], "tapscribe.v1.tap.tok-abc");
+  assert.equal(client.subprotocolsFor(""), undefined);
+  assert.equal(client.subprotocolsFor(undefined), undefined);
+});
+
 test("probeTapToken resolves timeout when its abort signal fires before the upgrade settles", async () => {
   const { FakeWS } = wsHarness("hang");
   const { client } = loadClient({ WebSocketImpl: FakeWS });
@@ -396,6 +408,9 @@ test("the client surface is exactly the allow-listed members (bounded tap-token 
   const ALLOWED = [
     "ControlError",
     "isTrustworthyHost",
+    "wouldBlockCleartext",
+    "subprotocolsFor",
+    "MIXED_CONTENT_BLOCKED_TEXT",
     "httpBase",
     "createDetachedSession",
     "triggerPipeline",
@@ -411,8 +426,13 @@ test("the client surface is exactly the allow-listed members (bounded tap-token 
   );
   // The deepEqual pins the key NAMES exactly (so no delete/prune member can
   // exist); also assert every member is callable — a name present as a
-  // non-function would pass the key-set check but not this.
+  // non-function would pass the key-set check but not this. The one string
+  // member is the shared mixed-content display copy, not a capability.
   for (const name of ALLOWED) {
+    if (name === "MIXED_CONTENT_BLOCKED_TEXT") {
+      assert.equal(typeof client[name], "string", name + " is the shared display-copy constant");
+      continue;
+    }
     assert.equal(typeof client[name], "function", name + " should be callable on the surface");
   }
 });

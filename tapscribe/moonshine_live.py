@@ -43,6 +43,7 @@ import os
 import socket
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -51,7 +52,14 @@ import numpy as np
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from .live import GATE_THRESHOLD_DECIMALS, LiveChannel, LiveConfig, _gate_knob_replacements
+from .live import (
+    GATE_THRESHOLD_DECIMALS,
+    LiveChannel,
+    LiveConfig,
+    TailLog,
+    _changed_gate_knobs,
+    _transition_replacements,
+)
 from .speech_gate import effective_gate_config
 from .transcribers._moonshine_window import MoonshineWindow
 
@@ -174,12 +182,14 @@ class MoonshineAsrServer:
     contract. One `MoonshineWindow` per connection (one `/tap` utterance),
     so state never leaks across connections. `generate_fn` is injected —
     production wires it to a loaded `MoonshineEngine.generate`; tests use
-    a stub."""
+    a stub. `decode_executor` (when supplied — the channel always does)
+    pins every decode to one dedicated thread; see `_decode`."""
 
-    def __init__(self, *, host: str, port: int, generate_fn) -> None:
+    def __init__(self, *, host: str, port: int, generate_fn, decode_executor=None) -> None:
         self._host = host
         self._port = port
         self._generate_fn = generate_fn
+        self._decode_executor = decode_executor
         self._server: Any = None
 
     @property
@@ -207,6 +217,28 @@ class MoonshineAsrServer:
             await self._server.wait_closed()
             self._server = None
 
+    async def _decode(self, fn):
+        """Run a blocking model op (`window.maybe_refresh` / `window.close`
+        → `engine.generate`) off the event loop.
+
+        With the channel-supplied single-thread `decode_executor`, EVERY
+        model op — the engine load in `MoonshineLiveChannel.start()` and
+        all decodes here — lands on the same one thread. MLX's Metal
+        stream is thread-local (see `transcribers.MODEL_THREAD_PREFIX`):
+        weights created on one thread can't be evaluated from another, and
+        `asyncio.to_thread`'s multi-worker default executor guarantees
+        exactly that violation — plus concurrent `generate()` calls on one
+        engine with 2+ open taps (mic + loopback). The ONNX engine doesn't
+        need the affinity (onnxruntime inference sessions are thread-safe)
+        but routes through the same executor anyway: one code path, and
+        serialised decodes match the repo's one-model-op-at-a-time
+        convention. The `asyncio.to_thread` fallback exists only for tests
+        that construct this server directly with a stub `generate_fn` — no
+        real engine, no affinity to preserve."""
+        if self._decode_executor is None:
+            return await asyncio.to_thread(fn)
+        return await asyncio.get_running_loop().run_in_executor(self._decode_executor, fn)
+
     async def _handle(self, ws: Any) -> None:
         window = MoonshineWindow(generate_fn=self._generate_fn)
         finalized = False
@@ -225,7 +257,7 @@ class MoonshineAsrServer:
                     # once the close handshake starts, `ws.send()` can
                     # only fail. This is what makes utterance tails
                     # reliable (PR #334 finding #5).
-                    lines = await asyncio.to_thread(window.close)
+                    lines = await self._decode(window.close)
                     await self._send_snapshot(ws, lines, buffer_text="", final=True)
                     finalized = True
                     break
@@ -238,7 +270,7 @@ class MoonshineAsrServer:
                 # per-connection ordering (never two concurrent decodes
                 # for one window).
                 if window.refresh_due:
-                    lines = await asyncio.to_thread(window.maybe_refresh)
+                    lines = await self._decode(window.maybe_refresh)
                     if lines is not None:
                         await self._send_snapshot(ws, lines, buffer_text=window.buffer_text)
         except ConnectionClosed:
@@ -258,7 +290,7 @@ class MoonshineAsrServer:
                 # above is the reliable delivery; this fallback only
                 # exists for peers that vanished mid-utterance, where the
                 # audio tail is best-effort by nature.
-                lines = await asyncio.to_thread(window.close)
+                lines = await self._decode(window.close)
                 if lines:
                     with contextlib.suppress(Exception):
                         await self._send_snapshot(ws, lines, buffer_text="")
@@ -276,6 +308,11 @@ class MoonshineAsrServer:
             # has nothing more to say" and ends its drain immediately.
             payload["type"] = "ready_to_stop"
         await ws.send(json.dumps(payload))
+
+
+# How long start() waits for the server thread to report bind success or
+# failure. Module-level so the ready-timeout teardown test can shrink it.
+_READY_TIMEOUT_S = 5.0
 
 
 def _initial_moonshine_info() -> dict[str, str]:
@@ -339,8 +376,23 @@ class MoonshineLiveChannel:
         # of MB, and dropping the cache there would defeat the point.
         self._engine: MoonshineEngine | None = None
         self._engine_model_id: str = ""
+        # Dedicated single-thread executor for EVERY Moonshine model op —
+        # engine load + all window decodes (`MoonshineAsrServer._decode`).
+        # The live-channel analogue of `transcribers._MODEL_EXECUTOR`
+        # (deliberately NOT shared with it: a latency-sensitive live decode
+        # must not queue behind a multi-second batch-transcribe window).
+        # Created lazily on first `start()` and NOT shut down in `stop()`:
+        # the engine cache above survives stop() (gate-knob applies are
+        # stop→start), and MLX weights must keep being evaluated on the
+        # thread that created them — so the executor lives exactly as long
+        # as the cached engine, i.e. the channel. Its idle worker exits
+        # when the channel (and executor) are garbage-collected.
+        self._model_executor: ThreadPoolExecutor | None = None
         self.info: dict[str, str] = _initial_moonshine_info()
-        self.log: deque[str] = deque(maxlen=200)
+        # TailLog for parity with WhisperLiveKitChannel: /api/state and
+        # /api/live/log iterate `log` on the event loop; any future
+        # thread-side appender is safe by construction.
+        self.log: deque[str] = TailLog(maxlen=200)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -419,22 +471,15 @@ class MoonshineLiveChannel:
         restart — the /asr server never reads these; every per-tap
         SpeechGate is built from `live.config` at attach time (#224). Same
         changed-only + display-precision semantics as
-        `WhisperLiveKitChannel.apply_gate_knobs` (the #238 guarantee)."""
-        replacements = _gate_knob_replacements(
+        `WhisperLiveKitChannel.apply_gate_knobs` (the #238 guarantee) —
+        both go through the shared `live._changed_gate_knobs` diff."""
+        changed = _changed_gate_knobs(
+            self.config,
             gate_speech_threshold=gate_speech_threshold,
             gate_hangover_ms=gate_hangover_ms,
             gate_pre_roll_ms=gate_pre_roll_ms,
             gate_min_speech_ms=gate_min_speech_ms,
         )
-        changed: dict[str, Any] = {}
-        for field, value in replacements.items():
-            current = getattr(self.config, field)
-            if field == "gate_speech_threshold":
-                if round(value, GATE_THRESHOLD_DECIMALS) == round(current, GATE_THRESHOLD_DECIMALS):
-                    continue
-            elif value == current:
-                continue
-            changed[field] = value
         if changed:
             self.config = replace(self.config, **changed)
             self._mirror_gate_info()
@@ -455,19 +500,17 @@ class MoonshineLiveChannel:
         write the supplied knobs into `config` so the imminent restart
         (and every per-tap SpeechGate built from this config — PR #334
         finding #8) picks them up, and flip `info` to "starting" so
-        dashboards polling mid-transition see the new selection."""
-        replacements = _gate_knob_replacements(
+        dashboards polling mid-transition see the new selection. The
+        gate_kind allowlist + conf coercion live in the shared
+        `live._transition_replacements`."""
+        replacements = _transition_replacements(
+            gate_kind=gate_kind,
+            conf=conf,
             gate_speech_threshold=gate_speech_threshold,
             gate_hangover_ms=gate_hangover_ms,
             gate_pre_roll_ms=gate_pre_roll_ms,
             gate_min_speech_ms=gate_min_speech_ms,
         )
-        if gate_kind is not None:
-            if gate_kind not in ("tapscribe", "backend"):
-                raise ValueError(f"gate_kind must be 'tapscribe' or 'backend', got {gate_kind!r}")
-            replacements["gate_kind"] = gate_kind
-        if conf is not None:
-            replacements["confidence_validation"] = bool(conf)
         if replacements:
             self.config = replace(self.config, **replacements)
         self.info["state"] = "starting"
@@ -499,9 +542,18 @@ class MoonshineLiveChannel:
                 # which races anything else grabbing ports on this host.
                 self.config = replace(self.config, port=0)
 
+            if self._model_executor is None:
+                self._model_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="tapscribe-moonshine-model"
+                )
             if self._engine is None or self._engine_model_id != self.config.model:
                 try:
-                    self._engine = self._engine_factory(self.config.model, use_mlx=self.use_mlx)
+                    # Load ON the model thread, not the caller's: decodes run
+                    # there (see MoonshineAsrServer._decode), and MLX weights
+                    # must be created on the thread that will evaluate them.
+                    self._engine = self._model_executor.submit(
+                        self._engine_factory, self.config.model, use_mlx=self.use_mlx
+                    ).result()
                     self._engine_model_id = self.config.model
                 except Exception as e:
                     msg = f"failed to load Moonshine engine: {e}"
@@ -511,10 +563,18 @@ class MoonshineLiveChannel:
             engine = self._engine
 
             server = MoonshineAsrServer(
-                host=self.config.host, port=self.config.port, generate_fn=engine.generate
+                host=self.config.host,
+                port=self.config.port,
+                generate_fn=engine.generate,
+                decode_executor=self._model_executor,
             )
             loop = asyncio.new_event_loop()
             ready = threading.Event()
+            # Set by the ready-timeout branch below: the caller gave up on
+            # this spawn, so `_run` must fall through to teardown instead of
+            # parking in `run_forever` (a bind completing after the deadline
+            # would otherwise leave a running server nothing references).
+            abandoned = threading.Event()
             errors: list[Exception] = []
 
             def _run() -> None:
@@ -531,10 +591,28 @@ class MoonshineLiveChannel:
                     errors.append(e)
                 finally:
                     ready.set()
-                if not errors:
+                if not errors and not abandoned.is_set():
                     loop.run_forever()
-                # `stop()` already awaited `server.stop()` to completion
-                # before calling `loop.stop()`, but websockets' own
+                # Close the server on the loop's own thread before draining.
+                # Idempotent no-op after a normal `stop()` (which already
+                # awaited `server.stop()` before `loop.stop()`) and after a
+                # failed bind — but on `start()`'s ready-timeout path this
+                # is the ONLY teardown: a bind that completed AFTER the
+                # deadline is unwound here instead of leaving an orphaned
+                # /asr listener nothing references. The RuntimeError
+                # suppressions: the timeout branch queues ONE loop.stop()
+                # that, depending on where the late bind was when it landed,
+                # may be consumed not by run_forever but by one of these
+                # teardown mini-runs ("Event loop stopped before Future
+                # completed") — absorb it so the rest of the teardown and
+                # loop.close() still run. The no-op sleep(0) mini-run first
+                # consumes such a stray stop (harmless on every other path),
+                # so the server close itself is never the run it interrupts.
+                with contextlib.suppress(RuntimeError):
+                    loop.run_until_complete(asyncio.sleep(0))
+                with contextlib.suppress(RuntimeError):
+                    loop.run_until_complete(server.stop())
+                # Even after a clean server close, websockets' own
                 # per-connection housekeeping (keepalive pings, the
                 # close-handshake task) can still have tasks scheduled-but-
                 # not-yet-finished at that instant. Draining them here
@@ -544,12 +622,32 @@ class MoonshineLiveChannel:
                 for t in pending:
                     t.cancel()
                 if pending:
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    with contextlib.suppress(RuntimeError):
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                 loop.close()
 
             thread = threading.Thread(target=_run, daemon=True)
             thread.start()
-            if not ready.wait(timeout=5.0):
+            if not ready.wait(timeout=_READY_TIMEOUT_S):
+                # A bind completing AFTER this deadline must not leave a
+                # running /asr server nothing can tear down. Flag the spawn
+                # abandoned FIRST (so `_run` skips `run_forever` however
+                # late the bind lands), then stop the loop (threadsafe;
+                # covers the sliver where `_run` checked the flag and
+                # entered `run_forever` just before it was set) — either
+                # way `_run` falls through to its `server.stop()` + drain +
+                # `loop.close()` tail. Join briefly; `_thread`/`_loop`/
+                # `_server` were never assigned, so `running()` stays False
+                # and `stop()` remains a safe idempotent no-op
+                # ("not running"). If the thread is wedged in the blocking
+                # `getaddrinfo` past the join timeout it stays a daemon
+                # thread with the teardown already queued — best effort.
+                # The suppress covers the loop having finished and closed
+                # between the wait and this call.
+                abandoned.set()
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(loop.stop)
+                thread.join(timeout=2.0)
                 msg = "timed out binding the /asr server"
                 self.info["state"] = "error"
                 self.info["last_error"] = msg

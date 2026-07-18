@@ -7,14 +7,14 @@
 // real data where we have it.
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson } from "../../api.js";
+import { putJson, errText } from "../../api.js";
 import { fmtSessionLabel, fmtDur } from "../../formatters.js";
-import { GLOBAL_VIEWS } from "../shell.js";
+import { GLOBAL_VIEWS, newestFirst, labelSigFor } from "../shell.js";
 
 // Optimistic rename overlay (sid → edited label) so a rename typed in the
 // Session Information card shows instantly in the name field AND the session
-// picker, without waiting for the next /api/state poll. Cleared per session once
-// the server's meta catches up (see buildSessInfo).
+// picker, without waiting for the next /api/state poll. Cleared once the
+// server's meta catches up (the every-session sweep at the top of render()).
 /** @type {Map<string, string>} */
 const localLabels = new Map();
 /** @type {Map<string, ReturnType<typeof setTimeout>>} */
@@ -39,7 +39,7 @@ function persistLabel(sid, statusEl) {
         setTimeout(() => { if (statusEl.textContent === "saved") statusEl.textContent = ""; }, 1400);
       }
     } catch (e) {
-      statusEl.textContent = `failed: ${String(e).replace(/^Error:\s*/, "")}`;
+      statusEl.textContent = `failed: ${errText(e)}`;
     }
   }, 600));
 }
@@ -214,10 +214,9 @@ function navItem(d, currentView, onSelect) {
  */
 function buildSessInfo(session, metaFor) {
   const sid = session.session;
-  // Drop the optimistic overlay once the server's meta reflects the save.
-  if (localLabels.has(sid) && metaFor(session).label === localLabels.get(sid)) {
-    localLabels.delete(sid);
-  }
+  // (The optimistic overlay is dropped by render()'s every-session catch-up
+  // sweep, not here — a buildSessInfo-local drop only ever saw the FOCUSED
+  // session and stranded every other session's overlay.)
   const card = tpl("tpl-next-sessinfo");
   const nameInput = /** @type {HTMLInputElement} */ (pick(card, "name"));
   const statusEl = pick(card, "status");
@@ -261,6 +260,24 @@ function buildSessInfo(session, metaFor) {
 export function render(host, j, ctx) {
   const { currentView, session, metaFor, onSelectView, onSelectSession, onNewSession } = ctx;
 
+  // Drop rename overlays the server has caught up to — for EVERY session,
+  // every tick, not just the focused one. An overlay stranded on a
+  // non-focused session (rename, then switch focus inside the debounce+poll
+  // window) would otherwise mask a later rename made elsewhere (the Sessions
+  // view, another tab) FOREVER: the sig below reads overlay-first, so the
+  // server's new label could never even trigger a rebuild, and refocusing
+  // would seed the name input with the stale value, inviting a save that
+  // reverts the external rename. The debounce window is safe: an entry the
+  // operator just typed differs from the server label until its PUT lands
+  // (so it survives), and when it equals the server label there is nothing
+  // left to save — persistLabel re-reads the overlay at timer-fire and
+  // no-ops once it's gone. Mirrors people.js's catch-up sweep.
+  for (const s of j.sessions || []) {
+    if (localLabels.get(s.session) === (s.session_meta?.label || "")) {
+      localLabels.delete(s.session);
+    }
+  }
+
   // Build the whole spine fragment. Invoked by renderRegion only when it
   // actually swaps, so a skipped tick (operator interacting with a control
   // inside the spine) never builds.
@@ -273,7 +290,7 @@ export function render(host, j, ctx) {
 
     // Session picker — real sessions from /api/state, newest first.
     const pickSel = /** @type {HTMLSelectElement} */ (pick(frag, "sessionPick"));
-    const sessions = [...(j.sessions || [])].sort((a, b) => (a.session < b.session ? 1 : -1));
+    const sessions = [...(j.sessions || [])].sort(newestFirst);
     if (!sessions.length) {
       pickSel.add(new Option("no sessions yet", "", true, true));
       pickSel.disabled = true;
@@ -346,7 +363,12 @@ export function render(host, j, ctx) {
     // The People chip's count reads the ADR-0009 registry directly (not a
     // per-session walk), so ONE scalar covers it here.
     peopleCount(j),
-    sessions.map((s) => `${s.session}~${(localLabels.get(s.session) ?? metaFor(s).label) || ""}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
+    // The label term is the shared shell.js sig helper bound to the spine's
+    // rename overlay — its doc carries the metaFor-equivalence rationale
+    // (value-identical to what buildFrag paints, no throwaway EffectiveMeta
+    // per session per tick); buildFrag itself keeps metaFor and only runs
+    // past the gate.
+    sessions.map((s) => `${s.session}~${labelSigFor(localLabels, s)}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
     session
       ? `${session.session}~${session.wav_count || 0}~${tx ? 1 : 0}~${tx?.suppressed_count || 0}~${session.stripped ? 1 : 0}~${session.is_current ? 1 : 0}~${session.session_summary?.summarized_at || ""}`
       : "",

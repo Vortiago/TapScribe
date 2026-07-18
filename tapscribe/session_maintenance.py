@@ -32,6 +32,7 @@ from .session_paths import (
 )
 from .sessions import read_session_meta, read_strip_meta, write_session_meta
 from .text import atomic_write_text, parse_wav_start
+from .wav_cache import sidecar_paths
 
 # ---------------------------------------------------------------------------
 # Domain errors — FastAPI-free maintenance exceptions.
@@ -126,15 +127,15 @@ def prune_empty_sessions(current_session: str) -> dict[str, Any]:
 
 
 def _move_sidecars_with_wav(src_wav: Path, dst_wav: Path) -> None:
-    """Carry whichever cache layout the source uses to the WAV's new
-    home — the legacy `<wav>.json` file, the new `<wav>.transcripts/`
-    directory, or both. Either may be absent."""
-    legacy = src_wav.with_suffix(".json")
-    if legacy.is_file():
-        shutil.move(str(legacy), str(dst_wav.with_suffix(".json")))
-    transcripts = src_wav.with_suffix(".transcripts")
-    if transcripts.is_dir():
-        shutil.move(str(transcripts), str(dst_wav.with_suffix(".transcripts")))
+    """Carry every sidecar the source WAV has to the WAV's new home.
+    Any entry may be absent. The layout enumeration comes from
+    `wav_cache.sidecar_paths` — the layout's one owner — so a new cache
+    layout added there follows the WAV with no change here; the stable
+    enumeration order lets the src/dst calls zip into move pairs."""
+    for (kind, src), (_, dst) in zip(sidecar_paths(src_wav), sidecar_paths(dst_wav), strict=True):
+        present = src.is_dir() if kind == "dir" else src.is_file()
+        if present:
+            shutil.move(str(src), str(dst))
 
 
 def _safe_size(p: Path) -> int:
@@ -154,18 +155,20 @@ def _dir_size(d: Path) -> int:
 
 
 def _delete_wav_with_sidecars(wav: Path, *, dry_run: bool = False) -> int:
-    """Delete one WAV plus whichever transcript-cache layout it carries —
-    the legacy `<wav>.json` file, the new `<wav>.transcripts/` directory,
-    or both. Returns the bytes reclaimed (WAV + sidecars).
+    """Delete one WAV plus every sidecar `wav_cache.sidecar_paths`
+    enumerates for it (any entry may be absent). Returns the bytes
+    reclaimed (WAV + sidecars).
 
     With `dry_run=True` nothing is unlinked — it only SUMS the same bytes it
-    would free. That makes this the single sidecar-layout enumeration the
-    bulk-reclaim PREVIEW reuses (via `delete_session_audio`), so a preview
-    total can never drift from what an execute actually frees.
+    would free. That makes this the sizing walk the bulk-reclaim PREVIEW
+    reuses (via `delete_session_audio`), so a preview total can never drift
+    from what an execute actually frees.
 
-    The destructive analog of `_move_sidecars_with_wav` above: both
-    enumerate the SAME two sidecar layouts, so if a third layout is ever
-    added, update both functions.
+    The destructive analog of `_move_sidecars_with_wav` above: both iterate
+    `wav_cache.sidecar_paths`, the layout's single enumeration, so a THIRD
+    cache layout added in `wav_cache` is automatically moved on absorb and
+    counted + removed here — nothing to wire by hand. The per-entry action
+    keys off the entry's `kind` (file → stat + unlink, dir → walk + rmtree).
 
     `wav` is a Path discovered by globbing a `resolve_session_dir`-checked
     folder (or returned by `resolve_wav`), not a path BUILT from a parsed
@@ -173,18 +176,19 @@ def _delete_wav_with_sidecars(wav: Path, *, dry_run: bool = False) -> int:
     construction against `py/path-injection`) does not apply here; deleting
     an already-validated Path is safe."""
     freed = _safe_size(wav)
-    legacy = wav.with_suffix(".json")
-    if legacy.is_file():
-        freed += _safe_size(legacy)
-        if not dry_run:
-            legacy.unlink(missing_ok=True)
-    transcripts = wav.with_suffix(".transcripts")
-    if transcripts.is_dir():
-        freed += _dir_size(transcripts)
-        if not dry_run:
-            # Best-effort: a locked cache dir shouldn't block reclaiming the
-            # WAV; an orphaned cache dir is harmless and re-cleanable.
-            shutil.rmtree(transcripts, ignore_errors=True)
+    for kind, sidecar in sidecar_paths(wav):
+        if kind == "dir":
+            if sidecar.is_dir():
+                freed += _dir_size(sidecar)
+                if not dry_run:
+                    # Best-effort: a locked cache dir shouldn't block
+                    # reclaiming the WAV; an orphaned cache dir is harmless
+                    # and re-cleanable.
+                    shutil.rmtree(sidecar, ignore_errors=True)
+        elif sidecar.is_file():
+            freed += _safe_size(sidecar)
+            if not dry_run:
+                sidecar.unlink(missing_ok=True)
     if not dry_run:
         wav.unlink(missing_ok=True)
     return freed

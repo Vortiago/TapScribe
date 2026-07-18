@@ -216,10 +216,11 @@ class SessionBusy(Exception):
 @dataclass
 class JobState:
     """State for an in-flight session-scoped job (transcribe, strip,
-    summarize, or the end-of-meeting pipeline chaining all three)."""
+    summarize, the end-of-meeting pipeline chaining all three, or an
+    audio-reclaim delete holding the slot so nothing runs mid-walk)."""
 
     session: str
-    kind: Literal["transcribe", "strip", "summarize", "pipeline"]
+    kind: Literal["transcribe", "strip", "summarize", "pipeline", "delete"]
     current: int
     total: int
     started_at: datetime
@@ -280,7 +281,7 @@ class JobTracker:
         self,
         session: str,
         *,
-        kind: Literal["transcribe", "strip", "summarize", "pipeline"],
+        kind: Literal["transcribe", "strip", "summarize", "pipeline", "delete"],
         total: int,
         model: str | None = None,
         status: str = "running",
@@ -564,8 +565,15 @@ class SecretFile:
     def rotate(self) -> None:
         try:
             self.path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as e:
+            # Read-only FS or a Windows file lock. Silently passing here
+            # would be wrong: the surviving file makes _read_or_mint_secret
+            # read the OLD value back, so the operator's explicit
+            # --rotate-* request no-ops — warn so that isn't lost quietly.
+            print(
+                f"[tapscribe] WARNING: could not remove {self.path}: {e} — {self.label} NOT rotated.",
+                flush=True,
+            )
         self.value = _read_or_mint_secret(self.path, label=self.label)
 
 
@@ -579,6 +587,11 @@ def _read_or_mint_secret(path: Path, *, label: str) -> str:
             if existing:
                 return existing
     except OSError:
+        # Unreadable existing file (permissions, transient I/O): fall
+        # through and mint a fresh value so the recorder still boots.
+        # What's lost is only secret stability — clients holding the old
+        # value must re-pair — and if the FS is truly broken the write
+        # below fails too and prints the rotate-on-restart warning.
         pass
     val = secrets.token_urlsafe(12)
     try:

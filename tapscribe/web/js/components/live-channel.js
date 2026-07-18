@@ -5,7 +5,7 @@
 // payload hasn't actually changed, so open <details>/<select> stay open.
 
 import { tpl, pick, renderRegion, selectionInside } from "../templates.js";
-import { wireConfigSave } from "../api.js";
+import { getJson, wireConfigSave } from "../api.js";
 import { LIVE_FAMILY_LABELS, buildModelSelect } from "../model-select.js";
 
 /** @type {ReturnType<typeof setInterval> | null} */
@@ -257,15 +257,10 @@ export const formValues = (host) => {
 // fetching the full deque on demand and polling once a second while the
 // dialog is open.
 
-async function fetchLog() {
-  try {
-    const r = await fetch("/api/live/log", { cache: "no-store" });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch {
-    return null;
-  }
-}
+/** The live-channel log payload, or null on any failure (the dialog shows a
+ * "(failed to load logs)" line and the 1s poll just retries).
+ * @returns {Promise<{ log?: string[], state?: string } | null>} */
+const fetchLog = () => getJson("/api/live/log").catch(() => null);
 
 /**
  * @param {HTMLDialogElement} dlg

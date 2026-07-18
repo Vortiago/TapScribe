@@ -462,7 +462,7 @@ async function onStart() {
     applyMeeting();
   } else {
     const why = out.kind === "mixed-content-blocked"
-      ? "recorder is http:// on a non-trustworthy host — enable TLS, or run it on localhost"
+      ? control.MIXED_CONTENT_BLOCKED_TEXT + ", or run it on localhost"
       : out.message;
     setStatus("meetingStatus", "Start meeting failed: " + why, "err");
     applyMeeting();

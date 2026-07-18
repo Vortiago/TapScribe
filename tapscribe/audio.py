@@ -20,6 +20,41 @@ RECORDER_SAMPLE_WIDTH = 2
 RECORDER_CHANNELS = 1
 
 
+def read_recorder_frames(path: Path) -> tuple[bytes, int]:
+    """Read every PCM frame from a recorder-format WAV, validating the
+    format first. Returns `(raw_bytes, frame_count)`.
+
+    Raises `RuntimeError` — naming the file and the actual vs expected
+    format, plus a one-line ffmpeg recipe — on a non-recorder WAV
+    (different rate / channels / sample width). There is NO ffmpeg
+    fallback and NO resample anywhere in the codebase (see
+    `tapscribe.wav_predecode`'s module docstring): the error is the
+    operator's signal to convert the file. `wave.Error` / `OSError` /
+    `EOFError` from an unreadable file propagate for the caller to
+    wrap or forward. Shared by `compute_peaks`,
+    `wav_predecode.load_recorder_wav_as_pcm`, and
+    `strip_silence.read_wav_int16` (which translates the RuntimeError
+    to ValueError for the strip routes' 422 contract) so the guard (and
+    its message) can't drift between them."""
+    with wave.open(str(path), "rb") as wf:
+        rate = wf.getframerate()
+        channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        if (
+            rate != RECORDER_SAMPLE_RATE
+            or channels != RECORDER_CHANNELS
+            or sampwidth != RECORDER_SAMPLE_WIDTH
+        ):
+            raise RuntimeError(
+                f"unexpected WAV format for {path.name}: "
+                f"{rate}Hz/{channels}ch/{sampwidth * 8}-bit "
+                "(expected 16kHz/mono/16-bit — TapScribe writes that natively). "
+                "Convert with: ffmpeg -i in.wav -ar 16000 -ac 1 -sample_fmt s16 out.wav"
+            )
+        frame_count = wf.getnframes()
+        return wf.readframes(frame_count), frame_count
+
+
 def _configure_recorder_format(wf: wave.Wave_write) -> None:
     """Apply the recorder's canonical PCM format (16 kHz / mono / int16) to a
     freshly opened `Wave_write`. Shared by `open_recorder_wav` and the append
@@ -162,32 +197,18 @@ def compute_peaks(path: Path, *, bins: int) -> WavePeaks:
 
     bins = max(1, int(bins))
     try:
-        with wave.open(str(path), "rb") as wf:
-            rate = wf.getframerate()
-            channels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
-            if (
-                rate != RECORDER_SAMPLE_RATE
-                or channels != RECORDER_CHANNELS
-                or sampwidth != RECORDER_SAMPLE_WIDTH
-            ):
-                # Same format guard (and message shape) as
-                # wav_predecode.load_recorder_wav_as_pcm — no ffmpeg, no resample.
-                raise RuntimeError(
-                    f"unexpected WAV format for {path.name}: "
-                    f"{rate}Hz/{channels}ch/{sampwidth * 8}-bit "
-                    "(expected 16kHz/mono/16-bit — TapScribe writes that natively). "
-                    "Convert with: ffmpeg -i in.wav -ar 16000 -ac 1 -sample_fmt s16 out.wav"
-                )
-            frame_count = wf.getnframes()
-            raw = wf.readframes(frame_count)
+        # Shared format guard (and message) with wav_predecode.load_recorder_wav_as_pcm.
+        raw, frame_count = read_recorder_frames(path)
     except (wave.Error, EOFError, OSError) as e:
         raise RuntimeError(f"could not read WAV {path.name}: {e}") from e
 
-    duration_s = frame_count / rate if rate else 0.0
+    # read_recorder_frames validated the rate == RECORDER_SAMPLE_RATE.
+    duration_s = frame_count / RECORDER_SAMPLE_RATE
     samples = np.frombuffer(raw, dtype=np.int16)
     if samples.size == 0:
-        return WavePeaks(peaks=[0.0] * bins, bins=bins, duration_s=duration_s, sample_rate=rate)
+        return WavePeaks(
+            peaks=[0.0] * bins, bins=bins, duration_s=duration_s, sample_rate=RECORDER_SAMPLE_RATE
+        )
 
     # Per bucket: max(|min|, |max|) / 32768. Working from the signed min/max
     # (not np.abs) sidesteps the int16 overflow where abs(-32768) stays
@@ -204,4 +225,4 @@ def compute_peaks(path: Path, *, bins: int) -> WavePeaks:
         peak = -lo if -lo > hi else hi
         peaks.append(peak / 32768.0)
 
-    return WavePeaks(peaks=peaks, bins=len(peaks), duration_s=duration_s, sample_rate=rate)
+    return WavePeaks(peaks=peaks, bins=len(peaks), duration_s=duration_s, sample_rate=RECORDER_SAMPLE_RATE)

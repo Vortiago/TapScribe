@@ -128,13 +128,14 @@ loss budget from scratch.
 - **Backoff ladder:** jittered exponential — `200, 400, 800, 1600, 3200 ms`,
   capped at `5000 ms`, with **±25 % jitter** on each delay so a roomful of
   reconnecting bridges doesn't synchronise its retries
-  (`bridges/spacialchat-bridge/content.js:227-228,261-263`;
+  (`spacialchat-bridge/content.js`'s `BACKOFF_MS` / `BACKOFF_CAP_MS`
+  constants and `nextBackoffMs()`;
   `TapStreamOptions.cs`'s `Backoff` / `BackoffCap` / `BackoffJitter`).
 - **Gap buffer:** cap PCM buffered while disconnected at **96 000 bytes**
   (≈ 3 s of 16 kHz mono int16), dropping the **oldest** frames past the cap
   so a long outage loses only its tail instead of growing memory without
-  bound (`content.js:229-233` `MAX_BUFFER_BYTES`; `TapStreamOptions.cs`'s
-  `MaxBufferBytes`).
+  bound (`content.js`'s `MAX_BUFFER_BYTES`, enforced in `bufferPush()`;
+  `TapStreamOptions.cs`'s `MaxBufferBytes`).
 - **Drain — flush-then-close on mute.** This is the Bridge-side half of the
   [Drain invariant](../CONTEXT.md#drain): trailing PCM buffered when mute
   fires hasn't necessarily reached the Recorder yet, so don't close `/tap`
@@ -144,15 +145,15 @@ loss budget from scratch.
   **Bound the wait** with a `DRAIN_MAX_MS` (recommended **8000 ms**): past
   that deadline, give up and close anyway — an unreachable Recorder must
   never wedge the utterance forever
-  (`content.js:234-238` `DRAIN_MAX_MS`, `restartDrainTimer` /
-  `endUtterance`; `TapStreamOptions.cs`'s `DrainBudget`, `TapStream.cs`'s
+  (`content.js`'s `DRAIN_MAX_MS`, `restartDrainTimer()` /
+  `endUtterance()`; `TapStreamOptions.cs`'s `DrainBudget`, `TapStream.cs`'s
   `BeginDrain` / `DrainAndDisposeAsync`).
 
 **First-connect-failure semantics — an open choice, pick one deliberately:**
 the two bundled bridges diverge here and neither is wrong, but a new bridge
 should choose consciously rather than copy both halves:
 
-- `spacialchat-bridge/content.js`'s `shouldReconnect` (`content.js:421-423`)
+- `spacialchat-bridge/content.js`'s `shouldReconnect()`
   keeps the reconnect ladder running on **any** unclean close — including
   the very first connect attempt for an utterance — as long as the speaker
   hasn't muted or the tap hasn't stopped. A Recorder that's briefly
@@ -161,7 +162,8 @@ should choose consciously rather than copy both halves:
   genuinely wrong host/token/session with no user-visible give-up (the
   popup surfaces an `error` status, but nothing stops the ladder short of
   mute/stop).
-- `windows-tray-bridge`'s `TapStream.cs` (`TapStream.cs:19-24,172-182`)
+- `windows-tray-bridge`'s `TapStream.cs` (the class doc's fail-loudly
+  reconnect rule and the first-connect branch in `RunAsync`)
   treats a failure on the utterance's **first** connect as terminal: it
   surfaces the exception via `onTerminalFailure` and stops immediately,
   reasoning that an unreachable Recorder / refused token / unknown session

@@ -15,7 +15,7 @@ strip-silence endpoint, and is also runnable as a CLI via
 from __future__ import annotations
 
 import math
-import wave
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,7 +23,7 @@ import numpy as np
 
 from . import config
 from .audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
-from .audio import dbfs_from_rms, open_recorder_wav
+from .audio import dbfs_from_rms, open_recorder_wav, read_recorder_frames
 
 # Per-region amplitude floor for what counts as actual speech. Below this,
 # regions are usually room noise / HVAC / faint breathing that silero-vad
@@ -34,14 +34,22 @@ SPEECH_RMS_DBFS_FLOOR = -45.0
 
 
 def read_wav_int16(path: Path) -> np.ndarray:
-    with wave.open(str(path), "rb") as w:
-        if w.getframerate() != SAMPLE_RATE:
-            raise ValueError(f"{path}: expected {SAMPLE_RATE} Hz, got {w.getframerate()}")
-        if w.getnchannels() != 1:
-            raise ValueError(f"{path}: expected mono, got {w.getnchannels()} channels")
-        if w.getsampwidth() != 2:
-            raise ValueError(f"{path}: expected int16, got sampwidth {w.getsampwidth()}")
-        raw = w.readframes(w.getnframes())
+    """Read a recorder-format WAV into a writable int16 sample array.
+
+    Delegates the open / format-validate / readframes sequence to
+    `audio.read_recorder_frames` — the ONE recorder-format guard (shared
+    with `compute_peaks` and `wav_predecode`) — translating its
+    format-mismatch `RuntimeError` into `ValueError`: the strip-preview
+    route maps `(ValueError, wave.Error, EOFError, OSError)` to a 422
+    and documents this function raising ValueError for non-recorder
+    formats, so the translation keeps that contract (and the callers'
+    exception handling) intact while removing the duplicated guard.
+    `wave.Error` / `EOFError` / `OSError` from unreadable files
+    propagate unchanged, as before."""
+    try:
+        raw, _ = read_recorder_frames(path)
+    except RuntimeError as e:
+        raise ValueError(str(e)) from e
     # .copy() so the returned array is writable. np.frombuffer returns a
     # read-only view of the bytes buffer, and torch.from_numpy(...) on a
     # read-only array emits a noisy "non-writable" warning every run.
@@ -82,27 +90,48 @@ def filter_low_energy_regions(samples_int16: np.ndarray, regions, floor_dbfs: fl
     return out
 
 
-_silero_model = None
+# One Silero model PER WORKER THREAD for the strip detector. Silero's
+# ONNX wrapper carries its recurrent streaming state on the MODEL object
+# (see `speech_gate.load_silero_model`), so strip ops must never share an
+# instance with the live gates' per-gate models OR with each other:
+# a strip-preview knob drag / batch strip running `get_speech_timestamps`
+# on a shared model would zero and rewrite a live gate's state
+# mid-utterance from another thread. `threading.local` gives each
+# `asyncio.to_thread` worker its own instance, and use within a thread is
+# strictly sequential — a worker thread runs one work item at a time and
+# `detect_speech_silero` never re-enters itself, so no two detections can
+# interleave on one instance (and `get_speech_timestamps` resets model
+# state on entry anyway). Worker threads are reused across knob drags and
+# batch runs, so loads amortize instead of costing a model
+# deserialisation per slider pause.
+_SILERO_LOCAL = threading.local()
 
 
-def _get_silero_model():
-    """Load (and cache) the Silero VAD model once per process — mirrors
-    `speech_gate._get_silero_model`. The strip-preview route runs the
-    detector per knob pause, so reloading the model from disk on every
-    call would put its deserialisation cost on every slider drag.
+def _local_silero_model():
+    """This thread's own Silero model, loaded on first use (see the
+    `_SILERO_LOCAL` rationale above). The lazy `speech_gate` import keeps
+    silero/onnx out of this module's import graph; an ImportError
+    propagates to `detect_speech_silero`'s broken-install wrapping."""
+    model = getattr(_SILERO_LOCAL, "model", None)
+    if model is None:
+        from .speech_gate import load_silero_model
 
-    `onnx=True` for the same reason as `speech_gate._get_silero_model`:
-    avoid the `torch.jit.load` PyTorch deprecated / 3.14-flagged as unsupported."""
-    global _silero_model
-    if _silero_model is None:
-        from silero_vad import load_silero_vad
-
-        _silero_model = load_silero_vad(onnx=True)
-    return _silero_model
+        model = load_silero_model()
+        _SILERO_LOCAL.model = model
+    return model
 
 
 def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms: int):
     """Returns list of (start_sample, end_sample) speech regions.
+
+    The model is this worker thread's own instance (`_local_silero_model`)
+    — NEVER the live SpeechGates' per-gate instances, because silero's
+    streaming state lives on the model object (the `_SILERO_LOCAL`
+    rationale above; the onnx=True rationale lives on
+    `speech_gate.load_silero_model`). The strip-preview route runs this
+    detector per knob pause; the per-thread cache keeps the model's
+    deserialisation cost off every slider drag. Imported lazily so
+    importing this module never pulls silero/onnx.
 
     silero-vad + torch are core dependencies (pyproject.toml). If the
     import below ever fails, the install is broken — reinstall TapScribe.
@@ -113,7 +142,7 @@ def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms:
         import torch
         from silero_vad import get_speech_timestamps
 
-        model = _get_silero_model()
+        model = _local_silero_model()
     except ImportError as e:
         raise RuntimeError(
             "silero-vad/torch import failed — TapScribe install is corrupt. "

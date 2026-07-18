@@ -80,9 +80,12 @@ export async function endMeeting({ control, storage, cfg, sessionId, snapshot, n
   // this try (mirroring startMeeting) so a post-trigger storage failure can't be
   // caught here and mislabel an already-successful trigger as phase:"failed"
   // (it rejects instead, so onEnd re-enables the buttons — no wedge, no
-  // duplicate trigger on retry). Mixed-content is keyed off e.kind (as
-  // content.js's finishEndMeeting does) so the stale-tab failed card can't drift
-  // from the live-tab card on a control-client message reword.
+  // duplicate trigger on retry). The failure text is the thrown message
+  // verbatim: a mixed-content ControlError carries the client's
+  // MIXED_CONTENT_BLOCKED_TEXT as its message (control-client.js throws the
+  // constant), so the stale-tab failed card matches content.js's live-tab card
+  // without a kind-keyed remap here — end-meeting-stale-tab.test.js pins that
+  // parity against the real client.
   /** @type {string} */ let phase;
   /** @type {string | null} */ let error;
   try {
@@ -91,9 +94,7 @@ export async function endMeeting({ control, storage, cfg, sessionId, snapshot, n
     error = null;
   } catch (e) {
     phase = "failed";
-    error = errKind(e) === "mixed-content-blocked"
-      ? "recorder is http:// on a non-trustworthy host — enable TLS"
-      : errText(e);
+    error = errText(e);
   }
   await storage.set({
     meetingActive: false,

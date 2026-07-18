@@ -40,6 +40,23 @@
 
   const TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap.";
 
+  // The operator-facing copy for a mixed-content-blocked control call.
+  // Exported so the popup's and content script's failure cards render the
+  // exact same text as the ControlError thrown below — one source instead
+  // of hand-duplicated literals held in lockstep by a parity test.
+  const MIXED_CONTENT_BLOCKED_TEXT =
+    "recorder is http:// on a non-trustworthy host — enable TLS";
+
+  // The /tap WS handshake can only carry the tap token in the subprotocol
+  // slot (a browser WebSocket can't set headers). Returns the `protocols`
+  // argument for `new WebSocket(url, …)`: the prefixed token, or undefined
+  // for a --no-auth recorder (omit the slot entirely so the upgrade
+  // succeeds without server-side subprotocol echo).
+  /** @param {string | null | undefined} token @returns {string[] | undefined} */
+  function subprotocolsFor(token) {
+    return token ? [TAP_SUBPROTOCOL_PREFIX + token] : undefined;
+  }
+
   // A caught value is `unknown`; pull a printable message from it defensively.
   /** @param {unknown} e @returns {string} */
   function errText(e) {
@@ -94,13 +111,15 @@
     );
   }
 
-  // True when a cleartext http:// control call from the current page would
-  // be mixed-content-blocked. Only meaningful from an https:// origin (the
+  // True when a cleartext call (http:// fetch or ws:// upgrade — the
+  // browser applies the same mixed-content policy to both) from the current
+  // page would be blocked. Only meaningful from an https:// origin (the
   // SpatialChat content-script world); from the popup's own
   // chrome-extension:// origin `location.protocol` isn't "https:", so this
   // returns false and the popup keeps its existing always-fire behaviour.
+  // Exported: content.js's /tap WS pre-flight applies the same predicate.
   /** @param {RecorderCfg} cfg @returns {boolean} */
-  function wouldBlockHttp(cfg) {
+  function wouldBlockCleartext(cfg) {
     if (cfg && cfg.useTls) return false;
     if (typeof location === "undefined") return false;
     if (location.protocol !== "https:") return false;
@@ -139,11 +158,8 @@
   // trips the timeout instead of hanging).
   /** @param {RecorderCfg} cfg @param {string} path @param {RequestInit} init @param {CallOpts} [opts] */
   async function controlFetch(cfg, path, init, opts) {
-    if (wouldBlockHttp(cfg)) {
-      throw new ControlError(
-        "mixed-content-blocked",
-        "recorder is http:// on a non-trustworthy host — enable TLS",
-      );
+    if (wouldBlockCleartext(cfg)) {
+      throw new ControlError("mixed-content-blocked", MIXED_CONTENT_BLOCKED_TEXT);
     }
     if (typeof fetch !== "function") {
       throw new ControlError("network", "fetch is unavailable in this context");
@@ -279,7 +295,7 @@
       /** @type {WebSocket} */
       let ws;
       try {
-        ws = cfg.token ? new WebSocket(url, [TAP_SUBPROTOCOL_PREFIX + cfg.token]) : new WebSocket(url);
+        ws = new WebSocket(url, subprotocolsFor(cfg.token));
       } catch (e) {
         resolve({ ok: false, error: errText(e) });
         return;
@@ -305,11 +321,16 @@
     ControlError,
     // The trustworthy-host primitive + a plain recorder base URL, exposed
     // so callers stop hand-rolling scheme/host/port (the popup's
-    // mixed-content warning and dashboard link use these). Scheme/guard
-    // internals (httpScheme/wsScheme/wouldBlockHttp/subprotocol prefix)
+    // mixed-content warning and dashboard link use these). The cleartext
+    // guard, the /tap subprotocol builder, and the mixed-content display
+    // copy are exported too so content.js's WS path shares them instead of
+    // keeping private duplicates. Scheme internals (httpScheme/wsScheme)
     // stay private — every call that needs them already routes through a
     // method here.
     isTrustworthyHost,
+    wouldBlockCleartext,
+    subprotocolsFor,
+    MIXED_CONTENT_BLOCKED_TEXT,
     httpBase,
     createDetachedSession,
     triggerPipeline,

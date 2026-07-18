@@ -21,11 +21,11 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { getJson, putJson, wireConfigSave, wireSave } from "../../api.js";
+import { getJson, putJson, wireConfigSave, wireSave, errText, getBridgeCatalog } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 import { header } from "../shell.js";
-import { makeStatusFlasher, clipboardAvailable } from "../ui.js";
+import { makeStatusFlasher, copyToClipboard } from "../ui.js";
 import * as configCard from "../../components/config-card.js";
 import { LIVE_FAMILY_LABELS, buildModelSelect } from "../../model-select.js";
 
@@ -116,7 +116,7 @@ export function build(ctx) {
       bridgeToken.textContent = t;
       bridgeReveal.textContent = "🙈 hide";
     } catch (e) {
-      flashBridgeStatus(`couldn't load token: ${String(e).replace(/^Error:\s*/, "")}`);
+      flashBridgeStatus(`couldn't load token: ${errText(e)}`);
     } finally {
       bridgeReveal.disabled = false;
     }
@@ -127,40 +127,34 @@ export function build(ctx) {
     try {
       t = await loadTapToken();
     } catch (e) {
-      flashBridgeStatus(`couldn't load token: ${String(e).replace(/^Error:\s*/, "")}`);
+      flashBridgeStatus(`couldn't load token: ${errText(e)}`);
       return;
     }
-    // Same non-secure-context fallback as the transcript pane's copy button
-    // (the probe is shared — see ui.js).
-    if (!clipboardAvailable()) {
-      window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t);
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(t);
-      flashBridgeStatus("✓ copied");
-    } catch {
-      // Clipboard write rejected (permission denied) — fall back to a
-      // prompt() the operator can select-copy from.
-      window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t);
-    }
+    // Shared copy flow (ui.js copyToClipboard) — the fallback here is a
+    // prompt() the operator can select-copy from, covering both the
+    // non-secure context and a rejected clipboard write.
+    await copyToClipboard(t, {
+      onOk: () => flashBridgeStatus("✓ copied"),
+      onFallback: () => { window.prompt("Copy the /tap bearer token (Ctrl/Cmd-C, Enter):", t); },
+    });
   });
 
   // ---- Get-a-bridge card ------------------------------------------------------
   // static-render: built ONCE here, never touched by `update`. The two download
   // anchors point at GitHub-Release assets (releases/latest/download/<asset>),
   // so they are plain cross-origin hrefs — NOT same-origin triggerDownload
-  // targets. The hrefs are filled from a single best-effort GET /api/bridges on
-  // build (mirroring the Models card's /api/setup/state fetch), matched by id;
-  // on failure the hint line degrades gracefully. The latest/download URLs 404
-  // until the first tagged release, so the hint always names that caveat.
+  // targets. The hrefs are filled from the memoized bridge catalog
+  // (api.js getBridgeCatalog — ONE best-effort GET /api/bridges per page,
+  // even across the boot-time view rebuild), matched by id; on failure the
+  // hint line degrades gracefully. The latest/download URLs 404 until the
+  // first tagged release, so the hint always names that caveat.
   const bridgeDlSpatial = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlSpatial"));
   const bridgeDlTray = /** @type {HTMLAnchorElement} */ (pick(frag, "bridgeDlTray"));
   const bridgeDlHint = pick(frag, "bridgeDlHint");
   /** @type {Record<string, HTMLAnchorElement>} */
   const bridgeAnchors = { spacialchat: bridgeDlSpatial, "windows-tray": bridgeDlTray };
-  getJson("/api/bridges")
-    .then((/** @type {{ id: string, download_url: string }[]} */ bridges) => {
+  getBridgeCatalog()
+    .then((bridges) => {
       for (const b of bridges || []) {
         const a = bridgeAnchors[b.id];
         if (a && b.download_url) {
@@ -282,7 +276,7 @@ export function build(ctx) {
   /** @param {string} modelId */
   const saveLiveModel = async (modelId) => {
     try { await putJson("/api/config/live-model", { content: modelId }); }
-    catch (e) { alert(`Save live model failed: ${String(e).replace(/^Error:\s*/, "")}`); }
+    catch (e) { alert(`Save live model failed: ${errText(e)}`); }
     finally { afterMutate(); }
   };
 

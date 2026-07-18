@@ -17,7 +17,7 @@
   variable consumed via a post-await cast — see `stripSession` in
   `main.js`), prefix the name with `_`.
 - `/next` re-renders every per-tick region on each `/api/state`
-  poll (500ms, adaptively backing off to 2s when idle — ADR-0011)
+  poll (500ms, adaptively backing off to 2s when idle — ADR-0013)
   via `replaceChildren`, which would snap a focused `<select>`
   shut or drop a caret mid-edit. The governing rule is the
   **Interaction hold** (CONTEXT.md + ADR-0004): defer the render, never
