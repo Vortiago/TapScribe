@@ -361,7 +361,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           global-json-file: bridges/windows-tray-bridge/global.json
 
@@ -381,7 +381,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           global-json-file: bridges/windows-tray-bridge/global.json
 
@@ -420,7 +420,7 @@ jobs:
           python -c "from tapscribe.nb_whisper import download_nb_whisper_ct2_dir as d; d('nb-whisper-tiny')"
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           global-json-file: bridges/windows-tray-bridge/global.json
 
