@@ -1,8 +1,10 @@
-"""Tests for tools/install_picker.py — per-family + per-backend bootstrap.
+"""Tests for tapscribe/install_picker.py — per-family + per-backend bootstrap.
 
-The picker is a standalone stdlib-only script (it runs before TapScribe's
-extras are installed), so these tests import it via path manipulation
-rather than as a package module.
+The picker is stdlib-only (it runs before TapScribe's extras are installed) but
+now lives in the package, because `tools/` isn't shipped in the wheel and a
+Bundle installs a wheel (ADR-0015). Importing it is free — `tapscribe/__init__.py`
+has no imports — so these tests import it normally rather than via the old
+`sys.path` manipulation.
 """
 
 from __future__ import annotations
@@ -17,13 +19,8 @@ from conftest import atomic_extras
 from packaging.requirements import Requirement
 from packaging.version import Version
 
-# tools/ isn't a package — make install_picker importable by name.
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-import install_picker  # noqa: E402
-from install_picker import (  # noqa: E402
+from tapscribe import install_picker
+from tapscribe.install_picker import (
     BACKEND_BOTH,
     BACKEND_CPU,
     BACKEND_MLX,
@@ -387,6 +384,138 @@ def test_build_pip_argv_drops_extras_brackets_when_empty():
     assert argv[-1] == "."
 
 
+def test_build_pip_argv_installs_the_bundled_wheel_when_given_one(tmp_path):
+    """The Bundle topology: install the wheel the installer shipped, not an
+    editable checkout that doesn't exist in `%LOCALAPPDATA%` (ADR-0015)."""
+    wheel = tmp_path / "tapscribe-1.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    argv = install_picker.build_pip_argv(
+        ["whisper-live", "whisper-cpu"], python="py", install_spec=str(wheel)
+    )
+    assert "-e" not in argv
+    assert argv[-1] == f"{wheel.resolve()}[whisper-live,whisper-cpu]"
+
+
+def test_main_forwards_install_spec_to_the_install(tmp_path, monkeypatch, tmp_stamp):
+    """End of the thread: `--install-spec` on the picker's own CLI reaches the
+    pip argv. Without this the flag would parse and be silently ignored, and a
+    Bundle would quietly try (and fail) to install an editable checkout."""
+    wheel = tmp_path / "tapscribe-1.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    state = tmp_path / ".tapscribe-install.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_CPU}},
+            }
+        )
+    )
+    monkeypatch.setattr(install_picker, "STATE_FILE", state)
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _caps())
+    seen: list[list[str]] = []
+    monkeypatch.setattr(install_picker.subprocess, "call", lambda argv, **kw: seen.append(argv) or 0)
+
+    assert install_picker.main(["--non-interactive", "--install-spec", str(wheel)]) == 0
+    assert seen, "pip was never invoked"
+    assert "-e" not in seen[0]
+    assert str(wheel.resolve()) in seen[0][-1]
+
+
+def test_main_reads_and_writes_the_state_file_given_on_the_cli(tmp_path, monkeypatch, tmp_stamp):
+    """`--state-file` relocates the saved selection. A Bundle keeps it under
+    TAPSCRIBE_BASE_DIR so it survives an upgrade; the module-level default
+    (repo root) is what a dev checkout keeps using."""
+    state = tmp_path / "elsewhere" / ".tapscribe-install.json"
+    state.parent.mkdir()
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_MLX}},
+            }
+        )
+    )
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _apple_caps())
+    monkeypatch.setattr(install_picker, "run_install", lambda *a, **k: 0)
+
+    assert install_picker.main(["--non-interactive", "--state-file", str(state)]) == 0
+    # Read from the given path (mlx would be absent had it loaded defaults)…
+    reloaded = install_picker.Selection.load(state, _apple_caps())
+    assert reloaded.choices["whisper"].backend == BACKEND_MLX
+    # …and written back there, not to the module-level default.
+    assert not install_picker.STATE_FILE.exists() or install_picker.STATE_FILE != state
+
+
+def test_main_records_removed_backends_to_a_sidecar(tmp_path, monkeypatch, tmp_stamp):
+    """`removed_backend_families()` has always warned to STDERR — invisible in a
+    Bundle, where the Launcher pipes output to a log file nobody opens. The
+    operator upgrades, their models quietly stop installing, and nothing they'd
+    look at says so. Record it where the dashboard can read it."""
+    state = tmp_path / ".tapscribe-install.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                # 'mlx' is real today; monkeypatching the family's declared
+                # backends below is what makes it "removed by a later version".
+                "choices": {"parakeet": {"enabled": True, "backend": BACKEND_MLX}},
+            }
+        )
+    )
+    shrunk = tuple(
+        install_picker.FamilyDef(
+            key=f.key,
+            label=f.label,
+            description=f.description,
+            size_hint=f.size_hint,
+            shared_extras=f.shared_extras,
+            default_selected=f.default_selected,
+            backends=tuple(b for b in f.backends if b.key != BACKEND_MLX),
+        )
+        for f in FAMILIES
+    )
+    monkeypatch.setattr(install_picker, "FAMILIES", shrunk)
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _apple_caps())
+    monkeypatch.setattr(install_picker, "run_install", lambda *a, **k: 0)
+
+    assert install_picker.main(["--non-interactive", "--state-file", str(state)]) == 0
+
+    sidecar = state.parent / install_picker.WARNINGS_FILENAME
+    assert sidecar.exists(), "expected a warnings sidecar next to the state file"
+    stale = json.loads(sidecar.read_text())["stale_backends"]
+    assert {entry["family"] for entry in stale} == {"parakeet"}
+    assert stale[0]["backend"] == BACKEND_MLX
+
+
+def test_main_clears_a_stale_sidecar_once_the_selection_is_valid(tmp_path, monkeypatch, tmp_stamp):
+    """The banner must disappear when the operator re-picks — a warning file
+    that outlives its cause is worse than no warning."""
+    state = tmp_path / ".tapscribe-install.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_CPU}},
+            }
+        )
+    )
+    sidecar = state.parent / install_picker.WARNINGS_FILENAME
+    sidecar.write_text(json.dumps({"stale_backends": [{"family": "parakeet", "backend": "mlx"}]}))
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _caps())
+    monkeypatch.setattr(install_picker, "run_install", lambda *a, **k: 0)
+
+    assert install_picker.main(["--non-interactive", "--state-file", str(state)]) == 0
+    assert not sidecar.exists()
+
+
+def test_main_rejects_a_bogus_install_spec(tmp_path, capsys):
+    """Validated at the boundary, not handed to pip — CLAUDE.md's CodeQL rule
+    for argparse values that flow onward."""
+    assert install_picker.main(["--non-interactive", "--install-spec", "requests"]) == 2
+    assert "install spec" in capsys.readouterr().err
+
+
 # ── Skip-install stamp ──────────────────────────────────────────────
 
 
@@ -502,7 +631,7 @@ def _patch_run_install_counter(monkeypatch) -> list[list[str]]:
     """Replace run_install with a no-op that records each call's extras."""
     calls: list[list[str]] = []
 
-    def fake_run_install(extras, *, dry_run=False):
+    def fake_run_install(extras, *, dry_run=False, install_spec=None):
         calls.append(list(extras))
         return 0
 
@@ -531,7 +660,7 @@ def _package_missing():
     return False
 
 
-def _pip_install_fails(extras, *, dry_run=False):
+def _pip_install_fails(extras, *, dry_run=False, install_spec=None):
     """Stand-in for `install_picker.run_install` that pretends pip exited
     non-zero, so tests can verify failure paths without invoking real pip."""
     return 1

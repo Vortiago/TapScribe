@@ -121,7 +121,7 @@
 
 ## Runtime deps the install picker does NOT cover
 
-`tools/install_picker.py` resolves *model* extras (`whisper-cpu`,
+`tapscribe/install_picker.py` resolves *model* extras (`whisper-cpu`,
 `parakeet-mlx`, …). One recurring runtime dependency falls outside
 that matrix and is wired into `start.sh` / `start.ps1` instead, after
 the picker runs:

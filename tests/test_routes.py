@@ -128,8 +128,12 @@ def test_api_setup_state_shape(client):
     r = client.get("/api/setup/state")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"first_run", "available_backends", "families"}
+    assert set(body) == {"first_run", "available_backends", "families", "stale_selection"}
     assert isinstance(body["available_backends"], list)
+    # Families the last picker run had to SKIP because their saved backend left
+    # the catalog (ADR-0015). Empty on a healthy install; /setup renders it as a
+    # banner because the picker's own warning only reaches stderr.
+    assert isinstance(body["stale_selection"], list)
     assert isinstance(body["families"], list) and body["families"]
     fam = body["families"][0]
     assert {"family", "label", "live", "batch", "installed", "backends", "size_hint", "models"} <= set(fam)

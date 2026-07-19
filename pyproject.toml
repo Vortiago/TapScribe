@@ -58,7 +58,7 @@ Issues = "https://github.com/Vortiago/TapScribe/issues"
 # The actual model backends are heavy and platform-dependent; keep them
 # optional so a CI / docs install doesn't pull in PyTorch + CUDA.
 #
-# The picker (tools/install_picker.py) composes per-family backend
+# The picker (tapscribe/install_picker.py) composes per-family backend
 # selections from these atomic extras: each family has a "shared" extra
 # (always installed when the family is on) plus one or two backend-
 # specific extras (CPU/CUDA and/or MLX) which the operator can opt into
@@ -149,7 +149,7 @@ cuda-libs = [
 # on CPU/CUDA (and any non-Apple-Silicon box) — the two paths run different
 # models for now; see the divergence note on LOCAL_MLX_MODEL in summarizers.py. Unlike the transcription extras,
 # this is installed at STARTUP via the recorder's runtime-deps step (start.sh /
-# start.ps1) — NOT by tools/install_picker.py (which resolves transcription
+# start.ps1) — NOT by tapscribe/install_picker.py (which resolves transcription
 # model extras only) and NOT as a per-request preflight. The imported upstream
 # symbols are guarded by importorskip smoke tests
 # (tests/test_summarizers_local.py::test_{mlx_lm,llama_cpp}_upstream_contract);
@@ -193,7 +193,7 @@ voxtral = ["tapscribe[voxtral-cpu]"]
 # so a mac install doesn't pull transformers when MLX is the path, and a
 # Linux/Windows box doesn't pull the Apple-only parakeet-mlx wheel.
 # Operators who explicitly want both backends can still pick "Both" in
-# `tools/install_picker.py`, which composes the atomic extras directly.
+# `tapscribe/install_picker.py`, which composes the atomic extras directly.
 parakeet = [
     "tapscribe[parakeet-mlx]; sys_platform == 'darwin' and platform_machine == 'arm64'",
     # PEP 508 marker grammar has no unary `not` (only `and`/`or` join

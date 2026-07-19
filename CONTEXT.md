@@ -117,7 +117,7 @@ and `/api/models` surface it so the dashboard can gray out chips
 for backends not installed on the server.
 
 **Disambiguation — picker vocabulary vs runtime vocabulary:**
-`tools/install_picker.py` exposes its own `BackendDef` and
+`tapscribe/install_picker.py` exposes its own `BackendDef` and
 `FamilyChoice.backend` strings (`"cpu"` / `"mlx"` / `"both"`). These
 describe what pyproject extras pip should install *before* TapScribe
 runs — not what the runtime selects at transcribe time. The picker
@@ -487,6 +487,29 @@ release), downloadable straight from the dashboard's Settings "Get a bridge"
 card — see [ADR-0012](docs/adr/0012-bridge-artifacts-on-tagged-releases.md).
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
+
+## Bundle · Launcher
+
+A **Bundle** is a self-contained, platform-native distribution of the
+Recorder: an embedded CPython, the `tapscribe` wheel, and a Launcher,
+installed per-user with no Python prerequisite. The Windows Bundle
+(`TapScribe-Setup-win-x64.exe`) is the first; the name generalises to a
+future macOS or Linux equivalent without re-coining.
+
+A **Launcher** is the small executable *inside* a Bundle that points
+`TAPSCRIBE_BASE_DIR` at the operator's data directory, boots the
+Recorder, and opens the dashboard. It is not the server — it starts one.
+
+A Bundle is **not a Bridge**. A Bridge taps audio *into* a Recorder; a
+Bundle *is* a Recorder, packaged. Consequently a Bundle never appears in
+`bridges_catalog.BRIDGE_ARTIFACTS` or the dashboard's "Get a bridge"
+card — you need a Bundle to have a dashboard, so a dashboard cannot
+advertise one. Bundles are announced by the README and the GitHub
+Release page; they still ride ADR-0012's mechanism of CI-built assets
+attached to a tagged release under stable, unversioned filenames.
+
+_Avoid_: "installer" for the artifact (it names the act, leaving no word
+for the installed result), "the exe", "the Windows app".
 
 ## HTTP auth gate · auth schemes
 

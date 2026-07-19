@@ -1,7 +1,7 @@
 """Install resolver for the browser setup surface (GET /setup).
 
 The app does NOT resolve pip extras or run pip itself — it delegates to the
-dependency-free `tools/install_picker.py`, which already encapsulates the messy
+dependency-free `tapscribe/install_picker.py`, which already encapsulates the messy
 parts (shared extras like `whisper-live`, the auto-appended `cuda-libs`,
 per-backend extras, the skip-if-unchanged stamp). The app's job is the
 translation seam: turn the catalog-family selection the UI speaks into the
@@ -32,11 +32,19 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_PICKER_SCRIPT = _REPO_ROOT / "tools" / "install_picker.py"
-_STATE_FILE = _REPO_ROOT / ".tapscribe-install.json"
+from . import config
 
-# Mirror of tools/install_picker.py's keys (see module docstring on why these
+# Spawned as `python -m <this>`, never imported — see the module docstring.
+_PICKER_MODULE = "tapscribe.install_picker"
+
+# The saved selection lives with the operator's DATA, not beside the package:
+# in a wheel install (the Bundle topology) the package's parent is
+# `site-packages`, where a selection would be at the mercy of the next
+# reinstall. `BASE_DIR` is the repo root in a checkout, so this is byte-for-byte
+# the path devs already had (ADR-0015).
+_STATE_FILE = config.BASE_DIR / ".tapscribe-install.json"
+
+# Mirror of tapscribe/install_picker.py's keys (see module docstring on why these
 # are duplicated rather than imported; the test pins them to the real picker).
 _STATE_VERSION = 2
 _BK_CPU, _BK_MLX, _BK_BOTH = "cpu", "mlx", "both"
@@ -114,12 +122,30 @@ def write_picker_state(state: dict, *, path: Path = _STATE_FILE) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
-def picker_install_argv(*, python: str = sys.executable, no_mlx: bool = False) -> list[str]:
+def picker_install_argv(
+    *,
+    python: str = sys.executable,
+    no_mlx: bool = False,
+    install_spec: str | None = None,
+) -> list[str]:
     """argv to run the install picker non-interactively against the written
-    selection. The picker resolves extras, runs pip, and writes the stamp."""
-    argv = [python, str(_PICKER_SCRIPT), "--non-interactive"]
+    selection. The picker resolves extras, runs pip, and writes the stamp.
+
+    Invoked as `-m tapscribe.install_picker` rather than by script path: a
+    Bundle installs a wheel into a venv, where no repo-relative
+    `tapscribe/install_picker.py` exists, and `-m` resolves wherever the package
+    actually landed (ADR-0015).
+
+    `install_spec` forwards the Bundle's wheel path so the subprocess installs
+    from the SAME wheel the installer shipped. Omitted by default — absent flag
+    means the checkout topology, which is what a dev launching `start.ps1`
+    without the installer must keep getting.
+    """
+    argv = [python, "-m", _PICKER_MODULE, "--non-interactive", "--state-file", str(_STATE_FILE)]
     if no_mlx:
         argv.append("--no-mlx")
+    if install_spec is not None:
+        argv += ["--install-spec", install_spec]
     return argv
 
 
@@ -143,6 +169,7 @@ async def run_install(
     selection: dict[str, str],
     *,
     no_mlx: bool = False,
+    install_spec: str | None = None,
     spawn: Callable[[list[str]], Awaitable] | None = None,
     write_state: Callable[..., None] | None = None,
     on_success: Callable[[], None] | None = None,
@@ -151,6 +178,10 @@ async def run_install(
     and yield progress events: one ``{"phase":"start"}``, a ``{"phase":"log"}``
     per output line, then ``{"phase":"done"}`` (returncode 0) or
     ``{"phase":"error"}``. `on_success` (hot-reload) fires only on success.
+
+    `install_spec` is the recorder's `--install-spec` (ADR-0015), forwarded so a
+    Bundle installs extras from the wheel it shipped instead of an editable
+    checkout that isn't there. `None` (a dev checkout) keeps the historical argv.
 
     `spawn` / `write_state` are injectable for tests; they default to the real
     asyncio subprocess and the on-disk picker-state writer at call time.
@@ -161,7 +192,7 @@ async def run_install(
     yield {"phase": "start"}
     try:
         write_state(to_picker_state(selection))
-        proc = await spawn(picker_install_argv(no_mlx=no_mlx))
+        proc = await spawn(picker_install_argv(no_mlx=no_mlx, install_spec=install_spec))
         async for raw in proc.stdout:
             line = raw.decode("utf-8", "replace").rstrip("\n")
             yield {"phase": "log", "line": line}

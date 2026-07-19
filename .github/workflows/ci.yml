@@ -388,6 +388,43 @@ jobs:
       - name: Build + test bridge-core only
         run: dotnet test bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapScribe.Bridge.Core.Tests.csproj -c Release
 
+  # The Windows Bundle's Launcher (packaging/windows/, ADR-0015) uses the same
+  # Core/Windows split as the tray Bridge above and for the same reason: the
+  # path resolution, argv construction, log-rotation policy and password read
+  # live in a cross-platform Core so they're testable off Windows. Only the
+  # tray, the Job Object and the actual spawn are Windows-only, and those are
+  # covered by the compile in `bundle-build` below.
+  bundle-core-crossplatform:
+    name: bundle launcher core (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: packaging/windows/global.json
+
+      - name: Build + test bundle-core only
+        run: dotnet test packaging/windows/tests/TapScribe.Bundle.Core.Tests/TapScribe.Bundle.Core.Tests.csproj -c Release
+
+  # Compiles the WinForms Launcher on its native OS. The release `bundle` job
+  # publishes it, but only on a tag — without this, a Launcher that doesn't
+  # compile would not be discovered until release day.
+  bundle-build:
+    name: bundle launcher build (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: packaging/windows/global.json
+
+      - name: Build the whole bundle solution
+        run: dotnet build packaging/windows/TapScribe.Bundle.slnx -c Release
+
   # The cross-platform job above runs the bridge-core tests but SKIPS the
   # real-Recorder meeting E2E (RealRecorderMeetingE2ETests, via the
   # RequiresPythonAsr attribute) because it has no Python ASR stack. This job

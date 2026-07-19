@@ -43,6 +43,16 @@ artifact.
   (unzip → `chrome://extensions` → Developer mode → Load unpacked).
 - **`TapScribe.TrayBridge-win-x64.zip`** — the self-contained Windows tray exe
   (unsigned; SmartScreen may warn).
+- **`TapScribe-Setup-win-x64.exe`** — the [Windows Bundle](packaging/README.md):
+  embedded CPython + the wheel + the tray Launcher, per-user install, no Python
+  prerequisite (unsigned; SmartScreen may warn). Not a Bridge, so it is
+  announced by the README and the Release page rather than the dashboard's
+  "Get a bridge" card.
+- **PyPI** — `tapscribe` is published via Trusted Publishing from the
+  `pypi-publish` job. That job depends only on `build`, so a failed Windows
+  Bundle can't block or corrupt the upload. The publisher is registered on
+  pypi.org against **this workflow filename** (`release.yml`) and the **`pypi`
+  environment** — renaming either breaks the OIDC exchange.
 - **`ghcr.io/vortiago/tapscribe`** — a Docker image tagged `:vX.Y.Z` and
   `:latest` on GHCR.
 

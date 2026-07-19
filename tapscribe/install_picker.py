@@ -18,8 +18,21 @@ the operator picks:
 
 Backend choices map to per-family atomic extras in `pyproject.toml`
 (e.g. `whisper-cpu`, `whisper-mlx`, plus a shared `whisper-live` for
-the live-socket server). The picker composes the final
-`pip install -e ".[…]"` argv from those atoms.
+the live-socket server). The picker composes the final `pip install`
+argv from those atoms, delegating the install TARGET (checkout / Bundle
+wheel / pinned PyPI) to `tapscribe.install_target` — see ADR-0015.
+
+Why this lives in the package rather than `tools/`
+--------------------------------------------------
+`tools/` is not shipped in the wheel (`packages.find` includes
+`tapscribe*` only), and a Bundle installs a wheel — so a picker under
+`tools/` is unreachable in every non-checkout topology. It moved here to
+be reachable, NOT to become part of the app's import surface: the app
+still only ever runs it as a subprocess (`setup_install.py`). Importing
+`tapscribe` costs nothing (`__init__.py` is a docstring and
+`__version__`), so living in the package doesn't compromise the
+stdlib-only rule below. `tests/test_install_picker_not_imported_by_app.py`
+pins the never-imported half.
 
 To keep re-launches quiet, the picker stamps each successful install
 (resolved extras + a pyproject.toml fingerprint) inside the venv and
@@ -44,9 +57,26 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Stdlib-only sibling (see the module docstring): `install_target` imports
+# nothing beyond re/sys/pathlib, so this doesn't break the pre-install rule.
+from tapscribe import install_target
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = REPO_ROOT / ".tapscribe-install.json"
 STATE_VERSION = 2
+
+# Sidecar next to the state file recording families the picker had to SKIP
+# because their saved backend is gone from this version's catalog. A separate
+# file rather than a key inside the state file: the state file has a versioned
+# schema with a v1 migration path, and this is a derived observation about the
+# last run, not part of the operator's selection.
+#
+# It exists because `removed_backend_families()` only ever warned to stderr,
+# which in a Bundle goes to a log file nobody opens (ADR-0015) — the operator
+# upgrades, their models quietly stop installing, and nothing they'd look at
+# says so. `setup_state.build_setup_state` reads this into /api/setup/state so
+# /setup can say it out loud.
+WARNINGS_FILENAME = ".tapscribe-install-warnings.json"
 
 # Install stamp: records the extras + pyproject fingerprint of the last
 # successful `pip install`, so a re-run with an unchanged selection skips
@@ -927,24 +957,58 @@ def interactive_loop(selection: Selection, caps: MachineCaps, *, stream_in, stre
 # ---------------------------------------------------------------------------
 
 
-def build_pip_argv(extras: list[str], *, python: str = sys.executable) -> list[str]:
-    """Argv for the install. `python -m pip install -e ".[a,b,c]"` keeps
-    us inside the current venv. Always editable so source-tree edits
-    land immediately; the operator's TapScribe is a checkout, not a
-    release."""
-    spec = "."
-    if extras:
-        spec = f".[{','.join(extras)}]"
-    return [python, "-m", "pip", "install", "-e", spec]
+def write_install_warnings(state_file: Path, selection: Selection, removed: list[FamilyDef]) -> None:
+    """Record (or clear) the skipped-family sidecar beside `state_file`.
+
+    Clearing on an empty list is the point as much as writing is: once the
+    operator re-picks a valid backend the dashboard banner must go away.
+    """
+    sidecar = state_file.parent / WARNINGS_FILENAME
+    if not removed:
+        sidecar.unlink(missing_ok=True)
+        return
+    body = {
+        "stale_backends": [
+            {"family": fam.key, "label": fam.label, "backend": selection.choices[fam.key].backend}
+            for fam in removed
+        ]
+    }
+    try:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        # A read-only or vanished data dir must not fail the install — the
+        # stderr warning above already carried the message, and this file is
+        # only the nicer surface for it.
+        print(f"[install-picker] could not write {sidecar}: {exc}", file=sys.stderr, flush=True)
 
 
-def run_install(extras: list[str], *, dry_run: bool = False) -> int:
+def build_pip_argv(
+    extras: list[str],
+    *,
+    python: str = sys.executable,
+    install_spec: str | None = None,
+) -> list[str]:
+    """Argv for the install, keeping us inside the current venv.
+
+    The install TARGET is delegated to `tapscribe.install_target`, which knows
+    the three topologies (ADR-0015). `install_spec=None` — the default and what
+    a dev checkout passes — still yields the historical
+    `pip install -e ".[a,b,c]"`, editable so source-tree edits land
+    immediately. A Bundle passes its shipped wheel instead.
+    """
+    return install_target.pip_install_argv(extras, install_spec=install_spec, python=python)
+
+
+def run_install(extras: list[str], *, dry_run: bool = False, install_spec: str | None = None) -> int:
     """Execute the install. `dry_run` skips the subprocess (used by tests
     and by `--dry-run` in the CLI)."""
-    argv = build_pip_argv(extras)
+    argv = build_pip_argv(extras, install_spec=install_spec)
     print(f"[install-picker] Running: {' '.join(argv)}", flush=True)
     if dry_run:
         return 0
+    # cwd only matters for the checkout topology, where `-e .` is relative;
+    # a wheel / PyPI spec is absolute, so this is harmless there.
     return subprocess.call(argv, cwd=REPO_ROOT)  # nosec B603 — fixed argv.
 
 
@@ -1041,11 +1105,38 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the resolved pip command and exit without running it.",
     )
+    p.add_argument(
+        "--state-file",
+        default=None,
+        help="Where the saved family/backend selection lives. Defaults to the "
+        "repo root. A Bundle points this at TAPSCRIBE_BASE_DIR so the selection "
+        "survives an upgrade instead of sitting in site-packages (ADR-0015).",
+    )
+    p.add_argument(
+        "--install-spec",
+        default=None,
+        help="What pip installs TapScribe from: omitted (a dev checkout, the "
+        "default), a path to the Bundle's shipped .whl, or a pinned "
+        "'tapscribe==X.Y.Z'. See ADR-0015.",
+    )
     args = p.parse_args(argv)
 
+    # Validate before anything else touches it: this is a CLI value that flows
+    # into a pip argv, which CodeQL treats as external input regardless of who
+    # launched the process (CLAUDE.md). Fail with a message the operator can
+    # act on rather than letting pip report an unfindable requirement.
+    try:
+        install_target.resolve_install_spec(args.install_spec)
+    except install_target.InstallSpecError as exc:
+        print(f"[install-picker] {exc}", file=sys.stderr, flush=True)
+        return 2
+
     caps = detect_caps(force_no_mlx=args.no_mlx)
-    first_run = not STATE_FILE.exists()
-    selection = Selection.load(STATE_FILE, caps)
+    # `--state-file` wins when given (a Bundle relocates it to the operator's
+    # data dir); the module-level default is the dev checkout's repo root.
+    state_file = Path(args.state_file) if args.state_file else STATE_FILE
+    first_run = not state_file.exists()
+    selection = Selection.load(state_file, caps)
 
     interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -1055,8 +1146,9 @@ def main(argv: list[str] | None = None) -> int:
     # mode there's no renderer — print one line per affected family so
     # `start.sh --non-interactive` doesn't silently produce an
     # incomplete install.
+    removed = selection.removed_backend_families()
     if not interactive:
-        for fam in selection.removed_backend_families():
+        for fam in removed:
             backend = selection.choices[fam.key].backend
             print(
                 f"[install-picker] WARNING: '{fam.key}' was saved with backend "
@@ -1066,6 +1158,10 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
                 flush=True,
             )
+    # Persist the same finding where the dashboard can see it. Written on every
+    # run (including interactive) so re-picking clears the banner — a warning
+    # file that outlives its cause is worse than no warning at all.
+    write_install_warnings(state_file, selection, removed)
 
     if interactive:
         if first_run:
@@ -1099,9 +1195,9 @@ def main(argv: list[str] | None = None) -> int:
     # Dry-run is purely read-only: don't persist the selection or stamp so
     # the operator can preview the pip command without committing to it.
     if args.dry_run:
-        return run_install(extras, dry_run=True)
+        return run_install(extras, dry_run=True, install_spec=args.install_spec)
 
-    selection.save(STATE_FILE)
+    selection.save(state_file)
 
     # Skip pip entirely when nothing that affects the installed package set
     # has changed since the last successful install AND the package is still
@@ -1124,7 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    rc = run_install(extras)
+    rc = run_install(extras, install_spec=args.install_spec)
     if rc != 0:
         print(f"[install-picker] pip exited with status {rc}.", file=sys.stderr)
         return rc

@@ -34,7 +34,6 @@ import pytest
 pytestmark = pytest.mark.real_pip
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-TOOLS_DIR = REPO_ROOT / "tools"
 
 # Runs ONE install_picker.main() against a redirected catalog/paths. Only the
 # paths and the (no-extras) catalog are swapped so the install is a trivial,
@@ -43,8 +42,12 @@ TOOLS_DIR = REPO_ROOT / "tools"
 # all execute for real.
 _DRIVER = """\
 import os, sys, pathlib
-sys.path.insert(0, os.environ["IP_TOOLS"])
-import install_picker as ip
+# The picker lives in the package now (ADR-0015). This driver runs inside a
+# throwaway venv where tapscribe is NOT installed, so point sys.path at the
+# source tree — importable without installing because tapscribe/__init__.py
+# has no imports and the picker is stdlib-only.
+sys.path.insert(0, os.environ["IP_SRC"])
+from tapscribe import install_picker as ip
 
 ip.REPO_ROOT = pathlib.Path(os.environ["IP_REPO"])
 ip.STATE_FILE = pathlib.Path(os.environ["IP_STATE"])
@@ -101,7 +104,7 @@ def sandbox(tmp_path):
     stamp = venv / ".tapscribe-install-stamp.json"
     env = {
         **os.environ,
-        "IP_TOOLS": str(TOOLS_DIR),
+        "IP_SRC": str(REPO_ROOT),
         "IP_REPO": str(tmp_path / "repo"),
         "IP_STATE": str(tmp_path / "state.json"),
         "IP_STAMP": str(stamp),

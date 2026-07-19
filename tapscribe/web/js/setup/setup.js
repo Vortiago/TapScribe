@@ -63,7 +63,33 @@ async function boot() {
     ? "Pick the model families to install. Everything runs locally; nothing leaves this machine."
     : "Add or change models. Already-installed families are marked; only new picks download.";
 
+  renderStaleSelection(state.stale_selection);
   buildCard(state.families);
+}
+
+/**
+ * Warn about families the install picker had to SKIP because their saved
+ * backend left the catalog (ADR-0015).
+ *
+ * The picker has always reported this on stderr, which a Bundle operator never
+ * sees — the Launcher pipes it to a log file. Without this banner an upgrade
+ * silently stops installing someone's models with nothing to point at. The
+ * remedy is re-picking below, which is exactly where they already are.
+ *
+ * @param {Array<Record<string, any>>|undefined} stale
+ */
+function renderStaleSelection(stale) {
+  const host = byId("stale");
+  if (!stale?.length) return; // static-render — nothing to show, leave it empty
+  const names = stale.map((s) => `${s.label || s.family} (${s.backend})`).join(", ");
+  host.append(
+    createAlertSync({
+      tone: "warn",
+      message:
+        `Not installed on the last run: ${names}. The saved backend is no longer ` +
+        `in this version's catalog, so the family was skipped. Re-pick it below.`,
+    }).el,
+  );
 }
 
 /** @param {Array<Record<string, any>>} families */
