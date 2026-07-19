@@ -118,6 +118,63 @@ def sidecar_paths(wav_path: Path) -> tuple[tuple[str, Path], ...]:
     )
 
 
+def _resolve_sidecar_paths(wav_path: Path) -> tuple[Path, ...]:
+    """Return all sidecar JSON paths that exist on disk for a WAV, in deterministic order.
+
+    Checks ``transcripts_dir(wav_path).is_dir()`` once — if it exists, returns
+    ``sorted(d.glob("*.json"))``; otherwise returns ``(legacy_path,)`` if the legacy
+    file exists, or ``()`` if neither layout has anything."""
+    d = transcripts_dir(wav_path)
+    if d.is_dir():
+        return tuple(sorted(d.glob("*.json")))
+    legacy = legacy_sidecar(wav_path)
+    return (legacy,) if legacy.is_file() else ()
+
+
+def _resolve_sidecars(
+    wav_path: Path,
+) -> tuple[list[CachedTranscription], list[Path], int]:
+    """Return ``(entries, paths, primary_index)`` for a WAV's sidecars.
+
+    * ``paths`` — surviving (parseable) paths from ``_resolve_sidecar_paths``,
+      in the same order.
+    * ``entries`` — parsed ``CachedTranscription`` for each surviving path,
+      aligned one-to-one with ``paths``.
+    * ``primary_index`` — index of the primary within *paths*/*entries*, or ``-1``
+      when the primary didn't survive parsing.
+
+    Primary is resolved over the **full** ``_resolve_sidecar_paths`` result
+    (parse-agnostic): new-layout calls ``_primary_filename`` on the full set;
+    legacy falls back to the single legacy path."""
+    raw_paths = _resolve_sidecar_paths(wav_path)
+    if not raw_paths:
+        return ([], [], -1)
+
+    # Resolve primary over the full raw_paths set.
+    d = transcripts_dir(wav_path)
+    primary_path: Path | None = None
+    if d.is_dir():
+        name = _primary_filename(d, list(raw_paths))
+        primary_path = d / name if name else None
+    else:
+        # Legacy-only: the single legacy path is the primary.
+        primary_path = raw_paths[0]
+
+    # Parse and filter: surviving entries in same order as raw_paths.
+    entries: list[CachedTranscription] = []
+    surviving_paths: list[Path] = []
+    primary_index = -1
+    for path in raw_paths:
+        entry = _read_entry(path)
+        if entry is not None:
+            entries.append(entry)
+            surviving_paths.append(path)
+            if primary_path is not None and path == primary_path:
+                primary_index = len(entries) - 1
+
+    return (entries, surviving_paths, primary_index)
+
+
 def cache_signature(wav_path: Path) -> tuple:
     """A cheap, stat-only signature of this WAV's cached transcripts, so the
     dashboard listing can memoise `read_primary_payload` / `cache_listing`
@@ -221,16 +278,8 @@ def read_primary_marker(wav_path: Path) -> dict[str, Any] | None:
 def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
     """Every cached transcript for `wav_path`, one per (backend, model).
     Unparseable sidecars are silently dropped. Order is unspecified."""
-    d = transcripts_dir(wav_path)
-    if d.is_dir():
-        out: list[CachedTranscription] = []
-        for entry in sorted(d.glob("*.json")):
-            cached = _read_entry(entry)
-            if cached is not None:
-                out.append(cached)
-        return out
-    legacy = _read_entry(legacy_sidecar(wav_path))
-    return [legacy] if legacy is not None else []
+    entries, _, _ = _resolve_sidecars(wav_path)
+    return entries
 
 
 def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
@@ -241,39 +290,19 @@ def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
     dashboard's set-primary needs it to resolve the file's directory, since a
     stripped clip lives in <session>/stripped/. Single-sidecar legacy WAVs
     return a one-element list with `is_primary=True`."""
-    d = transcripts_dir(wav_path)
-    if d.is_dir():
-        sidecars = sorted(d.glob("*.json"))
-        if not sidecars:
-            return []
-        primary = _primary_filename(d, sidecars)
-        out: list[dict[str, Any]] = []
-        for sidecar in sidecars:
-            entry = _read_entry(sidecar)
-            if entry is None:
-                continue
-            item: dict[str, Any] = {
-                "backend": entry.result.backend,
-                "model": entry.result.model,
-                "source": entry.source,
-                "is_primary": sidecar.name == primary,
-            }
-            if entry.transcribe_ms:
-                item["transcribe_ms"] = entry.transcribe_ms
-            out.append(item)
-        return out
-    legacy = _read_entry(legacy_sidecar(wav_path))
-    if legacy is None:
-        return []
-    item: dict[str, Any] = {
-        "backend": legacy.result.backend,
-        "model": legacy.result.model,
-        "source": legacy.source,
-        "is_primary": True,
-    }
-    if legacy.transcribe_ms:
-        item["transcribe_ms"] = legacy.transcribe_ms
-    return [item]
+    entries, _, primary_idx = _resolve_sidecars(wav_path)
+    out: list[dict[str, Any]] = []
+    for i, entry in enumerate(entries):
+        item: dict[str, Any] = {
+            "backend": entry.result.backend,
+            "model": entry.result.model,
+            "source": entry.source,
+            "is_primary": i == primary_idx,
+        }
+        if entry.transcribe_ms:
+            item["transcribe_ms"] = entry.transcribe_ms
+        out.append(item)
+    return out
 
 
 def set_primary_transcript(wav_path: Path, *, backend: str, model: str) -> None:
@@ -416,14 +445,10 @@ def _read_entry_for(wav_path: Path, *, backend: str, model: str) -> CachedTransc
     """Return the cached entry for this specific `(backend, model)`,
     or None. Looks first in the new-layout directory; falls back to the
     legacy `<wav>.json` only if its embedded backend+model match."""
-    d = transcripts_dir(wav_path)
-    if d.is_dir():
-        return _read_entry(d / f"{_entry_key(backend, model)}.json")
-    legacy = _read_entry(legacy_sidecar(wav_path))
-    if legacy is None:
-        return None
-    if legacy.result.backend == backend and legacy.result.model == model:
-        return legacy
+    entries, _, _ = _resolve_sidecars(wav_path)
+    for entry in entries:
+        if entry.result.backend == backend and entry.result.model == model:
+            return entry
     return None
 
 
@@ -432,12 +457,8 @@ def _primary_sidecar_path(wav_path: Path) -> Path | None:
     if no transcript is cached. Picks the new-layout primary when the
     `<wav>.transcripts/` directory exists, otherwise the legacy
     `<wav>.json`."""
-    d = transcripts_dir(wav_path)
-    if d.is_dir():
-        name = _primary_filename(d)
-        return d / name if name else None
-    legacy = legacy_sidecar(wav_path)
-    return legacy if legacy.is_file() else None
+    entries, paths, primary_idx = _resolve_sidecars(wav_path)
+    return paths[primary_idx] if primary_idx >= 0 else None
 
 
 def _primary_filename(transcripts_dir: Path, sidecars: list[Path] | None = None) -> str | None:
