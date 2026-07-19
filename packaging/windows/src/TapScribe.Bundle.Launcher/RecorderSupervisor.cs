@@ -34,6 +34,8 @@ internal sealed class RecorderSupervisor : IDisposable
     private readonly Action<RecorderState, string> _onState;
     private readonly Lock _gate = new();
     private Process? _recorder;
+    /// <summary>The preflight child while it runs, so Stop() can reach it too.</summary>
+    private Process? _preflight;
     private bool _stopping;
 
     public RecorderSupervisor(BundleLayout layout, JobObject? job, Action<string> log, Action<RecorderState, string> onState)
@@ -48,6 +50,23 @@ internal sealed class RecorderSupervisor : IDisposable
     public void Start() => Task.Run(Run);
 
     private void Run()
+    {
+        // Start() is fire-and-forget (Task.Run), so anything escaping here lands in an
+        // unobserved Task and vanishes: no Fail(), no log line, no state change, and a
+        // tray frozen on "Preparing TapScribe…" forever with no way to tell whether it
+        // is still working. The narrow filtered catches below handle what we expect;
+        // this outer one guarantees the operator hears about what we didn't.
+        try
+        {
+            RunCore();
+        }
+        catch (Exception error)
+        {
+            Fail($"TapScribe could not start: {error.Message}");
+        }
+    }
+
+    private void RunCore()
     {
         string wheel;
         try
@@ -69,6 +88,19 @@ internal sealed class RecorderSupervisor : IDisposable
         if (!RunPreflight(wheel))
             return;
 
+        // Preflight blocks on an unbounded pip install that can pull torch — minutes,
+        // gigabytes. If the operator hit Quit during it, Stop() already ran and found no
+        // Recorder to kill, so spawning one now would start a process nobody is left to
+        // reap. The JobObject usually covers it, but TryCreate returning null is an
+        // explicitly supported degraded path, and on THAT path the Recorder plus its
+        // WhisperLiveKit grandchild would be orphaned holding port 8001 — the exact leak
+        // this class exists to prevent.
+        lock (_gate)
+        {
+            if (_stopping)
+                return;
+        }
+
         StartRecorder(wheel);
     }
 
@@ -84,7 +116,26 @@ internal sealed class RecorderSupervisor : IDisposable
         try
         {
             using Process process = Spawn(command);
-            process.WaitForExit();
+            lock (_gate)
+            {
+                if (_stopping)
+                {
+                    // Quit landed between the check above and the spawn.
+                    process.Kill(entireProcessTree: true);
+                    return false;
+                }
+                _preflight = process;
+            }
+
+            try
+            {
+                process.WaitForExit();
+            }
+            finally
+            {
+                lock (_gate)
+                    _preflight = null;
+            }
             if (process.ExitCode != 0)
                 _log($"preflight exited {process.ExitCode} — continuing; some optional components may be missing.");
             return true;
@@ -144,11 +195,29 @@ internal sealed class RecorderSupervisor : IDisposable
     public void Stop()
     {
         Process? handle;
+        Process? preflight;
         lock (_gate)
         {
             _stopping = true;
             handle = _recorder;
             _recorder = null;
+            preflight = _preflight;
+        }
+
+        // Preflight is a long blocking pip install; killing it is what makes Quit feel
+        // immediate instead of "nothing happens for four minutes". Not disposed here —
+        // RunPreflight's own `using` owns it.
+        if (preflight is not null)
+        {
+            try
+            {
+                if (!preflight.HasExited)
+                    preflight.Kill(entireProcessTree: true);
+            }
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+            {
+                _log($"stop (preflight): {error.Message}");
+            }
         }
 
         if (handle is null)

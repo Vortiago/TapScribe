@@ -157,3 +157,31 @@ def test_bundle_wheel_reaches_every_pip_step(tmp_path):
     for step in pip_steps:
         assert "-e" not in step.argv
         assert any(str(wheel.resolve()) in a for a in step.argv), step.argv
+
+
+def test_llama_cpp_install_refuses_to_build_from_source():
+    """The prebuilt index is an EXTRA index, so pip resolves across it and PyPI and
+    picks the highest version — which, whenever PyPI is ahead of abetlen's wheel
+    index, is a source distribution.
+
+    That matters far more under a Bundle than it did under start.sh: a Bundle box
+    has, by construction, no cmake and no MSVC (the whole point of shipping an
+    embedded interpreter), so the build fails, the probe never goes green, and the
+    same multi-minute doomed compile repeats on EVERY launch with 'Local summarizer
+    needs the [summarize] extra' as the only symptom.
+
+    `--only-binary` is the fix rather than `--index-url`: that index carries ONLY
+    llama-cpp-python (numpy and the other deps 404 there), so making it the sole
+    index would break dependency resolution outright. Refusing the sdist instead
+    fails fast and legibly when no wheel matches.
+    """
+    steps = plan_steps(python="py", system="Linux", module_present=_present("silero_vad"))
+    argv = next(s for s in steps if s.name == "summarize").argv
+    assert "--only-binary" in argv
+    assert argv[argv.index("--only-binary") + 1] == "llama-cpp-python"
+
+
+def test_mlx_summarize_install_does_not_restrict_binaries():
+    """The restriction is a llama-cpp-python workaround; mlx_lm resolves normally."""
+    steps = plan_steps(python="py", system="Darwin", machine="arm64", module_present=_present("silero_vad"))
+    assert "--only-binary" not in next(s for s in steps if s.name == "summarize").argv

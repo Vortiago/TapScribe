@@ -27,10 +27,28 @@ internal sealed class LauncherContext : ApplicationContext
     private readonly JobObject? _job;
     private readonly RecorderSupervisor _supervisor;
 
+    /// <summary>
+    /// Captured on the UI thread in the ctor. This — NOT
+    /// <c>ContextMenuStrip.InvokeRequired</c> — is how supervisor callbacks get onto the
+    /// UI thread. A ContextMenuStrip is a parentless top-level ToolStripDropDown whose
+    /// handle is not created until it is first SHOWN, and WinForms' InvokeRequired
+    /// returns FALSE for a handle-less control with no marshalling parent. So every state
+    /// change before the operator's first right-click — Preflight, Running, and the
+    /// Failed/Stopped paths raised from Process.Exited — took the unmarshalled branch and
+    /// touched NotifyIcon/ToolStrip from a thread-pool thread. The balloon is a Bundle's
+    /// only error surface, so one that intermittently fails to appear reads as "the app
+    /// silently did nothing".
+    /// </summary>
+    private readonly SynchronizationContext _ui;
+
     public LauncherContext(BundleLayout layout)
     {
         _layout = layout;
         _log = new RotatingLogWriter(layout);
+        // WindowsFormsSynchronizationContext is installed by Application.Run's message
+        // loop; if this runs before that (or under a bare context) fall back to a plain
+        // one, which posts to the thread pool — no worse than the old behaviour.
+        _ui = SynchronizationContext.Current ?? new SynchronizationContext();
 
         // Created BEFORE anything is spawned: a process started by a process already in a
         // job lands in that job automatically, which is what makes the WhisperLiveKit
@@ -64,9 +82,9 @@ internal sealed class LauncherContext : ApplicationContext
     /// <summary>Marshal a supervisor state change onto the UI thread and render it.</summary>
     private void OnState(RecorderState state, string message)
     {
-        if (_icon.ContextMenuStrip is { } menu && menu.InvokeRequired)
+        if (SynchronizationContext.Current != _ui)
         {
-            menu.BeginInvoke(() => OnState(state, message));
+            _ui.Post(_ => OnState(state, message), null);
             return;
         }
 
@@ -143,12 +161,33 @@ internal sealed class LauncherContext : ApplicationContext
         ShellOpen(_log.Path);
     }
 
-    /// <summary>Hand a URL or a file to the shell's default handler.</summary>
+    /// <summary>
+    /// Hand a URL or a file to the shell's default handler, VIA EXPLORER.
+    ///
+    /// Not <c>UseShellExecute = true</c> directly: the Launcher self-assigns into a
+    /// <see cref="JobObject"/> with KILL_ON_JOB_CLOSE, and for an ordinary
+    /// <c>shell\open\command</c> verb ShellExecuteEx does its CreateProcess INSIDE the
+    /// calling process — so the browser or Notepad becomes our child and the kernel puts
+    /// it in the job, exactly as it does the WhisperLiveKit grandchild we actually want
+    /// reaped. Quitting from the tray then killed the operator's browser, or every
+    /// Notepad tab they had open (Win11 Notepad is single-process).
+    ///
+    /// Handing the target to <c>explorer.exe</c> sidesteps it: an explorer instance is
+    /// already running outside our job, the one we start forwards to it and exits
+    /// immediately, and the real application is spawned by THAT explorer — never a member
+    /// of our job. The job also now carries BREAKAWAY_OK (see JobObject) so the forwarding
+    /// stub itself can leave.
+    ///
+    /// Cost: explorer returns before the target opens, so a bad URL/handler no longer
+    /// surfaces as an exception here. Acceptable — the failure was already only advisory.
+    /// </summary>
     private void ShellOpen(string target)
     {
         try
         {
-            using (Process.Start(new ProcessStartInfo(target) { UseShellExecute = true })) { }
+            var info = new ProcessStartInfo("explorer.exe") { UseShellExecute = false, CreateNoWindow = true };
+            info.ArgumentList.Add(target);
+            using (Process.Start(info)) { }
         }
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or FileNotFoundException)
         {
