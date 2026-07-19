@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import wave
 from pathlib import Path
 
@@ -12,10 +13,12 @@ from wav_builders import seed_wav  # type: ignore[import-not-found]
 from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 from tapscribe.wav_cache import (
     CachedTranscription,
+    _read_entry,
     cache_listing,
     cached_transcribe,
     read_all_cached,
     read_cached,
+    read_primary_payload,
     set_primary_transcript,
 )
 
@@ -590,7 +593,7 @@ def test_primary_read_parses_at_most_the_primary_sidecar(tmp_path: Path, monkeyp
     HARM-layer pin the structural seam contract can't see: a future reroute of
     `_primary_sidecar_path` back through the parse-all `_resolve_sidecars`
     would re-parse every sibling here (3 / 4 instead of 0 / 1) and redden."""
-    import tapscribe.wav_cache as wc
+    wc = sys.modules[_read_entry.__module__]
 
     wav = seed_wav(tmp_path / "x.wav")
     for i in range(3):
@@ -604,7 +607,7 @@ def test_primary_read_parses_at_most_the_primary_sidecar(tmp_path: Path, monkeyp
     assert len(read_all_cached(wav)) == 3
 
     calls = {"n": 0}
-    real_read_entry = wc._read_entry
+    real_read_entry = _read_entry
 
     def counting(path):
         calls["n"] += 1
@@ -613,7 +616,7 @@ def test_primary_read_parses_at_most_the_primary_sidecar(tmp_path: Path, monkeyp
     monkeypatch.setattr(wc, "_read_entry", counting)
 
     calls["n"] = 0
-    payload = wc.read_primary_payload(wav)
+    payload = read_primary_payload(wav)
     assert isinstance(payload, dict)
     assert calls["n"] == 0, (
         "read_primary_payload must build no dataclass — parse-free resolve + one raw json.loads"
