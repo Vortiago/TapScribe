@@ -4,7 +4,7 @@
 // global). Not shipped — dev-only, the webServer for playwright.config.js.
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { join, normalize, extname, resolve } from "node:path";
+import { join, relative, isAbsolute, extname, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const PORT = Number(process.argv[2] || process.env.PORT || 8099);
@@ -18,10 +18,15 @@ const MIME = {
 
 createServer(async (req, res) => {
   try {
-    let path = decodeURIComponent((req.url || "/").split("?")[0]);
-    if (path === "/") path = "/popup.html";
-    const full = normalize(join(ROOT, path));
-    if (full !== ROOT && !full.startsWith(ROOT + "/")) {
+    let reqPath = decodeURIComponent((req.url || "/").split("?")[0]);
+    if (reqPath === "/") reqPath = "/popup.html";
+    // join() normalises, collapsing any decoded `..` segments; the served
+    // path is then contained iff its path RELATIVE to ROOT neither climbs out
+    // (leading `..`) nor is absolute (a different drive/root). Rejecting on
+    // that relative form is the traversal barrier CodeQL recognises.
+    const full = join(ROOT, reqPath);
+    const rel = relative(ROOT, full);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
       res.writeHead(403).end("forbidden");
       return;
     }

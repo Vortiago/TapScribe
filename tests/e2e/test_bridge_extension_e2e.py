@@ -143,6 +143,10 @@ class FakeTapServer:
                     if isinstance(msg, bytes):
                         conn.frames.append(msg)
             except websockets.exceptions.ConnectionClosed:
+                # The tap client closing ends this receive loop — the normal
+                # end-of-connection signal for a websockets server handler, not
+                # an error. The `finally` records the close; nothing is lost by
+                # swallowing it here.
                 pass
             finally:
                 conn.closed = True

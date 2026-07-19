@@ -1074,7 +1074,9 @@
     if (typeof err === "string" && err.indexOf("tap-ws-closed-") === 0) {
       return "WebSocket closed unexpectedly (" + err + "). Reconnecting…";
     }
-    return err || "";
+    // Reached only via updateIndicator's `if (firstError)` guard, so err is
+    // always a non-empty string here — no `|| ""` fallback needed.
+    return err;
   }
 
   function updateIndicator() {

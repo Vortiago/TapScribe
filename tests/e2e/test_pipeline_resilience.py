@@ -111,6 +111,11 @@ async def _stream_frames_then_abort(
         try:
             await ws.wait_closed()
         except Exception:
+            # We forcibly aborted the transport just above, so wait_closed() is
+            # only a best-effort join on an already-destroyed connection — the
+            # close handshake can't complete and any error it raises is an
+            # artefact of that deliberate abort, irrelevant to the test. Nothing
+            # is lost: the RST is what this helper set out to deliver.
             pass
     return sent
 
@@ -335,6 +340,10 @@ async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
                     break
                 await asyncio.sleep(0.005)
     except websockets.ConnectionClosed:
+        # The recorder is tearing down this tap mid-stream (the reconnect
+        # scenario under test); connect()/the context-manager exit can surface
+        # the close as ConnectionClosed. That IS the expected outcome here, so
+        # swallow it — the "exactly one WAV" assertion below is the real check.
         pass
 
     assert await wait_until(lambda: streams_drained(rec), timeout=3.0)

@@ -35,7 +35,7 @@ from tapscribe.recorder import Recorder
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
 from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explicit sys.path insertion picks up the project's tests/conftest.py
-    FakeAliveProc,  # noqa: F401 — re-exported: e2e files import it from .conftest (see test_dashboard_ui)
+    FakeAliveProc,  # re-exported via __all__: e2e files import it from .conftest (see test_dashboard_ui)
     FakeWlkThread,
     all_probe_modules,
     build_tap_recorder,
@@ -43,6 +43,11 @@ from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # explic
 )
 
 from .harness import RecorderServer
+
+# Public re-exports: sibling e2e modules do `from .conftest import <name>`.
+# Declaring them here marks the otherwise locally-unused `FakeAliveProc`
+# re-export as intentional API — for readers and for static analysis alike.
+__all__ = ["FakeAliveProc", "RunningRecorder"]
 
 
 @pytest.fixture(autouse=True)

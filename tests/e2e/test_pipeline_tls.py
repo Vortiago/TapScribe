@@ -167,19 +167,22 @@ async def test_tls_happy_path_wav_lands_and_api_state_reachable(
     disk and /api/state is reachable via https://. Closes the
     "TLS only in unit tests" gap.
 
-    Cert verification is disabled in the test client — production
-    operators with self-signed certs accept the browser prompt once;
-    here we model that by using a permissive SSL context.
+    The test client verifies against the fixture's self-signed cert,
+    pinned as the sole trust anchor — a real CERT_REQUIRED handshake,
+    modelling an operator who has trusted their self-signed cert. Only
+    hostname matching is relaxed (the cert's SAN is the bare "localhost"
+    dev name); the certificate chain itself is validated.
     """
     rec = tls_running_recorder.recorder
     wav_path = synth_speech_like_wav(tmp_path / "alice-tls.wav", seconds=0.5, freq_hz=220.0)
 
-    # Permissive SSL context — production self-signed deployments rely
-    # on the browser's "accept once" flow; tests model that by skipping
-    # verification entirely.
-    ssl_ctx = ssl.create_default_context()
+    # Trust the fixture's self-signed cert as the sole CA (it was generated
+    # into this same tmp_path by `tls_running_recorder`). This is a real
+    # CERT_REQUIRED handshake — the chain is validated — shared by both the
+    # wss:// and https:// clients below. Only hostname matching is relaxed,
+    # since the cert's SAN is the bare "localhost" dev name.
+    ssl_ctx = ssl.create_default_context(cafile=str(tmp_path / "test-cert.pem"))
     ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
 
     # Stream via wss:// — assert the URL scheme actually carries through
     # the harness's ws_base_url to catch a copy-paste regression where
@@ -205,11 +208,11 @@ async def test_tls_happy_path_wav_lands_and_api_state_reachable(
         assert w.getframerate() == SAMPLE_RATE
         assert w.getnframes() == len(frames) * 320
 
-    # /api/state over https:// — verify=False mirrors the wss:// path.
+    # /api/state over https:// — same cert-verified SSL context as wss://.
     async with httpx.AsyncClient(
         base_url=tls_running_recorder.base_url,
         timeout=5.0,
-        verify=False,
+        verify=ssl_ctx,
     ) as client:
         resp = await client.get("/api/state")
         assert resp.status_code == 200

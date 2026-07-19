@@ -50,6 +50,16 @@ class _SignalList(list):
         super().append(item)
         self._event.set()
 
+    def __eq__(self, other: object) -> bool:
+        # `_event` is a signalling side-channel, not part of the list's value:
+        # equality is deliberately by contents alone (plain list semantics), so
+        # tests can assert `signal_list == [expected, ...]`. Declared explicitly
+        # to document that the added attribute is excluded — behaviour is
+        # identical to the inherited list.__eq__ (py/missing-equals).
+        return list.__eq__(self, other)
+
+    __hash__ = None  # type: ignore[assignment]  # unhashable, exactly as a plain list is
+
     async def wait_count(self, n: int, *, timeout: float = 1.0) -> None:
         """Block until the list has at least `n` items, or raise TimeoutError."""
 
