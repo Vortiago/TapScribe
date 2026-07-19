@@ -1624,6 +1624,7 @@ async def api_bulk_reclaim_audio(req: Request, recorder: Recorder = Depends(get_
         older_than_days,
         execute=execute,
         exclude_sessions=frozenset(busy),
+        busy_check=recorder.jobs.get,
     )
     return {"ok": True, **result}
 

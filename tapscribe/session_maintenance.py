@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -431,6 +431,7 @@ def reclaim_audio_older_than(
     *,
     execute: bool = False,
     exclude_sessions: frozenset[str] = frozenset(),
+    busy_check: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
     """Walk the recordings archive and reclaim audio from sessions older than
     ``older_than_days`` days that also have a merged transcript.
@@ -443,6 +444,9 @@ def reclaim_audio_older_than(
         writing to them (``recorder.streams``); this recorder-free function
         can't see that state itself, so without the set a bulk reclaim could
         delete a session's WAVs out from under a running job/tap
+      * NOT busy at delete time (checked via ``busy_check`` when
+        ``execute=True``) — catches sessions that became busy *after* the
+        ``exclude_sessions`` snapshot was taken, closing the TOCTOU race
       * Has at least one ``*.wav`` file
       * Has a ``session-transcript.json`` (audio backed by a transcript)
       * Its latest WAV start timestamp is older than the cutoff
@@ -461,7 +465,13 @@ def reclaim_audio_older_than(
     fails (a locked ``stripped/`` dir, etc.) is collected into ``failed`` and
     the walk continues, so one bad session never aborts the whole bulk op or
     strands the operator in an unknown partial state (mirrors
-    ``prune_empty_sessions``).
+    ``prune_empty_sessions``.
+
+    ``busy_check`` — optional callable(session_name) -> JobState | None
+    consulted at delete time (only when ``execute=True``). When it returns
+    truthy (a session became busy *after* the ``exclude_sessions`` snapshot),
+    the session is silently skipped, closing the TOCTOU gap. When absent,
+    only the static ``exclude_sessions`` set is used.
 
     Returns ``{"sessions": [{"session": str, "bytes_freed": int}],
     "total_bytes": int, "failed": [{"session": str, "error": str}]}``.
@@ -502,6 +512,8 @@ def reclaim_audio_older_than(
         # Eligible. Both branches route through delete_session_audio so the
         # preview's byte total is the SAME walk an execute frees.
         if execute:
+            if callable(busy_check) and busy_check(sd.name):
+                continue
             try:
                 bytes_freed = delete_session_audio(sd.name)["bytes_freed"]
             except SessionDeleteError as e:
