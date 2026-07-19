@@ -80,7 +80,7 @@ async function boot() {
  */
 function renderStaleSelection(stale) {
   const host = byId("stale");
-  if (!stale?.length) return; // static-render — nothing to show, leave it empty
+  if (!stale?.length) return;
   const names = stale.map((s) => `${s.label || s.family} (${s.backend})`).join(", ");
   host.append(
     createAlertSync({
