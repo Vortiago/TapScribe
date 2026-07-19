@@ -53,14 +53,11 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from .live import (
-    GATE_THRESHOLD_DECIMALS,
     LiveChannel,
+    LiveChannelBase,
     LiveConfig,
     TailLog,
-    _changed_gate_knobs,
-    _transition_replacements,
 )
-from .speech_gate import effective_gate_config
 from .transcribers._moonshine_window import MoonshineWindow
 
 
@@ -337,7 +334,7 @@ def _initial_moonshine_info() -> dict[str, str]:
     }
 
 
-class MoonshineLiveChannel:
+class MoonshineLiveChannel(LiveChannelBase):
     """Concrete `LiveChannel` (Protocol) backed by Moonshine. No
     subprocess: `start()` loads the inference engine (MLX or ONNX-CPU,
     per `use_mlx`) and spins up a dedicated thread running the `/asr`
@@ -349,6 +346,13 @@ class MoonshineLiveChannel:
     """
 
     supports_native_vad: bool = False  # no built-in VAC — SpeechGate is the only gate
+    # English-only engine: `language` never forces a restart and `info`
+    # always reports "en" (the shared `LiveChannelBase` honours the
+    # `fixed_language` hook).
+    fixed_language: str | None = "en"
+    # No confidence-validation knob (that's a WhisperLiveKit feature), so
+    # `info["confidence_validation"]` stays "" ("not applicable").
+    supports_confidence_validation: bool = False
 
     def __init__(
         self,
@@ -403,127 +407,20 @@ class MoonshineLiveChannel:
         self.info["model"] = self.config.model
         # `info` reports what the engine actually DOES, not what the
         # carried config says: Moonshine is English-only regardless of
-        # config.language, and the reported gate_kind derives from the
-        # same `effective_gate_config` seam TapRelay builds the tap gate
-        # from, so report and behavior can't diverge. The config itself
-        # stays untouched so the operator's choices survive the roundtrip
-        # back to Whisper.
+        # config.language. (gate_kind is reported the same way, from the
+        # shared `_mirror_gate_info` below — via the `effective_gate_config`
+        # seam TapRelay builds the tap gate from, so report and behavior
+        # can't diverge.) The config itself stays untouched so the
+        # operator's choices survive the roundtrip back to Whisper.
         self.info["language"] = "en"
-        self.info["gate_kind"] = effective_gate_config(self, self.config).gate_kind
         self.info["host"] = self.config.host
         self.info["port"] = str(self.config.port)
         self.info["backend"] = "mlx-audio" if self.use_mlx else "moonshine-onnx"
         self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
         self._mirror_gate_info()
 
-    def _mirror_gate_info(self) -> None:
-        # Mirror the gate knobs the per-tap SpeechGate reads from config —
-        # the dashboard's sliders seed from these (same contract as
-        # WhisperLiveKitChannel._mirror_gate_info). Called from _seed_info
-        # and from apply_gate_knobs' no-restart path.
-        self.info["gate_speech_threshold"] = (
-            f"{self.config.gate_speech_threshold:.{GATE_THRESHOLD_DECIMALS}f}"
-        )
-        self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
-        self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
-        self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
-
     def running(self) -> bool:
         return self._loop is not None and self._thread is not None and self._thread.is_alive()
-
-    def matches(
-        self,
-        *,
-        model: str | None,
-        language: str | None,
-        gate_kind: str | None,
-        conf: bool | None,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> bool:
-        """Same "no requested field differs from current config" contract
-        `WhisperLiveKitChannel.matches` implements, with one deliberate
-        divergence: `language` never forces a restart, because `start()`
-        deliberately ignores it (English-only engine — restarting for a
-        language change would reload the engine and change nothing, PR
-        #334 finding #9). The four `gate_*` kwargs are Recorder-side per
-        #224 — accepted-but-IGNORED here, exactly like the WlK channel: a
-        differing knob does NOT force a restart; the route applies it via
-        `apply_gate_knobs` on the no-restart path (finding #8)."""
-        return (
-            self.running()
-            and (not model or model == self.config.model)
-            and (gate_kind is None or gate_kind == self.config.gate_kind)
-            and (conf is None or conf == self.config.confidence_validation)
-        )
-
-    def apply_gate_knobs(
-        self,
-        *,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> None:
-        """Apply Recorder-side gate-knob changes to config without a server
-        restart — the /asr server never reads these; every per-tap
-        SpeechGate is built from `live.config` at attach time (#224). Same
-        changed-only + display-precision semantics as
-        `WhisperLiveKitChannel.apply_gate_knobs` (the #238 guarantee) —
-        both go through the shared `live._changed_gate_knobs` diff."""
-        changed = _changed_gate_knobs(
-            self.config,
-            gate_speech_threshold=gate_speech_threshold,
-            gate_hangover_ms=gate_hangover_ms,
-            gate_pre_roll_ms=gate_pre_roll_ms,
-            gate_min_speech_ms=gate_min_speech_ms,
-        )
-        if changed:
-            self.config = replace(self.config, **changed)
-            self._mirror_gate_info()
-
-    def begin_transition(
-        self,
-        *,
-        model: str | None = None,
-        language: str | None = None,
-        gate_kind: str | None = None,
-        conf: bool | None = None,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> None:
-        """Same contract as `WhisperLiveKitChannel.begin_transition`:
-        write the supplied knobs into `config` so the imminent restart
-        (and every per-tap SpeechGate built from this config — PR #334
-        finding #8) picks them up, and flip `info` to "starting" so
-        dashboards polling mid-transition see the new selection. The
-        gate_kind allowlist + conf coercion live in the shared
-        `live._transition_replacements`."""
-        replacements = _transition_replacements(
-            gate_kind=gate_kind,
-            conf=conf,
-            gate_speech_threshold=gate_speech_threshold,
-            gate_hangover_ms=gate_hangover_ms,
-            gate_pre_roll_ms=gate_pre_roll_ms,
-            gate_min_speech_ms=gate_min_speech_ms,
-        )
-        if replacements:
-            self.config = replace(self.config, **replacements)
-        self.info["state"] = "starting"
-        self.info["last_error"] = ""
-        if model is not None:
-            self.info["model"] = model
-        # Moonshine is English-only regardless of what the operator's
-        # candidate-language set names; reflect that rather than the
-        # requested language, so the dashboard never implies a
-        # multilingual capability this engine doesn't have. The requested
-        # language is deliberately NOT written to config either — see
-        # `__init__`'s verbatim-carry rationale (finding #3).
-        self.info["language"] = "en"
 
     def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]:
         with self._lock:

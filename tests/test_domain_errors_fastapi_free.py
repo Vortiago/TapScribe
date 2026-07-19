@@ -46,13 +46,13 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from tapscribe import session_maintenance, session_merge, session_paths, sessions
+from tapscribe import live_control, session_maintenance, session_merge, session_paths, sessions
 
 # ---------------------------------------------------------------------------
 # 1. Completeness — every domain module is FastAPI-free.
 # ---------------------------------------------------------------------------
 
-_DOMAIN_MODULES = [session_paths, sessions, session_maintenance, session_merge]
+_DOMAIN_MODULES = [session_paths, sessions, session_maintenance, session_merge, live_control]
 
 
 def _references_httpexception(module) -> bool:
