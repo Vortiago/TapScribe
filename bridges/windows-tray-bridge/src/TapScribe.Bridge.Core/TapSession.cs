@@ -73,6 +73,7 @@ public sealed class TapSession : IAsyncDisposable
         // the seed then reads the reconciled current state.
         _capture.DataAvailable += OnData;
         _capture.MuteChanged += OnMuteChanged;
+        _capture.Failed += OnFailed;
         _muted = _capture.IsMuted; // seed from the device's current state before any frame
         try
         {
@@ -83,6 +84,7 @@ public sealed class TapSession : IAsyncDisposable
         {
             _capture.DataAvailable -= OnData;
             _capture.MuteChanged -= OnMuteChanged;
+            _capture.Failed -= OnFailed;
             throw;
         }
     }
@@ -200,6 +202,12 @@ public sealed class TapSession : IAsyncDisposable
             _current?.Enqueue(frame);
     }
 
+    private void OnFailed(object? sender, Exception? ex)
+    {
+        if (ex is not null)
+            _onFailed(ex);
+    }
+
     private void CloseUtterance()
     {
         lock (_lock)
@@ -218,6 +226,7 @@ public sealed class TapSession : IAsyncDisposable
     {
         _capture.DataAvailable -= OnData; // stop producing gate events
         _capture.MuteChanged -= OnMuteChanged;
+        _capture.Failed -= OnFailed;
 
         TapStream? current;
         List<Task> draining;
@@ -262,6 +271,7 @@ public sealed class TapSession : IAsyncDisposable
         // handler is a no-op.
         _capture.DataAvailable -= OnData;
         _capture.MuteChanged -= OnMuteChanged;
+        _capture.Failed -= OnFailed;
 
         List<Task> draining;
         lock (_lock)
