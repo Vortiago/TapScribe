@@ -580,3 +580,66 @@ def test_legacy_sidecar_still_serves_cache_hits_for_matching_backend_and_model(t
     stub = _StubByKey(backend="fake-backend", model="fake-model")
     cached_transcribe(wav, stub, initial_prompt=None, hotwords=None, hallucination_rules=[])
     assert stub.call_count == 0, "legacy sidecar must satisfy a cache hit"
+
+
+def test_primary_read_parses_at_most_the_primary_sidecar(tmp_path: Path, monkeypatch):
+    """Hot-path ceiling: resolving/streaming the primary must parse only the
+    primary sidecar, never every sibling. `read_primary_payload` bypasses the
+    dataclass build entirely (0 `_read_entry` calls — it streams the raw dict),
+    and `read_cached` parses exactly ONE sidecar (the primary). This is the
+    HARM-layer pin the structural seam contract can't see: a future reroute of
+    `_primary_sidecar_path` back through the parse-all `_resolve_sidecars`
+    would re-parse every sibling here (3 / 4 instead of 0 / 1) and redden."""
+    import tapscribe.wav_cache as wc
+
+    wav = seed_wav(tmp_path / "x.wav")
+    for i in range(3):
+        cached_transcribe(
+            wav,
+            _StubByKey(backend=f"backend-{i}", model=f"model-{i}"),
+            initial_prompt=None,
+            hotwords=None,
+            hallucination_rules=[],
+        )
+    assert len(read_all_cached(wav)) == 3
+
+    calls = {"n": 0}
+    real_read_entry = wc._read_entry
+
+    def counting(path):
+        calls["n"] += 1
+        return real_read_entry(path)
+
+    monkeypatch.setattr(wc, "_read_entry", counting)
+
+    calls["n"] = 0
+    payload = wc.read_primary_payload(wav)
+    assert isinstance(payload, dict)
+    assert calls["n"] == 0, (
+        "read_primary_payload must build no dataclass — parse-free resolve + one raw json.loads"
+    )
+
+    calls["n"] = 0
+    primary = read_cached(wav)
+    assert primary is not None
+    assert calls["n"] == 1, "read_cached must parse only the primary sidecar, not every sibling"
+
+
+def test_read_primary_payload_streams_incomplete_valid_json_primary(tmp_path: Path):
+    """A primary sidecar that is valid JSON but fails the dataclass build
+    (here: missing `device`/`transcriber`) must STILL stream its raw dict —
+    `read_primary_payload` bypasses the dataclass on purpose so an older- or
+    partially-written sidecar keeps showing on the dashboard. `read_cached`,
+    which builds the dataclass, returns None for the same input — the
+    documented asymmetry."""
+    from tapscribe.wav_cache import _PRIMARY_POINTER, read_primary_payload, transcripts_dir
+
+    wav = seed_wav(tmp_path / "x.wav")
+    d = transcripts_dir(wav)
+    d.mkdir(parents=True, exist_ok=True)
+    incomplete = {"backend": "b", "model": "m", "transcribed_at": "2026-05-01T00:00:00+00:00"}
+    (d / "b__m.json").write_text(json.dumps(incomplete), encoding="utf-8")
+    (d / _PRIMARY_POINTER).write_text("b__m", encoding="utf-8")
+
+    assert read_primary_payload(wav) == incomplete
+    assert read_cached(wav) is None
