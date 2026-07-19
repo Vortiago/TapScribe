@@ -27,7 +27,11 @@ by nature — whether the resulting seam is genuinely clean (vs merely present) 
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
+
+import pytest
+from wav_builders import seed_wav  # type: ignore[import-not-found]  # tests/ on sys.path
 
 import tapscribe.wav_cache as wav_cache
 
@@ -79,3 +83,61 @@ def test_public_readers_still_exist():
         n.name for n in ast.walk(_module_tree()) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert {"read_all_cached", "cache_listing"} <= defined
+
+
+# --- Harm-layer guards: the structural pins above force the consolidation but are
+# blind to what it costs. The cheap PRIMARY path (`read_primary_payload` /
+# `read_primary_marker`, on the once-per-second /api/state poll) must resolve the
+# primary via the `_primary` pointer WITHOUT parsing every sibling, and must stay
+# lenient about the primary's shape. Routing it through the parse-all seam ships green
+# past the behavior suite (a corrupt sibling is filtered, the valid primary still
+# returns) while regressing both — so pin the parse COUNT and the lenient case directly.
+
+
+def _seed_new_layout(wav: Path, keys: tuple[str, ...], primary: str) -> None:
+    """Write `keys` sidecars into `<wav>.transcripts/` (valid JSON, layout-blind
+    content) and point the `_primary` marker at `primary` — no transcriber needed."""
+    d = wav_cache.transcripts_dir(wav)
+    d.mkdir(parents=True, exist_ok=True)
+    for key in keys:
+        (d / f"{key}.json").write_text(
+            json.dumps({"backend": key, "model": key, "text": key}), encoding="utf-8"
+        )
+    (d / wav_cache._PRIMARY_POINTER).write_text(primary, encoding="utf-8")
+
+
+def test_primary_path_does_not_parse_every_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Hot-path parse-count ceiling: resolving the primary path parses AT MOST the
+    primary, never every sibling. RED if a reader is rebuilt on the parse-all seam
+    (3 siblings -> 3 parses); the pointer-based resolution parses zero."""
+    wav = seed_wav(tmp_path / "x.wav")
+    _seed_new_layout(wav, keys=("a", "b", "c"), primary="a")
+
+    calls = {"n": 0}
+    real_read_entry = wav_cache._read_entry
+    monkeypatch.setattr(
+        wav_cache,
+        "_read_entry",
+        lambda p: (calls.__setitem__("n", calls["n"] + 1), real_read_entry(p))[1],
+    )
+
+    assert wav_cache._primary_sidecar_path(wav) == wav_cache.transcripts_dir(wav) / "a.json"
+    assert calls["n"] <= 1, f"_primary_sidecar_path parsed {calls['n']} sidecars (should read the pointer)"
+
+    calls["n"] = 0
+    assert wav_cache.read_primary_payload(wav) is not None
+    assert calls["n"] <= 1, f"read_primary_payload parsed {calls['n']} sidecars"
+
+
+def test_read_primary_payload_streams_valid_json_the_dataclass_parse_rejects(tmp_path: Path):
+    """Lenient-input guard: `read_primary_payload` streams the raw primary dict for ANY
+    valid JSON — including a shape the strict dataclass parse (`_read_entry`) rejects.
+    Rebuilding it on the parse-all seam silently flips such a primary to None."""
+    wav = seed_wav(tmp_path / "x.wav")
+    incomplete = {"backend": "faster-whisper", "model": "tiny", "text": "partial"}
+    wav.with_suffix(".json").write_text(json.dumps(incomplete), encoding="utf-8")
+
+    # This shape is one the strict dataclass parse rejects (missing required fields)...
+    assert wav_cache._read_entry(wav.with_suffix(".json")) is None
+    # ...yet the raw-streaming primary reader must still surface it verbatim.
+    assert wav_cache.read_primary_payload(wav) == incomplete
