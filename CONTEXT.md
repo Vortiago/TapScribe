@@ -161,9 +161,29 @@ in the unsuffixed `LiveChannel` class) and `MoonshineLiveChannel`
 (see below, PRD #120) — the Recorder never touches the concrete class
 directly.
 
+Both concrete channels inherit **`LiveChannelBase`** (`live.py`): the
+shared transition surface — `matches` / `apply_gate_knobs` /
+`begin_transition` and the `info` gate-mirror — lives there ONCE, so the
+two engines no longer copy it byte-for-byte (and Moonshine no longer
+reaches across the module boundary for `live.py` privates). The only
+per-engine divergences are two capability flags: `fixed_language`
+(Moonshine `"en"`; `None` = multilingual — a language change never forces
+a restart and `info` reports that fixed language) and
+`supports_confidence_validation` (Moonshine `False` —
+`info` reports that field as `""` rather than a misleading on/off, keeping
+its `/api/state` payload unchanged, AND `matches` ignores a `conf` change
+so it never forces a restart the engine wouldn't honour). Engine
+construction and `running` /
+`start` / `stop` stay in the subclass; `supports_native_vad` (already
+per-engine) rides alongside. The `LiveChannel` Protocol remains the seam
+the Recorder types against (ADR-0003); the base is one implementation of
+it, and a from-scratch implementer is still free to satisfy the Protocol
+directly.
+
 A follow-up PR will add `ParakeetLiveChannel` (rolling-chunk
 pseudo-streaming on `parakeet-mlx` / `transformers`) without touching
-the Recorder. That's the whole point of the seam.
+the Recorder. That's the whole point of the seam — it inherits the base
+for the shared surface, or implements the Protocol directly.
 
 The dashboard's live-channel picker reads `/api/models?context=live`,
 which excludes Parakeet and Voxtral (both batch-only — `build_live_cmd`
@@ -212,13 +232,48 @@ own `SpeechGate` is always the gate — a carried-forward
 construction, never persisted into the operator's config).
 Picking a Moonshine model swaps which concrete `LiveChannel`
 `recorder.live` holds (`moonshine_live.resolve_live_channel_for_model`,
-applied by both `/api/live/start` and the `AUTO_START_LIVE` boot path)
+driven through the `live_control` reconcile seam that both
+`/api/live/start` and the `AUTO_START_LIVE` boot path share — see below)
 — the Recorder's own construction still always starts with
 `WhisperLiveKitChannel`. The forward plan for Moonshine v2 "Voice"
 (true incremental streaming) lives in PRD #120's Further Notes:
 additive `ModelEntry` rows + a streaming channel variant when an MLX
 port exists; the `LiveChannel` seam and the `/asr` snapshot contract
 don't change.
+
+### Live reconcile — the `live_control` seam
+
+`/api/live/start` and the boot auto-start don't drive the channel
+directly; both go through the FastAPI-free reconcile seam in
+`tapscribe/live_control.py` so the swap-and-restart sequence lives in one
+place instead of each re-deriving it:
+
+- `plan_live(current, desired, *, use_mlx) -> LivePlan` is **pure**. It
+  resolves the family swap (`resolve_live_channel_for_model`, run
+  **unconditionally** — a persisted Moonshine default needs a swap even
+  though `config.model` is unchanged, #259), validates the request (a
+  *changed* model against the catalog allowlist; `gate_kind` against the
+  **target** channel's `supports_native_vad`), and decides no-op /
+  gate-knob-only / restart. It raises a `LiveReconcileError`
+  (`LiveModelUnknown` / `GateKindUnsupported` → 400, `LiveStartFailed` →
+  500, all registered in `app._DOMAIN_ERROR_STATUS`) **before touching
+  anything**, so a rejected request leaves a running channel exactly as
+  it was (#334 — the invariant is now structural, not ordering
+  discipline in the route).
+- `apply_live(current, plan, *, set_live)` runs the side effects (stop
+  the old engine on a swap → `set_live(target)` → announce → restart),
+  preserving the double-`begin_transition` around the teardown so
+  `/api/state` stays on "starting" through the multi-second reload. It's
+  offloaded to a worker thread.
+
+The route parses the body into a `DesiredLiveState` (the parse-once test
+surface) and is a thin shim; `set_live` keeps the slot owner
+(route/lifespan) in control of `recorder.live`, so the ~38 other
+`recorder.live` read sites are untouched. `plan_live` is unit-tested in
+`tests/test_live_control.py` with no subprocess, engine, or TestClient.
+This completes ADR-0003's `LiveChannel` seam — see ADR-0014 for why the
+reconcile is free functions on the slot rather than a `LiveController`
+object.
 
 ## SpeechGate · gate_kind
 

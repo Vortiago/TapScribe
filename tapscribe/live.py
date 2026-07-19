@@ -118,9 +118,12 @@ def resolve_live_init_prompt() -> str | None:
 class LiveChannel(Protocol):
     """The interface every live-transcription engine satisfies.
 
-    Concrete implementations today: `WhisperLiveKitChannel`. The
-    Recorder consumes this Protocol (not the concrete class) so a
-    future `ParakeetLiveChannel` slots in as a drop-in.
+    Concrete implementations: `WhisperLiveKitChannel` (this module) and
+    `MoonshineLiveChannel` (`moonshine_live.py`), both inheriting the
+    shared transition machinery from `LiveChannelBase`. The Recorder
+    consumes this Protocol (not a concrete class) so a future
+    `ParakeetLiveChannel` slots in as a drop-in — inheriting the base for
+    the shared surface, or implementing the Protocol directly.
 
     Attributes the dashboard reads via `/api/state`:
       * `info`  — dict mirrored into the response payload
@@ -151,6 +154,14 @@ class LiveChannel(Protocol):
         language: str | None,
         gate_kind: str | None,
         conf: bool | None,
+        # Recorder-side gate knobs (#224): accepted-but-ignored by every
+        # implementation — a differing knob never forces a restart. Declared
+        # here so the Protocol signature matches what callers actually pass
+        # (`@runtime_checkable` only checks method names, not signatures).
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
     ) -> bool: ...
 
     def begin_transition(
@@ -558,7 +569,190 @@ def _transition_replacements(
     return replacements
 
 
-class WhisperLiveKitChannel:
+class LiveChannelBase:
+    """Shared implementation for every concrete `LiveChannel`.
+
+    Owns the parts identical across engines: the frozen-`config` swap
+    logic (`matches` / `apply_gate_knobs` / `begin_transition`) and the
+    `info` gate-mirror. The engine-specific lifecycle — construction and
+    `running` / `start` / `stop` — stays in the subclass. Two capability
+    flags express the only real divergences between engines:
+
+      * `fixed_language` — the engine transcribes exactly one language
+        regardless of the requested one (Moonshine: `"en"`; `None` =
+        multilingual). A language change never forces a restart
+        (`matches`), and `info` reports the fixed language
+        (`begin_transition`).
+      * `supports_confidence_validation` — the engine has a confidence-
+        validation knob (WhisperLiveKit's `--confidence-validation`). When
+        False (Moonshine): `info` reports `confidence_validation` as ""
+        ("not applicable") rather than a misleading on/off (keeping the
+        `/api/state` payload byte-identical to the pre-base engine), AND
+        `matches` ignores a `conf` change so it never forces a restart the
+        engine wouldn't honour.
+
+    `supports_native_vad` is deliberately NOT declared here: its
+    safe-in-absence default is `False` (build a gate) — the OPPOSITE of
+    Whisper's `True` — so it stays a required per-subclass declaration (and a
+    `LiveChannel` Protocol field, since `plan_live` reads it externally).
+
+    Subclasses MUST set `config`, `info`, and `log` in their own
+    `__init__` before any gate mirror runs (see `_mirror_gate_info`).
+    """
+
+    # Divergence hooks — overridden per engine (see the class docstring).
+    fixed_language: str | None = None
+    supports_confidence_validation: bool = True
+
+    # Set by the subclass constructor; declared here for readers/type-checkers.
+    config: LiveConfig
+    info: dict[str, str]
+    log: deque[str]
+
+    def running(self) -> bool:  # pragma: no cover - subclass owns the lifecycle
+        raise NotImplementedError
+
+    def start(  # pragma: no cover - subclass owns the lifecycle
+        self, *, model: str | None = None, language: str | None = None
+    ) -> tuple[bool, str]:
+        raise NotImplementedError
+
+    def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]:  # pragma: no cover
+        raise NotImplementedError
+
+    def _mirror_gate_info(self) -> None:
+        """Push the current `config`'s gate + confidence fields into `info`.
+        Called from the subclass seed (boot) and `start()` (after a
+        config-swap) so the dashboard never reads a stale value.
+
+        `gate_kind` is derived through the same `effective_gate_config`
+        seam TapRelay builds tap gates from, so a no-native-VAD engine
+        can't report "backend" while the tap actually runs the tapscribe
+        gate. `confidence_validation` is mirrored only when the engine
+        has that knob (`supports_confidence_validation`)."""
+        self.info["gate_kind"] = effective_gate_config(self, self.config).gate_kind
+        self.info["gate_speech_threshold"] = (
+            f"{self.config.gate_speech_threshold:.{GATE_THRESHOLD_DECIMALS}f}"
+        )
+        self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
+        self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
+        self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
+        if self.supports_confidence_validation:
+            self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
+
+    def apply_gate_knobs(
+        self,
+        *,
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
+    ) -> None:
+        """Apply Recorder-side gate-knob changes to config without announcing a
+        (re)start. Replaces only the non-None gate knobs on `self.config` and
+        mirrors the updated gate info into `info`, leaving `info["state"]`,
+        `info["last_error"]`, `info["model"]`, and `info["language"]` untouched.
+        Used on the no-restart path in `live_control.apply_live`. The changed-
+        only diff (and its #238 display-precision compare) lives in
+        `_changed_gate_knobs`."""
+        changed = _changed_gate_knobs(
+            self.config,
+            gate_speech_threshold=gate_speech_threshold,
+            gate_hangover_ms=gate_hangover_ms,
+            gate_pre_roll_ms=gate_pre_roll_ms,
+            gate_min_speech_ms=gate_min_speech_ms,
+        )
+        if changed:
+            self.config = replace(self.config, **changed)
+            self._mirror_gate_info()
+
+    def matches(
+        self,
+        *,
+        model: str | None,
+        language: str | None,
+        gate_kind: str | None,
+        conf: bool | None,
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
+    ) -> bool:
+        """True when a running engine already satisfies the requested config.
+
+        Compares only the engine-side config — model / language / gate_kind /
+        conf: an explicitly-supplied value that differs returns False (the
+        caller then restarts). `model`/`language` treat "" as "no override";
+        `gate_kind`/`conf` compare only when non-None. An engine with a
+        `fixed_language` (Moonshine) skips the `language` clause, and an engine
+        without `supports_confidence_validation` (Moonshine) skips the `conf`
+        clause — in both cases the requested value can't change what the engine
+        does, so it never forces a restart (PR #334 finding #9).
+
+        The four `gate_*` kwargs are Recorder-side per #224 (they configure the
+        per-tap SpeechGate, NOT the engine) and are accepted-but-IGNORED here: a
+        differing gate knob does NOT force a restart — it is applied via
+        `apply_gate_knobs` on the no-restart path. Pinned by
+        `test_matches_ignores_gate_knob_differences`."""
+        if not self.running():
+            return False
+        if model and model != self.config.model:
+            return False
+        if self.fixed_language is None and language and language != self.config.language:
+            return False
+        if gate_kind is not None and gate_kind != self.config.gate_kind:
+            return False
+        if (
+            self.supports_confidence_validation
+            and conf is not None
+            and conf != self.config.confidence_validation
+        ):
+            return False
+        return True
+
+    def begin_transition(
+        self,
+        *,
+        model: str | None = None,
+        language: str | None = None,
+        gate_kind: str | None = None,
+        conf: bool | None = None,
+        gate_speech_threshold: float | None = None,
+        gate_hangover_ms: int | None = None,
+        gate_pre_roll_ms: int | None = None,
+        gate_min_speech_ms: int | None = None,
+    ) -> None:
+        """Announce that a (re)start with the supplied overrides is about to
+        happen. Replaces `config` for the supplied knobs so the next `start()`
+        picks them up, and flips `info` to `state="starting"` with the new
+        model/language reflected — so dashboards polling /api/state during the
+        stop→start window don't see the previous selection. `start()`
+        overwrites `state` again on success; this method makes the transition
+        itself observable. An engine with a `fixed_language` always reports
+        that language regardless of the requested one (Moonshine `"en"`, PR
+        #334 finding #3 — `config.language` is carried verbatim, never
+        rewritten here)."""
+        replacements = _transition_replacements(
+            gate_kind=gate_kind,
+            conf=conf,
+            gate_speech_threshold=gate_speech_threshold,
+            gate_hangover_ms=gate_hangover_ms,
+            gate_pre_roll_ms=gate_pre_roll_ms,
+            gate_min_speech_ms=gate_min_speech_ms,
+        )
+        if replacements:
+            self.config = replace(self.config, **replacements)
+        self.info["state"] = "starting"
+        self.info["last_error"] = ""
+        if model is not None:
+            self.info["model"] = model
+        if self.fixed_language is not None:
+            self.info["language"] = self.fixed_language
+        elif language is not None:
+            self.info["language"] = language
+
+
+class WhisperLiveKitChannel(LiveChannelBase):
     """Owns one supervised whisperlivekit-server child process.
     Concrete `LiveChannel` (Protocol) implementation backing the existing
     `whisperlivekit-server` integration.
@@ -598,124 +792,10 @@ class WhisperLiveKitChannel:
         # the right values before the first start().
         self._mirror_gate_info()
 
-    def _mirror_gate_info(self) -> None:
-        """Push the current `config`'s gate + confidence fields into
-        `info`. Called from `__init__` (boot) and `start()` (after a
-        config-swap) so the dashboard never reads a stale value."""
-        # Derived through the same seam TapRelay builds tap gates from
-        # (identity for this channel — it HAS native VAD — but every
-        # LiveChannel reporting through the one helper means a future
-        # no-native-VAD channel can't report "backend" while the tap
-        # actually runs the tapscribe gate).
-        self.info["gate_kind"] = effective_gate_config(self, self.config).gate_kind
-        self.info["gate_speech_threshold"] = (
-            f"{self.config.gate_speech_threshold:.{GATE_THRESHOLD_DECIMALS}f}"
-        )
-        self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
-        self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
-        self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
-        self.info["confidence_validation"] = "on" if self.config.confidence_validation else "off"
-
-    def apply_gate_knobs(
-        self,
-        *,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> None:
-        """Apply Recorder-side gate-knob changes to config without announcing a
-        child transition. Replaces only the non-None gate knobs on `self.config`
-        and mirrors the updated gate info into `info`. Leaves `info["state"]`,
-        `info["last_error"]`, `info["model"]`, and `info["language"]` untouched —
-        the child process is not affected by these knobs. Used on the no-restart
-        path in `api_live_start` when only gate knobs changed. The changed-only
-        diff (and its #238 display-precision compare) lives in
-        `_changed_gate_knobs`, shared with `MoonshineLiveChannel`."""
-        changed = _changed_gate_knobs(
-            self.config,
-            gate_speech_threshold=gate_speech_threshold,
-            gate_hangover_ms=gate_hangover_ms,
-            gate_pre_roll_ms=gate_pre_roll_ms,
-            gate_min_speech_ms=gate_min_speech_ms,
-        )
-        if changed:
-            self.config = replace(self.config, **changed)
-            self._mirror_gate_info()
-
     supports_native_vad: bool = True  # --vac / --no-vac flag exists
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
-
-    def matches(
-        self,
-        *,
-        model: str | None,
-        language: str | None,
-        gate_kind: str | None,
-        conf: bool | None,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> bool:
-        """True when a running child already satisfies the requested config.
-
-        Compares only the CHILD-side config — model / language / gate_kind /
-        conf: an explicitly-supplied value that differs from the current config
-        returns False (the caller then restarts). `model`/`language` treat "" as
-        "no override"; `gate_kind`/`conf` compare only when non-None.
-
-        The four `gate_*` kwargs are Recorder-side per #224 (they configure the
-        per-tap SpeechGate, NOT the supervised child) and are accepted-but-
-        IGNORED here for backward-compat: a differing gate knob does NOT force a
-        restart — it is applied via `apply_gate_knobs` on the no-restart path.
-        Pinned by `test_matches_ignores_gate_knob_differences`."""
-        return (
-            self.running()
-            and (not model or model == self.config.model)
-            and (not language or language == self.config.language)
-            and (gate_kind is None or gate_kind == self.config.gate_kind)
-            and (conf is None or conf == self.config.confidence_validation)
-        )
-
-    def begin_transition(
-        self,
-        *,
-        model: str | None = None,
-        language: str | None = None,
-        gate_kind: str | None = None,
-        conf: bool | None = None,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> None:
-        """Announce that a (re)start with the supplied overrides is about
-        to happen. Replaces `config` for the supplied knobs so the next
-        `start()` spawns with the new values, and flips `info` to
-        `state="starting"` with the new model/language reflected — so
-        dashboards polling /api/state during the stop→start window don't
-        see the previous selection. `start()` will overwrite `state`
-        again on success; this method ensures the transition itself is
-        observable."""
-        replacements = _transition_replacements(
-            gate_kind=gate_kind,
-            conf=conf,
-            gate_speech_threshold=gate_speech_threshold,
-            gate_hangover_ms=gate_hangover_ms,
-            gate_pre_roll_ms=gate_pre_roll_ms,
-            gate_min_speech_ms=gate_min_speech_ms,
-        )
-        if replacements:
-            self.config = replace(self.config, **replacements)
-        self.info["state"] = "starting"
-        self.info["last_error"] = ""
-        if model is not None:
-            self.info["model"] = model
-        if language is not None:
-            self.info["language"] = language
 
     def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]:
         """Spawn whisperlivekit-server with the current (optionally overridden)
