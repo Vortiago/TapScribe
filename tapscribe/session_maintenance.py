@@ -444,9 +444,7 @@ def reclaim_audio_older_than(
         writing to them (``recorder.streams``); this recorder-free function
         can't see that state itself, so without the set a bulk reclaim could
         delete a session's WAVs out from under a running job/tap
-      * NOT busy at delete time (checked via ``busy_check`` when
-        ``execute=True``) — catches sessions that became busy *after* the
-        ``exclude_sessions`` snapshot was taken, closing the TOCTOU race
+      * NOT busy at delete time (see the ``busy_check`` note below)
       * Has at least one ``*.wav`` file
       * Has a ``session-transcript.json`` (audio backed by a transcript)
       * Its latest WAV start timestamp is older than the cutoff
@@ -465,7 +463,7 @@ def reclaim_audio_older_than(
     fails (a locked ``stripped/`` dir, etc.) is collected into ``failed`` and
     the walk continues, so one bad session never aborts the whole bulk op or
     strands the operator in an unknown partial state (mirrors
-    ``prune_empty_sessions``.
+    ``prune_empty_sessions``).
 
     ``busy_check`` — optional callable(session_name) -> JobState | None
     consulted at delete time (only when ``execute=True``). When it returns
@@ -512,7 +510,7 @@ def reclaim_audio_older_than(
         # Eligible. Both branches route through delete_session_audio so the
         # preview's byte total is the SAME walk an execute frees.
         if execute:
-            if callable(busy_check) and busy_check(sd.name):
+            if busy_check is not None and busy_check(sd.name):
                 continue
             try:
                 bytes_freed = delete_session_audio(sd.name)["bytes_freed"]
