@@ -83,14 +83,14 @@ internal sealed class RotatingLogWriter : IDisposable
         {
             _writer?.Dispose();
             _writer = null;
-            File.Move(_path, System.IO.Path.Combine(_directory, plan.ArchiveName));
+            File.Move(_path, System.IO.Path.Join(_directory, plan.ArchiveName));
         }
 
         foreach (string name in plan.Delete)
         {
             try
             {
-                File.Delete(System.IO.Path.Combine(_directory, name));
+                File.Delete(System.IO.Path.Join(_directory, name));
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {

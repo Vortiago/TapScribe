@@ -26,7 +26,10 @@ public sealed class BundleLayoutException : Exception
 /// </list>
 ///
 /// Path construction only — the sole disk access is <see cref="ResolveWheel"/>, which
-/// has to look at what actually shipped. Everything uses <see cref="Path.Combine"/>
+/// has to look at what actually shipped. Everything uses <see cref="Path.Join"/>
+/// rather than <c>Path.Combine</c>: Combine silently DISCARDS everything before a
+/// rooted later argument, which turns a bad input into a plausible-looking path
+/// somewhere else on disk instead of an error. Join just concatenates.
 /// rather than literal separators, which is what lets the Core stay cross-platform and
 /// be tested on the Linux CI leg.
 /// </summary>
@@ -66,7 +69,7 @@ public sealed record BundleLayout
     /// <summary>What <c>TAPSCRIBE_BASE_DIR</c> is set to.</summary>
     public string DataDirectory { get; }
 
-    public string PythonDirectory => Path.Combine(ProgramDirectory, PythonFolder);
+    public string PythonDirectory => Path.Join(ProgramDirectory, PythonFolder);
 
     /// <summary>
     /// Console interpreter — used for blocking, logged steps like preflight.
@@ -77,18 +80,18 @@ public sealed record BundleLayout
     /// <c>Scripts\python.exe</c>. (<c>Scripts\</c> exists, but holds console-script entry
     /// points like <c>pip.exe</c> and <c>whisperlivekit-server.exe</c>.)
     /// </summary>
-    public string Python => Path.Combine(PythonDirectory, "python.exe");
+    public string Python => Path.Join(PythonDirectory, "python.exe");
 
     /// <summary>Windowless interpreter — used for the long-lived Recorder so no console flashes.</summary>
-    public string Pythonw => Path.Combine(PythonDirectory, "pythonw.exe");
+    public string Pythonw => Path.Join(PythonDirectory, "pythonw.exe");
 
-    public string WheelDirectory => Path.Combine(ProgramDirectory, WheelFolder);
+    public string WheelDirectory => Path.Join(ProgramDirectory, WheelFolder);
 
-    public string PasswordFile => Path.Combine(DataDirectory, PasswordFileName);
+    public string PasswordFile => Path.Join(DataDirectory, PasswordFileName);
 
-    public string LogDirectory => Path.Combine(DataDirectory, LogFolder);
+    public string LogDirectory => Path.Join(DataDirectory, LogFolder);
 
-    public string LogFile => Path.Combine(LogDirectory, LogFileName);
+    public string LogFile => Path.Join(LogDirectory, LogFileName);
 
     /// <summary>
     /// Resolve the layout from the Launcher's own directory and the user profile.
@@ -102,7 +105,7 @@ public sealed record BundleLayout
 
         return new BundleLayout(
             Path.GetFullPath(programDirectory),
-            Path.GetFullPath(Path.Combine(userProfileDirectory, DataFolder)));
+            Path.GetFullPath(Path.Join(userProfileDirectory, DataFolder)));
     }
 
     /// <summary>

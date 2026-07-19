@@ -50,7 +50,7 @@ public class PasswordFileTests
     [Fact]
     public void Read_ReturnsMissing_WhenTheRecorderHasNotStartedYet()
     {
-        string path = Path.Combine(Path.GetTempPath(), "tapscribe-missing-" + Guid.NewGuid().ToString("n"));
+        string path = Path.Join(Path.GetTempPath(), "tapscribe-missing-" + Guid.NewGuid().ToString("n"));
 
         PasswordLookup result = PasswordFile.Read(path);
 
@@ -85,7 +85,7 @@ public class PasswordFileTests
     {
         // Stands in for the whole class of IO failures (locked file, ACL, bad path):
         // the menu handler must never see an exception.
-        string dir = Path.Combine(Path.GetTempPath(), "tapscribe-dir-" + Guid.NewGuid().ToString("n"));
+        string dir = Path.Join(Path.GetTempPath(), "tapscribe-dir-" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(dir);
         try
         {
@@ -116,7 +116,7 @@ public class PasswordFileTests
 
         public TempFile(string contents)
         {
-            Path = System.IO.Path.Combine(
+            Path = System.IO.Path.Join(
                 System.IO.Path.GetTempPath(), "tapscribe-pw-" + Guid.NewGuid().ToString("n"));
             File.WriteAllText(Path, contents);
         }

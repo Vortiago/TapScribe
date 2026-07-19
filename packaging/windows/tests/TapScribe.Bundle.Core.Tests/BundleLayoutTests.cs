@@ -8,7 +8,7 @@ namespace TapScribe.Bundle.Core.Tests;
 /// and a SEPARATE data dir (%USERPROFILE%\TapScribe) so uninstalling the program can
 /// never delete someone's meeting recordings.
 ///
-/// Path assertions are written with <see cref="Path.Combine"/> rather than literal
+/// Path assertions are written with <see cref="Path.Join"/> rather than literal
 /// backslashes: the layout is Windows-shaped at runtime but the Core is cross-platform
 /// and these tests run on the Linux CI leg, where the separator is '/'.
 /// </summary>
@@ -26,10 +26,10 @@ public class BundleLayoutTests
         // python-build-standalone install_only distribution and pip-installs into it
         // directly (release.yml stages staging/python/python.exe) — there is no venv, so
         // there is no Scripts\python.exe to run.
-        Assert.Equal(Path.Combine("/opt/prog", "python"), layout.PythonDirectory);
-        Assert.Equal(Path.Combine("/opt/prog", "python", "python.exe"), layout.Python);
-        Assert.Equal(Path.Combine("/opt/prog", "python", "pythonw.exe"), layout.Pythonw);
-        Assert.Equal(Path.Combine("/opt/prog", "wheel"), layout.WheelDirectory);
+        Assert.Equal(Path.Join("/opt/prog", "python"), layout.PythonDirectory);
+        Assert.Equal(Path.Join("/opt/prog", "python", "python.exe"), layout.Python);
+        Assert.Equal(Path.Join("/opt/prog", "python", "pythonw.exe"), layout.Pythonw);
+        Assert.Equal(Path.Join("/opt/prog", "wheel"), layout.WheelDirectory);
     }
 
     [Fact]
@@ -39,7 +39,7 @@ public class BundleLayoutTests
 
         // %USERPROFILE%\TapScribe — never under the program dir (ADR-0015: an
         // uninstall must not be able to delete recordings).
-        Assert.Equal(Path.Combine("/home/op", "TapScribe"), layout.DataDirectory);
+        Assert.Equal(Path.Join("/home/op", "TapScribe"), layout.DataDirectory);
         Assert.DoesNotContain(layout.ProgramDirectory, layout.DataDirectory, StringComparison.Ordinal);
     }
 
@@ -48,7 +48,7 @@ public class BundleLayoutTests
     {
         // config.AUTH_PASSWORD_FILE is BASE_DIR / ".auth-password", and the Launcher
         // sets TAPSCRIBE_BASE_DIR to the data dir — so the two must agree.
-        Assert.Equal(Path.Combine("/home/op", "TapScribe", ".auth-password"), Layout().PasswordFile);
+        Assert.Equal(Path.Join("/home/op", "TapScribe", ".auth-password"), Layout().PasswordFile);
     }
 
     [Fact]
@@ -56,8 +56,8 @@ public class BundleLayoutTests
     {
         BundleLayout layout = Layout();
 
-        Assert.Equal(Path.Combine("/home/op", "TapScribe", "logs"), layout.LogDirectory);
-        Assert.Equal(Path.Combine(layout.LogDirectory, BundleLayout.LogFileName), layout.LogFile);
+        Assert.Equal(Path.Join("/home/op", "TapScribe", "logs"), layout.LogDirectory);
+        Assert.Equal(Path.Join(layout.LogDirectory, BundleLayout.LogFileName), layout.LogFile);
     }
 
     [Fact]
@@ -105,7 +105,7 @@ public class BundleLayoutTests
         using var dir = new TempDir();
         BundleLayout layout = dir.Layout();
         string wheel = dir.Wheel("tapscribe-1.0.0-py3-none-any.whl");
-        File.WriteAllText(Path.Combine(layout.WheelDirectory, "README.txt"), "not a wheel");
+        File.WriteAllText(Path.Join(layout.WheelDirectory, "README.txt"), "not a wheel");
 
         Assert.Equal(wheel, layout.ResolveWheel());
     }
@@ -152,17 +152,17 @@ public class BundleLayoutTests
     /// <summary>A throwaway program dir with a matching data dir, cleaned up on dispose.</summary>
     private sealed class TempDir : IDisposable
     {
-        private readonly string _root = Path.Combine(
+        private readonly string _root = Path.Join(
             Path.GetTempPath(), "tapscribe-bundle-" + Guid.NewGuid().ToString("n"));
 
         public BundleLayout Layout() =>
-            BundleLayout.Resolve(Path.Combine(_root, "program"), Path.Combine(_root, "profile"));
+            BundleLayout.Resolve(Path.Join(_root, "program"), Path.Join(_root, "profile"));
 
         public string Wheel(string name)
         {
             string dir = Layout().WheelDirectory;
             Directory.CreateDirectory(dir);
-            string path = Path.Combine(dir, name);
+            string path = Path.Join(dir, name);
             File.WriteAllText(path, "PK");
             return path;
         }
