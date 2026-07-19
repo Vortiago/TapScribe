@@ -277,7 +277,7 @@ def read_primary_marker(wav_path: Path) -> dict[str, Any] | None:
 
 def read_all_cached(wav_path: Path) -> list[CachedTranscription]:
     """Every cached transcript for `wav_path`, one per (backend, model).
-    Unparseable sidecars are silently dropped. Order is unspecified."""
+    Unparseable sidecars are silently dropped. Order follows filesystem listing."""
     entries, _, _ = _resolve_sidecars(wav_path)
     return entries
 
@@ -288,8 +288,8 @@ def cache_listing(wav_path: Path) -> list[dict[str, Any]]:
     "is_primary", "transcribe_ms"?}` dicts ready for the wire. `source`
     ("original"|"stripped") is what the entry was transcribed from — the
     dashboard's set-primary needs it to resolve the file's directory, since a
-    stripped clip lives in <session>/stripped/. Single-sidecar legacy WAVs
-    return a one-element list with `is_primary=True`."""
+     stripped clip lives in <session>/stripped/. Single-sidecar legacy WAVs
+     return a one-element list with `is_primary=True` when the sidecar parses."""
     entries, _, primary_idx = _resolve_sidecars(wav_path)
     out: list[dict[str, Any]] = []
     for i, entry in enumerate(entries):
