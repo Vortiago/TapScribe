@@ -600,13 +600,53 @@ def test_pyproject_fingerprint_changes_when_file_content_changes(tmp_repo_root):
     assert before != after
 
 
-def test_pyproject_fingerprint_empty_string_when_missing(monkeypatch, tmp_path):
-    """No readable pyproject → sentinel "" that can never equal a stored
-    fingerprint, so we never skip on the strength of a missing file."""
+def test_pyproject_fingerprint_falls_back_to_the_installed_version(monkeypatch, tmp_path):
+    """No pyproject.toml is the NORMAL state of a Bundle (it installs a wheel,
+    not a checkout), so "" would be recorded in the stamp AND computed on every
+    later run — they'd match, and pip would be skipped forever.
+
+    That is exactly the upgrade bug: after installing a new Bundle, the
+    operator's model extras would never be re-resolved against the new wheel's
+    dependency pins. Fall back to the installed version so an upgrade
+    invalidates the stamp the way a pyproject edit does in a checkout.
+    """
     empty = tmp_path / "no-repo"
     empty.mkdir()
     monkeypatch.setattr(install_picker, "REPO_ROOT", empty)
+
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: "1.1.0")
+    before = install_picker.pyproject_fingerprint()
+    assert before  # not the empty sentinel — it must be able to CHANGE
+
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: "1.2.0")
+    assert install_picker.pyproject_fingerprint() != before
+
+
+def test_fingerprint_is_empty_only_when_nothing_identifies_the_install(monkeypatch, tmp_path):
+    """Neither a pyproject nor a resolvable version → "" so we never skip pip on
+    the strength of an install we can't identify at all."""
+    empty = tmp_path / "no-repo"
+    empty.mkdir()
+    monkeypatch.setattr(install_picker, "REPO_ROOT", empty)
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: None)
     assert install_picker.pyproject_fingerprint() == ""
+
+
+def test_bundle_upgrade_invalidates_a_current_looking_stamp(monkeypatch, tmp_path):
+    """The whole point, at the seam that decides: same extras, no pyproject, but
+    a newer wheel ⇒ NOT current, so the picker re-runs pip."""
+    empty = tmp_path / "no-repo"
+    empty.mkdir()
+    monkeypatch.setattr(install_picker, "REPO_ROOT", empty)
+
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: "1.1.0")
+    stamp = {"extras": ["whisper-live"], "pyproject": install_picker.pyproject_fingerprint()}
+    assert install_picker.install_is_current(stamp, ["whisper-live"], install_picker.pyproject_fingerprint())
+
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: "1.2.0")
+    assert not install_picker.install_is_current(
+        stamp, ["whisper-live"], install_picker.pyproject_fingerprint()
+    )
 
 
 def test_package_is_installed_true_for_importable_module():

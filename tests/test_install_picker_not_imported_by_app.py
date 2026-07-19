@@ -56,7 +56,10 @@ def _imported_roots(path: Path, *, skip_probes: bool = False) -> set[str]:
     by importing torch and treating any failure as "no torch". Counting that as
     a dependency would forbid the one thing the module exists to do.
     """
-    tree = ast.parse(path.read_text(), filename=str(path))
+    # encoding pinned: Windows defaults to cp1252, and this repo's sources
+    # are full of em-dashes — reading them without utf-8 raises there and
+    # nowhere else (caught by the CI Windows matrix, not a Linux run).
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     probed: set[int] = set()
     if skip_probes:
         for node in ast.walk(tree):

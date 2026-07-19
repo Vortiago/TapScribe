@@ -108,7 +108,9 @@ def read_stale_selection(path: Path) -> list[dict]:
     what stops the page from rendering.
     """
     try:
-        blob = json.loads(path.read_text())
+        # utf-8 explicitly: family labels carry non-ASCII, and Windows would
+        # otherwise decode this cp1252 and blow up the setup page.
+        blob = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     entries = blob.get("stale_backends") if isinstance(blob, dict) else None

@@ -137,17 +137,20 @@ internal sealed class RecorderSupervisor : IDisposable
     /// </summary>
     public void Stop()
     {
-        Process? process;
+        Process? handle;
         lock (_gate)
         {
             _stopping = true;
-            process = _recorder;
+            handle = _recorder;
             _recorder = null;
         }
 
-        if (process is null)
+        if (handle is null)
             return;
 
+        // `using` rather than try/finally + Dispose(): same guarantee, and it keeps
+        // CodeQL's cs/missed-using-statement clean rather than needing a suppression.
+        using Process process = handle;
         try
         {
             if (!process.HasExited)
@@ -162,10 +165,6 @@ internal sealed class RecorderSupervisor : IDisposable
             // job object's KILL_ON_JOB_CLOSE reaps anything still alive when we exit,
             // which is exactly the leak this Stop() is trying to avoid.
             _log($"stop: {error.Message}");
-        }
-        finally
-        {
-            process.Dispose();
         }
     }
 

@@ -975,7 +975,7 @@ def write_install_warnings(state_file: Path, selection: Selection, removed: list
     }
     try:
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
+        sidecar.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     except OSError as exc:
         # A read-only or vanished data dir must not fail the install — the
         # stderr warning above already carried the message, and this file is
@@ -1017,18 +1017,44 @@ def run_install(extras: list[str], *, dry_run: bool = False, install_spec: str |
 # ---------------------------------------------------------------------------
 
 
+def _installed_version() -> str | None:
+    """The installed TapScribe version, or None if it can't be determined.
+
+    Split out as a seam so the Bundle-upgrade branch below is testable without
+    reinstalling the package.
+    """
+    try:
+        from tapscribe import __version__
+    except ImportError:
+        return None
+    return __version__ or None
+
+
 def pyproject_fingerprint() -> str:
-    """SHA-256 of pyproject.toml. A dependency bump (e.g. after a
-    `git pull`) changes this, invalidating the skip-install stamp even
-    when the operator's family/backend selection is byte-for-byte
-    identical to last run."""
+    """A stamp of what a `pip install` would resolve, so an unchanged selection
+    can skip pip but a CHANGED dependency set cannot.
+
+    In a checkout that's the SHA-256 of pyproject.toml: a dependency bump after
+    a `git pull` changes it even when the family/backend selection is
+    byte-for-byte identical.
+
+    A Bundle has no pyproject.toml — it installs a wheel — so falling back to
+    the empty sentinel would be recorded in the stamp AND recomputed identically
+    on every later run. They'd match forever, and after an upgrade the
+    operator's model extras would never be re-resolved against the new wheel's
+    pins. So fall back to the installed VERSION, which changes on exactly the
+    event that matters.
+    """
     try:
         return hashlib.sha256((REPO_ROOT / "pyproject.toml").read_bytes()).hexdigest()
     except OSError:
-        # No readable pyproject means the pip install would fail anyway;
-        # return a sentinel that can't match a stored fingerprint so we
-        # never skip on the strength of a missing file.
+        pass  # Not a checkout — fall through to the version-based stamp below.
+    version = _installed_version()
+    if version is None:
+        # Nothing identifies this install; return a sentinel rather than let a
+        # stamp comparison skip pip on the strength of an unknown.
         return ""
+    return f"version:{version}"
 
 
 def read_install_stamp(path: Path) -> dict | None:
