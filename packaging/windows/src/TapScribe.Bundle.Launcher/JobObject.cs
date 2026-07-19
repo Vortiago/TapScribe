@@ -59,20 +59,22 @@ internal sealed class JobObject : IDisposable
     public static JobObject? TryCreate(Action<string> log)
     {
         SafeFileHandle handle = CreateJobObjectW(IntPtr.Zero, null);
-        if (handle.IsInvalid)
-        {
-            log($"job object: CreateJobObject failed (win32 {Marshal.GetLastWin32Error()}); " +
-                "a crash may leave whisperlivekit-server running.");
-            handle.Dispose();
-            return null;
-        }
 
-        // Everything from here on can throw (Marshal.SizeOf, GetLastWin32Error, the
-        // log callback), and an escaping exception would leak the kernel handle we
-        // just created — the job would stay alive, unowned, holding KILL_ON_JOB_CLOSE
-        // over nothing. Dispose and rethrow instead.
+        // Everything below can throw (Marshal.SizeOf, GetLastWin32Error, the log
+        // callback), and an escaping exception would leak the kernel handle we just
+        // created — the job would stay alive, unowned, holding KILL_ON_JOB_CLOSE over
+        // nothing. The try starts at the handle so no path can miss the Dispose, not
+        // just the paths after the validity check.
         try
         {
+            if (handle.IsInvalid)
+            {
+                log($"job object: CreateJobObject failed (win32 {Marshal.GetLastWin32Error()}); " +
+                    "a crash may leave whisperlivekit-server running.");
+                handle.Dispose();
+                return null;
+            }
+
             var limits = new JobObjectExtendedLimitInformation();
             limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
 
