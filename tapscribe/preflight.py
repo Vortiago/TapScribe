@@ -153,7 +153,7 @@ def run_steps(steps: list[Step], *, run: Callable[[list[str]], int] = None) -> i
     learns which capability just degraded — in a Bundle this is the only trace,
     since the Launcher pipes this to a log file rather than a terminal.
     """
-    runner = run or (lambda argv: subprocess.call(argv))  # nosec B603 — fixed argv.
+    runner = run or subprocess.call  # nosec B603 — fixed argv lists, never a shell string.
     rc = 0
     for step in steps:
         print(f"[preflight] {step.name}: {step.reason}", flush=True)

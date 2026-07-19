@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pytest
 
+from tapscribe import preflight
 from tapscribe.preflight import Step, plan_steps
 
 _WHEEL_MISSING: frozenset[str] = frozenset()
@@ -108,7 +109,10 @@ def test_llama_cpp_install_uses_the_prebuilt_wheel_index():
     steps = plan_steps(python="py", system="Linux", module_present=_present("silero_vad"))
     argv = next(s for s in steps if s.name == "summarize").argv
     assert "--extra-index-url" in argv
-    assert "abetlen.github.io" in argv[argv.index("--extra-index-url") + 1]
+    # Exact equality, not a substring: a substring check on a URL is the shape of
+    # a sanitisation bug (the host could sit anywhere in the string), and the
+    # index is a constant we own — there is nothing to match loosely.
+    assert argv[argv.index("--extra-index-url") + 1] == preflight.LLAMA_CPP_WHEEL_INDEX
 
 
 def test_mlx_summarize_install_has_no_wheel_index():

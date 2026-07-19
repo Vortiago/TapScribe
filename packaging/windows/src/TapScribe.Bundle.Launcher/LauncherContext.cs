@@ -98,7 +98,13 @@ internal sealed class LauncherContext : ApplicationContext
             return;
         }
 
-        _log.Write($"copy password: {lookup.Message}");
+        // Log the STATUS, never text derived from the password file. Message is
+        // documented as secret-free and this is the failure path (Password is null
+        // here), but the log is a plaintext file the operator opens from the tray —
+        // keeping file-derived text out of it entirely means a future edit to Message
+        // cannot turn this into a password leak. Also what CodeQL's
+        // cs/cleartext-storage-of-sensitive-information is asking for.
+        _log.Write($"copy password: {lookup.Status}");
         _icon.ShowBalloonTip(10_000, "TapScribe", lookup.Message, ToolTipIcon.Warning);
     }
 

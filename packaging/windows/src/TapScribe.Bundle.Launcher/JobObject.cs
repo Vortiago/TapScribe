@@ -67,25 +67,37 @@ internal sealed class JobObject : IDisposable
             return null;
         }
 
-        var limits = new JobObjectExtendedLimitInformation();
-        limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
-
-        if (!SetInformationJobObject(handle, ExtendedLimitInformationClass, ref limits, (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
+        // Everything from here on can throw (Marshal.SizeOf, GetLastWin32Error, the
+        // log callback), and an escaping exception would leak the kernel handle we
+        // just created — the job would stay alive, unowned, holding KILL_ON_JOB_CLOSE
+        // over nothing. Dispose and rethrow instead.
+        try
         {
-            log($"job object: SetInformationJobObject failed (win32 {Marshal.GetLastWin32Error()}); " +
-                "a crash may leave whisperlivekit-server running.");
+            var limits = new JobObjectExtendedLimitInformation();
+            limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+
+            if (!SetInformationJobObject(handle, ExtendedLimitInformationClass, ref limits, (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
+            {
+                log($"job object: SetInformationJobObject failed (win32 {Marshal.GetLastWin32Error()}); " +
+                    "a crash may leave whisperlivekit-server running.");
+                handle.Dispose();
+                return null;
+            }
+
+            bool selfAssigned = AssignProcessToJobObject(handle, GetCurrentProcess());
+            if (!selfAssigned)
+            {
+                log($"job object: could not assign the Launcher itself (win32 {Marshal.GetLastWin32Error()}); " +
+                    "falling back to assigning the Recorder after spawn.");
+            }
+
+            return new JobObject(handle, selfAssigned);
+        }
+        catch
+        {
             handle.Dispose();
-            return null;
+            throw;
         }
-
-        bool selfAssigned = AssignProcessToJobObject(handle, GetCurrentProcess());
-        if (!selfAssigned)
-        {
-            log($"job object: could not assign the Launcher itself (win32 {Marshal.GetLastWin32Error()}); " +
-                "falling back to assigning the Recorder after spawn.");
-        }
-
-        return new JobObject(handle, selfAssigned);
     }
 
     /// <summary>
