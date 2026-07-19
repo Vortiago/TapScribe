@@ -87,7 +87,7 @@ own with `--cert <path> --key <path>`.
 
 ## Windows
 
-### Installer (no Python needed)
+### Windows Bundle (no Python needed)
 
 Download **`TapScribe-Setup-win-x64.exe`** from the
 [latest release](https://github.com/Vortiago/TapScribe/releases/latest) and run
@@ -96,7 +96,7 @@ no PowerShell — it carries its own interpreter. A tray icon starts the
 dashboard, and its **Copy password** item gives you the generated dashboard
 login on first run.
 
-The installer is **unsigned**, so SmartScreen shows "Windows protected your PC".
+The Bundle is **unsigned**, so SmartScreen shows "Windows protected your PC".
 Click **More info → Run anyway**.
 
 Program files land in `%LOCALAPPDATA%\Programs\TapScribe`; your recordings,

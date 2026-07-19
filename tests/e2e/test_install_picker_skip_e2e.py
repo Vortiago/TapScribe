@@ -60,7 +60,8 @@ ip.FAMILIES = (
     ),
 )
 ip.detect_caps = lambda **k: ip.MachineCaps(os_name="Linux", arch="x86_64", mlx=False, cuda=False)
-# Still the REAL find_spec, just probing the package we actually install.
+# Still the REAL probe (importlib.metadata), just aimed at the distribution
+# we actually install in the sandbox instead of `tapscribe`.
 _real = ip.package_is_installed
 ip.package_is_installed = lambda: _real(os.environ["IP_PKG"])
 
@@ -108,7 +109,10 @@ def sandbox(tmp_path):
         "IP_REPO": str(tmp_path / "repo"),
         "IP_STATE": str(tmp_path / "state.json"),
         "IP_STAMP": str(stamp),
-        "IP_PKG": "demo_pkg",
+        # The DISTRIBUTION name, not the import name: package_is_installed now
+        # asks importlib.metadata, because find_spec stopped being able to
+        # answer "is it installed" once the picker moved into the package.
+        "IP_PKG": "tapscribe-skip-demo",
     }
 
     def run() -> tuple[int, str]:

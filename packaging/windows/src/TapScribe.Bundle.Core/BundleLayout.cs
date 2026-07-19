@@ -27,11 +27,11 @@ public sealed class BundleLayoutException : Exception
 ///
 /// Path construction only — the sole disk access is <see cref="ResolveWheel"/>, which
 /// has to look at what actually shipped. Everything uses <see cref="Path.Join"/>
-/// rather than <c>Path.Combine</c>: Combine silently DISCARDS everything before a
-/// rooted later argument, which turns a bad input into a plausible-looking path
-/// somewhere else on disk instead of an error. Join just concatenates.
-/// rather than literal separators, which is what lets the Core stay cross-platform and
-/// be tested on the Linux CI leg.
+/// rather than <c>Path.Combine</c> and rather than literal separators. Combine
+/// silently DISCARDS everything before a rooted later argument, turning a bad input
+/// into a plausible-looking path somewhere else on disk instead of an error; Join
+/// just concatenates. Avoiding literal separators is what lets the Core stay
+/// cross-platform and be tested on the Linux CI leg.
 /// </summary>
 public sealed record BundleLayout
 {

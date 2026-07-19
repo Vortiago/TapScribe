@@ -44,6 +44,11 @@ LicenseFile=..\..\LICENSE
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
+; Same name the Launcher's single-instance guard uses (Program.cs). Without it
+; Setup happily overwrites files while the tray app is running them, which on
+; Windows means a locked TapScribe.exe and a half-applied upgrade.
+AppMutex=Local\TapScribe.Bundle.Launcher
+
 ; Multi-GB payload (torch alone is most of it), so compress hard but don't
 ; make the installer unopenable on a modest box.
 Compression=lzma2/max
@@ -64,6 +69,21 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
 Name: "startup"; Description: "Start {#MyAppName} when I sign in"; GroupDescription: "Startup:"; Flags: unchecked
+
+[InstallDelete]
+; RUNS BEFORE [Files]. Load-bearing for UPGRADES, not cosmetic.
+;
+; The wheel filename carries the version (tapscribe-1.1.0-py3-none-any.whl), so
+; installing 1.2.0 over 1.1.0 would ADD a second .whl rather than replace it —
+; and BundleLayout.ResolveWheel() deliberately refuses to guess between two,
+; throwing BundleLayoutException. Without this line the first upgrade after a
+; release bricks the Launcher for every operator at once, with the only recourse
+; being to delete a file out of %LOCALAPPDATA% by hand.
+;
+; Scoped to the wheel folder ONLY. Emphatically NOT {app}\python: /setup
+; pip-installs the operator's chosen model backends in there, and wiping it on
+; upgrade would re-download multi-GB of extras every time.
+Type: files; Name: "{app}\wheel\*.whl"
 
 [Files]
 ; The embedded interpreter AND its site-packages. `recursesubdirs` matters —

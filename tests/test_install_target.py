@@ -113,3 +113,29 @@ def test_python_defaults_to_the_running_interpreter():
     """Keeps the install inside whichever venv is executing — the bundled one in
     a Bundle, the dev's .venv in a checkout."""
     assert pip_install_argv([])[0] == sys.executable
+
+
+def test_pinned_pypi_argv_puts_extras_before_the_version(tmp_path):
+    """PEP 508 requires `name[extras]==version`, not `name==version[extras]`.
+
+    Getting it backwards produces a requirement pip refuses to parse at all
+    ("Expected end or semicolon (after version specifier)"), so the PyPI
+    topology — which `resolve_install_spec` accepts and all three `--install-spec`
+    help strings advertise — failed on the FIRST model install and on every
+    preflight `[summarize]` step. The `.` and `.whl` shapes are unaffected: pip
+    routes paths through a different parser that strips extras itself.
+    """
+    from packaging.requirements import Requirement
+
+    argv = pip_install_argv(["whisper-live", "whisper-cpu"], install_spec="tapscribe==1.1.0", python="py")
+    requirement = argv[-1]
+    assert requirement == "tapscribe[whisper-live,whisper-cpu]==1.1.0"
+    # Independent source of truth: the real PEP 508 parser must accept it.
+    parsed = Requirement(requirement)
+    assert parsed.name == "tapscribe"
+    assert parsed.extras == {"whisper-live", "whisper-cpu"}
+    assert str(parsed.specifier) == "==1.1.0"
+
+
+def test_pinned_pypi_argv_without_extras_is_the_bare_pin():
+    assert pip_install_argv([], install_spec="tapscribe==1.1.0", python="py")[-1] == "tapscribe==1.1.0"

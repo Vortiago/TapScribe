@@ -107,7 +107,12 @@ internal sealed class RecorderSupervisor : IDisposable
             lock (_gate)
                 _recorder = process;
 
-            process.EnableRaisingEvents = true;
+            // Handler BEFORE the flag: setting EnableRaisingEvents registers the
+            // wait immediately and, for a process that has ALREADY exited, raises
+            // Exited synchronously — and Process latches _raisedOnExited so it
+            // never fires again. A Recorder that dies instantly (broken wheel,
+            // EADDRINUSE) would raise into an empty delegate, leaving the tray
+            // green and "running" forever with a dead dashboard.
             process.Exited += (_, _) =>
             {
                 lock (_gate)
@@ -121,6 +126,7 @@ internal sealed class RecorderSupervisor : IDisposable
                     RecorderState.Stopped,
                     $"TapScribe stopped unexpectedly (exit {process.ExitCode}). See the log.");
             };
+            process.EnableRaisingEvents = true;
 
             _onState(RecorderState.Running, "TapScribe is running.");
         }
@@ -179,6 +185,12 @@ internal sealed class RecorderSupervisor : IDisposable
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // The child is forced to UTF-8 (RecorderCommand.EnvironmentFor); decode
+            // the pipe the same way. Without this .NET uses the console/ANSI code
+            // page and the em-dashes this repo's messages are full of arrive
+            // mangled in the operator's only diagnostic surface.
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
             WorkingDirectory = _layout.ProgramDirectory,
         };
         foreach (string argument in command.Arguments)

@@ -29,7 +29,7 @@ release and attached to the GitHub Release as
 "Get a bridge" card — a Bundle is not a Bridge, and you need one to *have* a
 dashboard.
 
-The installer is currently **unsigned**, so SmartScreen shows a
+The Bundle is currently **unsigned**, so SmartScreen shows a
 "Windows protected your PC" warning; click *More info → Run anyway*.
 
 ## systemd (Linux)

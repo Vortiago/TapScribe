@@ -649,10 +649,10 @@ def test_bundle_upgrade_invalidates_a_current_looking_stamp(monkeypatch, tmp_pat
     )
 
 
-def test_package_is_installed_true_for_importable_module():
-    # Exercises the real importlib.find_spec wiring against a stdlib module
-    # that is always importable.
-    assert install_picker.package_is_installed("json") is True
+def test_package_is_installed_true_for_a_real_distribution():
+    # Exercises the real importlib.metadata wiring against a distribution that
+    # is always present wherever the test suite runs.
+    assert install_picker.package_is_installed("pytest") is True
 
 
 def test_package_is_installed_false_for_absent_module():
@@ -1369,3 +1369,74 @@ def test_detect_caps_cuda_false_when_nvidia_smi_missing(monkeypatch):
     caps = install_picker.detect_caps()
     assert caps.cuda is False
     assert caps.mlx is False
+
+
+# ── review findings: dry-run purity, state-file topology, install probe ──────
+
+
+def test_dry_run_does_not_touch_the_warnings_sidecar(tmp_path, monkeypatch, tmp_stamp):
+    """`--dry-run` is documented as "purely read-only: don't persist the selection
+    or stamp". The sidecar write/clear escaped that gate, so previewing the pip
+    command DELETED the stale-selection banner an operator still needed — and a
+    dry run started needing write permission on the state dir."""
+    state = tmp_path / ".tapscribe-install.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_CPU}},
+            }
+        )
+    )
+    sidecar = tmp_path / install_picker.WARNINGS_FILENAME
+    sidecar.write_text(json.dumps({"stale_backends": [{"family": "parakeet", "backend": "mlx"}]}))
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _caps())
+
+    assert install_picker.main(["--non-interactive", "--dry-run", "--state-file", str(state)]) == 0
+    assert sidecar.exists(), "dry-run must not clear the sidecar"
+
+
+def test_state_file_default_follows_the_data_dir(tmp_path):
+    """start.sh/start.ps1 invoke the picker with NO --state-file, so its default
+    must land where the app's `setup_install._STATE_FILE` does. Before this they
+    diverged the moment TAPSCRIBE_BASE_DIR was set — a documented topology
+    (config.py names Docker/systemd, and systemd runs start.sh) — so /setup wrote
+    the selection to the data dir while the next start.sh silently re-applied a
+    stale one from the repo root.
+
+    Driven in a SUBPROCESS: both values are module-level constants resolved at
+    import, and reloading the modules in-process would hand other tests a fresh
+    `InstallSelectionError` class their `pytest.raises` no longer matches.
+    """
+    import os
+    import subprocess
+
+    probe = (
+        "from tapscribe import install_picker, setup_install, config;"
+        "print(install_picker.STATE_FILE);"
+        "print(setup_install._STATE_FILE);"
+        "print(config.BASE_DIR)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).resolve().parent.parent,
+        env={**os.environ, "TAPSCRIBE_BASE_DIR": str(tmp_path)},
+    )
+    picker_state, app_state, base_dir = out.stdout.split("\n")[:3]
+    assert picker_state == app_state, "picker default and /setup must write the same file"
+    assert Path(picker_state).parent == Path(base_dir)
+
+
+def test_package_is_installed_asks_for_a_distribution_not_an_import(monkeypatch):
+    """The guard exists to catch "the stamp outlived its package" (a manual
+    `pip uninstall`, a recreated venv). `find_spec` stopped answering that once
+    the picker moved INTO the package and callers switched to `-m` from the repo
+    root: cwd lands on sys.path, so the module is importable whether or not it
+    was ever installed, and the guard could never return False again."""
+    assert install_picker.package_is_installed("tapscribe_not_a_real_pkg_zzz") is False
+    # `json` is importable but is NOT an installed distribution — the old
+    # find_spec probe answered True here, which is exactly the wrong answer.
+    assert install_picker.package_is_installed("json") is False

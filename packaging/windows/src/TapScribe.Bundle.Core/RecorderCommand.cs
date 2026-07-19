@@ -92,10 +92,31 @@ public static class RecorderCommand
     private static ReadOnlyDictionary<string, string> EnvironmentFor(BundleLayout layout) =>
         new(new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            // Neutralise the host's CPython bootstrap variables. A Bundle's whole
+            // premise is "needs no Python", so it lands most often on machines where
+            // some other Python has been — and PYTHONHOME takes precedence over the
+            // executable-relative prefix resolution the embedded interpreter depends
+            // on. A stray one aborts python.exe with "init_fs_encoding: failed to get
+            // the Python codec of the filesystem encoding" before preflight's first
+            // line; a stray PYTHONPATH is subtler, shadowing the bundled torch with
+            // the operator's other site-packages. Empty string == removed, because
+            // ProcessStartInfo.Environment is seeded from OUR inherited environment.
+            ["PYTHONHOME"] = "",
+            ["PYTHONPATH"] = "",
+            ["PYTHONSTARTUP"] = "",
+
             [BaseDirVariable] = layout.DataDirectory,
             // start.ps1 set this and it is load-bearing here: an unbuffered child is the
             // difference between a log that updates live and one that only materialises
             // when the process dies — which is precisely when the operator needs it.
             ["PYTHONUNBUFFERED"] = "1",
+            // The Recorder prints speaker names and session titles, and `safe_name` is
+            // Unicode-aware — "週次会議" survives it verbatim. Under a Bundle stdout is a
+            // PIPE, so CPython encodes it with the host ANSI code page (cp1252 on a
+            // Western box) using errors='strict': a non-Latin-1 participant name would
+            // raise UnicodeEncodeError inside the /tap handler and STOP THE RECORDING.
+            // A console never hits this, which is why start.ps1 didn't need it.
+            ["PYTHONUTF8"] = "1",
+            ["PYTHONIOENCODING"] = "utf-8",
         });
 }

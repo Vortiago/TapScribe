@@ -93,6 +93,22 @@ def pip_install_argv(
     meaningless against a wheel or a PyPI pin.
     """
     spec = resolve_install_spec(install_spec)
-    target = f"{spec}[{','.join(extras)}]" if extras else spec
+    target = _with_extras(spec, extras)
     editable = ["-e"] if spec == CHECKOUT_SPEC else []
     return [python, "-m", "pip", "install", *editable, target]
+
+
+def _with_extras(spec: str, extras: list[str]) -> str:
+    """Attach an extras group to a resolved spec, in the right position.
+
+    A path (`.` or a wheel) takes extras as a SUFFIX — pip strips them off the
+    path itself. A PEP 508 requirement does not: extras bind to the NAME and
+    must precede the version specifier, so `tapscribe[a,b]==1.1.0` is valid and
+    `tapscribe==1.1.0[a,b]` is a parse error pip reports as "Expected end or
+    semicolon (after version specifier)".
+    """
+    if not extras:
+        return spec
+    group = f"[{','.join(extras)}]"
+    name, sep, version = spec.partition("==")
+    return f"{name}{group}{sep}{version}" if sep else f"{spec}{group}"

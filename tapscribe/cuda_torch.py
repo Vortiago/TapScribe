@@ -152,5 +152,5 @@ def main() -> int:
     return 0  # non-fatal: never block bring-up over a GPU optimisation.
 
 
-if __name__ == "__main__":  # pragma: no cover — exercised via start.ps1 / start.sh
+if __name__ == "__main__":  # pragma: no cover — exercised via `tapscribe.preflight` (Windows only)
     raise SystemExit(main())

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using TapScribe.Bundle.Core;
 
 namespace TapScribe.Bundle.Launcher;
@@ -93,7 +94,30 @@ internal sealed class LauncherContext : ApplicationContext
         PasswordLookup lookup = PasswordFile.Read(_layout.PasswordFile);
         if (lookup is { IsOk: true, Password: { } password })
         {
-            Clipboard.SetText(password);
+            // Clipboard.SetText is the one call in this handler that genuinely
+            // throws: another process holding the clipboard (RDP redirection, a
+            // clipboard manager like Ditto) surfaces as ExternalException
+            // CLIPBRD_E_CANT_OPEN. PasswordFile goes to great lengths never to
+            // throw so a menu click can't die silently — letting it die HERE
+            // instead would leave the operator locked out of their own dashboard
+            // behind a generic WinForms crash dialog, which is exactly the
+            // outcome that design was avoiding.
+            try
+            {
+                Clipboard.SetText(password);
+            }
+            catch (ExternalException error)
+            {
+                _log.Write($"copy password: clipboard unavailable ({error.Message})");
+                _icon.ShowBalloonTip(
+                    10_000,
+                    "TapScribe",
+                    "Couldn't reach the clipboard — another app is holding it. Try again, "
+                        + $"or read the password from {_layout.PasswordFile}.",
+                    ToolTipIcon.Warning);
+                return;
+            }
+
             _icon.ShowBalloonTip(5_000, "TapScribe", $"{lookup.Message} Username: admin.", ToolTipIcon.Info);
             return;
         }
@@ -150,12 +174,22 @@ internal sealed class LauncherContext : ApplicationContext
             _supervisor.Dispose();
             _icon.Dispose();
             _icons.Dispose();
-            // LAST: KILL_ON_JOB_CLOSE fires here and terminates anything the Recorder
-            // left behind (notably whisperlivekit-server), so it must outlive the
-            // supervisor's own polite shutdown.
-            _job?.Dispose();
+            // Log the clean-shutdown marker and close the writer BEFORE releasing
+            // the job. `_job.Dispose()` closes the last handle to a
+            // KILL_ON_JOB_CLOSE job that the Launcher ITSELF is a member of (it
+            // self-assigns so children are inherited), so the kernel terminates
+            // this process from inside that call — anything after it never runs.
+            // With the old ordering the marker was silently never written, which
+            // made "the operator quit" indistinguishable from "we were killed" in
+            // the only diagnostic a Bundle leaves behind.
             _log.Write("--- TapScribe Launcher stopped ---");
             _log.Dispose();
+
+            // LAST, and it does not return: KILL_ON_JOB_CLOSE fires here and
+            // terminates anything the Recorder left behind (notably
+            // whisperlivekit-server), so it must outlive the supervisor's own
+            // polite shutdown.
+            _job?.Dispose();
         }
 
         base.Dispose(disposing);

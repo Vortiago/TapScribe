@@ -31,8 +31,18 @@ import subprocess  # nosec B404 — fixed argv lists, no shell.
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from tapscribe import install_target
+
+#: Where a relative pip target (`-e .`) must resolve from — the repo root in a
+#: checkout. Harmless for the wheel/PyPI topologies, whose specs are absolute.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _call_in_repo_root(argv: list[str]) -> int:
+    return subprocess.call(argv, cwd=REPO_ROOT)  # nosec B603 — fixed argv list, no shell.
+
 
 #: llama-cpp-python builds from source by default (needs cmake + MSVC). A
 #: Bundle operator has neither, so the maintainer's prebuilt CPU-wheel index is
@@ -146,14 +156,22 @@ def plan_steps(
     return steps
 
 
-def run_steps(steps: list[Step], *, run: Callable[[list[str]], int] = None) -> int:  # type: ignore[assignment]
+def run_steps(steps: list[Step], *, run: Callable[[list[str]], int] | None = None) -> int:
     """Execute a plan. Returns 0 unless a `fatal` step failed.
 
     Non-fatal failures are printed with the step's `reason` so the operator
     learns which capability just degraded — in a Bundle this is the only trace,
     since the Launcher pipes this to a log file rather than a terminal.
+
+    Steps run with `cwd=REPO_ROOT`, matching `install_picker.run_install`. That
+    is load-bearing for the checkout topology, where the pip target is the
+    RELATIVE `-e .`: `start.sh` / `start.ps1` used to pin it by `cd`-ing to the
+    script's directory before inlining these commands, but this module is a
+    standalone entry point (`python -m tapscribe.preflight`) that can be run
+    from anywhere. Without it, `-e .` resolves against an arbitrary cwd and
+    either fails opaquely or installs an unrelated local project.
     """
-    runner = run or subprocess.call  # nosec B603 — fixed argv lists, never a shell string.
+    runner = run or _call_in_repo_root
     rc = 0
     for step in steps:
         print(f"[preflight] {step.name}: {step.reason}", flush=True)
