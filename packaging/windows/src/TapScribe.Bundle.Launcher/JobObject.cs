@@ -60,18 +60,18 @@ internal sealed class JobObject : IDisposable
     {
         SafeFileHandle handle = CreateJobObjectW(IntPtr.Zero, null);
 
-        // Everything below can throw (Marshal.SizeOf, GetLastWin32Error, the log
-        // callback), and an escaping exception would leak the kernel handle we just
-        // created — the job would stay alive, unowned, holding KILL_ON_JOB_CLOSE over
-        // nothing. The try starts at the handle so no path can miss the Dispose, not
-        // just the paths after the validity check.
+        // ONE dispose point, in a finally, with an explicit ownership transfer. Every
+        // step below can throw — Marshal.SizeOf, GetLastWin32Error, the caller's log
+        // callback — and an escaping exception must not leak the kernel handle: the job
+        // would stay alive, unowned, holding KILL_ON_JOB_CLOSE over nothing. `owned`
+        // flips only once the JobObject exists and has taken responsibility for it.
+        bool owned = false;
         try
         {
             if (handle.IsInvalid)
             {
                 log($"job object: CreateJobObject failed (win32 {Marshal.GetLastWin32Error()}); " +
                     "a crash may leave whisperlivekit-server running.");
-                handle.Dispose();
                 return null;
             }
 
@@ -82,7 +82,6 @@ internal sealed class JobObject : IDisposable
             {
                 log($"job object: SetInformationJobObject failed (win32 {Marshal.GetLastWin32Error()}); " +
                     "a crash may leave whisperlivekit-server running.");
-                handle.Dispose();
                 return null;
             }
 
@@ -93,12 +92,14 @@ internal sealed class JobObject : IDisposable
                     "falling back to assigning the Recorder after spawn.");
             }
 
-            return new JobObject(handle, selfAssigned);
+            var job = new JobObject(handle, selfAssigned);
+            owned = true;
+            return job;
         }
-        catch
+        finally
         {
-            handle.Dispose();
-            throw;
+            if (!owned)
+                handle.Dispose();
         }
     }
 
