@@ -93,11 +93,18 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     public bool IsMuted { get; private set; }
     public event EventHandler? MuteChanged;
 
+    public event EventHandler<Exception?>? Failed;
+
     public void Start() => Started = true;
     public void Stop() => Stopped = true;
     public void Dispose() => Disposed = true;
 
     public void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(pcm));
+
+    /// <summary>Raise <see cref="Failed"/> — the synthetic stand-in for the OS
+    /// invalidating the endpoint mid-capture (unplugged/disabled). A null
+    /// <paramref name="error"/> models a clean stop, which is NOT a failure.</summary>
+    public void RaiseFailed(Exception? error) => Failed?.Invoke(this, error);
 
     /// <summary>Flip the reported mute state and raise <see cref="MuteChanged"/> — the
     /// synthetic stand-in for the OS muting/unmuting the mic, so a test drives the
@@ -124,6 +131,7 @@ internal sealed class ThrowingOnStartCapture(AudioFormat format) : IAudioCapture
 
     public bool IsMuted => false;
     public event EventHandler? MuteChanged { add { } remove { } }
+    public event EventHandler<Exception?>? Failed { add { } remove { } }
 
     public void Start() => throw new InvalidOperationException("device open failed");
     public void Stop() { }
