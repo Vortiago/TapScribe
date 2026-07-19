@@ -585,9 +585,16 @@ class LiveChannelBase:
         (`begin_transition`).
       * `supports_confidence_validation` — the engine has a confidence-
         validation knob (WhisperLiveKit's `--confidence-validation`). When
-        False (Moonshine), `info` reports `confidence_validation` as ""
-        ("not applicable") rather than a misleading on/off, and the
-        `/api/state` payload stays byte-identical to the pre-base engine.
+        False (Moonshine): `info` reports `confidence_validation` as ""
+        ("not applicable") rather than a misleading on/off (keeping the
+        `/api/state` payload byte-identical to the pre-base engine), AND
+        `matches` ignores a `conf` change so it never forces a restart the
+        engine wouldn't honour.
+
+    `supports_native_vad` is deliberately NOT declared here: its
+    safe-in-absence default is `False` (build a gate) — the OPPOSITE of
+    Whisper's `True` — so it stays a required per-subclass declaration (and a
+    `LiveChannel` Protocol field, since `plan_live` reads it externally).
 
     Subclasses MUST set `config`, `info`, and `log` in their own
     `__init__` before any gate mirror runs (see `_mirror_gate_info`).
@@ -677,9 +684,10 @@ class LiveChannelBase:
         conf: an explicitly-supplied value that differs returns False (the
         caller then restarts). `model`/`language` treat "" as "no override";
         `gate_kind`/`conf` compare only when non-None. An engine with a
-        `fixed_language` (Moonshine) skips the `language` clause — a language
-        change reloads nothing, so it never forces a restart (PR #334
-        finding #9).
+        `fixed_language` (Moonshine) skips the `language` clause, and an engine
+        without `supports_confidence_validation` (Moonshine) skips the `conf`
+        clause — in both cases the requested value can't change what the engine
+        does, so it never forces a restart (PR #334 finding #9).
 
         The four `gate_*` kwargs are Recorder-side per #224 (they configure the
         per-tap SpeechGate, NOT the engine) and are accepted-but-IGNORED here: a
@@ -694,7 +702,11 @@ class LiveChannelBase:
             return False
         if gate_kind is not None and gate_kind != self.config.gate_kind:
             return False
-        if conf is not None and conf != self.config.confidence_validation:
+        if (
+            self.supports_confidence_validation
+            and conf is not None
+            and conf != self.config.confidence_validation
+        ):
             return False
         return True
 

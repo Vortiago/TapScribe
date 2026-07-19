@@ -231,6 +231,24 @@ def test_matches_true_only_when_running_with_same_model_and_language():
         ch.stop()
 
 
+def test_matches_ignores_conf_change_when_engine_has_no_confidence_knob():
+    """Moonshine has no confidence-validation knob
+    (`supports_confidence_validation=False`), so a `conf` change must NOT
+    force a restart — `matches` stays True even when `conf` differs from the
+    carried config (WhisperLiveKit, which HAS the knob, returns False here).
+    Pins the capability flag being honoured in `matches`, not just the info
+    mirror — the two flags (`fixed_language`, `supports_confidence_validation`)
+    are genuinely parallel."""
+    ch = _channel()
+    ch.start()
+    try:
+        assert ch.supports_confidence_validation is False
+        assert ch.config.confidence_validation is True  # LiveConfig default
+        assert ch.matches(model="moonshine-tiny", language="en", gate_kind=None, conf=False) is True
+    finally:
+        ch.stop()
+
+
 def test_begin_transition_marks_starting_before_the_real_restart():
     ch = _channel()
     ch.start()

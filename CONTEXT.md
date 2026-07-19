@@ -170,8 +170,10 @@ per-engine divergences are two capability flags: `fixed_language`
 (Moonshine `"en"`; `None` = multilingual — a language change never forces
 a restart and `info` reports that fixed language) and
 `supports_confidence_validation` (Moonshine `False` —
-`info` reports that field as `""` rather than a misleading on/off, so its
-`/api/state` payload is unchanged). Engine construction and `running` /
+`info` reports that field as `""` rather than a misleading on/off, keeping
+its `/api/state` payload unchanged, AND `matches` ignores a `conf` change
+so it never forces a restart the engine wouldn't honour). Engine
+construction and `running` /
 `start` / `stop` stay in the subclass; `supports_native_vad` (already
 per-engine) rides alongside. The `LiveChannel` Protocol remains the seam
 the Recorder types against (ADR-0003); the base is one implementation of

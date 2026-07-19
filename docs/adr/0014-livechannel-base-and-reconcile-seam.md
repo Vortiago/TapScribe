@@ -48,7 +48,9 @@ the existing `supports_native_vad`:
   language (`begin_transition`).
 - `supports_confidence_validation` (Moonshine `False`) — `info` reports
   `confidence_validation` as `""` ("not applicable") rather than a
-  misleading on/off, keeping Moonshine's `/api/state` payload unchanged.
+  misleading on/off (keeping Moonshine's `/api/state` payload unchanged),
+  and `matches` ignores a `conf` change so it never forces a restart the
+  engine wouldn't honour.
 
 The `LiveChannel` Protocol stays as the seam the Recorder types against
 (ADR-0003); the base is one implementation of it, and its `matches`
