@@ -18,8 +18,21 @@ the operator picks:
 
 Backend choices map to per-family atomic extras in `pyproject.toml`
 (e.g. `whisper-cpu`, `whisper-mlx`, plus a shared `whisper-live` for
-the live-socket server). The picker composes the final
-`pip install -e ".[…]"` argv from those atoms.
+the live-socket server). The picker composes the final `pip install`
+argv from those atoms, delegating the install TARGET (checkout / Bundle
+wheel / pinned PyPI) to `tapscribe.install_target` — see ADR-0015.
+
+Why this lives in the package rather than `tools/`
+--------------------------------------------------
+`tools/` is not shipped in the wheel (`packages.find` includes
+`tapscribe*` only), and a Bundle installs a wheel — so a picker under
+`tools/` is unreachable in every non-checkout topology. It moved here to
+be reachable, NOT to become part of the app's import surface: the app
+still only ever runs it as a subprocess (`setup_install.py`). Importing
+`tapscribe` costs nothing (`__init__.py` is a docstring and
+`__version__`), so living in the package doesn't compromise the
+stdlib-only rule below. `tests/test_install_picker_not_imported_by_app.py`
+pins the never-imported half.
 
 To keep re-launches quiet, the picker stamps each successful install
 (resolved extras + a pyproject.toml fingerprint) inside the venv and
@@ -44,9 +57,37 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Stdlib-only sibling (see the module docstring): `install_target` imports
+# nothing beyond re/sys/pathlib, so this doesn't break the pre-install rule.
+from tapscribe import install_target
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-STATE_FILE = REPO_ROOT / ".tapscribe-install.json"
+
+# The saved selection lives with the operator's DATA, matching `config.BASE_DIR`.
+# The env var is read directly rather than importing `config`, to keep this
+# module stdlib-only and importable before the package's deps exist — the RULE
+# is mirrored, not the module.
+#
+# It MUST stay in step with `config.BASE_DIR`: `start.sh` / `start.ps1` invoke
+# the picker with NO `--state-file`, so if this default and
+# `setup_install._STATE_FILE` disagree, a terminal launch silently re-applies a
+# stale selection from a different file than the one `/setup` just wrote.
+# `test_state_file_default_follows_the_data_dir` pins the agreement.
+STATE_FILE = Path(os.environ.get("TAPSCRIBE_BASE_DIR") or REPO_ROOT) / ".tapscribe-install.json"
 STATE_VERSION = 2
+
+# Sidecar next to the state file recording families the picker had to SKIP
+# because their saved backend is gone from this version's catalog. A separate
+# file rather than a key inside the state file: the state file has a versioned
+# schema with a v1 migration path, and this is a derived observation about the
+# last run, not part of the operator's selection.
+#
+# It exists because `removed_backend_families()` only ever warned to stderr,
+# which in a Bundle goes to a log file nobody opens (ADR-0015) — the operator
+# upgrades, their models quietly stop installing, and nothing they'd look at
+# says so. `setup_state.build_setup_state` reads this into /api/setup/state so
+# /setup can say it out loud.
+WARNINGS_FILENAME = ".tapscribe-install-warnings.json"
 
 # Install stamp: records the extras + pyproject fingerprint of the last
 # successful `pip install`, so a re-run with an unchanged selection skips
@@ -299,7 +340,7 @@ class Selection:
         if not path.exists():
             return cls.defaults_for(caps)
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return cls.defaults_for(caps)
         if isinstance(data, dict) and data.get("version") == STATE_VERSION:
@@ -368,7 +409,7 @@ class Selection:
                 for fam in FAMILIES
             },
         }
-        path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
+        path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -927,24 +968,58 @@ def interactive_loop(selection: Selection, caps: MachineCaps, *, stream_in, stre
 # ---------------------------------------------------------------------------
 
 
-def build_pip_argv(extras: list[str], *, python: str = sys.executable) -> list[str]:
-    """Argv for the install. `python -m pip install -e ".[a,b,c]"` keeps
-    us inside the current venv. Always editable so source-tree edits
-    land immediately; the operator's TapScribe is a checkout, not a
-    release."""
-    spec = "."
-    if extras:
-        spec = f".[{','.join(extras)}]"
-    return [python, "-m", "pip", "install", "-e", spec]
+def write_install_warnings(state_file: Path, selection: Selection, removed: list[FamilyDef]) -> None:
+    """Record (or clear) the skipped-family sidecar beside `state_file`.
+
+    Clearing on an empty list is the point as much as writing is: once the
+    operator re-picks a valid backend the dashboard banner must go away.
+    """
+    sidecar = state_file.parent / WARNINGS_FILENAME
+    if not removed:
+        sidecar.unlink(missing_ok=True)
+        return
+    body = {
+        "stale_backends": [
+            {"family": fam.key, "label": fam.label, "backend": selection.choices[fam.key].backend}
+            for fam in removed
+        ]
+    }
+    try:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as exc:
+        # A read-only or vanished data dir must not fail the install — the
+        # stderr warning above already carried the message, and this file is
+        # only the nicer surface for it.
+        print(f"[install-picker] could not write {sidecar}: {exc}", file=sys.stderr, flush=True)
 
 
-def run_install(extras: list[str], *, dry_run: bool = False) -> int:
+def build_pip_argv(
+    extras: list[str],
+    *,
+    python: str = sys.executable,
+    install_spec: str | None = None,
+) -> list[str]:
+    """Argv for the install, keeping us inside the current venv.
+
+    The install TARGET is delegated to `tapscribe.install_target`, which knows
+    the three topologies (ADR-0015). `install_spec=None` — the default and what
+    a dev checkout passes — still yields the historical
+    `pip install -e ".[a,b,c]"`, editable so source-tree edits land
+    immediately. A Bundle passes its shipped wheel instead.
+    """
+    return install_target.pip_install_argv(extras, install_spec=install_spec, python=python)
+
+
+def run_install(extras: list[str], *, dry_run: bool = False, install_spec: str | None = None) -> int:
     """Execute the install. `dry_run` skips the subprocess (used by tests
     and by `--dry-run` in the CLI)."""
-    argv = build_pip_argv(extras)
+    argv = build_pip_argv(extras, install_spec=install_spec)
     print(f"[install-picker] Running: {' '.join(argv)}", flush=True)
     if dry_run:
         return 0
+    # cwd only matters for the checkout topology, where `-e .` is relative;
+    # a wheel / PyPI spec is absolute, so this is harmless there.
     return subprocess.call(argv, cwd=REPO_ROOT)  # nosec B603 — fixed argv.
 
 
@@ -953,25 +1028,51 @@ def run_install(extras: list[str], *, dry_run: bool = False) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _installed_version() -> str | None:
+    """The installed TapScribe version, or None if it can't be determined.
+
+    Split out as a seam so the Bundle-upgrade branch below is testable without
+    reinstalling the package.
+    """
+    try:
+        from tapscribe import __version__
+    except ImportError:
+        return None
+    return __version__ or None
+
+
 def pyproject_fingerprint() -> str:
-    """SHA-256 of pyproject.toml. A dependency bump (e.g. after a
-    `git pull`) changes this, invalidating the skip-install stamp even
-    when the operator's family/backend selection is byte-for-byte
-    identical to last run."""
+    """A stamp of what a `pip install` would resolve, so an unchanged selection
+    can skip pip but a CHANGED dependency set cannot.
+
+    In a checkout that's the SHA-256 of pyproject.toml: a dependency bump after
+    a `git pull` changes it even when the family/backend selection is
+    byte-for-byte identical.
+
+    A Bundle has no pyproject.toml — it installs a wheel — so falling back to
+    the empty sentinel would be recorded in the stamp AND recomputed identically
+    on every later run. They'd match forever, and after an upgrade the
+    operator's model extras would never be re-resolved against the new wheel's
+    pins. So fall back to the installed VERSION, which changes on exactly the
+    event that matters.
+    """
     try:
         return hashlib.sha256((REPO_ROOT / "pyproject.toml").read_bytes()).hexdigest()
     except OSError:
-        # No readable pyproject means the pip install would fail anyway;
-        # return a sentinel that can't match a stored fingerprint so we
-        # never skip on the strength of a missing file.
+        pass  # Not a checkout — fall through to the version-based stamp below.
+    version = _installed_version()
+    if version is None:
+        # Nothing identifies this install; return a sentinel rather than let a
+        # stamp comparison skip pip on the strength of an unknown.
         return ""
+    return f"version:{version}"
 
 
 def read_install_stamp(path: Path) -> dict | None:
     """Load the last-successful-install stamp, or None if it's
     absent/unreadable — both of which mean 'don't skip, run pip'."""
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
@@ -987,23 +1088,37 @@ def install_is_current(stamp: dict | None, extras: list[str], fingerprint: str) 
 
 
 def package_is_installed(module: str = "tapscribe") -> bool:
-    """Whether the TapScribe package is importable in this venv. Guards the
+    """Whether TapScribe is actually INSTALLED in this environment. Guards the
     skip-install fast path against a stamp that outlived the package it
-    describes — e.g. the operator ran `pip uninstall tapscribe`, or the
-    venv was recreated by something other than start.sh. The picker runs
-    from tools/ with the repo root NOT on sys.path, so `find_spec` only
-    finds the module when an actual install put it there; a missing module
-    means we must run pip even when the stamp looks current."""
-    from importlib.util import find_spec
+    describes — e.g. the operator ran `pip uninstall tapscribe`, or the venv was
+    recreated by something other than start.sh.
 
-    return find_spec(module) is not None
+    This asks the metadata database for an installed DISTRIBUTION rather than
+    probing importability. `find_spec` stopped answering the question when this
+    module moved into the package (ADR-0015) and callers switched to
+    `python -m tapscribe.install_picker`: `-m` puts the cwd on `sys.path`, so
+    from a checkout the module imports whether or not anything ever installed
+    it, and the guard could never return False again.
+    """
+    from importlib.metadata import PackageNotFoundError, distribution  # noqa: PLC0415
+
+    try:
+        distribution(module)
+    except PackageNotFoundError:
+        return False
+    except (OSError, ValueError):
+        # A corrupt or half-written dist-info raises instead of reporting
+        # absence. Treat it as not-installed so the repair install runs —
+        # noticing a broken environment is exactly this guard's job.
+        return False
+    return True
 
 
 def write_install_stamp(path: Path, extras: list[str], fingerprint: str) -> None:
     """Record a successful install so the next unchanged run can skip pip."""
     body = {"extras": extras, "pyproject": fingerprint}
     try:
-        path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
+        path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     except OSError:
         # The stamp is a pure optimisation. If `sys.prefix` isn't writable
         # (read-only venv, odd permissions) we just lose the skip fast-path
@@ -1041,11 +1156,55 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the resolved pip command and exit without running it.",
     )
+    p.add_argument(
+        "--state-file",
+        default=None,
+        help="Where the saved family/backend selection lives. Defaults to the "
+        "repo root. A Bundle points this at TAPSCRIBE_BASE_DIR so the selection "
+        "survives an upgrade instead of sitting in site-packages (ADR-0015).",
+    )
+    p.add_argument(
+        "--install-spec",
+        default=None,
+        help="What pip installs TapScribe from: omitted (a dev checkout, the "
+        "default), a path to the Bundle's shipped .whl, or a pinned "
+        "'tapscribe==X.Y.Z'. See ADR-0015.",
+    )
     args = p.parse_args(argv)
 
+    # Validate before anything else touches it: this is a CLI value that flows
+    # into a pip argv, which CodeQL treats as external input regardless of who
+    # launched the process (CLAUDE.md). Fail with a message the operator can
+    # act on rather than letting pip report an unfindable requirement.
+    try:
+        install_target.resolve_install_spec(args.install_spec)
+    except install_target.InstallSpecError as exc:
+        print(f"[install-picker] {exc}", file=sys.stderr, flush=True)
+        return 2
+
     caps = detect_caps(force_no_mlx=args.no_mlx)
-    first_run = not STATE_FILE.exists()
-    selection = Selection.load(STATE_FILE, caps)
+    # `--state-file` wins when given (the app relocates it to the operator's
+    # data dir); the module-level default already follows TAPSCRIBE_BASE_DIR.
+    #
+    # Validated at the boundary like its sibling `--install-spec`: this is an
+    # argparse value that becomes a directory we `mkdir -p` and write two files
+    # into, and CodeQL treats argparse input as external regardless of who
+    # launched the process (CLAUDE.md). A bare filename would silently scatter
+    # state into the cwd; require an explicit, resolvable location.
+    if args.state_file:
+        state_file = Path(args.state_file).expanduser().resolve()
+        if state_file.exists() and not state_file.is_file():
+            print(
+                f"[install-picker] --state-file {args.state_file!r} is not a file "
+                f"(resolved to {state_file}).",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+    else:
+        state_file = STATE_FILE
+    first_run = not state_file.exists()
+    selection = Selection.load(state_file, caps)
 
     interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -1055,8 +1214,9 @@ def main(argv: list[str] | None = None) -> int:
     # mode there's no renderer — print one line per affected family so
     # `start.sh --non-interactive` doesn't silently produce an
     # incomplete install.
+    removed = selection.removed_backend_families()
     if not interactive:
-        for fam in selection.removed_backend_families():
+        for fam in removed:
             backend = selection.choices[fam.key].backend
             print(
                 f"[install-picker] WARNING: '{fam.key}' was saved with backend "
@@ -1066,7 +1226,6 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
                 flush=True,
             )
-
     if interactive:
         if first_run:
             print(
@@ -1099,9 +1258,21 @@ def main(argv: list[str] | None = None) -> int:
     # Dry-run is purely read-only: don't persist the selection or stamp so
     # the operator can preview the pip command without committing to it.
     if args.dry_run:
-        return run_install(extras, dry_run=True)
+        return run_install(extras, dry_run=True, install_spec=args.install_spec)
 
-    selection.save(STATE_FILE)
+    selection.save(state_file)
+
+    # Persist the skipped-family finding where the dashboard can read it.
+    # BELOW the dry-run gate, with the other writes: this both records AND
+    # CLEARS, so running it during a preview would delete a banner the operator
+    # still needs to act on — and would make a read-only preview require write
+    # permission on the data dir. Runs on interactive too, so re-picking clears
+    # it; a warning that outlives its cause is worse than no warning.
+    # Recomputed, NOT the `removed` from before the picker ran: an interactive
+    # re-pick mutates `selection`, so the earlier list is stale the moment the
+    # operator fixes the very thing it reported. Reusing it would leave the
+    # banner up after they'd already resolved it.
+    write_install_warnings(state_file, selection, selection.removed_backend_families())
 
     # Skip pip entirely when nothing that affects the installed package set
     # has changed since the last successful install AND the package is still
@@ -1124,7 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    rc = run_install(extras)
+    rc = run_install(extras, install_spec=args.install_spec)
     if rc != 0:
         print(f"[install-picker] pip exited with status {rc}.", file=sys.stderr)
         return rc

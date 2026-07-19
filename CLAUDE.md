@@ -121,10 +121,11 @@
 
 ## Runtime deps the install picker does NOT cover
 
-`tools/install_picker.py` resolves *model* extras (`whisper-cpu`,
+`tapscribe/install_picker.py` resolves *model* extras (`whisper-cpu`,
 `parakeet-mlx`, …). One recurring runtime dependency falls outside
-that matrix and is wired into `start.sh` / `start.ps1` instead, after
-the picker runs:
+that matrix and is wired into `tapscribe/preflight.py` instead, which
+`start.sh` / `start.ps1` and the Bundle's Launcher all run after the
+picker:
 
 - **`silero-vad`** (pulls `torch>=2.1`) — the per-tap TapScribe gate
   (`gate_kind="tapscribe"`, the default) imports `silero_vad` lazily
@@ -132,10 +133,10 @@ the picker runs:
   failed … falling back to passthrough` and the gate the operator
   picked is silently a no-op. It is a **core** dependency (no `[vad]`
   extra — `pyproject.toml`'s `dependencies` list installs it
-  unconditionally with a plain `pip install -e .`), so `start.sh`'s
-  `find_spec` probe + reinstall branch exists only to repair a venv
-  created before silero-vad became core; on a fresh install it's
-  already satisfied and the branch no-ops.
+  unconditionally with a plain `pip install -e .`), so
+  `preflight.plan_steps`' `find_spec` probe + reinstall step exists only
+  to repair a venv created before silero-vad became core; on a fresh
+  install it's already satisfied and no step is planned.
 
 **`ffmpeg` is NOT required, period.** Every array-accepting backend
 (`mlx_whisper`, `mlx_parakeet`, and the `transformers` Parakeet path in
@@ -186,9 +187,15 @@ belongs in the dashboard eventually; see the strip-silence knobs in
 these.
 
 If a new runtime dep with the same shape (system binary, or optional
-Python package gated by a lazy import) lands, add it to the `Runtime
-python deps` block in `start.sh` rather than as a Python preflight —
-operators hit it once on bring-up instead of mid-request.
+Python package gated by a lazy import) lands, add it as a `Step` in
+`tapscribe/preflight.py`'s `plan_steps` — NOT inline in `start.sh` /
+`start.ps1`. Operators still hit it once on bring-up instead of
+mid-request, but the Windows Bundle's Launcher has no `start.ps1` to
+inherit it from and runs `python -m tapscribe.preflight` instead
+(ADR-0015), so a shell-inlined probe silently never runs there.
+`plan_steps` is pure and its probes are injected, so a new step is
+unit-testable without a GPU, without the dep installed, and without
+running pip.
 
 ### Upstream adapter symbols: lock the contract with a smoke test
 
@@ -234,9 +241,14 @@ introduced and how to avoid them:
   internally — use that helper, don't build the filename yourself.
 - **Subprocess argv must always be the list form** (`subprocess.Popen([
   exe, "--flag", value])`) — never `shell=True`, never an f-string.
-  `tapscribe.live.build_live_cmd` is the only place that constructs
-  argv; new flags go there, with each value `str()`-converted at the
-  call site.
+  Argv construction is centralised per concern, and a new flag goes in
+  the matching builder — never hand-rolled at a call site:
+  `tapscribe.live.build_live_cmd` (the live channel),
+  `tapscribe.install_target.pip_install_argv` (every pip invocation —
+  checkout / Bundle wheel / pinned PyPI, ADR-0015),
+  `tapscribe.preflight.plan_steps` (bring-up steps), and
+  `RecorderCommand` (the Bundle Launcher's children). Each value is
+  `str()`-converted at the call site.
 - **Never widen `query-filters` in the CodeQL config to silence a new
   finding.** Every exclude has a written justification block; the bar
   for a third one is high. Fix the code instead.

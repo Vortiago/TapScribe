@@ -90,6 +90,13 @@ SILENT_RMS_DBFS_FLOOR: float = -50.0
 # AUTH_PASSWORD_FILE on first run.
 AUTH_USER: str = "admin"
 AUTH_PASSWORD_FILE: Path = BASE_DIR / ".auth-password"
+
+# Sidecar the install picker writes when it had to SKIP a model family whose
+# saved backend left the catalog. The filename is MIRRORED from
+# `install_picker.WARNINGS_FILENAME` rather than imported: the app must never
+# import the dependency-free picker (it runs before the package's deps exist).
+# `test_setup_state.test_warnings_filename_matches_the_picker` pins the mirror.
+INSTALL_WARNINGS_FILE: Path = BASE_DIR / ".tapscribe-install-warnings.json"
 AUTH_ENABLED: bool = True
 
 # Bearer token bridges send on the /tap WebSocket (carried via

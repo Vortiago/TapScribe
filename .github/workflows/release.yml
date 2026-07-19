@@ -22,6 +22,14 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # The interpreter the Windows Bundle embeds (ADR-0015). Pinned so a Bundle is
+  # reproducible and an upstream retag can't silently change what operators
+  # install. python-build-standalone tags are dates; verify the asset name still
+  # exists before bumping — the CPython patch level is part of it.
+  PBS_TAG: "20260718"
+  PBS_PYTHON: "3.12.13"
+
 jobs:
   build:
     name: build wheel + sdist
@@ -160,9 +168,107 @@ jobs:
             ghcr.io/vortiago/tapscribe:v${{ env.VER }}
             ghcr.io/vortiago/tapscribe:latest
 
+  bundle:
+    name: build windows bundle
+    # Must be windows-latest: it lays down a Windows embedded CPython, pip-installs
+    # into it (torch ships OS-specific wheels), publishes a WinForms Launcher, and
+    # runs Inno Setup — none of which cross-compile.
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: packaging/windows/global.json
+
+      - name: Derive version from tag
+        shell: bash
+        run: echo "VER=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      # The SAME wheel PyPI gets. The Bundle installs this rather than resolving
+      # `tapscribe` from PyPI, so the shipped installer's version can never drift
+      # from the server it starts (ADR-0015).
+      - name: Download the wheel built upstream
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Fetch the embedded CPython (python-build-standalone)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # A standalone, relocatable CPython — NOT the python.org embeddable zip,
+          # which ships no pip and no venv module and so can't run /setup's
+          # runtime install at all.
+          $tag = "${{ env.PBS_TAG }}"
+          $asset = "cpython-${{ env.PBS_PYTHON }}+$tag-x86_64-pc-windows-msvc-install_only.tar.gz"
+          $url = "https://github.com/astral-sh/python-build-standalone/releases/download/$tag/$asset"
+          Write-Host "Fetching $url"
+          Invoke-WebRequest -Uri $url -OutFile pbs.tar.gz
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          tar -xzf pbs.tar.gz -C staging
+          # The archive unpacks to staging/python/…. Assert BOTH interpreters:
+          # the Launcher spawns the Recorder with pythonw.exe (no console
+          # window) and runs preflight with python.exe, and BundleLayout hard-
+          # codes those paths. An upstream layout change has to fail here, not
+          # as a silent "nothing happens when I click the tray icon".
+          foreach ($exe in @("python.exe", "pythonw.exe")) {
+            if (-not (Test-Path "staging/python/$exe")) {
+              throw "python-build-standalone layout changed — expected staging/python/$exe"
+            }
+          }
+
+      - name: Install TapScribe's core deps into the embedded interpreter
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $py = "staging/python/python.exe"
+          $wheel = (Get-ChildItem dist/*.whl | Select-Object -First 1).FullName
+          & $py -m pip install --upgrade pip
+          # Core deps only. Model backends are chosen by the operator at /setup
+          # and pip-installed then — bundling every family would multiply an
+          # already multi-GB payload for extras most operators don't want.
+          & $py -m pip install "$wheel"
+          if ($LASTEXITCODE -ne 0) { throw "core dependency install failed" }
+          New-Item -ItemType Directory -Force -Path staging/wheel | Out-Null
+          Copy-Item $wheel staging/wheel/
+
+      - name: Publish the Launcher
+        shell: pwsh
+        run: >
+          dotnet publish packaging/windows/src/TapScribe.Bundle.Launcher
+          -c Release -r win-x64 --self-contained
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ env.VER }}
+          -p:InformationalVersion=${{ env.VER }}
+          -o staging/launcher
+
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Inno Setup ships preinstalled on windows-latest runners.
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          & $iscc /DMyAppVersion=${{ env.VER }} packaging/windows/TapScribe.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-bundle
+          # Stable, UNVERSIONED filename so releases/latest/download/<name>
+          # stays a permanent URL across versions (ADR-0012).
+          path: dist-bundle/TapScribe-Setup-win-x64.exe
+          if-no-files-found: error
+
   github-release:
     name: github release
-    needs: [build, extension, tray]
+    needs: [build, extension, tray, bundle]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -187,6 +293,15 @@ jobs:
           name: bridge-tray
           path: bridge-artifacts/
 
+      # NOT under bridge-artifacts/: a Bundle is not a Bridge (CONTEXT.md). It
+      # is the Recorder packaged, so it never appears in the dashboard's
+      # "Get a bridge" card — you need a Bundle to have a dashboard.
+      - name: Download windows bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-bundle
+          path: bundle-artifacts/
+
       - name: Draft release notes (release-drafter)
         id: drafter
         uses: release-drafter/release-drafter@v7
@@ -206,28 +321,32 @@ jobs:
             dist/*
             bridge-artifacts/tapscribe-spacialchat-bridge.zip
             bridge-artifacts/TapScribe.TrayBridge-win-x64.zip
+            bundle-artifacts/TapScribe-Setup-win-x64.exe
           fail_on_unmatched_files: true
 
-  # TODO(havso): enable PyPI Trusted Publishing once the `tapscribe` project
-  # is claimed on PyPI. Configure the trusted-publisher there with this
-  # workflow file + environment name, then uncomment the job below. We
-  # intentionally do NOT add a token-based fallback — Trusted Publishing or
-  # nothing, per the team-lead decision.
+  # PyPI Trusted Publishing. The publisher is registered on PyPI against THIS
+  # workflow filename (`release.yml`) + the `pypi` environment below — changing
+  # either breaks the OIDC exchange, so they are a contract with pypi.org, not
+  # free-form names. No token-based fallback: Trusted Publishing or nothing.
   #
-  # pypi-publish:
-  #   name: publish to PyPI (trusted publishing)
-  #   needs: build
-  #   runs-on: ubuntu-latest
-  #   environment:
-  #     name: pypi
-  #     url: https://pypi.org/p/tapscribe
-  #   permissions:
-  #     id-token: write
-  #   steps:
-  #     - name: Download dist artifact
-  #       uses: actions/download-artifact@v8
-  #       with:
-  #         name: dist
-  #         path: dist/
-  #     - name: Publish to PyPI
-  #       uses: pypa/gh-action-pypi-publish@release/v1
+  # `needs: [build]` ONLY, deliberately. The Windows Bundle job runs on a
+  # different OS with a much longer toolchain (embedded interpreter, torch,
+  # Inno Setup); a failure there must not block or corrupt a PyPI upload that
+  # is already fully determined by the wheel `build` produced.
+  pypi-publish:
+    name: publish to PyPI (trusted publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tapscribe
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

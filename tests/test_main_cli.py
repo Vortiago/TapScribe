@@ -504,3 +504,47 @@ def test_help_smoke_via_subprocess() -> None:
     )
     assert result.returncode == 0
     assert "--auto-live" in result.stdout
+
+
+# ── --install-spec (ADR-0015) ───────────────────────────────────────────────
+
+
+def test_install_spec_defaults_to_none() -> None:
+    """Absent flag = the checkout topology, which is what every dev launching
+    start.sh / start.ps1 gets. The default must not change."""
+    from tapscribe.__main__ import build_parser
+
+    assert build_parser().parse_args([]).install_spec is None
+
+
+def test_install_spec_is_parsed(tmp_path: Path) -> None:
+    from tapscribe.__main__ import build_parser
+
+    wheel = tmp_path / "tapscribe-1.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    assert build_parser().parse_args(["--install-spec", str(wheel)]).install_spec == str(wheel)
+
+
+def test_main_publishes_the_install_spec_on_app_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boot_paths, fixed_backends, uvicorn_spy
+) -> None:
+    """`/setup` runs pip in a SUBPROCESS, so the recorder must carry the
+    Bundle's wheel path from its own argv through to `picker_install_argv`.
+    `app.state` is that handoff; without it a Bundle's /setup would silently
+    fall back to installing an editable checkout that isn't there."""
+    from tapscribe.app import app
+
+    wheel = tmp_path / "tapscribe-1.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    _run_main(["--install-spec", str(wheel)], monkeypatch)
+    assert app.state.install_spec == str(wheel)
+
+
+def test_main_rejects_a_bogus_install_spec(
+    monkeypatch: pytest.MonkeyPatch, boot_paths, fixed_backends, uvicorn_spy
+) -> None:
+    """Validated at the boundary — CLAUDE.md's CodeQL rule for argparse values
+    that flow onward (this one reaches a pip argv)."""
+    with pytest.raises(SystemExit) as exc:
+        _run_main(["--install-spec", "requests"], monkeypatch)
+    assert exc.value.code == 2

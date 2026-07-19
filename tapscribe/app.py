@@ -1099,7 +1099,7 @@ async def api_models(context: str = "batch"):
     if context not in ("batch", "live"):
         raise HTTPException(400, f"context must be 'batch' or 'live' (got {context!r})")
     # `only_installed` filters out families whose adapter packages weren't
-    # selected at install time (the picker in tools/install_picker.py only
+    # selected at install time (the picker in tapscribe/install_picker.py only
     # pulls in extras the operator ticks). Without this filter, the
     # dashboard would advertise Parakeet even on machines that skipped the
     # transformers install — and the operator would only find out by
@@ -1166,7 +1166,7 @@ async def api_setup_install(request: Request):
     Events. Body: ``{"families": {"<family>": "<mlx|cuda|cpu>", ...}}``.
 
     Delegates the actual pip work to the dependency-free install picker
-    (`tools/install_picker.py --non-interactive`) against a selection written
+    (`tapscribe/install_picker.py --non-interactive`) against a selection written
     from the validated request, streaming one SSE `data:` event per output line
     then a terminal `done`/`error`. On success the backend probes are refreshed
     so `/api/models` + `/api/setup/state` reflect the new install without a
@@ -1186,7 +1186,13 @@ async def api_setup_install(request: Request):
 
     async def events():
         try:
-            async for ev in run_install(selection, on_success=refresh_backend_probes):
+            async for ev in run_install(
+                selection,
+                # Set by `python -m tapscribe --install-spec` (the Bundle's
+                # Launcher passes its wheel); absent in a checkout.
+                install_spec=getattr(request.app.state, "install_spec", None),
+                on_success=refresh_backend_probes,
+            ):
                 yield sse(ev)
         finally:
             request.app.state.setup_install_active = False

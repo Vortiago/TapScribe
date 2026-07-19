@@ -19,6 +19,9 @@
       </header>
       <h1 class="setup__title" id="title">Set up TapScribe</h1>
       <p class="setup__sub" id="sub">Loading…</p>
+      <!-- Filled by renderStaleSelection() when the last picker run skipped a
+           family whose saved backend left the catalog (ADR-0015). -->
+      <div id="stale"></div>
       <div id="card"></div>
     </main>
     <script type="module" src="/web/js/setup/setup.js"></script>

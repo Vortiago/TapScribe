@@ -85,7 +85,30 @@ to serve `https://` and `wss://`; a self-signed cert is generated on first boot
 (`.tapscribe-cert.pem`, `.tapscribe-key.pem`) and reused after. Supply your
 own with `--cert <path> --key <path>`.
 
-## Quick start (Windows / PowerShell)
+## Windows
+
+### Windows Bundle (no Python needed)
+
+Download **`TapScribe-Setup-win-x64.exe`** from the
+[latest release](https://github.com/Vortiago/TapScribe/releases/latest) and run
+it. It installs per-user (no admin prompt) and needs no Python, no checkout, and
+no PowerShell — it carries its own interpreter. A tray icon starts the
+dashboard, and its **Copy password** item gives you the generated dashboard
+login on first run.
+
+The Bundle is **unsigned**, so SmartScreen shows "Windows protected your PC".
+Click **More info → Run anyway**.
+
+Program files land in `%LOCALAPPDATA%\Programs\TapScribe`; your recordings,
+transcripts and settings live separately in `%USERPROFILE%\TapScribe`, so
+uninstalling never deletes them. Model weights are cached in
+`%USERPROFILE%\.cache\huggingface`.
+
+See [packaging/README.md](packaging/README.md) for what's in the Bundle and
+[ADR-0015](docs/adr/0015-windows-bundle-embedded-interpreter.md) for why it
+embeds an interpreter instead of freezing to a single binary.
+
+### From a checkout (developers)
 
 ```powershell
 .\start.ps1

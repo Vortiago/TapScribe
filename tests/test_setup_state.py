@@ -18,6 +18,47 @@ from tapscribe.runtime_probe import (
 from tapscribe.setup_state import FAMILY_META, build_setup_state, is_first_run
 from tapscribe.transcribers.catalog import BackendBinding, ModelEntry, TranscriberRegistry
 
+# ── stale-selection surfacing (ADR-0015) ────────────────────────────────────
+#
+# The picker skips a family whose saved backend left the catalog and warns to
+# stderr. In a Bundle that goes to a log file nobody opens, so the operator's
+# models silently stop installing after an upgrade. /setup has to say it.
+
+
+def test_stale_selection_is_absent_when_no_sidecar_exists(tmp_path):
+    assert build_setup_state(warnings_file=tmp_path / "nope.json")["stale_selection"] == []
+
+
+def test_stale_selection_surfaces_the_skipped_families(tmp_path):
+    import json
+
+    sidecar = tmp_path / ".tapscribe-install-warnings.json"
+    sidecar.write_text(
+        json.dumps(
+            {"stale_backends": [{"family": "parakeet", "label": "Parakeet (NVIDIA)", "backend": "mlx"}]}
+        )
+    )
+    stale = build_setup_state(warnings_file=sidecar)["stale_selection"]
+    assert [entry["family"] for entry in stale] == ["parakeet"]
+    assert stale[0]["backend"] == "mlx"
+
+
+def test_malformed_sidecar_degrades_to_no_warning(tmp_path):
+    """A corrupt sidecar must not 500 the setup page — the page is how the
+    operator recovers, so it has to render even when this file is garbage."""
+    sidecar = tmp_path / ".tapscribe-install-warnings.json"
+    sidecar.write_text("not json at all")
+    assert build_setup_state(warnings_file=sidecar)["stale_selection"] == []
+
+
+def test_warnings_filename_matches_the_picker():
+    """The app must not import the dependency-free picker, so the filename is
+    mirrored in config. This pins the mirror to the real constant — the same
+    guard `test_setup_install.py` applies to the picker's family/backend keys."""
+    from tapscribe import config, install_picker
+
+    assert config.INSTALL_WARNINGS_FILE.name == install_picker.WARNINGS_FILENAME
+
 
 @pytest.fixture(autouse=True)
 def _reset_probes():
