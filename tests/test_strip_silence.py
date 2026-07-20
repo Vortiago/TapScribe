@@ -59,9 +59,10 @@ def test_detect_speech_silero_without_silero_raises_runtime_error(monkeypatch):
     real_import = builtins.__import__
 
     def _no_silero(name, *args, **kwargs):
-        # Block both deps that the production import line uses so the test
-        # outcome doesn't depend on whether torch happens to be installed.
-        if name in {"torch", "silero_vad"} or name.startswith(("torch.", "silero_vad.")):
+        # onnxruntime is what the VAD actually needs since #374 dropped torch
+        # and the silero-vad package; `tapscribe.vad` imports it lazily inside
+        # SileroVad.__init__, which is reached from _local_silero_model().
+        if name == "onnxruntime" or name.startswith("onnxruntime."):
             raise ImportError(f"simulated missing dep: {name}")
         return real_import(name, *args, **kwargs)
 

@@ -35,18 +35,25 @@ dependencies = [
     # block ws:// from https://app.spatial.chat as mixed content), so
     # TLS is effectively the happy path — not optional enough to gate.
     "cryptography>=42",
-    # silero-vad powers two production paths: the live SpeechGate
-    # (tapscribe/speech_gate.py) and strip-silence's region detector
-    # (tapscribe/strip_silence.py). Both are core operator features, so
-    # silero ships as a hard dependency rather than an opt-in extra.
-    # The `[onnx-cpu]` extra pulls onnxruntime so we load the model via
-    # ONNX, NOT the TorchScript `.jit` through `torch.jit.load` — PyTorch
-    # deprecated that loader and flags it unsupported on Python 3.14+.
-    # silero still imports torch + torchaudio and uses torch tensors for
-    # I/O (both come via silero's own deps), so torch stays — the ~500 MB
-    # payload is unavoidable for the live channel anyway.
-    "silero-vad[onnx-cpu]>=5.0",
-    "torch>=2.1",
+    # onnxruntime runs the vendored Silero VAD model behind
+    # `tapscribe.vad`, which powers two core operator features: the live
+    # SpeechGate (tapscribe/speech_gate.py) and strip-silence's region
+    # detector (tapscribe/strip_silence.py).
+    #
+    # NOT the `silero-vad` package, and NOT torch (#374). Upstream declares
+    # torch + torchaudio as HARD requirements and imports them at module
+    # level even when the model is loaded with `onnx=True` — while using
+    # torch purely as an array container. That made ~500 MB (CPU) to
+    # ~2.5 GB (CUDA) a core dependency of every install, and the single
+    # largest component of the Windows Bundle payload (ADR-0015). The port
+    # in `tapscribe/vad/` is pinned against the real package by
+    # `tests/test_vad_silero_port.py`, which asserts identical output.
+    #
+    # torch is still needed by some MODEL backends (voxtral, parakeet-cpu)
+    # and by the live channel's whisperlivekit — those declare it in their
+    # own extras, so it installs when an operator picks a family that
+    # needs it rather than unconditionally.
+    "onnxruntime>=1.17",
 ]
 
 [project.urls]
@@ -239,7 +246,17 @@ include = ["tapscribe*"]
 # components/**, and web/js/next/** — editable installs (start.sh) masked it,
 # but every built wheel / Docker image served a blank dashboard.
 [tool.setuptools.package-data]
-tapscribe = ["web/**/*.html", "web/**/*.css", "web/**/*.js", "web/js/types.d.ts"]
+# The VAD model is CODE-adjacent data, not an optional asset: without it in the
+# wheel, `tapscribe.vad.load_model` has nothing to open and both the live
+# SpeechGate and strip-silence fail at first use — in a Bundle, with no terminal
+# to say why. Same class of bug as the web/** globs below once were.
+tapscribe = [
+    "web/**/*.html",
+    "web/**/*.css",
+    "web/**/*.js",
+    "web/js/types.d.ts",
+    "vad/*.onnx",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
