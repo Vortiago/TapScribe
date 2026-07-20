@@ -35,6 +35,15 @@ internal sealed class JobObject : IDisposable
     private const int ExtendedLimitInformationClass = 9;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
 
+    /// <summary>
+    /// JOB_OBJECT_LIMIT_BREAKAWAY_OK — lets a child that explicitly asks (via
+    /// CREATE_BREAKAWAY_FROM_JOB) leave the job. Nothing TapScribe spawns asks for it, so
+    /// the Recorder and its WhisperLiveKit grandchild are still reaped as before; this
+    /// only stops the kernel from refusing a breakaway that the shell may request when
+    /// LauncherContext.ShellOpen hands a URL or a file to explorer.exe.
+    /// </summary>
+    private const uint JobObjectLimitBreakawayOk = 0x00000800;
+
     private readonly SafeFileHandle _handle;
 
     private JobObject(SafeFileHandle handle, bool selfAssigned)
@@ -76,7 +85,7 @@ internal sealed class JobObject : IDisposable
             }
 
             var limits = new JobObjectExtendedLimitInformation();
-            limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose | JobObjectLimitBreakawayOk;
 
             if (!SetInformationJobObject(handle, ExtendedLimitInformationClass, ref limits, (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
             {

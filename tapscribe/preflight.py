@@ -125,7 +125,22 @@ def plan_steps(
     if not module_present(probe):
         argv = install_target.pip_install_argv(["summarize"], install_spec=install_spec, python=python)
         if probe == "llama_cpp":
-            argv += ["--extra-index-url", LLAMA_CPP_WHEEL_INDEX]
+            # The wheel index is an EXTRA index, not the only one, because it carries
+            # llama-cpp-python and nothing else — its deps (numpy, diskcache, jinja2)
+            # would 404 if we made it authoritative with --index-url.
+            #
+            # But that means pip resolves across it AND PyPI and takes the highest
+            # version, which whenever PyPI is ahead is an sdist. `--only-binary` refuses
+            # that: a Bundle box has no cmake and no MSVC by construction, so a source
+            # build is guaranteed to fail — and because this step is non-fatal and
+            # nothing stamps the attempt, it would silently retry the same doomed
+            # multi-minute compile on EVERY launch. Failing fast is strictly better.
+            argv += [
+                "--extra-index-url",
+                LLAMA_CPP_WHEEL_INDEX,
+                "--only-binary",
+                "llama-cpp-python",
+            ]
         steps.append(
             Step(
                 name="summarize",

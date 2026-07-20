@@ -24,6 +24,13 @@ internal sealed class RotatingLogWriter : IDisposable
     private readonly Lock _gate = new();
     private StreamWriter? _writer;
 
+    /// <summary>
+    /// Bytes in the ACTIVE file, tracked so the common write doesn't have to ask the
+    /// filesystem. Set from the real length when the file is opened, then advanced per
+    /// line; -1 means "unknown, measure on next write".
+    /// </summary>
+    private long _written = -1;
+
     public RotatingLogWriter(BundleLayout layout, LogRotationPolicy? policy = null)
     {
         ArgumentNullException.ThrowIfNull(layout);
@@ -46,11 +53,28 @@ internal sealed class RotatingLogWriter : IDisposable
         {
             try
             {
-                Rotate();
+                // Only ask the filesystem when the running byte count says we might have
+                // crossed the threshold. The pumps feed this ONE LINE PER EVENT from the
+                // Recorder's stdout and stderr (PYTHONUNBUFFERED=1), and preflight pipes
+                // pip's torch install through it — thousands of lines. Enumerating the
+                // directory and stat-ing every file on each of those, inside the lock
+                // both pump threads contend on, is pure waste.
+                if (_written < 0 || _written >= _policy.MaxBytes)
+                    Rotate();
+
                 StreamWriter writer = _writer ??= Open();
-                writer.Write(DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss ", CultureInfo.InvariantCulture));
+                string stamp = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss ", CultureInfo.InvariantCulture);
+                writer.Write(stamp);
                 writer.WriteLine(line);
                 writer.Flush();
+                // The EXACT byte count, taken from the stream after the flush — not a
+                // character count. The file is UTF-8 and the Recorder deliberately emits
+                // it (PYTHONUTF8), so a log full of non-ASCII speaker names or this
+                // repo's em-dashes has meaningfully more bytes than characters. Counting
+                // chars would under-measure and let the file grow well past MaxBytes
+                // before a roll was even considered. Position is an in-memory field on
+                // FileStream once flushed, so this costs nothing.
+                _written = writer.BaseStream.Position;
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
@@ -61,6 +85,7 @@ internal sealed class RotatingLogWriter : IDisposable
                 // Open()). Nothing else in the Launcher depends on the log.
                 _writer?.Dispose();
                 _writer = null;
+                _written = -1;
             }
         }
     }
@@ -83,6 +108,7 @@ internal sealed class RotatingLogWriter : IDisposable
         {
             _writer?.Dispose();
             _writer = null;
+            _written = -1;
             File.Move(_path, System.IO.Path.Join(_directory, plan.ArchiveName));
         }
 
@@ -102,8 +128,14 @@ internal sealed class RotatingLogWriter : IDisposable
         }
     }
 
-    private StreamWriter Open() =>
-        new(new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite), new UTF8Encoding(false));
+    private StreamWriter Open()
+    {
+        var stream = new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+        // Seed the running count from the real file, so an append to an existing log
+        // still rolls at the right size instead of starting from zero every launch.
+        _written = stream.Length;
+        return new StreamWriter(stream, new UTF8Encoding(false));
+    }
 
     public void Dispose()
     {

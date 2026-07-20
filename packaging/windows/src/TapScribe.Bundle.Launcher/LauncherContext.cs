@@ -27,10 +27,34 @@ internal sealed class LauncherContext : ApplicationContext
     private readonly JobObject? _job;
     private readonly RecorderSupervisor _supervisor;
 
+    /// <summary>
+    /// A hidden, handle-owning control created on the UI thread purely to marshal
+    /// supervisor callbacks onto it.
+    ///
+    /// Not <c>ContextMenuStrip.InvokeRequired</c>: a ContextMenuStrip is a parentless
+    /// top-level ToolStripDropDown whose handle is not created until it is first SHOWN,
+    /// and WinForms' InvokeRequired returns FALSE for a handle-less control with no
+    /// marshalling parent — so every state change before the operator's first
+    /// right-click ran unmarshalled on a thread-pool thread.
+    ///
+    /// Not a captured <see cref="SynchronizationContext"/> either: this type is built by
+    /// <c>Application.Run(new LauncherContext(...))</c>, i.e. BEFORE the message loop
+    /// exists, and <c>ApplicationConfiguration.Initialize()</c> creates no Control — so
+    /// <c>SynchronizationContext.Current</c> is null at construction time and capturing
+    /// it yields a plain context whose Post goes to the THREAD POOL. Forcing this
+    /// control's handle here binds it to the current (UI) thread explicitly, with no
+    /// dependency on when WinForms happens to install its context.
+    /// </summary>
+    private readonly Control _marshaller;
+
     public LauncherContext(BundleLayout layout)
     {
         _layout = layout;
         _log = new RotatingLogWriter(layout);
+        // Touching Handle forces window creation on THIS thread, which is the thread
+        // Application.Run will pump. That is what makes InvokeRequired meaningful below.
+        _marshaller = new Control();
+        _ = _marshaller.Handle;
 
         // Created BEFORE anything is spawned: a process started by a process already in a
         // job lands in that job automatically, which is what makes the WhisperLiveKit
@@ -64,9 +88,19 @@ internal sealed class LauncherContext : ApplicationContext
     /// <summary>Marshal a supervisor state change onto the UI thread and render it.</summary>
     private void OnState(RecorderState state, string message)
     {
-        if (_icon.ContextMenuStrip is { } menu && menu.InvokeRequired)
+        if (_marshaller.InvokeRequired)
         {
-            menu.BeginInvoke(() => OnState(state, message));
+            try
+            {
+                _marshaller.BeginInvoke(() => OnState(state, message));
+            }
+            catch (Exception error) when (error is ObjectDisposedException or InvalidOperationException)
+            {
+                // We are shutting down and the marshaller's handle is already gone — a
+                // late Process.Exited during Quit is the realistic case. The tray is on
+                // its way out, so there is nothing left to render; just note it.
+                _log.Write($"state after shutdown ({state}): {message}");
+            }
             return;
         }
 
@@ -143,12 +177,33 @@ internal sealed class LauncherContext : ApplicationContext
         ShellOpen(_log.Path);
     }
 
-    /// <summary>Hand a URL or a file to the shell's default handler.</summary>
+    /// <summary>
+    /// Hand a URL or a file to the shell's default handler, VIA EXPLORER.
+    ///
+    /// Not <c>UseShellExecute = true</c> directly: the Launcher self-assigns into a
+    /// <see cref="JobObject"/> with KILL_ON_JOB_CLOSE, and for an ordinary
+    /// <c>shell\open\command</c> verb ShellExecuteEx does its CreateProcess INSIDE the
+    /// calling process — so the browser or Notepad becomes our child and the kernel puts
+    /// it in the job, exactly as it does the WhisperLiveKit grandchild we actually want
+    /// reaped. Quitting from the tray then killed the operator's browser, or every
+    /// Notepad tab they had open (Win11 Notepad is single-process).
+    ///
+    /// Handing the target to <c>explorer.exe</c> sidesteps it: an explorer instance is
+    /// already running outside our job, the one we start forwards to it and exits
+    /// immediately, and the real application is spawned by THAT explorer — never a member
+    /// of our job. The job also now carries BREAKAWAY_OK (see JobObject) so the forwarding
+    /// stub itself can leave.
+    ///
+    /// Cost: explorer returns before the target opens, so a bad URL/handler no longer
+    /// surfaces as an exception here. Acceptable — the failure was already only advisory.
+    /// </summary>
     private void ShellOpen(string target)
     {
         try
         {
-            using (Process.Start(new ProcessStartInfo(target) { UseShellExecute = true })) { }
+            var info = new ProcessStartInfo("explorer.exe") { UseShellExecute = false, CreateNoWindow = true };
+            info.ArgumentList.Add(target);
+            using (Process.Start(info)) { }
         }
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or FileNotFoundException)
         {
@@ -174,6 +229,7 @@ internal sealed class LauncherContext : ApplicationContext
             _supervisor.Dispose();
             _icon.Dispose();
             _icons.Dispose();
+            _marshaller.Dispose();
             // Log the clean-shutdown marker and close the writer BEFORE releasing
             // the job. `_job.Dispose()` closes the last handle to a
             // KILL_ON_JOB_CLOSE job that the Launcher ITSELF is a member of (it

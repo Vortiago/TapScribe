@@ -34,6 +34,8 @@ internal sealed class RecorderSupervisor : IDisposable
     private readonly Action<RecorderState, string> _onState;
     private readonly Lock _gate = new();
     private Process? _recorder;
+    /// <summary>The preflight child while it runs, so Stop() can reach it too.</summary>
+    private Process? _preflight;
     private bool _stopping;
 
     public RecorderSupervisor(BundleLayout layout, JobObject? job, Action<string> log, Action<RecorderState, string> onState)
@@ -48,6 +50,32 @@ internal sealed class RecorderSupervisor : IDisposable
     public void Start() => Task.Run(Run);
 
     private void Run()
+    {
+        // TASK-BOUNDARY HANDLER — deliberately catches everything, and CodeQL's
+        // cs/catch-of-all-exceptions is dismissed on it for that reason.
+        //
+        // Start() is fire-and-forget (Task.Run), so an exception escaping here lands in
+        // an unobserved Task and vanishes: no Fail(), no log line, no state change, and a
+        // tray frozen on "Preparing TapScribe…" forever with no way for the operator to
+        // tell whether it is still working. Narrowing this catch would restore exactly
+        // the silent death this PR exists to remove — an unhandled type is precisely the
+        // case that must still reach the tray.
+        //
+        // Nothing is swallowed: the FULL exception (type, message, stack) goes to the
+        // log, and only the friendly one-liner goes to the balloon. That split is the
+        // substance of CodeQL's complaint about broad catches, and it is honoured here.
+        try
+        {
+            RunCore();
+        }
+        catch (Exception error)
+        {
+            _log($"unhandled exception in supervisor: {error}");
+            Fail($"TapScribe could not start: {error.Message} See the log for details.");
+        }
+    }
+
+    private void RunCore()
     {
         string wheel;
         try
@@ -69,6 +97,19 @@ internal sealed class RecorderSupervisor : IDisposable
         if (!RunPreflight(wheel))
             return;
 
+        // Preflight blocks on an unbounded pip install that can pull torch — minutes,
+        // gigabytes. If the operator hit Quit during it, Stop() already ran and found no
+        // Recorder to kill, so spawning one now would start a process nobody is left to
+        // reap. The JobObject usually covers it, but TryCreate returning null is an
+        // explicitly supported degraded path, and on THAT path the Recorder plus its
+        // WhisperLiveKit grandchild would be orphaned holding port 8001 — the exact leak
+        // this class exists to prevent.
+        lock (_gate)
+        {
+            if (_stopping)
+                return;
+        }
+
         StartRecorder(wheel);
     }
 
@@ -84,7 +125,32 @@ internal sealed class RecorderSupervisor : IDisposable
         try
         {
             using Process process = Spawn(command);
-            process.WaitForExit();
+            bool quitRaced;
+            lock (_gate)
+            {
+                quitRaced = _stopping;
+                if (!quitRaced)
+                    _preflight = process;
+            }
+
+            if (quitRaced)
+            {
+                // Quit landed between RunCore's check and this spawn. Kill OUTSIDE the
+                // lock — Stop() takes the same lock, and blocking it behind a kill is
+                // the opposite of what Quit is trying to achieve.
+                process.Kill(entireProcessTree: true);
+                return false;
+            }
+
+            try
+            {
+                process.WaitForExit();
+            }
+            finally
+            {
+                lock (_gate)
+                    _preflight = null;
+            }
             if (process.ExitCode != 0)
                 _log($"preflight exited {process.ExitCode} — continuing; some optional components may be missing.");
             return true;
@@ -144,11 +210,29 @@ internal sealed class RecorderSupervisor : IDisposable
     public void Stop()
     {
         Process? handle;
+        Process? preflight;
         lock (_gate)
         {
             _stopping = true;
             handle = _recorder;
             _recorder = null;
+            preflight = _preflight;
+        }
+
+        // Preflight is a long blocking pip install; killing it is what makes Quit feel
+        // immediate instead of "nothing happens for four minutes". Not disposed here —
+        // RunPreflight's own `using` owns it.
+        if (preflight is not null)
+        {
+            try
+            {
+                if (!preflight.HasExited)
+                    preflight.Kill(entireProcessTree: true);
+            }
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+            {
+                _log($"stop (preflight): {error.Message}");
+            }
         }
 
         if (handle is null)
@@ -217,6 +301,18 @@ internal sealed class RecorderSupervisor : IDisposable
 
     private void Fail(string message)
     {
+        // A Quit mid-preflight kills the child, which surfaces here as a spawn/wait
+        // failure — but the operator asked for that, so a red "TapScribe could not
+        // start" balloon on the way out would be a lie. Log it and stay quiet.
+        lock (_gate)
+        {
+            if (_stopping)
+            {
+                _log($"(after quit) {message}");
+                return;
+            }
+        }
+
         _log($"FATAL: {message}");
         _onState(RecorderState.Failed, message);
     }
