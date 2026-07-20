@@ -46,6 +46,11 @@ public abstract class WasapiCaptureBase : IAudioCapture
 
     public event EventHandler? MuteChanged;
 
+    // Declared for the IAudioCapture seam (#218). Raising it from NAudio's
+    // RecordingStopped (endpoint invalidated mid-capture) is the follow-up; empty
+    // accessors keep the not-yet-raised member off the CS0067 radar until then.
+    public event EventHandler<Exception?>? Failed { add { } remove { } }
+
     /// <summary>Wrap an already-constructed WASAPI capture (the subclass picks the
     /// endpoint/mode). The WaveFormat is read eagerly, so an unsupported mix format
     /// surfaces from construction — the caller builds the capture before streaming.

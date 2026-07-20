@@ -88,16 +88,36 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     public bool Stopped { get; private set; }
     public bool Disposed { get; private set; }
 
+    /// <summary>When set, <see cref="Start"/> throws — a device that fails to open (in use,
+    /// invalidated, unsupported format). Records disposal (via <see cref="Disposed"/>) and
+    /// still supports real <see cref="Failed"/> subscription, so a test can drive both the
+    /// orchestrator's failed-capture cleanup and TapSession's ctor-catch unwind, then assert
+    /// a late Failed reaches nobody.</summary>
+    public bool ThrowOnStart { get; init; }
+
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
     public bool IsMuted { get; private set; }
     public event EventHandler? MuteChanged;
 
-    public void Start() => Started = true;
+    public event EventHandler<Exception?>? Failed;
+
+    public void Start()
+    {
+        if (ThrowOnStart)
+            throw new InvalidOperationException("device open failed");
+        Started = true;
+    }
+
     public void Stop() => Stopped = true;
     public void Dispose() => Disposed = true;
 
     public void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new AudioCapturedEventArgs(pcm));
+
+    /// <summary>Raise <see cref="Failed"/> — the synthetic stand-in for the OS
+    /// invalidating the endpoint mid-capture (unplugged/disabled). A null
+    /// <paramref name="error"/> models a clean stop, which is NOT a failure.</summary>
+    public void RaiseFailed(Exception? error) => Failed?.Invoke(this, error);
 
     /// <summary>Flip the reported mute state and raise <see cref="MuteChanged"/> — the
     /// synthetic stand-in for the OS muting/unmuting the mic, so a test drives the
@@ -109,25 +129,6 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
         IsMuted = muted;
         MuteChanged?.Invoke(this, EventArgs.Empty);
     }
-}
-
-/// <summary>A capture whose <see cref="Start"/> throws — a device that fails to open
-/// (in use, invalidated, unsupported format). Records disposal so a test can assert
-/// the orchestrator's failure path cleaned it up rather than leaking it.</summary>
-internal sealed class ThrowingOnStartCapture(AudioFormat format) : IAudioCapture
-{
-    public AudioFormat Format { get; } = format;
-    public bool Disposed { get; private set; }
-
-    // Never raised; empty accessors keep it off the unused-event warning radar.
-    public event EventHandler<AudioCapturedEventArgs>? DataAvailable { add { } remove { } }
-
-    public bool IsMuted => false;
-    public event EventHandler? MuteChanged { add { } remove { } }
-
-    public void Start() => throw new InvalidOperationException("device open failed");
-    public void Stop() { }
-    public void Dispose() => Disposed = true;
 }
 
 /// <summary>

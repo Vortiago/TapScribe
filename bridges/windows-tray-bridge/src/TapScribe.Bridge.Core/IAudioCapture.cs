@@ -50,6 +50,17 @@ public interface IAudioCapture : IDisposable
     /// </summary>
     event EventHandler? MuteChanged;
 
+    /// <summary>
+    /// Raised when capture ends unexpectedly mid-stream — the endpoint was invalidated
+    /// (unplugged/disabled/default-device switch) after <see cref="Start"/>, so
+    /// <see cref="DataAvailable"/> silently stops. Carries the failure exception, or
+    /// <c>null</c> for a clean stop (which is NOT a failure). Lets the pipeline surface
+    /// "microphone lost — audio not being captured" instead of going quietly dead.
+    /// May fire on an arbitrary thread. A backend that can't detect mid-stream loss
+    /// never raises it.
+    /// </summary>
+    event EventHandler<Exception?>? Failed;
+
     /// <summary>Begin capturing. <see cref="DataAvailable"/> fires until <see cref="Stop"/>.</summary>
     void Start();
 
