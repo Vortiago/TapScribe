@@ -125,15 +125,21 @@ internal sealed class RecorderSupervisor : IDisposable
         try
         {
             using Process process = Spawn(command);
+            bool quitRaced;
             lock (_gate)
             {
-                if (_stopping)
-                {
-                    // Quit landed between the check above and the spawn.
-                    process.Kill(entireProcessTree: true);
-                    return false;
-                }
-                _preflight = process;
+                quitRaced = _stopping;
+                if (!quitRaced)
+                    _preflight = process;
+            }
+
+            if (quitRaced)
+            {
+                // Quit landed between RunCore's check and this spawn. Kill OUTSIDE the
+                // lock — Stop() takes the same lock, and blocking it behind a kill is
+                // the opposite of what Quit is trying to achieve.
+                process.Kill(entireProcessTree: true);
+                return false;
             }
 
             try
@@ -295,6 +301,18 @@ internal sealed class RecorderSupervisor : IDisposable
 
     private void Fail(string message)
     {
+        // A Quit mid-preflight kills the child, which surfaces here as a spawn/wait
+        // failure — but the operator asked for that, so a red "TapScribe could not
+        // start" balloon on the way out would be a lie. Log it and stay quiet.
+        lock (_gate)
+        {
+            if (_stopping)
+            {
+                _log($"(after quit) {message}");
+                return;
+            }
+        }
+
         _log($"FATAL: {message}");
         _onState(RecorderState.Failed, message);
     }

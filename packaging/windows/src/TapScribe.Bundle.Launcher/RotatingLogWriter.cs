@@ -67,9 +67,14 @@ internal sealed class RotatingLogWriter : IDisposable
                 writer.Write(stamp);
                 writer.WriteLine(line);
                 writer.Flush();
-                // Approximate on purpose: exact only matters for WHEN we re-measure, and
-                // Rotate() reads the true length from disk before deciding to roll.
-                _written += stamp.Length + line.Length + Environment.NewLine.Length;
+                // The EXACT byte count, taken from the stream after the flush — not a
+                // character count. The file is UTF-8 and the Recorder deliberately emits
+                // it (PYTHONUTF8), so a log full of non-ASCII speaker names or this
+                // repo's em-dashes has meaningfully more bytes than characters. Counting
+                // chars would under-measure and let the file grow well past MaxBytes
+                // before a roll was even considered. Position is an in-memory field on
+                // FileStream once flushed, so this costs nothing.
+                _written = writer.BaseStream.Position;
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {

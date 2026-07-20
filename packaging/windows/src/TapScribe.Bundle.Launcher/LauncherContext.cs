@@ -28,27 +28,33 @@ internal sealed class LauncherContext : ApplicationContext
     private readonly RecorderSupervisor _supervisor;
 
     /// <summary>
-    /// Captured on the UI thread in the ctor. This — NOT
-    /// <c>ContextMenuStrip.InvokeRequired</c> — is how supervisor callbacks get onto the
-    /// UI thread. A ContextMenuStrip is a parentless top-level ToolStripDropDown whose
-    /// handle is not created until it is first SHOWN, and WinForms' InvokeRequired
-    /// returns FALSE for a handle-less control with no marshalling parent. So every state
-    /// change before the operator's first right-click — Preflight, Running, and the
-    /// Failed/Stopped paths raised from Process.Exited — took the unmarshalled branch and
-    /// touched NotifyIcon/ToolStrip from a thread-pool thread. The balloon is a Bundle's
-    /// only error surface, so one that intermittently fails to appear reads as "the app
-    /// silently did nothing".
+    /// A hidden, handle-owning control created on the UI thread purely to marshal
+    /// supervisor callbacks onto it.
+    ///
+    /// Not <c>ContextMenuStrip.InvokeRequired</c>: a ContextMenuStrip is a parentless
+    /// top-level ToolStripDropDown whose handle is not created until it is first SHOWN,
+    /// and WinForms' InvokeRequired returns FALSE for a handle-less control with no
+    /// marshalling parent — so every state change before the operator's first
+    /// right-click ran unmarshalled on a thread-pool thread.
+    ///
+    /// Not a captured <see cref="SynchronizationContext"/> either: this type is built by
+    /// <c>Application.Run(new LauncherContext(...))</c>, i.e. BEFORE the message loop
+    /// exists, and <c>ApplicationConfiguration.Initialize()</c> creates no Control — so
+    /// <c>SynchronizationContext.Current</c> is null at construction time and capturing
+    /// it yields a plain context whose Post goes to the THREAD POOL. Forcing this
+    /// control's handle here binds it to the current (UI) thread explicitly, with no
+    /// dependency on when WinForms happens to install its context.
     /// </summary>
-    private readonly SynchronizationContext _ui;
+    private readonly Control _marshaller;
 
     public LauncherContext(BundleLayout layout)
     {
         _layout = layout;
         _log = new RotatingLogWriter(layout);
-        // WindowsFormsSynchronizationContext is installed by Application.Run's message
-        // loop; if this runs before that (or under a bare context) fall back to a plain
-        // one, which posts to the thread pool — no worse than the old behaviour.
-        _ui = SynchronizationContext.Current ?? new SynchronizationContext();
+        // Touching Handle forces window creation on THIS thread, which is the thread
+        // Application.Run will pump. That is what makes InvokeRequired meaningful below.
+        _marshaller = new Control();
+        _ = _marshaller.Handle;
 
         // Created BEFORE anything is spawned: a process started by a process already in a
         // job lands in that job automatically, which is what makes the WhisperLiveKit
@@ -82,9 +88,19 @@ internal sealed class LauncherContext : ApplicationContext
     /// <summary>Marshal a supervisor state change onto the UI thread and render it.</summary>
     private void OnState(RecorderState state, string message)
     {
-        if (SynchronizationContext.Current != _ui)
+        if (_marshaller.InvokeRequired)
         {
-            _ui.Post(_ => OnState(state, message), null);
+            try
+            {
+                _marshaller.BeginInvoke(() => OnState(state, message));
+            }
+            catch (Exception error) when (error is ObjectDisposedException or InvalidOperationException)
+            {
+                // We are shutting down and the marshaller's handle is already gone — a
+                // late Process.Exited during Quit is the realistic case. The tray is on
+                // its way out, so there is nothing left to render; just note it.
+                _log.Write($"state after shutdown ({state}): {message}");
+            }
             return;
         }
 
@@ -213,6 +229,7 @@ internal sealed class LauncherContext : ApplicationContext
             _supervisor.Dispose();
             _icon.Dispose();
             _icons.Dispose();
+            _marshaller.Dispose();
             // Log the clean-shutdown marker and close the writer BEFORE releasing
             // the job. `_job.Dispose()` closes the last handle to a
             // KILL_ON_JOB_CLOSE job that the Launcher ITSELF is a member of (it
