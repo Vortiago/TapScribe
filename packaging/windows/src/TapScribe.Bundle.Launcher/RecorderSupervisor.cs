@@ -51,18 +51,27 @@ internal sealed class RecorderSupervisor : IDisposable
 
     private void Run()
     {
-        // Start() is fire-and-forget (Task.Run), so anything escaping here lands in an
-        // unobserved Task and vanishes: no Fail(), no log line, no state change, and a
-        // tray frozen on "Preparing TapScribe…" forever with no way to tell whether it
-        // is still working. The narrow filtered catches below handle what we expect;
-        // this outer one guarantees the operator hears about what we didn't.
+        // TASK-BOUNDARY HANDLER — deliberately catches everything, and CodeQL's
+        // cs/catch-of-all-exceptions is dismissed on it for that reason.
+        //
+        // Start() is fire-and-forget (Task.Run), so an exception escaping here lands in
+        // an unobserved Task and vanishes: no Fail(), no log line, no state change, and a
+        // tray frozen on "Preparing TapScribe…" forever with no way for the operator to
+        // tell whether it is still working. Narrowing this catch would restore exactly
+        // the silent death this PR exists to remove — an unhandled type is precisely the
+        // case that must still reach the tray.
+        //
+        // Nothing is swallowed: the FULL exception (type, message, stack) goes to the
+        // log, and only the friendly one-liner goes to the balloon. That split is the
+        // substance of CodeQL's complaint about broad catches, and it is honoured here.
         try
         {
             RunCore();
         }
         catch (Exception error)
         {
-            Fail($"TapScribe could not start: {error.Message}");
+            _log($"unhandled exception in supervisor: {error}");
+            Fail($"TapScribe could not start: {error.Message} See the log for details.");
         }
     }
 
