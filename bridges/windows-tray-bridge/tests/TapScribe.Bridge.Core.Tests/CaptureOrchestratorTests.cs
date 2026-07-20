@@ -330,7 +330,7 @@ public class CaptureOrchestratorTests
     {
         var transport = new FakeTapTransport();
         var mic = new FakeAudioCapture(RecorderFormat);
-        var badSystem = new ThrowingOnStartCapture(RecorderFormat); // device fails to open
+        var badSystem = new FakeAudioCapture(RecorderFormat) { ThrowOnStart = true }; // device fails to open
         var failures = new List<(string Identity, Exception Error)>();
 
         await using var orchestrator = CaptureOrchestrator.StartAll(

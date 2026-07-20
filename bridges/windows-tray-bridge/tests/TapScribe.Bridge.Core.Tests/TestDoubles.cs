@@ -88,6 +88,13 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
     public bool Stopped { get; private set; }
     public bool Disposed { get; private set; }
 
+    /// <summary>When set, <see cref="Start"/> throws — a device that fails to open (in use,
+    /// invalidated, unsupported format). Records disposal (via <see cref="Disposed"/>) and
+    /// still supports real <see cref="Failed"/> subscription, so a test can drive both the
+    /// orchestrator's failed-capture cleanup and TapSession's ctor-catch unwind, then assert
+    /// a late Failed reaches nobody.</summary>
+    public bool ThrowOnStart { get; init; }
+
     public event EventHandler<AudioCapturedEventArgs>? DataAvailable;
 
     public bool IsMuted { get; private set; }
@@ -95,7 +102,13 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
 
     public event EventHandler<Exception?>? Failed;
 
-    public void Start() => Started = true;
+    public void Start()
+    {
+        if (ThrowOnStart)
+            throw new InvalidOperationException("device open failed");
+        Started = true;
+    }
+
     public void Stop() => Stopped = true;
     public void Dispose() => Disposed = true;
 
@@ -116,26 +129,6 @@ internal sealed class FakeAudioCapture(AudioFormat format) : IAudioCapture
         IsMuted = muted;
         MuteChanged?.Invoke(this, EventArgs.Empty);
     }
-}
-
-/// <summary>A capture whose <see cref="Start"/> throws — a device that fails to open
-/// (in use, invalidated, unsupported format). Records disposal so a test can assert
-/// the orchestrator's failure path cleaned it up rather than leaking it.</summary>
-internal sealed class ThrowingOnStartCapture(AudioFormat format) : IAudioCapture
-{
-    public AudioFormat Format { get; } = format;
-    public bool Disposed { get; private set; }
-
-    // Never raised; empty accessors keep it off the unused-event warning radar.
-    public event EventHandler<AudioCapturedEventArgs>? DataAvailable { add { } remove { } }
-
-    public bool IsMuted => false;
-    public event EventHandler? MuteChanged { add { } remove { } }
-    public event EventHandler<Exception?>? Failed { add { } remove { } }
-
-    public void Start() => throw new InvalidOperationException("device open failed");
-    public void Stop() { }
-    public void Dispose() => Disposed = true;
 }
 
 /// <summary>

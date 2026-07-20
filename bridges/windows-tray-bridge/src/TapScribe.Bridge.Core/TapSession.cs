@@ -71,9 +71,7 @@ public sealed class TapSession : IAsyncDisposable
         // Subscribe BEFORE seeding _muted so a mute toggled during construction can't slip
         // through the gap between the read and the subscribe — the handler catches it and
         // the seed then reads the reconciled current state.
-        _capture.DataAvailable += OnData;
-        _capture.MuteChanged += OnMuteChanged;
-        _capture.Failed += OnFailed;
+        AttachCaptureEvents();
         _muted = _capture.IsMuted; // seed from the device's current state before any frame
         try
         {
@@ -82,18 +80,39 @@ public sealed class TapSession : IAsyncDisposable
         }
         catch
         {
-            _capture.DataAvailable -= OnData;
-            _capture.MuteChanged -= OnMuteChanged;
-            _capture.Failed -= OnFailed;
+            DetachCaptureEvents();
             throw;
         }
+    }
+
+    // The capture-event wiring, hand-listed in one place so subscribe and unsubscribe
+    // stay symmetric by construction: the ctor attaches, and every teardown path — the
+    // ctor-catch on a failed Start, DisposeAsync, and DrainAllAsync — detaches. Detach is
+    // idempotent (removing an already-removed handler is a no-op), so the End path's
+    // belt-and-braces double-unsubscribe (DrainAllAsync then DisposeAsync) is safe. A new
+    // capture event is added or removed here once, keeping the four call sites in lockstep.
+    private void AttachCaptureEvents()
+    {
+        _capture.DataAvailable += OnData;
+        _capture.MuteChanged += OnMuteChanged;
+        _capture.Failed += OnFailed;
+    }
+
+    private void DetachCaptureEvents()
+    {
+        _capture.DataAvailable -= OnData;
+        _capture.MuteChanged -= OnMuteChanged;
+        _capture.Failed -= OnFailed;
     }
 
     /// <summary>
     /// Start a gated capture pipeline over <paramref name="capture"/>.
     /// <paramref name="onConnected"/> fires when an Utterance's WS connects;
-    /// <paramref name="onFailed"/> fires if an Utterance can't reach the Recorder on
-    /// its first connect (refused token / unreachable / unknown session). The
+    /// <paramref name="onFailed"/> fires on a capture-pipeline failure: an Utterance that
+    /// can't reach the Recorder on its first connect (refused token / unreachable / unknown
+    /// session), or a mid-stream capture loss — the endpoint invalidated after Start
+    /// (unplugged / disabled / default-device switch), forwarded from
+    /// <see cref="IAudioCapture.Failed"/>. The
     /// session takes ownership of <paramref name="capture"/> and disposes it.
     /// Construct the capture before calling so a device-open failure surfaces to the
     /// caller. <paramref name="connectionFactory"/> defaults to a real
@@ -224,9 +243,7 @@ public sealed class TapSession : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        _capture.DataAvailable -= OnData; // stop producing gate events
-        _capture.MuteChanged -= OnMuteChanged;
-        _capture.Failed -= OnFailed;
+        DetachCaptureEvents(); // stop producing gate events, and a late device-loss Failed
 
         TapStream? current;
         List<Task> draining;
@@ -269,9 +286,7 @@ public sealed class TapSession : IAsyncDisposable
         // the End barrier exists to prevent. DisposeAsync (which follows on
         // the End path) unsubscribes again; removing an already-removed
         // handler is a no-op.
-        _capture.DataAvailable -= OnData;
-        _capture.MuteChanged -= OnMuteChanged;
-        _capture.Failed -= OnFailed;
+        DetachCaptureEvents();
 
         List<Task> draining;
         lock (_lock)
