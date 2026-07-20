@@ -133,23 +133,22 @@ def detect_speech_silero(samples_int16: np.ndarray, min_silence_ms: int, pad_ms:
     deserialisation cost off every slider drag. Imported lazily so
     importing this module never pulls silero/onnx.
 
-    silero-vad + torch are core dependencies (pyproject.toml). If the
-    import below ever fails, the install is broken — reinstall TapScribe.
-    Raised as RuntimeError so the route surfaces a clear 500 instead of
-    a bare ImportError.
+    onnxruntime is a core dependency (pyproject.toml) and the VAD model
+    is vendored, so if the import below ever fails the install is broken
+    — reinstall TapScribe. Raised as RuntimeError so the route surfaces a
+    clear 500 instead of a bare ImportError.
     """
     try:
-        import torch
-        from silero_vad import get_speech_timestamps
+        from .vad import speech_timestamps
 
         model = _local_silero_model()
     except ImportError as e:
         raise RuntimeError(
-            "silero-vad/torch import failed — TapScribe install is corrupt. "
+            "the VAD backend failed to import — TapScribe install is corrupt. "
             "Reinstall the package (`pip install -e .`)."
         ) from e
-    audio = torch.from_numpy(samples_int16).float() / 32768.0
-    ts = get_speech_timestamps(
+    audio = samples_int16.astype(np.float32) / 32768.0
+    ts = speech_timestamps(
         audio,
         model,
         sampling_rate=SAMPLE_RATE,
