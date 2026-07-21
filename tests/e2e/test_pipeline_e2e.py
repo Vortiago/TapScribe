@@ -38,6 +38,7 @@ from .harness import (
     streams_drained,
     synth_speech_like_wav,
     wait_until,
+    word_tokens,
 )
 
 ALICE_SCRIPTED_TEXT = "The quick brown fox jumps over the lazy dog."
@@ -388,10 +389,6 @@ async def test_two_detached_sessions_capture_concurrently_without_cross_leak(
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "audio"
 
-# Match alphabetic runs only — Whisper output has punctuation, the
-# reference has parenthetical clauses; we want lowercased word tokens.
-_WORD_RE = re.compile(r"[^\W\d_]+", flags=re.UNICODE)
-
 
 @dataclass
 class AudioFixture:
@@ -415,11 +412,6 @@ def _real_audio_fixtures() -> list[AudioFixture]:
         if text:
             out.append(AudioFixture(wav=wav, reference=text))
     return out
-
-
-def _word_tokens(text: str, *, min_len: int = 4) -> set[str]:
-    """Lowercased alphabetic word tokens of at least `min_len` chars."""
-    return {m.group(0).lower() for m in _WORD_RE.finditer(text) if len(m.group(0)) >= min_len}
 
 
 @pytest.mark.real_audio
@@ -483,8 +475,8 @@ async def test_pipeline_with_real_whisper(running_recorder: RunningRecorder):
             f"no sidecar for speaker {fx.wav.stem!r} (have: {sorted(sidecars_by_speaker)})"
         )
         transcript = sidecar.result.text
-        reference_words = _word_tokens(fx.reference)
-        transcript_words = _word_tokens(transcript)
+        reference_words = word_tokens(fx.reference)
+        transcript_words = word_tokens(transcript)
         overlap = reference_words & transcript_words
         assert overlap, (
             f"{fx.wav.name}: no ≥ 4-char reference word appears in "
@@ -567,7 +559,7 @@ async def test_candidate_languages_control_real_whisper_on_norwegian_audio(
             f"got language={pinned.result.language!r}"
         )
         # It really transcribed Norwegian, not just stamped a language code.
-        assert _word_tokens(nb.reference) & _word_tokens(pinned.result.text), (
+        assert word_tokens(nb.reference) & word_tokens(pinned.result.text), (
             f"pinned-Norwegian transcript shares no reference word: {pinned.result.text!r}"
         )
 
@@ -714,8 +706,8 @@ async def test_pipeline_with_real_parakeet(running_recorder: RunningRecorder):
         )
 
         # (1) Content — soft word overlap with the reference.
-        reference_words = _word_tokens(fx.reference)
-        transcript_words = _word_tokens(result.text)
+        reference_words = word_tokens(fx.reference)
+        transcript_words = word_tokens(result.text)
         overlap = reference_words & transcript_words
         assert overlap, (
             f"{fx.wav.name}: no ≥ 4-char reference word appears in "
@@ -984,7 +976,7 @@ async def test_cover_real_whisper_plus_nb_specialist_e2e(running_recorder: Runni
     # The NB-Whisper sidecar really transcribed the Norwegian clip as Norwegian
     # (it is pinned to 'no' by name) — a reference word survives.
     nb_sidecar = next(c for c in read_all_cached(marlene) if c.result.model == "nb-whisper-tiny")
-    assert _word_tokens(_reference_for("marlene-nb")) & _word_tokens(nb_sidecar.result.text), (
+    assert word_tokens(_reference_for("marlene-nb")) & word_tokens(nb_sidecar.result.text), (
         f"nb-whisper transcript shares no Norwegian reference word: {nb_sidecar.result.text!r}"
     )
     on_disk = json.loads((rec.session_dir / "session-transcript.json").read_text(encoding="utf-8"))
@@ -1097,7 +1089,7 @@ async def test_cover_real_parakeet_generalist_keeps_generalist_on_english_e2e(
         f"unscored Parakeet generalist must be kept, primary={primary.result.model if primary else None}"
     )
     # And it really transcribed English (a reference word survives).
-    assert _word_tokens(_reference_for("armstrong-en")) & _word_tokens(primary.result.text), (
+    assert word_tokens(_reference_for("armstrong-en")) & word_tokens(primary.result.text), (
         f"Parakeet primary shares no English reference word: {primary.result.text!r}"
     )
 
@@ -1180,7 +1172,7 @@ async def test_multiperson_multilingual_meeting_routes_each_language_e2e(
         primary = read_cached(wav)
         assert primary is not None, f"{stem}: no primary selected"
         # The chosen transcript really is in this utterance's language.
-        assert _word_tokens(_reference_for(stem)) & _word_tokens(primary.result.text), (
+        assert word_tokens(_reference_for(stem)) & word_tokens(primary.result.text), (
             f"{stem}: primary shares no reference word — wrong language? {primary.result.text!r}"
         )
 
@@ -1205,7 +1197,7 @@ async def test_multiperson_multilingual_meeting_routes_each_language_e2e(
     # The merged transcript stitches all three speakers' content.
     assert merged["wav_count"] == 3
     for stem in wavs:
-        assert _word_tokens(_reference_for(stem)) & _word_tokens(merged["plain_text"]), (
+        assert word_tokens(_reference_for(stem)) & word_tokens(merged["plain_text"]), (
             f"{stem} content missing from the merged multilingual transcript"
         )
 
@@ -1276,10 +1268,10 @@ def _word_recall(reference: str, hypothesis: str) -> float:
     """Fraction of the reference's ≥4-char content words present in the
     hypothesis — robust to da/no near-identity (the shared words match either
     way; the discriminating ones are what move this)."""
-    ref = _word_tokens(reference)
+    ref = word_tokens(reference)
     if not ref:
         return 0.0
-    return round(len(ref & _word_tokens(hypothesis)) / len(ref), 3)
+    return round(len(ref & word_tokens(hypothesis)) / len(ref), 3)
 
 
 @pytest.mark.real_audio

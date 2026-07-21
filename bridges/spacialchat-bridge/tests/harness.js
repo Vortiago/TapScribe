@@ -15,7 +15,12 @@
 //   - `status()`          — last bridgeStatus snapshot written to
 //                           chrome.storage.local (the popup's view)
 //   - `clock.tick(ms)`    — advance virtual time and fire any timers
-//                           whose deadlines have arrived
+//                           whose deadlines have arrived. An exception
+//                           thrown by a timer body (or by a storage
+//                           onChanged listener, in `_fireChange`) is
+//                           collected and RE-THROWN once the pass
+//                           completes, so a regression on those paths
+//                           fails the suite instead of vanishing.
 //   - `publishTick()`     — fire the 2 Hz publish/title interval body once
 //                           (not auto-fired; drives the tab-title suffix)
 //   - `title()`           — the current document.title the script maintains
@@ -31,10 +36,30 @@ const vm = require("node:vm");
 const CONTROL_CLIENT_JS = path.join(__dirname, "..", "control-client.js");
 const CONTENT_JS = path.join(__dirname, "..", "content.js");
 
+// Errors thrown out of a virtual-timer body or a storage-change listener are
+// COLLECTED here rather than swallowed, then re-thrown once the pass that
+// produced them has finished (so timer ordering / listener fan-out is
+// preserved). Those bodies — scheduleReconnect's timer, restartDrainTimer,
+// and the whole endMeeting → publishStatus → updateIndicator chain — are the
+// bridge's least-asserted paths; swallowing meant a regression that threw
+// there vanished with the suite still green. Same hazard the repo's CLAUDE.md
+// calls out for the dashboard's addEventListener callbacks.
+function throwFirstCollected(collected, what) {
+  if (collected.length === 0) return;
+  const first = collected[0];
+  collected.length = 0;
+  if (first instanceof Error) {
+    first.message = "uncaught throw inside " + what + ": " + first.message;
+    throw first;
+  }
+  throw new Error("uncaught throw inside " + what + ": " + String(first));
+}
+
 function createClock() {
   let now = 0;
   let nextId = 1;
   const timers = new Map(); // id -> { at, fn }
+  const collected = [];
 
   function setTimeoutFn(fn, ms) {
     const id = nextId++;
@@ -59,9 +84,12 @@ function createClock() {
       const t = timers.get(due);
       timers.delete(due);
       now = t.at;
-      try { t.fn(); } catch (e) { /* surface in test if needed */ }
+      try { t.fn(); } catch (e) { collected.push(e); }
     }
     now = target;
+    // Fire every due timer first, THEN surface the failure — a throw mid-pass
+    // would leave the remaining timers unfired and change what the test ran.
+    throwFirstCollected(collected, "a scheduled timer body");
   }
   return {
     setTimeout: setTimeoutFn,
@@ -149,10 +177,16 @@ function makeChromeMock(initialSettings) {
       },
     },
     _writes: writes,
+    _addChangeListener: (fn) => changeListeners.push(fn),
     _fireChange: (changes) => {
+      const collected = [];
       for (const fn of changeListeners) {
-        try { fn(changes, "local"); } catch (e) { /* surface via assert */ }
+        try { fn(changes, "local"); } catch (e) { collected.push(e); }
       }
+      // Every listener gets its turn (real chrome.storage.onChanged doesn't
+      // stop fanning out because one listener threw), then the first failure
+      // is surfaced so the test goes red.
+      throwFirstCollected(collected, "a chrome.storage.onChanged listener");
     },
   };
 }
@@ -316,6 +350,15 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     chrome._fireChange({ useTls: { newValue: !!useTls, oldValue: !useTls } });
   }
 
+  // Simulate the operator pasting a fresh tap token into the popup — the
+  // recovery path out of a sticky `tap-auth-failed`.
+  let lastToken = null;
+  function setTapToken(token) {
+    const prev = lastToken;
+    lastToken = token;
+    chrome._fireChange({ tapToken: { newValue: token, oldValue: prev } });
+  }
+
   // Simulate the popup starting / ending a bracketed meeting — fires the
   // same onChanged listener content.js registered at boot, mirroring the
   // popup persisting (or clearing) meetingSessionId in chrome.storage.local.
@@ -414,6 +457,11 @@ function createBridge({ settings = {}, location: locationOverride, triggerStatus
     clock,
     flushMicrotasks,
     flipUseTls,
+    setTapToken,
+    // Register an extra chrome.storage.onChanged listener alongside the one
+    // content.js installed. Used by harness.test.js to prove a throw out of
+    // the onChanged fan-out reaches the test rather than being swallowed.
+    addStorageChangeListener: (fn) => chrome._addChangeListener(fn),
     startMeeting,
     endMeeting,
     requestEndMeeting,

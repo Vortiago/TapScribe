@@ -290,3 +290,58 @@ test("a null nonce reset (startMeeting/dismissMeeting) does NOT end the meeting"
   assert.ok(ws.closed, "a real End request still closes the tap");
   assert.equal(triggerCalls(b).length, 1, "and still fires exactly one trigger");
 });
+
+test("an End request that lands before the settings read resolves is honoured, not dropped", async () => {
+  // Reload the SpatialChat tab mid-meeting and click End inside the
+  // settings-load window: the onChanged listener fired while settingsReady
+  // was still false, and `if (settingsReady) endMeeting();` was the ONLY
+  // consumer of the nonce — so the request was dropped permanently. The
+  // popup showed "Ending meeting…" for 10 s, then degraded, and the meeting
+  // was never processed. Deliberately NO `await ready(b)` before the click:
+  // that IS the window under test.
+  const b = createBridge({
+    settings: {
+      meetingSessionId: "sess-boot",
+      meetingActive: true,
+      recorderHost: "localhost",
+      recorderPort: 9999,
+      tapToken: "tok",
+    },
+  });
+  b.requestEndMeeting();
+  assert.equal(triggerCalls(b).length, 0, "nothing fires before settings resolve");
+
+  await ready(b); // settings land → the deferred End must run now
+  await b.flushMicrotasks(); // let triggerPipeline resolve + publish
+
+  const calls = triggerCalls(b);
+  assert.equal(calls.length, 1, "the deferred End fired exactly one pipeline trigger");
+  assert.equal(calls[0].url, "http://localhost:9999/api/tap/sessions/sess-boot/pipeline");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer tok",
+    "and it used the REAL settings, not the boot defaults");
+  const end = b.meetingEnd();
+  assert.equal(end.phase, "started");
+  assert.equal(end.sessionId, "sess-boot");
+
+  // Sixty seconds of virtual time must not produce a SECOND trigger — the
+  // deferred request is consumed once, not re-armed.
+  b.clock.tick(60_000);
+  assert.equal(triggerCalls(b).length, 1, "the deferred End is one-shot");
+});
+
+test("a nonce reset arriving before settings resolve cancels the deferred End", async () => {
+  // The reset is the popup saying "that request is stale" (startMeeting /
+  // dismissMeeting write null). Deferring the End must not resurrect a
+  // request the popup already withdrew.
+  const b = createBridge({
+    settings: { meetingSessionId: "sess-boot", meetingActive: true, tapToken: "tok" },
+  });
+  b.requestEndMeeting();
+  b.resetEndRequest();
+
+  await ready(b);
+  await b.flushMicrotasks();
+
+  assert.equal(triggerCalls(b).length, 0, "the withdrawn request never ran");
+  assert.equal(b.meetingEnd(), null, "and no end-state was published");
+});

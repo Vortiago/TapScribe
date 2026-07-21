@@ -40,8 +40,11 @@ _WORD_TOKENS_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 
 def word_tokens(text: str, *, min_len: int = 4) -> set[str]:
-    """≥`min_len`-char lowercased word set — the shared e2e helper for soft
-    reference-overlap assertions (it used to be hand-copied into each test file)."""
+    """≥`min_len`-char lowercased word set — the ONE e2e helper for soft
+    reference-overlap assertions. Matches alphabetic runs only: real-backend
+    output carries punctuation the references don't. Every e2e module imports
+    this; there are no per-file copies left, so tightening the semantics here
+    moves all the suites together instead of silently splitting them."""
     return {m.group(0).lower() for m in _WORD_TOKENS_RE.finditer(text) if len(m.group(0)) >= min_len}
 
 

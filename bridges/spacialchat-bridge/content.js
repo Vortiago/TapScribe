@@ -66,6 +66,14 @@
   // answers "is an End in progress?".
   let endingSessionId = null;
   let settingsReady = false;
+  // An End-meeting request that arrived BEFORE the settings read resolved.
+  // The trigger has to use the operator's real recorder config, so it can't
+  // run immediately — but dropping it strands the meeting (reload the tab
+  // mid-meeting, click End inside the load window: the popup shows
+  // "Ending meeting…" until it degrades and the Session is never processed).
+  // Held here and replayed from the settings-load handler; a nonce RESET
+  // arriving in the same window withdraws it, matching the settled case.
+  let deferredMeetingEndRequest = false;
   const SETTINGS_KEYS = ["recorderHost", "recorderPort", "tapToken", "useTls", "meetingSessionId", "meetingActive"];
   chrome.storage.local.get(SETTINGS_KEYS).then((s) => {
     if (s && s.recorderHost) recorderHost = s.recorderHost;
@@ -86,11 +94,25 @@
       recorderHost + ":" + recorderPort + " (tap-token " + (tapToken ? "set" : "MISSING") + ")",
     );
     try { publishStatus(); } catch (e) { /* indicator may not be ready yet */ }
+    runDeferredMeetingEnd();
   }).catch((e) => {
     settingsReady = true; // fall back to default rather than block forever
     console.warn("[tapscribe-bridge] could not read recorder settings; using defaults", e);
     try { publishStatus(); } catch (e2) { /* ignore */ }
+    // Defaults are now the config, so a request held over the load window
+    // still runs (against localhost:8001) rather than being stranded.
+    runDeferredMeetingEnd();
   });
+
+  // Replay an End-meeting request the operator made during the settings-load
+  // window. One-shot: the flag is consumed before endMeeting() runs, so a
+  // later nonce is a fresh request rather than a re-fire of this one.
+  function runDeferredMeetingEnd() {
+    if (!deferredMeetingEndRequest) return;
+    deferredMeetingEndRequest = false;
+    console.log("[tapscribe-bridge] replaying End meeting requested before settings loaded");
+    endMeeting();
+  }
 
   // Re-pick up popup edits without a tab reload. We update the in-memory
   // settings and tear down any in-flight /tap WS so the reconnect path
@@ -126,15 +148,22 @@
         meetingSessionId = (typeof v === "string" && v) ? v : null;
         publishStatus();
       }
-      if (changes.meetingEndRequestedAt && typeof changes.meetingEndRequestedAt.newValue === "number") {
+      if (changes.meetingEndRequestedAt) {
         // The popup clicked "End meeting": drain + close every open tap, then
-        // trigger the end-of-meeting pipeline. Gated on settingsReady so the
-        // trigger uses the real recorder config (not boot defaults). Only a
-        // REAL nonce (a number) is a request — startMeeting/dismissMeeting
-        // RESET the key to null so a stale request can't haunt the next
-        // meeting (#219 popup timeout), and that reset must not end the
-        // meeting it just started.
-        if (settingsReady) endMeeting();
+        // trigger the end-of-meeting pipeline. Only a REAL nonce (a number)
+        // is a request — startMeeting/dismissMeeting RESET the key to null so
+        // a stale request can't haunt the next meeting (#219 popup timeout),
+        // and that reset must not end the meeting it just started.
+        const isEndRequest = typeof changes.meetingEndRequestedAt.newValue === "number";
+        if (settingsReady) {
+          if (isEndRequest) endMeeting();
+        } else {
+          // Settings haven't landed, so the trigger would go to the boot
+          // defaults instead of the operator's recorder. DEFER rather than
+          // drop (a tab reloaded mid-meeting is exactly when End gets
+          // clicked here); a reset in the same window withdraws it.
+          deferredMeetingEndRequest = isEndRequest;
+        }
       }
       if (!touched) return;
       console.log(
@@ -373,6 +402,13 @@
     return (
       err === "tap-ws-error" ||
       err === "tap-auth-failed" ||
+      // A sticky configuration diagnosis, not a symptom: the operator has
+      // to fix TLS / the host before ANY audio can flow. Letting the
+      // derived overflow label overwrite it after 3 s of speech points the
+      // operator at the popup's Test connection — a dead end, because the
+      // popup runs on chrome-extension:// where the cleartext guard is
+      // inactive by design and reports everything healthy.
+      err === "tls-required" ||
       err.startsWith("tap-ws-closed-")
     );
   }
@@ -467,6 +503,15 @@
   }
 
   function openTapWs(identity, ch) {
+    // Pre-flight: the recorder already rejected this tap token with a 4401.
+    // The onclose ladder declines to retry, but that only covers the LADDER:
+    // onclose nulls ch.tapWs and arms no reconnect timer, so the pcm
+    // handler's "no socket and no timer → dial" path would re-dial on the
+    // very next frame — one rejected upgrade per 20 ms of speech, forever,
+    // with no backoff at all. Same sticky shape as tls-required below;
+    // reconnectAllForSettingsChange clears the error, so saving a fresh
+    // token redials.
+    if (ch.error === "tap-auth-failed") return;
     // Pre-flight: ws:// to a non-trustworthy host from an https:// page
     // is blocked by the browser's mixed-content policy. `new WebSocket`
     // throws SecurityError synchronously here, so detect-and-surface
@@ -817,6 +862,22 @@
           ch.stopped = false;
         }
         publishStatus();
+        break;
+      }
+      case "capture-failed": {
+        // The page world lost this speaker's MediaStreamTrack mid-stream
+        // (mic unplugged, permission revoked, device switched away). It
+        // arrives immediately BEFORE the tap-stop that closes the Utterance,
+        // so the channel is still live here and the reason lands in the
+        // popup row rather than on a tombstone. A rebind (reconcile taps the
+        // replacement track) re-arms the channel and clears it — correct:
+        // a channel with a fresh live track is no longer failed.
+        const ch = channels.get(d.identity);
+        if (ch) {
+          ch.error = "capture-" + (typeof d.reason === "string" && d.reason ? d.reason : "failed");
+          console.error("[tapscribe-bridge] capture failed for " + d.identity + ": " + ch.error);
+          publishStatus();
+        }
         break;
       }
       case "tap-stop": {

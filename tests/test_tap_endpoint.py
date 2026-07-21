@@ -59,8 +59,9 @@ def client(recorder_with_fake_wlk: Recorder) -> Iterator[TestClient]:
 @pytest.fixture
 def auth_client(recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """Like `client` but with AUTH_ENABLED, so the tap-token gates run: the
-    /tap WS subprotocol check (TestTapAuth) and the /api/tap/new-session bearer
-    check (TestTapNewSession)."""
+    /tap WS subprotocol check (TestTapSubprotocolGate) and the
+    /api/tap/new-session tap-bearer check
+    (TestTapNewSession)."""
     monkeypatch.setattr(_config, "AUTH_ENABLED", True)
     app.dependency_overrides[get_recorder] = lambda: recorder_with_fake_wlk
     app.state.recorder = recorder_with_fake_wlk
@@ -530,11 +531,16 @@ def test_tap_drain_then_reconnect_appends_tail_pcm_to_same_wav(
 
 
 # ---------------------------------------------------------------------------
-# /tap auth gate — Sec-WebSocket-Protocol bearer token
+# The /tap subprotocol gate — Sec-WebSocket-Protocol tap token
+#
+# CONTEXT.md's naming rule: this is the `/tap` SUBPROTOCOL GATE (WS), not
+# "tap auth" — the tap-BEARER scheme (ADR-0008's `Authorization: Bearer`
+# middleware over `/api/tap/**`) is a separate mechanism with separate
+# coverage (TestTapNewSession). Nothing below exercises the bearer path.
 # ---------------------------------------------------------------------------
 
 
-class TestTapAuth:
+class TestTapSubprotocolGate:
     """When AUTH_ENABLED, the /tap WS requires a Sec-WebSocket-Protocol of
     the form 'tapscribe.v1.tap.<token>'. With the right token the upgrade
     succeeds and the server echoes the same subprotocol back; with the
@@ -1138,7 +1144,7 @@ def test_pick_tap_subprotocol_returns_match():
 
 
 # ---------------------------------------------------------------------------
-# Property-based fuzz of the /tap auth gate. The helper must return the
+# Property-based fuzz of the /tap subprotocol gate. The helper must return the
 # exact PREFIX+token if (and only if) one of the offered protocols carries
 # that exact string. Substring matches, prefix-of-prefix collisions, and
 # unicode-normalisation tricks should all return None.

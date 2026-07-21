@@ -4,7 +4,7 @@ Every OTHER e2e fixture runs with `AUTH_ENABLED=False` (auth has its own
 route-level tests, and bridges don't have to juggle subprotocols). That
 leaves the security boundary every real Bridge crosses — the `/tap` WS
 subprotocol token gate — untested against a real uvicorn server: the route
-suite (`tests/test_tap_endpoint.py::TestTapAuth`) exercises it through
+suite (`tests/test_tap_endpoint.py::TestTapSubprotocolGate`) exercises it through
 Starlette's `TestClient`, and the SpatialChat token-rotation reconnect
 (`test_bridge_extension_e2e`) runs against a FAKE `/tap` server.
 

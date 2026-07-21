@@ -83,6 +83,18 @@ errors — there's nothing for it to do about WlK state anyway.
 - `identity` (required-ish): a stable per-speaker identifier. Used as
   the WAV filename slug and as the `identity` field on settled-line
   entries. Falls back to `unknown` if not supplied.
+  **`__probe__` is RESERVED** — it is the identity a bridge uses to
+  verify the tap token works ("Test connection"), and the Recorder
+  special-cases it so the tap leaves no durable and no live-visible
+  state: no WAV, no roster occurrence, no `ActiveStreams` row.
+  `tapscribe/tap_fan_out.py`'s `PROBE_IDENTITY` is the server-side
+  source of truth. Probe with that exact string, never with a
+  human-looking one like `probe`: an ordinary identity writes a roster
+  occurrence at WS open, which auto-binds a durable Person in
+  `people.json` — one junk speaker in the operator's GLOBAL registry per
+  Test-connection click. Both bundled bridges do this already
+  (`spacialchat-bridge/control-client.js`'s `probeTapToken`,
+  `windows-tray-bridge`'s `ConnectionTester.cs`).
 - `name`: human-readable display name (e.g. "Alice"). Used on the
   dashboard. Falls back to empty.
 - `utterance_id` (recommended): a per-utterance id the bridge mints once
@@ -158,10 +170,17 @@ should choose consciously rather than copy both halves:
   the very first connect attempt for an utterance — as long as the speaker
   hasn't muted or the tap hasn't stopped. A Recorder that's briefly
   unreachable right as an utterance starts (e.g. mid-restart) still catches
-  up once it comes back, at the cost of retrying indefinitely against a
-  genuinely wrong host/token/session with no user-visible give-up (the
-  popup surfaces an `error` status, but nothing stops the ladder short of
-  mute/stop).
+  up once it comes back, at the cost of retrying indefinitely against an
+  unreachable host or an unknown `session` (which refuses the upgrade with
+  a 404 the browser only surfaces as an abnormal close, indistinguishable
+  from a network blip) with no user-visible give-up beyond the popup's
+  `error` status. Two failures are carved out as **sticky** instead,
+  because retrying them can only thrash: a `4401` tap-token rejection
+  (`tap-auth-failed`) and a `ws://`-from-`https://` mixed-content
+  configuration (`tls-required`). Both stop the ladder *and* the
+  dial-on-next-PCM-frame path in `openTapWs`, and both are cleared by a
+  settings change (`reconnectAllForSettingsChange`), so fixing the token
+  or ticking Use TLS in the popup redials without a tab reload.
 - `windows-tray-bridge`'s `TapStream.cs` (the class doc's fail-loudly
   reconnect rule and the first-connect branch in `RunAsync`)
   treats a failure on the utterance's **first** connect as terminal: it

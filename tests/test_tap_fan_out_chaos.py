@@ -78,7 +78,12 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
         do_record=True,
         do_live=True,
     )
-    try:
+    # `pytest.raises`, not a bare `try/except`: an `except` clause also accepts
+    # "nothing propagated", so if `__aexit__` ever started SUPPRESSING the
+    # exception this half would stay green while no longer exercising an
+    # abnormal close at all — and it is the only guard that an abnormal close
+    # still finalises the WAV and releases the UtteranceIndex entry.
+    with pytest.raises(RuntimeError, match="simulated abnormal /tap close"):
         async with fan_out:
             await fan_out.write_frame(PCM_FRAME)
             await fan_out.write_frame(PCM_FRAME)
@@ -86,8 +91,6 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
             # mid-utterance — e.g. a ConnectionResetError bubbling from
             # the ASGI transport. __aexit__ must still finalize.
             raise RuntimeError("simulated abnormal /tap close mid-stream")
-    except RuntimeError as e:
-        assert "simulated" in str(e)
 
     # WAV finalized non-empty.
     wavs = list(r.session_dir.glob("*.wav"))
@@ -130,11 +133,12 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
         do_record=True,
         do_live=False,
     )
-    try:
+    # Same reasoning as half A: the abnormal close must PROPAGATE, and this is
+    # the only guard that it leaves no WAV, no UtteranceIndex entry and no
+    # ActiveStream.
+    with pytest.raises(RuntimeError, match="abnormal close before any frame written"):
         async with fan_out2:
             raise RuntimeError("abnormal close before any frame written")
-    except RuntimeError:
-        pass
 
     assert list(r2.session_dir.glob("*.wav")) == []
     assert "utt-abnormal-empty" not in r2.utterances.snapshot()

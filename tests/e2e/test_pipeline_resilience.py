@@ -63,11 +63,6 @@ def alice_wav(tmp_path: Path) -> Path:
     return synth_speech_like_wav(tmp_path / "alice.wav", seconds=0.8, freq_hz=220.0)
 
 
-@pytest.fixture
-def bob_wav(tmp_path: Path) -> Path:
-    return synth_speech_like_wav(tmp_path / "bob.wav", seconds=0.6, freq_hz=440.0)
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -363,34 +358,22 @@ async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
 # ---------------------------------------------------------------------------
 
 
-def _fake_wlk_has_killable_api(fake_wlk) -> bool:
-    """Track D's killable FakeWlk exposes `terminate()`, which simulates a
-    process crash mid-utterance by abruptly tearing connections without a
-    graceful drain. Without it, callers should skip — a degraded substitute
-    would silently coexist with the real test and mask regressions."""
-    return hasattr(fake_wlk, "terminate")
-
-
-async def test_wlk_crash_mid_utterance_keeps_wav_and_recovers_for_next_tap(
+async def test_wlk_crash_mid_utterance_keeps_wav_when_wlk_crashes(
     running_recorder: RunningRecorder,
     fake_transcriber: FakeTranscriber,  # noqa: ARG001
     alice_wav: Path,
-    bob_wav: Path,
 ):
     """Recording is independent of the live channel (CONTEXT.md invariant
     "Bridge → /tap is the only audio path; Recorder owns all fan-out",
     plus ADR-0002's graceful-degradation rule). If the WhisperLiveKit
-    child dies mid-utterance, the in-flight /tap's WAV must finalise
-    correctly, and a SUBSEQUENT /tap must get a working relay once the
-    live channel is back up.
+    child dies mid-utterance, the in-flight /tap's WAV must still finalise
+    with every frame the bridge sent.
 
-    Skipped until Track D's killable FakeWlk lands — without it the
-    crash simulation degrades into a port-rebinding dance that no longer
-    matches the real failure mode.
+    The name says only what the body asserts: TapRelay's
+    reconnect-with-backoff — the recovery half — has NO e2e guard yet. See
+    the note at the end of the body for why, and treat "a subsequent /tap
+    gets a working relay once the live channel is back up" as UNCOVERED.
     """
-    if not _fake_wlk_has_killable_api(running_recorder.fake_wlk):
-        pytest.skip("requires Track D's killable FakeWlk")
-
     rec = running_recorder.recorder
     ws_base = running_recorder.ws_base_url
     fake_wlk = running_recorder.fake_wlk
@@ -415,13 +398,12 @@ async def test_wlk_crash_mid_utterance_keeps_wav_and_recovers_for_next_tap(
     with wave.open(str(wavs[0]), "rb") as w:
         assert w.getnframes() == len(frames) * 320
 
-    # The restart-and-reconnect half of this test is left for a follow-up:
-    # FakeWlkThread is a single-shot daemon thread (Thread.start() can only
-    # run once), and the recorder's relay is bound to the WlK port at
-    # configuration time, so re-pointing it at a fresh FakeWlk on a new
-    # port would require either a port-pinned FakeWlk constructor or a
-    # recorder API to swap the relay target. Neither exists today.
-    # The first half above already pins the high-value invariant
-    # (recording independent of live channel); restart-coverage will need
-    # its own design pass.
-    _ = bob_wav
+    # NOT covered here: the restart-and-reconnect half. FakeWlkThread is a
+    # single-shot daemon thread (Thread.start() can only run once), and the
+    # recorder's relay is bound to the WlK port at configuration time, so
+    # re-pointing it at a fresh FakeWlk on a new port would need either a
+    # port-pinned FakeWlk constructor or a recorder API to swap the relay
+    # target. Neither exists today, so TapRelay's reconnect-with-backoff —
+    # which CONTEXT.md calls the live path's most intricate, most-broken
+    # part — has no e2e guard. Covering it needs its own design pass; the
+    # test name above deliberately does not claim it.

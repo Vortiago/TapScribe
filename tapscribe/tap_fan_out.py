@@ -242,9 +242,20 @@ class TapFanOut:
         # WAV whose slug the recorded-slug backfill (name_resolution F1) turns
         # into a 'probe' Person. Skipping the ActiveStream keeps __probe__ out of
         # /api/state's live_identities, which attach_people would auto-bind AND
-        # persist as a blank Person on the ~0.5s poll even with zero audio. We
-        # still build + open the relay so the context manager and write_frame
-        # stay valid (a probe that sends frames is fed through an inert relay).
+        # persist as a blank Person on the ~0.5s poll even with zero audio.
+        #
+        # The LIVE leg is deliberately NOT skipped: the probe still builds and
+        # opens a TapRelay so the context manager and write_frame stay valid.
+        # That relay is only inert while the live channel is down. With WlK
+        # running, `TapSettings.get("__probe__")` returns the default
+        # `TapSetting(record=True, live=True)`, so `do_live=True` and
+        # `TapRelay.open()` attaches a REAL relay to the WlK child and builds a
+        # REAL Silero ONNX SpeechGate (~0.1-0.2 s of CPU, off-loop via
+        # to_thread), then tears both down through the tail-caption drain on
+        # close — on every Test-connection click, and the SpatialChat popup
+        # probes on EVERY popup open. Nothing DURABLE leaks (the relay writes
+        # no WAV and registers no ActiveStream), which is the guarantee this
+        # branch exists for, but the probe is not free.
         is_probe = self._identity == PROBE_IDENTITY
 
         if self._do_record and not is_probe:
