@@ -130,3 +130,31 @@ def test_prior_truncated_after_close_appends_at_real_eof(tmp_path: Path) -> None
     with wave.open(str(path), "rb") as w:
         assert w.getnframes() == 320 * 5, "4 surviving prior frames + 1 appended"
         assert w.readframes(w.getnframes()) == PRIOR_FRAME * 4 + RESUME_FRAME
+
+
+def test_prior_truncated_by_an_odd_byte_appends_on_the_sample_grid(tmp_path: Path) -> None:
+    """A prior WAV whose data ends MID-SAMPLE (a partial flush when the disk
+    filled) must have its torn trailing sample dropped, not appended past.
+
+    Seeking to an odd offset would shift every appended int16 half a sample:
+    each one decodes as the high byte of a sample plus the low byte of the
+    next — loud noise for the rest of the utterance — and close() would patch
+    an odd `data` size that disagrees with the frame counter."""
+    path = tmp_path / "utt.wav"
+    _seed_recorder_wav(path, frames=3)
+    # Chop ONE byte: 1920 data bytes -> 1919, i.e. 959 whole samples + a
+    # dangling high byte.
+    with open(path, "r+b") as f:
+        f.truncate(path.stat().st_size - 1)
+
+    wf = open_recorder_wav_append(path)
+    wf.writeframes(RESUME_FRAME)
+    wf.close()
+
+    surviving_prior = (PRIOR_FRAME * 3)[: 959 * 2]
+    with wave.open(str(path), "rb") as w:
+        assert w.getnframes() == 959 + 320
+        assert w.readframes(w.getnframes()) == surviving_prior + RESUME_FRAME
+    # The patched `data` size must be a whole number of frames — otherwise the
+    # counters disagreed and the samples are off the grid.
+    assert _locate_data_chunk(path)[1] == (959 + 320) * 2

@@ -24,7 +24,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -368,7 +368,18 @@ def cached_transcribe(
     otherwise editing the session-meta override and re-running would
     silently return the stale transcript. Adapters that don't consume
     these kwargs (Voxtral / Parakeet today) record empty strings, so the
-    match is trivially "both empty" there."""
+    match is trivially "both empty" there.
+
+    Rules-aware WITHOUT re-running the model: `hallucination_rules` is
+    deliberately NOT part of the match key (a rule edit must not force
+    every WAV through the transcriber again). Instead a cache hit
+    re-applies the filter over the entry's reconstituted raw result —
+    `segments + suppressed_hallucinations`, both already persisted — and
+    rewrites the sidecar when the kept/suppressed split changed. Adding a
+    rule and re-running therefore actually drops the hallucination from
+    the merged transcript (`session_merge` re-reads the sidecar), and
+    removing one restores the segment; when nothing changed the entry is
+    returned untouched, so a plain re-run stays a pure cache hit."""
     backend = transcriber.backend
     model = transcriber.model_name
     size, mtime_ns = _wav_fingerprint(wav_path)
@@ -396,7 +407,13 @@ def cached_transcribe(
             and (existing.result.initial_prompt_used or "") == (initial_prompt or "")
             and (existing.result.hotwords_used or "") == (hotwords or "")
         ):
-            return existing
+            return _refilter_cached(
+                wav_path,
+                existing,
+                rules=hallucination_rules,
+                backend=backend,
+                model=model,
+            )
 
     started = datetime.now(UTC)
     raw = transcriber.transcribe(
@@ -421,6 +438,56 @@ def cached_transcribe(
     )
     _write_entry(wav_path, cached, backend=backend, model=model)
     return cached
+
+
+def _segment_order(segment: TranscriptionSegment) -> tuple[float, float]:
+    return (segment.start, segment.end)
+
+
+def _refilter_cached(
+    wav_path: Path,
+    existing: CachedTranscription,
+    *,
+    rules: list[dict[str, Any]],
+    backend: str,
+    model: str,
+) -> CachedTranscription:
+    """Re-run the hallucination filter over a CACHE HIT and persist the result
+    when the kept/suppressed split changed. Returns the entry to serve.
+
+    The entry stores both halves of the last filter pass (`segments` and
+    `suppressed_hallucinations`), so their concatenation IS the transcriber's
+    raw output — no model run is needed to re-decide the split under edited
+    rules. `matched_rule` is cleared on the suppressed half first so a segment
+    that is kept this time doesn't carry a stale annotation.
+
+    Concatenating kept-then-suppressed (rather than sorting) makes the
+    unchanged case an EXACT round-trip — `hallucinations.apply` preserves
+    relative order within each half — so an unedited rules file never triggers
+    a spurious rewrite. Only when the split really changed do we sort both
+    halves back into temporal order, so a segment restored by a REMOVED rule
+    lands where it belongs in the per-WAV sidecar (the merged view re-sorts by
+    absolute start anyway)."""
+    raw_segments = tuple(existing.result.segments) + tuple(
+        replace(seg, matched_rule=None) for seg in existing.result.suppressed_hallucinations
+    )
+    raw = replace(existing.result, segments=raw_segments, suppressed_hallucinations=())
+    refiltered = hallucinations_mod.apply(raw, rules=rules)
+    if (
+        refiltered.segments == existing.result.segments
+        and refiltered.suppressed_hallucinations == existing.result.suppressed_hallucinations
+    ):
+        return existing
+    refiltered = replace(
+        refiltered,
+        segments=tuple(sorted(refiltered.segments, key=_segment_order)),
+        suppressed_hallucinations=tuple(sorted(refiltered.suppressed_hallucinations, key=_segment_order)),
+    )
+    # Keep the write-time envelope (transcribed_at / transcribe_ms / wav
+    # fingerprint): no model ran, only the post-decode filter was re-decided.
+    refreshed = replace(existing, result=refiltered)
+    _write_entry(wav_path, refreshed, backend=backend, model=model)
+    return refreshed
 
 
 def _wav_fingerprint(wav_path: Path) -> tuple[int, int]:
@@ -508,8 +575,24 @@ def _primary_filename(transcripts_dir: Path, sidecars: list[Path] | None = None)
         sidecars = list(transcripts_dir.glob("*.json"))
     if not sidecars:
         return None
-    newest = max(sidecars, key=lambda p: p.stat().st_mtime_ns)
-    return newest.name
+    # Stat defensively: `sidecars` was globbed (here or by a caller sharing the
+    # syscall) and a concurrent `delete_session_audio` rmtree can remove an
+    # entry between the glob and the stat — the /api/state poll walks sessions
+    # on a worker thread while a delete runs on another. A bare
+    # `max(..., key=p.stat)` let that FileNotFoundError escape read_cached /
+    # read_primary_payload / read_primary_marker and 500 the poll for the
+    # duration of the delete. Skip the vanished ones; None when none survive.
+    newest_name: str | None = None
+    newest_mtime = -1
+    for path in sidecars:
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        if mtime > newest_mtime:
+            newest_mtime = mtime
+            newest_name = path.name
+    return newest_name
 
 
 def _write_entry(
@@ -563,6 +646,23 @@ def _migrate_legacy_if_needed(wav_path: Path) -> None:
             atomic_write_text(target, legacy.read_text(encoding="utf-8"))
             legacy.unlink()
         except OSError:
+            # Neither the move nor the copy landed (Windows sharing violation
+            # on the legacy file, read-only FS, disk full). Swallowing is
+            # correct — a failed migration must not fail the transcribe that
+            # triggered it — but the empty `<wav>.transcripts/` we just made
+            # would PERMANENTLY hide the transcript: `_resolve_sidecar_paths`
+            # takes the `d.is_dir()` branch, globs nothing, and the migration
+            # never retries because it early-returns on `if d.exists()`. So
+            # remove the directory again (rmdir only succeeds while it is
+            # empty, which it is — atomic_write_text cleans up its own
+            # tempfile) and leave the legacy layout intact: reads keep serving
+            # `<wav>.json`. What's lost is only this attempt — if the write
+            # that triggered the migration goes on to create the directory for
+            # its OWN entry, the legacy one is shadowed until it is
+            # re-transcribed, but the operator still sees a transcript instead
+            # of the blank row an empty directory produced.
+            with contextlib.suppress(OSError):
+                d.rmdir()
             return
     atomic_write_text(d / _PRIMARY_POINTER, key)
 

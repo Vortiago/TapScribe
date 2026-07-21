@@ -232,6 +232,12 @@ class JobState:
     stage: str | None = None
 
 
+# Which JobState fields `JobTracker.update` may set. `session` is excluded on
+# purpose: it is the dict KEY the job is filed under, so rewriting it would
+# leave /api/state reporting the job against the wrong session.
+_JOB_STATE_UPDATABLE_FIELDS = frozenset(f.name for f in fields(JobState)) - {"session"}
+
+
 class _JobHandle:
     """The handle `JobTracker.run` yields: a thin per-session progress updater
     so the body reports progress with `await job.update(current=i,
@@ -263,14 +269,28 @@ class JobTracker:
             self._by_session[state.session] = state
             return True
 
-    async def update(self, session: str, **fields) -> None:
+    async def update(self, session: str, /, **updates) -> None:
+        """Set one or more fields on the session's in-flight JobState.
+        No-op when the session has no job — the update can land after the
+        job released its slot.
+
+        Typo'd field names raise `AttributeError` rather than being silently
+        dropped (`await job.update(current_fil=name)` used to leave the
+        dashboard's job bar frozen at 0/N with no error anywhere), mirroring
+        `ActiveStreams._apply`. Validated before the lock, like there.
+
+        `session` is positional-only so a `session=` kwarg lands in `updates`
+        and is rejected there rather than silently rewriting `JobState.session`
+        out from under the dict key it is filed by."""
+        for k in updates:
+            if k not in _JOB_STATE_UPDATABLE_FIELDS:
+                raise AttributeError(f"JobState has no updatable field {k!r}")
         async with self._lock:
             existing = self._by_session.get(session)
             if existing is None:
                 return
-            for k, v in fields.items():
-                if hasattr(existing, k):
-                    setattr(existing, k, v)
+            for k, v in updates.items():
+                setattr(existing, k, v)
 
     async def release(self, session: str) -> None:
         async with self._lock:
