@@ -89,8 +89,9 @@ export function build(ctx) {
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
   let session = null;
-  /** The summary currently shown (null until a Generate lands). Either the
-   * just-generated POST result or the lazily-fetched stored body. */
+  /** The body THIS tab just generated (null until a Generate lands) — shown
+   * during the window before /api/state's marker catches up, and superseded as
+   * soon as that marker carries a NEWER `summarized_at` (see update()). */
   /** @type {import('../../types.js').PersistedSummary | null} */
   let lastSummary = null;
   /** The session id `lastSummary` belongs to — so switching sessions clears a
@@ -136,12 +137,24 @@ export function build(ctx) {
    * per poll tick) so the retry fires on a later tick. A re-generate changes
    * the stamp — a different key — and fetches at once. @type {Set<string>} */
   const failedStored = new Set();
+  /** Per-session last-good persisted summary — the stale-while-revalidate hold
+   * that keeps an EXTERNAL re-summarize (the end-of-meeting pipeline, a second
+   * tab) from blanking the output pane to the "No summary yet" empty state for
+   * a whole round trip while the new body refetches. Show the previous summary
+   * in place until the fresh one lands (the fetch's markRegionStale forces the
+   * swap); the cold sentinel (null) is returned only when nothing ever resolved
+   * for that session. Keyed by session, so switching back to a previously-read
+   * session shows its own last-good rather than a cold placeholder. Same shape
+   * as transcript.js's `lastGoodMerged` and api.js's `_lastGoodFiles`.
+   * @type {Map<string, import('../../types.js').PersistedSummary>} */
+  const lastGoodSummary = new Map();
 
   /**
    * Resolve the persisted summary behind the session's slim marker: the cached
    * body when already in hand, else fire ONE lazy fetch and re-cross the
    * output gate when it lands (the resolveMerged pattern from transcript.js).
-   * Returns null until loaded — the placeholder shows meanwhile.
+   * Returns the session's last-good body during a refetch, and null only on a
+   * genuine cold load — the placeholder shows meanwhile.
    * @param {import('../../types.js').SummaryMarker | null | undefined} marker
    * @param {string} sid
    * @returns {import('../../types.js').PersistedSummary | null}
@@ -150,7 +163,10 @@ export function build(ctx) {
     if (!marker || !marker.summarized_at || !sid) return null;
     const stamp = marker.summarized_at;
     const cached = sessionSummary.peek(sid, stamp);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      if (cached) lastGoodSummary.set(sid, cached);
+      return cached;
+    }
     const key = `${sid}@${stamp}`;
     // `failedStored.delete(key)` is check-AND-consume: a key whose last fetch
     // failed skips this one resolve, and the next poll tick's resolve retries.
@@ -167,7 +183,11 @@ export function build(ctx) {
         )
         .finally(() => { sumPending.delete(key); });
     }
-    return null;
+    // Stale-while-revalidate (#266's shape): hold this session's last-good body
+    // during the refetch instead of the bare loading sentinel, which the pane
+    // renders exactly like a cold load and blanks the whole region to the
+    // empty state for the round trip. null only when nothing ever resolved.
+    return lastGoodSummary.get(sid) ?? null;
   };
 
   /** Sync the Generate button + the note line from current state. Never touches
@@ -421,8 +441,11 @@ export function build(ctx) {
     // in the Summarizer panel.
     renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job, { only: "summarize" });
 
-    // ---- Header — gated on session + has-transcript.
-    const headSig = [sid, hasTranscript() ? 1 : 0].join("§");
+    // ---- Header — gated on session + has-transcript + the LABEL the sub-line
+    // actually renders (a bespoke gate, invisible to the __TAPSCRIBE_SIG_AUDIT
+    // drift audit): without the label term, renaming the session elsewhere left
+    // the old name in the header until an unrelated term changed.
+    const headSig = [sid, hasTranscript() ? 1 : 0, sess ? sessionLabel(sess) : ""].join("§");
     if (headSig !== lastHeadSig) {
       lastHeadSig = headSig;
       header(headHost, {
@@ -453,10 +476,23 @@ export function build(ctx) {
     // a tick can't dissolve a mid-copy selection. The hint side-effect lives in
     // the build closures, so it only fires on a real render.
     // A persisted summary (slim marker on the session) is resolved lazily — the
-    // cached body when in hand, else null + a one-shot fetch that marks the pane
-    // stale when it lands (resolveStored).
+    // cached body when in hand, else this session's last-good body + a one-shot
+    // fetch that marks the pane stale when it lands (resolveStored).
+    // The just-POSTed body (`lastSummary`) wins only until the STORED marker
+    // moves past it: a summary regenerated elsewhere — the end-of-meeting
+    // pipeline (processSession) or a second tab — carries a newer
+    // `summarized_at`, and holding the local body then showed the operator a
+    // superseded summary forever (lastSummary is cleared only on a session
+    // switch, so no later tick could ever displace it) with no cue, since the
+    // #94 staleness banner only fires when the TRANSCRIPT also moved. While the
+    // newer body is still in flight, keep showing the local one rather than
+    // blanking the pane.
     const marker = sess?.session_summary || null;
-    const shown = lastSummary || resolveStored(marker, sid);
+    const localStamp = lastSummary?.summarized_at || "";
+    const markerStamp = marker?.summarized_at || "";
+    const superseded = !!markerStamp && markerStamp > localStamp;
+    const stored = superseded || !lastSummary ? resolveStored(marker, sid) : null;
+    const shown = superseded ? stored || lastSummary : lastSummary || stored;
     // Staleness (#94): the summary carries the `transcribed_at` of the transcript
     // it was built from; if the session was re-transcribed since, the live
     // transcript marker's stamp is newer. Prefer the resolved body's stamp, fall
@@ -467,7 +503,9 @@ export function build(ctx) {
     const stale = !!(curStamp && sumStamp && sumStamp < curStamp);
     const outSig = [
       sid,
-      lastSummary?.created_at || "",
+      // The body actually rendered — NOT `lastSummary`'s stamp, which no longer
+      // decides what `shown` is (see the supersede rule above).
+      shown?.created_at || "",
       marker?.summarized_at || "",
       shown ? 1 : 0,
       hasTranscript() ? 1 : 0,

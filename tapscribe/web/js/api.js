@@ -82,6 +82,29 @@ function _capCache(cache) {
 }
 
 /**
+ * Insert/refresh `key` as the MOST-recently-used entry. `Map.set` on an
+ * EXISTING key does NOT move it in insertion order, so a key re-set every tick
+ * (loadSessionFiles re-records the FOCUSED session's listing on every poll)
+ * stayed at the OLDEST position and was the first thing `_capCache` dropped —
+ * i.e. once a tab had focused more than `_TX_CACHE_MAX` distinct sessions, the
+ * session IN USE was evicted on every call. Invisible while files_sig held
+ * still, but the moment a sibling WAV finished transcribing and the sig
+ * flipped, `_lastGoodFiles.get(session) ?? null` yielded the COLD-load
+ * sentinel and both WAV lists blanked to "loading…" on every per-track
+ * completion — #266, resurrected for exactly the session being worked on.
+ * Deleting first makes the hot key most-recently-used before the cap runs.
+ * @template T
+ * @param {Map<string, T>} cache
+ * @param {string} key
+ * @param {T} value
+ */
+function _setMru(cache, key, value) {
+  cache.delete(key);
+  cache.set(key, value);
+  _capCache(cache);
+}
+
+/**
  * One lazily-fetched, signature-keyed resource: a bounded cache Map plus a
  * get-or-fetch and a synchronous peek that share the same key function, so
  * the two can never drift apart. `fetch` fires `load()` once per key and
@@ -203,8 +226,9 @@ export const sessionFiles = _resource(
  * round-trip until the fresh listing landed, then rebuild it: a visible blink on
  * every per-WAV completion. Holding the last good listing here refreshes the list
  * IN PLACE instead (the view reconciles by key when the fresh data lands via
- * onLand). Capped via `_capCache` like the sibling resource caches, so a
- * long-lived tab that browses many sessions doesn't retain every listing.
+ * onLand). Capped like the sibling resource caches, so a long-lived tab that
+ * browses many sessions doesn't retain every listing — through `_setMru`, so
+ * the session being polled right now is the LAST thing evicted, not the first.
  * The stored array is the resource's own value BY REFERENCE (the same array the
  * view assigns to `currentFiles`), so callers must treat the listing as
  * read-only — mutating it in place would corrupt every holder of it.
@@ -252,14 +276,12 @@ export function loadSessionFiles(session, filesSig, pending, onLand) {
     // this session's last-good IS now empty. Record that, so a later non-empty
     // flip (a new tap records in) shows the empty state through the stale path
     // rather than resurrecting the pre-deletion rows as ghosts.
-    _lastGoodFiles.set(session, []);
-    _capCache(_lastGoodFiles);
+    _setMru(_lastGoodFiles, session, []);
     return [];
   }
   const cached = sessionFiles.peek(session, filesSig);
   if (cached !== undefined) {
-    _lastGoodFiles.set(session, cached);
-    _capCache(_lastGoodFiles);
+    _setMru(_lastGoodFiles, session, cached);
     return cached;
   }
   const k = `${session}@${filesSig}`;

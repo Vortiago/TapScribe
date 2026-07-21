@@ -10,10 +10,17 @@
 //
 //   - the ADR-0004 interaction-hold flag for the BESPOKE per-tick gates that
 //     can't route through renderRegion (recordings.js / transcript.js WAV
-//     lists, active-taps.js, live-feed.js): markDeferredRender /
-//     consumeDeferredRender / deferIfSelectionInside. Canon renderRegion
-//     needs none of this — a swap it defers flushes ITSELF the instant the
-//     interaction clears (one-shot listener per host), tick or no tick.
+//     lists, active-taps.js, live-feed.js, sessions.js's per-row gate, the
+//     [data-cfg-key] save-button holds): markDeferredRender /
+//     consumeDeferredRender / deferIfSelectionInside / deferIfFocusedCfgKey.
+//     A renderRegion swap needs none of this — it flushes ITSELF the instant
+//     the interaction clears (one-shot listener per host), tick or no tick;
+//     the one exception is the straddling-selection case below, which has no
+//     listener of its own.
+//   - the two interaction-hold guards the canon gets WRONG, pre-empted here
+//     rather than patched in the vendored file: the focus hold (canon flushes
+//     onto the incoming focus — see the "Focus hold" block) and the widened
+//     `selectionInside` (canon only tests the selection's endpoints).
 //   - interactionHeld() — the document-wide hold predicate the poll pacer
 //     uses to keep the /api/state cadence fast while the operator works.
 //   - the dev/test-only sig-drift audit (__TAPSCRIBE_SIG_AUDIT), wrapped
@@ -22,13 +29,13 @@
 //     summaries.
 
 export { loadTemplates, tpl, slot, pick, mount, loadCSS, every, withPending } from "./lib/templates.js";
-export { reconcileList, withTransition, selectionInside } from "./lib/render.js";
+export { reconcileList, withTransition } from "./lib/render.js";
 export { wireTheme, wireErrorBar } from "./lib/chrome.js";
 
 import {
   renderRegion as canonRenderRegion,
   markRegionStale as canonMarkRegionStale,
-  selectionInside,
+  selectionInside as canonSelectionInside,
 } from "./lib/render.js";
 
 // A per-tick render can be DEFERRED (skipped without advancing its signature
@@ -57,6 +64,39 @@ export function consumeDeferredRender() {
   const had = _deferredRender;
   _deferredRender = false;
   return had;
+}
+
+/**
+ * Canon `selectionInside`, WIDENED. The canon tests only the selection's
+ * anchor/focus nodes, so a range that starts BEFORE `host` and ends AFTER it —
+ * ⌘A over a panel, a drag from the header past the last card — reports false
+ * and the region is rebuilt out of the MIDDLE of the operator's selection
+ * mid-copy: exactly the bug ADR-0004 names, just approached from outside.
+ * Endpoint containment stays the fast path; `intersectsNode` covers the
+ * straddle. Every app consumer imports the predicate from this module (the
+ * bespoke gates in active-taps.js / live-feed.js / recordings.js /
+ * transcript.js / sessions.js, via deferIfSelectionInside, and the live-log
+ * dialog directly), so widening it here covers all of them at once.
+ * @param {Element} host
+ */
+export function selectionInside(host) {
+  if (canonSelectionInside(host)) return true;
+  return _selectionStraddles(host);
+}
+
+/** The DELTA the canon guard can't see: a range that contains `host` outright
+ * (neither endpoint inside it). Split out so renderRegion can hold for exactly
+ * that case without re-testing what the canon already handles.
+ * @param {Element} host */
+function _selectionStraddles(host) {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const range = sel.getRangeAt(i);
+    // Feature-guarded: the node tests' fake documents have no Range API.
+    if (typeof range?.intersectsNode === "function" && range.intersectsNode(host)) return true;
+  }
+  return false;
 }
 
 /** @param {Element} el — true for controls that hold live interaction state. */
@@ -99,6 +139,98 @@ export function deferIfSelectionInside(host) {
   return true;
 }
 
+/**
+ * The one hold canon renderRegion deliberately doesn't cover: a focused SAVE
+ * BUTTON. `[data-cfg-key]` marks the save button (and, in config-card, the
+ * textarea + status span) of a config editor; while its putJson is in flight
+ * focus sits on that button, and swapping the region would detach the status
+ * span the awaiting save writes to. A button isn't an "interactive control" to
+ * renderRegion, so the two callers (`components/live-channel.js`'s body,
+ * `components/config-card.js`'s grid) guard it themselves — through this ONE
+ * seam rather than two hand-rolled copies.
+ *
+ * Marking the deferred-render flag is the load-bearing half: main.js's tick()
+ * skips the whole renderAll pass on a 304, so a render held back here while the
+ * poll goes quiet would be STRANDED FOREVER (the operator focuses Save, the
+ * live child dies, the state settles, every later poll 304s — and the blur
+ * re-renders nothing). Returns true when the render must be held back.
+ * @param {Element} host
+ */
+export function deferIfFocusedCfgKey(host) {
+  const active = /** @type {HTMLElement | null} */ (document.activeElement);
+  if (!active || !active.dataset || !active.dataset.cfgKey || !host.contains(active)) return false;
+  markDeferredRender();
+  return true;
+}
+
+// ── Focus hold (seam-owned, pre-empts the canon's) ──────────────────────────
+//
+// Canon renderRegion defers a swap while a control inside the host is focused
+// and arms a ONE-SHOT `focusout` listener to flush it. That listener re-enters
+// renderRegion — but during `focusout` `document.activeElement` is <body>, so
+// the re-checked guard sees NO hold and the swap lands ON TOP of the INCOMING
+// focus. Verified in headless Chromium: two inputs in one host, focus the
+// first, defer, Tab to the second → the host is rebuilt and focus is lost
+// entirely. It bites hardest on live-channel.js's body, which holds the model
+// <select>, the language input, the gate-kind <select>, four number inputs and
+// the init-prompt textarea in ONE host: an operator tabbing between gate knobs
+// mid-transition loses un-Applied edits.
+//
+// `focusout`'s `relatedTarget` IS populated (unlike activeElement) and names
+// the element RECEIVING focus, so it answers the question the flush actually
+// needs to ask. The canon can't be patched here (it's a copy-verbatim vendored
+// file — CLAUDE.md), so the seam takes the focus branch over entirely and
+// leaves the canon its overlay/selection/sig branches: when we delegate below,
+// no control inside the host is focused, so the canon's focus branch is never
+// reached. Drop this block once the fix lands upstream in vanilla-web.
+
+/** @typedef {{ build: () => Node, sig: string | undefined, controller: AbortController }} HeldSwap */
+/** One entry per host with a swap held back by focus — latest-wins, exactly
+ * like the canon's `_pendingFlush`: a repeat skip on an already-held host
+ * replaces `build`/`sig` in place and keeps the SAME controller, so one
+ * listener is armed per host, never appended. @type {WeakMap<Element, HeldSwap>} */
+const _focusHeld = new WeakMap();
+
+/** @param {Element} host — true while a control INSIDE `host` holds focus. */
+function _focusedInside(host) {
+  const active = document.activeElement;
+  return !!active && active !== document.body && host.contains(active) && _isInteractive(active);
+}
+
+/** Stash the latest skipped build for `host` and, if nothing is armed yet,
+ * attach the listener that flushes it once focus leaves the host FOR REAL.
+ * Not `once`, so focus moving BETWEEN controls inside the host re-arms for
+ * free rather than needing a second registration.
+ * @param {Element} host @param {() => Node} build @param {string | undefined} sig */
+function _holdForFocus(host, build, sig) {
+  const held = _focusHeld.get(host);
+  if (held) { held.build = build; held.sig = sig; return; }
+  const controller = new AbortController();
+  _focusHeld.set(host, { build, sig, controller });
+  host.addEventListener("focusout", (e) => {
+    const to = /** @type {Node | null} */ (/** @type {FocusEvent} */ (e).relatedTarget);
+    if (to && host.contains(to)) return; // focus moved to a sibling control INSIDE the host — still held
+    const pending = _focusHeld.get(host);
+    if (!pending) return;
+    _focusHeld.delete(host);
+    controller.abort();
+    // Re-enter through the full guard set: another interaction (an overlay, a
+    // selection) may have started meanwhile, in which case this just re-defers.
+    // A DETACHED host drops its held swap — nothing may render into DOM that
+    // left the document, and the entry must not pin its build closure.
+    if (host.isConnected) renderRegion(host, pending.build, { sig: pending.sig });
+  }, { signal: controller.signal }); // gate-allow: signal-listener — armed only while a swap is held; the same controller detaches it on flush
+}
+
+/** Drop `host`'s held swap — a swap happening NOW (or a canon-side deferral
+ * that supersedes it) makes the held one moot. @param {Element} host */
+function _releaseFocusHold(host) {
+  const held = _focusHeld.get(host);
+  if (!held) return;
+  _focusHeld.delete(host);
+  held.controller.abort();
+}
+
 // ── Sig-drift audit (dev/test only) ─────────────────────────────────────────
 
 /** App-side mirror of the canon's per-host sig, used ONLY to decide when the
@@ -111,8 +243,7 @@ const _auditSig = new WeakMap();
  * means the canon deferred (or would defer) rather than sig-skipped.
  * @param {Element} host */
 function _holdInside(host) {
-  const active = document.activeElement;
-  if (active && active !== document.body && host.contains(active) && _isInteractive(active)) return true;
+  if (_focusedInside(host)) return true;
   if (host.querySelector(":popover-open, dialog[open]")) return true;
   return selectionInside(host);
 }
@@ -142,18 +273,44 @@ function _auditSigCoversOutput(host, build, sig) {
 }
 
 /**
- * Canon renderRegion (lib/render.js) plus the dev/test-only sig-drift audit:
- * when __TAPSCRIBE_SIG_AUDIT is set and a call is about to sig-skip (same sig,
- * no interaction hold inside the host), the build is probed against the live
- * DOM and any divergence is recorded to __TAPSCRIBE_SIG_DRIFT. Semantics are
- * otherwise the canon's — including the instant deferred-flush: a swap held
- * back by focus / an open overlay / a selection lands the moment that clears,
- * not on the next poll tick.
+ * Canon renderRegion (lib/render.js) plus the two guards the seam owns and the
+ * dev/test-only sig-drift audit.
+ *
+ * The guards run BEFORE the canon and, when they hold, the canon is never
+ * called (so it never records `sig` — a skip must not advance the gate,
+ * ADR-0004):
+ *   - a focused control inside `host` (see the "Focus hold" block above — the
+ *     canon flushes such a swap onto the INCOMING focus);
+ *   - a selection that STRADDLES `host` without either endpoint inside it,
+ *     which the canon's own selection guard can't see. That one defers through
+ *     the bespoke tick-retry flag rather than a listener: it's rare, and the
+ *     canon already self-flushes every case where an endpoint IS inside.
+ *
+ * Everything else is the canon's — the overlay guard, the sig gate, the swap,
+ * and the instant deferred-flush (a swap held back lands the moment the hold
+ * clears, not on the next poll tick).
+ *
+ * The audit: when __TAPSCRIBE_SIG_AUDIT is set and a call is about to sig-skip
+ * (same sig, no interaction hold inside the host), the build is probed against
+ * the live DOM and any divergence is recorded to __TAPSCRIBE_SIG_DRIFT.
  * @param {Element} host
  * @param {() => Node} build
  * @param {{ sig?: string, force?: boolean }} [opts]
  */
 export function renderRegion(host, build, opts = {}) {
+  if (!opts.force) {
+    if (_focusedInside(host)) {
+      _holdForFocus(host, build, opts.sig);
+      return;
+    }
+    if (_selectionStraddles(host)) {
+      markDeferredRender();
+      return;
+    }
+  }
+  // This call reaches the canon: whatever it does with the build (swap, or
+  // defer on an overlay / an endpoint-inside selection) supersedes a held one.
+  _releaseFocusHold(host);
   if (globalThis.__TAPSCRIBE_SIG_AUDIT && !opts.force && opts.sig != null &&
       _auditSig.get(host) === opts.sig && !_holdInside(host)) {
     _auditSigCoversOutput(host, build, opts.sig);

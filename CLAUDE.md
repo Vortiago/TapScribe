@@ -105,11 +105,15 @@
   UNRELATED row, flips the sig via a sibling, and asserts the stamped node
   survives the poll (`test_next_files_sig_flip_does_not_blank_wav_list`,
   `…_does_not_blank_transcript_picker`). The same shape recurs for any
-  region fed by a lazy body keyed on a content stamp — the merged
-  transcript pane (`transcript.js`, `sessionTranscript`) and the summary
-  output pane (`summary.js`, `sessionSummary`) blank to "loading…" on a
-  re-transcribe / external re-summarize for the same reason; give them a
-  last-good hold if that blink matters. The DUAL requirement: a multi-item
+  region fed by a lazy body keyed on a content stamp, and the other two
+  instances are now fixed the same way — the merged transcript pane
+  (`transcript.js`'s `lastGoodMerged`, keyed on `sessionTranscript`'s
+  `transcribed_at`) and the summary output pane (`summary.js`'s
+  `lastGoodSummary`, keyed on `sessionSummary`'s `summarized_at`) each
+  hold their last-good body instead of blanking to "loading…" on a
+  re-transcribe / external re-summarize. A new lazy pane keyed on a
+  content stamp inherits the requirement: copy one of the three holds.
+  The DUAL requirement: a multi-item
   region gated on such an aggregate must render through `reconcileList`
   (keyed, in-place) — a full `replaceChildren` rebuild on the sig, even
   WITHOUT a placeholder blank, still churns O(content) nodes + row
