@@ -143,3 +143,27 @@ def test_torn_file_loads_empty(recordings_dir: Path) -> None:
     assert PeopleRegistry.load().as_list() == []
     (recordings_dir / PEOPLE_JSON).write_text(json.dumps([1, 2]), encoding="utf-8")
     assert PeopleRegistry.load().as_list() == []
+
+
+def test_detach_sole_identity_is_a_no_op_and_keeps_the_name(recordings_dir: Path) -> None:
+    """Detaching a Person's only Identity must not destroy the Person.
+
+    It used to drop the emptied Person and mint a blank-named replacement with
+    a NEW id, so `POST /api/people/{id}/detach` silently discarded the
+    operator's chosen name with no undo — the information loss ADR-0009
+    decision 7 rules out for merge. people.js already documents the no-op
+    contract client-side and merely hides the ✕, so a scripted call or a UI
+    regression reached it unguarded.
+    """
+    reg = PeopleRegistry.load()
+    reg.sync(["solo"])
+    pid = reg.person_for_identity("solo")["id"]
+    reg.rename(pid, "Alice Havso")
+
+    result = reg.detach(pid, "solo")
+
+    assert result["id"] == pid, "the Person id must survive"
+    assert result["name"] == "Alice Havso", "the operator's chosen name must survive"
+    assert result["identities"] == ["solo"]
+    assert len(reg.as_list()) == 1
+    assert reg.person_for_identity("solo")["name"] == "Alice Havso"

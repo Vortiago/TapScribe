@@ -446,3 +446,61 @@ def test_parakeet_mlx_audio_entry_points_present():
     sig = inspect.signature(get_logmel)
     params = list(sig.parameters)
     assert len(params) >= 2, f"get_logmel must accept (audio, preprocessor_config); saw {params}"
+
+
+def test_stitch_windows_drops_the_previous_window_tail_above_the_midpoint():
+    """The other half of the overlap-midpoint rule.
+
+    `stitch_windows`' docstring says "Above the midpoint, window N+1's segment
+    wins", but the code copied window N WHOLE and then appended everything from
+    window N+1 above the midpoint — so `[midpoint, window_N_end)` was emitted
+    TWICE. At the defaults (chunk 120 s, overlap 15 s) that is 7.5 s of
+    duplicated speech at every boundary, in the sidecar and in the merged
+    session transcript, on both Parakeet adapters.
+
+    `test_overlap_stitching_drops_duplicate_sentences` above could not catch it:
+    its duplicate sits at 25 s, BELOW that case's 30 s midpoint, so it passes
+    either way. This asserts at the seam, with a duplicate ABOVE the midpoint.
+    """
+    from tapscribe.chunking import chunk_windows
+    from tapscribe.transcribers._chunked import stitch_windows
+
+    windows = chunk_windows(200 * 16000, chunk_s=120.0, overlap_s=15.0)
+    assert [w.start_s for w in windows] == [0.0, 105.0]  # midpoint = 112.5
+
+    w0 = [_seg(100.0, "ALPHA"), _seg(115.0, "BRAVO")]  # BRAVO is above the midpoint
+    w1 = [_seg(106.0, "alpha-echo"), _seg(115.0, "BRAVO"), _seg(130.0, "CHARLIE")]
+
+    out = stitch_windows([(windows[0], w0), (windows[1], w1)], overlap_s=15.0)
+
+    assert [s.text for s in out] == ["ALPHA", "BRAVO", "CHARLIE"]
+
+
+def test_stitch_windows_bounds_middle_windows_on_both_sides():
+    """With 3+ windows the upper bound is needed on every MIDDLE window too,
+    not just the first — otherwise each interior window re-emits its own tail
+    alongside its successor's head."""
+    from tapscribe.chunking import chunk_windows
+    from tapscribe.transcribers._chunked import stitch_windows
+
+    windows = chunk_windows(300 * 16000, chunk_s=120.0, overlap_s=15.0)
+    assert len(windows) >= 3
+
+    per_window = []
+    for i, w in enumerate(windows):
+        segs = [_seg(w.start_s + 1.0, f"w{i}-head")]
+        if i + 1 < len(windows):
+            # A segment inside the NEXT window's overlap, above its midpoint —
+            # the successor owns it, so this copy must be dropped.
+            segs.append(_seg(windows[i + 1].start_s + 15.0 / 2 + 1.0, f"w{i}-tail"))
+        per_window.append((w, segs))
+
+    texts = [s.text for s in stitch_windows(per_window, overlap_s=15.0)]
+
+    assert not [t for t in texts if t.endswith("-tail")], f"interior tails leaked: {texts}"
+
+
+def _seg(start: float, text: str):
+    from tapscribe.transcribers.base import TranscriptionSegment
+
+    return TranscriptionSegment(start=start, end=start + 1.0, text=text)

@@ -1250,12 +1250,12 @@ async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_re
     identity = body.get("identity")
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity required")
-    record = body.get("record")
-    live = body.get("live")
+    # _parse_opt_bool, not bool(): see api_recording_toggle — "false" from a
+    # client that stringifies its flags must 400, never silently mean True.
     setting = recorder.tap_settings.set(
         identity,
-        record=bool(record) if record is not None else None,
-        live=bool(live) if live is not None else None,
+        record=_parse_opt_bool(body.get("record"), "record"),
+        live=_parse_opt_bool(body.get("live"), "live"),
     )
     return {
         "ok": True,
@@ -1274,7 +1274,11 @@ async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_re
     on the bridge's normal trackMuted close."""
     body = await _json_body(req)
     if "enabled" in body:
-        enabled = recorder.toggle_recording(enabled=bool(body["enabled"]))
+        # _parse_opt_bool, not bool(): a client that stringifies its flags would
+        # otherwise turn {"enabled": "false"} into ENABLED (bool("false") is
+        # True) and keep recording every participant after the operator asked
+        # to pause — a wrong-direction privacy bug, not just a bad request.
+        enabled = recorder.toggle_recording(enabled=_parse_opt_bool(body["enabled"], "enabled"))
     else:
         enabled = recorder.toggle_recording()
     print(f"[tapscribe] recording {'enabled' if enabled else 'paused'}", flush=True)

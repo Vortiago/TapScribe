@@ -462,6 +462,30 @@ def test_recording_toggle_with_explicit_enabled(client, recorder_under_test):
     assert recorder_under_test.recording_enabled is False
 
 
+@pytest.mark.parametrize("raw", ["false", "no", 0, "0"])
+def test_recording_toggle_rejects_a_non_bool_enabled(client, recorder_under_test, raw):
+    """A stringified flag must 400, never coerce to the OPPOSITE meaning.
+
+    The route used `bool(body["enabled"])`, so `{"enabled": "false"}` from a
+    bridge or dashboard that stringifies its flags (an HTML form value,
+    `String(bool)`, a URL param) returned `{"ok": true, "enabled": true}` and
+    kept recording every participant after the operator asked to pause. That is
+    a wrong-DIRECTION privacy bug, not merely a rejected request —
+    `_parse_opt_bool`'s own docstring names the trap ("bool('false') is True").
+    """
+    recorder_under_test.recording_enabled = True
+    r = client.post("/api/recording/toggle", json={"enabled": raw})
+    assert r.status_code == 400
+    assert recorder_under_test.recording_enabled is True
+
+
+def test_tap_settings_put_rejects_a_non_bool_record(client, recorder_under_test):
+    """Same coercion, same consequence, on the per-identity record flag."""
+    r = client.put("/api/tap-settings", json={"identity": "alice", "record": "false"})
+    assert r.status_code == 400
+    assert recorder_under_test.tap_settings.get("alice").record is True
+
+
 # ---------------------------------------------------------------------------
 # /api/tap-token (#190) — bridge onboarding reveal
 # ---------------------------------------------------------------------------
@@ -3092,6 +3116,42 @@ def test_summarizer_config_round_trips(client):
         "base_url": "",
         "key_set": False,
     }
+
+
+def test_summarizer_config_put_accepts_a_free_text_model_for_the_api_source(client):
+    """The `api` source's model is free text and must round-trip.
+
+    The allowlist exists because a LOCAL model id reaches `mlx_lm.load` /
+    `Llama.from_pretrained` — a network fetch keyed on request text. An `api`
+    model never reaches a loader; it is a field POSTed to the operator's own
+    base_url, and the UI renders it as free text for exactly that reason.
+    Allowlisting it regardless of source made an api default unsaveable
+    ("isn't a known gguf model"), so the end-of-meeting pipeline — which runs
+    from operator defaults only — could never use one.
+    """
+    from tapscribe.runtime_probe import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    try:
+        r = client.put(
+            "/api/summarize/config",
+            json={
+                "source": "api",
+                "base_url": "http://localhost:11434/v1",
+                "model": "llama3.1:8b",
+                "prompt": "Summarize.",
+            },
+        )
+        assert r.status_code == 200, r.json()
+        got = client.get("/api/summarize/config").json()
+        assert got["source"] == "api"
+        assert got["model"] == "llama3.1:8b"
+
+        # The local source keeps its allowlist — that is the security boundary.
+        bad = client.put("/api/summarize/config", json={"source": "local", "model": "evil/not-in-catalog"})
+        assert bad.status_code == 400
+    finally:
+        set_available_backends_for_testing(None)
 
 
 def test_summarizer_config_put_rejects_bad_fields(client):

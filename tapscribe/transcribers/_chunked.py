@@ -53,21 +53,31 @@ def stitch_windows(
     """Merge per-window segment sequences into one session-spanning tuple.
 
     For every adjacent pair (N, N+1) the overlap region is
-    `[window_{N+1}.start, window_{N+1}.start + overlap_s)`. Segments in
-    window N+1 whose `start` falls before the overlap midpoint were already
-    transcribed (and likely identical) in window N — they get dropped.
-    Above the midpoint, window N+1's segment wins. This is the same
-    crude-but-effective dedup parakeet-mlx uses upstream; a segment
-    straddling the seam is double-counted. Word-level dedup would need
-    confidence scores we don't currently have.
+    `[window_{N+1}.start, window_{N+1}.start + overlap_s)`, and its MIDPOINT is
+    the seam: below it the audio belongs to window N, at or above it to window
+    N+1. Each window therefore contributes only the segments whose `start`
+    falls in `[its leading seam, its trailing seam)` — half-open, so a segment
+    landing exactly on a seam is claimed by exactly one window.
+
+    Bounding BOTH sides matters. Contributing window N whole and then filtering
+    only window N+1's head emits `[seam, window_N_end)` twice — 7.5 s of
+    duplicated speech per boundary at the defaults — and with three or more
+    windows every interior window needs the upper bound, not just the first.
+
+    This is the same crude-but-effective dedup parakeet-mlx uses upstream; a
+    segment straddling the seam is attributed to one side by its start, so a
+    word or two can still be clipped or repeated at the join. Word-level dedup
+    would need confidence scores we don't currently have.
     """
     if not per_window:
         return ()
-    out: list[TranscriptionSegment] = list(per_window[0][1])
-    for prev_idx in range(len(per_window) - 1):
-        nxt_window, nxt_segs = per_window[prev_idx + 1]
-        midpoint_s = nxt_window.start_s + overlap_s / 2.0
-        out.extend(seg for seg in nxt_segs if seg.start >= midpoint_s)
+    out: list[TranscriptionSegment] = []
+    for idx, (_window, segs) in enumerate(per_window):
+        lower = per_window[idx][0].start_s + overlap_s / 2.0 if idx > 0 else float("-inf")
+        upper = (
+            per_window[idx + 1][0].start_s + overlap_s / 2.0 if idx + 1 < len(per_window) else float("inf")
+        )
+        out.extend(seg for seg in segs if lower <= seg.start < upper)
     return tuple(out)
 
 

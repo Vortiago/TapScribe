@@ -25,8 +25,16 @@ from .transcribers.base import TranscriptionResult
 # an unbounded quantifier (the `+)+`, `+)*`, `*)+`, `*)*` sequences).
 # False positives here are fine; a wedged regex on the post-decode path is
 # the failure mode we actually care about.
+#
+# "Unbounded quantifier" must include the BRACE form: `{n,}` is exactly as
+# unbounded as `+`, so `(a{1,}){1,}` backtracks identically to `(a+)+` while
+# matching none of `[+*]`. It measured clean exponential doubling here — 18
+# chars 0.03 s, 20 -> 0.14, 22 -> 0.59, 24 -> 2.18 — so a ~40-char segment
+# wedges the transcribe job indefinitely, and `match()` runs once per segment
+# with no timeout. `{n}` and `{n,m}` are bounded and stay allowed.
 _MAX_REGEX_PATTERN_LEN = 256
-_NESTED_QUANTIFIER_RE = re.compile(r"[+*]\)[+*]")
+_UNBOUNDED_QUANTIFIER = r"(?:[+*]|\{\d+,\})"
+_NESTED_QUANTIFIER_RE = re.compile(rf"{_UNBOUNDED_QUANTIFIER}\){_UNBOUNDED_QUANTIFIER}")
 
 
 # Single-slot cache of the parsed/compiled rules, keyed on the rules file's

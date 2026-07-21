@@ -147,6 +147,29 @@ def test_regex_is_safe_helper_returns_false_for_nested_unbounded():
     assert _regex_is_safe(r"a+b+")
 
 
+def test_regex_guard_rejects_the_brace_form_of_nested_unbounded():
+    """`{n,}` is as unbounded as `+`, and backtracks identically.
+
+    The guard matched only `[+*]\\)[+*]`, so `(a{1,}){1,}$` passed both
+    `regex_rule_ok` (the PUT /api/config/hallucinations validator) and the
+    runtime parser. Measured on a no-match input it doubles cleanly — 18 chars
+    0.03 s, 20 -> 0.14, 22 -> 0.59, 24 -> 2.18 — so a ~40-char transcript
+    segment wedges the transcribe job, and `match()` runs once per segment with
+    no timeout. That is exactly what the guard's comment says it prevents.
+    """
+    from tapscribe.hallucinations import _regex_is_safe, regex_rule_ok
+
+    for bad in [r"(a{1,}){1,}", r"(a+){1,}", r"(a{1,})+", r"(a{2,})*", r"(a*){5,}"]:
+        assert not _regex_is_safe(bad), f"expected guard to reject {bad!r}"
+        assert not regex_rule_ok(bad + "$"), f"the write-time validator must reject {bad!r} too"
+
+    # BOUNDED braces are not the hazard and must stay usable — real rules use
+    # them (e.g. a repeated-phrase filter).
+    assert _regex_is_safe(r"(ab){3}")
+    assert _regex_is_safe(r"(ab){2,3}")
+    assert regex_rule_ok(r"^(ha){3,8}$")
+
+
 def test_match_returns_none_for_empty_text(tmp_config_dir):
     _write_rules(tmp_config_dir / "hallucinations.txt", "amara.org\n")
     rules = hallucinations.parse_rules()

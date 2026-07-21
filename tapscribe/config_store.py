@@ -376,7 +376,15 @@ def write_summarizer_config(cfg: dict) -> dict:
     prompt = validate_config_text(str(cfg.get("prompt") or ""))
     command = validate_config_text(str(cfg.get("command") or ""))
     model = str(cfg.get("model") or "").strip()
-    if model:
+    # Allowlist the LOCAL model only. The allowlist exists because a local
+    # model id reaches `mlx_lm.load` / `Llama.from_pretrained`, i.e. a network
+    # fetch keyed on attacker-controllable text. The `api` source's model is by
+    # design free text (an Ollama/OpenAI-compatible name the operator types)
+    # and never reaches a loader — it is a JSON field POSTed to the operator's
+    # own base_url. Gating it on the catalog anyway made saving an api default
+    # impossible ("isn't a known gguf model"), which in turn meant the
+    # end-of-meeting pipeline — operator-defaults-only — could never run one.
+    if model and source in ("", "local"):
         from .summarizers.catalog import (
             is_allowed_local_model,
             resolve_local_backend,

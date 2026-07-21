@@ -177,6 +177,15 @@ def env_float(
     except ValueError:
         print(f"[tapscribe] ignoring unparseable {name}={raw!r}; using default {default}", flush=True)
         return default
+    if not math.isfinite(v):
+        # `float("nan")` parses fine and then passes BOTH bounds below, because
+        # `nan < min` and `nan > max` are each False — so it reaches the
+        # consumer, where it is no longer typo-tolerant: chunk_windows dies on
+        # `int(nan * 16000)` at transcribe time, and `subprocess.run(timeout=nan)`
+        # never fires, wedging a summarize job forever. Same reject as
+        # `_parse_bounded_ttl` below, and for the same reason.
+        print(f"[tapscribe] ignoring non-finite {name}={raw!r}; using default {default}", flush=True)
+        return default
     if min_value is not None and v < min_value:
         print(
             f"[tapscribe] ignoring {name}={v} < min {min_value}; using default {default}",
