@@ -127,16 +127,26 @@ that matrix and is wired into `tapscribe/preflight.py` instead, which
 `start.sh` / `start.ps1` and the Bundle's Launcher all run after the
 picker:
 
-- **`silero-vad`** (pulls `torch>=2.1`) — the per-tap TapScribe gate
-  (`gate_kind="tapscribe"`, the default) imports `silero_vad` lazily
-  on the first `/tap` WS. Missing → the tap logs `gate construction
-  failed … falling back to passthrough` and the gate the operator
-  picked is silently a no-op. It is a **core** dependency (no `[vad]`
-  extra — `pyproject.toml`'s `dependencies` list installs it
-  unconditionally with a plain `pip install -e .`), so
-  `preflight.plan_steps`' `find_spec` probe + reinstall step exists only
-  to repair a venv created before silero-vad became core; on a fresh
+- **`onnxruntime`** — the per-tap TapScribe gate (`gate_kind="tapscribe"`,
+  the default) runs the VAD through `tapscribe.vad`, a numpy+onnxruntime
+  port of Silero over a vendored model (`tapscribe/vad/silero_vad.onnx`,
+  see its `PROVENANCE.md`), imported lazily on the first `/tap` WS.
+  Missing → the tap logs `gate construction failed … falling back to
+  passthrough` and the gate the operator picked is silently a no-op. It
+  is a **core** dependency (no `[vad]` extra — `pyproject.toml`'s
+  `dependencies` list installs it unconditionally with a plain
+  `pip install -e .`), so `preflight.plan_steps`' `find_spec` probe +
+  reinstall step is a repair for an incomplete venv; on a healthy
   install it's already satisfied and no step is planned.
+
+  **The `silero-vad` package and `torch` are NOT dependencies** — #374
+  dropped both (773 MB) in favour of the vendored model. A probe here
+  must name a module some core dependency actually provides, or the
+  reinstall it plans can never satisfy it and preflight re-runs pip on
+  every launch; `test_every_core_repair_probes_a_module_a_core_dependency_provides`
+  pins that. The differential test that keeps the port honest,
+  `tests/test_vad_silero_port.py`, needs the real upstream package and
+  therefore has its own `upstream-contract` CI lane.
 
 **`ffmpeg` is NOT required, period.** Every array-accepting backend
 (`mlx_whisper`, `mlx_parakeet`, and the `transformers` Parakeet path in
@@ -336,7 +346,7 @@ green, check what's in the CI matrix you're not running:
   them on a plain box. Run them under a virtual display:
   `xvfb-run -a python -m pytest tests/e2e/test_bridge_extension_e2e.py
   tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e -q` (the meeting flow
-  also needs `pip install -e ".[whisper-cpu,vad]"`). CI runs both in the
+  also needs `pip install -e ".[whisper-cpu]"`). CI runs both in the
   `bridge E2E (extension + meeting)` job.
 
 ### e2e selectors: `data-slot` is the test-id; open Playwright via `playwright_session()`

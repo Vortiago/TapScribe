@@ -30,7 +30,6 @@ updates:
           - "mlx-whisper"
           - "transformers"
           - "torch"
-          - "silero-vad"
     commit-message:
       prefix: "build"
       include: "scope"

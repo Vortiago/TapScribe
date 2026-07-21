@@ -49,14 +49,24 @@ GATE_KNOB_TEST_VALUES: dict[str, float] = {
 # Silero stub for strip-silence tests
 # ---------------------------------------------------------------------------
 #
-# tapscribe.strip_silence.detect_speech_silero loads the real silero-vad
-# model, which pulls torch into the import graph — too heavy for CI. The
-# fixture below monkeypatches it with a deterministic RMS-windowed detector
-# that produces the same region boundaries silero would on the synthetic
-# square-wave-and-silence fixtures the tests use.
+# The fixture below monkeypatches tapscribe.strip_silence.detect_speech_silero
+# with a deterministic RMS-windowed detector that produces the same region
+# boundaries the real VAD would on the synthetic square-wave-and-silence
+# fixtures the tests use.
+#
+# The reason is DETERMINISM, not cost. It used to be cost — the real detector
+# pulled torch into the import graph — but #374 replaced that with
+# `tapscribe.vad` (onnxruntime + a vendored 2.3 MB ONNX model, both core), so
+# the real path is now cheap enough to run in CI. What the stub still buys is
+# exact, stable region boundaries for the planning/splitting assertions.
+#
+# The cost of that: because this fixture is AUTOUSE, no production speech
+# detection runs anywhere in the unit suite, so every region-boundary
+# assertion is a statement about the stub. Tests that need the real detector
+# opt out with @pytest.mark.real_silero (see pyproject's marker list).
 #
 # Keep this strictly a test-side helper: production must always run the real
-# silero (any TapScribe install that has the live channel already does).
+# detector (it is core, so every TapScribe install has it).
 
 
 def _stub_detect_speech_silero(samples_int16, min_silence_ms: int, pad_ms: int):

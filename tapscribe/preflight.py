@@ -1,8 +1,8 @@
 """Bring-up steps that must run between "a venv exists" and "the recorder boots".
 
 `start.sh` / `start.ps1` accumulated a set of probe-then-repair steps that are
-not part of the model install picker: repair silero-vad in a venv created before
-it became a core dependency, pull the `[summarize]` extra so the Local
+not part of the model install picker: repair `onnxruntime` (the core VAD
+backend) in an incomplete venv, pull the `[summarize]` extra so the Local
 summarizer works on first Generate, and — on Windows only — swap PyPI's
 CPU-only torch wheel for a CUDA build.
 
@@ -108,13 +108,13 @@ def plan_steps(
     machine = machine or platform.machine()
     steps: list[Step] = []
 
-    if not module_present("silero_vad"):
+    if not module_present("onnxruntime"):
         steps.append(
             Step(
-                name="silero-vad",
+                name="onnxruntime",
                 reason=(
-                    "silero-vad is a core dependency but isn't importable — this venv "
-                    "predates that. Without it every /tap falls back to passthrough, "
+                    "onnxruntime is a core dependency but isn't importable — this venv "
+                    "is incomplete. Without it every /tap falls back to passthrough, "
                     "silently disabling the gate the operator picked."
                 ),
                 argv=install_target.pip_install_argv([], install_spec=install_spec, python=python),
@@ -202,7 +202,7 @@ def run_steps(steps: list[Step], *, run: Callable[[list[str]], int] | None = Non
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="python -m tapscribe.preflight",
-        description="Run TapScribe's bring-up repairs (silero-vad, [summarize], CUDA torch).",
+        description="Run TapScribe's bring-up repairs (onnxruntime, [summarize], CUDA torch).",
     )
     p.add_argument(
         "--install-spec",

@@ -273,8 +273,11 @@ filterwarnings = [
     "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
     "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
     "ignore:remove second argument of ws_handler:DeprecationWarning",
-    # (No torch.jit.load ignore needed: _get_silero_model loads silero via
-    #  ONNX, so the deprecated TorchScript loader is never called.)
+    # (No torch.jit.load ignore needed: since #374 nothing in the core install
+    #  imports torch at all — `speech_gate.load_silero_model` and
+    #  `strip_silence._local_silero_model` both go through `tapscribe.vad`,
+    #  which runs the vendored ONNX model on onnxruntime. The deprecated
+    #  TorchScript loader is unreachable, not merely unused.)
     # starlette 1.x started nagging that `httpx` should become `httpx2`
     # in TestClient. fastapi.testclient -> starlette.testclient imports
     # raise this at module load, which breaks every collection that uses

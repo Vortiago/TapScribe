@@ -80,9 +80,10 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
 
 # --- Runtime python deps + CUDA torch ---------------------------------------
 # Probe-then-repair for everything the install picker does NOT cover:
-#   * silero-vad — the per-tap silence gate. A CORE dependency, so this only
-#     repairs a venv created before it became one; missing → every /tap falls
-#     back to passthrough, silently disabling the gate the operator picked.
+#   * onnxruntime — the backend for the vendored Silero model behind
+#     `tapscribe.vad`, i.e. the per-tap silence gate. A CORE dependency, so this
+#     only repairs an incomplete venv; missing → every /tap falls back to
+#     passthrough, silently disabling the gate the operator picked.
 #   * the [summarize] extra — the Local summarizer's offline backend (mlx_lm on
 #     Apple Silicon, llama_cpp elsewhere; the latter needs the maintainer's
 #     prebuilt wheel index because it builds from source by default).

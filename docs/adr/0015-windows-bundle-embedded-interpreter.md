@@ -35,6 +35,13 @@ three load-bearing facts about how the Recorder actually works:
    before a single ASR model is chosen. The headline benefit of a
    freeze — one small self-contained file — is unattainable regardless.
 
+   > **Superseded (#374).** torch and `silero-vad` left the core
+   > dependency set: the VAD now runs on a vendored ONNX model via
+   > `onnxruntime` (`tapscribe/vad/`), cutting ~773 MB. The baseline
+   > payload is order-of ~150 MB, so this point no longer supports the
+   > decision. Points 1 and 2 still do, and they are sufficient — the
+   > decision stands unchanged.
+
 So "one `.exe`, no Python installed" and "keep the runtime model picker"
 are close to mutually exclusive, and the property a freeze buys is
 cosmetic at this payload size.

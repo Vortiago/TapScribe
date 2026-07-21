@@ -1,9 +1,9 @@
 """RED contract for `tapscribe.preflight` — the shared bring-up steps.
 
 `start.ps1` grew a pile of probe-then-repair logic that has to happen between
-"a venv exists" and "the recorder boots": repair silero-vad if the venv predates
-it becoming a core dep, pull the `[summarize]` extra, and swap CPU torch for a
-CUDA build on an NVIDIA Windows box. A Bundle has no `start.ps1`, so those steps
+"a venv exists" and "the recorder boots": repair `onnxruntime` (the core VAD
+backend) if the venv is incomplete, pull the `[summarize]` extra, and swap CPU
+torch for a CUDA build on an NVIDIA Windows box. A Bundle has no `start.ps1`, so those steps
 were homeless — and a Bundle that skips the CUDA swap silently gives every
 Windows NVIDIA operator `Available backends: ['cpu']` with no clue why
 (`start.ps1`'s own comment says exactly this).
@@ -19,6 +19,9 @@ torch installed, and without running pip.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from tapscribe import preflight
@@ -32,7 +35,7 @@ def _present(*names: str):
     return lambda name: name in names
 
 
-_ALL = _present("silero_vad", "llama_cpp", "mlx_lm")
+_ALL = _present("onnxruntime", "llama_cpp", "mlx_lm")
 
 
 def _names(steps: list[Step]) -> list[str]:
@@ -48,24 +51,65 @@ def test_nothing_to_do_when_every_probe_passes():
     assert plan_steps(python="py", system="Linux", module_present=_ALL) == []
 
 
-# --- silero-vad ------------------------------------------------------------
+# --- onnxruntime (the core VAD backend) -------------------------------------
 
 
-def test_missing_silero_repairs_the_core_install():
-    """silero-vad is a CORE dependency (no extra) — a venv without it predates
-    that change. The repair is a plain reinstall, no extras."""
+def test_missing_onnxruntime_repairs_the_core_install():
+    """onnxruntime is a CORE dependency (no extra) — the VAD's only backend
+    since #374 vendored the Silero model. The repair is a plain reinstall."""
     steps = plan_steps(python="py", system="Linux", module_present=_present("llama_cpp"))
-    assert "silero-vad" in _names(steps)
-    step = next(s for s in steps if s.name == "silero-vad")
+    assert "onnxruntime" in _names(steps)
+    step = next(s for s in steps if s.name == "onnxruntime")
     assert step.argv[:4] == ["py", "-m", "pip", "install"]
     assert step.argv[-1] == "."  # checkout topology, no extras group
 
 
-def test_silero_repair_is_not_fatal():
+def test_every_core_repair_probes_a_module_a_core_dependency_provides():
+    """A core repair must be SATISFIABLE by the reinstall it plans.
+
+    `plan_steps` probed `silero_vad` for a year after #374 dropped the package
+    from `dependencies`. On every post-#374 install the probe was permanently
+    False, so a `pip install -e .` was planned on EVERY launch and could never
+    make the module importable — breaking `plan_steps`' own documented "returns
+    [] on a warm venv, must not re-run pip" contract on 100% of fresh installs.
+
+    Nothing caught it because every test injects `module_present`, so the probe
+    set was never checked against the real dependency list. This test closes
+    that: a step whose argv is the no-extras reinstall is a CORE repair, and its
+    probe must name a module that `[project].dependencies` actually provides.
+    """
+    core = _core_dependency_names()
+    reinstall_argv = plan_steps(
+        python="py", system="Linux", module_present=lambda _: False
+    )  # every probe fails -> every step planned
+
+    for step in reinstall_argv:
+        if step.argv[:4] != ["py", "-m", "pip", "install"]:
+            continue  # not a pip step (cuda-torch shells out to a module)
+        if any(a.endswith("]") for a in step.argv):
+            continue  # an EXTRA repair (e.g. `.[summarize]`) — not a core dep.
+            # Scan the whole argv, not argv[-1]: the llama_cpp branch appends
+            # --extra-index-url/--only-binary AFTER the target.
+        assert step.name.replace("_", "-").lower() in core, (
+            f"core repair {step.name!r} probes a module no core dependency provides; "
+            f"the reinstall it plans can never satisfy it. Core deps: {sorted(core)}"
+        )
+
+
+def _core_dependency_names() -> set[str]:
+    """Normalised distribution names from `[project].dependencies`."""
+    import tomllib
+
+    with (Path(__file__).resolve().parent.parent / "pyproject.toml").open("rb") as fh:
+        deps = tomllib.load(fh)["project"]["dependencies"]
+    return {re.split(r"[<>=!~\[; ]", d, maxsplit=1)[0].strip().replace("_", "-").lower() for d in deps}
+
+
+def test_onnxruntime_repair_is_not_fatal():
     """The recorder still boots without it — the gate falls back to passthrough.
     Failing the whole launch over it would be worse than the degraded mode."""
     steps = plan_steps(python="py", system="Linux", module_present=_present("llama_cpp"))
-    assert next(s for s in steps if s.name == "silero-vad").fatal is False
+    assert next(s for s in steps if s.name == "onnxruntime").fatal is False
 
 
 # --- the [summarize] extra -------------------------------------------------
@@ -88,16 +132,16 @@ def test_summarize_probe_follows_the_routed_backend(system, machine, probe):
         python="py",
         system=system,
         machine=machine,
-        module_present=_present("silero_vad", probe),
+        module_present=_present("onnxruntime", probe),
     )
     assert "summarize" not in _names(steps)
 
-    steps = plan_steps(python="py", system=system, machine=machine, module_present=_present("silero_vad"))
+    steps = plan_steps(python="py", system=system, machine=machine, module_present=_present("onnxruntime"))
     assert "summarize" in _names(steps)
 
 
 def test_summarize_extra_is_requested_by_name():
-    steps = plan_steps(python="py", system="Linux", module_present=_present("silero_vad"))
+    steps = plan_steps(python="py", system="Linux", module_present=_present("onnxruntime"))
     argv = next(s for s in steps if s.name == "summarize").argv
     assert any(a.endswith("[summarize]") for a in argv), argv
 
@@ -106,7 +150,7 @@ def test_llama_cpp_install_uses_the_prebuilt_wheel_index():
     """llama-cpp-python builds from source by default, which needs cmake + a C++
     toolchain. A Bundle operator has neither, so the maintainer's prebuilt CPU
     wheel index is not optional here."""
-    steps = plan_steps(python="py", system="Linux", module_present=_present("silero_vad"))
+    steps = plan_steps(python="py", system="Linux", module_present=_present("onnxruntime"))
     argv = next(s for s in steps if s.name == "summarize").argv
     assert "--extra-index-url" in argv
     # Exact equality, not a substring: a substring check on a URL is the shape of
@@ -117,7 +161,7 @@ def test_llama_cpp_install_uses_the_prebuilt_wheel_index():
 
 def test_mlx_summarize_install_has_no_wheel_index():
     """The index is a llama-cpp-python workaround; mlx_lm ships normal wheels."""
-    steps = plan_steps(python="py", system="Darwin", machine="arm64", module_present=_present("silero_vad"))
+    steps = plan_steps(python="py", system="Darwin", machine="arm64", module_present=_present("onnxruntime"))
     assert "--extra-index-url" not in next(s for s in steps if s.name == "summarize").argv
 
 
@@ -153,7 +197,7 @@ def test_bundle_wheel_reaches_every_pip_step(tmp_path):
         module_present=_WHEEL_MISSING.__contains__,
     )
     pip_steps = [s for s in steps if "pip" in s.argv]
-    assert pip_steps, "expected silero + summarize repairs"
+    assert pip_steps, "expected onnxruntime + summarize repairs"
     for step in pip_steps:
         assert "-e" not in step.argv
         assert any(str(wheel.resolve()) in a for a in step.argv), step.argv
@@ -175,7 +219,7 @@ def test_llama_cpp_install_refuses_to_build_from_source():
     index would break dependency resolution outright. Refusing the sdist instead
     fails fast and legibly when no wheel matches.
     """
-    steps = plan_steps(python="py", system="Linux", module_present=_present("silero_vad"))
+    steps = plan_steps(python="py", system="Linux", module_present=_present("onnxruntime"))
     argv = next(s for s in steps if s.name == "summarize").argv
     assert "--only-binary" in argv
     assert argv[argv.index("--only-binary") + 1] == "llama-cpp-python"
@@ -183,5 +227,5 @@ def test_llama_cpp_install_refuses_to_build_from_source():
 
 def test_mlx_summarize_install_does_not_restrict_binaries():
     """The restriction is a llama-cpp-python workaround; mlx_lm resolves normally."""
-    steps = plan_steps(python="py", system="Darwin", machine="arm64", module_present=_present("silero_vad"))
+    steps = plan_steps(python="py", system="Darwin", machine="arm64", module_present=_present("onnxruntime"))
     assert "--only-binary" not in next(s for s in steps if s.name == "summarize").argv
