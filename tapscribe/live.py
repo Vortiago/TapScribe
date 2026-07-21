@@ -1,15 +1,21 @@
-"""Live-transcription channel — protocol + WhisperLiveKit implementation.
+"""Live-transcription channel — protocol, shared base, WhisperLiveKit engine.
 
-The Recorder holds one `LiveChannel` (the Protocol). Today the only
-concrete implementation is `WhisperLiveKitChannel`, which encapsulates
-the subprocess.Popen handle, the threading lock guarding spawn/kill,
-the log-pump tail, and the human-readable state dict the dashboard
-displays.
+The Recorder holds one `LiveChannel` (the Protocol). Two concrete
+implementations ship today, both inheriting the shared transition surface
+from `LiveChannelBase` (ADR-0014):
 
-A future PR adds a `ParakeetLiveChannel` that wraps `parakeet-mlx` in
-a rolling-chunk pseudo-streaming loop — same Protocol surface, same
-Recorder consumer code, different streaming engine. Today's split
-makes that follow-up a one-file addition with no Recorder change.
+  * `WhisperLiveKitChannel` (this module) — encapsulates the
+    subprocess.Popen handle, the threading lock guarding spawn/kill, the
+    log-pump tail, and the human-readable state dict the dashboard
+    displays.
+  * `MoonshineLiveChannel` (`moonshine_live.py`) — no subprocess at all:
+    an in-process `/asr` WebSocket server on its own thread + loop.
+
+A third engine (e.g. a `ParakeetLiveChannel` wrapping `parakeet-mlx` in a
+rolling-chunk pseudo-streaming loop) is a one-file addition with no
+Recorder change: inherit `LiveChannelBase` for the shared surface, or
+implement the Protocol directly. The swap-and-restart orchestration lives
+in `live_control.plan_live` / `apply_live`, not in the channels.
 
 `build_live_cmd` is the pure argv builder for WhisperLiveKit (testable
 as data); the class wires the surrounding orchestration (find the exe,
@@ -689,6 +695,14 @@ class LiveChannelBase:
         clause — in both cases the requested value can't change what the engine
         does, so it never forces a restart (PR #334 finding #9).
 
+        `gate_kind` is compared against the EFFECTIVE value
+        (`effective_gate_config`) — the one `info` reports and the dashboard
+        therefore echoes back on every Apply — not the raw `config.gate_kind`.
+        On a no-native-VAD engine carrying the operator's "backend" those two
+        differ, and comparing the raw value made the echo look like a change:
+        a knob-only tweak forced a full engine restart. Pinned by
+        `test_reported_gate_kind_echoed_back_is_a_no_op_not_a_config_rewrite`.
+
         The four `gate_*` kwargs are Recorder-side per #224 (they configure the
         per-tap SpeechGate, NOT the engine) and are accepted-but-IGNORED here: a
         differing gate knob does NOT force a restart — it is applied via
@@ -700,7 +714,7 @@ class LiveChannelBase:
             return False
         if self.fixed_language is None and language and language != self.config.language:
             return False
-        if gate_kind is not None and gate_kind != self.config.gate_kind:
+        if gate_kind is not None and gate_kind != effective_gate_config(self, self.config).gate_kind:
             return False
         if (
             self.supports_confidence_validation
@@ -731,7 +745,15 @@ class LiveChannelBase:
         itself observable. An engine with a `fixed_language` always reports
         that language regardless of the requested one (Moonshine `"en"`, PR
         #334 finding #3 — `config.language` is carried verbatim, never
-        rewritten here)."""
+        rewritten here).
+
+        A `gate_kind` equal to the EFFECTIVE one is likewise carried, not
+        written: the dashboard echoes back the coerced value `info` reports,
+        so on a no-native-VAD engine holding the operator's "backend" an
+        untouched selector would otherwise overwrite that choice with
+        "tapscribe" — permanently, since the config is what survives the swap
+        back to WhisperLiveKit. Only a genuinely different value (one the
+        request is actually asking to CHANGE) rewrites config."""
         replacements = _transition_replacements(
             gate_kind=gate_kind,
             conf=conf,
@@ -740,6 +762,8 @@ class LiveChannelBase:
             gate_pre_roll_ms=gate_pre_roll_ms,
             gate_min_speech_ms=gate_min_speech_ms,
         )
+        if replacements.get("gate_kind") == effective_gate_config(self, self.config).gate_kind:
+            replacements.pop("gate_kind")
         if replacements:
             self.config = replace(self.config, **replacements)
         self.info["state"] = "starting"
@@ -801,6 +825,34 @@ class WhisperLiveKitChannel(LiveChannelBase):
         """Spawn whisperlivekit-server with the current (optionally overridden)
         config. Returns (ok, message). Does NOT stop a running process first —
         callers wanting 'apply' semantics call stop() then start()."""
+        # Pre-resolve NB-Whisper weights BEFORE taking the spawn lock. Real
+        # I/O (an HF fetch, several hundred MB on a cold cache) so it stays
+        # out of the pure build_live_cmd — and out of the critical section:
+        # `stop()` takes this SAME lock as its first statement, and its
+        # `timeout` bounds `proc.wait()`, NOT lock acquisition. Holding the
+        # lock across the download therefore wedged every shutdown for the
+        # whole fetch — the ASGI lifespan calls `live.stop(timeout=3.0)`
+        # inline on the event loop, so Ctrl-C/SIGTERM hung until it finished
+        # (and `POST /api/live/stop` hung identically). A lock guarding
+        # spawn/kill must not span unbounded network I/O.
+        target_model = model if model is not None else self.config.model
+        ct2_dir: Path | None = None
+        if is_nb_whisper(target_model):
+            try:
+                ct2_dir = download_nb_whisper_ct2_dir(target_model)
+            except Exception as e:
+                msg = f"failed to fetch nb-whisper ct2 weights: {e}"
+                with self._lock:
+                    # Only stamp the failure when nothing is running: a
+                    # spurious concurrent start() against a healthy child
+                    # must not flip the dashboard to "error" behind its back
+                    # (same ownership rule `stop()`/`_pump_logs` apply).
+                    if not self.running():
+                        self._proc = None
+                        self.info["state"] = "error"
+                        self.info["last_error"] = msg
+                return False, msg
+
         with self._lock:
             if self.running():
                 return False, "already running"
@@ -812,6 +864,20 @@ class WhisperLiveKitChannel(LiveChannelBase):
                     model=model if model is not None else self.config.model,
                     language=language if language is not None else self.config.language,
                 )
+
+            if self.config.model != target_model:
+                # A concurrent start() rewrote config.model while the fetch
+                # above ran unlocked, so `ct2_dir` may belong to the wrong
+                # model (and build_live_cmd would raise on a missing one).
+                # Bail rather than spawn a mismatched child; the caller's
+                # next Apply resolves weights for the settled model.
+                msg = (
+                    f"live model changed from {target_model!r} to {self.config.model!r} "
+                    "while resolving weights — retry"
+                )
+                self.info["state"] = "error"
+                self.info["last_error"] = msg
+                return False, msg
 
             exe = self._find_exe()
             if exe is None:
@@ -837,19 +903,6 @@ class WhisperLiveKitChannel(LiveChannelBase):
                 self.info["last_error"] = port_err
                 print(f"[tapscribe] cannot start whisperlivekit-server: {port_err}", flush=True)
                 return False, port_err
-
-            # Pre-resolve NB-Whisper weights if needed. Real I/O (HF fetch)
-            # so it stays out of the pure build_live_cmd.
-            ct2_dir: Path | None = None
-            if is_nb_whisper(self.config.model):
-                try:
-                    ct2_dir = download_nb_whisper_ct2_dir(self.config.model)
-                except Exception as e:
-                    msg = f"failed to fetch nb-whisper ct2 weights: {e}"
-                    self.info["state"] = "error"
-                    self.info["last_error"] = msg
-                    self._proc = None
-                    return False, msg
 
             cmd = build_live_cmd(
                 exe,
@@ -1018,16 +1071,26 @@ class WhisperLiveKitChannel(LiveChannelBase):
                     self.log.append(ln)
                     if _is_console_worthy(ln):
                         print(f"[wlk] {ln}", flush=True)
+                    # Both info writes below carry the same ownership guard
+                    # the `finally` and `stop()` apply: a superseded child's
+                    # stdout is block-buffered, so its banner can still be
+                    # READ after a fresh start() replaced it — promoting on
+                    # it would show the live channel up ~30s before the new
+                    # child has bound anything. The log tail above is
+                    # unguarded on purpose: it is the child's own history,
+                    # not the channel's current state.
+                    #
                     # The child's own accelerator report beats the seeded
                     # prediction — same observe-the-child pattern as the
                     # 'running' promotion below.
                     device = parse_accelerator_line(ln)
-                    if device is not None:
+                    if device is not None and self._proc is proc:
                         self.info["device"] = device
                     if not promoted:
                         low = ln.lower()
                         if "uvicorn running" in low or "application startup complete" in low:
-                            self.info["state"] = "running"
+                            if self._proc is proc:
+                                self.info["state"] = "running"
                             promoted = True
         finally:
             rc = proc.wait()

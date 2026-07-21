@@ -34,6 +34,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from itertools import islice
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -206,20 +207,37 @@ def test_pump_logs_skips_info_update_when_proc_was_replaced():
     """A stale pump thread whose proc has been superseded by a fresh
     start() must not clobber the newer proc's info — otherwise a fast
     Apply-model click flaps the dashboard's state back to "error"
-    behind the new child's back."""
+    behind the new child's back.
+
+    All THREE in-pump info writes are covered: the exit-path stamp in the
+    `finally`, the "starting"->"running" promotion, and the
+    `Accelerator:` device overwrite. The latter two matter because pipes
+    are block-buffered — a superseded child's buffered stdout is still
+    readable AFTER it exited, so an unguarded promotion shows the live
+    channel up ~30 s before the NEW child has bound anything.
+    """
     chan = _make_channel()
     old_proc = _FakeChildProc(pid=1, rc=1)
     new_proc = _FakeChildProc(pid=2, rc=0)
     chan._proc = old_proc
-    chan.info["state"] = "running"
+    # The state/device the FRESH child owns — a start() that has spawned
+    # but not yet been promoted by its own pump.
+    chan.info["state"] = "starting"
+    chan.info["device"] = "CPU"
 
     with _pumping(chan, old_proc):
         # Simulate a fresh start() swapping in a new proc while the stale
         # pump is still draining the old child's tail; the EOF at `with`
         # exit is the old child "exiting" with rc=1.
         chan._proc = new_proc
+        old_proc.stdout.push("INFO:     Uvicorn running on http://127.0.0.1:8000")
+        old_proc.stdout.push("  Accelerator: CUDA (NVIDIA A100)")
+        _wait_until(lambda: len(chan.log) == 2)
 
-    assert chan.info["state"] == "running"
+    # The stale child's banner lines were tailed into the log (so the pump
+    # really did process them) but changed none of the new child's info.
+    assert chan.info["state"] == "starting"
+    assert chan.info["device"] == "CPU"
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +355,53 @@ def test_start_reports_error_when_popen_raises():
     assert chan.info["state"] == "error"
     assert chan.info["last_error"] == msg
     assert chan._proc is None
+
+
+def test_stop_is_not_blocked_by_an_in_flight_weights_download():
+    """`start()` used to hold the spawn lock across
+    `download_nb_whisper_ct2_dir` — a several-hundred-MB HuggingFace fetch
+    on a cold cache — while `stop()` takes that SAME lock as its FIRST
+    statement. `stop(timeout=…)` bounds `proc.wait()`, NOT lock
+    acquisition, so a shutdown blocked for the entire download: the ASGI
+    lifespan calls `recorder.live.stop(timeout=3.0)` inline on the event
+    loop, so Ctrl-C / SIGTERM wedged the whole shutdown (and
+    `POST /api/live/stop` hung identically, burning an executor worker).
+    A lock guarding spawn/kill must not span unbounded network I/O."""
+    chan = _make_channel(model="nb-whisper-small")
+    fetching = threading.Event()
+    release = threading.Event()
+    proc = _FakeChildProc(pid=31337)
+
+    def _slow_download(model_name: str) -> Path:
+        fetching.set()
+        assert release.wait(timeout=10), "test never released the fake download"
+        return Path("/fake/ct2-dir")
+
+    with (
+        patch.object(WhisperLiveKitChannel, "_find_exe", return_value="/fake/whisperlivekit-server"),
+        patch("tapscribe.live.download_nb_whisper_ct2_dir", side_effect=_slow_download),
+        patch("tapscribe.live.subprocess.Popen", return_value=proc),
+    ):
+        starter = threading.Thread(target=chan.start, daemon=True)
+        starter.start()
+        try:
+            assert fetching.wait(timeout=5), "the weights fetch never began"
+            stopped: list[tuple[bool, str]] = []
+            stopper = threading.Thread(target=lambda: stopped.append(chan.stop(timeout=0.5)), daemon=True)
+            stopper.start()
+            stopper.join(timeout=3.0)
+            assert not stopper.is_alive(), (
+                "stop() is still blocked — the spawn lock is held across the weights download"
+            )
+            # Nothing had spawned yet, so the shutdown is the idempotent no-op.
+            assert stopped == [(True, "not running")]
+        finally:
+            release.set()
+            starter.join(timeout=5)
+    # The fetch did complete and feed the spawn — proving the download was
+    # genuinely in flight (not skipped) while stop() sailed past it.
+    assert chan._proc is proc
+    proc.stdout.close()  # let the background pump thread exit
 
 
 # ---------------------------------------------------------------------------
