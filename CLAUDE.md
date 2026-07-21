@@ -225,10 +225,13 @@ short — see `test_transformers_parakeet_upstream_contract` in
 
 PRs are scanned by CodeQL with the `security-and-quality` suite (see
 `.github/codeql/codeql-config.yml`). The repo filters out
-`py/path-injection` because `tapscribe/sessions.py` already enforces a
-strict two-layer path sanitiser — every OTHER rule still runs and
-PR authors are expected to land clean. Common trip-wires Claude has
-introduced and how to avoid them:
+`py/path-injection` because `tapscribe/session_paths.py` already enforces
+a strict two-layer path sanitiser (`_safe_part`, then
+`_assert_contained`/`_assert_under`) — every OTHER rule still runs and
+PR authors are expected to land clean. That exclusion is what makes
+`session_paths.py` a review-gate module: a new user-input-to-path helper
+there is covered by neither CodeQL nor any other automated check.
+Common trip-wires Claude has introduced and how to avoid them:
 
 - **Path components from parsed filenames must round-trip through
   `safe_name`** before being interpolated into a new path. Even when
@@ -236,7 +239,7 @@ introduced and how to avoid them:
   walk, CodeQL's intraprocedural analysis can't see the upstream
   containment check. Both the live `/tap` recorder
   (`tapscribe/tap_fan_out.py`) and the strip-silence splitter
-  (`tapscribe/sessions.py`) build filenames via
+  (`tapscribe/batch_strip.py`) build filenames via
   `tapscribe.text.build_recorder_wav_name`, which applies `safe_name`
   internally — use that helper, don't build the filename yourself.
 - **Subprocess argv must always be the list form** (`subprocess.Popen([

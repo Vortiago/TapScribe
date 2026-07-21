@@ -92,8 +92,27 @@ def _assert_contained(
     ONE copy of the containment check — every resolver crosses this, none
     re-derives the idiom."""
     root = os.path.realpath(config.RECORDINGS_DIR)
+    return _assert_under(candidate, root, message, exc=exc)
+
+
+def _assert_under(
+    candidate: Path | str,
+    base: str,
+    message: str,
+    *,
+    exc: type[SessionPathError] = SessionNotFound,
+) -> str:
+    """`_assert_contained` generalised to any `base` — the shared realpath walk.
+
+    STRICTLY below `base`: a candidate that realpaths to `base` itself is an
+    escape, not a hit. Every resolver joins at least one component under its
+    base, so none has a legitimate base-equal result — while accepting one let a
+    session symlinked to RECORDINGS_DIR come back as a session dir, and
+    `absorb_session` ends in `shutil.rmtree(source_dir)`, i.e. it would delete
+    the whole archive.
+    """
     real = os.path.realpath(candidate)
-    if real != root and not real.startswith(root + os.sep):
+    if not real.startswith(base + os.sep):
         raise exc(message)
     return real
 
@@ -133,9 +152,18 @@ def session_meta_path(session: str) -> Path:
 def stripped_dir(session: str) -> Path:
     """Build `<RECORDINGS_DIR>/<session>/stripped` after validating the
     session id against path traversal. Returns the realpathed Path so
-    downstream filesystem operations can use it without re-checking."""
+    downstream filesystem operations can use it without re-checking.
+
+    Containment is scoped to the SESSION, not just the archive root: a
+    `<session>/stripped -> <other session>` symlink is contained under
+    RECORDINGS_DIR and so passed the root-scoped check, but
+    `batch_strip.strip_session_locked` rmtree's this directory — it would
+    delete a sibling session's WAVs. A resolver must never hand back a path
+    belonging to a different session.
+    """
     session = _safe_part(session, "session")
-    return Path(_assert_contained(config.RECORDINGS_DIR / session / DIRNAME_STRIPPED))
+    session_real = _assert_contained(config.RECORDINGS_DIR / session)
+    return Path(_assert_under(Path(session_real) / DIRNAME_STRIPPED, session_real, "session not found"))
 
 
 def resolve_session_dir(session: str) -> Path:

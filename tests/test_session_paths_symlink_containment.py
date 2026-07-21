@@ -187,3 +187,51 @@ def test_create_session_dir_creates_a_legitimate_session_contained(recordings_di
     result = session_paths.create_session_dir("20260516T130000Z")
     _assert_contained(result, recordings_dir)
     assert result.is_dir()
+
+
+# --- harm: containment must be strict (below the root) and session-scoped -----
+#
+# Two holes the tests above could not see, because both helpers here accept
+# `real == root` as "contained" and neither asks WHICH session a path belongs to.
+
+
+def test_resolve_session_dir_refuses_a_session_symlinked_to_the_recordings_root(recordings_dir):
+    """A session that realpaths to RECORDINGS_DIR *itself* must be refused.
+
+    `_assert_contained`'s `real != root and ...` treated the root as contained,
+    so `resolve_session_dir` handed it back as a session dir — and
+    `session_maintenance.absorb_session` ends with `shutil.rmtree(source_dir)`,
+    i.e. it deletes the entire recordings archive including every sibling
+    session. No resolver has a legitimate root-equal result: each one joins at
+    least one component below it.
+    """
+    (recordings_dir / "victim").mkdir()
+    (recordings_dir / "self").symlink_to(recordings_dir)
+
+    with pytest.raises(SessionPathError):
+        session_paths.resolve_session_dir("self")
+
+
+def test_stripped_dir_refuses_a_stripped_symlink_into_another_session(recordings_dir):
+    """`stripped/` must resolve inside ITS OWN session, not merely under the root.
+
+    Containment was root-scoped, so a `S1/stripped -> S2` symlink resolved to a
+    sibling session and `batch_strip.strip_session_locked`'s cleanup rmtree'd
+    S2 and its WAVs. The repo already treats a planted symlink in RECORDINGS_DIR
+    as in-threat-model (`_iter_candidate_session_dirs` documents exactly that).
+    """
+    (recordings_dir / "S1").mkdir()
+    (recordings_dir / "S2").mkdir()
+    (recordings_dir / "S2" / "keep.wav").write_bytes(b"")
+    (recordings_dir / "S1" / "stripped").symlink_to(recordings_dir / "S2")
+
+    with pytest.raises(SessionPathError):
+        session_paths.stripped_dir("S1")
+
+
+def test_stripped_dir_allows_a_legitimate_stripped_subdir(recordings_dir):
+    """The tightened, session-scoped check must not reject the normal layout."""
+    (recordings_dir / "20260516T130000Z" / "stripped").mkdir(parents=True)
+    result = session_paths.stripped_dir("20260516T130000Z")
+    _assert_contained(result, recordings_dir)
+    assert result.name == "stripped"
