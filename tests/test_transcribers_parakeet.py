@@ -197,8 +197,16 @@ def test_assert_feature_extractor_sample_rate_mismatch_raises():
         t._assert_feature_extractor_sample_rate()
 
 
-def _hide_modules(monkeypatch, *names: str) -> None:
-    """Make `importlib.util.find_spec` report `names` as not installed."""
+def _hide_modules(monkeypatch, *names: str, present: tuple[str, ...] = ()) -> None:
+    """Make `find_spec` report `names` as missing and `present` as installed.
+
+    `present` is not optional sugar: a test that only HIDES a package asserts
+    nothing about the ones it left alone, and the CI matrix installs neither
+    `transformers` nor `librosa`. So hiding librosa alone produced
+    "missing: transformers, librosa" there — a test meaning "only librosa is
+    missing" has to pin the other side of that too, or it passes locally and
+    fails on all nine legs.
+    """
     import importlib.util as importlib_util
 
     real_find_spec = importlib_util.find_spec
@@ -206,6 +214,8 @@ def _hide_modules(monkeypatch, *names: str) -> None:
     def fake_find_spec(name, *args, **kwargs):
         if name in names:
             return None
+        if name in present:
+            return object()  # a truthy spec — load() only checks for None
         return real_find_spec(name, *args, **kwargs)
 
     monkeypatch.setattr(importlib_util, "find_spec", fake_find_spec)
@@ -214,11 +224,15 @@ def _hide_modules(monkeypatch, *names: str) -> None:
 def test_load_fails_fast_without_transformers(monkeypatch):
     """No `transformers` installed → an actionable RuntimeError naming the
     package, not a deep ImportError chain."""
-    _hide_modules(monkeypatch, "transformers")
+    _hide_modules(monkeypatch, "transformers", present=("librosa",))
 
     from tapscribe.transcribers.parakeet import ParakeetTranscriber
 
-    with pytest.raises(RuntimeError, match="missing: transformers"):
+    # Anchored on the trailing PERIOD: a bare "missing: transformers" is also a
+    # prefix of "missing: transformers, librosa", so it would pass in a venv
+    # missing BOTH and stop distinguishing the two cases — which is exactly how
+    # the librosa-only test came to be red on every CI leg.
+    with pytest.raises(RuntimeError, match=r"missing: transformers\."):
         ParakeetTranscriber.load("parakeet-tdt-0.6b-v3", kind="cpu")
 
 
@@ -230,11 +244,11 @@ def test_load_fails_fast_when_only_librosa_is_missing(monkeypatch):
     inside `AutoProcessor.from_pretrained`, deep in the feature extractor,
     with no mention of the package the operator actually needs.
     """
-    _hide_modules(monkeypatch, "librosa")
+    _hide_modules(monkeypatch, "librosa", present=("transformers",))
 
     from tapscribe.transcribers.parakeet import ParakeetTranscriber
 
-    with pytest.raises(RuntimeError, match="missing: librosa"):
+    with pytest.raises(RuntimeError, match=r"missing: librosa\b"):
         ParakeetTranscriber.load("parakeet-tdt-0.6b-v3", kind="cpu")
 
 

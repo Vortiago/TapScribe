@@ -238,10 +238,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install runtime + test harness + faster-whisper + silero-vad
+      - name: Install runtime + test harness + faster-whisper
         run: |
-          # CPU torch/torchaudio FIRST, so silero-vad's torch dependency is
-          # already satisfied and pip never downloads the default CUDA build
+          # CPU torch/torchaudio FIRST so pip never downloads the default CUDA build.
+          # NOTE: since #374 nothing in THIS job declares torch — silero-vad is
+          # gone and whisper-cpu resolves to faster-whisper (CTranslate2, no
+          # torch). These lines are kept only because dropping them is a
+          # separate change that wants its own green run; if you are here to
+          # trim CI time, verify no transitive consumer and delete them.
           # (~7 GB installed with its nvidia libs). The old order installed
           # CUDA torch and then --force-reinstall'd the CPU build on top,
           # leaving the runner with ~1 GB free disk — the real-audio test's
@@ -480,7 +484,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install tapscribe runtime + faster-whisper + silero-vad
+      - name: Install tapscribe runtime + faster-whisper
         run: |
           pip install -e ".[whisper-cpu]"
           # silero-vad pulls torch/torchaudio from PyPI whose native libs can

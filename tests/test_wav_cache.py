@@ -786,6 +786,16 @@ def test_cache_hit_restores_a_segment_when_its_rule_is_removed(tmp_path: Path):
     ], "the restored segment belongs at its own start time, not appended at the end"
     assert restored.result.suppressed_hallucinations == ()
     assert restored.result.segments[0].matched_rule is None, "stale rule annotation must be cleared"
+    # `text` must agree with `segments`. `hallucinations.apply` recomputes it,
+    # but SHORT-CIRCUITS on an empty rule set — exactly this case — so the
+    # restored line reappeared in `segments` while `text` still omitted it, and
+    # a non-empty edit joined kept-then-restored, which the temporal sort then
+    # reordered. Either way the persisted sidecar scalar disagreed with the list
+    # beside it, which is what `/api/transcribe` hands back.
+    assert restored.result.text == " ".join(s.text for s in restored.result.segments), (
+        f"text {restored.result.text!r} disagrees with segments "
+        f"{[s.text for s in restored.result.segments]!r}"
+    )
 
 
 def test_cache_hit_with_unchanged_rules_does_not_rewrite_the_entry(tmp_path: Path):

@@ -80,6 +80,17 @@ class TapFanOut:
         # One call here means a new consumer inherits the guard instead of
         # needing its own.
         self._name = roster.sanitise_name(name)
+        # The WAV filename keeps deriving from the RAW name. `safe_name` (inside
+        # `build_recorder_wav_name`) already bounds and sanitises a filename
+        # component, so sanitising first buys nothing there — but it does
+        # collapse whitespace, which CHANGES the speaker slug ("Alice  Bob" ->
+        # `Alice_Bob`, not `Alice__Bob`). That slug is the roster's join key and
+        # `record_occurrence` only sets it once (first write wins), so a session
+        # that spans this change — a recorder restart mid-meeting, a re-tap into
+        # an existing session — would keep the old slug on the roster entry
+        # while new WAVs carried the new one, and `resolve_session_names` would
+        # render one human as two speakers.
+        self._filename_name = name or ""
         self._utterance_id = utterance_id
         # A fresh per-connection token. Two /tap WSes can briefly share one
         # utterance_id (a reconnect firing before the old WS is seen closed),
@@ -297,7 +308,7 @@ class TapFanOut:
                 # applies its own `safe_name` and empty-string fallbacks so
                 # we don't repeat them here.
                 short_id = safe_name(self._identity)[:10]
-                fname = build_recorder_wav_name(started_at, self._name or "", short_id)
+                fname = build_recorder_wav_name(started_at, self._filename_name, short_id)
                 session_dir = self._session_dir
                 session_dir.mkdir(parents=True, exist_ok=True)
                 fpath = session_dir / fname

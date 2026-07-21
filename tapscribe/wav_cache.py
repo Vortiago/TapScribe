@@ -507,10 +507,19 @@ def _refilter_cached(
         stamped = replace(existing, rules_sig=sig)
         _write_entry(wav_path, stamped, backend=backend, model=model, make_primary=False)
         return stamped
+    ordered = tuple(sorted(refiltered.segments, key=_segment_order))
     refiltered = replace(
         refiltered,
-        segments=tuple(sorted(refiltered.segments, key=_segment_order)),
+        segments=ordered,
         suppressed_hallucinations=tuple(sorted(refiltered.suppressed_hallucinations, key=_segment_order)),
+        # Recompute `text` from the SORTED kept segments. `hallucinations.apply`
+        # already recomputes it, but not usefully here: it short-circuits on an
+        # empty rule set (so a rules edit that RESTORES a segment left the
+        # restored phrase out of `text` entirely), and otherwise joins in
+        # kept-then-restored concat order, which the sort above then reorders.
+        # Either way `text` would disagree with `segments` in the persisted
+        # sidecar — the exact desync `apply`'s own recompute exists to prevent.
+        text=" ".join(s.text for s in ordered if s.text).strip(),
     )
     # Keep the write-time envelope (transcribed_at / transcribe_ms / wav
     # fingerprint): no model ran, only the post-decode filter was re-decided.

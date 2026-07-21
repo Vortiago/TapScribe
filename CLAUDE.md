@@ -44,9 +44,14 @@
   swap, so it can't use `renderRegion`) apply the exported
   `selectionInside(host)` for the same rule — defer WITHOUT updating
   the gate's signature, so the held-back render lands on the first
-  tick after the selection clears (these BESPOKE gates are the only
-  remaining users of the `markDeferredRender`/`consumeDeferredRender`
-  tick-retry; canon `renderRegion` deferrals no longer need it). `live-channel.js` and `config-card.js`
+  tick after the selection clears. Users of the
+  `markDeferredRender`/`consumeDeferredRender` tick-retry are those BESPOKE
+  gates (the live log dialog, `active-taps.js`, `live-feed.js`, the
+  `recordings.js` view-level gate, and `sessions.js`' per-row gate), PLUS one
+  case inside `renderRegion` itself: a swap held because a text selection
+  STRADDLES the host has no focusout/selectionchange listener of its own to
+  flush it, so it needs the next tick. Every other `renderRegion` deferral
+  flushes itself. `live-channel.js` and `config-card.js`
   render through it too, with NO bespoke guard of their own: a focused
   `[data-cfg-key]` save button mid-`putJson` counts as an interactive
   control in the seam's `_isInteractive`, so `renderRegion` holds the
