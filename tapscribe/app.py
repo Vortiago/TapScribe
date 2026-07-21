@@ -1459,7 +1459,21 @@ async def api_summarize_config_put(req: Request):
     one structured object. ALL validation (source/model allowlists, text
     caps, max_tokens int + bounds) lives in `write_summarizer_config`; its
     ValueError is the 400."""
-    body = await _json_body(req)
+    # Read the raw body rather than `_json_body` (which turns ANY parse
+    # failure into {}): combined with the full-object semantics above, a
+    # dropped or truncated body would WIPE the operator's saved summarizer
+    # default — taking the end-of-meeting pipeline's summarize stage with it
+    # — and answer {"ok": true}. Same hazard, same handling as
+    # `api_tap_new_session`. Only a deliberate `{}` clears.
+    raw_body = await req.body()
+    if not raw_body:
+        raise HTTPException(400, "a JSON object body is required (send {} to clear the config)")
+    try:
+        body = json.loads(raw_body)
+    except ValueError:
+        raise HTTPException(400, "malformed JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "JSON body must be an object")
     try:
         stored = write_summarizer_config(body)
     except ValueError as e:
@@ -1470,16 +1484,37 @@ async def api_summarize_config_put(req: Request):
 
 
 @app.delete("/api/sessions/{session}/stripped")
-async def api_session_stripped_delete(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
-    """Remove a session's stripped/ folder so it can be regenerated."""
+async def api_session_stripped_delete(session: str, recorder: Recorder = Depends(get_recorder)):
+    """Remove a session's stripped/ folder so it can be regenerated.
+
+    Deliberately NOT the full `_refuse_current_or_busy`: stripped/ is a
+    derived artefact, so clearing the CURRENT session's copy — including
+    while a tap is writing ORIGINALS into that session — is legitimate, and
+    only the busy-job guard applies. `batch_strip.strip_session` holds the
+    session's job slot for its whole run and is writing region clips into
+    exactly this directory, so an rmtree underneath it would delete half of
+    what it just wrote and leave the strip-meta describing clips that are
+    gone."""
+    if recorder.jobs.get(session) is not None:
+        raise SessionBusy("a transcribe or strip job is in flight on this session")
     resolve_session_dir(session)
     d = stripped_dir(session)
     if not d.is_dir():
         return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
-    try:
-        shutil.rmtree(d)
-    except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from None
+    # Hold the session's job slot for the walk, as the audio delete does: the
+    # guard above is check-then-act, so a strip could otherwise claim the free
+    # slot between the check and the thread hop and race the rmtree.
+    async with recorder.jobs.run(session, kind="delete", total=1):
+        try:
+            await asyncio.to_thread(shutil.rmtree, d)
+        except FileNotFoundError:
+            # Someone cleared stripped/ between the is_dir() above and here
+            # (a second dashboard tab, an absorb). The caller's goal — no
+            # stripped/ folder — already holds, so report it as a no-op
+            # rather than 500ing on a check-then-act window.
+            return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
+        except OSError as e:
+            raise HTTPException(500, f"delete failed: {e}") from None
     print(f"[tapscribe] removed stripped/ from session: {session}", flush=True)
     return {"ok": True, "deleted": True}
 
@@ -1945,6 +1980,29 @@ async def api_set_primary(
     return {"ok": True, "primary": {"backend": backend, "model": model}}
 
 
+def _translate_registry_rejection(model: str, backend: str) -> None:
+    """Translate the catalog's rejection of `(model, backend)` into a 400
+    naming it — or return, leaving the caller's original exception to
+    propagate as the 500 it is.
+
+    The catalog is the single source of truth for which model ids exist and
+    which backends they bind, and it is consulted lazily, deep inside
+    `load_transcriber`, where it raises plain `KeyError` / `RuntimeError`.
+    Neither is in `_DOMAIN_ERROR_STATUS`, so a stale dashboard tab (or a
+    bridge) holding a since-removed model id used to get a bare
+    "Internal Server Error". Re-running the resolve from the failure path
+    keeps the catalog lookup off the happy path and — because it only
+    converts when the resolve confirms the request was the problem — leaves
+    an unrelated `RuntimeError` (e.g. wav_predecode's "unexpected WAV
+    format") on a perfectly good model id as a 500."""
+    try:
+        REGISTRY.resolve(model, preference=backend)  # type: ignore[arg-type]
+    except KeyError:
+        raise HTTPException(400, f"unknown model {model!r} — not in the catalog") from None
+    except RuntimeError as e:
+        raise HTTPException(400, str(e)) from None
+
+
 @app.post("/api/transcribe")
 async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await _json_body(req)
@@ -1968,7 +2026,11 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         # the session's candidate languages decide (ADR-0010/0011).
         source_lang=(body.get("source_lang") or "").strip() or None,
     )
-    payload = await transcribe_one(recorder, request)
+    try:
+        payload = await transcribe_one(recorder, request)
+    except (KeyError, RuntimeError):
+        _translate_registry_rejection(request.model, request.backend)
+        raise
     print(
         f"[tapscribe] transcribed {request.name} ({request.source}) with {request.model}",
         flush=True,
@@ -1995,7 +2057,11 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
         force=bool(body.get("force")),
         source_lang=(body.get("source_lang") or "").strip() or None,
     )
-    return JSONResponse(await transcribe_session(recorder, request))
+    try:
+        return JSONResponse(await transcribe_session(recorder, request))
+    except (KeyError, RuntimeError):
+        _translate_registry_rejection(request.model, request.backend)
+        raise
 
 
 # ---------------------------------------------------------------------------
