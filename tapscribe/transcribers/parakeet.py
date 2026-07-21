@@ -108,10 +108,16 @@ class ParakeetTranscriber(ChunkedTranscriber):
     def load(cls, model_name: str, *, kind: str = "auto") -> ParakeetTranscriber:
         import importlib.util
 
-        if importlib.util.find_spec("transformers") is None:
+        # BOTH deps, not just transformers: a Voxtral-only venv already has
+        # transformers (its extra declares it) but no librosa, and passing
+        # this guard on that box only moved the failure to
+        # `AutoProcessor.from_pretrained`, which raises deep inside the
+        # feature extractor. Name whichever one is actually missing.
+        missing = [m for m in ("transformers", "librosa") if importlib.util.find_spec(m) is None]
+        if missing:
             raise RuntimeError(
                 "Parakeet on CUDA/CPU requires the `transformers` package "
-                "(>=5.12) and `librosa`. Install with:\n"
+                f"(>=5.12) and `librosa`; missing: {', '.join(missing)}. Install with:\n"
                 "    pip install -U 'transformers>=5.12' librosa\n"
                 "On Apple Silicon, prefer `pip install parakeet-mlx` for the "
                 "MLX adapter."

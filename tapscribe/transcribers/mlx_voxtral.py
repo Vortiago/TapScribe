@@ -61,7 +61,8 @@ class MlxVoxtralTranscriber(VoxtralTranscriberBase):
             raise RuntimeError(
                 "MLX Voxtral requires the `mlx-voxtral` package "
                 "(Apple Silicon only). Install with:\n"
-                "    pip install mlx-voxtral\n"
+                "    pip install -e '.[voxtral-mlx]'\n"
+                "or re-run the install picker and give Voxtral the MLX backend.\n"
                 "See https://github.com/mzbac/mlx.voxtral"
             )
 

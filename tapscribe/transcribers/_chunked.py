@@ -44,6 +44,39 @@ ENV_OVERLAP_S = "TAPSCRIBE_PARAKEET_OVERLAP_S"
 _CHUNK_S_BOUNDS = (1.0, 600.0)
 _OVERLAP_S_BOUNDS = (0.0, 60.0)
 
+# Mirrors the ratio hard-coded in `chunking.chunk_windows`:
+# `chunk_windows` requires `overlap_s <= chunk_s * MAX_OVERLAP_FRACTION`
+# (otherwise a window advances by ≤0 and the walk can't terminate). The two
+# env knobs are validated INDEPENDENTLY by `env_float`, so a legal-but-
+# incompatible PAIR — `TAPSCRIBE_PARAKEET_CHUNK_S=10` against the default
+# 15 s overlap — passes both bound checks and only blows up inside
+# `chunk_windows`, i.e. per-WAV at request time. See `_clamp_overlap`.
+MAX_OVERLAP_FRACTION = 0.9
+
+
+def clamp_overlap(chunk_s: float, overlap_s: float) -> float:
+    """Return an overlap `chunk_windows` will accept for `chunk_s`, printing
+    the same one-line "ignoring …; using …" notice `env_float` emits when it
+    has to reduce one.
+
+    The joint constraint can't live in `env_float`, which validates each knob
+    on its own. Degrading LOUDLY at construction keeps the documented
+    "typo-tolerant rather than fatal" contract: without this, an operator
+    setting `TAPSCRIBE_PARAKEET_CHUNK_S=10` and leaving the 15 s overlap
+    default constructs a perfectly healthy adapter whose EVERY transcribe
+    dies with a `ValueError` that isn't a domain error — a bare 500 per
+    request, and an aborted job in `transcribe_session`.
+    """
+    limit = chunk_s * MAX_OVERLAP_FRACTION
+    if overlap_s <= limit:
+        return overlap_s
+    print(
+        f"[tapscribe] ignoring overlap {overlap_s} > {MAX_OVERLAP_FRACTION:g} × chunk "
+        f"{chunk_s} ({ENV_OVERLAP_S} / {ENV_CHUNK_S}); using {limit}",
+        flush=True,
+    )
+    return limit
+
 
 def stitch_windows(
     per_window: list[tuple[Window, Sequence[TranscriptionSegment]]],
@@ -115,7 +148,7 @@ class ChunkedTranscriber:
                 max_value=_CHUNK_S_BOUNDS[1],
             )
         )
-        self.overlap_duration_s = (
+        overlap = (
             overlap_duration_s
             if overlap_duration_s is not None
             else env_float(
@@ -125,6 +158,10 @@ class ChunkedTranscriber:
                 max_value=_OVERLAP_S_BOUNDS[1],
             )
         )
+        # Joint constraint — see `clamp_overlap`. Resolved HERE, at
+        # construction, so a bad pair degrades once and loudly instead of
+        # raising inside `chunk_windows` on every WAV.
+        self.overlap_duration_s = clamp_overlap(self.chunk_duration_s, overlap)
 
     def _transcribe_window(self, chunk_pcm: Any, window: Window) -> Sequence[TranscriptionSegment]:
         """Run the model on one window's PCM and return its segments with

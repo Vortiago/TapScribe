@@ -538,7 +538,21 @@ _VOXTRAL_BACKENDS: tuple[BackendBinding, ...] = (
 
 _PARAKEET_BACKENDS: tuple[BackendBinding, ...] = (
     BackendBinding(kinds=frozenset({"mlx"}), loader=_load_parakeet_mlx, probe_module="parakeet_mlx"),
-    BackendBinding(kinds=frozenset({"cuda", "cpu"}), loader=_load_parakeet_hf, probe_module="transformers"),
+    BackendBinding(
+        kinds=frozenset({"cuda", "cpu"}),
+        loader=_load_parakeet_hf,
+        # `librosa` rather than `transformers`, for the reason spelled out on
+        # the Voxtral binding above: `transformers` is pulled in by OTHER
+        # extras (voxtral-cpu declares it, and plenty of indirect deps carry
+        # it), so probing it advertised Parakeet as INSTALLED on a
+        # Voxtral-only venv — /api/models and /setup said "ready", the
+        # explicit-preference branch of `resolve()` handed back this binding,
+        # and `from transformers import AutoModelForTDT` only blew up at the
+        # first transcribe. `librosa` backs the Parakeet feature extractor's
+        # log-mel and is declared by `parakeet-cpu` ALONE, so its presence is
+        # a reliable signal that the operator opted into Parakeet.
+        probe_module="librosa",
+    ),
 )
 
 

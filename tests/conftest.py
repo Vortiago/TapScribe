@@ -705,7 +705,12 @@ def atomic_extras(extra_name: str) -> list[str]:
     resolution tests and install-matrix.yml's family-axis meta-test — both
     need "does this extra exist in pyproject.toml", so it lives here rather
     than in either test file alone."""
-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    # `tomllib.load` on a BINARY handle, not `loads(read_text())`: TOML is
+    # utf-8 by spec, but `read_text()` with no encoding uses the platform
+    # default (cp1252 on all three Windows CI legs), so the first curly quote
+    # or non-ASCII character in a pyproject comment would redden Windows only.
+    with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
+        data = tomllib.load(fh)
     extras = data["project"]["optional-dependencies"]
     assert extra_name in extras, f"no `{extra_name}` extra in pyproject.toml"
     return list(extras[extra_name])
