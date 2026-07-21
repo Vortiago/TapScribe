@@ -40,8 +40,45 @@ def test_wav_rms_dbfs_silence_returns_minus_200(tmp_path):
     assert audio.wav_rms_dbfs(tmp_path / "silence.wav") == pytest.approx(-200.0)
 
 
-def test_wav_rms_dbfs_full_scale_is_zero():
-    pass  # see test below — split for clarity
+def test_wav_rms_dbfs_full_scale_is_zero(tmp_path):
+    """The top of the range: a full-scale square wave measures 0 dBFS.
+
+    This body was `pass  # see test below — split for clarity` and the promised
+    follow-up never landed, so the 0 dBFS boundary was unguarded behind a green
+    test named for it. `test_wav_rms_dbfs_known_amplitude` only covers HALF
+    scale, so a normalisation divisor changed from 32768.0 to 32767.0, or a
+    clamp added at the top of the range, would shift the tap volume meter and
+    the strip-silence loudness floor with every test still passing.
+    """
+    samples = np.full(SAMPLE_RATE, 32767, dtype=np.int16)
+    samples[1::2] = -32767
+    _write_pcm_wav(tmp_path / "full.wav", samples)
+    assert audio.wav_rms_dbfs(tmp_path / "full.wav") == pytest.approx(0.0, abs=0.05)
+
+
+def test_wav_rms_dbfs_survives_an_odd_length_data_chunk(tmp_path):
+    """An odd byte count must fail OPEN, not raise.
+
+    `np.frombuffer(raw, dtype=np.int16)` raises ValueError when the buffer
+    isn't a multiple of 2 — which `wav_rms_dbfs`' `except (wave.Error, OSError,
+    EOFError)` does not catch. A WAV truncated mid-sample (a partial flush on
+    ENOSPC — the case `tap_fan_out._close` handles for #264) therefore broke
+    the documented "Returns 0.0 on read errors so callers fail OPEN" contract
+    that `batch_transcribe._precheck_original` relies on, turning its
+    WavTooQuiet/WavUnreadable 422 into a bare 500. `int16_peak_norm` already
+    guarded exactly this with `len(buf) & ~1`.
+    """
+    path = tmp_path / "odd.wav"
+    samples = np.full(SAMPLE_RATE, 16384, dtype=np.int16)
+    samples[1::2] = -16384
+    _write_pcm_wav(path, samples)
+    path.write_bytes(path.read_bytes()[:-1])  # lop one byte off the data chunk
+
+    db = audio.wav_rms_dbfs(path)
+    assert db == pytest.approx(-6.02, abs=0.05), "an odd tail must not change the measurement"
+
+    peaks = audio.compute_peaks(path, bins=4)  # must not raise ValueError either
+    assert len(peaks.peaks) == 4
 
 
 def test_wav_rms_dbfs_known_amplitude(tmp_path):

@@ -4,6 +4,9 @@ the stub in conftest)."""
 
 from __future__ import annotations
 
+import wave
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -47,10 +50,10 @@ def test_read_wav_int16_rejects_wrong_rate(tmp_path):
 
 @pytest.mark.real_silero
 def test_detect_speech_silero_without_silero_raises_runtime_error(monkeypatch):
-    """silero-vad + torch are core deps; the production path must surface
-    a clear "install is corrupt" error — not silently fall back, not
-    return None — when the import fails (which now signals a broken
-    install rather than an opt-out).
+    """onnxruntime is a core dep (it backs the vendored Silero model behind
+    `tapscribe.vad`); the production path must surface a clear "install is
+    corrupt" error — not silently fall back, not return None — when the
+    import fails, which signals a broken install rather than an opt-out.
 
     Opts out of the autouse silero stub via @real_silero so we exercise
     the actual import path."""
@@ -109,7 +112,9 @@ def test_strip_model_is_per_thread_and_never_the_gates(monkeypatch: pytest.Monke
 
     # And a gate built afterwards loads yet another instance — strip's
     # models and the gates' models are disjoint by construction.
-    pytest.importorskip("silero_vad")
+    # (The dependency gate for this lives at the TOP of the test: a mid-body
+    # `importorskip` reports SKIPPED after the assertions above have already
+    # run, so the half named in the test's title silently never executed.)
     sg.make_silero_vad(threshold=0.5, hangover_ms=400)
     gate_model = loaded[-1]
     assert gate_model is not a
@@ -177,3 +182,49 @@ def test_plan_strip_regions_silence_verdicts():
     assert silent.detector is None
     empty = plan_strip_regions(np.zeros(0, dtype=np.int16), min_silence_ms=400, pad_ms=50)
     assert empty.silent is True and empty.reason == "empty" and empty.in_seconds == 0.0
+
+
+@pytest.mark.real_silero
+def test_detect_speech_silero_separates_speech_from_silence_on_real_audio():
+    """The vendored VAD's HAPPY path, end to end — the one thing the autouse
+    stub hides from every other test in this file.
+
+    Without this, `tapscribe/vad/` had no EXECUTING behavioural coverage
+    anywhere: `tests/test_vad_silero_port.py` needs the upstream package (it
+    has its own CI lane), the gate tests only assert that a call returns, and
+    every other assertion here is really a statement about
+    `_stub_detect_speech_silero`. A change that returned no regions for real
+    audio would keep this file green while stripping every operator's
+    recording to nothing — and one that returned the whole clip would keep it
+    green while stripping nothing. Both directions are asserted below.
+
+    Uses a REAL speech fixture, not `_speech_silence_samples`: Silero detects
+    SPEECH, not energy, and returns nothing at all for its square-wave bursts,
+    while the stub (RMS-windowed) calls them speech. The two therefore do NOT
+    agree on this file's other fixtures — harmless for the planning tests,
+    which only need stable boundaries, but it makes the synthetic helper
+    useless as an oracle for the real model.
+
+    Asserts a coarse, model-version-robust property; exact sample boundaries
+    are the model's to choose and would make this brittle.
+    """
+    pytest.importorskip("onnxruntime")
+
+    wav = Path(__file__).resolve().parent / "fixtures" / "audio" / "marlene-nb.wav"
+    if not wav.is_file():
+        pytest.skip("real-audio fixture missing — see tests/fixtures/audio/README.md")
+    with wave.open(str(wav)) as w:
+        assert (w.getnchannels(), w.getframerate(), w.getsampwidth()) == (1, SAMPLE_RATE, 2)
+        samples = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+
+    regions = ss.detect_speech_silero(samples, min_silence_ms=400, pad_ms=50)
+
+    assert regions, "the real VAD found no speech in a clip that is mostly speech"
+    speech = sum(end - start for start, end in regions)
+    fraction = speech / len(samples)
+    assert 0.4 < fraction < 0.99, f"expected speech-with-gaps, got {fraction:.0%} of the clip in {regions}"
+    for start, end in regions:
+        assert 0 <= start < end <= len(samples)
+    assert regions == sorted(regions), "regions must be ordered"
+    pairs = zip(regions, regions[1:], strict=False)  # deliberately ragged: adjacent pairs
+    assert all(a[1] <= b[0] for a, b in pairs), "regions must not overlap"

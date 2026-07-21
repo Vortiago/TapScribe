@@ -173,8 +173,9 @@ fi
 
 # --- Runtime python deps ----------------------------------------------------
 # Probe-then-repair for the runtime deps the install picker does NOT cover:
-# silero-vad (the per-tap silence gate; a core dependency, so this only repairs
-# a venv created before it became one) and the `[summarize]` extra (the Local
+# onnxruntime (the backend for the vendored Silero model behind `tapscribe.vad`,
+# i.e. the per-tap silence gate; a core dependency, so this only repairs an
+# incomplete venv) and the `[summarize]` extra (the Local
 # summarizer's offline backend — mlx_lm on Apple Silicon, llama_cpp elsewhere,
 # the latter needing the maintainer's prebuilt wheel index because it builds
 # from source by default).

@@ -145,6 +145,52 @@ def test_write_picker_state_roundtrips_through_picker_load(tmp_path):
     assert sel.choices["voxtral"].enabled is False
 
 
+def test_write_picker_state_preserves_families_setup_does_not_manage(tmp_path):
+    """A /setup install must not silently clear a family /setup has no row for.
+
+    `_PICKER_FAMILIES` is a deliberate SUBSET of `install_picker.FAMILIES`
+    (moonshine is live-only, so /setup shows no row for it). A wholesale
+    rewrite of the state file dropped the `moonshine` key, the picker read the
+    absence back as `enabled=False`, and its next `Selection.save` re-persisted
+    that — the operator's terminal-picker choice was gone for good. It kept
+    WORKING until the venv was rebuilt (pip doesn't uninstall), so nothing
+    surfaced the loss.
+    """
+    path = tmp_path / ".tapscribe-install.json"
+
+    # The operator's terminal picker run: everything on, MLX where offered.
+    prior = install_picker.Selection.defaults_for(_MAC)
+    for fam in install_picker.FAMILIES:
+        prior.choices[fam.key].enabled = True
+    prior.save(path)
+
+    # Now they use /setup, which only knows about Whisper.
+    write_picker_state(to_picker_state({"whisper": "mlx"}), path=path)
+
+    reloaded = install_picker.Selection.load(path, _MAC)
+    # Every family the picker declares still has a key on disk...
+    on_disk = json.loads(path.read_text(encoding="utf-8"))["choices"]
+    assert set(on_disk) == {fam.key for fam in install_picker.FAMILIES}
+    # ...and the one /setup doesn't manage kept BOTH its flag and its backend.
+    assert reloaded.choices["moonshine"].enabled is True
+    assert reloaded.choices["moonshine"].backend == prior.choices["moonshine"].backend
+    # The families /setup DOES manage are still overwritten by the new pick.
+    assert reloaded.choices["whisper"].backend == "mlx"
+    assert reloaded.choices["parakeet"].enabled is False
+
+
+def test_write_picker_state_ignores_a_corrupt_prior_file(tmp_path):
+    """Merging must not make a hand-mangled state file fail the install —
+    /setup falls back to writing its own selection alone."""
+    path = tmp_path / ".tapscribe-install.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    write_picker_state(to_picker_state({"whisper": "cpu"}), path=path)
+
+    sel = install_picker.Selection.load(path, _CPU)
+    assert sel.choices["whisper"].enabled is True
+
+
 # ── validation ──────────────────────────────────────────────────────────────
 
 

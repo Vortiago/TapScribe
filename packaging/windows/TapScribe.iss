@@ -49,8 +49,12 @@ PrivilegesRequiredOverridesAllowed=dialog
 ; Windows means a locked TapScribe.exe and a half-applied upgrade.
 AppMutex=Local\TapScribe.Bundle.Launcher
 
-; Multi-GB payload (torch alone is most of it), so compress hard but don't
-; make the installer unopenable on a modest box.
+; The staged payload is embedded CPython + TapScribe's CORE deps only (fastapi,
+; uvicorn, numpy, websockets, cryptography, onnxruntime) — order of ~150 MB, not
+; the multi-GB it was when torch was core (#374 dropped it). Model backends are
+; pip-installed at /setup, after the installer. Compression stays high because
+; the embedded interpreter + onnxruntime still compress well and the download is
+; the operator's first impression; revisit if build time becomes the constraint.
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible

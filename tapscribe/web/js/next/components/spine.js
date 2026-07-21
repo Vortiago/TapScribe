@@ -21,25 +21,47 @@ const localLabels = new Map();
 const labelSaveTimers = new Map();
 
 /**
+ * The LIVE status cells for `sid`, resolved at call time. The card that holds
+ * them is rebuilt by the interaction hold's blur flush (and by any spine sig
+ * change) well within the 600 ms rename debounce, so a node captured at
+ * build time is DETACHED by the time the save settles — a `failed: …` written
+ * there is invisible, and the operator reads the rename as saved while the
+ * `localLabels` overlay keeps showing the typed value. Re-query instead, the
+ * same way people.js's row-status path does.
+ * @param {string} sid
+ */
+function statusCellsFor(sid) {
+  return document.querySelectorAll(`[data-status-sid="${CSS.escape(sid)}"]`);
+}
+
+/**
  * Debounced PUT /api/session-meta/{sid} {label}. The server merges partial meta,
  * so aliases/prompt/hotwords are preserved. Mirrors sessions.js's rename save.
- * @param {string} sid @param {HTMLElement} statusEl
+ * @param {string} sid
  */
-function persistLabel(sid, statusEl) {
+function persistLabel(sid) {
   clearTimeout(labelSaveTimers.get(sid));
   labelSaveTimers.set(sid, setTimeout(async () => {
     labelSaveTimers.delete(sid);
     const label = localLabels.get(sid);
     if (label == null) return;
-    statusEl.textContent = "saving…";
+    /** @param {string} text */
+    const setStatus = (text) => {
+      for (const el of statusCellsFor(sid)) {
+        if (el instanceof HTMLElement) el.textContent = text;
+      }
+    };
+    setStatus("saving…");
     try {
       await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { label });
-      if (statusEl.textContent === "saving…") {
-        statusEl.textContent = "saved";
-        setTimeout(() => { if (statusEl.textContent === "saved") statusEl.textContent = ""; }, 1400);
+      for (const el of statusCellsFor(sid)) {
+        if (el instanceof HTMLElement && el.textContent === "saving…") {
+          el.textContent = "saved";
+          setTimeout(() => { if (el.textContent === "saved") el.textContent = ""; }, 1400);
+        }
       }
     } catch (e) {
-      statusEl.textContent = `failed: ${errText(e)}`;
+      setStatus(`failed: ${errText(e)}`);
     }
   }, 600));
 }
@@ -220,12 +242,16 @@ function buildSessInfo(session, metaFor) {
   const card = tpl("tpl-next-sessinfo");
   const nameInput = /** @type {HTMLInputElement} */ (pick(card, "name"));
   const statusEl = pick(card, "status");
+  // Stamp the cell with the session it reports on, so persistLabel can find
+  // the LIVE one at timer-fire time rather than writing into this (by then
+  // possibly detached) node — see statusCellsFor.
+  statusEl.dataset.statusSid = sid;
 
   nameInput.value = localLabels.get(sid) ?? metaFor(session).label ?? "";
   nameInput.placeholder = fmtSessionLabel(sid) || "name this session";
   nameInput.addEventListener("input", () => {
     localLabels.set(sid, nameInput.value);
-    persistLabel(sid, statusEl);
+    persistLabel(sid);
   });
 
   const live = !!session.is_current;

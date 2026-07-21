@@ -150,15 +150,24 @@ class FasterWhisperTranscriber:
         )
 
         # Older faster-whisper versions reject some kwargs. Fall back to the
-        # required set if the quality-knob call raises TypeError.
+        # required set if the quality-knob CALL raises TypeError.
+        #
+        # Only the call is inside the try. `WhisperModel.transcribe` returns a
+        # LAZY generator, so the actual decode happens in `list(...)` below —
+        # and a TypeError raised DURING generation (an upstream bug, a None
+        # field on a segment, a numpy dtype mismatch on one CPU/CUDA build) is
+        # not a kwarg-compatibility signal. Catching it here would silently
+        # re-transcode the whole WAV without hotwords / repetition_penalty /
+        # hallucination_silence_threshold: double the wall-clock, a
+        # lower-quality transcript, and a `quality_settings` audit field
+        # recording the reduced set with no warning anywhere. Let it propagate.
         try:
             segments_iter, info = self._model.transcribe(str(path), **common, **optional)
-            segments = list(segments_iter)
             applied = {**common, **optional}
         except TypeError:
             segments_iter, info = self._model.transcribe(str(path), **common)
-            segments = list(segments_iter)
             applied = dict(common)
+        segments = list(segments_iter)
 
         typed_segments = [TranscriptionSegment.from_payload(s) for s in segments]
 

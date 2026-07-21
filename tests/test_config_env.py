@@ -97,3 +97,20 @@ def test_env_int_above_max_falls_back(monkeypatch, capsys):
     monkeypatch.setenv("TAPSCRIBE_TEST_X", "100000")
     assert env_int("TAPSCRIBE_TEST_X", 256, min_value=16, max_value=4096) == 256
     assert "> max" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "Infinity"])
+def test_env_float_rejects_non_finite_values(monkeypatch, capsys, raw):
+    """NaN/inf must fall back like any other bad value.
+
+    `float("nan")` parses, and then passes BOTH bounds — `nan < min` and
+    `nan > max` are each False — so it reached the consumer, where env_float's
+    documented "typo-tolerant rather than fatal" contract no longer holds:
+    `TAPSCRIBE_PARAKEET_CHUNK_S=nan` dies in `chunk_windows` on
+    `int(nan * 16000)` at transcribe time, and `TAPSCRIBE_SUMMARIZE_TIMEOUT_S=nan`
+    makes `subprocess.run(timeout=nan)` never fire, wedging a summarize job
+    forever — the exact outcome the timeout bound exists to prevent.
+    """
+    monkeypatch.setenv("TAPSCRIBE_TEST_X", raw)
+    assert env_float("TAPSCRIBE_TEST_X", 1.5, min_value=1.0, max_value=600.0) == 1.5
+    assert "ignoring non-finite" in capsys.readouterr().out

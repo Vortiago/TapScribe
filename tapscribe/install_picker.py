@@ -192,6 +192,11 @@ FAMILIES: tuple[FamilyDef, ...] = (
         label="Voxtral (Mistral)",
         description=("Mistral Voxtral 3B audio LLM. Batch + live. Pulls PyTorch + transformers."),
         size_hint="~2 GB",
+        # CPU/CUDA only, deliberately: the `voxtral-mlx` extra exists so the
+        # shipped `transcribers.mlx_voxtral` adapter is installable, but
+        # `mlx-voxtral` is a 0.0.x single-author port. Listing it here would
+        # make it `natural_backend_key`'s default on every Apple-Silicon
+        # install — a product decision, not a packaging one.
         backends=(BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("voxtral-cpu",)),),
     ),
     FamilyDef(
@@ -356,6 +361,11 @@ class Selection:
     @classmethod
     def _load_v1(cls, data: dict, caps: MachineCaps) -> Selection:
         raw = data.get("families", [])
+        if not isinstance(raw, (list, tuple, set)):
+            # Same hand-edit hazard as `_load_v2` below: `"families": 3`
+            # would blow up on iteration. Treat a wrong shape as "nothing
+            # was ticked" rather than aborting bring-up.
+            raw = []
         known_keys = {f.key for f in FAMILIES}
         old_enabled = {k for k in raw if k in known_keys}
         out = cls()
@@ -373,10 +383,25 @@ class Selection:
 
     @classmethod
     def _load_v2(cls, data: dict, caps: MachineCaps) -> Selection:
-        choices_raw = data.get("choices", {}) or {}
+        # Shape-coerce, don't assume. The picker's own non-interactive warning
+        # tells operators to "edit .tapscribe-install.json", so a syntactically
+        # valid but wrong-shaped file (`"choices": ["whisper"]`, or a bare
+        # string per family) is a realistic hand-edit. `Selection.load` only
+        # catches OSError/JSONDecodeError, so an AttributeError raised here
+        # escapes `main` — `start.sh` prints "install picker failed; aborting"
+        # and exits 1, and the Bundle's Launcher only logs a traceback. A
+        # wrong shape must degrade to the machine defaults exactly as
+        # unparsable JSON already does.
+        choices_raw = data.get("choices")
+        if not isinstance(choices_raw, dict):
+            return cls.defaults_for(caps)
         out = cls()
         for fam in FAMILIES:
-            raw = choices_raw.get(fam.key, {}) or {}
+            raw = choices_raw.get(fam.key)
+            if not isinstance(raw, dict):
+                # Per-family wrong shape ("whisper": "mlx") is treated like a
+                # missing key: off, with the machine-natural backend.
+                raw = {}
             enabled = bool(raw.get("enabled", False))
             backend = raw.get("backend", "")
             if backend not in (BACKEND_CPU, BACKEND_MLX, BACKEND_BOTH):

@@ -22,8 +22,20 @@ The headline flows:
 - Plus poll-safety sweeps (focus clobbering, idle DOM churn) and the
   structural perf guards at the bottom of the file.
 
-Skipped entirely when Playwright's Chromium isn't installed. Install
-with `pip install playwright && python -m playwright install chromium`.
+Skipped entirely when the `playwright` PACKAGE isn't importable — the
+module-level guard below, and the ONLY honest precondition for skipping.
+Install with `pip install playwright && python -m playwright install
+chromium`.
+
+A `chromium.launch()` FAILURE is deliberately NOT a skip. Every test used
+to swallow it into `pytest.skip`, so a launch failure after a successful
+`playwright install` step (the pip/on-disk revision drift documented in
+CLAUDE.md, a missing shared lib, a blocked sandbox) made all 65 tests skip
+and the only CI leg that runs any dashboard test exited 0 GREEN having
+exercised nothing. Letting the exception propagate matches
+`harness.launch_bridge_context` ("not swallowed as a skip, so a genuinely
+broken Chromium fails red") and `test_setup_ui.py`, which runs in the same
+CI job with no such swallows. Don't reintroduce the try/except.
 """
 
 from __future__ import annotations
@@ -51,6 +63,7 @@ from .harness import (
     streams_drained,
     synth_speech_like_wav,
     wait_until,
+    word_tokens,
 )
 
 if importlib.util.find_spec("playwright") is None:  # pragma: no cover
@@ -116,13 +129,6 @@ async def _shot(page, name: str) -> None:
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "audio"
 
-_WORD_RE = re.compile(r"[^\W\d_]+", flags=re.UNICODE)
-
-
-def _word_tokens(text: str, *, min_len: int = 4) -> set[str]:
-    """Lowercased alphabetic tokens of at least `min_len` chars."""
-    return {m.group(0).lower() for m in _WORD_RE.finditer(text) if len(m.group(0)) >= min_len}
-
 
 @pytest.fixture
 def fake_transcriber(monkeypatch: pytest.MonkeyPatch) -> FakeTranscriber:
@@ -165,11 +171,7 @@ async def test_dashboard_shows_active_taps_live_feed_and_merged_transcript(
     }
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(
                 viewport={"width": 1400, "height": 900},
@@ -450,11 +452,7 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
     )
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(
                 viewport={"width": 1400, "height": 900},
@@ -464,10 +462,10 @@ async def test_dashboard_renders_strip_silence_region_sub_rows(
 
             # Switch the WAV list to the stripped source — clip rows render
             # under their parent original only when that source is active.
-            stripped_toggle = page.locator('#viewRoot .srcsw__opt[data-src="stripped"]')
+            stripped_toggle = page.locator("#viewRoot").get_by_role("button", name="stripped", exact=True)
             await stripped_toggle.wait_for(state="visible", timeout=10000)
             await page.wait_for_function(
-                """() => !document.querySelector('#viewRoot .srcsw__opt[data-src="stripped"]')?.disabled""",
+                """() => !document.querySelector('#viewRoot button[data-src="stripped"]')?.disabled""",
                 timeout=10000,
             )
             await stripped_toggle.click()
@@ -592,11 +590,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
     overlay_js = OVERLAY_JS
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -623,7 +617,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
             # back keeps it too. (The pre-#N behaviour dropped it here, which
             # left the stripped view trying to fetch the original name from
             # stripped/ → 404.)
-            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.locator("#viewRoot").get_by_role("button", name="stripped", exact=True).click()
             # The clip sub-rows confirm the stripped VIEW is active…
             await page.wait_for_function(
                 """() => document.querySelectorAll('#viewRoot .wavlist .wavrow.is-clip').length === 3""",
@@ -639,7 +633,7 @@ async def test_recordings_committed_cut_overlay_persists_across_reload(
             assert await page.locator("#viewRoot .wave-msg").is_hidden(), (
                 "the stripped view must not surface a waveform error (the 404 bug)"
             )
-            await page.locator('#viewRoot .srcsw__opt[data-src="original"]').click()
+            await page.locator("#viewRoot").get_by_role("button", name="original", exact=True).click()
             await page.wait_for_function(overlay_js, timeout=5000)
 
             # Live path: a re-strip with a wider pad lands while the page is
@@ -717,11 +711,7 @@ async def test_recordings_stripped_toggle_hero_shows_original_overlay_not_404(
     overlay_js = OVERLAY_JS
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -742,7 +732,7 @@ async def test_recordings_stripped_toggle_hero_shows_original_overlay_not_404(
             await page.wait_for_function(overlay_js, timeout=10000)
 
             # Toggle to the stripped VIEW — clip rows appear below…
-            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.locator("#viewRoot").get_by_role("button", name="stripped", exact=True).click()
             await page.wait_for_function(
                 """() => document.querySelectorAll('#viewRoot .wavlist .wavrow.is-clip').length === 3""",
                 timeout=10000,
@@ -805,17 +795,13 @@ async def test_recordings_stripped_view_original_row_targets_original_source(
     assert len(region_wavs) == 3
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
             await page.goto(base + "/#recordings", wait_until="domcontentloaded")
 
-            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.locator("#viewRoot").get_by_role("button", name="stripped", exact=True).click()
             await page.wait_for_function(
                 """() => document.querySelectorAll('#viewRoot .wavlist .wavrow.is-clip').length === 3""",
                 timeout=10000,
@@ -877,11 +863,7 @@ async def test_recordings_strip_preview_dropped_when_source_toggled(
         assert resp.json()["files_written"] == 1
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -894,7 +876,7 @@ async def test_recordings_strip_preview_dropped_when_source_toggled(
             await page.wait_for_function(PREVIEW_JS, timeout=10000)
 
             # Toggle to the stripped view — the preview must be dropped…
-            await page.locator('#viewRoot .srcsw__opt[data-src="stripped"]').click()
+            await page.locator("#viewRoot").get_by_role("button", name="stripped", exact=True).click()
             await page.wait_for_function(
                 """() => !document.querySelector('#viewRoot .wave-canvas')?.dataset.previewSpans""",
                 timeout=5000,
@@ -935,11 +917,7 @@ async def test_recordings_strip_preview_tracks_knobs_and_matches_commit(
     preview_js = PREVIEW_JS
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -1044,11 +1022,7 @@ async def test_dashboard_delete_session_audio_keeps_transcript(
     )
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -1113,11 +1087,7 @@ async def test_sessions_view_absorb_delete_and_prune(
     empty_dir = seed(empty_id, wavs=0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -1205,7 +1175,7 @@ async def test_dashboard_with_real_audio_and_whisper(
             f"missing fixture {fixture_wav.name} or its reference — see tests/fixtures/audio/README.md",
         )
 
-    reference_words = _word_tokens(fixture_ref.read_text(encoding="utf-8"))
+    reference_words = word_tokens(fixture_ref.read_text(encoding="utf-8"))
     rec = running_recorder.recorder
     ws_base = running_recorder.ws_base_url
 
@@ -1227,11 +1197,7 @@ async def test_dashboard_with_real_audio_and_whisper(
         assert r.status_code == 200, r.text
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(
                 viewport={"width": 1400, "height": 900},
@@ -1363,11 +1329,7 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
         assert resp.status_code == 200, resp.text
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -1391,7 +1353,7 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
             # /api/wav/.../transcript), wait for the text, then collapse. The
             # row is an original, so its name block SELECTS the waveform —
             # toggle via a neutral part of the summary (the duration) instead.
-            await page.locator(f"{row_sel} .wavrow__dur").click()
+            await page.locator(f'{row_sel} [data-slot="dur"]').click()
             await page.wait_for_function(
                 f"""
                 () => {{
@@ -1403,7 +1365,7 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
                 """,
                 timeout=5000,
             )
-            await page.locator(f"{row_sel} .wavrow__dur").click()
+            await page.locator(f'{row_sel} [data-slot="dur"]').click()
             # A native <details> keeps its body in the DOM when collapsed (just
             # hidden) — assert the row is closed, not that the node is gone.
             await page.wait_for_function(
@@ -1419,7 +1381,7 @@ async def test_ui_only_click_updates_dom_without_a_fresh_poll(
 
             await page.route("**/api/state", _kill_state)
 
-            await page.locator(f"{row_sel} .wavrow__dur").click()
+            await page.locator(f'{row_sel} [data-slot="dur"]').click()
             # The 1500ms bound is below what any rescuing poll could deliver
             # (polls are dead) — so a pass means the expand re-rendered from the
             # cached body on click (the toggle is pure DOM; fillExpand reads the
@@ -1484,11 +1446,7 @@ async def test_lazy_transcript_fetch_is_cached_not_per_poll(
         assert resp.status_code == 200, resp.text
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -1628,11 +1586,7 @@ async def test_next_poll_render_does_not_clobber_open_controls(
         assert resp.status_code == 200, resp.text
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -1821,11 +1775,7 @@ async def test_transcript_languages_readout_names_the_specialist(
     assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -1904,11 +1854,7 @@ async def test_transcript_transcribe_saves_languages_first_wysiwyg(
     assert await wait_until(lambda: streams_drained(rec), timeout=5.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -1977,26 +1923,37 @@ async def test_dashboard_idle_polling_does_not_churn_dom(running_recorder: Runni
     """
     base = running_recorder.base_url
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             failures: list[str] = []
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
             client = await page.context.new_cdp_session(page)
             await client.send("Performance.enable")
+            # Count /api/state hits: per-tick churn can only be measured across
+            # ticks that actually FIRED. With zero polls in the window the
+            # deltas are trivially 0 and the guard passes vacuously.
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.goto(base, wait_until="domcontentloaded")
             # Settle: let first-paint + the first couple of polls land.
             await page.wait_for_timeout(2500)
             n0, l0 = await _perf_metrics(client)
-            # Idle through ~20 poll cycles — no input.
+            polls_0 = await page.evaluate("() => window.__statePolls || 0")
+            # Idle for ~10 s of wall clock. That is NOT "~20 poll cycles": this
+            # recorder is idle-and-unchanged, so ADR-0013's pacer backs off from
+            # FAST_MS=500 to SLOW_MS=2000 after IDLE_STREAK=4 and the window
+            # really contains ~5-8 ticks. The wall-clock window is deliberate
+            # (the CDP metrics are a rate measurement), but the poll floor below
+            # is what makes it non-vacuous.
             await page.wait_for_timeout(10000)
             n1, l1 = await _perf_metrics(client)
+            polls_1 = await page.evaluate("() => window.__statePolls || 0")
+            assert polls_1 >= polls_0 + 4, (
+                f"only {polls_1 - polls_0} /api/state tick(s) crossed the idle window "
+                f"({polls_0} → {polls_1}) — per-tick churn can't be measured across no ticks"
+            )
             dn, dl = n1 - n0, l1 - l0
-            print(f"[idle-churn] /: dNodes={dn:+.0f}  dListeners={dl:+.0f}")
+            print(f"[idle-churn] /: dNodes={dn:+.0f}  dListeners={dl:+.0f}  polls={polls_1 - polls_0}")
             if dl > _IDLE_MAX_LISTENER_GROWTH:
                 failures.append(f"/: +{dl:.0f} listeners over ~10s idle (per-tick listener churn)")
             if dn > _IDLE_MAX_NODE_GROWTH:
@@ -2053,11 +2010,7 @@ async def test_next_idle_304_ticks_skip_render_all(running_recorder: RunningReco
         synth_speech_like_wav(d / f"{sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -2122,11 +2075,7 @@ async def test_next_deferred_render_lands_after_focus_clears_across_304_ticks(
         synth_speech_like_wav(d / f"{sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -2304,11 +2253,7 @@ async def test_live_captions_scoped_to_focused_session(running_recorder: Running
     count_sel = '#viewRoot [data-slot="liveFeedCount"]'
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -2445,11 +2390,7 @@ async def test_dashboard_live_channel_start_stop(
     monkeypatch.setattr(rec.live, "stop", _fake_stop)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -2557,11 +2498,7 @@ async def test_next_job_ticks_do_not_rebuild_merged_transcript(running_recorder:
     _seed_merged_session(rec, sid, segments=120)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -2653,11 +2590,7 @@ async def test_next_merged_transcript_rows_are_content_visibility_gated(
     _seed_merged_session(rec, sid, segments=120)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -2767,11 +2700,7 @@ async def test_next_files_sig_flip_does_not_blank_wav_list(running_recorder: Run
     session_dir, names = _seed_multi_wav_session(rec, sid, n=3)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -2854,11 +2783,7 @@ async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_reco
     session_dir, names = _seed_multi_wav_session(rec, sid, n=3)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -2958,11 +2883,7 @@ async def test_next_apply_selection_skips_walk_on_quiet_tick(running_recorder: R
     _session_dir, names = _seed_multi_wav_session(rec, sid, n=2)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3040,11 +2961,7 @@ async def test_next_apply_picker_selection_skips_walk_on_quiet_tick(running_reco
     _session_dir, names = _seed_multi_wav_session(rec, sid, n=2)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3151,11 +3068,7 @@ async def test_next_retranscribe_does_not_blank_merged_pane(running_recorder: Ru
     _seed_merged_session(rec, sid, segments=120)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3225,11 +3138,7 @@ async def test_meeting_pipeline_job_renders_stage_labelled_bar(running_recorder:
     _seed_merged_session(rec, sid, segments=5)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3329,11 +3238,7 @@ async def test_next_caption_churn_appends_feed_lines_without_rebuilds(
         assert await wait_until(lambda: len(rr.fake_wlk.connections) >= 1, timeout=10.0)
 
         async with playwright_session() as pw:
-            try:
-                browser = await pw.chromium.launch(headless=True)
-            except Exception as e:  # pragma: no cover
-                pytest.skip(f"Chromium not available: {e}")
-                return  # unreachable; for static analysers
+            browser = await pw.chromium.launch(headless=True)
             try:
                 context = await browser.new_context(viewport={"width": 1400, "height": 900})
                 page = await context.new_page()
@@ -3419,11 +3324,7 @@ async def test_live_log_dialog_refresh_preserves_text_selection(
         rr.recorder.live.log.append(f"INFO:whisperlivekit:seed line {i}")
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3506,11 +3407,7 @@ async def test_recordings_strip_controls_stay_visible_with_many_wavs(
     assert await wait_until(lambda: streams_drained(rr.recorder), timeout=15.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3565,11 +3462,7 @@ async def test_recordings_list_virtualized_rows_survive_select_and_poll(
     assert await wait_until(lambda: streams_drained(rr.recorder), timeout=15.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3650,11 +3543,7 @@ async def test_recordings_waveform_renders_real_canvas_not_mock(
     assert await wait_until(lambda: streams_drained(rr.recorder), timeout=10.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3708,11 +3597,7 @@ async def test_recordings_name_selects_waveform_rest_of_row_toggles_expand(
     assert await wait_until(lambda: streams_drained(rr.recorder), timeout=12.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -3754,7 +3639,7 @@ async def test_recordings_name_selects_waveform_rest_of_row_toggles_expand(
             # (2) Clicking the DURATION of the still-unselected first row toggles
             # its <details> open and does NOT steal the selection.
             first_row = page.locator(f'#viewRoot .wavlist .wavrow[data-wav="{sel0}"]')
-            await first_row.locator(".wavrow__dur").click()
+            await first_row.locator('[data-slot="dur"]').click()
             await page.wait_for_function(
                 """(want) => {
                   const r = document.querySelector(`#viewRoot .wavlist .wavrow[data-wav="${want}"]`);
@@ -3798,37 +3683,42 @@ async def test_transcribe_page_source_toggle_picks_original_or_stripped(
     assert n_clips >= 1
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
             captured: dict = {}
+            # Set INSIDE the route handler, so the assertion below waits on the
+            # request actually arriving rather than on a fixed budget. A
+            # `wait_for_timeout` here fails with `got {}` on a loaded runner —
+            # a timing failure indistinguishable from a real regression.
+            transcribe_posted = asyncio.Event()
 
             async def _route(route):
                 captured.update(route.request.post_data_json or {})
+                transcribe_posted.set()
                 await route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
 
             await page.route("**/api/transcribe-session", _route)
             await page.goto(rr.base_url + "/#transcript", wait_until="domcontentloaded")
-            await page.wait_for_selector('[data-slot="srcSwHost"] .srcsw', timeout=6000)
+            await page.wait_for_selector('[data-slot="srcSwHost"] [data-src="original"]', timeout=6000)
 
             stripped_btn = page.locator('[data-slot="srcSwHost"] [data-src="stripped"]')
             assert not await stripped_btn.is_disabled(), "stripped must enable once a stripped/ folder exists"
 
             await stripped_btn.click()
-            await page.wait_for_timeout(700)
-            assert await page.locator('[data-slot="srcSwHost"] [data-src="stripped"].is-on').count() == 1
-            picker_rows = await page.locator('[data-slot="wavList"] .wavrow').count()
-            assert picker_rows >= n_clips, (
-                f"switching to stripped must list the {n_clips} clips in the picker, got {picker_rows}"
+            # Wait on the DOM conditions themselves, not a fixed budget: the
+            # toggle latching on, and the picker having re-listed the clips.
+            await page.wait_for_selector('[data-slot="srcSwHost"] [data-src="stripped"].is-on', timeout=6000)
+            await page.wait_for_function(
+                "n => document.querySelectorAll('[data-slot=wavList] .wavrow').length >= n",
+                arg=n_clips,
+                timeout=6000,
             )
+            assert await page.locator('[data-slot="srcSwHost"] [data-src="stripped"].is-on').count() == 1
 
             await page.locator('[data-slot="txRangeBtn"]').click()
-            await page.wait_for_timeout(700)
+            await asyncio.wait_for(transcribe_posted.wait(), timeout=6.0)
             assert captured.get("source") == "stripped", (
                 f"the session-range transcribe must send source=stripped, got {captured!r}"
             )
@@ -3892,19 +3782,19 @@ async def test_transcribe_cache_panel_unions_original_and_stripped_variants(
         )
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
             put_payloads: list[dict] = []
+            # Same reason as the source-toggle test: gate the payload assertion
+            # on the PUT actually landing, not on a 500 ms guess.
+            primary_put = asyncio.Event()
 
             async def _route(route):
                 if route.request.method == "PUT":
                     put_payloads.append(route.request.post_data_json or {})
+                    primary_put.set()
                 await route.fulfill(
                     status=200, content_type="application/json", body='{"ok": true, "primary": {}}'
                 )
@@ -3919,23 +3809,35 @@ async def test_transcribe_cache_panel_unions_original_and_stripped_variants(
                 "() => document.querySelectorAll('[data-slot=cacheBody] .cacherow').length >= 3",
                 timeout=6000,
             )
-            orig_tags = await page.locator('[data-slot="cacheBody"] .cacherow__src.is-original').count()
-            strip_tags = await page.locator('[data-slot="cacheBody"] .cacherow__src.is-stripped').count()
+            # Select on the slot the template binds through + the tag's own
+            # TEXT (transcript.js writes `v.source` into it), not the
+            # presentational `.cacherow__src` / `.is-*` classes.
+            src_tags = page.locator('[data-slot="cacheBody"] [data-slot="src"]')
+            orig_tags = await src_tags.filter(has_text=re.compile(r"^original$")).count()
+            strip_tags = await src_tags.filter(has_text=re.compile(r"^stripped$")).count()
             assert orig_tags >= 1 and strip_tags >= 2, f"orig={orig_tags} stripped={strip_tags}"
             rows_before = await page.locator('[data-slot="cacheBody"] .cacherow').count()
 
-            # Flipping to Stripped must NOT change the cache list.
+            # Flipping to Stripped must NOT change the cache list. Wait on the
+            # toggle latching AND on the WAV picker having re-rendered to the
+            # stripped source — that re-render is the tick that COULD have
+            # rebuilt the cache list, so a fixed sleep here risks asserting
+            # "unchanged" before anything had a chance to change it.
             await page.locator('[data-slot="srcSwHost"] [data-src="stripped"]').click()
-            await page.wait_for_timeout(700)
+            await page.wait_for_selector('[data-slot="srcSwHost"] [data-src="stripped"].is-on', timeout=6000)
+            await page.wait_for_function(
+                "() => document.querySelectorAll('[data-slot=wavList] .wavrow').length > 0",
+                timeout=6000,
+            )
             rows_after = await page.locator('[data-slot="cacheBody"] .cacherow').count()
             assert rows_after == rows_before, f"cache list changed on toggle: {rows_before} -> {rows_after}"
-            assert await page.locator('[data-slot="cacheBody"] .cacherow__src.is-stripped').count() >= 2
+            assert await src_tags.filter(has_text=re.compile(r"^stripped$")).count() >= 2
 
             # 'Set' on the non-primary stripped row sends source=stripped (404 fix).
             set_btn = page.locator('[data-slot="cacheBody"] [data-slot="primary"]', has_text="set")
             assert await set_btn.count() == 1, "expected one non-primary 'set' row (a stripped variant)"
             await set_btn.first.click()
-            await page.wait_for_timeout(500)
+            await asyncio.wait_for(primary_put.wait(), timeout=6.0)
             assert put_payloads and put_payloads[-1].get("source") == "stripped", (
                 f"set-primary on a stripped row must send source=stripped, got {put_payloads!r}"
             )
@@ -3992,11 +3894,7 @@ async def test_summary_stage_command_source_generates_and_renders(
     fail_cmd = _py_summarize_cmd("import sys; sys.stderr.write('kaboom'); sys.exit(1)")
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4005,8 +3903,8 @@ async def test_summary_stage_command_source_generates_and_renders(
             # Local is the default source now (#86); switch to Command to reveal
             # its CLI template field, then wait for Generate to enable once the
             # seeded transcript lands on a poll (proves the view sees the marker).
-            await page.wait_for_selector('[data-src="command"]', timeout=6000)
-            await page.click('[data-src="command"]')
+            await page.wait_for_selector('button[data-src="command"]', timeout=6000)
+            await page.click('button[data-src="command"]')
             await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
             await page.wait_for_function(
                 """() => {
@@ -4053,29 +3951,25 @@ async def test_summary_stage_has_no_mock_not_wired_tags(running_recorder: Runnin
     real; Local + Command + API (#85) are all wired — no source stays disabled."""
     rr = running_recorder
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
             await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
             # Anchor on the source selector (always visible) — the command field
             # is hidden under the Local default now.
-            await page.wait_for_selector('[data-src="local"]', timeout=6000)
+            await page.wait_for_selector('button[data-src="local"]', timeout=6000)
 
             assert await page.locator("#viewRoot .mocktag").count() == 0, (
                 "the mock·not-wired tag must be gone"
             )
             # Local + Command + API all enabled now (#85 wired the API source).
-            seg = page.locator("#viewRoot .segctl--wide .segctl__opt")
+            seg = page.locator("#viewRoot button[data-src]")
             assert await seg.count() == 3
-            disabled = await page.locator("#viewRoot .segctl--wide .segctl__opt[disabled]").count()
+            disabled = await page.locator("#viewRoot button[data-src][disabled]").count()
             assert disabled == 0, f"no source must be disabled, got {disabled} disabled options"
             # Local is the bundled-offline default selected source (#86).
-            assert await page.locator('#viewRoot .segctl--wide [data-src="local"].is-on').count() == 1
+            assert await page.locator('#viewRoot button[data-src="local"].is-on').count() == 1
         finally:
             await browser.close()
 
@@ -4088,11 +3982,7 @@ async def test_summary_stage_local_is_default_and_toggles_command_field(running_
     needed, so it runs offline on CI."""
     rr = running_recorder
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4105,11 +3995,11 @@ async def test_summary_stage_local_is_default_and_toggles_command_field(running_
             )
 
             # Switch to Command → the CLI template field appears.
-            await page.click('[data-src="command"]')
+            await page.click('button[data-src="command"]')
             await page.locator('[data-slot="sumCmd"]').wait_for(state="visible", timeout=4000)
 
             # Switch back to Local → it hides again, and Local is is-on.
-            await page.click('[data-src="local"]')
+            await page.click('button[data-src="local"]')
             await page.locator('[data-slot="sumCmd"]').wait_for(state="hidden", timeout=4000)
             assert await page.locator('[data-src="local"].is-on').count() == 1
         finally:
@@ -4123,11 +4013,7 @@ async def test_summary_api_source_reveals_pane_with_write_only_key(running_recor
     away hides the pane. All click-driven, so the poll never rebuilds it."""
     rr = running_recorder
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4148,7 +4034,7 @@ async def test_summary_api_source_reveals_pane_with_write_only_key(running_recor
             assert await key.input_value() == "", "the API key field must never be pre-filled"
 
             # Switch back to Local → the API pane hides again.
-            await page.click('[data-src="local"]')
+            await page.click('button[data-src="local"]')
             await page.locator('[data-slot="sumApiBase"]').wait_for(state="hidden", timeout=4000)
             assert await page.locator('[data-src="local"].is-on').count() == 1
         finally:
@@ -4163,18 +4049,14 @@ async def test_summary_command_preset_seeds_template_and_preview(running_recorde
     custom. All input-event-driven — the poll never rebuilds the pane."""
     rr = running_recorder
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
             await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
 
-            await page.wait_for_selector('[data-src="command"]', timeout=6000)
-            await page.click('[data-src="command"]')
+            await page.wait_for_selector('button[data-src="command"]', timeout=6000)
+            await page.click('button[data-src="command"]')
             await page.locator('[data-slot="sumCmdPreset"]').wait_for(state="visible", timeout=4000)
 
             # Presets populate from the catalog fetch: custom… + claude + opencode.
@@ -4252,18 +4134,14 @@ async def test_summary_output_renders_markdown_safely(running_recorder: RunningR
     md_cmd = _py_summarize_cmd(f"import sys; sys.stdin.read(); sys.stdout.write({md!r})")
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
             await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
 
-            await page.wait_for_selector('[data-src="command"]', timeout=6000)
-            await page.click('[data-src="command"]')
+            await page.wait_for_selector('button[data-src="command"]', timeout=6000)
+            await page.click('button[data-src="command"]')
             await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
             await page.wait_for_function(
                 """() => {
@@ -4362,11 +4240,7 @@ async def test_summary_stage_local_sends_picked_model_and_max_tokens(running_rec
     captured: dict[str, object] = {}
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4485,11 +4359,7 @@ async def test_summary_stage_local_seeds_max_tokens_and_surfaces_error(running_r
     }
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4575,19 +4445,15 @@ async def test_summary_persists_across_reload(running_recorder: RunningRecorder)
     echo_cmd = _py_summarize_cmd(f"import sys; sys.stdout.write({marker!r})")
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
             await page.goto(rr.base_url + "/#summary", wait_until="domcontentloaded")
 
             # Generate once via the Command source (the #82 flow).
-            await page.wait_for_selector('[data-src="command"]', timeout=6000)
-            await page.click('[data-src="command"]')
+            await page.wait_for_selector('button[data-src="command"]', timeout=6000)
+            await page.click('button[data-src="command"]')
             await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
             await page.wait_for_function(
                 """() => {
@@ -4682,11 +4548,7 @@ async def test_dashboard_renders_real_end_of_meeting_pipeline_summary(
         assert await wait_until(_pipeline_done, timeout=60.0, interval=0.25), "pipeline did not finish"
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4768,11 +4630,7 @@ async def test_dashboard_flags_stale_summary_after_retranscribe_and_clears_on_re
     stale_text = "predates the current transcript"
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4780,8 +4638,8 @@ async def test_dashboard_flags_stale_summary_after_retranscribe_and_clears_on_re
 
             # Generate once via the Command source — the summary records the v1
             # transcript stamp.
-            await page.wait_for_selector('[data-src="command"]', timeout=6000)
-            await page.click('[data-src="command"]')
+            await page.wait_for_selector('button[data-src="command"]', timeout=6000)
+            await page.click('button[data-src="command"]')
             await page.wait_for_selector('[data-slot="sumCmd"]', state="visible", timeout=6000)
             await page.wait_for_function(
                 """() => {
@@ -4837,11 +4695,7 @@ async def test_settings_summarizer_default_card_saves_and_prefills(running_recor
     rr = running_recorder
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4897,11 +4751,7 @@ async def test_settings_models_card_links_to_setup(running_recorder: RunningReco
     rr = running_recorder
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -4948,11 +4798,7 @@ async def test_settings_connect_a_bridge_card_reveals_and_hides_tap_token(runnin
     real_token = rr.recorder.tap.value
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -5026,11 +4872,7 @@ async def test_settings_get_a_bridge_card_links_to_release_assets(running_record
     rr = running_recorder
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -5039,6 +4881,13 @@ async def test_settings_get_a_bridge_card_links_to_release_assets(running_record
             page.on(
                 "request", lambda req: bridges_requests.append(req) if "/api/bridges" in req.url else None
             )
+            # Count /api/state hits so "cross a poll tick" below is a PROVEN
+            # crossing. Under ADR-0013's idle backoff (FAST_MS=500,
+            # IDLE_STREAK=4, SLOW_MS=2000) this recorder is idle-and-unchanged,
+            # so the pacer flips to 2 s and a fixed 1200 ms window can contain
+            # ZERO ticks — making the invariant below re-assert its own
+            # pre-existing value and pass for a card that DID re-fetch per poll.
+            await page.add_init_script(_COUNT_STATE_304S_JS)
 
             await page.goto(rr.base_url + "/#settings", wait_until="domcontentloaded")
 
@@ -5069,8 +4918,19 @@ async def test_settings_get_a_bridge_card_links_to_release_assets(running_record
                 f"GET /api/bridges must fire exactly once on render, saw {len(bridges_requests)}"
             )
 
-            # Cross a poll tick and confirm the card does no further fetching.
-            await page.wait_for_timeout(1200)
+            # Cross REAL poll ticks (wait on the counter advancing, not on a
+            # wall-clock budget) and confirm the card does no further fetching.
+            polls_before = await page.evaluate("() => window.__statePolls || 0")
+            await page.wait_for_function(
+                "(base) => (window.__statePolls || 0) >= base + 2",
+                arg=polls_before,
+                timeout=15000,
+            )
+            polls_after = await page.evaluate("() => window.__statePolls || 0")
+            assert polls_after >= polls_before + 2, (
+                f"no poll crossed the window ({polls_before} → {polls_after}) — the invariant below "
+                "would only re-assert its own pre-existing value"
+            )
             assert len(bridges_requests) == 1, "the Get-a-bridge card must not re-fetch on a poll tick"
         finally:
             await browser.close()
@@ -5125,11 +4985,7 @@ async def test_settings_stack_scrolls_without_clipping_cards(running_recorder: R
     rr = running_recorder
     height = 650
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": height})
             page = await context.new_page()
@@ -5222,11 +5078,7 @@ async def test_no_view_clips_content_without_scroll_path(
 
     views = ("capture", "recordings", "transcript", "summary", "taps", "sessions", "people", "settings")
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             # A short viewport so the stacked at-risk views overflow and would
             # clip if a scroll owner were missing.
@@ -5308,11 +5160,7 @@ async def test_summary_prefills_effective_config_and_saves_session_override(
     )
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -5323,7 +5171,7 @@ async def test_summary_prefills_effective_config_and_saves_session_override(
                 """() => document.querySelector('[data-slot="sumPrompt"]')?.value === 'GLOBAL PROMPT'""",
                 timeout=8000,
             )
-            on = await page.get_attribute('.segctl--wide [data-src="command"]', "class")
+            on = await page.get_attribute('button[data-src="command"]', "class")
             assert "is-on" in (on or ""), f"global default source must pre-select, got {on!r}"
             # The command value applies once the catalog fetch settles (the
             # shared controls sequence saved values on it) — wait, don't race it.
@@ -5333,7 +5181,7 @@ async def test_summary_prefills_effective_config_and_saves_session_override(
             )
 
             # (b) Save a per-session override: Local source + a session prompt.
-            await page.click('.segctl--wide [data-src="local"]')
+            await page.click('button[data-src="local"]')
             await page.fill('[data-slot="sumPrompt"]', "SESSION PROMPT")
             await page.click('[data-slot="sumSaveSession"]')
             await page.wait_for_function(
@@ -5347,7 +5195,7 @@ async def test_summary_prefills_effective_config_and_saves_session_override(
                 """() => document.querySelector('[data-slot="sumPrompt"]')?.value === 'SESSION PROMPT'""",
                 timeout=8000,
             )
-            on = await page.get_attribute('.segctl--wide [data-src="local"]', "class")
+            on = await page.get_attribute('button[data-src="local"]', "class")
             assert "is-on" in (on or ""), f"override source must pre-select after reload, got {on!r}"
             note = await page.locator('[data-slot="sumOverrideNote"]').text_content()
             assert "override" in (note or ""), f"override indicator must show, got {note!r}"
@@ -5397,11 +5245,7 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
     base = running_recorder.base_url
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -5528,11 +5372,7 @@ async def test_people_view_registry_auto_binds_renames_merges_detaches(
     )
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -5636,11 +5476,7 @@ async def test_capture_per_session_prompt_and_hotwords_overrides_save_independen
         )
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -5705,11 +5541,7 @@ async def test_capture_per_session_languages_override_saves_and_reseeds(
     synth_speech_like_wav(d / f"{sid}_Finn_finn_0000ffff.wav", seconds=0.4, freq_hz=215.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -5765,11 +5597,7 @@ async def test_settings_default_languages_picker_saves_global_default(
     base = running_recorder.base_url
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -5819,11 +5647,7 @@ async def test_sessions_view_inline_label_rename_persists(
     row = f'#viewRoot .sessrow[data-sid="{sid}"]'
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -5898,11 +5722,7 @@ async def test_capture_recording_toggle_and_clear_captions(
             return (await client.get("/api/state")).json().get("recording_enabled")
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -5998,11 +5818,7 @@ async def test_taps_toggle_and_recording_pill_wired_in_both_hosts(
     taps_rec_pill = '#viewRoot [data-slot="recPill"]'
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -6106,11 +5922,7 @@ async def test_recordings_delete_single_wav_removes_row_and_file(
     synth_speech_like_wav(d / drop, seconds=0.4, freq_hz=260.0)
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
@@ -6193,11 +6005,7 @@ async def test_transcript_single_wav_transcribe_marks_row_done(
     tx_one = '#viewRoot [data-slot="txOneBtn"]'
 
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1440, "height": 900})
             page = await context.new_page()
@@ -6248,11 +6056,7 @@ async def test_get_by_test_id_is_wired_to_data_slot() -> None:
     this red instead of silently breaking every `get_by_test_id` in the suite.
     """
     async with playwright_session() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as e:  # pragma: no cover
-            pytest.skip(f"Chromium not available: {e}")
-            return  # unreachable; for static analysers (CodeQL py/uninitialized-local-variable)
+        browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context()
             page = await context.new_page()

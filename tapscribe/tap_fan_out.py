@@ -71,7 +71,26 @@ class TapFanOut:
     ) -> None:
         self._recorder = recorder
         self._identity = identity
-        self._name = name
+        # Sanitise ONCE, here, where the bridge-supplied `?name=` enters the
+        # object — not deeper in at `roster.record_occurrence`. The name has
+        # eight consumers on this object (the ActiveStream row and thus every
+        # `/api/state` response, the UtteranceRecord, the resume comparison,
+        # the WAV filename), and capping it only at the roster left the raw
+        # value — control characters, unbounded length — reaching all of them.
+        # One call here means a new consumer inherits the guard instead of
+        # needing its own.
+        self._name = roster.sanitise_name(name)
+        # The WAV filename keeps deriving from the RAW name. `safe_name` (inside
+        # `build_recorder_wav_name`) already bounds and sanitises a filename
+        # component, so sanitising first buys nothing there — but it does
+        # collapse whitespace, which CHANGES the speaker slug ("Alice  Bob" ->
+        # `Alice_Bob`, not `Alice__Bob`). That slug is the roster's join key and
+        # `record_occurrence` only sets it once (first write wins), so a session
+        # that spans this change — a recorder restart mid-meeting, a re-tap into
+        # an existing session — would keep the old slug on the roster entry
+        # while new WAVs carried the new one, and `resolve_session_names` would
+        # render one human as two speakers.
+        self._filename_name = name or ""
         self._utterance_id = utterance_id
         # A fresh per-connection token. Two /tap WSes can briefly share one
         # utterance_id (a reconnect firing before the old WS is seen closed),
@@ -242,9 +261,20 @@ class TapFanOut:
         # WAV whose slug the recorded-slug backfill (name_resolution F1) turns
         # into a 'probe' Person. Skipping the ActiveStream keeps __probe__ out of
         # /api/state's live_identities, which attach_people would auto-bind AND
-        # persist as a blank Person on the ~0.5s poll even with zero audio. We
-        # still build + open the relay so the context manager and write_frame
-        # stay valid (a probe that sends frames is fed through an inert relay).
+        # persist as a blank Person on the ~0.5s poll even with zero audio.
+        #
+        # The LIVE leg is deliberately NOT skipped: the probe still builds and
+        # opens a TapRelay so the context manager and write_frame stay valid.
+        # That relay is only inert while the live channel is down. With WlK
+        # running, `TapSettings.get("__probe__")` returns the default
+        # `TapSetting(record=True, live=True)`, so `do_live=True` and
+        # `TapRelay.open()` attaches a REAL relay to the WlK child and builds a
+        # REAL Silero ONNX SpeechGate (~0.1-0.2 s of CPU, off-loop via
+        # to_thread), then tears both down through the tail-caption drain on
+        # close — on every Test-connection click, and the SpatialChat popup
+        # probes on EVERY popup open. Nothing DURABLE leaks (the relay writes
+        # no WAV and registers no ActiveStream), which is the guarantee this
+        # branch exists for, but the probe is not free.
         is_probe = self._identity == PROBE_IDENTITY
 
         if self._do_record and not is_probe:
@@ -278,7 +308,7 @@ class TapFanOut:
                 # applies its own `safe_name` and empty-string fallbacks so
                 # we don't repeat them here.
                 short_id = safe_name(self._identity)[:10]
-                fname = build_recorder_wav_name(started_at, self._name or "", short_id)
+                fname = build_recorder_wav_name(started_at, self._filename_name, short_id)
                 session_dir = self._session_dir
                 session_dir.mkdir(parents=True, exist_ok=True)
                 fpath = session_dir / fname

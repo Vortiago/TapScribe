@@ -14,6 +14,7 @@ import asyncio
 
 import numpy as np
 import pytest
+import websockets
 from conftest import wait_for  # type: ignore[import-not-found]  # noqa: E402
 
 from tapscribe.live import LiveConfig, WhisperLiveKitChannel
@@ -548,7 +549,7 @@ def test_operator_config_survives_a_moonshine_roundtrip():
     # The carried "backend" never yields a gate-less Moonshine tap:
     # TapRelay._attach coerces gate construction to "tapscribe" for
     # channels with no native VAD (see test_tap_relay.py::
-    # test_gate_kind_backend_coerced_to_tapscribe_when_channel_has_no_native_vad).
+    # test_gate_kind_backend_coercion_is_keyed_on_native_vad).
     assert moonshine.config.language == "no"
     assert moonshine.config.gate_kind == "backend"
     assert moonshine.config.gate_speech_threshold == 0.7
@@ -562,6 +563,33 @@ def test_operator_config_survives_a_moonshine_roundtrip():
     assert back.config.language == "no"
     assert back.config.gate_kind == "backend"
     assert back.config.gate_speech_threshold == 0.7
+
+
+def test_reported_gate_kind_echoed_back_is_a_no_op_not_a_config_rewrite():
+    """The dashboard sets its gate-kind selector from `info["gate_kind"]`
+    — which for a no-native-VAD engine is the EFFECTIVE (coerced)
+    "tapscribe", not the carried config's "backend" — and POSTs that value
+    back on every Apply. Judging it against the RAW `config.gate_kind`
+    made the echo look like a change: a hangover-slider tweak forced a
+    full engine restart, and `begin_transition` then wrote "tapscribe"
+    into config, so the operator's carried "backend" was permanently gone
+    on the swap back to WhisperLiveKit. Both `matches` and
+    `begin_transition` must judge the request through the same
+    `effective_gate_config` seam `info` reports from."""
+    config = LiveConfig(model="moonshine-tiny", language="en", host="localhost", port=0, gate_kind="backend")
+    ch = MoonshineLiveChannel(config=config, use_mlx=False, engine_factory=lambda *a, **k: _FakeEngine())
+    ch.start()
+    try:
+        assert ch.info["gate_kind"] == "tapscribe"  # what the dashboard shows and re-POSTs
+        # (a) no spurious restart for a knob-only Apply...
+        assert ch.matches(model=None, language=None, gate_kind="tapscribe", conf=None) is True
+        # (b) ...and even on a restart forced by something else, the echoed
+        # value must not overwrite the operator's carried choice.
+        ch.begin_transition(gate_kind="tapscribe", gate_hangover_ms=800)
+        assert ch.config.gate_kind == "backend"
+        assert ch.config.gate_hangover_ms == 800
+    finally:
+        ch.stop()
 
 
 def test_matches_ignores_language_because_start_does():
@@ -790,3 +818,125 @@ def test_engine_load_and_all_decodes_share_one_dedicated_model_thread():
 
     assert len(thread_names) >= 2, "expected the load plus at least one decode"
     assert all(n.startswith("tapscribe-moonshine-model") for n in thread_names), thread_names
+
+
+# ---------------------------------------------------------------------------
+# stop() — honest join reporting + the concurrent-start ownership guard
+# ---------------------------------------------------------------------------
+
+
+def _wedge_the_loop_thread(ch: MoonshineLiveChannel, *, seconds: float) -> None:
+    """Park the channel's server thread inside a plain blocking callback
+    for `seconds`, so a `stop()` racing it observes a thread that provably
+    CANNOT have exited yet. Stands in for the real wedge — the `/asr`
+    handler's close-time Moonshine decode outlasting stop()'s timeout —
+    without needing a slow model."""
+    import threading as _threading
+    import time as _time
+
+    entered = _threading.Event()
+
+    def _wedge() -> None:
+        entered.set()
+        _time.sleep(seconds)
+
+    assert ch._loop is not None
+    ch._loop.call_soon_threadsafe(_wedge)
+    assert entered.wait(timeout=5.0), "the wedge callback never reached the loop thread"
+
+
+def test_stop_reports_failure_when_the_server_thread_does_not_join():
+    """`stop()` used to return (True, "stopped") and stamp
+    state="stopped" without ever checking whether the join succeeded. The
+    real trigger: the `/asr` handler's `finally` runs a full Moonshine
+    decode of the buffered window, which on a slow CPU outlasts the
+    default 5s — `loop.stop()` only takes effect after the current
+    callback, so the join returns with the thread still alive and still
+    holding the `/asr` socket. With an operator-pinned port the
+    immediately-following start() then dies on `[Errno 98] Address
+    already in use` with no trace of the cause. stop() must report the
+    timeout instead of claiming a clean shutdown."""
+    ch = _channel()
+    assert ch.start()[0] is True
+    thread = ch._thread
+    assert thread is not None
+    _wedge_the_loop_thread(ch, seconds=1.0)
+
+    ok, msg = ch.stop(timeout=0.1)
+
+    assert ok is False
+    assert "did not shut down" in msg
+    assert ch.info["state"] == "error"
+    assert ch.info["last_error"] == msg
+    # The wedge does clear — the channel is genuinely torn down afterwards.
+    thread.join(timeout=10.0)
+    assert not thread.is_alive()
+
+
+def test_stop_does_not_stamp_stopped_over_a_concurrent_restart():
+    """Two `/api/live/start` requests close together (a double-clicked
+    Apply) each offload `apply_live` to a worker: worker 1's stop() nulls
+    the loop/server/thread then spends up to `timeout` joining, while
+    worker 2's start() binds a fresh `/asr` and sets state="running".
+    Without the ownership guard `WhisperLiveKitChannel.stop()` carries,
+    worker 1 then overwrites that with "stopped" and the dashboard
+    reports the channel DOWN while it is actually serving."""
+    import threading as _threading
+
+    ch = _channel()
+    assert ch.start()[0] is True
+    _wedge_the_loop_thread(ch, seconds=0.5)
+
+    results: list = []
+    stopper = _threading.Thread(target=lambda: results.append(ch.stop(timeout=5.0)), daemon=True)
+    stopper.start()
+    # stop() surrenders ownership (nulls loop/thread/server) under the lock
+    # BEFORE it joins — that's the window a concurrent start() lands in.
+    wait_for_sync(lambda: not ch.running(), timeout=5.0)
+
+    assert ch.start()[0] is True
+    assert ch.info["state"] == "running"
+
+    stopper.join(timeout=10.0)
+    assert not stopper.is_alive()
+    assert results == [(True, "stopped")]
+    try:
+        assert ch.info["state"] == "running"
+    finally:
+        ch.stop()
+
+
+async def test_close_time_decode_is_bounded_so_teardown_cannot_hang(monkeypatch):
+    """Tearing the server down closes every peer, so each `/asr` handler
+    lands in its `finally` best-effort final decode. Unbounded, ONE slow
+    full-window Moonshine decode (a slow CPU, a long utterance) holds the
+    handler — and therefore `wait_closed()`, the loop thread, and the
+    `/asr` socket — hostage for its whole duration, which is exactly what
+    makes `MoonshineLiveChannel.stop()`'s join time out. The tail is
+    best-effort by nature, so bound it and let teardown proceed."""
+    import threading as _threading
+
+    from tapscribe import moonshine_live as ml
+
+    monkeypatch.setattr(ml, "_FINAL_DECODE_TIMEOUT_S", 0.1)
+    decoding = _threading.Event()
+    release = _threading.Event()
+
+    def stalling_generate(arr: np.ndarray) -> str:
+        decoding.set()
+        release.wait(timeout=10)
+        return "far too late to matter"
+
+    server = MoonshineAsrServer(host="localhost", port=0, generate_fn=stalling_generate)
+    await server.start()
+    try:
+        async with websockets.connect(f"ws://localhost:{server.port}/asr") as ws:
+            # Under the refresh cadence, so the close-time decode in the
+            # handler's `finally` is the ONLY one this test can stall on.
+            await ws.send(_pcm_seconds(0.3))
+            await asyncio.sleep(0.1)
+            await asyncio.wait_for(server.stop(), timeout=3.0)
+        assert decoding.is_set(), "the close-time decode never ran — the bound went untested"
+    finally:
+        release.set()
+        await server.stop()

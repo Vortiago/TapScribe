@@ -51,7 +51,14 @@ jobs:
           # `cryptography` is needed so test_tls runs (the test itself uses
           # pytest.importorskip, so omitting it just silently skips
           # coverage of the --tls boot path).
-          pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx hypothesis ruff cryptography
+          #
+          # This list is hand-maintained rather than `pip install -e .`, so it
+          # can DRIFT from pyproject's core dependencies — `onnxruntime` was
+          # missing for a while after #374 made it core, which silently skipped
+          # every test that exercises the VAD (the gate tests and the
+          # strip-silence detector) on all nine legs. When you add a core
+          # dependency, add it here too.
+          pip install fastapi uvicorn python-multipart numpy websockets onnxruntime pytest pytest-asyncio pytest-cov httpx hypothesis ruff cryptography
 
       - name: Lint (ruff)
         run: ruff check tapscribe tools tests benchmarks bridges/local-test-bridge
@@ -231,10 +238,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install runtime + test harness + faster-whisper + silero-vad
+      - name: Install runtime + test harness + faster-whisper
         run: |
-          # CPU torch/torchaudio FIRST, so silero-vad's torch dependency is
-          # already satisfied and pip never downloads the default CUDA build
+          # CPU torch/torchaudio FIRST so pip never downloads the default CUDA build.
+          # NOTE: since #374 nothing in THIS job declares torch — silero-vad is
+          # gone and whisper-cpu resolves to faster-whisper (CTranslate2, no
+          # torch). These lines are kept only because dropping them is a
+          # separate change that wants its own green run; if you are here to
+          # trim CI time, verify no transitive consumer and delete them.
           # (~7 GB installed with its nvidia libs). The old order installed
           # CUDA torch and then --force-reinstall'd the CPU build on top,
           # leaving the runner with ~1 GB free disk — the real-audio test's
@@ -246,7 +257,7 @@ jobs:
           # httpx is the real-audio pipeline E2E's HTTP client (websockets is a
           # core dep already); the rest of that test reads the committed WAV
           # fixtures via stdlib wave, so no soundfile/scipy needed at runtime.
-          pip install --no-cache-dir -e ".[whisper-cpu,vad]" playwright pytest pytest-asyncio httpx
+          pip install --no-cache-dir -e ".[whisper-cpu]" playwright pytest pytest-asyncio httpx
 
       - name: Install Chromium + xvfb
         run: |
@@ -324,6 +335,25 @@ jobs:
             extras: moonshine-mlx
             probe: mlx_audio
             tests: tests/test_transcribers_mlx_moonshine.py
+          # tests/test_vad_silero_port.py is the ONLY thing pinning
+          # tapscribe/vad/ — a hand port of upstream silero-vad's OnnxWrapper /
+          # VADIterator / get_speech_timestamps onto numpy — against the real
+          # package (#374). It importorskips silero_vad + torch, which nothing
+          # else in CI installs, so before this lane it skipped on every leg and
+          # the port's "line for line" claim was unverified anywhere. Those are
+          # deliberately NOT project extras (dropping them is the whole point of
+          # #374), so this lane installs them as test-only pins.
+          - lane: silero-port
+            os: ubuntu-latest
+            extras: ""
+            # CPU torch first, from the PyTorch index, so silero-vad's own
+            # torch requirement doesn't pull the default CUDA build (~7 GB).
+            pre_install: >-
+              pip install --no-cache-dir torch torchaudio
+              --index-url https://download.pytorch.org/whl/cpu
+              && pip install --no-cache-dir silero-vad
+            probe: silero_vad
+            tests: tests/test_vad_silero_port.py
     steps:
       - uses: actions/checkout@v7
 
@@ -337,7 +367,21 @@ jobs:
       - name: Install the ${{ matrix.lane }} runtime deps
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[${{ matrix.extras }}]" pytest pytest-asyncio
+          # `extras: ""` means the lane's runtime is NOT a project extra (the
+          # silero-port lane pins upstream silero-vad, which #374 deliberately
+          # removed from the dependency set) — install the base package and let
+          # pre_install add it. `pip install -e ".[]"` is not valid.
+          if [ -n "${{ matrix.extras }}" ]; then
+            pip install -e ".[${{ matrix.extras }}]" pytest pytest-asyncio
+          else
+            pip install -e . pytest pytest-asyncio
+          fi
+          # `|| 'true'` is load-bearing: a lane WITHOUT pre_install renders the
+          # expression to an empty string, and an `if ...; then <empty>; fi` is a
+          # bash SYNTAX error — which kills the step before it runs anything, so
+          # every lane that omitted the key went red at once. No conditional, no
+          # empty body.
+          ${{ matrix.pre_install || 'true' }}
 
       # The smokes are importorskip-gated, so an unimportable runtime would
       # otherwise skip them and leave the lane GREEN — the exact silent-skip
@@ -443,9 +487,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install tapscribe runtime + faster-whisper + silero-vad
+      - name: Install tapscribe runtime + faster-whisper
         run: |
-          pip install -e ".[whisper-cpu,vad]"
+          pip install -e ".[whisper-cpu]"
           # silero-vad pulls torch/torchaudio from PyPI whose native libs can
           # mismatch; pin the CPU build last so torchaudio's extension loads
           # (same fix as the bridge-meeting-e2e job).

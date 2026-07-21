@@ -24,9 +24,11 @@ pip install -e ".[mlx]"            # Apple Silicon only
 pip install -e ".[voxtral]"        # Mistral Voxtral via HF transformers
 ```
 
-silero-vad + torch are core dependencies (used by both the live
-SpeechGate and the strip-silence detector) so they install
-automatically with `pip install -e .` — no extra needed.
+`onnxruntime` is a core dependency (it runs the vendored Silero VAD model
+behind `tapscribe.vad`, used by both the live SpeechGate and the
+strip-silence detector) so it installs automatically with
+`pip install -e .` — no extra needed. The `silero-vad` package and torch
+are NOT dependencies; #374 replaced them with the vendored ONNX model.
 
 ## Running tests + lint
 
@@ -48,7 +50,7 @@ xvfb-run -a python -m pytest \
   tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e -q
 ```
 
-The meeting flow also needs `pip install -e ".[whisper-cpu,vad]"` for the real
+The meeting flow also needs `pip install -e ".[whisper-cpu]"` for the real
 transcribe. CI runs both under xvfb in the `bridge E2E (extension + meeting)`
 job.
 

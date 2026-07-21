@@ -44,7 +44,7 @@
 // its live counts) repaints every tick; the prune button lives in the static
 // panel head, wired once.
 
-import { tpl, pick, mount, reconcileList, deferIfSelectionInside } from "../../templates.js";
+import { tpl, pick, mount, reconcileList, deferIfSelectionInside, markDeferredRender } from "../../templates.js";
 import { putJson, postJson, del, getJson, errText } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline, newestFirst, labelSigFor } from "../shell.js";
@@ -475,12 +475,14 @@ export function build(ctx) {
       targetsSig,
     ].join("§");
     if (row.dataset.rowSig === rowSig) return;
-    row.dataset.rowSig = rowSig;
 
     row.classList.toggle("is-focused", s.session === focusedId);
 
     const nameInput = /** @type {HTMLInputElement} */ (row.querySelector('[data-slot="rename"]'));
-    if (nameInput && document.activeElement !== nameInput) {
+    // ADR-0004: a write held back by focus must NOT advance the row's gate —
+    // the sig is recorded at the BOTTOM, only when every guarded write ran.
+    const renameHeld = !!nameInput && document.activeElement === nameInput;
+    if (nameInput && !renameHeld) {
       nameInput.value = labelFor(s);
       nameInput.placeholder = fmtSessionLabel(s.session) || s.session;
       const labelEl = row.querySelector('[data-slot="label"]');
@@ -500,7 +502,8 @@ export function build(ctx) {
     pick(row, "size").textContent = wavs ? fmtBytes(totalBytes(s)) : "—";
 
     const absorbSel = /** @type {HTMLSelectElement | null} */ (row.querySelector('[data-slot="absorb"]'));
-    if (absorbSel && document.activeElement !== absorbSel) {
+    const absorbHeld = !!absorbSel && document.activeElement === absorbSel;
+    if (absorbSel && !absorbHeld) {
       while (absorbSel.options.length > 1) absorbSel.remove(1);
       for (const t of archived) {
         if (t.session === s.session) continue; // a row can't absorb into itself
@@ -508,6 +511,21 @@ export function build(ctx) {
         absorbSel.add(new Option(`${lbl} (${t.wav_count || 0}w)`, t.session));
       }
     }
+
+    // Record the gate ONLY when every guarded write actually ran (ADR-0004's
+    // named trap). Advancing it above the guards stranded the skipped update
+    // FOREVER: on blur nothing re-runs, because the next tick recomputes the
+    // identical rowSig and early-returns — the row kept a stale label / stale
+    // absorb targets, and a later keystroke persisted the stale value back over
+    // an external rename. reconcileList's update path has no focus guard of its
+    // own, so nothing upstream compensates. Marking the deferred-render flag is
+    // what gets the retry a tick at all: main.js skips the whole renderAll pass
+    // on a 304, and the poll goes quiet exactly while the operator types.
+    if (renameHeld || absorbHeld) {
+      markDeferredRender();
+      return;
+    }
+    row.dataset.rowSig = rowSig;
   };
 
   /**

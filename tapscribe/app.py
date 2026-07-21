@@ -34,7 +34,7 @@ import time
 import wave
 from collections import deque
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from functools import partial
 from itertools import islice
@@ -219,6 +219,26 @@ async def _json_body(req: Request) -> dict[str, Any]:
     except Exception:
         return {}
     return body if isinstance(body, dict) else {}
+
+
+async def _require_json_object_body(req: Request, *, allow_empty: bool) -> dict[str, Any]:
+    """`_json_body`'s strict twin: a body that isn't a JSON object is a 400
+    rather than a silent `{}`. Routes where the empty dict would DESTROY state
+    (rotate the global session, wipe the summarizer default) use this.
+    `allow_empty=True` still accepts a missing body as `{}` — the legacy
+    no-body call."""
+    raw = await req.body()
+    if not raw:
+        if allow_empty:
+            return {}
+        raise HTTPException(400, "a JSON object body is required (send {} to clear the config)")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "malformed JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "JSON body must be an object")
+    return body
 
 
 def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | None:
@@ -702,16 +722,7 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     # present, must parse as a JSON object: a malformed {"detached": true}
     # falling through to the legacy branch would silently rotate the GLOBAL
     # session out from under every plain tap — reject so the bridge retries.
-    raw_body = await req.body()
-    if raw_body:
-        try:
-            body = json.loads(raw_body)
-        except ValueError:
-            return JSONResponse({"detail": "malformed JSON body"}, status_code=400)
-        if not isinstance(body, dict):
-            return JSONResponse({"detail": "JSON body must be an object"}, status_code=400)
-    else:
-        body = {}
+    body = await _require_json_object_body(req, allow_empty=True)
     if body.get("detached"):
         session_id, session_dir = recorder.create_detached_session()
         print(
@@ -1250,12 +1261,12 @@ async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_re
     identity = body.get("identity")
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity required")
-    record = body.get("record")
-    live = body.get("live")
+    # _parse_opt_bool, not bool(): see api_recording_toggle — "false" from a
+    # client that stringifies its flags must 400, never silently mean True.
     setting = recorder.tap_settings.set(
         identity,
-        record=bool(record) if record is not None else None,
-        live=bool(live) if live is not None else None,
+        record=_parse_opt_bool(body.get("record"), "record"),
+        live=_parse_opt_bool(body.get("live"), "live"),
     )
     return {
         "ok": True,
@@ -1274,7 +1285,11 @@ async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_re
     on the bridge's normal trackMuted close."""
     body = await _json_body(req)
     if "enabled" in body:
-        enabled = recorder.toggle_recording(enabled=bool(body["enabled"]))
+        # _parse_opt_bool, not bool(): a client that stringifies its flags would
+        # otherwise turn {"enabled": "false"} into ENABLED (bool("false") is
+        # True) and keep recording every participant after the operator asked
+        # to pause — a wrong-direction privacy bug, not just a bad request.
+        enabled = recorder.toggle_recording(enabled=_parse_opt_bool(body["enabled"], "enabled"))
     else:
         enabled = recorder.toggle_recording()
     print(f"[tapscribe] recording {'enabled' if enabled else 'paused'}", flush=True)
@@ -1455,7 +1470,12 @@ async def api_summarize_config_put(req: Request):
     one structured object. ALL validation (source/model allowlists, text
     caps, max_tokens int + bounds) lives in `write_summarizer_config`; its
     ValueError is the 400."""
-    body = await _json_body(req)
+    # Strict parse rather than `_json_body` (which turns ANY parse failure into
+    # {}): combined with the full-object semantics above, a dropped or
+    # truncated body would WIPE the operator's saved summarizer default —
+    # taking the end-of-meeting pipeline's summarize stage with it — and answer
+    # {"ok": true}. Only a deliberate `{}` clears.
+    body = await _require_json_object_body(req, allow_empty=False)
     try:
         stored = write_summarizer_config(body)
     except ValueError as e:
@@ -1466,16 +1486,35 @@ async def api_summarize_config_put(req: Request):
 
 
 @app.delete("/api/sessions/{session}/stripped")
-async def api_session_stripped_delete(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
-    """Remove a session's stripped/ folder so it can be regenerated."""
-    resolve_session_dir(session)
-    d = stripped_dir(session)
-    if not d.is_dir():
-        return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
-    try:
-        shutil.rmtree(d)
-    except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from None
+async def api_session_stripped_delete(session: str, recorder: Recorder = Depends(get_recorder)):
+    """Remove a session's stripped/ folder so it can be regenerated.
+
+    Deliberately NOT the full `_refuse_current_or_busy`: stripped/ is a
+    derived artefact, so clearing the CURRENT session's copy — including
+    while a tap is writing ORIGINALS into that session — is legitimate, and
+    only the busy-job guard applies. `batch_strip.strip_session` holds the
+    session's job slot for its whole run and is writing region clips into
+    exactly this directory, so an rmtree underneath it would delete half of
+    what it just wrote and leave the strip-meta describing clips that are
+    gone."""
+    # `jobs.run` IS the busy guard (SessionBusy → 409) and holds the slot for
+    # the walk, so a strip can't claim it mid-rmtree. The path work is inside
+    # the block for the same reason.
+    async with recorder.jobs.run(session, kind="delete", total=1):
+        resolve_session_dir(session)
+        d = stripped_dir(session)
+        if not d.is_dir():
+            return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
+        try:
+            await asyncio.to_thread(shutil.rmtree, d)
+        except FileNotFoundError:
+            # Someone cleared stripped/ between the is_dir() above and here
+            # (a second dashboard tab, an absorb). The caller's goal — no
+            # stripped/ folder — already holds, so report it as a no-op
+            # rather than 500ing on a check-then-act window.
+            return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
+        except OSError as e:
+            raise HTTPException(500, f"delete failed: {e}") from None
     print(f"[tapscribe] removed stripped/ from session: {session}", flush=True)
     return {"ok": True, "deleted": True}
 
@@ -1941,6 +1980,33 @@ async def api_set_primary(
     return {"ok": True, "primary": {"backend": backend, "model": model}}
 
 
+def _translate_registry_rejection(model: str, backend: str) -> None:
+    """Translate the catalog's rejection of `(model, backend)` into a 400 — or
+    return, leaving the caller's exception to propagate as the 500 it is.
+
+    The lazy resolve inside `load_transcriber` raises plain KeyError /
+    RuntimeError, neither a domain error; re-resolving here is what tells a bad
+    model id apart from an unrelated failure on a good one."""
+    try:
+        REGISTRY.resolve(model, preference=backend)  # type: ignore[arg-type]
+    except KeyError:
+        raise HTTPException(400, f"unknown model {model!r} — not in the catalog") from None
+    except RuntimeError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@contextmanager
+def _translating_registry_rejection(model: str, backend: str):
+    """Wrap a batch transcribe so a catalog rejection of `(model, backend)`
+    surfaces as a 400 (see `_translate_registry_rejection`) instead of a 500.
+    One copy, so a third transcribe route can't become a third paste."""
+    try:
+        yield
+    except (KeyError, RuntimeError):
+        _translate_registry_rejection(model, backend)
+        raise
+
+
 @app.post("/api/transcribe")
 async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await _json_body(req)
@@ -1964,7 +2030,8 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         # the session's candidate languages decide (ADR-0010/0011).
         source_lang=(body.get("source_lang") or "").strip() or None,
     )
-    payload = await transcribe_one(recorder, request)
+    with _translating_registry_rejection(request.model, request.backend):
+        payload = await transcribe_one(recorder, request)
     print(
         f"[tapscribe] transcribed {request.name} ({request.source}) with {request.model}",
         flush=True,
@@ -1991,7 +2058,8 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
         force=bool(body.get("force")),
         source_lang=(body.get("source_lang") or "").strip() or None,
     )
-    return JSONResponse(await transcribe_session(recorder, request))
+    with _translating_registry_rejection(request.model, request.backend):
+        return JSONResponse(await transcribe_session(recorder, request))
 
 
 # ---------------------------------------------------------------------------

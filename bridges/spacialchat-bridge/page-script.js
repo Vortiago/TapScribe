@@ -99,18 +99,26 @@
   function armGestureRetry() {
     if (gestureRetryArmed) return;
     gestureRetryArmed = true;
-    const handler = () => {
-      if (!audioCtx) return;
-      audioCtx.resume().then(() => {
-        console.log("[tapscribe-bridge/page] AudioContext resumed via user gesture");
-      }).catch((e) => {
-        console.warn("[tapscribe-bridge/page] resume() in gesture handler failed:", e);
-      });
-      // Clear regardless — statechange will rearm us if resume failed.
+    const disarm = () => {
       gestureRetryArmed = false;
       window.removeEventListener("pointerdown", handler, true);
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("touchstart", handler, true);
+    };
+    const handler = () => {
+      if (!audioCtx) return;
+      audioCtx.resume().then(() => {
+        console.log("[tapscribe-bridge/page] AudioContext resumed via user gesture");
+        // Disarm ONLY on success. Nothing else would re-arm us: `statechange`
+        // fires on an actual transition, and a rejected resume() is precisely
+        // the case where no transition happened — so disarming here left
+        // capture dead until the operator hid and re-showed the tab. Staying
+        // armed costs one listener and buys a retry on the NEXT gesture.
+        disarm();
+      }).catch((e) => {
+        console.warn("[tapscribe-bridge/page] resume() in gesture handler failed; " +
+          "staying armed for the next gesture:", e);
+      });
     };
     window.addEventListener("pointerdown", handler, true);
     window.addEventListener("keydown", handler, true);
@@ -158,8 +166,24 @@
   });
 
   async function tap(participant, mediaStreamTrack) {
-    if (taps.has(participant.identity)) return;
+    // Guard on the TRACK, not just the identity. LiveKit's device switch
+    // (operator picks a different mic) replaces `pub.track.mediaStreamTrack`
+    // IN PLACE and fires no trackUnsubscribed, so an identity-only guard made
+    // the 250 ms reconcile a no-op while our MediaStreamAudioSourceNode
+    // stayed wrapped around the STOPPED track: the worklet kept emitting
+    // frames of zeros, the byte counter climbed, the pill stayed green, and
+    // the WAV recorded silence for the rest of the meeting.
+    const existing = taps.get(participant.identity);
+    if (existing && existing.track === mediaStreamTrack) return;
     if (!mediaStreamTrack || mediaStreamTrack.readyState !== "live") return;
+    // A different, live track for an identity we're already tapping: tear the
+    // old graph down first so the Utterance closes (its WAV finalises) and the
+    // rebind below starts a fresh one.
+    if (existing) {
+      console.warn("[tapscribe-bridge/page] track replaced for " + participant.identity +
+        "; rebinding the tap");
+      untap(participant.identity);
+    }
 
     // Every step from here through `new AudioWorkletNode` can throw
     // synchronously (CSP blocks blob: worklet, addModule rejects,
@@ -190,7 +214,34 @@
     // reference here would silently pick that up and break the label
     // all the way through to the dashboard.
     const name = getDisplayName(participant);
-    const entry = { source, worklet, silentGain, name, resolvedName: name || "", nextNameRetryAtMs: 0 };
+    const entry = {
+      source,
+      worklet,
+      silentGain,
+      name,
+      resolvedName: name || "",
+      nextNameRetryAtMs: 0,
+      // The exact MediaStreamTrack this graph is wrapped around — the guard
+      // at the top of tap() compares against it to detect a device switch.
+      track: mediaStreamTrack,
+      onTrackEnded: null,
+    };
+
+    // A track that ENDS (mic unplugged, permission revoked, device switched
+    // away) keeps its MediaStreamAudioSourceNode alive and the worklet keeps
+    // producing zeros — indistinguishable, from the recorder's side, from a
+    // silent speaker. Nothing in LiveKit tells us, and reconcile can't
+    // recover on its own (tap() rejects a non-live track), so listen for it:
+    // untap closes the /tap WS (finalising the WAV instead of accruing
+    // zeros), and the capture-failed signal gives content.js something to
+    // surface rather than a green pill over silence.
+    entry.onTrackEnded = () => {
+      console.error("[tapscribe-bridge/page] media track ended for " + participant.identity +
+        "; capture is dead until a live track is republished");
+      postToContent({ kind: "capture-failed", identity: participant.identity, reason: "track-ended" });
+      untap(participant.identity);
+    };
+    mediaStreamTrack.addEventListener("ended", entry.onTrackEnded);
 
     worklet.port.onmessage = (ev) => {
       const buf = ev.data.buffer;
@@ -240,6 +291,15 @@
   function untap(identity) {
     const t = taps.get(identity);
     if (t) {
+      // Detach first, so tearing the graph down can't re-enter through the
+      // ended handler and so a later re-tap of the same track can't stack a
+      // second listener on it.
+      if (t.track && t.onTrackEnded) {
+        // Only an exotic / proxied track object could throw here, and the
+        // worst case is a stale listener on a track we're already dropping —
+        // never a reason to abort the rest of the teardown below.
+        try { t.track.removeEventListener("ended", t.onTrackEnded); } catch (e) {}
+      }
       try { t.source.disconnect(); } catch (e) {}
       try { t.worklet.disconnect(); } catch (e) {}
       try { t.silentGain.disconnect(); } catch (e) {}

@@ -204,6 +204,37 @@ def test_merge_drops_abs_hms_field_from_wire_shape(tmp_path: Path):
     assert isinstance(serialized["speaking_seconds"], dict)
 
 
+def test_merge_orders_identical_timestamp_segments_by_source_wav_name(tmp_path: Path):
+    """Two taps recording the same wall-clock second produce segments with an
+    identical `abs_start`. Their relative order in `segments[]` / `plain_text`
+    is what the operator diffs between two runs, and today it rests entirely on
+    `list.sort` being stable over the `sorted(glob)` selection order — nothing
+    pins it, so a heapq merge, a threaded sidecar read, or a `reverse=True`
+    would silently reshuffle the two lines. The contract: ties break on the
+    source WAV filename, and the result is reproducible."""
+    session_dir = tmp_path / "s"
+    session_dir.mkdir()
+    same_second = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
+    # Distinct speakers, IDENTICAL timestamp — the filenames differ only after
+    # the stamp, so filename order is the only available tiebreaker.
+    wav_a = seed_wav(session_dir / _wav_name(same_second, "alice", "u00000001"))
+    wav_z = seed_wav(session_dir / _wav_name(same_second, "zoe", "u00000002"))
+    for wav in (wav_a, wav_z):
+        cached_transcribe(
+            wav, _FixedTranscriber(), initial_prompt=None, hotwords=None, hallucination_rules=[]
+        )
+
+    first = merge_session(select_session_wavs(session_dir))
+    second = merge_session(select_session_wavs(session_dir))
+
+    starts = {s.abs_start for s in first.segments}
+    assert len(starts) == 1, "precondition: both segments must share one abs_start"
+    expected = sorted([wav_a.name, wav_z.name])
+    assert [s.source_wav for s in first.segments] == expected
+    assert [s.source_wav for s in second.segments] == expected
+    assert first.plain_text == second.plain_text
+
+
 class _StubB(_FixedTranscriber):
     """A second canned transcriber with a different (backend, model) and
     a distinctive prefix on its text so merge tests can tell whose

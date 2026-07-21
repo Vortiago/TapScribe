@@ -99,7 +99,17 @@ function buildCard(families) {
 
   // Built synchronously after warm + state, so it can be enabled from the start.
   const install = createButtonSync(
-    { label: "Install & launch", variant: "primary", onClick: () => void runInstall(install) },
+    {
+      label: "Install & launch",
+      variant: "primary",
+      // .catch, not `void`: runInstall handles its own failures, but a bug in
+      // its terminal path must not leave the wizard silently spinning with the
+      // button disabled — re-enable and say so.
+      onClick: () => runInstall(install).catch((e) => {
+        console.error("install failed", e);
+        install.setDisabled(false);
+      }),
+    },
     ac.signal,
   );
   const log = el("pre", "setup__log");
@@ -204,34 +214,48 @@ async function runInstall(install) {
   }
 
   // Parse the SSE stream: events are "data: <json>\n\n".
+  //
+  // The read loop is wrapped because the install is pip-installing into the
+  // very venv serving this page: a worker restart, an OOM-kill or a proxy
+  // timeout breaks the stream mid-flight and rejects reader.read(). Unwrapped,
+  // that escaped as an unhandled rejection — finish() never ran, the Install
+  // button stayed disabled, and the first-run wizard sat on the spinner FOREVER
+  // on the one surface that has no other UI to recover from (only a reload).
+  // Route it through the same terminal path as a rejected POST instead.
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   let ok = false;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n\n")) !== -1) {
-      const frame = buf.slice(0, nl);
-      buf = buf.slice(nl + 2);
-      if (!frame.startsWith("data:")) continue;
-      let ev;
-      try {
-        ev = JSON.parse(frame.slice(5).trim());
-      } catch {
-        continue;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, nl);
+        buf = buf.slice(nl + 2);
+        if (!frame.startsWith("data:")) continue;
+        let ev;
+        try {
+          ev = JSON.parse(frame.slice(5).trim());
+        } catch {
+          continue;
+        }
+        if (ev.phase === "log") append(ev.line);
+        else if (ev.phase === "start") append("· installing…");
+        else if (ev.phase === "done") {
+          ok = true;
+          append("· done");
+        } else if (ev.phase === "error") append(`· error: ${ev.message || "exit " + ev.returncode}`);
       }
-      if (ev.phase === "log") append(ev.line);
-      else if (ev.phase === "start") append("· installing…");
-      else if (ev.phase === "done") {
-        ok = true;
-        append("· done");
-      } else if (ev.phase === "error") append(`· error: ${ev.message || "exit " + ev.returncode}`);
     }
+  } catch (e) {
+    append(`install stream failed: ${e}`);
+    ok = false;
+  } finally {
+    finish(ok, install, result);
   }
-  finish(ok, install, result);
 }
 
 /**

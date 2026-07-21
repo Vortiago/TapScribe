@@ -75,15 +75,57 @@ Issues = "https://github.com/Vortiago/TapScribe/issues"
 # --- Whisper / NB-Whisper ---------------------------------------------------
 # Live channel needs whisperlivekit no matter which backend drives it;
 # faster-whisper covers the CPU/CUDA path; mlx-whisper covers Apple
-# Silicon. mlx-whisper's PyPI release line tops out at 0.4.x — a `>=0.5`
-# floor is unsatisfiable, so don't tighten this without checking PyPI.
+# Silicon.
+#
+# Upper bounds: `tapscribe.transcribers.faster_whisper` drives
+# `WhisperModel.transcribe(..., hotwords=, repetition_penalty=,
+# hallucination_silence_threshold=, word_timestamps=)` plus
+# `WhisperModel.detect_language()`, and
+# `tapscribe.transcribers.mlx_whisper` drives `mlx_whisper.transcribe(array,
+# ...)` — the array-accepting entry point that lets us skip ffmpeg
+# (`tapscribe/wav_predecode.py`). Neither set is covered by a stability
+# promise, and importorskip smoke tests
+# (tests/test_transcribers_{faster_whisper,mlx_whisper}.py) guard them, so
+# bump the caps deliberately after auditing the upstream changelog.
+#
+# NOTE — two DIFFERENT constraints on mlx-whisper, don't confuse them: the
+# `<0.5` cap below is the deliberate API window, while the `>=0.4` FLOOR is
+# as high as it can go — mlx-whisper's PyPI release line tops out at 0.4.x,
+# so a `>=0.5` floor is unsatisfiable (it broke `bash start.sh` on Apple
+# Silicon once already; `test_pyproject_whisper_mlx_admits_a_real_release`
+# pins it).
 whisper-live = ["whisperlivekit>=0.1"]
-whisper-cpu = ["faster-whisper>=1.0"]
-whisper-mlx = ["mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+whisper-cpu = ["faster-whisper>=1.0,<2"]
+whisper-mlx = ["mlx-whisper>=0.4,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 # --- Voxtral (Mistral) ------------------------------------------------------
-# CPU/CUDA only — no published MLX adapter on PyPI as of 2026-05.
-voxtral-cpu = ["transformers>=4.46", "torch>=2.1", "mistral-common>=1.5"]
+# Two independent adapters (same shape as the Parakeet/Moonshine pairs):
+# `transcribers.voxtral` on HF transformers for CPU/CUDA, and
+# `transcribers.mlx_voxtral` on mzbac's `mlx-voxtral` port for Apple Silicon.
+#
+# The transformers floor is deliberately the SAME window as `parakeet-cpu`
+# below, not a looser one: a Voxtral-only install that resolved an older
+# transformers would still advertise Parakeet as installed (the catalog's
+# Parakeet HF binding used to probe bare `transformers`) and then die on
+# `from transformers import AutoModelForTDT` at first transcribe. The probe
+# moved to `librosa` — declared only by `parakeet-cpu` — but two extras
+# resolving incompatible transformers windows in one venv is its own trap,
+# so keep them identical. `AutoProcessor.apply_transcription_request` and
+# `VoxtralForConditionalGeneration` are the imported symbols; an
+# importorskip smoke test guards them
+# (tests/test_transcribers_voxtral.py::test_apply_transcription_request_signature_matches_real_upstream)
+# — bump the cap deliberately after auditing the upstream changelog.
+voxtral-cpu = ["transformers>=5.12,<6", "torch>=2.1", "mistral-common>=1.5"]
+voxtral-mlx = [
+    # Upper bound: `tapscribe.transcribers.mlx_voxtral` imports
+    # `VoxtralForConditionalGeneration` / `VoxtralProcessor` and calls the
+    # upstream-TYPO'd `processor.apply_transcrition_request(...)` (sic). A
+    # release that fixes the typo breaks the adapter at request time, so the
+    # window is narrow and `test_mlx_voxtral_upstream_contract` asserts the
+    # spelling. Upstream is at 0.0.x — bump deliberately after auditing the
+    # changelog. See https://github.com/mzbac/mlx.voxtral
+    "mlx-voxtral>=0.0.4,<0.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 # --- Parakeet TDT 0.6B v3 ---------------------------------------------------
 # Two independent adapters; no shared piece between them.
@@ -193,6 +235,12 @@ summarize = [
 # kept alive by a duplicate floor in the umbrella).
 whisper = ["tapscribe[whisper-live,whisper-cpu,whisper-mlx]"]
 mlx = ["tapscribe[whisper-mlx]"]
+# Deliberately NOT split by platform the way `parakeet` / `moonshine` are.
+# `voxtral-mlx` exists so the shipped `transcribers.mlx_voxtral` adapter is
+# installable at all, but `mlx-voxtral` is a 0.0.x single-author port, so
+# making it the DEFAULT an Apple-Silicon operator gets for ticking "Voxtral"
+# is a product call, not a packaging one. Opt in explicitly with
+# `pip install "tapscribe[voxtral-mlx]"`.
 voxtral = ["tapscribe[voxtral-cpu]"]
 # On Apple Silicon, parakeet-mlx is the natural backend (GPU-accelerated
 # via Metal, ~2-3× faster than torch on CPU). Everywhere else the
@@ -273,8 +321,11 @@ filterwarnings = [
     "ignore:websockets\\.server\\.WebSocketServerProtocol is deprecated:DeprecationWarning",
     "ignore:websockets\\.legacy is deprecated:DeprecationWarning",
     "ignore:remove second argument of ws_handler:DeprecationWarning",
-    # (No torch.jit.load ignore needed: _get_silero_model loads silero via
-    #  ONNX, so the deprecated TorchScript loader is never called.)
+    # (No torch.jit.load ignore needed: since #374 nothing in the core install
+    #  imports torch at all — `speech_gate.load_silero_model` and
+    #  `strip_silence._local_silero_model` both go through `tapscribe.vad`,
+    #  which runs the vendored ONNX model on onnxruntime. The deprecated
+    #  TorchScript loader is unreachable, not merely unused.)
     # starlette 1.x started nagging that `httpx` should become `httpx2`
     # in TestClient. fastapi.testclient -> starlette.testclient imports
     # raise this at module load, which breaks every collection that uses

@@ -48,15 +48,24 @@ function makeRoom() {
   };
 }
 
-function makeAudioMocks({ failWorklet = false } = {}) {
+function makeAudioMocks({ failWorklet = false, ctxState = "running" } = {}) {
+  // Every MediaStream the script wraps, in order — lets a test prove WHICH
+  // MediaStreamTrack the source node is bound to (the device-switch case
+  // swaps the track in place, so identity is the only observable).
+  const wrappedStreams = [];
+  const resumeCalls = [];
+  let resumeRejects = false;
   // ensureAudioGraph awaits audioWorklet.addModule(...) before returning,
   // so the resolved Promise has to actually settle. The rest is just
   // duck-typing of the AudioContext / WorkletNode surface tap() touches.
   const ctx = {
-    state: "running",
+    state: ctxState,
     sampleRate: 48000,
     destination: { _isDestination: true },
-    createMediaStreamSource: () => ({ connect: (next) => next }),
+    createMediaStreamSource: (stream) => {
+      wrappedStreams.push(stream);
+      return { connect: (next) => next, disconnect: () => {} };
+    },
     createGain: () => ({
       gain: { value: 0 },
       connect: (next) => next,
@@ -64,7 +73,12 @@ function makeAudioMocks({ failWorklet = false } = {}) {
     }),
     audioWorklet: { addModule: () => Promise.resolve() },
     addEventListener: () => {},
-    resume: () => Promise.resolve(),
+    resume: () => {
+      resumeCalls.push(ctx.state);
+      return resumeRejects
+        ? Promise.reject(new Error("autoplay policy: resume() requires a user gesture"))
+        : Promise.resolve();
+    },
   };
   function AudioContext() { return ctx; }
   function AudioWorkletNode() {
@@ -83,8 +97,17 @@ function makeAudioMocks({ failWorklet = false } = {}) {
     AudioWorkletNode._last = node;
     return node;
   }
-  function MediaStream(_tracks) { return { _isStream: true }; }
-  return { AudioContext, AudioWorkletNode, MediaStream, ctx };
+  function MediaStream(tracks) { return { _isStream: true, tracks }; }
+  return {
+    AudioContext,
+    AudioWorkletNode,
+    MediaStream,
+    ctx,
+    // The MediaStreamTrack behind each source node the script created, in order.
+    wrappedTracks: () => wrappedStreams.map((s) => (s.tracks || [])[0]),
+    resumeCalls,
+    setResumeRejects: (v) => { resumeRejects = !!v; },
+  };
 }
 
 function loadPageScript({
@@ -93,8 +116,9 @@ function loadPageScript({
   localParticipant = null,
   failWorklet = false,
   startWithRoom = true,
+  ctxState = "running",
 } = {}) {
-  const audio = makeAudioMocks({ failWorklet });
+  const audio = makeAudioMocks({ failWorklet, ctxState });
   const room = makeRoom();
   // Seed any pre-existing participants the test wants attached at
   // load time (covers the "tap was running before the extension
@@ -131,7 +155,15 @@ function loadPageScript({
       if (!eventListeners[ev]) eventListeners[ev] = [];
       eventListeners[ev].push(fn);
     },
-    removeEventListener: () => {},
+    // A REAL removal, not a no-op: the gesture-retry tests assert on whether
+    // the one-shot listeners are still attached after a failed resume(), so a
+    // stubbed-out remove would make them pass vacuously.
+    removeEventListener: (ev, fn) => {
+      const list = eventListeners[ev];
+      if (!list) return;
+      const i = list.indexOf(fn);
+      if (i >= 0) list.splice(i, 1);
+    },
     postMessage: (data) => posted.push(data),
     // `name` is the global the regression accidentally read instead of
     // the participant's display name. Setting it to something distinctive
@@ -208,13 +240,38 @@ function makeAudioPublication({ track, isMuted = false, source = "microphone" })
   };
 }
 
+// A MediaStreamTrack stand-in with a real listener registry, so a test can
+// fire the browser's `ended` event (mic unplugged, device switched away,
+// permission revoked) — the signal the bridge had no listener for.
+function makeMst() {
+  const listeners = {};
+  return {
+    readyState: "live",
+    kind: "audio",
+    addEventListener(ev, fn) {
+      (listeners[ev] = listeners[ev] || []).push(fn);
+    },
+    removeEventListener(ev, fn) {
+      const list = listeners[ev];
+      if (!list) return;
+      const i = list.indexOf(fn);
+      if (i >= 0) list.splice(i, 1);
+    },
+    listenerCount: (ev) => (listeners[ev] || []).length,
+    fireEnded() {
+      this.readyState = "ended";
+      for (const fn of (listeners.ended || []).slice()) fn({ type: "ended" });
+    },
+  };
+}
+
 function makeTrack() {
   // LiveKit exposes the underlying MediaStreamTrack on Track via
   // `.mediaStreamTrack`; the bridge passes that into tap(). The Track
   // object itself only carries `kind` in the path we exercise.
   return {
     kind: "audio",
-    mediaStreamTrack: { readyState: "live", kind: "audio" },
+    mediaStreamTrack: makeMst(),
   };
 }
 
@@ -806,4 +863,144 @@ test("reconcile is idempotent — repeated ticks don't re-announce or churn mute
     findMessages(env.posted, "mute", "steady").length, 1,
     "the only mute message is the initial presence seed — no per-tick churn",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Mid-stream capture failure — a LIVE track that stops being live
+// ---------------------------------------------------------------------------
+
+test("a device switch rebinds the source node to the replacement MediaStreamTrack", async () => {
+  // LiveKit's device switch swaps `pub.track.mediaStreamTrack` IN PLACE and
+  // fires NO trackUnsubscribed. tap() early-returned on IDENTITY alone, so
+  // the 250 ms reconcile no-op'd and the MediaStreamAudioSourceNode stayed
+  // wrapped around the STOPPED track: the worklet kept emitting frames of
+  // zeros, the byte counter climbed, the pill stayed green, and the WAV
+  // recorded SILENCE for the rest of the meeting.
+  const track = makeTrack();
+  const mstA = track.mediaStreamTrack;
+  const participant = makeParticipant({ identity: "alice-id", name: "Alice" });
+  participant.audioTrackPublications.set("0", makeAudioPublication({ track }));
+
+  // Seeded into the room, so the load-time maybeAttach()'s reconcile does the
+  // first tap — the same code path the 250 ms tick below re-runs.
+  const env = loadPageScript({ remoteParticipants: [participant] });
+  await flush();
+  assert.equal(env.audio.wrappedTracks().length, 1, "reconcile tapped once at attach");
+  assert.equal(env.audio.wrappedTracks()[0], mstA, "first tap wraps the original track");
+
+  // The device switch: same Track wrapper, brand-new MediaStreamTrack, old
+  // one stopped. No LiveKit event fires — only the reconcile tick sees it.
+  const mstB = makeMst();
+  mstA.readyState = "ended";
+  track.mediaStreamTrack = mstB;
+
+  env.sandbox.__pollFn(); // the 250 ms reconcile
+  await flush();
+
+  const wrapped = env.audio.wrappedTracks();
+  assert.equal(wrapped.length, 2, "reconcile re-tapped instead of no-op'ing");
+  assert.equal(wrapped[1], mstB, "the source node is bound to the LIVE replacement track");
+
+  // The utterance boundary is honoured: the old /tap closes (so its WAV
+  // finalises) and a fresh one opens, rather than the same channel silently
+  // continuing over a dead source.
+  assert.equal(findMessages(env.posted, "tap-stop", "alice-id").length, 1);
+  assert.equal(findMessages(env.posted, "tap-start", "alice-id").length, 2);
+});
+
+test("a second reconcile over an UNCHANGED track does not churn the tap", async () => {
+  // The other half of the guard: reconcile runs 4x/s, so widening the
+  // early-return must not turn every tick into an untap/re-tap cycle.
+  const track = makeTrack();
+  const participant = makeParticipant({ identity: "alice-id", name: "Alice" });
+  participant.audioTrackPublications.set("0", makeAudioPublication({ track }));
+
+  const env = loadPageScript({ remoteParticipants: [participant] });
+  await flush();
+
+  env.sandbox.__pollFn();
+  env.sandbox.__pollFn();
+  await flush();
+
+  assert.equal(env.audio.wrappedTracks().length, 1, "still exactly one source node");
+  assert.equal(findMessages(env.posted, "tap-stop", "alice-id").length, 0, "no spurious tap-stop");
+  assert.equal(findMessages(env.posted, "tap-start", "alice-id").length, 1, "no spurious tap-start");
+});
+
+test("a track that ends mid-stream untaps and reports a capture failure", async () => {
+  // Mic unplugged / permission revoked: the track goes to readyState
+  // "ended" and LiveKit sends nothing. Without an `ended` listener the
+  // bridge held the stopped track forever, and reconcile could not recover
+  // (tap() rejects a non-live track), so the /tap WS stayed open recording
+  // zeros. The bridge must close the Utterance and say why.
+  const track = makeTrack();
+  const mst = track.mediaStreamTrack;
+  const participant = makeParticipant({ identity: "alice-id", name: "Alice" });
+  participant.audioTrackPublications.set("0", makeAudioPublication({ track }));
+
+  const env = loadPageScript({ remoteParticipants: [participant] });
+  await flush();
+  assert.equal(mst.listenerCount("ended"), 1, "the tap listens for the track ending");
+
+  mst.fireEnded();
+  await flush();
+
+  const failures = findMessages(env.posted, "capture-failed", "alice-id");
+  assert.equal(failures.length, 1, "the dead track is reported, not silent");
+  assert.equal(failures[0].reason, "track-ended");
+  assert.equal(
+    findMessages(env.posted, "tap-stop", "alice-id").length, 1,
+    "and the Utterance is closed so the WAV finalises instead of accruing zeros",
+  );
+
+  // The listener is removed with the tap, so a later re-tap can't stack a
+  // second one on the same track.
+  assert.equal(mst.listenerCount("ended"), 0, "untap detaches the ended listener");
+});
+
+// ---------------------------------------------------------------------------
+// AudioContext gesture retry
+// ---------------------------------------------------------------------------
+
+test("a gesture whose resume() REJECTS leaves the retry armed", async () => {
+  // The old comment claimed "statechange will rearm us if resume failed" —
+  // false: statechange only fires on an actual transition, so a rejected
+  // resume() disarmed the retry with nothing left to re-arm it and capture
+  // stayed dead until the operator hid and re-showed the tab.
+  const env = loadPageScript({ ctxState: "suspended" });
+  env.audio.setResumeRejects(true);
+
+  const track = makeTrack();
+  const participant = makeParticipant({ identity: "alice-id", name: "Alice" });
+  const pub = makeAudioPublication({ track });
+  participant.audioTrackPublications.set("0", pub);
+  env.room.fire("trackSubscribed", track, pub, participant);
+  await flush();
+
+  const armed = (env.eventListeners.pointerdown || []).slice();
+  assert.equal(armed.length, 1, "the eager resume() rejected → gesture retry armed");
+
+  // Gesture #1 — resume() still rejects.
+  armed[0]({ type: "pointerdown" });
+  await flush();
+  assert.equal(
+    (env.eventListeners.pointerdown || []).length, 1,
+    "a failed retry must stay armed — nothing else would ever re-arm it",
+  );
+
+  // Gesture #2 — the operator interacts again and this time resume() works.
+  env.audio.setResumeRejects(false);
+  const resumesBefore = env.audio.resumeCalls.length;
+  (env.eventListeners.pointerdown || [])[0]({ type: "pointerdown" });
+  await flush();
+  assert.equal(
+    env.audio.resumeCalls.length, resumesBefore + 1,
+    "the still-armed listener retried on the next gesture",
+  );
+  for (const ev of ["pointerdown", "keydown", "touchstart"]) {
+    assert.equal(
+      (env.eventListeners[ev] || []).length, 0,
+      "a SUCCESSFUL resume disarms every one-shot listener (" + ev + ")",
+    );
+  }
 });

@@ -44,6 +44,39 @@ ENV_OVERLAP_S = "TAPSCRIBE_PARAKEET_OVERLAP_S"
 _CHUNK_S_BOUNDS = (1.0, 600.0)
 _OVERLAP_S_BOUNDS = (0.0, 60.0)
 
+# Mirrors the ratio hard-coded in `chunking.chunk_windows`:
+# `chunk_windows` requires `overlap_s <= chunk_s * MAX_OVERLAP_FRACTION`
+# (otherwise a window advances by ≤0 and the walk can't terminate). The two
+# env knobs are validated INDEPENDENTLY by `env_float`, so a legal-but-
+# incompatible PAIR — `TAPSCRIBE_PARAKEET_CHUNK_S=10` against the default
+# 15 s overlap — passes both bound checks and only blows up inside
+# `chunk_windows`, i.e. per-WAV at request time. See `_clamp_overlap`.
+MAX_OVERLAP_FRACTION = 0.9
+
+
+def clamp_overlap(chunk_s: float, overlap_s: float) -> float:
+    """Return an overlap `chunk_windows` will accept for `chunk_s`, printing
+    the same one-line "ignoring …; using …" notice `env_float` emits when it
+    has to reduce one.
+
+    The joint constraint can't live in `env_float`, which validates each knob
+    on its own. Degrading LOUDLY at construction keeps the documented
+    "typo-tolerant rather than fatal" contract: without this, an operator
+    setting `TAPSCRIBE_PARAKEET_CHUNK_S=10` and leaving the 15 s overlap
+    default constructs a perfectly healthy adapter whose EVERY transcribe
+    dies with a `ValueError` that isn't a domain error — a bare 500 per
+    request, and an aborted job in `transcribe_session`.
+    """
+    limit = chunk_s * MAX_OVERLAP_FRACTION
+    if overlap_s <= limit:
+        return overlap_s
+    print(
+        f"[tapscribe] ignoring overlap {overlap_s} > {MAX_OVERLAP_FRACTION:g} × chunk "
+        f"{chunk_s} ({ENV_OVERLAP_S} / {ENV_CHUNK_S}); using {limit}",
+        flush=True,
+    )
+    return limit
+
 
 def stitch_windows(
     per_window: list[tuple[Window, Sequence[TranscriptionSegment]]],
@@ -53,21 +86,31 @@ def stitch_windows(
     """Merge per-window segment sequences into one session-spanning tuple.
 
     For every adjacent pair (N, N+1) the overlap region is
-    `[window_{N+1}.start, window_{N+1}.start + overlap_s)`. Segments in
-    window N+1 whose `start` falls before the overlap midpoint were already
-    transcribed (and likely identical) in window N — they get dropped.
-    Above the midpoint, window N+1's segment wins. This is the same
-    crude-but-effective dedup parakeet-mlx uses upstream; a segment
-    straddling the seam is double-counted. Word-level dedup would need
-    confidence scores we don't currently have.
+    `[window_{N+1}.start, window_{N+1}.start + overlap_s)`, and its MIDPOINT is
+    the seam: below it the audio belongs to window N, at or above it to window
+    N+1. Each window therefore contributes only the segments whose `start`
+    falls in `[its leading seam, its trailing seam)` — half-open, so a segment
+    landing exactly on a seam is claimed by exactly one window.
+
+    Bounding BOTH sides matters. Contributing window N whole and then filtering
+    only window N+1's head emits `[seam, window_N_end)` twice — 7.5 s of
+    duplicated speech per boundary at the defaults — and with three or more
+    windows every interior window needs the upper bound, not just the first.
+
+    This is the same crude-but-effective dedup parakeet-mlx uses upstream; a
+    segment straddling the seam is attributed to one side by its start, so a
+    word or two can still be clipped or repeated at the join. Word-level dedup
+    would need confidence scores we don't currently have.
     """
     if not per_window:
         return ()
-    out: list[TranscriptionSegment] = list(per_window[0][1])
-    for prev_idx in range(len(per_window) - 1):
-        nxt_window, nxt_segs = per_window[prev_idx + 1]
-        midpoint_s = nxt_window.start_s + overlap_s / 2.0
-        out.extend(seg for seg in nxt_segs if seg.start >= midpoint_s)
+    out: list[TranscriptionSegment] = []
+    for idx, (window, segs) in enumerate(per_window):
+        lower = window.start_s + overlap_s / 2.0 if idx > 0 else float("-inf")
+        upper = (
+            per_window[idx + 1][0].start_s + overlap_s / 2.0 if idx + 1 < len(per_window) else float("inf")
+        )
+        out.extend(seg for seg in segs if lower <= seg.start < upper)
     return tuple(out)
 
 
@@ -105,7 +148,7 @@ class ChunkedTranscriber:
                 max_value=_CHUNK_S_BOUNDS[1],
             )
         )
-        self.overlap_duration_s = (
+        overlap = (
             overlap_duration_s
             if overlap_duration_s is not None
             else env_float(
@@ -115,6 +158,10 @@ class ChunkedTranscriber:
                 max_value=_OVERLAP_S_BOUNDS[1],
             )
         )
+        # Joint constraint — see `clamp_overlap`. Resolved HERE, at
+        # construction, so a bad pair degrades once and loudly instead of
+        # raising inside `chunk_windows` on every WAV.
+        self.overlap_duration_s = clamp_overlap(self.chunk_duration_s, overlap)
 
     def _transcribe_window(self, chunk_pcm: Any, window: Window) -> Sequence[TranscriptionSegment]:
         """Run the model on one window's PCM and return its segments with

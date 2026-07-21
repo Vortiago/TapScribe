@@ -44,13 +44,23 @@
   swap, so it can't use `renderRegion`) apply the exported
   `selectionInside(host)` for the same rule — defer WITHOUT updating
   the gate's signature, so the held-back render lands on the first
-  tick after the selection clears (these BESPOKE gates are the only
-  remaining users of the `markDeferredRender`/`consumeDeferredRender`
-  tick-retry; canon `renderRegion` deferrals no longer need it). `live-channel.js` and `config-card.js`
-  render through it too, keeping only a 2-line `[data-cfg-key]` button
-  guard renderRegion deliberately doesn't cover (a focused save button
-  mid-putJson isn't an "interactive control" but must still hold the
-  swap). The People editor (`people.js`) renders its list through
+  tick after the selection clears. Users of the
+  `markDeferredRender`/`consumeDeferredRender` tick-retry are those BESPOKE
+  gates (the live log dialog, `active-taps.js`, `live-feed.js`, the
+  `recordings.js` view-level gate, and `sessions.js`' per-row gate), PLUS one
+  case inside `renderRegion` itself: a swap held because a text selection
+  STRADDLES the host has no focusout/selectionchange listener of its own to
+  flush it, so it needs the next tick. Every other `renderRegion` deferral
+  flushes itself. `live-channel.js` and `config-card.js`
+  render through it too, with NO bespoke guard of their own: a focused
+  `[data-cfg-key]` save button mid-`putJson` counts as an interactive
+  control in the seam's `_isInteractive`, so `renderRegion` holds the
+  swap (and `interactionHeld()` reports it to the poll pacer) without
+  the call site remembering anything. Both used to carry a hand-rolled
+  2-line guard that returned WITHOUT marking the deferred render, which
+  stranded the held-back render forever once the poll started 304ing —
+  the argument for folding it into the seam rather than repeating it.
+  The People editor (`people.js`) renders its list through
   `renderRegion` too — `renderRegion` is the pattern for every region,
   new or existing. The
   `test_next_poll_render_does_not_clobber_open_controls` sweep in
@@ -105,11 +115,15 @@
   UNRELATED row, flips the sig via a sibling, and asserts the stamped node
   survives the poll (`test_next_files_sig_flip_does_not_blank_wav_list`,
   `…_does_not_blank_transcript_picker`). The same shape recurs for any
-  region fed by a lazy body keyed on a content stamp — the merged
-  transcript pane (`transcript.js`, `sessionTranscript`) and the summary
-  output pane (`summary.js`, `sessionSummary`) blank to "loading…" on a
-  re-transcribe / external re-summarize for the same reason; give them a
-  last-good hold if that blink matters. The DUAL requirement: a multi-item
+  region fed by a lazy body keyed on a content stamp, and the other two
+  instances are now fixed the same way — the merged transcript pane
+  (`transcript.js`'s `lastGoodMerged`, keyed on `sessionTranscript`'s
+  `transcribed_at`) and the summary output pane (`summary.js`'s
+  `lastGoodSummary`, keyed on `sessionSummary`'s `summarized_at`) each
+  hold their last-good body instead of blanking to "loading…" on a
+  re-transcribe / external re-summarize. A new lazy pane keyed on a
+  content stamp inherits the requirement: copy one of the three holds.
+  The DUAL requirement: a multi-item
   region gated on such an aggregate must render through `reconcileList`
   (keyed, in-place) — a full `replaceChildren` rebuild on the sig, even
   WITHOUT a placeholder blank, still churns O(content) nodes + row
@@ -127,16 +141,26 @@ that matrix and is wired into `tapscribe/preflight.py` instead, which
 `start.sh` / `start.ps1` and the Bundle's Launcher all run after the
 picker:
 
-- **`silero-vad`** (pulls `torch>=2.1`) — the per-tap TapScribe gate
-  (`gate_kind="tapscribe"`, the default) imports `silero_vad` lazily
-  on the first `/tap` WS. Missing → the tap logs `gate construction
-  failed … falling back to passthrough` and the gate the operator
-  picked is silently a no-op. It is a **core** dependency (no `[vad]`
-  extra — `pyproject.toml`'s `dependencies` list installs it
-  unconditionally with a plain `pip install -e .`), so
-  `preflight.plan_steps`' `find_spec` probe + reinstall step exists only
-  to repair a venv created before silero-vad became core; on a fresh
+- **`onnxruntime`** — the per-tap TapScribe gate (`gate_kind="tapscribe"`,
+  the default) runs the VAD through `tapscribe.vad`, a numpy+onnxruntime
+  port of Silero over a vendored model (`tapscribe/vad/silero_vad.onnx`,
+  see its `PROVENANCE.md`), imported lazily on the first `/tap` WS.
+  Missing → the tap logs `gate construction failed … falling back to
+  passthrough` and the gate the operator picked is silently a no-op. It
+  is a **core** dependency (no `[vad]` extra — `pyproject.toml`'s
+  `dependencies` list installs it unconditionally with a plain
+  `pip install -e .`), so `preflight.plan_steps`' `find_spec` probe +
+  reinstall step is a repair for an incomplete venv; on a healthy
   install it's already satisfied and no step is planned.
+
+  **The `silero-vad` package and `torch` are NOT dependencies** — #374
+  dropped both (773 MB) in favour of the vendored model. A probe here
+  must name a module some core dependency actually provides, or the
+  reinstall it plans can never satisfy it and preflight re-runs pip on
+  every launch; `test_every_core_repair_probes_a_module_a_core_dependency_provides`
+  pins that. The differential test that keeps the port honest,
+  `tests/test_vad_silero_port.py`, needs the real upstream package and
+  therefore has its own `upstream-contract` CI lane.
 
 **`ffmpeg` is NOT required, period.** Every array-accepting backend
 (`mlx_whisper`, `mlx_parakeet`, and the `transformers` Parakeet path in
@@ -225,10 +249,13 @@ short — see `test_transformers_parakeet_upstream_contract` in
 
 PRs are scanned by CodeQL with the `security-and-quality` suite (see
 `.github/codeql/codeql-config.yml`). The repo filters out
-`py/path-injection` because `tapscribe/sessions.py` already enforces a
-strict two-layer path sanitiser — every OTHER rule still runs and
-PR authors are expected to land clean. Common trip-wires Claude has
-introduced and how to avoid them:
+`py/path-injection` because `tapscribe/session_paths.py` already enforces
+a strict two-layer path sanitiser (`_safe_part`, then
+`_assert_contained`/`_assert_under`) — every OTHER rule still runs and
+PR authors are expected to land clean. That exclusion is what makes
+`session_paths.py` a review-gate module: a new user-input-to-path helper
+there is covered by neither CodeQL nor any other automated check.
+Common trip-wires Claude has introduced and how to avoid them:
 
 - **Path components from parsed filenames must round-trip through
   `safe_name`** before being interpolated into a new path. Even when
@@ -236,7 +263,7 @@ introduced and how to avoid them:
   walk, CodeQL's intraprocedural analysis can't see the upstream
   containment check. Both the live `/tap` recorder
   (`tapscribe/tap_fan_out.py`) and the strip-silence splitter
-  (`tapscribe/sessions.py`) build filenames via
+  (`tapscribe/batch_strip.py`) build filenames via
   `tapscribe.text.build_recorder_wav_name`, which applies `safe_name`
   internally — use that helper, don't build the filename yourself.
 - **Subprocess argv must always be the list form** (`subprocess.Popen([
@@ -333,7 +360,7 @@ green, check what's in the CI matrix you're not running:
   them on a plain box. Run them under a virtual display:
   `xvfb-run -a python -m pytest tests/e2e/test_bridge_extension_e2e.py
   tests/e2e/test_bridge_meeting_e2e.py -m browser_e2e -q` (the meeting flow
-  also needs `pip install -e ".[whisper-cpu,vad]"`). CI runs both in the
+  also needs `pip install -e ".[whisper-cpu]"`). CI runs both in the
   `bridge E2E (extension + meeting)` job.
 
 ### e2e selectors: `data-slot` is the test-id; open Playwright via `playwright_session()`

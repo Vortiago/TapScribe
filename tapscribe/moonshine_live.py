@@ -17,11 +17,12 @@ speaks the exact same JSON shape WhisperLiveKit does, backed by a
 
 Consequence: this module touches nothing downstream — selecting Moonshine
 is purely a matter of which concrete `LiveChannel` the Recorder holds
-(see `tapscribe.app`'s `/api/live/start` route, which swaps
-`recorder.live` based on the requested model's catalog family). What was
-generalized downstream to make that swap seamless is documented in
-CONTEXT.md's `MoonshineLiveChannel` section — the single home for that
-architectural note.
+(see `tapscribe.live_control.plan_live`, which resolves the family swap
+from the requested model's catalog family; `/api/live/start` is a
+parse-and-delegate shim over it — ADR-0014). What was generalized
+downstream to make that swap seamless is documented in CONTEXT.md's
+`MoonshineLiveChannel` section — the single home for that architectural
+note.
 
 No subprocess here — unlike `WhisperLiveKitChannel`, there is no child
 process to spawn/supervise/pump logs from. Instead `start()` spins up a
@@ -29,9 +30,9 @@ dedicated background thread running its own asyncio event loop hosting the
 `/asr` websockets server; `stop()` tears both down. This mirrors the
 "own thread, own loop" shape rather than reusing the FastAPI app's loop,
 because `LiveChannel.start()`/`stop()` are synchronous Protocol methods —
-`/api/live/start` already calls them via `asyncio.to_thread`, exactly like
-`WhisperLiveKitChannel.start()`'s blocking subprocess spawn + NB-Whisper
-weight download.
+callers already run `apply_live` (which drives them) via
+`asyncio.to_thread`, exactly like `WhisperLiveKitChannel.start()`'s
+blocking subprocess spawn.
 """
 
 from __future__ import annotations
@@ -100,11 +101,12 @@ def default_engine_factory(model_id: str, *, use_mlx: bool) -> MoonshineEngine:
 
 def is_moonshine_model(model_id: str) -> bool:
     """True iff `model_id` belongs to the `moonshine` catalog family —
-    the routing predicate `tapscribe.app`'s live-start route uses to
-    decide whether `recorder.live` should be a `MoonshineLiveChannel`
-    rather than a `WhisperLiveKitChannel`. Never raises — an unknown or
-    unregistered id is simply "not moonshine", so an ordinary Whisper
-    model name is the (fast, common) False case."""
+    the routing predicate `resolve_live_channel_for_model` (and through it
+    `live_control.plan_live`) uses to decide whether `recorder.live`
+    should be a `MoonshineLiveChannel` rather than a
+    `WhisperLiveKitChannel`. Never raises — an unknown or unregistered id
+    is simply "not moonshine", so an ordinary Whisper model name is the
+    (fast, common) False case."""
     try:
         from .transcribers.catalog import REGISTRY
 
@@ -119,8 +121,9 @@ def resolve_live_channel_for_model(
 ) -> LiveChannel | None:
     """Decide whether the Recorder's live channel needs to become a
     DIFFERENT concrete implementation to run `target_model` — the routing
-    `tapscribe.app`'s `/api/live/start` route applies before its usual
-    `matches()` / `begin_transition()` / `start()` sequence.
+    `live_control.plan_live` resolves (unconditionally, #259) before the
+    usual `matches()` / `begin_transition()` / `start()` sequence
+    `apply_live` then executes (ADR-0014).
 
     Returns a freshly constructed channel (carrying `current.config`
     forward) if `target_model`'s family doesn't match what `current`
@@ -172,6 +175,13 @@ def _bound_socket(host: str, port: int) -> socket.socket:
 # MoonshineAsrServer — the /asr WebSocket server, one MoonshineWindow per
 # connection.
 # ---------------------------------------------------------------------------
+
+
+# How long the `/asr` handler's close-time (abrupt-disconnect) decode may
+# run before it is abandoned. Bounds teardown: `MoonshineLiveChannel.stop()`
+# waits on the loop thread, which waits on this handler. Comfortably above a
+# real full-window decode on a slow CPU, well under stop()'s 5 s default.
+_FINAL_DECODE_TIMEOUT_S = 3.0
 
 
 class MoonshineAsrServer:
@@ -287,7 +297,20 @@ class MoonshineAsrServer:
                 # above is the reliable delivery; this fallback only
                 # exists for peers that vanished mid-utterance, where the
                 # audio tail is best-effort by nature.
-                lines = await self._decode(window.close)
+                #
+                # Bounded: this is the decode a channel teardown waits on
+                # (`server.stop()` closes the peers, every handler lands
+                # here), and on a slow CPU one full-window Moonshine decode
+                # outlasts `MoonshineLiveChannel.stop()`'s join timeout —
+                # holding the loop thread, and with it the `/asr` socket,
+                # hostage. Timing out abandons only this best-effort tail;
+                # the decode thread finishes on its own.
+                try:
+                    lines = await asyncio.wait_for(
+                        self._decode(window.close), timeout=_FINAL_DECODE_TIMEOUT_S
+                    )
+                except TimeoutError:
+                    lines = None
                 if lines:
                     with contextlib.suppress(Exception):
                         await self._send_snapshot(ws, lines, buffer_text="")
@@ -567,6 +590,11 @@ class MoonshineLiveChannel(LiveChannelBase):
             return True, "started"
 
     def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]:
+        """Tear the `/asr` server and its loop thread down. Idempotent.
+
+        Returns `(False, …)` when the loop thread is STILL alive after the
+        join — see the `is_alive` check below for why claiming a clean
+        shutdown there is worse than reporting the timeout."""
         with self._lock:
             loop = self._loop
             server = self._server
@@ -574,10 +602,9 @@ class MoonshineLiveChannel(LiveChannelBase):
             self._loop = None
             self._server = None
             self._thread = None
-
-        if loop is None:
-            self.info["state"] = "stopped"
-            return True, "not running"
+            if loop is None:
+                self.info["state"] = "stopped"
+                return True, "not running"
 
         if server is not None:
             fut = asyncio.run_coroutine_threadsafe(server.stop(), loop)
@@ -586,9 +613,34 @@ class MoonshineLiveChannel(LiveChannelBase):
         loop.call_soon_threadsafe(loop.stop)
         if thread is not None:
             thread.join(timeout=timeout)
+            if thread.is_alive():
+                # The join did NOT complete: `loop.stop()` only takes effect
+                # after the current callback returns, so one slow in-flight
+                # decode (the `/asr` handler's close-time `window.close()`)
+                # can outlast `timeout` — leaving the thread alive and still
+                # holding the `/asr` socket. Reporting "stopped" here made
+                # the immediately-following start() fail with a bare
+                # `[Errno 98] Address already in use` on an operator-pinned
+                # port, with no trace of the cause.
+                msg = f"live channel did not shut down within {timeout}s"
+                with self._lock:
+                    if self._thread is None:
+                        self.info["state"] = "error"
+                        self.info["last_error"] = msg
+                return False, msg
 
-        self.info["state"] = "stopped"
-        self.info["pid"] = ""
+        with self._lock:
+            if self._thread is not None or self._loop is not None:
+                # A concurrent start() (a double-clicked Apply: both requests
+                # offload `apply_live` to a worker) installed a replacement
+                # while we were joining — `info` now describes THAT server
+                # ("running", its fresh port). Stamping "stopped" would tell
+                # the dashboard the channel is down while it is serving. Same
+                # ownership guard `WhisperLiveKitChannel.stop()` carries; our
+                # own loop IS down, so still report success.
+                return True, "stopped"
+            self.info["state"] = "stopped"
+            self.info["pid"] = ""
         return True, "stopped"
 
 

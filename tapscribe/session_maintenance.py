@@ -21,11 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from . import config
+from .roster import read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
+    FILENAME_ROSTER_JSON,
     FILENAME_STRIP_META_JSON,
     FILENAME_SUMMARY_JSON,
     FILENAME_TRANSCRIPT_JSON,
+    FILENAME_TRANSCRIPT_TXT,
     resolve_session_dir,
     resolve_wav,
     stripped_dir,
@@ -228,8 +231,9 @@ def _prune_strip_meta_clip(session: str, clip_name: str) -> None:
 
 def absorb_session(target: str, source: str) -> dict[str, Any]:
     """Move every WAV (and its `<name>.json` sidecar) from `source` into
-    `target`, fold the source's `session-meta.json` aliases into the
-    target's (target wins on key conflict), invalidate the target's merged
+    `target`, fold the source's `session-meta.json` aliases and
+    `session-roster.json` occurrences into the target's (target wins on key
+    conflict; roster WAV lists union), invalidate the target's merged
     transcript, and delete the source folder.
 
     Per-WAV filenames embed timestamps + UUIDs so cross-session collisions
@@ -320,14 +324,49 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
             },
         )
 
+    # Carry the source's Roster into the target's. The Roster is the ONLY
+    # record of a recorded occurrence's FULL bridge Identity — the filename
+    # keeps just `safe_name(identity)[:10]` (`parse_wav_speaker_ident`) — and
+    # it is written by the tap path alone (`roster.record_occurrence`), never
+    # rebuilt by transcribe/merge. The rmtree below would destroy it while the
+    # WAVs it describes live on in the target, losing ADR-0009's cross-session
+    # join key irreversibly (`attach_people` / `known_names_for_session` would
+    # silently fall back to the truncated slug).
+    #
+    # Same conflict rule as the alias merge above — the target's entry wins on
+    # the scalar fields — EXCEPT `wavs`, which unions: the source's WAVs now
+    # physically live in the target, so the target's entry has to account for
+    # them.
+    src_roster = read_roster(source_dir)
+    roster_merged = 0
+    if src_roster:
+        tgt_roster = read_roster(target_dir)
+        for identity, src_entry in src_roster.items():
+            tgt_entry = tgt_roster.get(identity)
+            if tgt_entry is None:
+                tgt_roster[identity] = src_entry
+            else:
+                tgt_entry["wavs"] = tgt_entry["wavs"] + [
+                    w for w in src_entry["wavs"] if w not in tgt_entry["wavs"]
+                ]
+            roster_merged += 1
+        atomic_write_text(
+            target_dir / FILENAME_ROSTER_JSON,
+            json.dumps(tgt_roster, indent=2, ensure_ascii=False),
+        )
+
     # The target's merged transcript predates the just-moved WAVs, so it's
-    # now stale. Drop it so the operator's next "transcribe whole session"
-    # rebuilds against the fuller WAV set.
+    # now stale. Drop it — both the JSON and the plain-text rendering
+    # `batch_transcribe` writes beside it — so the operator's next "transcribe
+    # whole session" rebuilds against the fuller WAV set. (Dropping only the
+    # JSON reported `transcript_invalidated: True` while a stale .txt missing
+    # every absorbed WAV survived on disk.)
     tgt_transcript = target_dir / FILENAME_TRANSCRIPT_JSON
     transcript_invalidated = tgt_transcript.exists()
     if transcript_invalidated:
         try:
             tgt_transcript.unlink()
+            (target_dir / FILENAME_TRANSCRIPT_TXT).unlink(missing_ok=True)
         except OSError:
             # Best-effort: the WAVs are already moved at this point, so
             # raising would leave the merge half-applied (WAVs in target,
@@ -358,6 +397,7 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         "wavs_moved": len(moved_wavs),
         "stripped_moved": len(moved_stripped),
         "aliases_added": aliases_added,
+        "roster_merged": roster_merged,
         "transcript_invalidated": transcript_invalidated,
         "summary_invalidated": summary_invalidated,
     }

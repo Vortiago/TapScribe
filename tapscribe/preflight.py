@@ -1,8 +1,8 @@
 """Bring-up steps that must run between "a venv exists" and "the recorder boots".
 
 `start.sh` / `start.ps1` accumulated a set of probe-then-repair steps that are
-not part of the model install picker: repair silero-vad in a venv created before
-it became a core dependency, pull the `[summarize]` extra so the Local
+not part of the model install picker: repair `onnxruntime` (the core VAD
+backend) in an incomplete venv, pull the `[summarize]` extra so the Local
 summarizer works on first Generate, and — on Windows only — swap PyPI's
 CPU-only torch wheel for a CUDA build.
 
@@ -59,12 +59,26 @@ class Step:
     step here degrades a *feature* (the silence gate, the Local summarizer, GPU
     acceleration) rather than breaking the recorder, and refusing to boot over
     a failed optional repair would be worse than the degraded mode.
+
+    `provided_by` names the **distribution** whose install satisfies this step's
+    probe, which is not always the probed MODULE name (`pillow` provides `PIL`,
+    `pyyaml` provides `yaml`). It defaults to `name` because today's steps all
+    happen to match, but stating the link as DATA is what lets the test suite
+    cross-check a core repair against `[project].dependencies` — inferring it by
+    string equality would fail a perfectly correct future step and invite
+    weakening the assertion instead.
     """
 
     name: str
     reason: str
     argv: list[str] = field(default_factory=list)
     fatal: bool = False
+    provided_by: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.provided_by:
+            # frozen=True, so assign through object.__setattr__.
+            object.__setattr__(self, "provided_by", self.name)
 
 
 def _module_present(name: str) -> bool:
@@ -108,13 +122,13 @@ def plan_steps(
     machine = machine or platform.machine()
     steps: list[Step] = []
 
-    if not module_present("silero_vad"):
+    if not module_present("onnxruntime"):
         steps.append(
             Step(
-                name="silero-vad",
+                name="onnxruntime",
                 reason=(
-                    "silero-vad is a core dependency but isn't importable — this venv "
-                    "predates that. Without it every /tap falls back to passthrough, "
+                    "onnxruntime is a core dependency but isn't importable — this venv "
+                    "is incomplete. Without it every /tap falls back to passthrough, "
                     "silently disabling the gate the operator picked."
                 ),
                 argv=install_target.pip_install_argv([], install_spec=install_spec, python=python),
@@ -202,7 +216,7 @@ def run_steps(steps: list[Step], *, run: Callable[[list[str]], int] | None = Non
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="python -m tapscribe.preflight",
-        description="Run TapScribe's bring-up repairs (silero-vad, [summarize], CUDA torch).",
+        description="Run TapScribe's bring-up repairs (onnxruntime, [summarize], CUDA torch).",
     )
     p.add_argument(
         "--install-spec",

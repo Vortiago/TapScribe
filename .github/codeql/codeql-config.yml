@@ -10,21 +10,32 @@ queries:
 query-filters:
   # py/path-injection is the only rule that triggers false positives
   # here. The repository has exactly one place that builds paths from
-  # user input — `tapscribe/sessions.py` — and every path-building
-  # helper there enforces TWO defensive layers:
+  # user input — `tapscribe/session_paths.py`, the path-resolution seam
+  # (CONTEXT.md: "the ONE place a request-supplied session/name becomes
+  # a filesystem path") — and every resolver there crosses TWO
+  # defensive layers:
   #
   #   1. `_safe_part(s)` rejects strings containing `/`, `\`, NUL, `.`,
   #      `..`, the empty value, AND anything `Path(s).is_absolute()`
   #      flags (catches the Windows `C:foo` drive-prefix escape that
   #      `Path("D:/rec") / "C:foo"` lets through).
-  #   2. The canonical `os.path.realpath(x).startswith(root + os.sep)`
-  #      containment check, inlined at every helper before any
-  #      filesystem operation.
+  #   2. `_assert_contained` / `_assert_under` — the canonical
+  #      `os.path.realpath(x).startswith(base + os.sep)` check, in ONE
+  #      copy every resolver calls before any filesystem operation.
+  #      Strictly below `base`: a candidate realpathing to the base
+  #      itself is an escape (a session symlinked to RECORDINGS_DIR
+  #      would otherwise come back as a session dir, and
+  #      `absorb_session` rmtree's what it is handed). `stripped_dir`
+  #      scopes its base to the resolved SESSION, not the archive root,
+  #      so a `<session>/stripped -> <other session>` symlink cannot
+  #      hand back a sibling session's directory.
   #
-  # Behaviour is pinned by 27 regression tests in
-  # `tests/test_sessions_path_safety.py` covering traversal strings,
-  # non-string types, Windows drive prefixes, and a "didn't touch
-  # disk" assertion.
+  # Behaviour is pinned by `tests/test_sessions_path_safety.py`
+  # (layer 1 — traversal strings, non-string types, Windows drive
+  # prefixes, and a "didn't touch disk" assertion) and
+  # `tests/test_session_paths_symlink_containment.py` (layer 2 —
+  # per-resolver symlink escapes, the root-equal escape, and the
+  # cross-session `stripped/` escape).
   #
   # CodeQL's intraprocedural sanitiser analysis fails to recognise the
   # custom helper shape used here despite the realpath+startswith
@@ -36,8 +47,12 @@ query-filters:
   # Filtering this rule is repo-wide; the cost is that a NEW user-
   # input-to-path code path elsewhere wouldn't be flagged. The
   # mitigation is that all such code is centralised in
-  # `tapscribe.sessions` (review gate on PRs touching this module),
-  # and bandit's broader path-related checks still run.
+  # `tapscribe.session_paths` — REVIEW GATE on PRs touching that module,
+  # and on `tapscribe/session_merge.py`, the one place outside it that
+  # imports `_safe_part` — and bandit's broader path-related checks
+  # still run. Keep this list in step with the real seam: it named
+  # `tapscribe/sessions.py` for a while after the seam moved, which
+  # left the actual sanitiser covered by neither the rule nor the gate.
   - exclude:
       id: py/path-injection
 

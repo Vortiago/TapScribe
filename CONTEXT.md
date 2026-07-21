@@ -989,10 +989,16 @@ Two entry points:
   the meeting's candidate languages — the same routing as the range,
   ADR-0011), points `_primary` at the selector's winner, and returns the
   winning sidecar's raw JSON dict. `force=True` — an explicit per-WAV
-  request bypasses the cache.
+  request bypasses the cache. Brackets its work in `recorder.jobs.run`
+  (`kind="transcribe"`), so a manual per-WAV re-transcribe gets
+  `SessionBusy` (409) while ANY other job holds that session — a range
+  transcribe, a strip, or an end-of-meeting pipeline. Without that claim
+  two covers ran concurrently, doubling resident models and racing
+  `set_primary_transcript` on the same WAV.
 - `transcribe_session(recorder, BatchSessionRequest) -> dict` — every
   WAV in the supplied `from_iso`/`to_iso` range. Brackets the loop in
-  `recorder.jobs.run` (the Session job seam), reporting progress through the
+  `recorder.jobs.run` too (the Session job seam — both entry points claim
+  it), reporting progress through the
   yielded handle, then merges via `merge_session` and writes both
   `session-transcript.json` and `.txt`. No per-WAV silence pre-check —
   the session loop transcribes everything in range.

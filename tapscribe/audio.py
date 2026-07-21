@@ -52,7 +52,19 @@ def read_recorder_frames(path: Path) -> tuple[bytes, int]:
                 "Convert with: ffmpeg -i in.wav -ar 16000 -ac 1 -sample_fmt s16 out.wav"
             )
         frame_count = wf.getnframes()
-        return wf.readframes(frame_count), frame_count
+        raw = wf.readframes(frame_count)
+        # WHOLE FRAMES ONLY. A WAV truncated mid-sample (a partial flush on
+        # ENOSPC, a device error mid-write) yields an odd byte count, and every
+        # consumer here feeds the result straight to `np.frombuffer(...,
+        # int16)`, which raises `ValueError: buffer size must be a multiple of
+        # element size` — bypassing each caller's documented error contract.
+        # Truncating in the ONE shared reader is what this function is for: the
+        # guard cannot then drift between `compute_peaks`,
+        # `wav_predecode.load_recorder_wav_as_pcm` and
+        # `strip_silence.read_wav_int16`, and a fourth consumer inherits it.
+        frame_bytes = RECORDER_SAMPLE_WIDTH * RECORDER_CHANNELS
+        usable = len(raw) - (len(raw) % frame_bytes)
+        return raw[:usable], min(frame_count, usable // frame_bytes)
 
 
 def _configure_recorder_format(wf: wave.Wave_write) -> None:
@@ -152,7 +164,14 @@ def wav_rms_dbfs(path: Path) -> float:
         return 0.0
     if not raw:
         return -200.0
-    samples = np.frombuffer(raw, dtype=np.int16)
+    # Truncate to whole int16s: a WAV whose data chunk is an ODD byte count
+    # (a partial flush on ENOSPC, a device error mid-write) makes
+    # `np.frombuffer` raise ValueError, which this function's `except` does not
+    # catch — so the documented "Returns 0.0 on read errors so callers fail
+    # OPEN" contract silently didn't hold, and `_precheck_original` 500'd
+    # instead of returning its WavTooQuiet/WavUnreadable 422. Same `& ~1` guard
+    # `int16_peak_norm` already applies above, for the same reason.
+    samples = np.frombuffer(raw[: len(raw) & ~1], dtype=np.int16)
     if len(samples) == 0:
         return -200.0
     rms = float(np.sqrt((samples.astype(np.float32) ** 2).mean()))
@@ -204,6 +223,8 @@ def compute_peaks(path: Path, *, bins: int) -> WavePeaks:
 
     # read_recorder_frames validated the rate == RECORDER_SAMPLE_RATE.
     duration_s = frame_count / RECORDER_SAMPLE_RATE
+    # `read_recorder_frames` guarantees a whole number of frames, so this
+    # cannot raise on a torn WAV.
     samples = np.frombuffer(raw, dtype=np.int16)
     if samples.size == 0:
         return WavePeaks(

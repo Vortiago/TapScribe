@@ -10,6 +10,7 @@ same patch-the-consumer convention the transcribe suite uses for
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -153,6 +154,45 @@ async def test_pipeline_mid_chain_failure_records_stage_and_error_and_releases(
     assert recorder_under_test.jobs.get("s") is None  # released despite failure
 
 
+async def test_pipeline_cancellation_records_a_failure_instead_of_hanging_running(
+    recorder_under_test, monkeypatch
+):
+    """`asyncio.CancelledError` is a BaseException, so a plain `except
+    Exception` misses it: the `finally` releases the slot but the
+    PipelineRecord stays `state="running"` forever, and a Bridge's meeting
+    card polling `GET /api/tap/sessions/{s}/pipeline` spins indefinitely
+    instead of surfacing a failure. Cancellation must be recorded AND
+    re-raised (never swallowed)."""
+    started = asyncio.Event()
+
+    async def _strip(req, *, job):  # noqa: ARG001
+        started.set()
+        await asyncio.Event().wait()  # suspend so the task is cancellable mid-stage
+
+    async def _transcribe(req, *, job, model, backend):  # noqa: ARG001
+        raise AssertionError("transcribe must not run after cancellation")
+
+    async def _summarize(req, *, job):  # noqa: ARG001
+        raise AssertionError("summarize must not run after cancellation")
+
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_strip_stage", _strip)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_transcribe_stage", _transcribe)
+    monkeypatch.setattr("tapscribe.batch_pipeline.run_summarize_stage", _summarize)
+
+    task = await start_pipeline(recorder_under_test, PipelineRequest(session="s"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record = recorder_under_test.pipelines.get("s")
+    assert record is not None
+    assert record.state == "failed"
+    assert record.stage == "strip"
+    assert record.error_kind == "CancelledError"
+    assert recorder_under_test.jobs.get("s") is None  # slot released
+
+
 async def test_pipeline_record_overwritten_on_next_trigger(recorder_under_test, fake_stages):
     """One current record per session: a re-trigger replaces a previous
     outcome rather than accumulating history."""
@@ -176,6 +216,9 @@ async def test_pipeline_record_overwritten_on_next_trigger(recorder_under_test, 
         ("tiny.en", "tiny.en"),  # operator default, catalog-listed → used
         ("", "large-v3-turbo"),  # unset → bundled default (multilingual, ADR-0010)
         ("evil/repo", "large-v3-turbo"),  # not in the catalog → never reaches a loader
+        # In the catalog but LIVE-ONLY (no batch adapter) — resolving it would
+        # raise a raw NotImplementedError at the transcribe stage.
+        ("moonshine-tiny", "large-v3-turbo"),
     ],
 )
 async def test_pipeline_resolves_model_from_batch_model_config_else_default(
