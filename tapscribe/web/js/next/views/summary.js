@@ -33,7 +33,7 @@
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
-import { postJson, putJson, wireSave, sessionSummary, errText } from "../../api.js";
+import { postJson, putJson, wireSave, sessionSummary, createLastGoodHold, errText } from "../../api.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar, sessionLabel } from "../shell.js";
 
@@ -117,10 +117,9 @@ export function build(ctx) {
   /** @type {import('../../types.js').SummarizerDefault | null} */
   let lastDefault = null;
 
-  // Split render gates: the header and the controls each update independently so
-  // an idle tick rebuilds nothing. The output pane has no closure sig — it
-  // renders through `renderRegion(sumOut, …, {sig})`, which owns its own gate.
-  let lastHeadSig = " ";
+  // The controls' render gate. The other two regions own theirs: the output pane
+  // renders through `renderRegion(sumOut, …, {sig})`, and the header through
+  // header()'s own `headerNeedsRender` (via the lazy `{sig, build}` sub-line).
   let lastCtlSig = " ";
 
   // ---- Helpers --------------------------------------------------------------
@@ -137,17 +136,16 @@ export function build(ctx) {
    * per poll tick) so the retry fires on a later tick. A re-generate changes
    * the stamp — a different key — and fetches at once. @type {Set<string>} */
   const failedStored = new Set();
-  /** Per-session last-good persisted summary — the stale-while-revalidate hold
-   * that keeps an EXTERNAL re-summarize (the end-of-meeting pipeline, a second
-   * tab) from blanking the output pane to the "No summary yet" empty state for
-   * a whole round trip while the new body refetches. Show the previous summary
-   * in place until the fresh one lands (the fetch's markRegionStale forces the
-   * swap); the cold sentinel (null) is returned only when nothing ever resolved
-   * for that session. Keyed by session, so switching back to a previously-read
-   * session shows its own last-good rather than a cold placeholder. Same shape
-   * as transcript.js's `lastGoodMerged` and api.js's `_lastGoodFiles`.
-   * @type {Map<string, import('../../types.js').PersistedSummary>} */
-  const lastGoodSummary = new Map();
+  /** Per-session last-good persisted summary — the shared bounded
+   * stale-while-revalidate hold (api.js `createLastGoodHold`), which keeps an
+   * EXTERNAL re-summarize (the end-of-meeting pipeline, a second tab) from
+   * blanking the output pane to the "No summary yet" empty state for a whole
+   * round trip while the new body refetches. Show the previous summary in place
+   * until the fresh one lands (the fetch's markRegionStale forces the swap);
+   * `get` returns the cold sentinel (null) only when nothing ever resolved for
+   * that session.
+   * @type {import('../../api.js').LastGoodHold<import('../../types.js').PersistedSummary>} */
+  const lastGoodSummary = createLastGoodHold();
 
   /**
    * Resolve the persisted summary behind the session's slim marker: the cached
@@ -164,7 +162,7 @@ export function build(ctx) {
     const stamp = marker.summarized_at;
     const cached = sessionSummary.peek(sid, stamp);
     if (cached !== undefined) {
-      if (cached) lastGoodSummary.set(sid, cached);
+      if (cached) lastGoodSummary.hold(sid, cached);
       return cached;
     }
     const key = `${sid}@${stamp}`;
@@ -187,7 +185,7 @@ export function build(ctx) {
     // during the refetch instead of the bare loading sentinel, which the pane
     // renders exactly like a cold load and blanks the whole region to the
     // empty state for the round trip. null only when nothing ever resolved.
-    return lastGoodSummary.get(sid) ?? null;
+    return lastGoodSummary.get(sid);
   };
 
   /** Sync the Generate button + the note line from current state. Never touches
@@ -441,21 +439,21 @@ export function build(ctx) {
     // in the Summarizer panel.
     renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job, { only: "summarize" });
 
-    // ---- Header — gated on session + has-transcript + the LABEL the sub-line
-    // actually renders (a bespoke gate, invisible to the __TAPSCRIBE_SIG_AUDIT
-    // drift audit): without the label term, renaming the session elsewhere left
-    // the old name in the header until an unrelated term changed.
-    const headSig = [sid, hasTranscript() ? 1 : 0, sess ? sessionLabel(sess) : ""].join("§");
-    if (headSig !== lastHeadSig) {
-      lastHeadSig = headSig;
-      header(headHost, {
-        eyebrow: "Session · 4 Summary",
-        title: "Summary",
-        sub: sess
-          ? inline("summarize ", strong(sessionLabel(sess)))
-          : "no session selected — pick one from the spine",
-      });
-    }
+    // ---- Header — gated by header()'s OWN headerNeedsRender, through the lazy
+    // `{sig, build}` sub-line (capture.js / people.js shape): pairing the sig
+    // WITH the builder is what makes forgetting a term impossible. The sig
+    // mirrors the FULL rendered text, so it can't collide with the sess-null
+    // fallback string below.
+    header(headHost, {
+      eyebrow: "Session · 4 Summary",
+      title: "Summary",
+      sub: sess
+        ? {
+            sig: `summarize ${sessionLabel(sess)}`,
+            build: () => inline("summarize ", strong(sessionLabel(sess))),
+          }
+        : "no session selected — pick one from the spine",
+    });
 
     // ---- Session switch — drop a summary/error that belonged to another
     // session, force the output + controls to re-sync, and pre-fill source +

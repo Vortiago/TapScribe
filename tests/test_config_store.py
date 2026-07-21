@@ -14,6 +14,7 @@ Two behaviours that have no home in the older suites:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,6 @@ from tapscribe.config_store import (
     write_languages,
     write_summarizer_config,
 )
-from tapscribe.live import LiveConfig
 from tapscribe.recorder import Recorder
 from tapscribe.transcribers.catalog import DEFAULT_BATCH_MODEL, REGISTRY
 
@@ -41,16 +41,21 @@ LIVE_ONLY_ID = "moonshine-tiny"
 
 
 @pytest.fixture(autouse=True)
-def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    d = tmp_path / "config"
-    d.mkdir()
-    monkeypatch.setattr(_config, "CONFIG_DIR", d)
-    monkeypatch.setattr(_config, "BATCH_MODEL_FILE", d / "batch-model.txt")
-    monkeypatch.setattr(_config, "PROMPT_FILE", d / "prompt.txt")
-    monkeypatch.setattr(_config, "SUMMARIZER_CONFIG_FILE", d / "summarizer.json")
-    monkeypatch.setattr(_config, "LANGUAGES_FILE", d / "languages.txt")
+def config_dir(recorder_under_test: Recorder) -> Iterator[Path]:
+    """The tmpdir config dir every test here writes into.
+
+    Sourced from the shared `recorder_under_test` fixture (conftest), whose
+    `repoint_config_files` re-binds CONFIG_DIR **and every `*_FILE` under it**
+    by introspecting `tapscribe.config` — so a fifth config file is
+    self-registering and can never silently start writing into the repo's real
+    `config/`. A hand-written list here covered four of the nine and left the
+    rest aimed at the working tree.
+
+    The module-level text cache is cleared either side so no value leaks
+    between tests.
+    """
     config_store._CONFIG_TEXT_CACHE.clear()
-    yield d
+    yield _config.CONFIG_DIR
     config_store._CONFIG_TEXT_CACHE.clear()
 
 
@@ -88,20 +93,9 @@ def test_resolve_batch_model_ignores_an_out_of_band_live_only_id(config_dir: Pat
 
 
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_dir: Path):
-    monkeypatch.setattr(_config, "AUTH_ENABLED", False)
-    monkeypatch.setattr(_config, "AUTO_START_LIVE", False)
-    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path / "recordings")
-    (tmp_path / "recordings").mkdir()
-    recorder = Recorder(
-        recordings_dir=tmp_path / "recordings",
-        config_dir=config_dir,
-        live_config=LiveConfig(model="tiny.en", language="en", host="localhost", port=8000),
-        use_mlx=False,
-        auth_password_file=tmp_path / ".auth-password",
-    )
-    app.dependency_overrides[get_recorder] = lambda: recorder
-    app.state.recorder = recorder
+def client(recorder_under_test: Recorder):
+    app.dependency_overrides[get_recorder] = lambda: recorder_under_test
+    app.state.recorder = recorder_under_test
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -128,24 +122,48 @@ def frozen_stat_sig(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config_store, "file_stat_sig", lambda path, **kw: ("frozen",))
 
 
-def test_write_config_is_never_served_stale(frozen_stat_sig):
-    (_config.PROMPT_FILE).write_text("first", encoding="utf-8")
-    assert read_config("prompt") == "first"  # populates the cache
-    write_config("prompt", "second")
-    assert read_config("prompt") == "second"
+#: Every writer whose reader is backed by `_read_config_text_cached`. A new one
+#: is added HERE and inherits the invariant below — that is the point of the
+#: list. Each case is (seed the file, read → `before`, write, read → `after`);
+#: the callables are evaluated inside the test so the fixtures' repointing of
+#: `_config` has already landed.
+_CACHED_WRITERS = [
+    pytest.param(
+        lambda: _config.PROMPT_FILE.write_text("first", encoding="utf-8"),
+        lambda: read_config("prompt"),
+        lambda: write_config("prompt", "second"),
+        "first",
+        "second",
+        id="write_config",
+    ),
+    pytest.param(
+        lambda: _config.SUMMARIZER_CONFIG_FILE.write_text(
+            json.dumps({"source": "command", "command": "first"}), encoding="utf-8"
+        ),
+        lambda: read_summarizer_config()["command"],
+        lambda: write_summarizer_config({"source": "command", "command": "second"}),
+        "first",
+        "second",
+        id="write_summarizer_config",
+    ),
+    pytest.param(
+        lambda: _config.LANGUAGES_FILE.write_text("da,no", encoding="utf-8"),
+        lambda: read_languages(),
+        lambda: write_languages("en"),
+        ("da", "no"),
+        ("en",),
+        id="write_languages",
+    ),
+]
 
 
-def test_write_summarizer_config_is_never_served_stale(frozen_stat_sig):
-    _config.SUMMARIZER_CONFIG_FILE.write_text(
-        json.dumps({"source": "command", "command": "first"}), encoding="utf-8"
-    )
-    assert read_summarizer_config()["command"] == "first"  # populates the cache
-    write_summarizer_config({"source": "command", "command": "second"})
-    assert read_summarizer_config()["command"] == "second"
-
-
-def test_write_languages_is_never_served_stale(frozen_stat_sig):
-    _config.LANGUAGES_FILE.write_text("da,no", encoding="utf-8")
-    assert read_languages() == ("da", "no")  # populates the cache
-    write_languages("en")
-    assert read_languages() == ("en",)
+@pytest.mark.parametrize(("seed", "read", "write", "before", "after"), _CACHED_WRITERS)
+def test_a_write_is_never_served_stale(frozen_stat_sig, seed, read, write, before, after):
+    """The INVARIANT, deliberately not the mechanism: whatever performs the
+    invalidation — each writer popping the key today, `atomic_write_text` owning
+    it tomorrow — a value written must never be served from the cache that the
+    read before it populated."""
+    seed()
+    assert read() == before  # populates the cache
+    write()
+    assert read() == after

@@ -105,8 +105,8 @@ def stitch_windows(
     if not per_window:
         return ()
     out: list[TranscriptionSegment] = []
-    for idx, (_window, segs) in enumerate(per_window):
-        lower = per_window[idx][0].start_s + overlap_s / 2.0 if idx > 0 else float("-inf")
+    for idx, (window, segs) in enumerate(per_window):
+        lower = window.start_s + overlap_s / 2.0 if idx > 0 else float("-inf")
         upper = (
             per_window[idx + 1][0].start_s + overlap_s / 2.0 if idx + 1 < len(per_window) else float("inf")
         )

@@ -24,7 +24,9 @@
 
 import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside, selectionInside } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
-import { postJson, putJson, sessionTranscript, loadSessionFiles, wireSave, errText } from "../../api.js";
+import {
+  postJson, putJson, sessionTranscript, loadSessionFiles, wireSave, createLastGoodHold, errText,
+} from "../../api.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
@@ -191,15 +193,16 @@ export function build(ctx) {
    * re-transcribe changes the stamp — a different key — and fetches at once.
    * @type {Set<string>} */
   const failedMerged = new Set();
-  /** Per-session last-good merged body — the stale-while-revalidate hold that
-   * keeps a re-transcribe (a new transcribed_at) from blanking the merged pane
-   * to "loading transcript…" while the new body refetches. Show the previous
-   * merged transcript in place until the fresh one lands (markRegionStale on the
-   * fetch forces the swap), instead of wiping the transcript the operator is
-   * reading. Keyed by session, so switching to a previously-viewed session shows
-   * its own last-good rather than a cold-load placeholder. Same shape as
-   * api.js `_lastGoodFiles`. @type {Map<string, import('../../types.js').MergedTranscript>} */
-  const lastGoodMerged = new Map();
+  /** Per-session last-good merged body — the shared bounded
+   * stale-while-revalidate hold (api.js `createLastGoodHold`), which keeps a
+   * re-transcribe (a new transcribed_at) from blanking the merged pane to
+   * "loading transcript…" while the new body refetches. Show the previous merged
+   * transcript in place until the fresh one lands (markRegionStale on the fetch
+   * forces the swap), instead of wiping the transcript the operator is reading.
+   * `get` returns the cold-load sentinel (null) only when this session never
+   * resolved a body.
+   * @type {import('../../api.js').LastGoodHold<import('../../types.js').MergedTranscript>} */
+  const lastGoodMerged = createLastGoodHold();
   /** The lazily-fetched WAV listing for the FOCUSED session — the array
    * /api/state no longer embeds. Refreshed at the top of update() from the
    * (sid, files_sig) client cache; sourceFiles()/recordingFor read it. */
@@ -225,7 +228,7 @@ export function build(ctx) {
     const stamp = marker.transcribed_at;
     const cached = sessionTranscript.peek(sid, stamp);
     if (cached !== undefined) {
-      if (cached) lastGoodMerged.set(sid, cached);
+      if (cached) lastGoodMerged.hold(sid, cached);
       return cached;
     }
     const key = `${sid}@${stamp}`;
@@ -250,7 +253,7 @@ export function build(ctx) {
     // "loading transcript…". null (→ cold-load placeholder) only when this
     // session never resolved a body. markRegionStale (above) forces the swap to
     // the fresh body once the fetch lands.
-    return lastGoodMerged.get(sid) ?? null;
+    return lastGoodMerged.get(sid);
   };
 
   /** The WAVs the picker + per-WAV transcribe operate on: the originals, or the

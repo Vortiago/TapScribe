@@ -232,11 +232,11 @@ class LocalSummarizer:
         GGUF only: the MLX path has no `n_ctx` cap (it feeds the model the whole
         prompt), so a ValueError there means something else entirely and is left
         to propagate rather than be blamed on a window that doesn't exist."""
-        if self._backend != "gguf":
-            return generate(transcript, instruction)
         try:
             return generate(transcript, instruction)
         except ValueError as e:
+            if self._backend != "gguf":
+                raise
             raise SummarizerFailed(
                 _gguf_generation_failed_message(catalog.default_gguf_ctx(), self._max_tokens, e)
             ) from e

@@ -547,6 +547,7 @@ def _changed_gate_knobs(
 def _transition_replacements(
     *,
     gate_kind: str | None,
+    effective_gate_kind: str,
     conf: bool | None,
     gate_speech_threshold: float | None,
     gate_hangover_ms: int | None,
@@ -559,7 +560,12 @@ def _transition_replacements(
     plus the validated `gate_kind` and the bool-coerced
     `confidence_validation`. Shared by both channels' `begin_transition`
     so the allowlist check and coercions stay in lockstep. Raises
-    `ValueError` on a gate_kind outside GATE_KINDS."""
+    `ValueError` on a gate_kind outside GATE_KINDS.
+
+    A `gate_kind` equal to `effective_gate_kind` is NOT emitted: it's the
+    value `info` reports and the dashboard echoes back, i.e. no change at
+    all (see `LiveChannelBase.begin_transition`). Validation runs first, so
+    a bogus kind still raises."""
     replacements = _gate_knob_replacements(
         gate_speech_threshold=gate_speech_threshold,
         gate_hangover_ms=gate_hangover_ms,
@@ -569,7 +575,8 @@ def _transition_replacements(
     if gate_kind is not None:
         if gate_kind not in GATE_KINDS:
             raise ValueError(gate_kind_error(gate_kind))
-        replacements["gate_kind"] = gate_kind
+        if gate_kind != effective_gate_kind:
+            replacements["gate_kind"] = gate_kind
     if conf is not None:
         replacements["confidence_validation"] = bool(conf)
     return replacements
@@ -626,6 +633,13 @@ class LiveChannelBase:
     def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]:  # pragma: no cover
         raise NotImplementedError
 
+    def _effective_gate_kind(self) -> str:
+        """The gate_kind actually in force — `config.gate_kind` coerced through
+        the same `effective_gate_config` seam TapRelay builds tap gates from. The
+        ONE definition `info` reports, `matches` compares against, and
+        `begin_transition` treats as "not a change"."""
+        return effective_gate_config(self, self.config).gate_kind
+
     def _mirror_gate_info(self) -> None:
         """Push the current `config`'s gate + confidence fields into `info`.
         Called from the subclass seed (boot) and `start()` (after a
@@ -636,7 +650,7 @@ class LiveChannelBase:
         can't report "backend" while the tap actually runs the tapscribe
         gate. `confidence_validation` is mirrored only when the engine
         has that knob (`supports_confidence_validation`)."""
-        self.info["gate_kind"] = effective_gate_config(self, self.config).gate_kind
+        self.info["gate_kind"] = self._effective_gate_kind()
         self.info["gate_speech_threshold"] = (
             f"{self.config.gate_speech_threshold:.{GATE_THRESHOLD_DECIMALS}f}"
         )
@@ -714,7 +728,7 @@ class LiveChannelBase:
             return False
         if self.fixed_language is None and language and language != self.config.language:
             return False
-        if gate_kind is not None and gate_kind != effective_gate_config(self, self.config).gate_kind:
+        if gate_kind is not None and gate_kind != self._effective_gate_kind():
             return False
         if (
             self.supports_confidence_validation
@@ -756,14 +770,13 @@ class LiveChannelBase:
         request is actually asking to CHANGE) rewrites config."""
         replacements = _transition_replacements(
             gate_kind=gate_kind,
+            effective_gate_kind=self._effective_gate_kind(),
             conf=conf,
             gate_speech_threshold=gate_speech_threshold,
             gate_hangover_ms=gate_hangover_ms,
             gate_pre_roll_ms=gate_pre_roll_ms,
             gate_min_speech_ms=gate_min_speech_ms,
         )
-        if replacements.get("gate_kind") == effective_gate_config(self, self.config).gate_kind:
-            replacements.pop("gate_kind")
         if replacements:
             self.config = replace(self.config, **replacements)
         self.info["state"] = "starting"

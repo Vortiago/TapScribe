@@ -75,8 +75,15 @@ def test_every_core_repair_probes_a_module_a_core_dependency_provides():
 
     Nothing caught it because every test injects `module_present`, so the probe
     set was never checked against the real dependency list. This test closes
-    that: a step whose argv is the no-extras reinstall is a CORE repair, and its
-    probe must name a module that `[project].dependencies` actually provides.
+    that: a step whose argv is the no-extras reinstall is a CORE repair, and the
+    distribution it declares as `provided_by` must be one `[project].dependencies`
+    actually installs.
+
+    `Step.provided_by` — not the step NAME — is what's checked, because a module
+    name and a distribution name are different things (`pillow` provides `PIL`,
+    `pyyaml` provides `yaml`). Equating them worked for `onnxruntime` by luck,
+    and would have failed a correct future step, whose likeliest repair is
+    weakening this assertion.
     """
     core = _core_dependency_names()
     reinstall_argv = plan_steps(
@@ -90,10 +97,18 @@ def test_every_core_repair_probes_a_module_a_core_dependency_provides():
             continue  # an EXTRA repair (e.g. `.[summarize]`) — not a core dep.
             # Scan the whole argv, not argv[-1]: the llama_cpp branch appends
             # --extra-index-url/--only-binary AFTER the target.
-        assert step.name.replace("_", "-").lower() in core, (
-            f"core repair {step.name!r} probes a module no core dependency provides; "
-            f"the reinstall it plans can never satisfy it. Core deps: {sorted(core)}"
+        assert step.provided_by.replace("_", "-").lower() in core, (
+            f"core repair {step.name!r} probes a module that no core dependency "
+            f"provides ({step.provided_by!r}); the reinstall it plans can never "
+            f"satisfy it. Core deps: {sorted(core)}"
         )
+
+
+def test_provided_by_defaults_to_the_step_name():
+    """Every step today probes a module whose name matches its distribution, so
+    the link only has to be RESTATED when they diverge."""
+    assert Step(name="onnxruntime", reason="…").provided_by == "onnxruntime"
+    assert Step(name="imaging", reason="…", provided_by="pillow").provided_by == "pillow"
 
 
 def _core_dependency_names() -> set[str]:

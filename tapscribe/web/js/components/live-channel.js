@@ -7,7 +7,7 @@
 // (they cover popovers and <dialog>, not <details>), so its open state is
 // carried across the rebuild explicitly — see buildBody.
 
-import { tpl, pick, renderRegion, selectionInside, deferIfFocusedCfgKey } from "../templates.js";
+import { tpl, pick, renderRegion, selectionInside } from "../templates.js";
 import { getJson, wireConfigSave } from "../api.js";
 import { LIVE_FAMILY_LABELS, buildModelSelect } from "../model-select.js";
 
@@ -41,15 +41,11 @@ export function render(j, ctx) {
 
   // The body swap goes through renderRegion (focus-guarded + per-host sig):
   // it skips while any <select>/<input>/<textarea> inside the body is focused,
-  // so an open dropdown or mid-edit gate knob survives the poll tick. One case
-  // it deliberately can't see: BUTTONS. While an init-prompt save is in
-  // flight, focus sits on its [data-cfg-key] save button — swapping then would
-  // detach the status span the awaiting putJson writes to. Hold the body for
-  // that one case here (the shared seam marks the deferred-render flag, so the
-  // held-back render is retried on the next tick instead of being stranded
-  // once the poll starts 304ing).
-  if (deferIfFocusedCfgKey(bodyEl)) return;
-
+  // so an open dropdown or mid-edit gate knob survives the poll tick — and,
+  // since the seam folded [data-cfg-key] into its interactive test, while an
+  // init-prompt save is in flight and focus sits on its save button (swapping
+  // then would detach the status span the awaiting putJson writes to).
+  //
   // NOTE: the log tail is deliberately NOT in this sig. Folding it in
   // rebuilt the whole body on every WlK log line — snapping shut an
   // operator-opened init-prompt <details> and churning the form for a

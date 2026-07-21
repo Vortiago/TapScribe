@@ -274,7 +274,14 @@ def atomic_write_text(path: Path, content: str) -> None:
 
     Shared by `_write_text_file_atomic` (prompt/hotwords files, with CRLF
     normalisation) and `tapscribe.sessions.write_session_meta` (JSON, no
-    normalisation needed because json.dumps escapes any literal CR)."""
+    normalisation needed because json.dumps escapes any literal CR).
+
+    Invalidates `_CONFIG_TEXT_CACHE` for `path` on the way out (a no-op pop
+    for uncached paths): our own write must never be served stale, even when
+    the filesystem's stat signature failed to move (coarse-mtime filesystem +
+    same-size rewrite). Living HERE rather than in a wrapper is what keeps the
+    next writer that reaches for `atomic_write_text` from reintroducing that
+    bug."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
@@ -293,26 +300,16 @@ def atomic_write_text(path: Path, content: str) -> None:
             # and the outer `raise` below propagates the original error.
             pass
         raise
-
-
-def _write_and_invalidate(path: Path, content: str) -> None:
-    """Atomic write of a file backed by `_read_config_text_cached`, plus the
-    structural cache invalidation every such write owes: our own write must
-    never be served stale, even if the filesystem's stat signature failed to
-    move (a coarse-mtime filesystem + a same-size rewrite). ONE owner, so the
-    three writers over that cache — `write_config`, `write_summarizer_config`,
-    `write_languages` — can't diverge on whether they remembered the pop."""
-    atomic_write_text(path, content)
     _CONFIG_TEXT_CACHE.pop(str(path), None)
 
 
 def _write_text_file_atomic(path: Path, content: str) -> None:
-    """`_write_and_invalidate` for a config TEXT file: CRLF is normalised to
-    LF so the Whisper CLI doesn't see literal `\r` in the prompt. (The JSON
-    writer skips the normalisation — json.dumps escapes any literal CR — and
-    calls `_write_and_invalidate` directly.)"""
+    """`atomic_write_text` for a config TEXT file: CRLF is normalised to LF so
+    the Whisper CLI doesn't see literal `\r` in the prompt. (The JSON writer
+    skips the normalisation — json.dumps escapes any literal CR — and calls
+    `atomic_write_text` directly.)"""
     normalised = content.replace("\r\n", "\n").replace("\r", "\n")
-    _write_and_invalidate(path, normalised)
+    atomic_write_text(path, normalised)
 
 
 def read_summarizer_config() -> dict:
@@ -441,7 +438,7 @@ def write_summarizer_config(cfg: dict) -> dict:
         "base_url": base_url,
         "api_key": api_key,
     }
-    _write_and_invalidate(config.SUMMARIZER_CONFIG_FILE, json.dumps(stored, indent=2) + "\n")
+    atomic_write_text(config.SUMMARIZER_CONFIG_FILE, json.dumps(stored, indent=2) + "\n")
     return stored
 
 

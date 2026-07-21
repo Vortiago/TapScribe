@@ -152,9 +152,9 @@ def merge_picker_state(existing: object, fresh: dict) -> dict:
     prior = existing.get("choices") if isinstance(existing, dict) else None
     if not isinstance(prior, dict):
         return out
-    merged = {k: v for k, v in prior.items() if k not in fresh_choices}
-    merged.update(fresh_choices)
-    out["choices"] = merged
+    # Fresh wins per family; key order isn't observable (the state file is
+    # written with sort_keys=True).
+    out["choices"] = {**prior, **fresh_choices}
     return out
 
 

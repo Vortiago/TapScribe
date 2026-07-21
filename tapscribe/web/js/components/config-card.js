@@ -11,7 +11,7 @@
 // server. While focus is inside any editor textarea the whole card
 // skips its per-second rebuild so polling can't blow away unsaved edits.
 
-import { tpl, pick, renderRegion, deferIfFocusedCfgKey } from "../templates.js";
+import { tpl, pick, renderRegion } from "../templates.js";
 import { wireConfigSave } from "../api.js";
 
 /**
@@ -75,16 +75,9 @@ function buildEditor({ key, content, placeholder, overrideCount }) {
  */
 export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOverrideCounts = true }) {
   // The grid swap goes through renderRegion (focus-guarded + per-host sig),
-  // which covers a focused editor textarea. One case it deliberately can't
-  // see: BUTTONS. While a save is in flight, focus sits on its [data-cfg-key]
-  // save button — swapping then would detach the status span the awaiting
-  // putJson writes to. Hold the grid for that one case here (the shared seam
-  // marks the deferred-render flag, so the held-back render is retried on the
-  // next tick instead of being stranded once the poll starts 304ing —
-  // buildEditor stamps `cfgKey` on the TEXTAREA too, so any focus inside any
-  // editor used to strand the whole grid).
-  if (deferIfFocusedCfgKey(gridEl)) return;
-
+  // which covers a focused editor textarea AND — since the seam folded
+  // [data-cfg-key] into its interactive test — a focused save button mid-save,
+  // whose status span the awaiting putJson still writes to. No guard here.
   const p = j.prompt || { path: "", content: "", length: 0 };
   const h = j.hotwords || { path: "", content: "", length: 0 };
   const hl = j.hallucinations || { path: "", content: "", count: 0 };

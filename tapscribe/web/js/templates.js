@@ -10,9 +10,8 @@
 //
 //   - the ADR-0004 interaction-hold flag for the BESPOKE per-tick gates that
 //     can't route through renderRegion (recordings.js / transcript.js WAV
-//     lists, active-taps.js, live-feed.js, sessions.js's per-row gate, the
-//     [data-cfg-key] save-button holds): markDeferredRender /
-//     consumeDeferredRender / deferIfSelectionInside / deferIfFocusedCfgKey.
+//     lists, active-taps.js, live-feed.js, sessions.js's per-row gate):
+//     markDeferredRender / consumeDeferredRender / deferIfSelectionInside.
 //     A renderRegion swap needs none of this — it flushes ITSELF the instant
 //     the interaction clears (one-shot listener per host), tick or no tick;
 //     the one exception is the straddling-selection case below, which has no
@@ -99,11 +98,23 @@ function _selectionStraddles(host) {
   return false;
 }
 
-/** @param {Element} el — true for controls that hold live interaction state. */
+/**
+ * True for elements that hold live interaction state: the form controls, plus
+ * a focused `[data-cfg-key]` SAVE BUTTON. A button is not a control canon
+ * renderRegion would ever hold for — but while a config editor's putJson is in
+ * flight focus sits on its save button, and swapping the region then detaches
+ * the status span the awaiting save writes to. Folding it in HERE (rather than
+ * leaving each region to remember a guard of its own before its renderRegion
+ * call — the shape that made `[data-cfg-key]` a hold two callers applied and
+ * every future one would forget) means the seam holds the swap automatically,
+ * and `interactionHeld()` reports a mid-save button to the poll pacer too.
+ * @param {Element} el
+ */
 function _isInteractive(el) {
   const tag = el.tagName;
   return (
     tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA" ||
+    /** @type {HTMLElement} */ (el).dataset?.cfgKey != null ||
     /** @type {HTMLElement} */ (el).isContentEditable === true
   );
 }
@@ -135,30 +146,6 @@ export function interactionHeld() {
  */
 export function deferIfSelectionInside(host) {
   if (!selectionInside(host)) return false;
-  markDeferredRender();
-  return true;
-}
-
-/**
- * The one hold canon renderRegion deliberately doesn't cover: a focused SAVE
- * BUTTON. `[data-cfg-key]` marks the save button (and, in config-card, the
- * textarea + status span) of a config editor; while its putJson is in flight
- * focus sits on that button, and swapping the region would detach the status
- * span the awaiting save writes to. A button isn't an "interactive control" to
- * renderRegion, so the two callers (`components/live-channel.js`'s body,
- * `components/config-card.js`'s grid) guard it themselves — through this ONE
- * seam rather than two hand-rolled copies.
- *
- * Marking the deferred-render flag is the load-bearing half: main.js's tick()
- * skips the whole renderAll pass on a 304, so a render held back here while the
- * poll goes quiet would be STRANDED FOREVER (the operator focuses Save, the
- * live child dies, the state settles, every later poll 304s — and the blur
- * re-renders nothing). Returns true when the render must be held back.
- * @param {Element} host
- */
-export function deferIfFocusedCfgKey(host) {
-  const active = /** @type {HTMLElement | null} */ (document.activeElement);
-  if (!active || !active.dataset || !active.dataset.cfgKey || !host.contains(active)) return false;
   markDeferredRender();
   return true;
 }

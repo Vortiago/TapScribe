@@ -176,10 +176,10 @@
 
   function reconnectAllForSettingsChange() {
     for (const [identity, ch] of channels) {
-      // Sticky configuration errors (tls-required, tap-auth-failed)
-      // can only be cleared by a settings change. Drop them so the
-      // next PCM frame redials with the fresh settings.
-      if (ch.error === "tls-required" || ch.error === "tap-auth-failed") {
+      // A sticky error can only be cleared by a settings change — this is
+      // that change. Drop it so the next PCM frame redials with the fresh
+      // settings.
+      if (isStickyError(ch.error)) {
         ch.error = null;
       }
       const hadWs = !!ch.tapWs;
@@ -250,6 +250,25 @@
   // this point the trailing audio is lost — but we'd rather give up than
   // wedge an utterance forever against an unreachable recorder.
   const DRAIN_MAX_MS = 8000;
+
+  // ---- Sticky errors -------------------------------------------------------
+  // A STICKY error is a channel error retrying cannot clear: the operator has
+  // to change a setting first (fix TLS / the host, re-paste the tap token).
+  // Three places have to agree on the set, and a member missing from any one of
+  // them is a live bug:
+  //   - the onclose reconnect ladder must not schedule a retry,
+  //   - openTapWs must PRE-FLIGHT it, because the ladder arming no timer leaves
+  //     the pcm handler's "no socket, no timer → dial" path re-dialling on the
+  //     very next frame — one rejected upgrade per 20 ms of speech, no backoff,
+  //   - reconnectAllForSettingsChange must CLEAR it, since a settings save is
+  //     the only thing that can.
+  // (`isTransportError` also keeps them: they are diagnoses, not symptoms, so
+  // the derived buffer-overflow label must never overwrite one.)
+  // tap-auth-failed had the ladder guard but not the dial pre-flight for
+  // exactly as long as this set was four separate string comparisons; naming it
+  // makes adding a member one line and impossible to half-apply.
+  const STICKY_TAP_ERRORS = new Set(["tls-required", "tap-auth-failed"]);
+  const isStickyError = (err) => !!err && STICKY_TAP_ERRORS.has(err);
 
   // Begin an utterance for `ch` if one isn't already in flight: mint the
   // utterance_id the Recorder uses to stitch reconnects together, and
@@ -401,14 +420,13 @@
     if (!err) return false;
     return (
       err === "tap-ws-error" ||
-      err === "tap-auth-failed" ||
-      // A sticky configuration diagnosis, not a symptom: the operator has
-      // to fix TLS / the host before ANY audio can flow. Letting the
-      // derived overflow label overwrite it after 3 s of speech points the
-      // operator at the popup's Test connection — a dead end, because the
-      // popup runs on chrome-extension:// where the cleartext guard is
-      // inactive by design and reports everything healthy.
-      err === "tls-required" ||
+      // Every sticky error is a configuration DIAGNOSIS, not a symptom: the
+      // operator has to fix TLS / the host / the token before ANY audio can
+      // flow. Letting the derived overflow label overwrite one after 3 s of
+      // speech points the operator at the popup's Test connection — a dead
+      // end, because the popup runs on chrome-extension:// where the
+      // cleartext guard is inactive by design and reports everything healthy.
+      isStickyError(err) ||
       err.startsWith("tap-ws-closed-")
     );
   }
@@ -503,15 +521,14 @@
   }
 
   function openTapWs(identity, ch) {
-    // Pre-flight: the recorder already rejected this tap token with a 4401.
-    // The onclose ladder declines to retry, but that only covers the LADDER:
-    // onclose nulls ch.tapWs and arms no reconnect timer, so the pcm
-    // handler's "no socket and no timer → dial" path would re-dial on the
-    // very next frame — one rejected upgrade per 20 ms of speech, forever,
-    // with no backoff at all. Same sticky shape as tls-required below;
-    // reconnectAllForSettingsChange clears the error, so saving a fresh
-    // token redials.
-    if (ch.error === "tap-auth-failed") return;
+    // Pre-flight: a STICKY error (see STICKY_TAP_ERRORS) means dialling again
+    // cannot succeed until the operator changes a setting. The onclose ladder
+    // declining to retry covers only the LADDER: it nulls ch.tapWs and arms no
+    // reconnect timer, so the pcm handler's "no socket and no timer → dial"
+    // path would re-dial on the very next frame — one doomed upgrade per 20 ms
+    // of speech, forever, with no backoff at all. reconnectAllForSettingsChange
+    // clears the error, so saving fresh settings redials.
+    if (isStickyError(ch.error)) return;
     // Pre-flight: ws:// to a non-trustworthy host from an https:// page
     // is blocked by the browser's mixed-content policy. `new WebSocket`
     // throws SecurityError synchronously here, so detect-and-surface
@@ -597,10 +614,12 @@
       if (ch.tapWs === ws) ch.tapWs = null;
       // Reconnect only if the speaker is still active and the close was
       // recoverable. A clean close (operator pause, mute, tap-stop) means
-      // the utterance is over; an auth rejection won't fix itself by
-      // retrying — leave it surfaced so the operator updates the token.
+      // the utterance is over; a STICKY error (the auth rejection just set
+      // above) won't fix itself by retrying — leave it surfaced so the
+      // operator updates the setting. Testing the sticky SET rather than
+      // `authFailed` keeps this arm and openTapWs's pre-flight on one list.
       // shouldReconnect carves out the drain-after-mute exception.
-      if (!clean && !authFailed && shouldReconnect(ch)) {
+      if (!clean && !isStickyError(ch.error) && shouldReconnect(ch)) {
         scheduleReconnect(identity, ch);
       }
       publishStatus();

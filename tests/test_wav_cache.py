@@ -677,59 +677,39 @@ def test_read_primary_payload_streams_incomplete_valid_json_primary(tmp_path: Pa
 # ---------------------------------------------------------------------------
 
 
-def test_cached_transcribe_re_runs_when_initial_prompt_changes(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("kwarg", "first", "second", "result_attr"),
+    [
+        ("initial_prompt", "A", "B", "initial_prompt_used"),
+        ("hotwords", "Kubernetes", "Kubernetes,Grafana", "hotwords_used"),
+        # The language pin (ADR-0010): an entry decoded as Norwegian must not
+        # be served when the operator re-pins to English.
+        ("source_lang", "no", "en", "source_language"),
+    ],
+)
+def test_cached_transcribe_re_runs_when_a_match_key_input_changes(
+    tmp_path: Path, kwarg: str, first: str, second: str, result_attr: str
+):
+    """Each input is its own match-key clause: re-calling with the ORIGINAL
+    value must still HIT (otherwise this passes by always missing), and the
+    changed value must MISS and write the new value into the fresh entry."""
     wav = seed_wav(tmp_path / "x.wav")
     stub = _StubByKey(backend="faster-whisper", model="small.en")
+    base = {"initial_prompt": None, "hotwords": None, "hallucination_rules": []}
 
-    cached_transcribe(wav, stub, initial_prompt="A", hotwords=None, hallucination_rules=[])
+    cached_transcribe(wav, stub, **{**base, kwarg: first})
     assert stub.call_count == 1
 
-    # Same prompt → cache hit (so the miss below can't be "always misses").
-    cached_transcribe(wav, stub, initial_prompt="A", hotwords=None, hallucination_rules=[])
+    # Same value → cache hit.
+    cached_transcribe(wav, stub, **{**base, kwarg: first})
     assert stub.call_count == 1
 
-    # Edited session-meta prompt → must re-run, not serve the stale transcript.
-    cached_transcribe(wav, stub, initial_prompt="B", hotwords=None, hallucination_rules=[])
+    # Changed value → must re-run, not serve the stale transcript.
+    cached_transcribe(wav, stub, **{**base, kwarg: second})
     assert stub.call_count == 2
     fresh = read_cached(wav)
     assert fresh is not None
-    assert fresh.result.initial_prompt_used == "B"
-
-
-def test_cached_transcribe_re_runs_when_hotwords_change(tmp_path: Path):
-    wav = seed_wav(tmp_path / "x.wav")
-    stub = _StubByKey(backend="faster-whisper", model="small.en")
-
-    cached_transcribe(wav, stub, initial_prompt=None, hotwords="Kubernetes", hallucination_rules=[])
-    assert stub.call_count == 1
-
-    cached_transcribe(wav, stub, initial_prompt=None, hotwords="Kubernetes", hallucination_rules=[])
-    assert stub.call_count == 1
-
-    cached_transcribe(wav, stub, initial_prompt=None, hotwords="Kubernetes,Grafana", hallucination_rules=[])
-    assert stub.call_count == 2
-    fresh = read_cached(wav)
-    assert fresh is not None
-    assert fresh.result.hotwords_used == "Kubernetes,Grafana"
-
-
-def test_cached_transcribe_re_runs_when_source_lang_changes(tmp_path: Path):
-    """The language pin (ADR-0010) is part of the match key: an entry decoded
-    as Norwegian must not be served when the operator re-pins to English."""
-    wav = seed_wav(tmp_path / "x.wav")
-    stub = _StubByKey(backend="faster-whisper", model="small.en")
-
-    cached_transcribe(wav, stub, initial_prompt=None, hotwords=None, hallucination_rules=[], source_lang="no")
-    assert stub.call_count == 1
-
-    cached_transcribe(wav, stub, initial_prompt=None, hotwords=None, hallucination_rules=[], source_lang="no")
-    assert stub.call_count == 1
-
-    cached_transcribe(wav, stub, initial_prompt=None, hotwords=None, hallucination_rules=[], source_lang="en")
-    assert stub.call_count == 2
-    fresh = read_cached(wav)
-    assert fresh is not None
-    assert fresh.result.source_language == "en"
+    assert getattr(fresh.result, result_attr) == second
 
 
 # ---------------------------------------------------------------------------

@@ -59,12 +59,26 @@ class Step:
     step here degrades a *feature* (the silence gate, the Local summarizer, GPU
     acceleration) rather than breaking the recorder, and refusing to boot over
     a failed optional repair would be worse than the degraded mode.
+
+    `provided_by` names the **distribution** whose install satisfies this step's
+    probe, which is not always the probed MODULE name (`pillow` provides `PIL`,
+    `pyyaml` provides `yaml`). It defaults to `name` because today's steps all
+    happen to match, but stating the link as DATA is what lets the test suite
+    cross-check a core repair against `[project].dependencies` — inferring it by
+    string equality would fail a perfectly correct future step and invite
+    weakening the assertion instead.
     """
 
     name: str
     reason: str
     argv: list[str] = field(default_factory=list)
     fatal: bool = False
+    provided_by: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.provided_by:
+            # frozen=True, so assign through object.__setattr__.
+            object.__setattr__(self, "provided_by", self.name)
 
 
 def _module_present(name: str) -> bool:

@@ -34,7 +34,7 @@ import time
 import wave
 from collections import deque
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from functools import partial
 from itertools import islice
@@ -219,6 +219,26 @@ async def _json_body(req: Request) -> dict[str, Any]:
     except Exception:
         return {}
     return body if isinstance(body, dict) else {}
+
+
+async def _require_json_object_body(req: Request, *, allow_empty: bool) -> dict[str, Any]:
+    """`_json_body`'s strict twin: a body that isn't a JSON object is a 400
+    rather than a silent `{}`. Routes where the empty dict would DESTROY state
+    (rotate the global session, wipe the summarizer default) use this.
+    `allow_empty=True` still accepts a missing body as `{}` — the legacy
+    no-body call."""
+    raw = await req.body()
+    if not raw:
+        if allow_empty:
+            return {}
+        raise HTTPException(400, "a JSON object body is required (send {} to clear the config)")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "malformed JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "JSON body must be an object")
+    return body
 
 
 def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | None:
@@ -702,16 +722,7 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     # present, must parse as a JSON object: a malformed {"detached": true}
     # falling through to the legacy branch would silently rotate the GLOBAL
     # session out from under every plain tap — reject so the bridge retries.
-    raw_body = await req.body()
-    if raw_body:
-        try:
-            body = json.loads(raw_body)
-        except ValueError:
-            return JSONResponse({"detail": "malformed JSON body"}, status_code=400)
-        if not isinstance(body, dict):
-            return JSONResponse({"detail": "JSON body must be an object"}, status_code=400)
-    else:
-        body = {}
+    body = await _require_json_object_body(req, allow_empty=True)
     if body.get("detached"):
         session_id, session_dir = recorder.create_detached_session()
         print(
@@ -1459,21 +1470,12 @@ async def api_summarize_config_put(req: Request):
     one structured object. ALL validation (source/model allowlists, text
     caps, max_tokens int + bounds) lives in `write_summarizer_config`; its
     ValueError is the 400."""
-    # Read the raw body rather than `_json_body` (which turns ANY parse
-    # failure into {}): combined with the full-object semantics above, a
-    # dropped or truncated body would WIPE the operator's saved summarizer
-    # default — taking the end-of-meeting pipeline's summarize stage with it
-    # — and answer {"ok": true}. Same hazard, same handling as
-    # `api_tap_new_session`. Only a deliberate `{}` clears.
-    raw_body = await req.body()
-    if not raw_body:
-        raise HTTPException(400, "a JSON object body is required (send {} to clear the config)")
-    try:
-        body = json.loads(raw_body)
-    except ValueError:
-        raise HTTPException(400, "malformed JSON body") from None
-    if not isinstance(body, dict):
-        raise HTTPException(400, "JSON body must be an object")
+    # Strict parse rather than `_json_body` (which turns ANY parse failure into
+    # {}): combined with the full-object semantics above, a dropped or
+    # truncated body would WIPE the operator's saved summarizer default —
+    # taking the end-of-meeting pipeline's summarize stage with it — and answer
+    # {"ok": true}. Only a deliberate `{}` clears.
+    body = await _require_json_object_body(req, allow_empty=False)
     try:
         stored = write_summarizer_config(body)
     except ValueError as e:
@@ -1495,16 +1497,14 @@ async def api_session_stripped_delete(session: str, recorder: Recorder = Depends
     exactly this directory, so an rmtree underneath it would delete half of
     what it just wrote and leave the strip-meta describing clips that are
     gone."""
-    if recorder.jobs.get(session) is not None:
-        raise SessionBusy("a transcribe or strip job is in flight on this session")
-    resolve_session_dir(session)
-    d = stripped_dir(session)
-    if not d.is_dir():
-        return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
-    # Hold the session's job slot for the walk, as the audio delete does: the
-    # guard above is check-then-act, so a strip could otherwise claim the free
-    # slot between the check and the thread hop and race the rmtree.
+    # `jobs.run` IS the busy guard (SessionBusy → 409) and holds the slot for
+    # the walk, so a strip can't claim it mid-rmtree. The path work is inside
+    # the block for the same reason.
     async with recorder.jobs.run(session, kind="delete", total=1):
+        resolve_session_dir(session)
+        d = stripped_dir(session)
+        if not d.is_dir():
+            return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
         try:
             await asyncio.to_thread(shutil.rmtree, d)
         except FileNotFoundError:
@@ -1981,26 +1981,30 @@ async def api_set_primary(
 
 
 def _translate_registry_rejection(model: str, backend: str) -> None:
-    """Translate the catalog's rejection of `(model, backend)` into a 400
-    naming it — or return, leaving the caller's original exception to
-    propagate as the 500 it is.
+    """Translate the catalog's rejection of `(model, backend)` into a 400 — or
+    return, leaving the caller's exception to propagate as the 500 it is.
 
-    The catalog is the single source of truth for which model ids exist and
-    which backends they bind, and it is consulted lazily, deep inside
-    `load_transcriber`, where it raises plain `KeyError` / `RuntimeError`.
-    Neither is in `_DOMAIN_ERROR_STATUS`, so a stale dashboard tab (or a
-    bridge) holding a since-removed model id used to get a bare
-    "Internal Server Error". Re-running the resolve from the failure path
-    keeps the catalog lookup off the happy path and — because it only
-    converts when the resolve confirms the request was the problem — leaves
-    an unrelated `RuntimeError` (e.g. wav_predecode's "unexpected WAV
-    format") on a perfectly good model id as a 500."""
+    The lazy resolve inside `load_transcriber` raises plain KeyError /
+    RuntimeError, neither a domain error; re-resolving here is what tells a bad
+    model id apart from an unrelated failure on a good one."""
     try:
         REGISTRY.resolve(model, preference=backend)  # type: ignore[arg-type]
     except KeyError:
         raise HTTPException(400, f"unknown model {model!r} — not in the catalog") from None
     except RuntimeError as e:
         raise HTTPException(400, str(e)) from None
+
+
+@contextmanager
+def _translating_registry_rejection(model: str, backend: str):
+    """Wrap a batch transcribe so a catalog rejection of `(model, backend)`
+    surfaces as a 400 (see `_translate_registry_rejection`) instead of a 500.
+    One copy, so a third transcribe route can't become a third paste."""
+    try:
+        yield
+    except (KeyError, RuntimeError):
+        _translate_registry_rejection(model, backend)
+        raise
 
 
 @app.post("/api/transcribe")
@@ -2026,11 +2030,8 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         # the session's candidate languages decide (ADR-0010/0011).
         source_lang=(body.get("source_lang") or "").strip() or None,
     )
-    try:
+    with _translating_registry_rejection(request.model, request.backend):
         payload = await transcribe_one(recorder, request)
-    except (KeyError, RuntimeError):
-        _translate_registry_rejection(request.model, request.backend)
-        raise
     print(
         f"[tapscribe] transcribed {request.name} ({request.source}) with {request.model}",
         flush=True,
@@ -2057,11 +2058,8 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
         force=bool(body.get("force")),
         source_lang=(body.get("source_lang") or "").strip() or None,
     )
-    try:
+    with _translating_registry_rejection(request.model, request.backend):
         return JSONResponse(await transcribe_session(recorder, request))
-    except (KeyError, RuntimeError):
-        _translate_registry_rejection(request.model, request.backend)
-        raise
 
 
 # ---------------------------------------------------------------------------

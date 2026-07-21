@@ -22,6 +22,7 @@ CONTEXT.md "Per-WAV transcript cache" for the layout.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 from dataclasses import dataclass, replace
@@ -56,6 +57,10 @@ class CachedTranscription:
     speaker_name: str
     wav_size: int = 0
     wav_mtime_ns: int = 0
+    # Fingerprint of the hallucination rules the stored kept/suppressed split
+    # was decided under (see `_rules_fingerprint`). None on a legacy entry
+    # written before the field existed — those refilter once, then self-heal.
+    rules_sig: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +440,7 @@ def cached_transcribe(
         speaker_name=parse_wav_speaker_slug(wav_path.name),
         wav_size=size,
         wav_mtime_ns=mtime_ns,
+        rules_sig=_rules_fingerprint(hallucination_rules),
     )
     _write_entry(wav_path, cached, backend=backend, model=model)
     return cached
@@ -442,6 +448,14 @@ def cached_transcribe(
 
 def _segment_order(segment: TranscriptionSegment) -> tuple[float, float]:
     return (segment.start, segment.end)
+
+
+def _rules_fingerprint(rules: list[dict[str, Any]]) -> str:
+    """Stable digest of the rule set a filter pass ran under — the sidecar's
+    `rules_sig`. `raw` is the whole rule (kind is derived from its prefix), and
+    a cross-process-stable hash is required because the entry outlives us."""
+    joined = "\n".join(str(r.get("raw", "")) for r in rules)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
 def _refilter_cached(
@@ -454,6 +468,14 @@ def _refilter_cached(
 ) -> CachedTranscription:
     """Re-run the hallucination filter over a CACHE HIT and persist the result
     when the kept/suppressed split changed. Returns the entry to serve.
+
+    Gated on the entry's `rules_sig`: the filter re-runs only when the rule set
+    differs from the one the stored split was decided under. Rules almost never
+    change, and the pass is O(segments × rules) per WAV *per cover model* — on
+    an all-cached 400-WAV meeting it was the whole cost of a "re-transcribe"
+    that does nothing. A legacy entry (no sig) refilters once and is then
+    stamped, WITHOUT re-pointing `_primary` (an unchanged re-run must never
+    steal an operator's pin).
 
     The entry stores both halves of the last filter pass (`segments` and
     `suppressed_hallucinations`), so their concatenation IS the transcriber's
@@ -468,6 +490,9 @@ def _refilter_cached(
     halves back into temporal order, so a segment restored by a REMOVED rule
     lands where it belongs in the per-WAV sidecar (the merged view re-sorts by
     absolute start anyway)."""
+    sig = _rules_fingerprint(rules)
+    if existing.rules_sig == sig:
+        return existing
     raw_segments = tuple(existing.result.segments) + tuple(
         replace(seg, matched_rule=None) for seg in existing.result.suppressed_hallucinations
     )
@@ -477,7 +502,11 @@ def _refilter_cached(
         refiltered.segments == existing.result.segments
         and refiltered.suppressed_hallucinations == existing.result.suppressed_hallucinations
     ):
-        return existing
+        # Same split under a different rule set: stamp the sig so the next hit
+        # skips the pass entirely, leaving the primary pointer alone.
+        stamped = replace(existing, rules_sig=sig)
+        _write_entry(wav_path, stamped, backend=backend, model=model, make_primary=False)
+        return stamped
     refiltered = replace(
         refiltered,
         segments=tuple(sorted(refiltered.segments, key=_segment_order)),
@@ -485,7 +514,7 @@ def _refilter_cached(
     )
     # Keep the write-time envelope (transcribed_at / transcribe_ms / wav
     # fingerprint): no model ran, only the post-decode filter was re-decided.
-    refreshed = replace(existing, result=refiltered)
+    refreshed = replace(existing, result=refiltered, rules_sig=sig)
     _write_entry(wav_path, refreshed, backend=backend, model=model)
     return refreshed
 
@@ -582,17 +611,15 @@ def _primary_filename(transcripts_dir: Path, sidecars: list[Path] | None = None)
     # `max(..., key=p.stat)` let that FileNotFoundError escape read_cached /
     # read_primary_payload / read_primary_marker and 500 the poll for the
     # duration of the delete. Skip the vanished ones; None when none survive.
-    newest_name: str | None = None
-    newest_mtime = -1
+    survivors: list[tuple[int, str]] = []
     for path in sidecars:
-        try:
-            mtime = path.stat().st_mtime_ns
-        except OSError:
-            continue
-        if mtime > newest_mtime:
-            newest_mtime = mtime
-            newest_name = path.name
-    return newest_name
+        with contextlib.suppress(OSError):
+            survivors.append((path.stat().st_mtime_ns, path.name))
+    if not survivors:
+        return None
+    # `key=` on the mtime alone: ties keep the first-seen entry (a coarse-mtime
+    # filesystem can give two sidecars the same stamp), as the running max did.
+    return max(survivors, key=lambda s: s[0])[1]
 
 
 def _write_entry(
@@ -601,6 +628,7 @@ def _write_entry(
     *,
     backend: str,
     model: str,
+    make_primary: bool = True,
 ) -> None:
     _migrate_legacy_if_needed(wav_path)
     d = transcripts_dir(wav_path)
@@ -611,8 +639,11 @@ def _write_entry(
     )
     # A fresh write becomes the primary — operators flipping models on
     # the same WAV expect the dashboard to show the just-produced result
-    # unless they explicitly pinned a different primary.
-    atomic_write_text(d / _PRIMARY_POINTER, key)
+    # unless they explicitly pinned a different primary. `make_primary=False`
+    # is for a bookkeeping-only rewrite (the `rules_sig` stamp), which must not
+    # move the pointer.
+    if make_primary:
+        atomic_write_text(d / _PRIMARY_POINTER, key)
 
 
 def _migrate_legacy_if_needed(wav_path: Path) -> None:
@@ -698,6 +729,8 @@ def _to_dict(cached: CachedTranscription) -> dict[str, Any]:
     }
     if cached.wav_start is not None:
         out["wav_start"] = cached.wav_start.isoformat()
+    if cached.rules_sig is not None:
+        out["rules_sig"] = cached.rules_sig
     return out
 
 
@@ -742,4 +775,7 @@ def _from_dict(data: dict[str, Any]) -> CachedTranscription:
         # hit the cache normally.
         wav_size=int(data.get("wav_size", 0) or 0),
         wav_mtime_ns=int(data.get("wav_mtime_ns", 0) or 0),
+        # Absent on a pre-`rules_sig` sidecar → None, which never equals a
+        # fingerprint, so the entry refilters once and is stamped.
+        rules_sig=data.get("rules_sig") or None,
     )

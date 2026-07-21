@@ -260,14 +260,8 @@ describe("_resource: bounded cache", () => {
   });
 
   it("keeps the session in USE last-good under pressure from other sessions", async () => {
-    // `_lastGoodFiles` is capped oldest-first too, and `Map.set` on an EXISTING
-    // key does NOT move it — so the FOCUSED session, whose entry loadSessionFiles
-    // re-records on every poll tick, stayed pinned at the oldest position and was
-    // the first thing evicted once the tab had seen more sessions than the cap.
-    // Invisible while files_sig held still; the moment a sibling WAV finished
-    // transcribing and the sig flipped, the hold was gone and both WAV lists
-    // blanked to "loading…" on every per-track completion (#266, for exactly the
-    // session being worked on). The fix makes a re-record most-recently-used.
+    // The MRU eviction rule and the #266 blink behind it: see `_setMru`'s JSDoc
+    // in api.js. This pins it end-to-end through `loadSessionFiles`.
     //
     // The filler sessions come in through the empty-files_sig branch: it records
     // a last-good WITHOUT touching the network or the resource cache, so this

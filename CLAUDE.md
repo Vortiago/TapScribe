@@ -47,10 +47,15 @@
   tick after the selection clears (these BESPOKE gates are the only
   remaining users of the `markDeferredRender`/`consumeDeferredRender`
   tick-retry; canon `renderRegion` deferrals no longer need it). `live-channel.js` and `config-card.js`
-  render through it too, keeping only a 2-line `[data-cfg-key]` button
-  guard renderRegion deliberately doesn't cover (a focused save button
-  mid-putJson isn't an "interactive control" but must still hold the
-  swap). The People editor (`people.js`) renders its list through
+  render through it too, with NO bespoke guard of their own: a focused
+  `[data-cfg-key]` save button mid-`putJson` counts as an interactive
+  control in the seam's `_isInteractive`, so `renderRegion` holds the
+  swap (and `interactionHeld()` reports it to the poll pacer) without
+  the call site remembering anything. Both used to carry a hand-rolled
+  2-line guard that returned WITHOUT marking the deferred render, which
+  stranded the held-back render forever once the poll started 304ing —
+  the argument for folding it into the seam rather than repeating it.
+  The People editor (`people.js`) renders its list through
   `renderRegion` too — `renderRegion` is the pattern for every region,
   new or existing. The
   `test_next_poll_render_does_not_clobber_open_controls` sweep in
