@@ -71,7 +71,15 @@ class TapFanOut:
     ) -> None:
         self._recorder = recorder
         self._identity = identity
-        self._name = name
+        # Sanitise ONCE, here, where the bridge-supplied `?name=` enters the
+        # object — not deeper in at `roster.record_occurrence`. The name has
+        # eight consumers on this object (the ActiveStream row and thus every
+        # `/api/state` response, the UtteranceRecord, the resume comparison,
+        # the WAV filename), and capping it only at the roster left the raw
+        # value — control characters, unbounded length — reaching all of them.
+        # One call here means a new consumer inherits the guard instead of
+        # needing its own.
+        self._name = roster.sanitise_name(name)
         self._utterance_id = utterance_id
         # A fresh per-connection token. Two /tap WSes can briefly share one
         # utterance_id (a reconnect firing before the old WS is seen closed),

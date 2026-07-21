@@ -46,6 +46,12 @@ _VALID_SOURCES = ("recorded", "live")
 # privilege tap credential. 200 chars comfortably fits any real name.
 MAX_ROSTER_NAME_LEN = 200
 
+#: How much of an untrusted name is even LOOKED at. Generously above
+#: MAX_ROSTER_NAME_LEN so whitespace collapsing still has room to work on any
+#: plausible input, but bounded so the sanitiser's cost can't scale with what a
+#: bridge chooses to send. See the slice in `sanitise_name`.
+_SANITISE_INPUT_CAP = 4096
+
 
 def sanitise_name(name: str) -> str:
     """Cap and flatten a bridge-supplied `?name=` before it becomes durable
@@ -65,7 +71,16 @@ def sanitise_name(name: str) -> str:
     that exactly like the empty name it is (never blanking a stored one).
     Ordinary names are untouched: `str.isprintable()` keeps accents,
     apostrophes and hyphens."""
-    flattened = "".join(ch if ch.isprintable() else " " for ch in name or "")
+    # Slice FIRST. The cap below bounds what is STORED, not what is COMPUTED:
+    # applying the flatten/collapse passes to the raw value walked the whole
+    # unbounded string (plus a `.split()` list of every word) before truncating,
+    # so a 2 MB `?name=` cost ~280 ms and a 10 MB one over a second — all of it
+    # synchronous on the event loop, blocking every other request and every
+    # other tap. Whitespace collapsing can only ever shrink the string, so
+    # taking a generous prefix first cannot change the result for any input
+    # that survives the cap.
+    raw = (name or "")[:_SANITISE_INPUT_CAP]
+    flattened = "".join(ch if ch.isprintable() else " " for ch in raw)
     return " ".join(flattened.split())[:MAX_ROSTER_NAME_LEN].strip()
 
 

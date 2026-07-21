@@ -235,3 +235,46 @@ def test_stripped_dir_allows_a_legitimate_stripped_subdir(recordings_dir):
     result = session_paths.stripped_dir("20260516T130000Z")
     _assert_contained(result, recordings_dir)
     assert result.name == "stripped"
+
+
+# --- harm: a per-session resource must resolve INSIDE its own session --------
+
+
+def _plant_cross_session_symlink(recordings_dir: Path, name: str) -> Path:
+    """S1/<name> -> S2/<name>, both legitimately under RECORDINGS_DIR."""
+    (recordings_dir / "S1").mkdir(exist_ok=True)
+    (recordings_dir / "S2").mkdir(exist_ok=True)
+    victim = recordings_dir / "S2" / name
+    victim.write_bytes(b"S2 private")
+    (recordings_dir / "S1" / name).symlink_to(victim)
+    return victim
+
+
+@pytest.mark.parametrize(
+    ("label", "call"),
+    [
+        ("session_meta_path", lambda: session_paths.session_meta_path("S1")),
+        ("resolve_original_wav", lambda: session_paths.resolve_original_wav("S1", "leak.wav")),
+        ("resolve_wav", lambda: session_paths.resolve_wav("S1", "leak.wav")),
+    ],
+)
+def test_per_session_resolvers_refuse_a_symlink_into_another_session(recordings_dir, label, call):
+    """Root-scoped containment is not enough for a resolver keyed on a SESSION.
+
+    `stripped_dir` was hardened to assert containment under the resolved
+    session, but its siblings still only asked "is this under RECORDINGS_DIR?"
+    — which a `S1/<name> -> S2/<name>` symlink satisfies. So they handed back a
+    path belonging to a DIFFERENT session: `read_session_meta("S1")` returned
+    S2's label, and the transcribe path read S2's audio under S1's identity.
+    Every per-session resolver must be session-scoped, or the guarantee depends
+    on which helper the caller happened to reach for.
+    """
+    name = "session-meta.json" if label == "session_meta_path" else "leak.wav"
+    _plant_cross_session_symlink(recordings_dir, name)
+
+    try:
+        result = call()
+    except SessionPathError:
+        return  # refusing is the contract
+    real = os.path.realpath(result)
+    assert "S2" not in Path(real).parts, f"{label} handed back another session's path: {real}"

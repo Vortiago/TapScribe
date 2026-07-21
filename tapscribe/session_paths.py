@@ -143,6 +143,31 @@ def _contained_path(*parts: str, message: str = "session not found") -> Path:
     return path
 
 
+def _session_root(session: str, message: str = "session not found") -> str:
+    """The realpathed `<RECORDINGS_DIR>/<session>`, proven contained.
+
+    The base every PER-SESSION resolver scopes against. Root-scoped
+    containment is not enough for them: a `<session>/<name> -> <other
+    session>/<name>` symlink is genuinely under RECORDINGS_DIR, so the
+    root-scoped check passed it and the resolver handed back a path belonging
+    to a DIFFERENT session — `read_session_meta` returning another session's
+    label, the transcribe path reading another session's audio under this
+    session's identity, and `strip_session_locked` rmtree'ing a sibling.
+    """
+    return _assert_contained(config.RECORDINGS_DIR / _safe_part(session, "session"), message)
+
+
+def _in_session(session: str, *parts: str, message: str = "session not found") -> Path:
+    """Resolve `<session>/<parts...>`, proven contained under THAT session.
+
+    Use this for anything a session OWNS — its meta file, its roster, its
+    stripped/ dir, one of its WAVs. `_contained_path` (root-scoped) is only
+    correct for the session directory itself.
+    """
+    root = _session_root(session, message)
+    return Path(_assert_under(Path(root).joinpath(*parts), root, message))
+
+
 # ---------------------------------------------------------------------------
 # On-disk session layout — the canonical name for each per-session bookkeeping
 # file and the stripped/ subdir. The ONE owner of each literal: every reader,
@@ -162,7 +187,7 @@ DIRNAME_STRIPPED = "stripped"
 
 
 def session_meta_path(session: str) -> Path:
-    return _contained_path(_safe_part(session, "session"), FILENAME_META_JSON)
+    return _in_session(session, FILENAME_META_JSON)
 
 
 def stripped_dir(session: str) -> Path:
@@ -177,9 +202,7 @@ def stripped_dir(session: str) -> Path:
     delete a sibling session's WAVs. A resolver must never hand back a path
     belonging to a different session.
     """
-    session = _safe_part(session, "session")
-    session_real = _assert_contained(config.RECORDINGS_DIR / session)
-    return Path(_assert_under(Path(session_real) / DIRNAME_STRIPPED, session_real, "session not found"))
+    return _in_session(session, DIRNAME_STRIPPED)
 
 
 def resolve_session_dir(session: str) -> Path:
@@ -224,11 +247,7 @@ def resolve_original_wav(session: str, name: str) -> Path:
     missing originals) — it is `resolve_wav(..., source='original')` minus the
     existence/extension checks. The file-level 404 body ("not found") matches
     `resolve_wav` for the identical name-escape class."""
-    return _contained_path(
-        _safe_part(session, "session"),
-        _safe_part(name, "file"),
-        message="not found",
-    )
+    return _in_session(session, _safe_part(name, "file"), message="not found")
 
 
 def resolve_wav(session: str, name: str, source: str = "original") -> Path:
@@ -237,7 +256,10 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     can't escape RECORDINGS_DIR. 404 on any failure."""
     name = _safe_part(name, "file")
     source_dir = resolve_source_dir(session, source)
-    real = _assert_contained(source_dir / name, "not found", exc=WavNotFound)
+    # Scoped to the SOURCE dir (already proven session-contained), not the
+    # archive root: a `<session>/x.wav -> <other session>/y.wav` symlink is
+    # root-contained and would otherwise resolve to another session's audio.
+    real = _assert_under(source_dir / name, os.path.realpath(source_dir), "not found", exc=WavNotFound)
     if not os.path.isfile(real) or not real.lower().endswith(".wav"):
         raise WavNotFound("not found")
     return Path(real)
