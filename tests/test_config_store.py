@@ -148,7 +148,7 @@ _CACHED_WRITERS = [
     ),
     pytest.param(
         lambda: _config.LANGUAGES_FILE.write_text("da,no", encoding="utf-8"),
-        lambda: read_languages(),
+        read_languages,
         lambda: write_languages("en"),
         ("da", "no"),
         ("en",),

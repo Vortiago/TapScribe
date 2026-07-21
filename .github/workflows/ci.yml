@@ -376,9 +376,12 @@ jobs:
           else
             pip install -e . pytest pytest-asyncio
           fi
-          if [ -n "${{ matrix.pre_install }}" ]; then
-            ${{ matrix.pre_install }}
-          fi
+          # `|| 'true'` is load-bearing: a lane WITHOUT pre_install renders the
+          # expression to an empty string, and an `if ...; then <empty>; fi` is a
+          # bash SYNTAX error — which kills the step before it runs anything, so
+          # every lane that omitted the key went red at once. No conditional, no
+          # empty body.
+          ${{ matrix.pre_install || 'true' }}
 
       # The smokes are importorskip-gated, so an unimportable runtime would
       # otherwise skip them and leave the lane GREEN — the exact silent-skip
