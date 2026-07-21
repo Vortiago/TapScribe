@@ -398,7 +398,28 @@ class FakeWlkThread:
         try:
             loop.run_until_complete(self._serve())
         finally:
-            loop.close()
+            # Drain BEFORE closing. `run_until_complete` returns the moment
+            # `_serve` does, but `_serve`'s own cleanup (`connection.close()`,
+            # `server.close()`) leaves work behind: the per-connection
+            # `_handler` tasks are still unwinding, and websockets/asyncio
+            # schedule the actual transport teardown as callbacks. Closing the
+            # loop here abandoned all of it, so the sockets were only finalized
+            # later by the GARBAGE COLLECTOR — which emits
+            # `ResourceWarning: unclosed transport`. With
+            # `filterwarnings = ["error"]` pytest turns that into an error and
+            # blames whichever test happened to be running when the GC fired,
+            # so this surfaced as a ~1-in-8 failure that moved between tests in
+            # this file and vanished under `-k` isolation. Draining makes
+            # teardown deterministic and the warning impossible.
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
 
     async def _serve(self) -> None:
         # One pre-bound socket (first resolved address): host+port=0
