@@ -216,17 +216,23 @@ def resolve_batch_model(*, warn: bool = True) -> str:
     *languages*, not a model (ADR-0011), so the routes resolve the generalist
     here rather than taking it from the request body.
 
+    The read-time mirror of `config_store._check_batch_model`: catalog
+    membership alone is NOT enough — a LIVE-ONLY entry (Moonshine) has no
+    batch adapter and would raise `NotImplementedError` at load time, so an
+    id that doesn't `supports_context("batch")` falls back like an unknown one.
+
     `warn=False` suppresses the invalid-config log line — pass it from the
     ~2 Hz `/api/state` poll (which resolves the generalist only to DISPLAY it),
     so a stale batch-model.txt warns once per real transcribe, not twice a
     second."""
     configured = read_config("batch-model")
     if configured:
-        if REGISTRY.get(configured) is not None:
+        entry = REGISTRY.get(configured)
+        if entry is not None and entry.supports_context("batch"):
             return configured
         if warn:
             print(
-                f"[tapscribe] configured batch model {configured!r} is not in the catalog — "
+                f"[tapscribe] configured batch model {configured!r} is not a usable batch model — "
                 f"falling back to {DEFAULT_BATCH_MODEL!r}",
                 flush=True,
             )
@@ -370,7 +376,7 @@ def _precheck_wav(path: Path, original_path: Path) -> None:
         )
 
 
-async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # noqa: ARG001 — Recorder unused for the single-WAV path today but kept for symmetry with transcribe_session and so future per-WAV state (e.g. per-tap overrides) has a place to land
+async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:
     """Transcribe one WAV, running the meeting's cover as a one-WAV slice
     (ADR-0011): the generalist plus a specialist for any of the meeting's
     candidate languages that has one, then point `_primary` at the selector's
@@ -378,36 +384,46 @@ async def transcribe_one(recorder: Recorder, req: BatchOneRequest) -> dict:  # n
     Returns the winning sidecar's raw JSON dict so the wire shape callers expect
     is preserved.
 
+    Brackets the whole run in `recorder.jobs.run(...)` — the Session job seam.
+    A manual per-WAV re-transcribe is a heavy job like the range form: without
+    the claim it runs CONCURRENTLY with an in-flight session/pipeline job,
+    which loads a second cover (doubling peak memory, defeating `_run_cover`'s
+    one-model-resident design) and races the other run over this WAV's
+    `_primary` pointer. The claim brackets the pre-check too, so a busy session
+    gets `SessionBusy` before any disk work — the 409 the end-of-meeting
+    pipeline's docstring promises for the chain's full duration.
+
     Pre-checks the ORIGINAL WAV's size and RMS (offloaded via
     `asyncio.to_thread` — issue #214) so the operator gets fast
     `WavUnreadable` / `WavTooQuiet` feedback on noise files instead of
     waiting for the model to chew through silence and produce a
     hallucinated transcript, without blocking the event loop while the
     file is read."""
-    path = resolve_wav(req.session, req.name, req.source)
-    original_path = resolve_original_wav(req.session, req.name)
-    await asyncio.to_thread(_precheck_wav, path, original_path)
+    async with recorder.jobs.run(req.session, kind="transcribe", total=1, model=req.model):
+        path = resolve_wav(req.session, req.name, req.source)
+        original_path = resolve_original_wav(req.session, req.name)
+        await asyncio.to_thread(_precheck_wav, path, original_path)
 
-    # Same language policy + cover as the session range (ADR-0011): declare
-    # languages, not a model. An explicit per-job source_lang still pins and
-    # covers nothing else; the multi-language default runs the ensemble.
-    inv, models, cover_languages = _resolve_cover(req)
+        # Same language policy + cover as the session range (ADR-0011): declare
+        # languages, not a model. An explicit per-job source_lang still pins and
+        # covers nothing else; the multi-language default runs the ensemble.
+        inv, models, cover_languages = _resolve_cover(req)
 
-    per_wav = await _run_cover(
-        [path],
-        models=models,
-        generalist=req.model,
-        backend=req.backend,
-        inv=inv,
-        force=True,
-        source=req.source,
-    )
-    # Point _primary at this run's winner (see `_select_primaries`), so the payload
-    # we return is the transcript we just produced rather than a stale pointer left
-    # by an earlier cover with different languages.
-    _select_primaries([path], per_wav, cover_languages=cover_languages)
+        per_wav = await _run_cover(
+            [path],
+            models=models,
+            generalist=req.model,
+            backend=req.backend,
+            inv=inv,
+            force=True,
+            source=req.source,
+        )
+        # Point _primary at this run's winner (see `_select_primaries`), so the
+        # payload we return is the transcript we just produced rather than a stale
+        # pointer left by an earlier cover with different languages.
+        _select_primaries([path], per_wav, cover_languages=cover_languages)
 
-    payload = read_primary_payload(path)
+        payload = read_primary_payload(path)
     if payload is None:
         # cached_transcribe just wrote the sidecar — read_primary_payload
         # returning None here means the cache layout migration or write

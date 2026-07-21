@@ -239,6 +239,76 @@ async def test_transcribe_one_precheck_runs_off_the_event_loop(
     assert seen_is_main == [False], seen_is_main
 
 
+async def test_transcribe_one_raises_session_busy_when_slot_taken(
+    recorder_under_test, install_stub_transcriber
+):
+    """The manual per-WAV re-transcribe is a heavy job like any other: while a
+    session/pipeline job holds the slot it must get `SessionBusy`, not run
+    concurrently. Two covers resident at once doubles peak memory, and both
+    runs repoint the same WAV's `_primary` — a race over which transcript
+    wins. The verdict must land BEFORE any work (the WAV need not even exist)."""
+    install_stub_transcriber(TranscriberStub(backend="fake-be", model="fake-m"))
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+    await recorder_under_test.jobs.claim(
+        JobState(
+            session="s",
+            kind="pipeline",
+            current=0,
+            total=1,
+            started_at=datetime.now(UTC),
+            status="transcribing",
+        )
+    )
+
+    request = BatchOneRequest(
+        session="s",
+        name=WAV_NAME,
+        source="original",
+        model="fake-m",
+        backend="cpu",
+        source_lang=None,
+    )
+    with pytest.raises(SessionBusy):
+        await transcribe_one(recorder_under_test, request)
+
+    # The foreign claim is intact — a refused run never releases someone
+    # else's slot.
+    held = recorder_under_test.jobs.get("s")
+    assert held is not None and held.kind == "pipeline"
+
+
+async def test_transcribe_one_claims_and_releases_the_session_slot(
+    recorder_under_test, install_stub_transcriber
+):
+    """The dual: a successful manual transcribe HOLDS the slot for its
+    duration (so a concurrent trigger 409s) and releases it on the way out."""
+    seen: list[str | None] = []
+
+    class _SlotWatchingStub(TranscriberStub):
+        def transcribe(self, path, **kw):
+            held = recorder_under_test.jobs.get("s")
+            seen.append(held.kind if held is not None else None)
+            return super().transcribe(path, **kw)
+
+    install_stub_transcriber(_SlotWatchingStub(backend="fake-be", model="fake-m", text="hi"))
+    seed_session(recorder_under_test.recordings_dir, "s", [WAV_NAME])
+
+    await transcribe_one(
+        recorder_under_test,
+        BatchOneRequest(
+            session="s",
+            name=WAV_NAME,
+            source="original",
+            model="fake-m",
+            backend="cpu",
+            source_lang=None,
+        ),
+    )
+
+    assert seen and all(kind == "transcribe" for kind in seen), seen
+    assert recorder_under_test.jobs.get("s") is None
+
+
 # ---------------------------------------------------------------------------
 # transcribe_session — happy path + JobTracker + range errors
 # ---------------------------------------------------------------------------
@@ -1205,7 +1275,7 @@ def test_resolve_batch_model_warn_flag_gates_the_invalid_config_log(recorder_und
     (recorder_under_test.config_dir / "batch-model.txt").write_text("not-a-real-model", encoding="utf-8")
 
     assert resolve_batch_model(warn=False) == DEFAULT_BATCH_MODEL
-    assert "not in the catalog" not in capsys.readouterr().out  # poll path: silent
+    assert "not a usable batch model" not in capsys.readouterr().out  # poll path: silent
 
     assert resolve_batch_model(warn=True) == DEFAULT_BATCH_MODEL
-    assert "not in the catalog" in capsys.readouterr().out  # on-demand: warns once
+    assert "not a usable batch model" in capsys.readouterr().out  # on-demand: warns once

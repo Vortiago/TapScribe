@@ -220,6 +220,42 @@ def test_apply_moves_matching_segment_to_suppressed_with_rule_annotated(tmp_conf
     assert sup.matched_rule == "amara.org"
 
 
+def test_apply_drops_suppressed_text_from_the_joined_plain_text(tmp_config_dir):
+    """`result.text` is what `wav_cache._to_dict` writes verbatim into the
+    sidecar, so leaving it un-recomputed persists the hallucination the filter
+    just removed — a wrong word count in the Transcript view's cached-variants
+    list today, and a re-introduction vector for any future consumer of the
+    sidecar's text."""
+    (tmp_config_dir / "hallucinations.txt").write_text("amara.org\n", encoding="utf-8")
+    rules = hallucinations.parse_rules()
+    keep = TranscriptionSegment(start=0.0, end=1.0, text="welcome to the meeting")
+    drop = TranscriptionSegment(start=2.0, end=3.0, text="Subtitles by the Amara.org community")
+    out = hallucinations.apply(_result_with((keep, drop)), rules=rules)
+
+    assert "Amara.org" not in out.text
+    assert "welcome to the meeting" in out.text
+
+
+def test_apply_leaves_empty_text_when_every_segment_is_suppressed(tmp_config_dir):
+    """The motivating case: a WAV whose ONLY segment is a hallucination must
+    not persist `segments: []` alongside the hallucinated text."""
+    (tmp_config_dir / "hallucinations.txt").write_text("amara.org\n", encoding="utf-8")
+    rules = hallucinations.parse_rules()
+    only = TranscriptionSegment(start=0.0, end=3.0, text="Subtitles by the Amara.org community")
+    out = hallucinations.apply(_result_with((only,)), rules=rules)
+
+    assert out.segments == ()
+    assert out.text == ""
+
+
+def test_apply_with_empty_rules_leaves_text_untouched():
+    """The no-rules early return must stay byte-for-byte identity — it is the
+    hot path for every WAV on a recorder with no rules configured."""
+    seg = TranscriptionSegment(start=0.0, end=1.0, text="hello world")
+    result = _result_with((seg,))
+    assert hallucinations.apply(result, rules=[]).text == result.text
+
+
 def test_apply_preserves_segment_order(tmp_config_dir):
     (tmp_config_dir / "hallucinations.txt").write_text("exact:thank you\n", encoding="utf-8")
     rules = hallucinations.parse_rules()

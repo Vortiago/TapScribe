@@ -142,18 +142,28 @@ def _check_hallucinations(content: str) -> None:
 def _check_batch_model(model_id: str) -> None:
     """WRITE-time check for the "batch-model" key: the batch default feeds
     the end-of-meeting pipeline's model loader with no operator in the loop,
-    so an unknown id must never land on disk (`ValueError` → the config PUT's
+    so an unusable id must never land on disk (`ValueError` → the config PUT's
     400). Empty clears the override (back to the bundled default). The
     catalog import is lazy to keep this module free of the transcribers
     dependency for every other caller.
+
+    "In the catalog" is NOT enough: a LIVE-ONLY entry (`contexts={"live"}` —
+    the Moonshine rows) has no batch adapter at all, so resolving it for batch
+    raises a raw `NotImplementedError` at the pipeline's transcribe stage. The
+    id must also `supports_context("batch")`. Deliberately NOT gated on
+    `entry.available`: batch resolves its backend at call time, so an operator
+    may legitimately set an id before installing the extra —
+    `live_control.plan_live` checks availability because the live channel
+    starts immediately.
 
     Deliberately NOT applied to "live-model": there an unknown id surfaces
     as a clear error at /api/live/start time, not silently."""
     if model_id:
         from .transcribers.catalog import REGISTRY
 
-        if REGISTRY.get(model_id) is None:
-            raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
+        entry = REGISTRY.get(model_id)
+        if entry is None or not entry.supports_context("batch"):
+            raise ValueError(f"unusable batch model id: {model_id!r} (no batch model by that name)")
 
 
 def _check_idle_ttl(content: str) -> None:
@@ -234,12 +244,7 @@ def write_config(key: str, content: str) -> None:
         content = content.strip()
     if spec.check is not None:
         spec.check(content)
-    path = getattr(config, spec.attr)
-    _write_text_file_atomic(path, validate_config_text(content))
-    # Structural invalidation: our own write must never be served stale, even
-    # if the filesystem's stat signature failed to move — the next read
-    # re-reads what we just wrote.
-    _CONFIG_TEXT_CACHE.pop(str(path), None)
+    _write_text_file_atomic(getattr(config, spec.attr), validate_config_text(content))
 
 
 # Cap pasted prompts/hotwords at 4000 chars. Whisper's init_prompt is
@@ -290,11 +295,24 @@ def atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
+def _write_and_invalidate(path: Path, content: str) -> None:
+    """Atomic write of a file backed by `_read_config_text_cached`, plus the
+    structural cache invalidation every such write owes: our own write must
+    never be served stale, even if the filesystem's stat signature failed to
+    move (a coarse-mtime filesystem + a same-size rewrite). ONE owner, so the
+    three writers over that cache — `write_config`, `write_summarizer_config`,
+    `write_languages` — can't diverge on whether they remembered the pop."""
+    atomic_write_text(path, content)
+    _CONFIG_TEXT_CACHE.pop(str(path), None)
+
+
 def _write_text_file_atomic(path: Path, content: str) -> None:
-    """Atomic write of a config text file. CRLF is normalised to LF so
-    the Whisper CLI doesn't see literal `\r` in the prompt."""
+    """`_write_and_invalidate` for a config TEXT file: CRLF is normalised to
+    LF so the Whisper CLI doesn't see literal `\r` in the prompt. (The JSON
+    writer skips the normalisation — json.dumps escapes any literal CR — and
+    calls `_write_and_invalidate` directly.)"""
     normalised = content.replace("\r\n", "\n").replace("\r", "\n")
-    atomic_write_text(path, normalised)
+    _write_and_invalidate(path, normalised)
 
 
 def read_summarizer_config() -> dict:
@@ -423,7 +441,7 @@ def write_summarizer_config(cfg: dict) -> dict:
         "base_url": base_url,
         "api_key": api_key,
     }
-    atomic_write_text(config.SUMMARIZER_CONFIG_FILE, json.dumps(stored, indent=2) + "\n")
+    _write_and_invalidate(config.SUMMARIZER_CONFIG_FILE, json.dumps(stored, indent=2) + "\n")
     return stored
 
 

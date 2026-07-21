@@ -5,14 +5,15 @@ orchestrator shape (resolve inputs, bracket the session's job slot via
 `recorder.jobs.run`, run the work off the event loop) and the same FastAPI-free
 contract — domain errors out, the route maps them to HTTP codes. `SessionBusy`
 lives in `tapscribe.recorder` next to JobTracker (the cm raises it); the "one
-heavy job per session" rule now has three claimants (transcribe / strip /
-summarize), all going through `run`.
+heavy job per session" rule has four claimants (transcribe / strip / summarize
+via `run`, plus the end-of-meeting pipeline, which hand-rolls the claim because
+claim and release live in different call frames — see `batch_pipeline`).
 
-This is the tracer-bullet slice (#82): the **Command** source only.
-Persistence (#83): the summary is written to session-summary.json next to the
-merged transcript and read back lazily. Saved config (source / command /
-prompt per request today) is #84 and layers on later without changing this
-seam.
+All three summarizer sources are wired: `load_summarizer` dispatches
+command (#82) / local (#86) / api (#85). The summary is persisted to
+session-summary.json next to the merged transcript and read back lazily (#83),
+and the operator's saved defaults resolve through `effective_summarizer_config`
+below (#84) — session-meta override › global summarizer.json › built-ins.
 """
 
 from __future__ import annotations
@@ -44,16 +45,20 @@ class SummarizeSessionRequest:
     """Inputs for summarizing a session. The operator's saved defaults
     (source / command / model / prompt, #84) live in `config/summarizer.json`
     and are resolved via `effective_summarizer_config`; direct callers may
-    still pass source / command / prompt explicitly per request. The prompt
-    default lives HERE so `SummarizeSessionRequest(session=…)` is the
-    canonical invocation — the same convention as `StripSessionRequest`'s knob
-    defaults."""
+    still pass source / command / prompt explicitly per request.
+
+    The knob defaults live HERE (the same convention as `StripSessionRequest`)
+    and deliberately MIRROR `effective_summarizer_config`'s built-ins, so
+    `SummarizeSessionRequest(session=…)` names the same source the routed and
+    pipeline paths resolve to. `source="command"` used to be the default, which
+    made that bare invocation raise `SummarizerUnavailable` before any work —
+    the command source needs a non-empty `command` and there is no default one."""
 
     session: str
-    # NOTE (#84): the routed/pipeline paths now always pass explicit values
-    # resolved via `effective_summarizer_config` (whose built-in source is
-    # "local"); these dataclass defaults only apply to direct callers.
-    source: str = "command"
+    # NOTE (#84): the routed/pipeline paths always pass explicit values resolved
+    # via `effective_summarizer_config`; these dataclass defaults only apply to
+    # direct callers, and match that resolver's built-ins.
+    source: str = "local"
     command: str = ""
     model: str = ""  # local/api source: which model to use (empty = default)
     max_tokens: int | None = None  # local source: OUTPUT cap; api: omit when None

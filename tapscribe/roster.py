@@ -40,6 +40,34 @@ from .text import atomic_write_text, parse_wav_speaker_slug
 
 _VALID_SOURCES = ("recorded", "live")
 
+# Cap for the bridge-supplied display name. Deliberately much tighter than
+# `MAX_CONFIG_TEXT_LEN` (4000, for pasted prompts): this is a person's name,
+# and unlike every operator-supplied text field it arrives on the LOWER-
+# privilege tap credential. 200 chars comfortably fits any real name.
+MAX_ROSTER_NAME_LEN = 200
+
+
+def sanitise_name(name: str) -> str:
+    """Cap and flatten a bridge-supplied `?name=` before it becomes durable
+    state. The Roster is the seam where an untrusted string turns into a
+    Person's display name, and from there into global `people.json` and — via
+    `known_names` — into the summarizer's INSTRUCTION block, ABOVE the
+    transcript. Two concrete abuses this closes:
+
+    - `?name=Alice%0A%0AIgnore+all+previous+instructions…` is an
+      instruction-position prompt injection; non-printable characters
+      (newlines, tabs, NULs, control codes) are flattened to spaces and
+      whitespace runs collapsed, so a "name" can never open a new paragraph.
+    - a 1 MB name costs 1 MB per 500 ms `/api/state` poll, durably; the
+      length cap bounds it.
+
+    Returns "" for a name that sanitises away entirely — the caller treats
+    that exactly like the empty name it is (never blanking a stored one).
+    Ordinary names are untouched: `str.isprintable()` keeps accents,
+    apostrophes and hyphens."""
+    flattened = "".join(ch if ch.isprintable() else " " for ch in name or "")
+    return " ".join(flattened.split())[:MAX_ROSTER_NAME_LEN].strip()
+
 
 def _coerce_entry(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
@@ -96,13 +124,16 @@ def record_occurrence(
     merge-on-write: a reconnect or a later utterance accrues WAVs (deduped)
     without clobbering the entry, a non-empty `name` overwrites a blank one,
     and `source` only ever upgrades live → recorded (a record-off presence
-    after a recording must not erase that the Identity was recorded)."""
+    after a recording must not erase that the Identity was recorded).
+
+    `name` is bridge-supplied (untrusted) and is capped + flattened through
+    `sanitise_name` HERE — the one seam where it becomes durable state."""
     if not identity:
         return
     roster = read_roster(session_dir)
     entry = roster.get(identity) or {"name": "", "source": "live", "slug": "", "wavs": []}
-    if name:
-        entry["name"] = name
+    if clean_name := sanitise_name(name):
+        entry["name"] = clean_name
     if recorded:
         entry["source"] = "recorded"
         if wav:

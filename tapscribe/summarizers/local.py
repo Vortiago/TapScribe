@@ -64,6 +64,29 @@ def _model_load_failed_message(backend: str, model_repo: str, why: object) -> st
     )
 
 
+def _gguf_generation_failed_message(n_ctx: int, max_tokens: int, why: object) -> str:
+    """The operator-facing error when the GGUF backend refuses to generate.
+
+    Overwhelmingly this is the context window: llama-cpp raises
+    `ValueError: Requested tokens (N) exceed context window of <n_ctx>` from
+    INSIDE generation — outside `_build_generate_fn`'s try, which wraps only
+    the load — so it used to surface as a bare 500. The window in force is
+    `TAPSCRIBE_SUMMARIZE_GGUF_CTX` (8192 by default), and `max_tokens` is
+    carved out of it for the OUTPUT, leaving the rest for the transcript —
+    roughly 25-30 minutes of meeting at the defaults. Note the top of
+    `MAX_TOKENS_BOUNDS` (8192) equals the default window, so a maxed-out
+    output cap leaves zero input room. The original error is quoted so a
+    NON-window ValueError is never mislabelled."""
+    room = n_ctx - max_tokens
+    return (
+        f"the local summarizer couldn't generate a summary ({why}). This is almost always the "
+        f"transcript being too long for the {n_ctx}-token window: the output cap of {max_tokens} "
+        f"tokens leaves ~{room} tokens for the transcript. Raise "
+        f"{catalog.ENV_GGUF_CTX}=<tokens> (bounded by host RAM) — or lower "
+        f"{catalog.ENV_MAX_TOKENS} — and summarize again."
+    )
+
+
 def _build_local_messages(transcript: str, prompt: str) -> list[dict[str, str]]:
     """The chat messages handed to the local model: a single user turn carrying
     the system framing, the operator's prompt, and the transcript. One turn (no
@@ -183,7 +206,7 @@ class LocalSummarizer:
         # equivalent downstream. `SummaryResult` below persists the ORIGINAL
         # operator `prompt`, not this augmented one.
         instruction = fold_hint(resolve_prompt(prompt), names)
-        summary = (generate(transcript, instruction) or "").strip()
+        summary = (self._generate_checked(generate, transcript, instruction) or "").strip()
         took_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
         if not summary:
             # Exit-0-but-blank is a useless summary — same contract as the
@@ -197,6 +220,26 @@ class LocalSummarizer:
             took_ms=took_ms,
             created_at=started.isoformat(),
         )
+
+    def _generate_checked(self, generate: LocalGenerateFn, transcript: str, instruction: str) -> str:
+        """Run the generation seam, budgeting the GGUF backend's fixed input
+        window. `_build_generate_fn`'s try wraps only the model LOAD, so an
+        overflow raised during generation had no domain-error mapping at all
+        and reached the route as an untyped 500 (it isn't in
+        `_DOMAIN_ERROR_STATUS`). Mapping it to `SummarizerFailed` (→ 502) hands
+        the operator the knob to raise instead of a traceback.
+
+        GGUF only: the MLX path has no `n_ctx` cap (it feeds the model the whole
+        prompt), so a ValueError there means something else entirely and is left
+        to propagate rather than be blamed on a window that doesn't exist."""
+        if self._backend != "gguf":
+            return generate(transcript, instruction)
+        try:
+            return generate(transcript, instruction)
+        except ValueError as e:
+            raise SummarizerFailed(
+                _gguf_generation_failed_message(catalog.default_gguf_ctx(), self._max_tokens, e)
+            ) from e
 
     def _build_generate_fn(self) -> LocalGenerateFn:
         """Lazy-import + load the routed backend. An ImportError (extra

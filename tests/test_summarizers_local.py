@@ -484,3 +484,71 @@ def test_local_summarizer_persists_operator_prompt_not_the_hint(reset_available_
     )
     assert res.prompt == "Summarize"
     assert "Alice Havso" not in res.prompt
+
+
+# ---------------------------------------------------------------------------
+# GGUF context window — advertise the EFFECTIVE one, and translate an overflow
+# ---------------------------------------------------------------------------
+#
+# The GGUF/CPU path loads `n_ctx = default_gguf_ctx()` (8192 by default) while
+# the catalog row advertises the model's NATIVE 128K window. On every
+# non-Apple-Silicon host the dropdown therefore promised "128K ctx" for a run
+# that actually had 8192 — and llama-cpp's overflow raises a bare `ValueError`
+# from INSIDE `_generate`, outside `_build_generate_fn`'s try, so it reached the
+# route as an untyped 500 instead of a domain error with remediation.
+
+
+def test_gguf_catalog_advertises_the_effective_window_not_the_native_one(
+    reset_available_backends, monkeypatch
+):
+    monkeypatch.setenv("TAPSCRIBE_SUMMARIZE_GGUF_CTX", "8192")
+    cat = summary_model_catalog("gguf")
+    assert cat["models"], "the gguf catalog must list at least the bundled default"
+    for row in cat["models"]:
+        assert row["context_tokens"] == 8192
+
+
+def test_gguf_catalog_window_follows_the_operator_env_knob(reset_available_backends, monkeypatch):
+    """Raising TAPSCRIBE_SUMMARIZE_GGUF_CTX is the documented remediation, so
+    the dropdown has to reflect it — and must never exceed the model's native
+    window either."""
+    monkeypatch.setenv("TAPSCRIBE_SUMMARIZE_GGUF_CTX", "32768")
+    assert all(row["context_tokens"] == 32768 for row in summary_model_catalog("gguf")["models"])
+
+
+def test_mlx_catalog_still_reports_the_full_native_window(reset_available_backends, monkeypatch):
+    """The MLX path feeds the model its whole prompt (no n_ctx cap), so capping
+    its advertised window would be a regression — the 128K rows exist precisely
+    for genuinely long meetings."""
+    monkeypatch.setenv("TAPSCRIBE_SUMMARIZE_GGUF_CTX", "8192")
+    windows = {row["repo_id"]: row["context_tokens"] for row in summary_model_catalog("mlx")["models"]}
+    assert max(windows.values()) > 8192
+
+
+def test_gguf_context_overflow_becomes_a_domain_error_not_a_bare_500(reset_available_backends):
+    """llama-cpp raises `ValueError: Requested tokens (N) exceed context window
+    of 8192` from inside generation. Unmapped it is a 500; as `SummarizerFailed`
+    it is a 502 whose message tells the operator which knob to raise."""
+
+    def _overflows(transcript, prompt):  # noqa: ARG001
+        raise ValueError("Requested tokens (11003) exceed context window of 8192")
+
+    s = LocalSummarizer(backend="gguf", generate_fn=_overflows)
+    with pytest.raises(SummarizerFailed) as excinfo:
+        s.summarize("a very long transcript", prompt="Summarize")
+    message = str(excinfo.value)
+    assert "TAPSCRIBE_SUMMARIZE_GGUF_CTX" in message
+    assert "8192" in message  # the window actually in force
+
+
+def test_mlx_generation_valueerror_is_not_relabelled_as_a_context_overflow(reset_available_backends):
+    """The translation is GGUF-specific — the MLX path has no n_ctx cap, so a
+    ValueError there means something else and must not be blamed on the window."""
+
+    def _boom(transcript, prompt):  # noqa: ARG001
+        raise ValueError("something else entirely")
+
+    s = LocalSummarizer(backend="mlx", generate_fn=_boom)
+    with pytest.raises(ValueError) as excinfo:
+        s.summarize("t", prompt="p")
+    assert "TAPSCRIBE_SUMMARIZE_GGUF_CTX" not in str(excinfo.value)

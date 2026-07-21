@@ -135,6 +135,13 @@ def apply(result: TranscriptionResult, *, rules: list[dict[str, Any]]) -> Transc
     Existing `suppressed_hallucinations` entries on the input (e.g. from
     a chained earlier filter) are preserved by appending the new
     suppressions on the end.
+
+    `.text` — the joined plain text — is recomputed from the KEPT segments,
+    the same `" ".join(...).strip()` the adapters build it with. It has to be:
+    `wav_cache._to_dict` writes `result.text` verbatim into the sidecar, so a
+    stale join would persist the very phrase the filter just dropped (a WAV
+    whose only segment is "Subtitles by the Amara.org community" would store
+    `segments: []` next to the hallucinated text).
     """
     if not rules:
         # Still return a fresh instance so the contract "apply produces a
@@ -154,6 +161,7 @@ def apply(result: TranscriptionResult, *, rules: list[dict[str, Any]]) -> Transc
     return dataclasses.replace(
         result,
         segments=tuple(kept),
+        text=" ".join(s.text for s in kept if s.text).strip(),
         suppressed_hallucinations=tuple(result.suppressed_hallucinations) + tuple(new_suppressed),
     )
 
