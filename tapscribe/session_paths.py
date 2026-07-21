@@ -6,7 +6,7 @@ constructions because the parts come from HTTP requests; the two-layer
 sanitiser lives here ONCE so every caller crosses it instead of re-deriving the
 guard:
 
-1. `_safe_part` rejects path separators, `.`/`..`, NUL, empty, and
+1. `_safe_part` rejects path separators, `.`/`..`, NUL, empty, over-long, and
    platform-absolute parts at the lowest path-building level.
 2. each `resolve_*` then realpaths the candidate via `_assert_contained` and
    confirms it stays under `RECORDINGS_DIR`. (CodeQL's `py/path-injection`
@@ -65,9 +65,25 @@ class StrippedMissing(SessionPathError):
 # the guard rather than relying on each route to remember it.
 _UNSAFE_PART_RE = re.compile(r"[\\/\x00]|^\.\.?$|^$")
 
+# Upper bound on one path component. Without it an over-NAME_MAX part clears
+# both sanitiser layers and only fails deep inside the filesystem call —
+# `create_session_dir("a" * 300)`'s `os.makedirs` raises a bare
+# `OSError: [Errno 36] File name too long`, which is not a `SessionPathError`
+# and so is absent from `app._DOMAIN_ERROR_STATUS`: `PUT /api/sessions/<300
+# chars>/meta` answered 500 while `resolve_session_dir` on the same id answered
+# 404. Length is just one more unsafe-input class, so it is refused here at
+# layer 1 with every other one.
+#
+# 128 clears real input by a wide margin: session ids are ISO stamps (~22
+# chars), and the longest WAV name `build_recorder_wav_name` can mint is 109
+# (20-char stamp + 64-char `safe_name` speaker cap + the 10-char
+# `safe_name(identity)[:10]` slug + an 8-char uuid + separators). It also stays
+# well under Windows' 260-char MAX_PATH once the recordings root is prefixed.
+_MAX_PART_LEN = 128
+
 
 def _safe_part(part: object, what: str = "session") -> str:
-    if not isinstance(part, str) or _UNSAFE_PART_RE.search(part):
+    if not isinstance(part, str) or len(part) > _MAX_PART_LEN or _UNSAFE_PART_RE.search(part):
         raise SessionNotFound(f"{what} not found")
     # Defense-in-depth: pathlib's `/` operator treats an absolute argument
     # as overriding the parent — `Path("D:/rec") / "C:foo"` is `C:foo` on
