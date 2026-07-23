@@ -28,6 +28,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import tapscribe.strip_meta as strip_meta
+
 from . import config
 from .audio import wav_duration_s
 from .name_resolution import known_names
@@ -262,47 +264,9 @@ def read_wav_transcript(session: str, name: str, source: str = "original") -> di
     return read_primary_payload(wav_path)
 
 
-def valid_strip_meta(meta: Any) -> dict[str, Any] | None:
-    """The v2 sidecar shape gate ({"files": {...}}): shared by every reader of
-    strip-meta.json — the two RECORDINGS_DIR-contained readers below, and
-    `session_merge.select_session_wavs`'s direct read (that function is pure
-    and has no RECORDINGS_DIR of its own to check against) — so all three
-    enforce the one shape contract."""
-    if not isinstance(meta, dict) or not isinstance(meta.get("files"), dict):
-        return None
-    return meta
-
-
-def strip_meta_owner_by_clip(meta: dict[str, Any]) -> dict[str, str]:
-    """Reverse-index an already shape-validated strip-meta.json (`valid_strip_meta`'s
-    return) into `{clip_name: owning_original_name}`, from
-    `files[<original>].spans[].name`. Shared by `build_session_files`'s
-    per-original region bucketing and `select_session_wavs`'s silence gate —
-    both need the same clip->original mapping, just for different purposes,
-    so the reverse-index loop has exactly one owner."""
-    owner_by_clip: dict[str, str] = {}
-    for orig_name, entry in meta["files"].items():
-        if isinstance(entry, dict):
-            for span in entry.get("spans") or []:
-                # A shape-valid sidecar can still carry a non-dict span
-                # (hand-edited or partially written); skip it rather than
-                # let span.get() crash a caller on the once-per-second poll.
-                if isinstance(span, dict) and isinstance(span.get("name"), str):
-                    owner_by_clip[span["name"]] = orig_name
-    return owner_by_clip
-
-
-def read_strip_meta(stripped: Path) -> dict[str, Any] | None:
-    """Parse `<stripped>/strip-meta.json` if present and shaped like the v2
-    sidecar ({"files": {...}}). None on missing/unparseable/legacy content —
-    every consumer (the per-WAV committed-cut read below, the maintenance
-    prune/absorb ops) treats a bad sidecar as absent rather than failing.
-    The ONE reader for the sidecar's shape contract;
-    `_read_json_or_none` re-checks containment before opening it.
-
-    Un-cached: these callers run off the hot path. The once-per-second session
-    listing reads the same sidecar through `_read_strip_meta_cached`."""
-    return valid_strip_meta(_read_json_or_none(stripped / FILENAME_STRIP_META_JSON))
+valid_strip_meta = strip_meta.valid_strip_meta
+strip_meta_owner_by_clip = strip_meta.strip_meta_owner_by_clip
+read_strip_meta = strip_meta.read_strip_meta
 
 
 def read_wav_strip_meta(session: str, name: str) -> dict[str, Any] | None:
