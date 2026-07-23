@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 import tapscribe.strip_meta as strip_meta
 
 ORIGINAL_NAME = "2026-05-12T09-19-55Z_alice_ident01_00000001.wav"
