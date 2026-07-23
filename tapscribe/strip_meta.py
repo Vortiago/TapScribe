@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from . import config
 from .session_paths import FILENAME_STRIP_META_JSON
+from .text import atomic_write_text
 
 
 def valid_strip_meta(meta: Any) -> dict[str, Any] | None:
@@ -46,37 +46,37 @@ def read_strip_meta_file(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _check_contained(stripped: Path) -> bool:
+def read_strip_meta(stripped: Path) -> dict[str, Any] | None:
+    """RECORDINGS_DIR-contained read. None when the sidecar (after symlinks are
+    resolved) escapes RECORDINGS_DIR, is missing, or is legacy.
+
+    Containment is a point-of-ACCESS property: the FILE is realpath'd and the
+    realpath string is opened directly (canonical CodeQL py/path-injection
+    form — the sanitiser sits at open(), and CodeQL flows it through `real`, not
+    through a re-wrapped Path), so a symlinked strip-meta.json cannot turn this
+    into an arbitrary-file reader. Mirrors the sessions._read_json_or_none guard
+    this was extracted from. `read_strip_meta_file` is the UNguarded pure reader
+    for callers (session_merge) that own their containment separately."""
     root = os.path.realpath(config.RECORDINGS_DIR)
     try:
-        real = os.path.realpath(stripped)
+        real = os.path.realpath(stripped / FILENAME_STRIP_META_JSON)
     except (OSError, ValueError):
-        return False
-    return real != root and real.startswith(root + os.sep)
-
-
-def read_strip_meta(stripped: Path) -> dict[str, Any] | None:
-    """RECORDINGS_DIR-contained read. None if path escapes, file missing, or legacy."""
-    if not _check_contained(stripped):
         return None
-    return read_strip_meta_file(stripped / FILENAME_STRIP_META_JSON)
+    if real != root and not real.startswith(root + os.sep):
+        return None
+    if not os.path.isfile(real):
+        return None
+    try:
+        with open(real, encoding="utf-8") as fh:
+            return valid_strip_meta(json.load(fh))
+    except (OSError, ValueError):
+        return None
 
 
 def write_strip_meta(stripped: Path, meta: dict[str, Any]) -> None:
-    """Atomic write via tempfile + os.replace. Leaves no temp droppings on success."""
-    path = stripped / FILENAME_STRIP_META_JSON
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".strip-meta-", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(meta, indent=2))
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Atomic write of the sidecar via the shared atomic_write_text helper
+    (tempfile + os.replace, no temp droppings on success)."""
+    atomic_write_text(stripped / FILENAME_STRIP_META_JSON, json.dumps(meta, indent=2))
 
 
 def prune_clip(stripped: Path, clip_name: str) -> None:

@@ -140,6 +140,28 @@ def test_contained_read_and_atomic_write_round_trip(recordings_root: Path, tmp_p
     assert strip_meta.read_strip_meta(outside) is None
 
 
+def test_contained_read_rejects_a_symlinked_sidecar_escaping_recordings_dir(
+    recordings_root: Path, tmp_path: Path
+):
+    """A strip-meta.json that is a SYMLINK to a file OUTSIDE RECORDINGS_DIR,
+    placed inside a CONTAINED stripped dir, must read as absent. Containment
+    is a point-of-ACCESS property: the reader must realpath the FILE, not just
+    its parent directory, or read_strip_meta becomes an arbitrary-file reader
+    for any session dir carrying such a symlink (and the CodeQL
+    py/path-injection sanitiser no longer sits at open())."""
+    stripped = recordings_root / "sess" / "stripped"
+    stripped.mkdir(parents=True)
+
+    # A VALID sidecar living OUTSIDE the recordings root — so a read-through
+    # would return real content, proving rejection is on containment grounds,
+    # not shape.
+    outside_target = tmp_path / "outside-secret.json"
+    outside_target.write_text(json.dumps(_two_original_meta()), encoding="utf-8")
+
+    (stripped / "strip-meta.json").symlink_to(outside_target)
+    assert strip_meta.read_strip_meta(stripped) is None
+
+
 # ---------------------------------------------------------------------------
 # Prune: the owner carries the span-drop semantics
 # ---------------------------------------------------------------------------
