@@ -113,6 +113,22 @@ body {
     font-size: 11px;
     color: var(--text-dim);
   }
+  /* Live-caption channel opt-out (#374) — a small labeled checkbox under a
+     live-capable family's name/chips. */
+  .fam__live {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    margin-top: var(--space-xs);
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .fam__live-check {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent);
+  }
   .fam__size {
     font-family: var(--mono);
     font-size: 12px;

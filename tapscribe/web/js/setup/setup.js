@@ -64,7 +64,12 @@ async function boot() {
     : "Add or change models. Already-installed families are marked; only new picks download.";
 
   renderStaleSelection(state.stale_selection);
-  buildCard(state.families);
+  // `state.live_channel` is the operator's PERSISTED live-caption choice
+  // (#374), distinct from a family's `f.live` CAPABILITY flag below — `!==
+  // false` treats an absent/undefined value (an older server, or a state
+  // file predating the flag) the same as `true`: the live channel stays on
+  // by default, the operator has to opt OUT.
+  buildCard(state.families, state.live_channel !== false);
 }
 
 /**
@@ -92,10 +97,10 @@ function renderStaleSelection(stale) {
   );
 }
 
-/** @param {Array<Record<string, any>>} families */
-function buildCard(families) {
+/** @param {Array<Record<string, any>>} families @param {boolean} liveDefault */
+function buildCard(families, liveDefault) {
   const list = el("div", "setup__list");
-  for (const f of families) list.append(familyRow(f));
+  for (const f of families) list.append(familyRow(f, liveDefault));
 
   // Built synchronously after warm + state, so it can be enabled from the start.
   const install = createButtonSync(
@@ -122,8 +127,8 @@ function buildCard(families) {
   byId("card").replaceChildren(panel.el);
 }
 
-/** @param {Record<string, any>} f @returns {HTMLElement} */
-function familyRow(f) {
+/** @param {Record<string, any>} f @param {boolean} liveDefault @returns {HTMLElement} */
+function familyRow(f, liveDefault) {
   const box = /** @type {HTMLInputElement} */ (el("input", "fam__check"));
   box.type = "checkbox";
   // default-check Whisper / anything already installed.
@@ -134,7 +139,21 @@ function familyRow(f) {
   const chips = [createChipSync({ text: f.live ? "live + batch" : "batch only", tone: f.live ? "info" : "neutral" }).el];
   if (f.installed) chips.push(createChipSync({ text: "installed", tone: "ok" }).el);
   const name = el("div", "fam__name", f.label, ...chips);
-  const meta = el("div", "fam__meta", `${(f.models || []).length} models`);
+  const nameCol = el("div", null, name, el("div", "fam__meta", `${(f.models || []).length} models`));
+  // Live-caption channel opt-out (#374) — scoped to the "whisper" catalog
+  // family specifically, NOT the generic `f.live` capability flag: NB-Whisper
+  // is ALSO `f.live === true` (it rides the same faster-whisper backend +
+  // whisperlivekit), but both catalog families fold onto the picker's ONE
+  // "whisper" install family (`_CATALOG_TO_PICKER` in setup_install.py), which
+  // has exactly one `live` bit — `to_picker_state` writes it onto
+  // `choices.whisper.live` only. Rendering a second checkbox on NB-Whisper's
+  // row would look like an independent setting when it isn't one, and
+  // `selectedLive()` (below) only ever reads the first `.fam__live-check` it
+  // finds — a NB-Whisper-row checkbox would silently do nothing.
+  // No `field` component for this: vc's field factory doesn't offer a
+  // checkbox type, and the existing `.fam__check` above is the precedent for
+  // a hand-rolled labeled/aria-labeled checkbox here.
+  if (f.family === "whisper") nameCol.append(liveToggleRow(f, liveDefault));
 
   // default backend = first host-valid; the select/chip below reflects it.
   if (f.backends.length) chosen.set(f.family, f.backends[0]);
@@ -161,7 +180,22 @@ function familyRow(f) {
     backend = el("span", "fam__none", "—");
   }
 
-  return el("div", "fam", box, el("div", null, name, meta), backend, el("div", "fam__size", f.size_hint || ""));
+  return el("div", "fam", box, nameCol, backend, el("div", "fam__size", f.size_hint || ""));
+}
+
+/**
+ * The live-caption channel opt-out row (#374) for a family that HAS a live
+ * channel. A plain labeled checkbox — no listener needed, same as `.fam__check`
+ * above: both are read synchronously at submit time (`selectedFamilies` /
+ * `selectedLive`), not reacted to live.
+ * @param {Record<string, any>} f @param {boolean} liveDefault @returns {HTMLElement}
+ */
+function liveToggleRow(f, liveDefault) {
+  const check = /** @type {HTMLInputElement} */ (el("input", "fam__live-check"));
+  check.type = "checkbox";
+  check.checked = liveDefault;
+  check.dataset.family = f.family;
+  return el("label", "fam__live", check, el("span", null, "Live captions (WhisperLiveKit — adds PyTorch)"));
 }
 
 /** @returns {Record<string, string>} */
@@ -178,9 +212,23 @@ function selectedFamilies() {
   return out;
 }
 
+/**
+ * The top-level `live` field of the install POST body (#374's opt-out).
+ * Exactly one `.fam__live-check` renders today — on the "whisper" row only,
+ * see `familyRow` — so reading the first one IS reading the operator's one
+ * live-channel decision; absent (e.g. Whisper itself removed from the
+ * catalog) defaults true, matching the server's own default.
+ * @returns {boolean}
+ */
+function selectedLive() {
+  const check = document.querySelector(".fam__live-check");
+  return check ? /** @type {HTMLInputElement} */ (check).checked : true;
+}
+
 /** @param {{ setDisabled: (d: boolean) => void }} install */
 async function runInstall(install) {
   const families = selectedFamilies();
+  const live = selectedLive();
   const log = byId("log");
   const result = byId("result");
   result.replaceChildren();
@@ -202,7 +250,7 @@ async function runInstall(install) {
     resp = await fetch("/api/setup/install", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ families }),
+      body: JSON.stringify({ families, live }),
     });
   } catch (e) {
     append(`request failed: ${e}`);

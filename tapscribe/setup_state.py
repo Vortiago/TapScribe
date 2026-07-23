@@ -34,6 +34,7 @@ from pathlib import Path
 
 from . import config
 from .runtime_probe import available_backend_strs
+from .setup_install import read_picker_state
 from .transcribers.catalog import REGISTRY, TranscriberRegistry
 
 # Curated per-family display metadata, in matrix order: (catalog family, label,
@@ -99,6 +100,33 @@ def _family_state(
     }
 
 
+def _persisted_live_choice(path: Path | None) -> bool:
+    """Whether the WhisperLiveKit live-caption channel (#374's opt-out) is
+    currently persisted ON, read from `.tapscribe-install.json`'s
+    `choices.whisper.live` — so the /setup toggle can pre-check to the
+    operator's actual last choice instead of always defaulting to checked.
+
+    Defaults True (live-on) whenever the file, the `whisper` choice, or the
+    `live` key itself is absent — matching `install_picker.FamilyChoice`'s
+    own default, so a state file from before #374 (or no state file at all,
+    a fresh install) still reports the live channel as on.
+
+    `read_picker_state` (not `install_picker.Selection.load`) is reused
+    deliberately: this module already depends on the app-side `setup_install`
+    seam (unlike `install_picker.py`, which must stay dependency-free and
+    importable pre-install — see its module docstring), and
+    `read_picker_state`'s best-effort degrade-to-`{}` on a missing/corrupt
+    file is exactly the "don't fail /setup over a bad state file" stance this
+    function needs too.
+    """
+    state = read_picker_state() if path is None else read_picker_state(path)
+    choices = state.get("choices") if isinstance(state, dict) else None
+    whisper = choices.get("whisper") if isinstance(choices, dict) else None
+    if not isinstance(whisper, dict):
+        return True
+    return bool(whisper.get("live", True))
+
+
 def read_stale_selection(path: Path) -> list[dict]:
     """Families the last picker run SKIPPED because their saved backend left the
     catalog, read from the sidecar the picker writes (ADR-0015).
@@ -119,16 +147,25 @@ def read_stale_selection(path: Path) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict) and "family" in entry]
 
 
-def build_setup_state(registry: TranscriberRegistry = REGISTRY, *, warnings_file: Path | None = None) -> dict:
+def build_setup_state(
+    registry: TranscriberRegistry = REGISTRY,
+    *,
+    warnings_file: Path | None = None,
+    picker_state_file: Path | None = None,
+) -> dict:
     """Assemble the setup state the first-run / manage surface renders from.
 
-    Returns ``{first_run, available_backends, families, stale_selection}`` where
-    each family is ``{family, label, size_hint, live, batch, installed,
-    backends, models}``. Only curated ``FAMILY_META`` families with at least one
-    available catalog entry are included, in display order.
+    Returns ``{first_run, available_backends, families, stale_selection,
+    live_channel}`` where each family is ``{family, label, size_hint, live,
+    batch, installed, backends, models}``. Only curated ``FAMILY_META``
+    families with at least one available catalog entry are included, in
+    display order.
 
     ``stale_selection`` is the picker's skipped-family report — see
-    ``read_stale_selection``.
+    ``read_stale_selection``. ``live_channel`` is the operator's PERSISTED
+    live-caption choice (#374) — see ``_persisted_live_choice`` — distinct
+    from a family's ``live`` flag above, which is the CAPABILITY (this family
+    has a live channel at all), not the current setting.
     """
     avail = available_backend_strs()
     families = [
@@ -141,4 +178,5 @@ def build_setup_state(registry: TranscriberRegistry = REGISTRY, *, warnings_file
         "available_backends": sorted(avail),
         "families": families,
         "stale_selection": read_stale_selection(warnings_file or config.INSTALL_WARNINGS_FILE),
+        "live_channel": _persisted_live_choice(picker_state_file),
     }

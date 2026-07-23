@@ -128,13 +128,22 @@ def test_api_setup_state_shape(client):
     r = client.get("/api/setup/state")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"first_run", "available_backends", "families", "stale_selection"}
+    assert set(body) == {
+        "first_run",
+        "available_backends",
+        "families",
+        "stale_selection",
+        "live_channel",
+    }
     assert isinstance(body["available_backends"], list)
     # Families the last picker run had to SKIP because their saved backend left
     # the catalog (ADR-0015). Empty on a healthy install; /setup renders it as a
     # banner because the picker's own warning only reaches stderr.
     assert isinstance(body["stale_selection"], list)
     assert isinstance(body["families"], list) and body["families"]
+    # WhisperLiveKit live-caption channel opt-out (#374) — the operator's
+    # PERSISTED choice, defaulting True absent a `.tapscribe-install.json`.
+    assert isinstance(body["live_channel"], bool)
     fam = body["families"][0]
     assert {"family", "label", "live", "batch", "installed", "backends", "size_hint", "models"} <= set(fam)
     # Capability flags come from the catalog contexts, independent of host.
@@ -164,6 +173,27 @@ def test_api_setup_install_streams_sse(client, monkeypatch):
 def test_api_setup_install_rejects_unknown_family(client):
     r = client.post("/api/setup/install", json={"families": {"evil-model": "cpu"}})
     assert r.status_code == 400
+
+
+def test_api_setup_install_rejects_non_bool_live(client):
+    # The WhisperLiveKit opt-out (#374) is validated the same way an unknown
+    # family/kind is: a malformed value gets a 400, not a silently coerced
+    # guess.
+    r = client.post("/api/setup/install", json={"families": {"whisper": "cpu"}, "live": "nope"})
+    assert r.status_code == 400
+
+
+def test_api_setup_install_accepts_live_false(client, monkeypatch):
+    fake_spawn = fake_install_spawn([b"installed\n"], 0)
+    monkeypatch.setattr("tapscribe.setup_install._create_subprocess", fake_spawn)
+    written: list[dict] = []
+    monkeypatch.setattr(
+        "tapscribe.setup_install.write_picker_state", lambda state, **_: written.append(state)
+    )
+
+    r = client.post("/api/setup/install", json={"families": {"whisper": "cpu"}, "live": False})
+    assert r.status_code == 200
+    assert written[-1]["choices"]["whisper"]["live"] is False
 
 
 def test_api_setup_install_refuses_concurrent_runs(client):

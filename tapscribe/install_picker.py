@@ -18,9 +18,11 @@ the operator picks:
 
 Backend choices map to per-family atomic extras in `pyproject.toml`
 (e.g. `whisper-cpu`, `whisper-mlx`, plus a shared `whisper-live` for
-the live-socket server). The picker composes the final `pip install`
-argv from those atoms, delegating the install TARGET (checkout / Bundle
-wheel / pinned PyPI) to `tapscribe.install_target` — see ADR-0015.
+the live-socket server — installed by default, opt-out per family via
+the live-channel toggle, since it pulls PyTorch). The picker composes
+the final `pip install` argv from those atoms, delegating the install
+TARGET (checkout / Bundle wheel / pinned PyPI) to
+`tapscribe.install_target` — see ADR-0015.
 
 Why this lives in the package rather than `tools/`
 --------------------------------------------------
@@ -141,10 +143,16 @@ class FamilyDef:
     """One row in the picker.
 
     `shared_extras` get installed regardless of which backend the
-    operator chose (e.g. whisperlivekit is needed for the live socket
-    server on both CPU and MLX). `backends` lists the optional runtimes
-    in machine-natural order — CPU first, MLX second — and the picker
-    filters them down to whatever's actually available on the host.
+    operator chose, ALWAYS, whenever the family is enabled — there's no
+    per-family opt-out for them. `live_extras` are also
+    backend-independent (installed whether the operator picked CPU/CUDA,
+    MLX, or Both) but ARE individually opt-out-able via
+    `FamilyChoice.live` — e.g. whisperlivekit powers the live caption
+    socket server for Whisper on both CPU and MLX, but an operator who
+    only wants batch transcription can skip it and its PyTorch pull.
+    `backends` lists the optional runtimes in machine-natural order — CPU
+    first, MLX second — and the picker filters them down to whatever's
+    actually available on the host.
     """
 
     key: str
@@ -153,6 +161,7 @@ class FamilyDef:
     size_hint: str
     backends: tuple[BackendDef, ...]
     shared_extras: tuple[str, ...] = ()
+    live_extras: tuple[str, ...] = ()
     default_selected: bool = False
 
     def has_mlx(self) -> bool:
@@ -179,8 +188,11 @@ FAMILIES: tuple[FamilyDef, ...] = (
         size_hint="~150 MB CPU / ~80 MB MLX",
         # whisperlivekit is the live-socket server — the recorder spawns
         # it whether MLX or faster-whisper drives transcription, so it's
-        # shared between both backends.
-        shared_extras=("whisper-live",),
+        # shared between both backends. It's `live_extras`, not
+        # `shared_extras`, because it's individually opt-out-able
+        # (`FamilyChoice.live`, default on) — it pulls PyTorch (~500 MB
+        # CPU / ~2.5 GB CUDA), which a batch-only operator may not want.
+        live_extras=("whisper-live",),
         backends=(
             BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("whisper-cpu",)),
             BackendDef(key=BACKEND_MLX, label="MLX", extras=("whisper-mlx",)),
@@ -313,10 +325,16 @@ class FamilyChoice:
     """One row's persisted state. Stale backend values (e.g. "mlx"
     loaded on a Linux box) are silently downgraded at install-time, not
     on load — so moving the checkout back to Apple Silicon restores the
-    MLX preference instead of losing it."""
+    MLX preference instead of losing it.
+
+    `live` gates a family's `live_extras` (currently only Whisper's
+    `whisper-live`). Defaults True — the live channel stays installed by
+    default; the operator has to opt OUT, not in. A family with no
+    `live_extras` simply ignores the field."""
 
     enabled: bool = False
     backend: str = BACKEND_CPU
+    live: bool = True
 
 
 @dataclass
@@ -406,7 +424,11 @@ class Selection:
             backend = raw.get("backend", "")
             if backend not in (BACKEND_CPU, BACKEND_MLX, BACKEND_BOTH):
                 backend = natural_backend_key(fam, caps)
-            out.choices[fam.key] = FamilyChoice(enabled=enabled, backend=backend)
+            # Absent key (pre-#374 state files, or a family with no
+            # `live_extras`) defaults True — the live channel stays
+            # installed unless the operator explicitly turned it off.
+            live = bool(raw.get("live", True))
+            out.choices[fam.key] = FamilyChoice(enabled=enabled, backend=backend, live=live)
         return out
 
     def removed_backend_families(self) -> list[FamilyDef]:
@@ -430,6 +452,7 @@ class Selection:
                 fam.key: {
                     "enabled": self.choices.get(fam.key, FamilyChoice()).enabled,
                     "backend": self.choices.get(fam.key, FamilyChoice()).backend,
+                    "live": self.choices.get(fam.key, FamilyChoice()).live,
                 }
                 for fam in FAMILIES
             },
@@ -492,6 +515,9 @@ def resolve_extras(selection: Selection, caps: MachineCaps) -> list[str]:
             continue
         for extra in fam.shared_extras:
             add(extra)
+        if choice.live:
+            for extra in fam.live_extras:
+                add(extra)
         for be in backends:
             for extra in be.extras:
                 add(extra)
@@ -517,6 +543,11 @@ def family_extras_preview(fam: FamilyDef, choice: FamilyChoice, caps: MachineCap
         if extra not in seen:
             out.append(extra)
             seen.add(extra)
+    if choice.live:
+        for extra in fam.live_extras:
+            if extra not in seen:
+                out.append(extra)
+                seen.add(extra)
     for be in effective_backends(fam, choice, caps):
         for extra in be.extras:
             if extra not in seen:
@@ -568,6 +599,12 @@ def _render_backend_row(fam: FamilyDef, choice: FamilyChoice, caps: MachineCaps)
     return "Backend: " + "   ".join(parts)
 
 
+def _render_live_row(choice: FamilyChoice) -> str:
+    """One-line summary of the live-channel toggle. Only called for
+    families that declare `live_extras` (currently only Whisper)."""
+    return f"Live channel: {'ON' if choice.live else 'OFF'}  (WhisperLiveKit — adds PyTorch)"
+
+
 def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None) -> str:
     """Return the picker as a string. Pure — easy to snapshot in tests.
 
@@ -587,6 +624,8 @@ def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None
         lines.append(f"{arrow} [{mark}] {idx}. {fam.label}  ({fam.size_hint})")
         lines.append(f"          {fam.description}")
         lines.append(f"          {_render_backend_row(fam, choice, caps)}")
+        if fam.live_extras:
+            lines.append(f"          {_render_live_row(choice)}")
         if choice.enabled:
             extras = family_extras_preview(fam, choice, caps)
             if extras:
@@ -619,9 +658,14 @@ def render(selection: Selection, caps: MachineCaps, *, cursor: int | None = None
         lines.append("  r           reset to defaults")
         lines.append("  Enter       confirm and install")
         lines.append("  q           quit without launching")
-        lines.append("  (backend choice needs the arrow-key UI — re-run on a real TTY to switch)")
+        lines.append(
+            "  (backend choice and the live-channel toggle need the arrow-key UI "
+            "— re-run on a real TTY to switch)"
+        )
     else:
-        lines.append("↑/↓ row · ←/→ backend · Space toggle · a all · r reset · Enter install · q quit")
+        lines.append(
+            "↑/↓ row · ←/→ backend · Space toggle · l live · a all · r reset · Enter install · q quit"
+        )
     return "\n".join(lines)
 
 
@@ -846,6 +890,11 @@ def _handle_key(
     elif key in ("space", "x"):
         ch = selection.for_family(fam.key)
         ch.enabled = not ch.enabled
+    elif key == "l":
+        # No-op for a family with no live_extras — nothing to gate.
+        if fam.live_extras:
+            ch = selection.for_family(fam.key)
+            ch.live = not ch.live
     elif key == "enter":
         return "confirm"
     elif key in ("q", "esc", "ctrl-c", "ctrl-d", "eof"):

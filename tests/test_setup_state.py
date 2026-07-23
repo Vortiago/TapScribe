@@ -168,6 +168,58 @@ def test_each_family_carries_a_size_hint_and_models():
         assert fam["models"]  # at least one model id in the family
 
 
+# ── live_channel: the persisted live-caption choice (#374) ─────────────────
+#
+# Distinct from a family's `live` capability flag (does this family HAVE a
+# live channel at all) — this is the OPERATOR'S current setting for it, read
+# from .tapscribe-install.json so /setup's toggle can pre-check to the real
+# state instead of always defaulting to checked.
+
+
+def test_live_channel_defaults_true_when_no_state_file(tmp_path):
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset())
+    state = build_setup_state(picker_state_file=tmp_path / "nope.json")
+    assert state["live_channel"] is True
+
+
+def test_live_channel_defaults_true_when_key_absent(tmp_path):
+    """A state file from before #374 (or a family with no `live` key at
+    all) must not be read as 'off' — the opt-out is new, the default isn't."""
+    import json
+
+    picker_state = tmp_path / ".tapscribe-install.json"
+    picker_state.write_text(
+        json.dumps({"version": 2, "choices": {"whisper": {"enabled": True, "backend": "cpu"}}})
+    )
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset())
+    state = build_setup_state(picker_state_file=picker_state)
+    assert state["live_channel"] is True
+
+
+def test_live_channel_reflects_a_persisted_false(tmp_path):
+    import json
+
+    picker_state = tmp_path / ".tapscribe-install.json"
+    picker_state.write_text(
+        json.dumps({"version": 2, "choices": {"whisper": {"enabled": True, "backend": "cpu", "live": False}}})
+    )
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset())
+    state = build_setup_state(picker_state_file=picker_state)
+    assert state["live_channel"] is False
+
+
+def test_live_channel_degrades_to_true_on_a_corrupt_state_file(tmp_path):
+    picker_state = tmp_path / ".tapscribe-install.json"
+    picker_state.write_text("not json at all")
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    set_installed_modules_for_testing(frozenset())
+    state = build_setup_state(picker_state_file=picker_state)
+    assert state["live_channel"] is True
+
+
 def test_family_with_only_unavailable_entries_is_not_surfaced():
     """A 'coming soon' family (all entries available=False) must not appear — it
     has no loadable models, so advertising backends for it would be misleading."""

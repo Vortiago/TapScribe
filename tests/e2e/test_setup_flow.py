@@ -50,10 +50,21 @@ def _installing_spawn(installed_after: set[str], family: str):
     )
 
 
-async def _run_install(client: httpx.AsyncClient, families: dict[str, str]) -> list[dict]:
-    """POST the install and collect the parsed SSE events to completion."""
+async def _run_install(
+    client: httpx.AsyncClient, families: dict[str, str], *, live: bool | None = None
+) -> list[dict]:
+    """POST the install and collect the parsed SSE events to completion.
+
+    `live` (#374's WhisperLiveKit opt-out) is omitted from the body entirely
+    when None — exercising the "existing client that predates the flag"
+    shape the two original callers below rely on, distinct from explicitly
+    passing `live=True`.
+    """
+    body: dict = {"families": families}
+    if live is not None:
+        body["live"] = live
     events: list[dict] = []
-    async with client.stream("POST", "/api/setup/install", json={"families": families}) as resp:
+    async with client.stream("POST", "/api/setup/install", json=body) as resp:
         assert resp.status_code == 200, resp.status_code
         async for line in resp.aiter_lines():
             if line.startswith("data:"):
@@ -131,3 +142,61 @@ async def test_adding_a_model_after_first_run_makes_it_available(running_recorde
             for m in (await client.get("/api/models", params={"context": "batch"})).json()["models"]
         }
         assert {"whisper", "parakeet"} <= batch
+
+
+# ── WhisperLiveKit live-channel opt-out (#374) — end-to-end at the real
+# endpoint boundary: POST body → validate_live → run_install → to_picker_state
+# → write_picker_state → (drift-checked) install_picker.resolve_extras. ──────
+
+
+async def test_install_live_false_is_persisted_and_drops_the_live_extra(running_recorder, monkeypatch):
+    """`{"live": false}` must reach the picker's on-disk selection as
+    `choices.whisper.live = false`, and resolving THAT selection through the
+    real picker must omit `whisper-live` — DEFAULT MUST NOT CHANGE means this
+    only happens when the operator explicitly opts out."""
+    from tapscribe import install_picker
+
+    set_installed_modules_for_testing(frozenset())
+    written: list[dict] = []
+    monkeypatch.setattr(
+        "tapscribe.setup_install.write_picker_state", lambda state, **_: written.append(state)
+    )
+    monkeypatch.setattr(
+        "tapscribe.setup_install._create_subprocess",
+        _installing_spawn(_probe_modules_for("whisper", "cpu"), "whisper"),
+    )
+
+    async with httpx.AsyncClient(base_url=running_recorder.base_url, timeout=10.0) as client:
+        events = await _run_install(client, {"whisper": "cpu"}, live=False)
+        assert events[-1] == {"phase": "done", "ok": True, "returncode": 0}
+
+    assert written[-1]["choices"]["whisper"]["live"] is False
+    caps = install_picker.MachineCaps(os_name="Linux", arch="x86_64", mlx=False, cuda=False)
+    sel = install_picker.Selection._load_v2(written[-1], caps)
+    assert "whisper-live" not in install_picker.resolve_extras(sel, caps)
+
+
+async def test_install_without_a_live_field_keeps_the_live_channel_on(running_recorder, monkeypatch):
+    """An existing client that predates #374 (no `live` key in the body at
+    all — see `_run_install`'s `live=None`) must keep getting the live
+    channel it always got."""
+    from tapscribe import install_picker
+
+    set_installed_modules_for_testing(frozenset())
+    written: list[dict] = []
+    monkeypatch.setattr(
+        "tapscribe.setup_install.write_picker_state", lambda state, **_: written.append(state)
+    )
+    monkeypatch.setattr(
+        "tapscribe.setup_install._create_subprocess",
+        _installing_spawn(_probe_modules_for("whisper", "cpu"), "whisper"),
+    )
+
+    async with httpx.AsyncClient(base_url=running_recorder.base_url, timeout=10.0) as client:
+        events = await _run_install(client, {"whisper": "cpu"})  # no `live` kwarg → omitted
+        assert events[-1] == {"phase": "done", "ok": True, "returncode": 0}
+
+    assert written[-1]["choices"]["whisper"]["live"] is True
+    caps = install_picker.MachineCaps(os_name="Linux", arch="x86_64", mlx=False, cuda=False)
+    sel = install_picker.Selection._load_v2(written[-1], caps)
+    assert "whisper-live" in install_picker.resolve_extras(sel, caps)

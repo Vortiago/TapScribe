@@ -103,6 +103,65 @@ def test_selection_round_trips_through_disk(tmp_state):
     assert loaded.choices["voxtral"].backend == BACKEND_CPU
 
 
+# ── Live-channel opt-out (#374) ──────────────────────────────────────
+
+
+def test_familychoice_defaults_live_on():
+    """DEFAULT MUST NOT CHANGE: a bare `FamilyChoice()` keeps the live
+    channel on, same as before the opt-out existed."""
+    assert FamilyChoice().live is True
+
+
+def test_selection_round_trips_live_flag_through_disk(tmp_state):
+    written = Selection()
+    written.choices["whisper"] = FamilyChoice(enabled=True, backend=BACKEND_CPU, live=False)
+    written.save(tmp_state)
+    blob = json.loads(tmp_state.read_text())
+    assert blob["choices"]["whisper"]["live"] is False
+    loaded = Selection.load(tmp_state, _caps())
+    assert loaded.choices["whisper"].live is False
+
+
+def test_selection_load_defaults_live_true_when_key_absent(tmp_state):
+    """A state file written before #374 (or hand-edited without the key)
+    must keep installing the live channel — the opt-out is new, the
+    default isn't."""
+    tmp_state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_CPU}},
+            }
+        )
+    )
+    sel = Selection.load(tmp_state, _caps())
+    assert sel.choices["whisper"].live is True
+
+
+def test_resolve_extras_live_off_drops_the_live_extra():
+    sel = Selection()
+    sel.choices["whisper"] = FamilyChoice(enabled=True, backend=BACKEND_CPU, live=False)
+    assert install_picker.resolve_extras(sel, _caps()) == ["whisper-cpu"]
+
+
+def test_resolve_extras_live_on_keeps_the_live_extra():
+    sel = Selection()
+    sel.choices["whisper"] = FamilyChoice(enabled=True, backend=BACKEND_CPU, live=True)
+    assert install_picker.resolve_extras(sel, _caps()) == ["whisper-live", "whisper-cpu"]
+
+
+def test_family_extras_preview_reflects_the_live_toggle():
+    whisper = next(f for f in FAMILIES if f.key == "whisper")
+    on = install_picker.family_extras_preview(
+        whisper, FamilyChoice(enabled=True, backend=BACKEND_CPU, live=True), _caps()
+    )
+    off = install_picker.family_extras_preview(
+        whisper, FamilyChoice(enabled=True, backend=BACKEND_CPU, live=False), _caps()
+    )
+    assert "whisper-live" in on
+    assert "whisper-live" not in off
+
+
 def test_selection_load_migrates_v1_format(tmp_state):
     """Operators who already ran the older picker have a `families: [...]`
     state file. Migrating must preserve enable flags and pick a sensible
@@ -1074,6 +1133,23 @@ def test_render_with_empty_selection_explains_consequences():
     assert "nothing" in text or "empty" in text
 
 
+def test_render_shows_live_channel_row_only_for_families_that_declare_it():
+    sel = Selection.defaults_for(_caps())
+    text = install_picker.render(sel, _caps())
+    assert "Live channel: ON" in text
+    # Voxtral has no live_extras — it must not grow a live-channel row.
+    voxtral_block = next(b for b in text.split("\n\n") if "2. Voxtral" in b)
+    assert "Live channel" not in voxtral_block
+
+
+def test_render_reflects_live_off():
+    sel = Selection()
+    sel.choices["whisper"] = FamilyChoice(enabled=True, backend=BACKEND_CPU, live=False)
+    text = install_picker.render(sel, _caps())
+    assert "Live channel: OFF" in text
+    assert "whisper-live" not in text
+
+
 # ── Arrow-key UI dispatch ────────────────────────────────────────────
 
 
@@ -1133,6 +1209,27 @@ def test_handle_key_a_preserves_backend_choices():
     install_picker._handle_key("a", sel, [0], _apple_caps())
     assert sel.choices["whisper"].enabled is True
     assert sel.choices["whisper"].backend == BACKEND_MLX
+
+
+def test_handle_key_l_toggles_live_on_the_cursor_row():
+    """Cursor starts on Whisper (row 0), which declares `live_extras` —
+    'l' must flip its live flag."""
+    sel = Selection.defaults_for(_caps())
+    assert sel.choices["whisper"].live is True
+    install_picker._handle_key("l", sel, [0], _caps())
+    assert sel.choices["whisper"].live is False
+    install_picker._handle_key("l", sel, [0], _caps())
+    assert sel.choices["whisper"].live is True
+
+
+def test_handle_key_l_is_a_noop_for_a_family_without_live_extras():
+    """Voxtral has no live channel — 'l' must not fabricate a meaningless
+    toggle state for it."""
+    sel = Selection.defaults_for(_caps())
+    cursor = [1]  # Voxtral
+    before = sel.choices["voxtral"].live
+    install_picker._handle_key("l", sel, cursor, _caps())
+    assert sel.choices["voxtral"].live == before
 
 
 def test_handle_key_enter_and_quit_sentinels():
@@ -1578,6 +1675,7 @@ def test_every_picker_extra_is_declared_in_pyproject():
     emitted: set[str] = {install_picker.CUDA_RUNTIME_EXTRA, install_picker.WHISPER_CPU_EXTRA}
     for fam in FAMILIES:
         emitted.update(fam.shared_extras)
+        emitted.update(fam.live_extras)
         for backend in fam.backends:
             emitted.update(backend.extras)
 
