@@ -13,25 +13,25 @@ filesystem op.
 
 from __future__ import annotations
 
-import json
 import shutil
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import tapscribe.strip_meta as strip_meta
+
 from . import config
 from .session_paths import (
     DIRNAME_STRIPPED,
-    FILENAME_STRIP_META_JSON,
     FILENAME_SUMMARY_JSON,
     FILENAME_TRANSCRIPT_JSON,
     resolve_session_dir,
     resolve_wav,
     stripped_dir,
 )
-from .sessions import read_session_meta, read_strip_meta, write_session_meta
-from .text import atomic_write_text, parse_wav_start
+from .sessions import read_session_meta, write_session_meta
+from .text import parse_wav_start
 from .wav_cache import sidecar_paths
 
 # ---------------------------------------------------------------------------
@@ -205,25 +205,7 @@ def _prune_strip_meta_clip(session: str, clip_name: str) -> None:
     original whose spans all vanish loses its whole entry. Best-effort: a
     missing/legacy meta is left alone."""
     stripped = stripped_dir(session)
-    meta = read_strip_meta(stripped)
-    if meta is None:
-        return
-    files = meta["files"]
-    changed = False
-    for orig, entry in list(files.items()):
-        spans = entry.get("spans") if isinstance(entry, dict) else None
-        if not isinstance(spans, list):
-            continue
-        kept = [sp for sp in spans if not (isinstance(sp, dict) and sp.get("name") == clip_name)]
-        if len(kept) == len(spans):
-            continue
-        changed = True
-        if kept:
-            entry["spans"] = kept
-        else:
-            del files[orig]
-    if changed:
-        atomic_write_text(stripped / FILENAME_STRIP_META_JSON, json.dumps(meta, indent=2))
+    strip_meta.prune_clip(stripped, clip_name)
 
 
 def absorb_session(target: str, source: str) -> dict[str, Any]:
@@ -290,15 +272,12 @@ def absorb_session(target: str, source: str) -> dict[str, Any]:
         # clash; target wins anyway). Knobs/stripped_at keep the TARGET's
         # values when both sides have a meta — they describe the target's
         # own last run; a target without a meta adopts the source's wholesale.
-        src_strip_meta = read_strip_meta(src_stripped_dir)
+        src_strip_meta = strip_meta.read_strip_meta(src_stripped_dir)
         if src_strip_meta is not None:
-            tgt_strip_meta = read_strip_meta(tgt_stripped_dir)
+            tgt_strip_meta = strip_meta.read_strip_meta(tgt_stripped_dir)
             if tgt_strip_meta is not None:
                 tgt_strip_meta["files"] = {**src_strip_meta["files"], **tgt_strip_meta["files"]}
-            atomic_write_text(
-                tgt_stripped_dir / FILENAME_STRIP_META_JSON,
-                json.dumps(tgt_strip_meta or src_strip_meta, indent=2),
-            )
+            strip_meta.write_strip_meta(tgt_stripped_dir, tgt_strip_meta or src_strip_meta)
 
     # Merge speaker aliases. Target wins on conflict; source fills in keys
     # the target doesn't already have. Target's label is preserved as-is.

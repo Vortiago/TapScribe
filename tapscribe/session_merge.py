@@ -18,16 +18,16 @@ through a Transcriber.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import tapscribe.strip_meta as strip_meta
+
 from . import config
 from .audio import wav_duration_s, wav_rms_dbfs
 from .session_paths import DIRNAME_STRIPPED, FILENAME_STRIP_META_JSON, SessionPathError, _safe_part
-from .sessions import strip_meta_owner_by_clip, valid_strip_meta
 from .text import parse_iso, parse_wav_start
 from .wav_cache import read_cached
 
@@ -107,23 +107,18 @@ def select_session_wavs(
             )
         # Build owner_by_clip from strip-meta.json, so the silence gate below
         # can key off the true original instead of the stripped clip itself.
-        # Read directly (not via `sessions.read_strip_meta`): this function is
-        # pure and makes no assumption that `session_dir` lives under
-        # `config.RECORDINGS_DIR` — every selection test (including this
-        # issue's) builds `session_dir` from a bare tmp_path, and the two
-        # production callers (`batch_transcribe`, `batch_pipeline`) only ever
-        # reach here with a `session_dir` already validated by
-        # `resolve_session_dir`, so the containment guarantee holds there too,
-        # just one layer up rather than re-checked here. `valid_strip_meta`
-        # still enforces the one shape contract shared with the safe reader.
-        meta_path = wav_dir / FILENAME_STRIP_META_JSON
-        try:
-            with meta_path.open("r", encoding="utf-8") as fh:
-                meta = valid_strip_meta(json.load(fh))
-        except (OSError, ValueError):
-            meta = None
+        # Crosses the owner's pure reader (`strip_meta.read_strip_meta_file`)
+        # because this function is pure and makes no assumption that
+        # `session_dir` lives under `config.RECORDINGS_DIR` — every selection
+        # test (including this issue's) builds `session_dir` from a bare
+        # tmp_path, and the two production callers (`batch_transcribe`,
+        # `batch_pipeline`) only ever reach here with a `session_dir` already
+        # validated by `resolve_session_dir`, so the containment guarantee
+        # holds there too, just one layer up rather than re-checked here.
+        # The shape gate enforces the one contract shared with the safe reader.
+        meta = strip_meta.read_strip_meta_file(wav_dir / FILENAME_STRIP_META_JSON)
         if meta is not None:
-            owner_by_clip = strip_meta_owner_by_clip(meta)
+            owner_by_clip = strip_meta.strip_meta_owner_by_clip(meta)
     elif source in (None, "", "original"):
         wav_dir = session_dir
     else:

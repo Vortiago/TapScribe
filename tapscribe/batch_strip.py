@@ -16,19 +16,20 @@ out of `sessions.py` when that module was narrowed to the dashboard read path.
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import tapscribe.strip_meta as strip_meta
+
 from . import strip_silence as _ss
 from .recorder import Recorder
 from .session_merge import NoUsableWavs
-from .session_paths import FILENAME_STRIP_META_JSON, resolve_session_dir, stripped_dir
+from .session_paths import resolve_session_dir, stripped_dir
 from .strip_silence import SPEECH_RMS_DBFS_FLOOR
-from .text import atomic_write_text, build_recorder_wav_name, parse_wav_speaker_ident, parse_wav_start
+from .text import build_recorder_wav_name, parse_wav_speaker_ident, parse_wav_start
 
 
 class BatchStripError(Exception):
@@ -204,20 +205,17 @@ async def strip_session_locked(req: StripSessionRequest, *, originals: list[Path
             "spans": r["region_spans"],
         }
     if spans_by_original:
-        atomic_write_text(
-            out_dir / FILENAME_STRIP_META_JSON,
-            json.dumps(
-                {
-                    "stripped_at": finished.isoformat(),
-                    "knobs": {
-                        "min_silence_ms": req.min_silence_ms,
-                        "pad_ms": req.pad_ms,
-                        "speech_floor_db": req.speech_floor_db,
-                    },
-                    "files": spans_by_original,
+        strip_meta.write_strip_meta(
+            out_dir,
+            {
+                "stripped_at": finished.isoformat(),
+                "knobs": {
+                    "min_silence_ms": req.min_silence_ms,
+                    "pad_ms": req.pad_ms,
+                    "speech_floor_db": req.speech_floor_db,
                 },
-                indent=2,
-            ),
+                "files": spans_by_original,
+            },
         )
 
     written = sum(1 for r in results if r.get("written"))
