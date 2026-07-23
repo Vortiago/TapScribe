@@ -34,6 +34,7 @@ from pathlib import Path
 
 from . import config
 from .runtime_probe import available_backend_strs
+from .setup_install import read_live_choice
 from .transcribers.catalog import REGISTRY, TranscriberRegistry
 
 # Curated per-family display metadata, in matrix order: (catalog family, label,
@@ -119,16 +120,25 @@ def read_stale_selection(path: Path) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict) and "family" in entry]
 
 
-def build_setup_state(registry: TranscriberRegistry = REGISTRY, *, warnings_file: Path | None = None) -> dict:
+def build_setup_state(
+    registry: TranscriberRegistry = REGISTRY,
+    *,
+    warnings_file: Path | None = None,
+    picker_state_file: Path | None = None,
+) -> dict:
     """Assemble the setup state the first-run / manage surface renders from.
 
-    Returns ``{first_run, available_backends, families, stale_selection}`` where
-    each family is ``{family, label, size_hint, live, batch, installed,
-    backends, models}``. Only curated ``FAMILY_META`` families with at least one
-    available catalog entry are included, in display order.
+    Returns ``{first_run, available_backends, families, stale_selection,
+    live_channel}`` where each family is ``{family, label, size_hint, live,
+    batch, installed, backends, models}``. Only curated ``FAMILY_META``
+    families with at least one available catalog entry are included, in
+    display order.
 
     ``stale_selection`` is the picker's skipped-family report — see
-    ``read_stale_selection``.
+    ``read_stale_selection``. ``live_channel`` is the operator's PERSISTED
+    live-caption choice (#374) — see ``setup_install.read_live_choice`` —
+    distinct from a family's ``live`` flag above, which is the CAPABILITY (this
+    family has a live channel at all), not the current setting.
     """
     avail = available_backend_strs()
     families = [
@@ -141,4 +151,5 @@ def build_setup_state(registry: TranscriberRegistry = REGISTRY, *, warnings_file
         "available_backends": sorted(avail),
         "families": families,
         "stale_selection": read_stale_selection(warnings_file or config.INSTALL_WARNINGS_FILE),
+        "live_channel": read_live_choice(picker_state_file),
     }

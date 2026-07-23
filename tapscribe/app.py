@@ -129,7 +129,7 @@ from .sessions import (
     search_transcripts,
     write_session_meta,
 )
-from .setup_install import InstallSelectionError, run_install, sse, validate_selection
+from .setup_install import InstallSelectionError, run_install, sse, validate_live, validate_selection
 from .setup_state import build_setup_state, is_first_run
 from .strip_silence import plan_strip_regions, read_wav_int16
 from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
@@ -1174,7 +1174,10 @@ async def api_setup_state():
 @app.post("/api/setup/install")
 async def api_setup_install(request: Request):
     """Install the selected model families and stream progress as Server-Sent
-    Events. Body: ``{"families": {"<family>": "<mlx|cuda|cpu>", ...}}``.
+    Events. Body: ``{"families": {"<family>": "<mlx|cuda|cpu>", ...}, "live":
+    <bool, default true>}``. `live` is the WhisperLiveKit live-caption channel
+    opt-out (#374) — it stays ON by default so an existing client that
+    predates the flag still gets the live channel it always got.
 
     Delegates the actual pip work to the dependency-free install picker
     (`tapscribe/install_picker.py --non-interactive`) against a selection written
@@ -1185,6 +1188,7 @@ async def api_setup_install(request: Request):
     body = await _json_body(request)
     try:
         selection = validate_selection(body.get("families", {}))
+        live = validate_live(body.get("live"))
     except InstallSelectionError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -1199,6 +1203,7 @@ async def api_setup_install(request: Request):
         try:
             async for ev in run_install(
                 selection,
+                live=live,
                 # Set by `python -m tapscribe --install-spec` (the Bundle's
                 # Launcher passes its wheel); absent in a checkout.
                 install_spec=getattr(request.app.state, "install_spec", None),

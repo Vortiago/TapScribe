@@ -22,9 +22,11 @@ from tapscribe import install_picker
 from tapscribe.setup_install import (
     InstallSelectionError,
     picker_install_argv,
+    read_live_choice,
     run_install,
     sse,
     to_picker_state,
+    validate_live,
     validate_selection,
     write_picker_state,
 )
@@ -34,9 +36,9 @@ _CUDA = install_picker.MachineCaps(os_name="Linux", arch="x86_64", mlx=False, cu
 _CPU = install_picker.MachineCaps(os_name="Linux", arch="x86_64", mlx=False, cuda=False)
 
 
-def _extras(selection: dict[str, str], caps) -> set[str]:
+def _extras(selection: dict[str, str], caps, *, live: bool = True) -> set[str]:
     """Resolve a catalog-family selection to pip extras THROUGH the real picker."""
-    state = to_picker_state(selection)
+    state = to_picker_state(selection, live=live)
     sel = install_picker.Selection._load_v2(state, caps)
     return set(install_picker.resolve_extras(sel, caps))
 
@@ -91,6 +93,80 @@ def test_unselected_families_are_disabled():
 
 def test_empty_selection_installs_nothing():
     assert _extras({}, _CPU) == set()
+
+
+# ── live-channel opt-out (#374) — drift-tested against the real picker ──────
+
+
+def test_live_true_resolves_with_whisper_live_extra():
+    # Explicit True behaves exactly like the (unspecified) default.
+    assert _extras({"whisper": "cpu"}, _CPU, live=True) == {"whisper-live", "whisper-cpu"}
+
+
+def test_live_false_resolves_without_whisper_live_extra():
+    assert _extras({"whisper": "cpu"}, _CPU, live=False) == {"whisper-cpu"}
+
+
+def test_live_default_is_true_when_unspecified():
+    """DEFAULT MUST NOT CHANGE: a caller that doesn't pass `live` at all
+    (an existing client, or the picker_install_argv path) must keep
+    getting the live channel — the whole point of an OPT-OUT."""
+    assert _extras({"whisper": "cpu"}, _CPU) == {"whisper-live", "whisper-cpu"}
+
+
+def test_live_false_still_resolves_nb_whisper_extras_it_just_drops_live():
+    # nb-whisper rides the same picker `whisper` family/backend — live=False
+    # drops the shared live extra but leaves nb-whisper's own atom alone.
+    assert _extras({"nb-whisper": "cpu"}, _CPU, live=False) == {"whisper-cpu"}
+
+
+def test_to_picker_state_carries_live_onto_the_whisper_choice():
+    assert to_picker_state({"whisper": "cpu"}, live=False)["choices"]["whisper"]["live"] is False
+    assert to_picker_state({"whisper": "cpu"}, live=True)["choices"]["whisper"]["live"] is True
+
+
+def test_to_picker_state_defaults_live_true():
+    assert to_picker_state({"whisper": "cpu"})["choices"]["whisper"]["live"] is True
+
+
+def test_to_picker_state_sets_live_even_when_whisper_is_not_selected():
+    """The toggle is a per-REQUEST flag (there's only one live row in
+    /setup), not conditioned on whisper/nb-whisper being part of THIS
+    install — so it stays sticky across e.g. a Parakeet-only install."""
+    state = to_picker_state({"parakeet": "cpu"}, live=False)
+    assert state["choices"]["whisper"]["enabled"] is False
+    assert state["choices"]["whisper"]["live"] is False
+
+
+def test_read_live_choice_roundtrips_to_picker_state(tmp_path):
+    """`read_live_choice` is the decode symmetric with `to_picker_state`'s
+    write, and owns the picker-state shape for the app side. A missing/absent
+    `live` reads as ON (matching `install_picker.FamilyChoice.live`)."""
+    path = tmp_path / ".tapscribe-install.json"
+    assert read_live_choice(path) is True  # no file → live-on default
+    write_picker_state(to_picker_state({"whisper": "cpu"}, live=False), path=path)
+    assert read_live_choice(path) is False
+    write_picker_state(to_picker_state({"whisper": "cpu"}, live=True), path=path)
+    assert read_live_choice(path) is True
+
+
+# ── validate_live ────────────────────────────────────────────────────────
+
+
+def test_validate_live_defaults_true_when_absent():
+    assert validate_live(None) is True
+
+
+def test_validate_live_accepts_explicit_booleans():
+    assert validate_live(True) is True
+    assert validate_live(False) is False
+
+
+def test_validate_live_rejects_non_bool():
+    with pytest.raises(InstallSelectionError):
+        validate_live("false")
+    with pytest.raises(InstallSelectionError):
+        validate_live(0)
 
 
 def test_picker_install_argv_runs_the_picker_as_a_module():
@@ -229,11 +305,12 @@ def test_sse_frames_an_event_as_data_block():
 # ── streaming runner (fake subprocess from conftest.fake_install_spawn) ───────
 
 
-async def _collect(selection, *, lines, returncode, on_success=None):
+async def _collect(selection, *, lines, returncode, live=True, on_success=None):
     written = {}
     events = []
     async for ev in run_install(
         selection,
+        live=live,
         spawn=fake_install_spawn(lines, returncode),
         write_state=lambda state, **_: written.update(state),
         on_success=on_success,
@@ -256,6 +333,12 @@ async def test_run_install_streams_start_logs_then_done_on_success():
     assert events[-1] == {"phase": "done", "ok": True, "returncode": 0}
     assert calls == ["reload"]  # hot-reload fired exactly once, on success
     assert written["choices"]["whisper"]["enabled"] is True  # selection was written
+    assert written["choices"]["whisper"]["live"] is True  # default carried through
+
+
+async def test_run_install_forwards_live_false_to_the_written_state():
+    _events, written = await _collect({"whisper": "cpu"}, lines=[b"installed\n"], returncode=0, live=False)
+    assert written["choices"]["whisper"]["live"] is False
 
 
 async def test_run_install_reports_error_and_skips_reload_on_failure():

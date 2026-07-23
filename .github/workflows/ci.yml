@@ -290,7 +290,10 @@ jobs:
       # gated in the `upstream-contract` matrix job below instead (its
       # moonshine-mlx lane runs on a macos-arm64 runner).
       - name: Run real-audio transcription pipeline E2E (faster-whisper + NB-Whisper)
-        run: pytest tests/e2e/test_pipeline_e2e.py -m real_audio -q
+        # Includes the /tap live-gate real-audio E2E (#248): real Silero VAD
+        # off the event loop → real relay → real faster-whisper over the gated
+        # bytes. Both use `tiny.en`/`base`, pre-fetched above.
+        run: pytest tests/e2e/test_pipeline_e2e.py tests/test_tap_live_gate_real_audio.py -m real_audio -q
 
       - name: Run the faster-whisper upstream-contract smoke (real package)
         run: pytest tests/test_transcribers_faster_whisper.py -k upstream_contract -q

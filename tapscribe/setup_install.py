@@ -2,10 +2,12 @@
 
 The app does NOT resolve pip extras or run pip itself — it delegates to the
 dependency-free `tapscribe/install_picker.py`, which already encapsulates the messy
-parts (shared extras like `whisper-live`, the auto-appended `cuda-libs`,
+parts (shared/live extras like `whisper-live`, the auto-appended `cuda-libs`,
 per-backend extras, the skip-if-unchanged stamp). The app's job is the
-translation seam: turn the catalog-family selection the UI speaks into the
-picker's selection (`.tapscribe-install.json` v2), then run the picker
+translation seam: turn the catalog-family selection the UI speaks — plus the
+top-level `live` flag (the WhisperLiveKit live-caption channel opt-out, #374;
+default True, unchanged from before the flag existed) — into the picker's
+selection (`.tapscribe-install.json` v2), then run the picker
 `--non-interactive`, which loads that selection and installs.
 
 Catalog families → picker (install) families
@@ -90,13 +92,41 @@ def validate_selection(families: object) -> dict[str, str]:
     return out
 
 
-def to_picker_state(selection: dict[str, str]) -> dict:
+def validate_live(value: object) -> bool:
+    """Validate the request body's top-level `live` field (the WhisperLiveKit
+    live-caption channel opt-out, #374).
+
+    Absent (``None``, the field omitted from the body) defaults True — a
+    fresh install and an existing request that predates this flag both keep
+    the live channel ON, matching `install_picker.FamilyChoice.live`'s own
+    default. Present but non-bool is rejected rather than coerced, same
+    stance as `validate_selection` on an unknown family/kind: a malformed
+    value must not silently pick an interpretation the operator didn't ask
+    for.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        raise InstallSelectionError(f"live must be a boolean, got {value!r}")
+    return value
+
+
+def to_picker_state(selection: dict[str, str], *, live: bool = True) -> dict:
     """Translate a catalog-family selection into the picker's v2 state dict.
 
     `selection` maps a catalog family to the chosen backend kind
     (``"mlx" | "cuda" | "cpu"`` — the host-valid kind the UI resolved). "cuda"
     and "cpu" both ride the picker's CPU/CUDA (faster-whisper / transformers)
     backend; "mlx" rides the MLX backend. Unknown families are ignored.
+
+    `live` (default True) is the WhisperLiveKit live-caption channel opt-out
+    (#374) — it's a per-request flag, not per-family, because /setup only
+    offers it on the one row (Whisper) that has a live channel. It's written
+    onto the picker's `whisper` choice regardless of whether Whisper/NB-Whisper
+    was selected THIS request: the picker's `FamilyChoice.live` only matters
+    while the family is also `enabled`, so persisting it unconditionally is
+    harmless and keeps the operator's toggle sticky across an install that
+    happens not to touch Whisper.
 
     Assumes `selection` has passed `validate_selection`: an unrecognised kind
     falls through to the CPU backend rather than raising, so callers must
@@ -122,19 +152,55 @@ def to_picker_state(selection: dict[str, str]) -> dict:
             choices[family] = {"enabled": True, "backend": _BK_MLX}
         else:
             choices[family] = {"enabled": True, "backend": _BK_CPU}
+    # Only Whisper declares `live_extras` in the picker's catalog — see
+    # install_picker.FamilyDef. "whisper" is always a key in `choices` (it's
+    # in `_PICKER_FAMILIES`), so this is never a KeyError.
+    choices["whisper"]["live"] = live
     return {"version": _STATE_VERSION, "choices": choices}
 
 
-def read_picker_state(path: Path = _STATE_FILE) -> dict:
+def read_picker_state(path: Path | None = None) -> dict:
     """Best-effort read of the picker's on-disk selection. An absent,
     unreadable, non-JSON or non-object file yields `{}` — the same
     "fall back to nothing preserved" stance `install_picker.Selection.load`
-    takes, so a corrupt file can't fail a /setup install."""
+    takes, so a corrupt file can't fail a /setup install.
+
+    `path` defaults to `_STATE_FILE`, looked up FRESH on each call (not
+    bound as the parameter's default value) so `monkeypatch.setattr(module,
+    "_STATE_FILE", ...)` reaches every caller that omits `path` — including
+    `setup_state.build_setup_state`'s live-channel read, called from the real
+    `/api/setup/state` route with no override of its own. A bound default
+    (`path: Path = _STATE_FILE`) would freeze the value at import time and
+    silently ignore that monkeypatch, the same trap `config.INSTALL_WARNINGS_FILE`
+    avoids by being re-read from the module each call.
+    """
+    if path is None:
+        path = _STATE_FILE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def read_live_choice(path: Path | None = None) -> bool:
+    """Whether the persisted picker state has the WhisperLiveKit live channel
+    ON (#374) — the decode symmetric with `to_picker_state`'s
+    `choices["whisper"]["live"]` write, kept here so this module stays the one
+    owner of the picker-state shape on the app side (like `_PICKER_FAMILIES`
+    and the catalog→picker fold above).
+
+    Defaults True whenever the file, the `whisper` choice, or the `live` key
+    is absent/corrupt — matching `install_picker.FamilyChoice.live`'s own
+    default, so a pre-#374 state file (or none at all) still reads as live-on.
+    Reuses `read_picker_state`'s best-effort degrade-to-`{}`, so a bad state
+    file can't fail the read.
+    """
+    choices = read_picker_state(path).get("choices")
+    whisper = choices.get("whisper") if isinstance(choices, dict) else None
+    if not isinstance(whisper, dict):
+        return True
+    return bool(whisper.get("live", True))
 
 
 def merge_picker_state(existing: object, fresh: dict) -> dict:
@@ -213,6 +279,7 @@ async def _create_subprocess(argv: list[str]):
 async def run_install(
     selection: dict[str, str],
     *,
+    live: bool = True,
     no_mlx: bool = False,
     install_spec: str | None = None,
     spawn: Callable[[list[str]], Awaitable] | None = None,
@@ -228,6 +295,9 @@ async def run_install(
     Bundle installs extras from the wheel it shipped instead of an editable
     checkout that isn't there. `None` (a dev checkout) keeps the historical argv.
 
+    `live` (default True) is the WhisperLiveKit live-caption channel opt-out
+    (#374), forwarded to `to_picker_state`.
+
     `spawn` / `write_state` are injectable for tests; they default to the real
     asyncio subprocess and the on-disk picker-state writer at call time.
     """
@@ -236,7 +306,7 @@ async def run_install(
 
     yield {"phase": "start"}
     try:
-        write_state(to_picker_state(selection))
+        write_state(to_picker_state(selection, live=live))
         proc = await spawn(picker_install_argv(no_mlx=no_mlx, install_spec=install_spec))
         async for raw in proc.stdout:
             line = raw.decode("utf-8", "replace").rstrip("\n")
