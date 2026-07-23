@@ -22,6 +22,7 @@ from tapscribe import install_picker
 from tapscribe.setup_install import (
     InstallSelectionError,
     picker_install_argv,
+    read_live_choice,
     run_install,
     sse,
     to_picker_state,
@@ -135,6 +136,18 @@ def test_to_picker_state_sets_live_even_when_whisper_is_not_selected():
     state = to_picker_state({"parakeet": "cpu"}, live=False)
     assert state["choices"]["whisper"]["enabled"] is False
     assert state["choices"]["whisper"]["live"] is False
+
+
+def test_read_live_choice_roundtrips_to_picker_state(tmp_path):
+    """`read_live_choice` is the decode symmetric with `to_picker_state`'s
+    write, and owns the picker-state shape for the app side. A missing/absent
+    `live` reads as ON (matching `install_picker.FamilyChoice.live`)."""
+    path = tmp_path / ".tapscribe-install.json"
+    assert read_live_choice(path) is True  # no file → live-on default
+    write_picker_state(to_picker_state({"whisper": "cpu"}, live=False), path=path)
+    assert read_live_choice(path) is False
+    write_picker_state(to_picker_state({"whisper": "cpu"}, live=True), path=path)
+    assert read_live_choice(path) is True
 
 
 # ── validate_live ────────────────────────────────────────────────────────

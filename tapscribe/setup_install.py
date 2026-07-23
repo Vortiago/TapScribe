@@ -183,6 +183,26 @@ def read_picker_state(path: Path | None = None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def read_live_choice(path: Path | None = None) -> bool:
+    """Whether the persisted picker state has the WhisperLiveKit live channel
+    ON (#374) — the decode symmetric with `to_picker_state`'s
+    `choices["whisper"]["live"]` write, kept here so this module stays the one
+    owner of the picker-state shape on the app side (like `_PICKER_FAMILIES`
+    and the catalog→picker fold above).
+
+    Defaults True whenever the file, the `whisper` choice, or the `live` key
+    is absent/corrupt — matching `install_picker.FamilyChoice.live`'s own
+    default, so a pre-#374 state file (or none at all) still reads as live-on.
+    Reuses `read_picker_state`'s best-effort degrade-to-`{}`, so a bad state
+    file can't fail the read.
+    """
+    choices = read_picker_state(path).get("choices")
+    whisper = choices.get("whisper") if isinstance(choices, dict) else None
+    if not isinstance(whisper, dict):
+        return True
+    return bool(whisper.get("live", True))
+
+
 def merge_picker_state(existing: object, fresh: dict) -> dict:
     """Overlay `fresh` (the families /setup manages) onto `existing` (what
     the terminal picker last wrote), keeping every OTHER family's choice.

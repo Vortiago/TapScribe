@@ -28,7 +28,6 @@ fans out internally) is unchanged. See CONTEXT.md (TapFanOut · TapRelay).
 from __future__ import annotations
 
 import asyncio
-import functools
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -68,9 +67,12 @@ if TYPE_CHECKING:
 # the pool is sized to the host's cores rather than pinned to one worker
 # — that's the "cap cores, don't serialise" the bound is for.
 #
-# Lazily created (mirroring `MoonshineLiveChannel._model_executor`) so a
-# process that never opens a live tap with gate_kind="tapscribe" never
-# pays for it. Safe without a lock: `_vad_executor()` only ever runs on
+# Module-level and lazily created — the same shape as
+# `transcribers._MODEL_EXECUTOR` (also module-level, unpinned, genuinely
+# process-wide compute), NOT `MoonshineLiveChannel._model_executor`
+# (instance-level precisely because MLX weights are thread-affine to the
+# channel that built them). A process that never opens a live tap with
+# gate_kind="tapscribe" never pays for it. Safe without a lock: `_vad_executor()` only ever runs on
 # the app's single event loop thread (called from `TapRelay.feed`, itself
 # only reachable from the `/tap` WS handler in `app.py`), and the
 # check-then-create has no `await` in between, so two `/tap`s racing to
@@ -276,7 +278,7 @@ class TapRelay:
         gate = self._gate
         if gate is not None:
             loop = asyncio.get_running_loop()
-            frames = tuple(await loop.run_in_executor(_vad_executor(), functools.partial(gate.feed, buf)))
+            frames = tuple(await loop.run_in_executor(_vad_executor(), gate.feed, buf))
             gate_open = gate.is_open
         else:
             frames = (buf,)

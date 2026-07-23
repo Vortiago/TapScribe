@@ -539,20 +539,20 @@ def family_extras_preview(fam: FamilyDef, choice: FamilyChoice, caps: MachineCap
     which row."""
     out: list[str] = []
     seen: set[str] = set()
-    for extra in fam.shared_extras:
+
+    def add(extra: str) -> None:
         if extra not in seen:
             out.append(extra)
             seen.add(extra)
+
+    for extra in fam.shared_extras:
+        add(extra)
     if choice.live:
         for extra in fam.live_extras:
-            if extra not in seen:
-                out.append(extra)
-                seen.add(extra)
+            add(extra)
     for be in effective_backends(fam, choice, caps):
         for extra in be.extras:
-            if extra not in seen:
-                out.append(extra)
-                seen.add(extra)
+            add(extra)
     return out
 
 

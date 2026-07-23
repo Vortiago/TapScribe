@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import wave
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -776,25 +775,35 @@ def _real_audio_frames(frame_bytes: int = FRAME_BYTES) -> list[bytes]:
     """The real ~12 s Apollo-11 speech clip used by `test_tap_fan_out.py`'s
     real-audio meter tests, read into 20 ms frames — real speech (not
     synthetic silence) so it actually drives Silero through
-    silence -> speech -> silence transitions."""
-    with wave.open(str(REAL_AUDIO_FIXTURE), "rb") as w:
-        assert w.getframerate() == 16000
-        assert w.getnchannels() == 1
-        assert w.getsampwidth() == 2
-        raw = w.readframes(w.getnframes())
-    return [raw[i : i + frame_bytes] for i in range(0, len(raw) - frame_bytes + 1, frame_bytes)]
+    silence -> speech -> silence transitions. Reuses that file's
+    `_wav_to_frames` so the WAV→frames read lives in one place."""
+    from test_tap_fan_out import _wav_to_frames
+
+    return _wav_to_frames(REAL_AUDIO_FIXTURE, frame_bytes=frame_bytes)
 
 
 def _real_gate() -> SpeechGate:
-    """A real, Silero-backed gate with the same defaults
-    `build_gate_for_config` produces for `gate_kind="tapscribe"` with
-    LiveConfig's defaults. Each call loads a FRESH model (per-gate, never
-    shared — see `speech_gate.load_silero_model`), so two gates built
-    with identical knobs and fed the identical frame sequence produce
-    identical output; Silero's ONNX inference is deterministic."""
-    from tapscribe.speech_gate import make_silero_vad
+    """A real, Silero-backed gate built through the PRODUCTION constructor
+    (`build_gate_for_config`, gate_kind="tapscribe") rather than hand-rolled,
+    so this equivalence test can't silently drift from how production wires a
+    gate. Each call loads a FRESH model (per-gate, never shared — see
+    `speech_gate.load_silero_model`), so two gates built with identical knobs
+    and fed the identical frame sequence produce identical output; Silero's
+    ONNX inference is deterministic."""
+    from types import SimpleNamespace
 
-    return SpeechGate(vad=make_silero_vad(threshold=0.5, hangover_ms=400), pre_roll_ms=300, min_speech_ms=0)
+    from tapscribe.speech_gate import build_gate_for_config
+
+    cfg = SimpleNamespace(
+        gate_kind="tapscribe",
+        gate_speech_threshold=0.5,
+        gate_hangover_ms=400,
+        gate_pre_roll_ms=300,
+        gate_min_speech_ms=0,
+    )
+    gate = build_gate_for_config(cfg)
+    assert gate is not None  # gate_kind="tapscribe" always yields a gate
+    return gate
 
 
 async def test_feed_offload_is_bit_identical_to_synchronous_real_silero():
