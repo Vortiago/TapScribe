@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import wave
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from tapscribe import tap_relay as tr
 from tapscribe.live_relay import WlKRelay
+from tapscribe.speech_gate import FRAME_BYTES, SpeechGate
 from tapscribe.tap_relay import FedFrames, RelayHandlers, TapRelay, _default_relay_factory
 
 PCM_FRAME = b"\x10\x00" * 320  # 20 ms @ 16 kHz mono int16
@@ -664,3 +667,170 @@ async def test_relay_follows_a_live_channel_object_swap(monkeypatch: pytest.Monk
     assert relay.connected == ("127.0.0.1", 9300, "en"), (
         "relay stayed bound to the stopped pre-swap channel — captions would be dead"
     )
+
+
+# --------------------------------------------------------------------------
+# Per-frame VAD off the event loop (#248)
+#
+# Same rationale as the "Gate construction off the event loop (#249)"
+# section above: a fake that proves `feed()` ran off the loop has to
+# actually block a real OS thread, because an `asyncio.sleep` fake would
+# already yield on its own and a synchronous call could never be told
+# apart from an offloaded one. `_blocking_gate` below is the `feed()`
+# analogue of `_blocking_gate_factory`.
+# --------------------------------------------------------------------------
+
+
+def _blocking_gate(
+    release: threading.Event, outcome: dict, output: list[bytes], *, is_open: bool, timeout: float = 3.0
+):
+    """A gate whose `feed()` blocks a real OS thread until `release`
+    fires, recording whether that happened before `timeout` elapsed into
+    `outcome["released_in_time"]` — `True` means something else (the
+    observing ticker) set it first, proving genuine off-loop concurrency;
+    `False` means only the bounded timeout unblocked it."""
+
+    class _Gate:
+        def feed(self, frame: bytes) -> list[bytes]:
+            outcome["released_in_time"] = release.wait(timeout=timeout)
+            return list(output)
+
+        @property
+        def is_open(self) -> bool:
+            return is_open
+
+    return _Gate()
+
+
+async def test_gate_feed_runs_off_the_event_loop():
+    """#248: `SpeechGate.feed` (Silero ONNX inference) must not block the
+    event loop. A `ticker` coroutine running alongside `relay.feed()` must
+    get 20 loop turns and flip `release` WHILE the (real-thread-blocked)
+    gate is still waiting on it. Pre-fix, `feed()` called
+    `self._gate.feed(buf)` directly on the loop, so the ticker could never
+    run until the blocking call had already given up on its own bounded
+    timeout — `release` would then be set too late to observe, and
+    `released_in_time` would read `False`."""
+    release = threading.Event()
+    outcome: dict = {}
+    gate = _blocking_gate(release, outcome, [PCM_FRAME], is_open=True)
+
+    async def ticker() -> None:
+        for _ in range(20):
+            await asyncio.sleep(0)
+        release.set()
+
+    factory = _RecordingFactory()
+    relay = _tap_relay(_FakeLive(_FakeConfig()), do_live=True, factory=factory, gate=gate)
+    await relay.open()
+
+    feed_task = asyncio.create_task(relay.feed(PCM_FRAME))
+    ticker_task = asyncio.create_task(ticker())
+
+    fed = await asyncio.wait_for(feed_task, timeout=6.0)
+    await asyncio.wait_for(ticker_task, timeout=6.0)
+
+    assert outcome.get("released_in_time") is True, (
+        "the ticker never ran concurrently with gate.feed() — feed() is stalling the event loop"
+    )
+    assert fed == FedFrames(frames=(PCM_FRAME,), gate_open=True)
+
+
+async def test_feed_offload_survives_a_gate_swap_mid_await(monkeypatch: pytest.MonkeyPatch):
+    """The gate is snapshotted into a local BEFORE the executor await
+    (`gate = self._gate`), so a reconnect that swaps `self._gate` to a
+    fresh object WHILE this frame's inference is in flight must not leak
+    into this call's result: both the emitted frames and `gate_open` must
+    reflect the gate this frame was actually fed to, not whatever
+    `self._gate` has become by the time the await resolves."""
+    release = threading.Event()
+    outcome: dict = {}
+    old_gate = _blocking_gate(release, outcome, [PCM_FRAME], is_open=True)
+    new_gate = _FakeGate(output=[], is_open=False)  # would report differently if read post-await
+
+    factory = _RecordingFactory()
+    relay = _tap_relay(_FakeLive(_FakeConfig()), do_live=True, factory=factory, gate=old_gate)
+    await relay.open()
+
+    feed_task = asyncio.create_task(relay.feed(PCM_FRAME))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    relay._gate = new_gate  # simulate a reconnect landing mid-inference
+    release.set()
+
+    fed = await asyncio.wait_for(feed_task, timeout=6.0)
+    assert fed == FedFrames(frames=(PCM_FRAME,), gate_open=True), (
+        "feed() must report the gate it actually fed, not the one swapped in mid-await"
+    )
+
+
+# --------------------------------------------------------------------------
+# Bit-identical equivalence against real Silero (#248 requirement: the
+# off-loop move must not change gating AT ALL)
+# --------------------------------------------------------------------------
+
+REAL_AUDIO_FIXTURE = Path(__file__).parent / "fixtures" / "audio" / "armstrong-en.wav"
+
+
+def _real_audio_frames(frame_bytes: int = FRAME_BYTES) -> list[bytes]:
+    """The real ~12 s Apollo-11 speech clip used by `test_tap_fan_out.py`'s
+    real-audio meter tests, read into 20 ms frames — real speech (not
+    synthetic silence) so it actually drives Silero through
+    silence -> speech -> silence transitions."""
+    with wave.open(str(REAL_AUDIO_FIXTURE), "rb") as w:
+        assert w.getframerate() == 16000
+        assert w.getnchannels() == 1
+        assert w.getsampwidth() == 2
+        raw = w.readframes(w.getnframes())
+    return [raw[i : i + frame_bytes] for i in range(0, len(raw) - frame_bytes + 1, frame_bytes)]
+
+
+def _real_gate() -> SpeechGate:
+    """A real, Silero-backed gate with the same defaults
+    `build_gate_for_config` produces for `gate_kind="tapscribe"` with
+    LiveConfig's defaults. Each call loads a FRESH model (per-gate, never
+    shared — see `speech_gate.load_silero_model`), so two gates built
+    with identical knobs and fed the identical frame sequence produce
+    identical output; Silero's ONNX inference is deterministic."""
+    from tapscribe.speech_gate import make_silero_vad
+
+    return SpeechGate(vad=make_silero_vad(threshold=0.5, hangover_ms=400), pre_roll_ms=300, min_speech_ms=0)
+
+
+async def test_feed_offload_is_bit_identical_to_synchronous_real_silero():
+    """The headline #248 correctness requirement: moving `SpeechGate.feed`
+    off the event loop must not change gating at all. Feed the same real
+    speech clip, frame for frame, through two independently-constructed
+    but identically-configured REAL Silero gates — one driven directly
+    (`gate.feed(frame)`, the pre-#248 shape) as the baseline, the other
+    through `TapRelay.feed` (the post-#248 offloaded shape) — and assert
+    the two sequences of emitted frames AND gate-open states match at
+    every single frame. Uses the real onnxruntime-backed Silero port
+    (a core dependency, #374), not a fake VAD, so this is a real-backend
+    check per repo convention, not just a mock."""
+    pytest.importorskip("onnxruntime")
+    frames_in = _real_audio_frames()
+    assert len(frames_in) > 200, "expected a real multi-second speech fixture"
+
+    baseline_gate = _real_gate()
+    baseline_frames: list[tuple[bytes, ...]] = []
+    baseline_open: list[bool] = []
+    for f in frames_in:
+        baseline_frames.append(tuple(baseline_gate.feed(f)))
+        baseline_open.append(baseline_gate.is_open)
+
+    offloaded_gate = _real_gate()
+    factory = _RecordingFactory()
+    relay = _tap_relay(_FakeLive(_FakeConfig()), do_live=True, factory=factory, gate=offloaded_gate)
+    await relay.open()
+
+    offloaded_frames: list[tuple[bytes, ...]] = []
+    offloaded_open: list[bool] = []
+    for f in frames_in:
+        fed = await relay.feed(f)
+        offloaded_frames.append(fed.frames)
+        offloaded_open.append(fed.gate_open)
+
+    assert offloaded_open == baseline_open
+    assert offloaded_frames == baseline_frames
+    assert any(baseline_open), "fixture never opened the gate — test wouldn't catch a broken transition"

@@ -28,8 +28,11 @@ fans out internally) is unchanged. See CONTEXT.md (TapFanOut · TapRelay).
 from __future__ import annotations
 
 import asyncio
+import functools
+import os
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
@@ -39,6 +42,52 @@ from .speech_gate import SpeechGate, build_gate_for_config, effective_gate_confi
 
 if TYPE_CHECKING:
     from .live import LiveChannel, LiveConfig
+
+# Dedicated, bounded, module-level pool for per-frame Silero VAD inference
+# (`SpeechGate.feed`, called from `TapRelay.feed` below), SHARED across
+# every open `/tap`'s gate (#248). Every /tap frame (~50 fps) used to run
+# its gate's ONNX inference inline on the event loop; at many concurrent
+# taps that's the loop's scaling ceiling, so it moves to a worker thread.
+#
+# Deliberately NOT `asyncio.to_thread`, which dispatches to the process's
+# shared default executor — the same pool serving disk walks and (per
+# `TapRelay._attach`, #249) gate CONSTRUCTION. #248 is specifically about
+# many-tap VAD *inference* scaling, so it gets its own pool: isolated from,
+# and unable to starve or be starved by, that unrelated off-loop work.
+#
+# Unlike `moonshine_live.py`'s `_decode_executor` / `transcribers.
+# _MODEL_EXECUTOR` (both pinned to `max_workers=1` because MLX's Metal
+# stream is thread-local — weights can only be evaluated on the thread
+# that created them), Silero-via-onnxruntime has no such affinity
+# constraint (`CPUExecutionProvider` is thread-safe, and each gate's
+# session already pins `intra_op_num_threads=1` — see `vad/silero.py` —
+# so it claims exactly one core per inference, never oversubscribing
+# within a single call) and every gate owns its own model instance
+# (`speech_gate.load_silero_model` is deliberately uncached). Different
+# taps' gates are therefore meant to run genuinely concurrently here, so
+# the pool is sized to the host's cores rather than pinned to one worker
+# — that's the "cap cores, don't serialise" the bound is for.
+#
+# Lazily created (mirroring `MoonshineLiveChannel._model_executor`) so a
+# process that never opens a live tap with gate_kind="tapscribe" never
+# pays for it. Safe without a lock: `_vad_executor()` only ever runs on
+# the app's single event loop thread (called from `TapRelay.feed`, itself
+# only reachable from the `/tap` WS handler in `app.py`), and the
+# check-then-create has no `await` in between, so two `/tap`s racing to
+# create it is not possible — cooperative scheduling only switches tasks
+# at an `await`.
+_VAD_EXECUTOR_MAX_WORKERS = os.cpu_count() or 4
+_vad_pool: ThreadPoolExecutor | None = None
+
+
+def _vad_executor() -> ThreadPoolExecutor:
+    global _vad_pool
+    if _vad_pool is None:
+        _vad_pool = ThreadPoolExecutor(
+            max_workers=_VAD_EXECUTOR_MAX_WORKERS, thread_name_prefix="tapscribe-vad"
+        )
+    return _vad_pool
+
 
 # Minimum seconds between relay reconnect attempts. The relay can die
 # mid-utterance for two reasons we want to recover from transparently —
@@ -207,10 +256,28 @@ class TapRelay:
         the relay, reconnecting transparently if the relay died but the
         LiveChannel is back up. Returns the post-gate frames + gate-open
         state for the caller's meter / ActiveStream row. Never raises on a
-        dead relay — recording continues regardless (ADR-0002)."""
-        if self._gate is not None:
-            frames = tuple(self._gate.feed(buf))
-            gate_open = self._gate.is_open
+        dead relay — recording continues regardless (ADR-0002).
+
+        The gate's own `feed` (Silero ONNX inference, #248) runs on the
+        shared `_vad_executor()` worker pool rather than inline on the
+        event loop. `self._gate` is snapshotted into a local BEFORE the
+        await — a reconnect can swap `self._gate` to a new object (or
+        `None`, mid-rebuild — see `_attach`) while this call is suspended
+        waiting on the executor, and both the inference call and the
+        `is_open` read below must stay pinned to the gate this frame was
+        actually fed to, not whatever `self._gate` has become by the time
+        the await resolves. `TapFanOut.write_frame` awaits this call to
+        completion before reading the next WS frame for this tap (see
+        `app.py`'s `/tap` receive loop), so one tap's frames only ever
+        reach its own gate one at a time — required, since Silero's
+        streaming RNN state lives on the gate's model instance and two
+        concurrent `feed`s on the same gate would corrupt it. Different
+        taps' gates run on the pool concurrently by design."""
+        gate = self._gate
+        if gate is not None:
+            loop = asyncio.get_running_loop()
+            frames = tuple(await loop.run_in_executor(_vad_executor(), functools.partial(gate.feed, buf)))
+            gate_open = gate.is_open
         else:
             frames = (buf,)
             gate_open = False
