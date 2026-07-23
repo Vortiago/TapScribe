@@ -53,3 +53,4 @@ Thumbs.db
 # files ARE tracked as starter files; this one is created on first save.)
 config/summarizer.json
 .bench-da-no.json
+.tapscribe-install-warnings.json

@@ -225,18 +225,20 @@ def load_silero_model() -> object:
     per-worker-thread via `strip_silence._local_silero_model`.
 
     Imports are inside the function so a TapScribe install without
-    silero doesn't fail at import time — the gate is constructible
-    without Silero (tests pass a fake analyzer), and only the production
-    wiring reaches for the model.
+    onnxruntime doesn't fail at import time — the gate is constructible
+    without a model (tests pass a fake analyzer), and only the production
+    wiring reaches for one.
 
-    `onnx=True` loads the ONNX build via onnxruntime rather than the
-    TorchScript `.jit` via `torch.jit.load`, which PyTorch deprecated and
-    flags as unsupported on Python 3.14+ ("may break"). Same model, same
-    results; silero still uses torch tensors for I/O so torch stays a
-    dependency — we just don't ride the deprecated loader."""
-    from silero_vad import load_silero_vad  # noqa: PLC0415
+    Backed by `tapscribe.vad`, a numpy+onnxruntime port of silero's own
+    ONNX path with the vendored model. That is what let `torch` and the
+    `silero-vad` package stop being core dependencies (#374): upstream
+    declares torch as a hard requirement and imports it at module level
+    even when loading `onnx=True`, though it only ever uses it as an
+    array container. `tests/test_vad_silero_port.py` pins the port
+    against the real package."""
+    from .vad import load_model  # noqa: PLC0415
 
-    return load_silero_vad(onnx=True)
+    return load_model()
 
 
 def make_silero_vad(*, threshold: float, hangover_ms: int) -> VadAnalyzer:
@@ -260,11 +262,11 @@ def make_silero_vad(*, threshold: float, hangover_ms: int) -> VadAnalyzer:
     /api/state poll.
     """
     import numpy as np  # noqa: PLC0415
-    import torch  # noqa: PLC0415
-    from silero_vad import VADIterator  # noqa: PLC0415
+
+    from .vad import VadIterator  # noqa: PLC0415
 
     model = load_silero_model()
-    it = VADIterator(
+    it = VadIterator(
         model,
         threshold=threshold,
         sampling_rate=SAMPLE_RATE,
@@ -272,11 +274,10 @@ def make_silero_vad(*, threshold: float, hangover_ms: int) -> VadAnalyzer:
     )
 
     def analyze(chunk: bytes) -> dict | None:
-        # int16 → float32 in [-1, 1]. Silero accepts numpy or torch;
-        # torch avoids one copy. View the byte buffer as int16 first.
+        # int16 → float32 in [-1, 1]. numpy the whole way now that the VAD
+        # takes arrays directly — one fewer copy than the old torch hop.
         arr = np.frombuffer(chunk, dtype=np.int16)
-        t = torch.from_numpy(arr.astype(np.float32) / 32768.0)
-        return it(t)
+        return it(arr.astype(np.float32) / 32768.0)
 
     return analyze
 

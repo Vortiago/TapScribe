@@ -336,6 +336,18 @@ def default_gguf_ctx() -> int:
     )
 
 
+def effective_context_tokens(backend: str, native_tokens: int) -> int:
+    """The window a model will ACTUALLY run with on `backend` — what the
+    dashboard must advertise, not the catalog's native number.
+
+    The GGUF path loads llama.cpp with `n_ctx = default_gguf_ctx()` (8192 by
+    default), so a row declaring a 128K native window really runs at 8192 and
+    the dropdown's "≈5 GB · 128K ctx" was a lie on every non-Apple-Silicon
+    host. The MLX path feeds the model its whole prompt (we never cap the
+    input), so there the native window IS the effective one."""
+    return min(native_tokens, default_gguf_ctx()) if backend == "gguf" else native_tokens
+
+
 def env_model_default(backend: str) -> str:
     """The default model repo for `backend`, with an env override
     (`TAPSCRIBE_SUMMARIZE_{MLX,GGUF}_MODEL`) so an operator can swap the bundled
@@ -381,7 +393,17 @@ def summary_model_catalog(backend: str | None = None) -> dict[str, Any]:
     return {
         "backend": b,
         "default": default,
-        "models": [{**m.to_mapping(), "is_default": m.repo_id == default} for m in SUMMARY_MODELS.get(b, ())],
+        # `context_tokens` is reported as the EFFECTIVE window for this backend
+        # (see `effective_context_tokens`) — the GGUF path really runs at
+        # `TAPSCRIBE_SUMMARIZE_GGUF_CTX`, not at the row's native number.
+        "models": [
+            {
+                **m.to_mapping(),
+                "context_tokens": effective_context_tokens(b, m.context_tokens),
+                "is_default": m.repo_id == default,
+            }
+            for m in SUMMARY_MODELS.get(b, ())
+        ],
         # The OUTPUT-length knob the dashboard's number input seeds + bounds. The
         # input window isn't a knob (MLX uses the model's native window; GGUF's is
         # the separate TAPSCRIBE_SUMMARIZE_GGUF_CTX), so only max_tokens is here.

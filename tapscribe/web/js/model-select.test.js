@@ -57,21 +57,33 @@ test("groupModelsByFamily treats a missing family as unknown (Other)", () => {
 
 // --- LIVE_FAMILY_LABELS: pin the "one table, sliced" contract so a family
 // added to FAMILY_LABELS doesn't silently drift the live subset's order.
+//
+// Asserted against LITERALS, not against FAMILY_LABELS: LIVE_FAMILY_LABELS IS
+// `FAMILY_LABELS.filter(...)`, so any assertion derived from FAMILY_LABELS
+// compares the same tuple references to themselves and passes by construction —
+// it would stay green if every label were changed to the wrong text, or if
+// parakeet were quietly made live-eligible. The expected list below is the
+// independent source: what the dashboard's live-model dropdowns must offer.
 
-test("LIVE_FAMILY_LABELS is a subset of FAMILY_LABELS in the same relative order", () => {
-  const fullOrder = FAMILY_LABELS.map(([fam]) => fam);
-  const liveOrder = LIVE_FAMILY_LABELS.map(([fam]) => fam);
-  const indices = liveOrder.map((fam) => fullOrder.indexOf(fam));
-  assert.ok(
-    indices.every((i) => i >= 0),
-    "every LIVE_FAMILY_LABELS family must exist in FAMILY_LABELS",
+test("LIVE_FAMILY_LABELS is the live-eligible slice, in dropdown order", () => {
+  assert.deepEqual(
+    LIVE_FAMILY_LABELS.map(([fam, label]) => [fam, label]),
+    [
+      ["whisper", "Whisper"],
+      ["nb-whisper", "NB-Whisper (Norwegian)"],
+      ["voxtral", "Voxtral (Mistral)"],
+      ["moonshine", "Moonshine"],
+    ],
   );
-  assert.deepEqual(indices, [...indices].sort((a, b) => a - b)); // strictly increasing → same relative order
 });
 
-test("LIVE_FAMILY_LABELS entries share the exact label text from FAMILY_LABELS", () => {
-  const byFamily = new Map(FAMILY_LABELS);
-  for (const [fam, label] of LIVE_FAMILY_LABELS) {
-    assert.equal(label, byFamily.get(fam));
-  }
+test("parakeet is offered for batch but NOT for live", () => {
+  assert.ok(
+    FAMILY_LABELS.some(([fam]) => fam === "parakeet"),
+    "parakeet is a batch-eligible family",
+  );
+  assert.ok(
+    !LIVE_FAMILY_LABELS.some(([fam]) => fam === "parakeet"),
+    "parakeet has no live-eligible model today — adding one must be a deliberate edit here",
+  );
 });

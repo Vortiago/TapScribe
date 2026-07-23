@@ -128,8 +128,12 @@ def test_api_setup_state_shape(client):
     r = client.get("/api/setup/state")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"first_run", "available_backends", "families"}
+    assert set(body) == {"first_run", "available_backends", "families", "stale_selection"}
     assert isinstance(body["available_backends"], list)
+    # Families the last picker run had to SKIP because their saved backend left
+    # the catalog (ADR-0015). Empty on a healthy install; /setup renders it as a
+    # banner because the picker's own warning only reaches stderr.
+    assert isinstance(body["stale_selection"], list)
     assert isinstance(body["families"], list) and body["families"]
     fam = body["families"][0]
     assert {"family", "label", "live", "batch", "installed", "backends", "size_hint", "models"} <= set(fam)
@@ -456,6 +460,30 @@ def test_recording_toggle_with_explicit_enabled(client, recorder_under_test):
     r = client.post("/api/recording/toggle", json={"enabled": False})
     assert r.json()["enabled"] is False
     assert recorder_under_test.recording_enabled is False
+
+
+@pytest.mark.parametrize("raw", ["false", "no", 0, "0"])
+def test_recording_toggle_rejects_a_non_bool_enabled(client, recorder_under_test, raw):
+    """A stringified flag must 400, never coerce to the OPPOSITE meaning.
+
+    The route used `bool(body["enabled"])`, so `{"enabled": "false"}` from a
+    bridge or dashboard that stringifies its flags (an HTML form value,
+    `String(bool)`, a URL param) returned `{"ok": true, "enabled": true}` and
+    kept recording every participant after the operator asked to pause. That is
+    a wrong-DIRECTION privacy bug, not merely a rejected request —
+    `_parse_opt_bool`'s own docstring names the trap ("bool('false') is True").
+    """
+    recorder_under_test.recording_enabled = True
+    r = client.post("/api/recording/toggle", json={"enabled": raw})
+    assert r.status_code == 400
+    assert recorder_under_test.recording_enabled is True
+
+
+def test_tap_settings_put_rejects_a_non_bool_record(client, recorder_under_test):
+    """Same coercion, same consequence, on the per-identity record flag."""
+    r = client.put("/api/tap-settings", json={"identity": "alice", "record": "false"})
+    assert r.status_code == 400
+    assert recorder_under_test.tap_settings.get("alice").record is True
 
 
 # ---------------------------------------------------------------------------
@@ -1467,6 +1495,147 @@ def test_delete_session_audio_missing_session_404(client, recorder_under_test): 
     assert r.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# DELETE /api/sessions/{s}/stripped — the busy guard. Unlike its destructive
+# siblings this route allows the CURRENT session (stripped/ is derived), so it
+# is not in the current-session sweep above; the job guard it DOES need is
+# pinned here.
+# ---------------------------------------------------------------------------
+
+
+def _claim_job(recorder, session: str, kind: str = "strip") -> None:
+    """Claim `session`'s job slot from sync test code — JobTracker.claim is
+    async, driven via anyio's sync→async portal (as the sibling tests do)."""
+    import anyio.from_thread
+
+    from tapscribe.recorder import JobState
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(
+            recorder.jobs.claim,
+            JobState(
+                session=session,
+                kind=kind,
+                current=0,
+                total=1,
+                started_at=datetime.now(UTC),
+                status="running",
+            ),
+        )
+
+
+def test_delete_stripped_refuses_inflight_job(client, recorder_under_test):
+    """A strip job holds the session's slot for its WHOLE run while writing
+    region clips into stripped/ — rmtree'ing that directory underneath it
+    deletes half of what it just wrote, so the route must 409 like every
+    other destructive sibling."""
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    (sd / "stripped").mkdir()
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+
+    _claim_job(recorder_under_test, "s")
+
+    r = client.delete("/api/sessions/s/stripped")
+    assert r.status_code == 409, r.text
+    assert "in flight" in r.json()["detail"]
+    assert (sd / "stripped" / "20260101T000000Z__alice__reg.wav").is_file()  # untouched
+
+
+def test_delete_stripped_holds_job_slot_during_rmtree(client, recorder_under_test, monkeypatch):
+    """The inverse pin: the pre-flight guard is check-then-act, so the delete
+    claims the SAME slot the batch jobs use for the rmtree's duration — a
+    strip arriving mid-delete is refused instead of racing the walk."""
+    import shutil as _shutil
+
+    from tapscribe.recorder import JobState
+
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    (sd / "stripped").mkdir()
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+
+    real_rmtree = _shutil.rmtree
+    observed: dict[str, bool] = {}
+
+    def probing_rmtree(path, *a, **kw):
+        # Runs inside the route's asyncio.to_thread — the slot must already
+        # be held, so a foreign claim attempt must be refused.
+        import anyio.from_thread
+
+        with anyio.from_thread.start_blocking_portal() as portal:
+            observed["claim_refused"] = not portal.call(
+                recorder_under_test.jobs.claim,
+                JobState(
+                    session="s",
+                    kind="strip",
+                    current=0,
+                    total=1,
+                    started_at=datetime.now(UTC),
+                    status="running",
+                ),
+            )
+        return real_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr(_shutil, "rmtree", probing_rmtree)
+    r = client.delete("/api/sessions/s/stripped")
+    assert r.status_code == 200, r.text
+    assert observed["claim_refused"] is True
+    assert not (sd / "stripped").exists()
+    # And the slot is released again afterwards: re-cut the folder so the
+    # second call actually reaches the claim (an empty stripped/ would
+    # short-circuit before it) and must get through rather than 409. Restore
+    # rmtree by re-patching, NOT monkeypatch.undo() — undo() would also
+    # revert the recorder fixture's patches (auth back on → 401).
+    monkeypatch.setattr(_shutil, "rmtree", real_rmtree)
+    (sd / "stripped").mkdir()
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+    r2 = client.delete("/api/sessions/s/stripped")
+    assert r2.status_code == 200 and r2.json()["deleted"] is True
+
+
+def test_delete_stripped_allows_the_current_session(client, recorder_under_test):
+    """Deliberately NOT `_refuse_current_or_busy`: stripped/ is a derived
+    artefact, so clearing the live session's regions to re-cut them is a
+    normal operator move. Guards against someone 'aligning' this route with
+    its siblings' current-session refusal."""
+    root = recorder_under_test.recordings_dir
+    cur = recorder_under_test.session_start
+    sd = seed_session(root, cur, ["20260101T000000Z__alice__abc.wav"])
+    (sd / "stripped").mkdir()
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+
+    r = client.delete(f"/api/sessions/{cur}/stripped")
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is True
+    assert not (sd / "stripped").exists()
+    assert (sd / "20260101T000000Z__alice__abc.wav").is_file()  # originals stay
+
+
+def test_delete_stripped_survives_a_concurrent_clear(client, recorder_under_test, monkeypatch):
+    """is_dir() → rmtree is check-then-act: a second dashboard tab (or an
+    absorb) can clear stripped/ inside that window. The caller's goal already
+    holds, so that must read as a no-op, not a 500."""
+    import shutil as _shutil
+
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    (sd / "stripped").mkdir()
+    seed_wav(sd / "stripped" / "20260101T000000Z__alice__reg.wav")
+
+    real_rmtree = _shutil.rmtree
+
+    def losing_rmtree(path, *a, **kw):
+        real_rmtree(path, *a, **kw)  # the OTHER client wins the race…
+        return real_rmtree(path, *a, **kw)  # …and ours finds it already gone
+
+    monkeypatch.setattr(_shutil, "rmtree", losing_rmtree)
+    r = client.delete("/api/sessions/s/stripped")
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is False
+    assert not (sd / "stripped").exists()
+
+
 def test_delete_wav_original_keeps_siblings_no_cascade(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     sd = seed_session(
@@ -2266,6 +2435,64 @@ def test_api_transcribe_falls_back_to_global_when_session_meta_empty(
     )
     assert captured["initial_prompt"] == "GLOBAL DEFAULT"
     assert captured["hotwords"] == "Acme"
+
+
+# ---------------------------------------------------------------------------
+# Registry rejections on the transcribe routes. These are the ONLY transcribe
+# tests that do NOT monkeypatch load_transcriber — the point is to exercise
+# the real catalog lookup from HTTP, where its bare KeyError/RuntimeError used
+# to escape as "Internal Server Error".
+# ---------------------------------------------------------------------------
+
+
+def test_api_transcribe_unknown_model_is_400_naming_the_model(client, recorder_under_test):
+    """A stale dashboard tab (or a bridge) holding a since-removed model id
+    must hear WHICH model the catalog rejected, not a bare 500."""
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    r = client.post(
+        "/api/transcribe",
+        json={
+            "session": "s",
+            "name": "20260101T000000Z__alice__abc.wav",
+            "model": "whisper-from-the-future",
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "whisper-from-the-future" in r.json()["detail"]
+
+
+def test_api_transcribe_session_unknown_model_is_400_naming_the_model(client, recorder_under_test):
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["2026-01-01T01-00-00Z__alice__abc.wav"])
+    r = client.post("/api/transcribe-session", json={"session": "s", "model": "whisper-from-the-future"})
+    assert r.status_code == 400, r.text
+    assert "whisper-from-the-future" in r.json()["detail"]
+
+
+def test_api_transcribe_backend_the_machine_lacks_is_400(client, recorder_under_test):
+    """The other half of the catalog's rejection: a KNOWN model with a
+    backend this machine can't run (an MLX-era bookmark replayed on a Linux
+    box) resolves to a RuntimeError, which was also an unmapped 500."""
+    from tapscribe.runtime_probe import set_available_backends_for_testing
+
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
+    set_available_backends_for_testing(frozenset({"cpu"}))
+    try:
+        r = client.post(
+            "/api/transcribe",
+            json={
+                "session": "s",
+                "name": "20260101T000000Z__alice__abc.wav",
+                "model": "tiny.en",
+                "backend": "mlx",
+            },
+        )
+    finally:
+        set_available_backends_for_testing(None)
+    assert r.status_code == 400, r.text
+    assert "mlx" in r.json()["detail"]
 
 
 def test_api_transcribe_session_re_runs_when_session_meta_prompt_changes(
@@ -3090,6 +3317,42 @@ def test_summarizer_config_round_trips(client):
     }
 
 
+def test_summarizer_config_put_accepts_a_free_text_model_for_the_api_source(client):
+    """The `api` source's model is free text and must round-trip.
+
+    The allowlist exists because a LOCAL model id reaches `mlx_lm.load` /
+    `Llama.from_pretrained` — a network fetch keyed on request text. An `api`
+    model never reaches a loader; it is a field POSTed to the operator's own
+    base_url, and the UI renders it as free text for exactly that reason.
+    Allowlisting it regardless of source made an api default unsaveable
+    ("isn't a known gguf model"), so the end-of-meeting pipeline — which runs
+    from operator defaults only — could never use one.
+    """
+    from tapscribe.runtime_probe import set_available_backends_for_testing
+
+    set_available_backends_for_testing(frozenset({"cpu"}))  # deterministic gguf route
+    try:
+        r = client.put(
+            "/api/summarize/config",
+            json={
+                "source": "api",
+                "base_url": "http://localhost:11434/v1",
+                "model": "llama3.1:8b",
+                "prompt": "Summarize.",
+            },
+        )
+        assert r.status_code == 200, r.json()
+        got = client.get("/api/summarize/config").json()
+        assert got["source"] == "api"
+        assert got["model"] == "llama3.1:8b"
+
+        # The local source keeps its allowlist — that is the security boundary.
+        bad = client.put("/api/summarize/config", json={"source": "local", "model": "evil/not-in-catalog"})
+        assert bad.status_code == 400
+    finally:
+        set_available_backends_for_testing(None)
+
+
 def test_summarizer_config_put_rejects_bad_fields(client):
     from tapscribe.runtime_probe import set_available_backends_for_testing
 
@@ -3119,6 +3382,26 @@ def test_summarizer_config_put_empty_object_clears(client):
         "base_url": "",
         "key_set": False,
     }
+
+
+def test_summarizer_config_put_rejects_a_bodyless_or_malformed_write(client):
+    """Full-object semantics + `_json_body`'s "any parse failure → {}" used to
+    mean a client that dropped or truncated the body WIPED the operator's
+    saved default — taking the end-of-meeting pipeline's summarize stage with
+    it — and was told the save worked. Only a deliberate `{}` may clear."""
+    saved = {"source": "command", "command": "claude -p", "prompt": "Summarize."}
+    assert client.put("/api/summarize/config", json=saved).status_code == 200
+    before = client.get("/api/summarize/config").json()
+    assert before["command"] == "claude -p"  # the state the bug destroyed
+
+    for label, kwargs in (
+        ("no body at all", {}),
+        ("truncated JSON", {"content": b'{"source": "comm'}),
+        ("a JSON array", {"json": ["source", "command"]}),
+    ):
+        r = client.put("/api/summarize/config", **kwargs)
+        assert r.status_code == 400, f"{label}: {r.status_code} {r.text}"
+    assert client.get("/api/summarize/config").json() == before
 
 
 def test_summarize_empty_body_resolves_from_global_default(client, recorder_under_test):

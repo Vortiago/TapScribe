@@ -777,8 +777,15 @@ export function build(ctx) {
     // per-second strip/transcribe job tick never rebuilds the O(files) list or
     // churns the chrome. Selection is NOT in the sig — select() repaints the
     // wave header in place, so picking a WAV never rebuilds the source toggle.
+    // `sessionLabel(sess)` is a sig TERM, not a hoisted header() call: header()
+    // is passed `actions` (the source toggle), which headerNeedsRender never
+    // gates, so calling it unconditionally would rebuild the toggle every tick.
+    // Without the term, renaming the session elsewhere left the old label in
+    // the header until an unrelated term changed — and this is a BESPOKE gate,
+    // so the __TAPSCRIBE_SIG_AUDIT drift audit can't see it.
     const chromeSig = [
       sid, src, filesSig, filesLoading ? "L" : "",
+      sess ? sessionLabel(sess) : "",
       stripped ? `${stripped.count}:${stripped.stripped_at}` : "",
       stripInflight.has(sid) ? "S" : "",
       job?.kind === "strip" ? "J" : "",

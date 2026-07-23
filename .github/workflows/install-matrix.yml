@@ -16,7 +16,11 @@ on:
       - 'claude/**'
     paths:
       - 'pyproject.toml'
-      - 'tools/install_picker.py'
+      - 'tapscribe/install_picker.py'
+      # argv composition moved here (ADR-0015); preflight owns the
+      # llama-cpp wheel index this job hand-mirrors below.
+      - 'tapscribe/install_target.py'
+      - 'tapscribe/preflight.py'
       - 'start.sh'
       - 'start.ps1'
       - '.github/workflows/install-matrix.yml'
@@ -24,7 +28,11 @@ on:
     branches: [main]
     paths:
       - 'pyproject.toml'
-      - 'tools/install_picker.py'
+      - 'tapscribe/install_picker.py'
+      # argv composition moved here (ADR-0015); preflight owns the
+      # llama-cpp wheel index this job hand-mirrors below.
+      - 'tapscribe/install_target.py'
+      - 'tapscribe/preflight.py'
       - 'start.sh'
       - 'start.ps1'
       - '.github/workflows/install-matrix.yml'
@@ -68,7 +76,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           # Wheel cache is orthogonal to dependency resolution — pip
@@ -104,7 +112,7 @@ jobs:
         # Cheap fast-fail: catches alias-references-removed-atomic-extra
         # regressions in the picker's argv composition before we pay
         # the multi-GB install download.
-        run: python tools/install_picker.py --dry-run --non-interactive
+        run: python -m tapscribe.install_picker --dry-run --non-interactive
 
       - name: Install tapscribe + ${{ matrix.family }} extra
         # `summarize` on non-macOS pulls llama-cpp-python, which builds from

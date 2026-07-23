@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from wav_builders import seed_silent_wav, seed_wav  # type: ignore[import-not-found]
 
+from tapscribe import session_merge
 from tapscribe.session_merge import SessionSelection, select_session_wavs
 
 
@@ -89,6 +90,79 @@ def test_select_filters_by_iso_time_range(tmp_path: Path):
     assert mid.name in names
     assert early.name not in names
     assert late.name not in names
+
+
+def test_select_does_not_read_wavs_outside_the_requested_range(tmp_path: Path, monkeypatch):
+    """The range filter must run BEFORE the size / duration / RMS gates.
+
+    `wav_rms_dbfs` reads every frame of a WAV end-to-end; applying it to the
+    whole directory first means a 3-WAV range against a 400-WAV meeting opens
+    and fully reads 400 files before discarding 397.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
+    early = seed_wav(session_dir / _wav_name(base))
+    mid = seed_wav(session_dir / _wav_name(base + timedelta(minutes=5), speaker="b"))
+    late = seed_wav(session_dir / _wav_name(base + timedelta(minutes=10), speaker="c"))
+
+    read: list[str] = []
+
+    def _spy(fn):
+        def wrapped(path):
+            read.append(Path(path).name)
+            return fn(path)
+
+        return wrapped
+
+    monkeypatch.setattr(session_merge, "wav_rms_dbfs", _spy(session_merge.wav_rms_dbfs))
+    monkeypatch.setattr(session_merge, "wav_duration_s", _spy(session_merge.wav_duration_s))
+
+    selection = select_session_wavs(
+        session_dir,
+        from_iso=(base + timedelta(minutes=3)).isoformat(),
+        to_iso=(base + timedelta(minutes=7)).isoformat(),
+    )
+
+    assert [w.name for w in selection.wavs] == [mid.name]
+    assert set(read) == {mid.name}, (
+        f"out-of-range WAVs were opened before being discarded: {sorted(set(read))}"
+    )
+    assert early.name not in read
+    assert late.name not in read
+
+
+def test_select_counts_only_in_range_wavs_as_bad_or_silent(tmp_path: Path):
+    """`skipped_bad` / `skipped_silent` are persisted into
+    `session-transcript.json` as `skipped_*_count`, so they must describe the
+    files the caller ASKED about — an out-of-range corrupt or silent WAV is not
+    a skip of this range."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    base = datetime(2026, 5, 12, 9, 19, 55, tzinfo=UTC)
+
+    # Out of range: one corrupt, one silent. Both have parseable timestamps.
+    out_bad = session_dir / _wav_name(base, speaker="outbad")
+    out_bad.write_bytes(b"RIFF" + b"\x00" * 30)
+    seed_silent_wav(session_dir / _wav_name(base + timedelta(minutes=1), speaker="outsilent"))
+
+    # In range: one good, one corrupt, one silent — so the gates still fire.
+    good = seed_wav(session_dir / _wav_name(base + timedelta(minutes=5), speaker="good"))
+    in_bad = session_dir / _wav_name(base + timedelta(minutes=5, seconds=10), speaker="inbad")
+    in_bad.write_bytes(b"RIFF" + b"\x00" * 30)
+    in_silent = seed_silent_wav(
+        session_dir / _wav_name(base + timedelta(minutes=5, seconds=20), speaker="insilent")
+    )
+
+    selection = select_session_wavs(
+        session_dir,
+        from_iso=(base + timedelta(minutes=3)).isoformat(),
+        to_iso=(base + timedelta(minutes=7)).isoformat(),
+    )
+
+    assert [w.name for w in selection.wavs] == [good.name]
+    assert selection.skipped_bad == (in_bad.name,)
+    assert selection.skipped_silent == (in_silent.name,)
 
 
 def test_select_rejects_garbage_iso_with_value_error(tmp_path: Path):

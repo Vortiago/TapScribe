@@ -147,6 +147,29 @@ def test_regex_is_safe_helper_returns_false_for_nested_unbounded():
     assert _regex_is_safe(r"a+b+")
 
 
+def test_regex_guard_rejects_the_brace_form_of_nested_unbounded():
+    """`{n,}` is as unbounded as `+`, and backtracks identically.
+
+    The guard matched only `[+*]\\)[+*]`, so `(a{1,}){1,}$` passed both
+    `regex_rule_ok` (the PUT /api/config/hallucinations validator) and the
+    runtime parser. Measured on a no-match input it doubles cleanly — 18 chars
+    0.03 s, 20 -> 0.14, 22 -> 0.59, 24 -> 2.18 — so a ~40-char transcript
+    segment wedges the transcribe job, and `match()` runs once per segment with
+    no timeout. That is exactly what the guard's comment says it prevents.
+    """
+    from tapscribe.hallucinations import _regex_is_safe, regex_rule_ok
+
+    for bad in [r"(a{1,}){1,}", r"(a+){1,}", r"(a{1,})+", r"(a{2,})*", r"(a*){5,}"]:
+        assert not _regex_is_safe(bad), f"expected guard to reject {bad!r}"
+        assert not regex_rule_ok(bad + "$"), f"the write-time validator must reject {bad!r} too"
+
+    # BOUNDED braces are not the hazard and must stay usable — real rules use
+    # them (e.g. a repeated-phrase filter).
+    assert _regex_is_safe(r"(ab){3}")
+    assert _regex_is_safe(r"(ab){2,3}")
+    assert regex_rule_ok(r"^(ha){3,8}$")
+
+
 def test_match_returns_none_for_empty_text(tmp_config_dir):
     _write_rules(tmp_config_dir / "hallucinations.txt", "amara.org\n")
     rules = hallucinations.parse_rules()
@@ -195,6 +218,42 @@ def test_apply_moves_matching_segment_to_suppressed_with_rule_annotated(tmp_conf
     sup = out.suppressed_hallucinations[0]
     assert sup.text == "subtitles by amara.org"
     assert sup.matched_rule == "amara.org"
+
+
+def test_apply_drops_suppressed_text_from_the_joined_plain_text(tmp_config_dir):
+    """`result.text` is what `wav_cache._to_dict` writes verbatim into the
+    sidecar, so leaving it un-recomputed persists the hallucination the filter
+    just removed — a wrong word count in the Transcript view's cached-variants
+    list today, and a re-introduction vector for any future consumer of the
+    sidecar's text."""
+    (tmp_config_dir / "hallucinations.txt").write_text("amara.org\n", encoding="utf-8")
+    rules = hallucinations.parse_rules()
+    keep = TranscriptionSegment(start=0.0, end=1.0, text="welcome to the meeting")
+    drop = TranscriptionSegment(start=2.0, end=3.0, text="Subtitles by the Amara.org community")
+    out = hallucinations.apply(_result_with((keep, drop)), rules=rules)
+
+    assert "Amara.org" not in out.text
+    assert "welcome to the meeting" in out.text
+
+
+def test_apply_leaves_empty_text_when_every_segment_is_suppressed(tmp_config_dir):
+    """The motivating case: a WAV whose ONLY segment is a hallucination must
+    not persist `segments: []` alongside the hallucinated text."""
+    (tmp_config_dir / "hallucinations.txt").write_text("amara.org\n", encoding="utf-8")
+    rules = hallucinations.parse_rules()
+    only = TranscriptionSegment(start=0.0, end=3.0, text="Subtitles by the Amara.org community")
+    out = hallucinations.apply(_result_with((only,)), rules=rules)
+
+    assert out.segments == ()
+    assert out.text == ""
+
+
+def test_apply_with_empty_rules_leaves_text_untouched():
+    """The no-rules early return must stay byte-for-byte identity — it is the
+    hot path for every WAV on a recorder with no rules configured."""
+    seg = TranscriptionSegment(start=0.0, end=1.0, text="hello world")
+    result = _result_with((seg,))
+    assert hallucinations.apply(result, rules=[]).text == result.text
 
 
 def test_apply_preserves_segment_order(tmp_config_dir):

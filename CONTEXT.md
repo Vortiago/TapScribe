@@ -117,7 +117,7 @@ and `/api/models` surface it so the dashboard can gray out chips
 for backends not installed on the server.
 
 **Disambiguation — picker vocabulary vs runtime vocabulary:**
-`tools/install_picker.py` exposes its own `BackendDef` and
+`tapscribe/install_picker.py` exposes its own `BackendDef` and
 `FamilyChoice.backend` strings (`"cpu"` / `"mlx"` / `"both"`). These
 describe what pyproject extras pip should install *before* TapScribe
 runs — not what the runtime selects at transcribe time. The picker
@@ -161,9 +161,29 @@ in the unsuffixed `LiveChannel` class) and `MoonshineLiveChannel`
 (see below, PRD #120) — the Recorder never touches the concrete class
 directly.
 
+Both concrete channels inherit **`LiveChannelBase`** (`live.py`): the
+shared transition surface — `matches` / `apply_gate_knobs` /
+`begin_transition` and the `info` gate-mirror — lives there ONCE, so the
+two engines no longer copy it byte-for-byte (and Moonshine no longer
+reaches across the module boundary for `live.py` privates). The only
+per-engine divergences are two capability flags: `fixed_language`
+(Moonshine `"en"`; `None` = multilingual — a language change never forces
+a restart and `info` reports that fixed language) and
+`supports_confidence_validation` (Moonshine `False` —
+`info` reports that field as `""` rather than a misleading on/off, keeping
+its `/api/state` payload unchanged, AND `matches` ignores a `conf` change
+so it never forces a restart the engine wouldn't honour). Engine
+construction and `running` /
+`start` / `stop` stay in the subclass; `supports_native_vad` (already
+per-engine) rides alongside. The `LiveChannel` Protocol remains the seam
+the Recorder types against (ADR-0003); the base is one implementation of
+it, and a from-scratch implementer is still free to satisfy the Protocol
+directly.
+
 A follow-up PR will add `ParakeetLiveChannel` (rolling-chunk
 pseudo-streaming on `parakeet-mlx` / `transformers`) without touching
-the Recorder. That's the whole point of the seam.
+the Recorder. That's the whole point of the seam — it inherits the base
+for the shared surface, or implements the Protocol directly.
 
 The dashboard's live-channel picker reads `/api/models?context=live`,
 which excludes Parakeet and Voxtral (both batch-only — `build_live_cmd`
@@ -212,13 +232,48 @@ own `SpeechGate` is always the gate — a carried-forward
 construction, never persisted into the operator's config).
 Picking a Moonshine model swaps which concrete `LiveChannel`
 `recorder.live` holds (`moonshine_live.resolve_live_channel_for_model`,
-applied by both `/api/live/start` and the `AUTO_START_LIVE` boot path)
+driven through the `live_control` reconcile seam that both
+`/api/live/start` and the `AUTO_START_LIVE` boot path share — see below)
 — the Recorder's own construction still always starts with
 `WhisperLiveKitChannel`. The forward plan for Moonshine v2 "Voice"
 (true incremental streaming) lives in PRD #120's Further Notes:
 additive `ModelEntry` rows + a streaming channel variant when an MLX
 port exists; the `LiveChannel` seam and the `/asr` snapshot contract
 don't change.
+
+### Live reconcile — the `live_control` seam
+
+`/api/live/start` and the boot auto-start don't drive the channel
+directly; both go through the FastAPI-free reconcile seam in
+`tapscribe/live_control.py` so the swap-and-restart sequence lives in one
+place instead of each re-deriving it:
+
+- `plan_live(current, desired, *, use_mlx) -> LivePlan` is **pure**. It
+  resolves the family swap (`resolve_live_channel_for_model`, run
+  **unconditionally** — a persisted Moonshine default needs a swap even
+  though `config.model` is unchanged, #259), validates the request (a
+  *changed* model against the catalog allowlist; `gate_kind` against the
+  **target** channel's `supports_native_vad`), and decides no-op /
+  gate-knob-only / restart. It raises a `LiveReconcileError`
+  (`LiveModelUnknown` / `GateKindUnsupported` → 400, `LiveStartFailed` →
+  500, all registered in `app._DOMAIN_ERROR_STATUS`) **before touching
+  anything**, so a rejected request leaves a running channel exactly as
+  it was (#334 — the invariant is now structural, not ordering
+  discipline in the route).
+- `apply_live(current, plan, *, set_live)` runs the side effects (stop
+  the old engine on a swap → `set_live(target)` → announce → restart),
+  preserving the double-`begin_transition` around the teardown so
+  `/api/state` stays on "starting" through the multi-second reload. It's
+  offloaded to a worker thread.
+
+The route parses the body into a `DesiredLiveState` (the parse-once test
+surface) and is a thin shim; `set_live` keeps the slot owner
+(route/lifespan) in control of `recorder.live`, so the ~38 other
+`recorder.live` read sites are untouched. `plan_live` is unit-tested in
+`tests/test_live_control.py` with no subprocess, engine, or TestClient.
+This completes ADR-0003's `LiveChannel` seam — see ADR-0014 for why the
+reconcile is free functions on the slot rather than a `LiveController`
+object.
 
 ## SpeechGate · gate_kind
 
@@ -432,6 +487,29 @@ release), downloadable straight from the dashboard's Settings "Get a bridge"
 card — see [ADR-0012](docs/adr/0012-bridge-artifacts-on-tagged-releases.md).
 
 The mnemonic: **TapScribe** = Bridge (the Tap) + Recorder (the Scribe).
+
+## Bundle · Launcher
+
+A **Bundle** is a self-contained, platform-native distribution of the
+Recorder: an embedded CPython, the `tapscribe` wheel, and a Launcher,
+installed per-user with no Python prerequisite. The Windows Bundle
+(`TapScribe-Setup-win-x64.exe`) is the first; the name generalises to a
+future macOS or Linux equivalent without re-coining.
+
+A **Launcher** is the small executable *inside* a Bundle that points
+`TAPSCRIBE_BASE_DIR` at the operator's data directory, boots the
+Recorder, and opens the dashboard. It is not the server — it starts one.
+
+A Bundle is **not a Bridge**. A Bridge taps audio *into* a Recorder; a
+Bundle *is* a Recorder, packaged. Consequently a Bundle never appears in
+`bridges_catalog.BRIDGE_ARTIFACTS` or the dashboard's "Get a bridge"
+card — you need a Bundle to have a dashboard, so a dashboard cannot
+advertise one. Bundles are announced by the README and the GitHub
+Release page; they still ride ADR-0012's mechanism of CI-built assets
+attached to a tagged release under stable, unversioned filenames.
+
+_Avoid_: "installer" for the artifact (it names the act, leaving no word
+for the installed result), "the exe", "the Windows app".
 
 ## HTTP auth gate · auth schemes
 
@@ -911,10 +989,16 @@ Two entry points:
   the meeting's candidate languages — the same routing as the range,
   ADR-0011), points `_primary` at the selector's winner, and returns the
   winning sidecar's raw JSON dict. `force=True` — an explicit per-WAV
-  request bypasses the cache.
+  request bypasses the cache. Brackets its work in `recorder.jobs.run`
+  (`kind="transcribe"`), so a manual per-WAV re-transcribe gets
+  `SessionBusy` (409) while ANY other job holds that session — a range
+  transcribe, a strip, or an end-of-meeting pipeline. Without that claim
+  two covers ran concurrently, doubling resident models and racing
+  `set_primary_transcript` on the same WAV.
 - `transcribe_session(recorder, BatchSessionRequest) -> dict` — every
   WAV in the supplied `from_iso`/`to_iso` range. Brackets the loop in
-  `recorder.jobs.run` (the Session job seam), reporting progress through the
+  `recorder.jobs.run` too (the Session job seam — both entry points claim
+  it), reporting progress through the
   yielded handle, then merges via `merge_session` and writes both
   `session-transcript.json` and `.txt`. No per-WAV silence pre-check —
   the session loop transcribes everything in range.

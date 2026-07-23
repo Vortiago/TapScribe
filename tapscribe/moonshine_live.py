@@ -17,11 +17,12 @@ speaks the exact same JSON shape WhisperLiveKit does, backed by a
 
 Consequence: this module touches nothing downstream — selecting Moonshine
 is purely a matter of which concrete `LiveChannel` the Recorder holds
-(see `tapscribe.app`'s `/api/live/start` route, which swaps
-`recorder.live` based on the requested model's catalog family). What was
-generalized downstream to make that swap seamless is documented in
-CONTEXT.md's `MoonshineLiveChannel` section — the single home for that
-architectural note.
+(see `tapscribe.live_control.plan_live`, which resolves the family swap
+from the requested model's catalog family; `/api/live/start` is a
+parse-and-delegate shim over it — ADR-0014). What was generalized
+downstream to make that swap seamless is documented in CONTEXT.md's
+`MoonshineLiveChannel` section — the single home for that architectural
+note.
 
 No subprocess here — unlike `WhisperLiveKitChannel`, there is no child
 process to spawn/supervise/pump logs from. Instead `start()` spins up a
@@ -29,9 +30,9 @@ dedicated background thread running its own asyncio event loop hosting the
 `/asr` websockets server; `stop()` tears both down. This mirrors the
 "own thread, own loop" shape rather than reusing the FastAPI app's loop,
 because `LiveChannel.start()`/`stop()` are synchronous Protocol methods —
-`/api/live/start` already calls them via `asyncio.to_thread`, exactly like
-`WhisperLiveKitChannel.start()`'s blocking subprocess spawn + NB-Whisper
-weight download.
+callers already run `apply_live` (which drives them) via
+`asyncio.to_thread`, exactly like `WhisperLiveKitChannel.start()`'s
+blocking subprocess spawn.
 """
 
 from __future__ import annotations
@@ -53,14 +54,11 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from .live import (
-    GATE_THRESHOLD_DECIMALS,
     LiveChannel,
+    LiveChannelBase,
     LiveConfig,
     TailLog,
-    _changed_gate_knobs,
-    _transition_replacements,
 )
-from .speech_gate import effective_gate_config
 from .transcribers._moonshine_window import MoonshineWindow
 
 
@@ -103,11 +101,12 @@ def default_engine_factory(model_id: str, *, use_mlx: bool) -> MoonshineEngine:
 
 def is_moonshine_model(model_id: str) -> bool:
     """True iff `model_id` belongs to the `moonshine` catalog family —
-    the routing predicate `tapscribe.app`'s live-start route uses to
-    decide whether `recorder.live` should be a `MoonshineLiveChannel`
-    rather than a `WhisperLiveKitChannel`. Never raises — an unknown or
-    unregistered id is simply "not moonshine", so an ordinary Whisper
-    model name is the (fast, common) False case."""
+    the routing predicate `resolve_live_channel_for_model` (and through it
+    `live_control.plan_live`) uses to decide whether `recorder.live`
+    should be a `MoonshineLiveChannel` rather than a
+    `WhisperLiveKitChannel`. Never raises — an unknown or unregistered id
+    is simply "not moonshine", so an ordinary Whisper model name is the
+    (fast, common) False case."""
     try:
         from .transcribers.catalog import REGISTRY
 
@@ -122,8 +121,9 @@ def resolve_live_channel_for_model(
 ) -> LiveChannel | None:
     """Decide whether the Recorder's live channel needs to become a
     DIFFERENT concrete implementation to run `target_model` — the routing
-    `tapscribe.app`'s `/api/live/start` route applies before its usual
-    `matches()` / `begin_transition()` / `start()` sequence.
+    `live_control.plan_live` resolves (unconditionally, #259) before the
+    usual `matches()` / `begin_transition()` / `start()` sequence
+    `apply_live` then executes (ADR-0014).
 
     Returns a freshly constructed channel (carrying `current.config`
     forward) if `target_model`'s family doesn't match what `current`
@@ -175,6 +175,13 @@ def _bound_socket(host: str, port: int) -> socket.socket:
 # MoonshineAsrServer — the /asr WebSocket server, one MoonshineWindow per
 # connection.
 # ---------------------------------------------------------------------------
+
+
+# How long the `/asr` handler's close-time (abrupt-disconnect) decode may
+# run before it is abandoned. Bounds teardown: `MoonshineLiveChannel.stop()`
+# waits on the loop thread, which waits on this handler. Comfortably above a
+# real full-window decode on a slow CPU, well under stop()'s 5 s default.
+_FINAL_DECODE_TIMEOUT_S = 3.0
 
 
 class MoonshineAsrServer:
@@ -290,7 +297,20 @@ class MoonshineAsrServer:
                 # above is the reliable delivery; this fallback only
                 # exists for peers that vanished mid-utterance, where the
                 # audio tail is best-effort by nature.
-                lines = await self._decode(window.close)
+                #
+                # Bounded: this is the decode a channel teardown waits on
+                # (`server.stop()` closes the peers, every handler lands
+                # here), and on a slow CPU one full-window Moonshine decode
+                # outlasts `MoonshineLiveChannel.stop()`'s join timeout —
+                # holding the loop thread, and with it the `/asr` socket,
+                # hostage. Timing out abandons only this best-effort tail;
+                # the decode thread finishes on its own.
+                try:
+                    lines = await asyncio.wait_for(
+                        self._decode(window.close), timeout=_FINAL_DECODE_TIMEOUT_S
+                    )
+                except TimeoutError:
+                    lines = None
                 if lines:
                     with contextlib.suppress(Exception):
                         await self._send_snapshot(ws, lines, buffer_text="")
@@ -337,7 +357,7 @@ def _initial_moonshine_info() -> dict[str, str]:
     }
 
 
-class MoonshineLiveChannel:
+class MoonshineLiveChannel(LiveChannelBase):
     """Concrete `LiveChannel` (Protocol) backed by Moonshine. No
     subprocess: `start()` loads the inference engine (MLX or ONNX-CPU,
     per `use_mlx`) and spins up a dedicated thread running the `/asr`
@@ -349,6 +369,13 @@ class MoonshineLiveChannel:
     """
 
     supports_native_vad: bool = False  # no built-in VAC — SpeechGate is the only gate
+    # English-only engine: `language` never forces a restart and `info`
+    # always reports "en" (the shared `LiveChannelBase` honours the
+    # `fixed_language` hook).
+    fixed_language: str | None = "en"
+    # No confidence-validation knob (that's a WhisperLiveKit feature), so
+    # `info["confidence_validation"]` stays "" ("not applicable").
+    supports_confidence_validation: bool = False
 
     def __init__(
         self,
@@ -403,127 +430,20 @@ class MoonshineLiveChannel:
         self.info["model"] = self.config.model
         # `info` reports what the engine actually DOES, not what the
         # carried config says: Moonshine is English-only regardless of
-        # config.language, and the reported gate_kind derives from the
-        # same `effective_gate_config` seam TapRelay builds the tap gate
-        # from, so report and behavior can't diverge. The config itself
-        # stays untouched so the operator's choices survive the roundtrip
-        # back to Whisper.
+        # config.language. (gate_kind is reported the same way, from the
+        # shared `_mirror_gate_info` below — via the `effective_gate_config`
+        # seam TapRelay builds the tap gate from, so report and behavior
+        # can't diverge.) The config itself stays untouched so the
+        # operator's choices survive the roundtrip back to Whisper.
         self.info["language"] = "en"
-        self.info["gate_kind"] = effective_gate_config(self, self.config).gate_kind
         self.info["host"] = self.config.host
         self.info["port"] = str(self.config.port)
         self.info["backend"] = "mlx-audio" if self.use_mlx else "moonshine-onnx"
         self.info["device"] = "Apple Silicon GPU" if self.use_mlx else "CPU"
         self._mirror_gate_info()
 
-    def _mirror_gate_info(self) -> None:
-        # Mirror the gate knobs the per-tap SpeechGate reads from config —
-        # the dashboard's sliders seed from these (same contract as
-        # WhisperLiveKitChannel._mirror_gate_info). Called from _seed_info
-        # and from apply_gate_knobs' no-restart path.
-        self.info["gate_speech_threshold"] = (
-            f"{self.config.gate_speech_threshold:.{GATE_THRESHOLD_DECIMALS}f}"
-        )
-        self.info["gate_hangover_ms"] = str(self.config.gate_hangover_ms)
-        self.info["gate_pre_roll_ms"] = str(self.config.gate_pre_roll_ms)
-        self.info["gate_min_speech_ms"] = str(self.config.gate_min_speech_ms)
-
     def running(self) -> bool:
         return self._loop is not None and self._thread is not None and self._thread.is_alive()
-
-    def matches(
-        self,
-        *,
-        model: str | None,
-        language: str | None,
-        gate_kind: str | None,
-        conf: bool | None,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> bool:
-        """Same "no requested field differs from current config" contract
-        `WhisperLiveKitChannel.matches` implements, with one deliberate
-        divergence: `language` never forces a restart, because `start()`
-        deliberately ignores it (English-only engine — restarting for a
-        language change would reload the engine and change nothing, PR
-        #334 finding #9). The four `gate_*` kwargs are Recorder-side per
-        #224 — accepted-but-IGNORED here, exactly like the WlK channel: a
-        differing knob does NOT force a restart; the route applies it via
-        `apply_gate_knobs` on the no-restart path (finding #8)."""
-        return (
-            self.running()
-            and (not model or model == self.config.model)
-            and (gate_kind is None or gate_kind == self.config.gate_kind)
-            and (conf is None or conf == self.config.confidence_validation)
-        )
-
-    def apply_gate_knobs(
-        self,
-        *,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> None:
-        """Apply Recorder-side gate-knob changes to config without a server
-        restart — the /asr server never reads these; every per-tap
-        SpeechGate is built from `live.config` at attach time (#224). Same
-        changed-only + display-precision semantics as
-        `WhisperLiveKitChannel.apply_gate_knobs` (the #238 guarantee) —
-        both go through the shared `live._changed_gate_knobs` diff."""
-        changed = _changed_gate_knobs(
-            self.config,
-            gate_speech_threshold=gate_speech_threshold,
-            gate_hangover_ms=gate_hangover_ms,
-            gate_pre_roll_ms=gate_pre_roll_ms,
-            gate_min_speech_ms=gate_min_speech_ms,
-        )
-        if changed:
-            self.config = replace(self.config, **changed)
-            self._mirror_gate_info()
-
-    def begin_transition(
-        self,
-        *,
-        model: str | None = None,
-        language: str | None = None,
-        gate_kind: str | None = None,
-        conf: bool | None = None,
-        gate_speech_threshold: float | None = None,
-        gate_hangover_ms: int | None = None,
-        gate_pre_roll_ms: int | None = None,
-        gate_min_speech_ms: int | None = None,
-    ) -> None:
-        """Same contract as `WhisperLiveKitChannel.begin_transition`:
-        write the supplied knobs into `config` so the imminent restart
-        (and every per-tap SpeechGate built from this config — PR #334
-        finding #8) picks them up, and flip `info` to "starting" so
-        dashboards polling mid-transition see the new selection. The
-        gate_kind allowlist + conf coercion live in the shared
-        `live._transition_replacements`."""
-        replacements = _transition_replacements(
-            gate_kind=gate_kind,
-            conf=conf,
-            gate_speech_threshold=gate_speech_threshold,
-            gate_hangover_ms=gate_hangover_ms,
-            gate_pre_roll_ms=gate_pre_roll_ms,
-            gate_min_speech_ms=gate_min_speech_ms,
-        )
-        if replacements:
-            self.config = replace(self.config, **replacements)
-        self.info["state"] = "starting"
-        self.info["last_error"] = ""
-        if model is not None:
-            self.info["model"] = model
-        # Moonshine is English-only regardless of what the operator's
-        # candidate-language set names; reflect that rather than the
-        # requested language, so the dashboard never implies a
-        # multilingual capability this engine doesn't have. The requested
-        # language is deliberately NOT written to config either — see
-        # `__init__`'s verbatim-carry rationale (finding #3).
-        self.info["language"] = "en"
 
     def start(self, *, model: str | None = None, language: str | None = None) -> tuple[bool, str]:
         with self._lock:
@@ -670,6 +590,11 @@ class MoonshineLiveChannel:
             return True, "started"
 
     def stop(self, *, timeout: float = 5.0) -> tuple[bool, str]:
+        """Tear the `/asr` server and its loop thread down. Idempotent.
+
+        Returns `(False, …)` when the loop thread is STILL alive after the
+        join — see the `is_alive` check below for why claiming a clean
+        shutdown there is worse than reporting the timeout."""
         with self._lock:
             loop = self._loop
             server = self._server
@@ -677,10 +602,9 @@ class MoonshineLiveChannel:
             self._loop = None
             self._server = None
             self._thread = None
-
-        if loop is None:
-            self.info["state"] = "stopped"
-            return True, "not running"
+            if loop is None:
+                self.info["state"] = "stopped"
+                return True, "not running"
 
         if server is not None:
             fut = asyncio.run_coroutine_threadsafe(server.stop(), loop)
@@ -689,9 +613,34 @@ class MoonshineLiveChannel:
         loop.call_soon_threadsafe(loop.stop)
         if thread is not None:
             thread.join(timeout=timeout)
+            if thread.is_alive():
+                # The join did NOT complete: `loop.stop()` only takes effect
+                # after the current callback returns, so one slow in-flight
+                # decode (the `/asr` handler's close-time `window.close()`)
+                # can outlast `timeout` — leaving the thread alive and still
+                # holding the `/asr` socket. Reporting "stopped" here made
+                # the immediately-following start() fail with a bare
+                # `[Errno 98] Address already in use` on an operator-pinned
+                # port, with no trace of the cause.
+                msg = f"live channel did not shut down within {timeout}s"
+                with self._lock:
+                    if self._thread is None:
+                        self.info["state"] = "error"
+                        self.info["last_error"] = msg
+                return False, msg
 
-        self.info["state"] = "stopped"
-        self.info["pid"] = ""
+        with self._lock:
+            if self._thread is not None or self._loop is not None:
+                # A concurrent start() (a double-clicked Apply: both requests
+                # offload `apply_live` to a worker) installed a replacement
+                # while we were joining — `info` now describes THAT server
+                # ("running", its fresh port). Stamping "stopped" would tell
+                # the dashboard the channel is down while it is serving. Same
+                # ownership guard `WhisperLiveKitChannel.stop()` carries; our
+                # own loop IS down, so still report success.
+                return True, "stopped"
+            self.info["state"] = "stopped"
+            self.info["pid"] = ""
         return True, "stopped"
 
 

@@ -97,9 +97,16 @@ async def start_pipeline(recorder: Recorder, req: PipelineRequest) -> asyncio.Ta
 
 async def _run_claimed(recorder: Recorder, req: PipelineRequest, *, model: str, backend: str) -> None:
     """Drive the three stages under the already-claimed slot, record the
-    outcome, release. Never raises: a stage failure (any exception) aborts
-    the chain and lands in `recorder.pipelines` as failed-at-stage — the
-    poll endpoint's contract — plus a log line for the operator."""
+    outcome, release. A stage failure (any `Exception`) aborts the chain and
+    lands in `recorder.pipelines` as failed-at-stage — the poll endpoint's
+    contract — plus a log line for the operator; only cancellation propagates.
+
+    Cancellation gets its OWN handler because `asyncio.CancelledError` is a
+    `BaseException` (3.8+) and so slips past `except Exception`: without this
+    the `finally` would release the slot while the PipelineRecord stayed
+    `state="running"` forever, and a Bridge's meeting card would poll a
+    never-finishing chain. It is recorded as a failure and RE-RAISED —
+    swallowing cancellation would lie to whoever cancelled the task."""
     job = recorder.jobs.handle(req.session)
     stage = "strip"
     try:
@@ -113,6 +120,12 @@ async def _run_claimed(recorder: Recorder, req: PipelineRequest, *, model: str, 
         stage = "summarize"
         await job.update(stage="summarize", status="summarizing", total=1, current=0, current_file=None)
         await run_summarize_stage(req, job=job)
+    except asyncio.CancelledError:
+        recorder.pipelines.finish_failed(
+            req.session, stage=stage, error="cancelled", error_kind="CancelledError"
+        )
+        print(f"[tapscribe] pipeline {req.session}: CANCELLED at {stage}", flush=True)
+        raise
     except Exception as e:
         recorder.pipelines.finish_failed(req.session, stage=stage, error=str(e), error_kind=type(e).__name__)
         print(f"[tapscribe] pipeline {req.session}: FAILED at {stage}: {e}", flush=True)
@@ -171,7 +184,10 @@ async def run_transcribe_stage(req: PipelineRequest, *, job, model: str, backend
         force=False,
         source_lang=None,
     )
-    await job.update(total=len(selection.wavs))
+    # No `job.update(total=…)` here: `transcribe_session_locked` owns the
+    # progress denominator (its first action sets total = wavs × cover models).
+    # Setting it here was dead — its only effect was a transient wrong
+    # denominator in the dashboard's job bar ("0/12" then "0/24").
     return await transcribe_session_locked(treq, selection=selection, job=job)
 
 

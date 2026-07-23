@@ -50,3 +50,29 @@ def test_load_recorder_wav_as_pcm_returns_normalised_float32(tmp_path):
     # int16 sample (-32768) maps to -1.0 cleanly, not slightly past it.
     assert out[1] == pytest.approx(0.5)
     assert out[2] == pytest.approx(-0.5)
+
+
+def test_a_torn_wav_decodes_instead_of_raising(tmp_path):
+    """The whole-frame guard lives in `read_recorder_frames`, so THIS path
+    inherits it — that inheritance is the point of the shared reader.
+
+    The guard was originally patched into `wav_rms_dbfs` and `compute_peaks`
+    instead, which left the transcribe path (here) and the strip path still
+    raising `ValueError: buffer size must be a multiple of element size` on a
+    WAV truncated mid-sample — a partial flush on ENOSPC, the case
+    `tap_fan_out._close` handles. Reverting the truncation reddened only
+    audio.py's own tests, so the fix's stated purpose was untested for two of
+    its four consumers.
+    """
+    path = tmp_path / "torn.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(np.full(1000, 4096, dtype=np.int16).tobytes())
+    path.write_bytes(path.read_bytes()[:-1])  # lop one byte off the data chunk
+
+    pcm = wav_predecode.load_recorder_wav_as_pcm(path)
+
+    assert pcm.dtype == np.float32
+    assert len(pcm) == 999, "the torn trailing sample is dropped, the rest decodes"

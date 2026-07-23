@@ -1,7 +1,7 @@
 """Install resolver for the browser setup surface (GET /setup).
 
 The app does NOT resolve pip extras or run pip itself — it delegates to the
-dependency-free `tools/install_picker.py`, which already encapsulates the messy
+dependency-free `tapscribe/install_picker.py`, which already encapsulates the messy
 parts (shared extras like `whisper-live`, the auto-appended `cuda-libs`,
 per-backend extras, the skip-if-unchanged stamp). The app's job is the
 translation seam: turn the catalog-family selection the UI speaks into the
@@ -32,14 +32,31 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_PICKER_SCRIPT = _REPO_ROOT / "tools" / "install_picker.py"
-_STATE_FILE = _REPO_ROOT / ".tapscribe-install.json"
+from . import config
 
-# Mirror of tools/install_picker.py's keys (see module docstring on why these
+# Spawned as `python -m <this>`, never imported — see the module docstring.
+_PICKER_MODULE = "tapscribe.install_picker"
+
+# The saved selection lives with the operator's DATA, not beside the package:
+# in a wheel install (the Bundle topology) the package's parent is
+# `site-packages`, where a selection would be at the mercy of the next
+# reinstall. `BASE_DIR` is the repo root in a checkout, so this is byte-for-byte
+# the path devs already had (ADR-0015).
+_STATE_FILE = config.BASE_DIR / ".tapscribe-install.json"
+
+# Mirror of tapscribe/install_picker.py's keys (see module docstring on why these
 # are duplicated rather than imported; the test pins them to the real picker).
 _STATE_VERSION = 2
 _BK_CPU, _BK_MLX, _BK_BOTH = "cpu", "mlx", "both"
+# The picker families /setup MANAGES. Deliberately a SUBSET of the picker's own
+# `install_picker.FAMILIES`: `moonshine` is live-only (no catalog family, no
+# /setup row — see setup_state.FAMILY_META), so /setup has no opinion about it
+# and must not express one. That is exactly why `write_picker_state` MERGES
+# rather than replaces: a wholesale rewrite dropped the `moonshine` key, the
+# picker read the absence back as `enabled=False`, and its next `Selection.save`
+# re-persisted that — permanently losing an operator's Moonshine choice (pip
+# doesn't uninstall, so it kept working until the venv was rebuilt).
+# `test_write_picker_state_preserves_families_setup_does_not_manage` pins this.
 _PICKER_FAMILIES: tuple[str, ...] = ("whisper", "voxtral", "parakeet")
 # catalog family -> picker (install) family
 _CATALOG_TO_PICKER: dict[str, str] = {
@@ -108,18 +125,72 @@ def to_picker_state(selection: dict[str, str]) -> dict:
     return {"version": _STATE_VERSION, "choices": choices}
 
 
+def read_picker_state(path: Path = _STATE_FILE) -> dict:
+    """Best-effort read of the picker's on-disk selection. An absent,
+    unreadable, non-JSON or non-object file yields `{}` — the same
+    "fall back to nothing preserved" stance `install_picker.Selection.load`
+    takes, so a corrupt file can't fail a /setup install."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def merge_picker_state(existing: object, fresh: dict) -> dict:
+    """Overlay `fresh` (the families /setup manages) onto `existing` (what
+    the terminal picker last wrote), keeping every OTHER family's choice.
+
+    Pure, so the preservation rule is testable without touching disk. Only
+    `choices` merges; the rest of `fresh` (currently just `version`) wins
+    outright, since /setup writes the schema version it speaks.
+    """
+    out = dict(fresh)
+    fresh_choices = fresh.get("choices")
+    if not isinstance(fresh_choices, dict):
+        return out
+    prior = existing.get("choices") if isinstance(existing, dict) else None
+    if not isinstance(prior, dict):
+        return out
+    # Fresh wins per family; key order isn't observable (the state file is
+    # written with sort_keys=True).
+    out["choices"] = {**prior, **fresh_choices}
+    return out
+
+
 def write_picker_state(state: dict, *, path: Path = _STATE_FILE) -> None:
     """Persist the picker state where `install_picker --non-interactive` reads
-    it. Matches the picker's own `Selection.save` formatting."""
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    it, MERGED over whatever is already there (see `merge_picker_state` and
+    the `_PICKER_FAMILIES` note). Matches the picker's own `Selection.save`
+    formatting."""
+    merged = merge_picker_state(read_picker_state(path), state)
+    path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def picker_install_argv(*, python: str = sys.executable, no_mlx: bool = False) -> list[str]:
+def picker_install_argv(
+    *,
+    python: str = sys.executable,
+    no_mlx: bool = False,
+    install_spec: str | None = None,
+) -> list[str]:
     """argv to run the install picker non-interactively against the written
-    selection. The picker resolves extras, runs pip, and writes the stamp."""
-    argv = [python, str(_PICKER_SCRIPT), "--non-interactive"]
+    selection. The picker resolves extras, runs pip, and writes the stamp.
+
+    Invoked as `-m tapscribe.install_picker` rather than by script path: a
+    Bundle installs a wheel into a venv, where no repo-relative
+    `tapscribe/install_picker.py` exists, and `-m` resolves wherever the package
+    actually landed (ADR-0015).
+
+    `install_spec` forwards the Bundle's wheel path so the subprocess installs
+    from the SAME wheel the installer shipped. Omitted by default — absent flag
+    means the checkout topology, which is what a dev launching `start.ps1`
+    without the installer must keep getting.
+    """
+    argv = [python, "-m", _PICKER_MODULE, "--non-interactive", "--state-file", str(_STATE_FILE)]
     if no_mlx:
         argv.append("--no-mlx")
+    if install_spec is not None:
+        argv += ["--install-spec", install_spec]
     return argv
 
 
@@ -143,6 +214,7 @@ async def run_install(
     selection: dict[str, str],
     *,
     no_mlx: bool = False,
+    install_spec: str | None = None,
     spawn: Callable[[list[str]], Awaitable] | None = None,
     write_state: Callable[..., None] | None = None,
     on_success: Callable[[], None] | None = None,
@@ -151,6 +223,10 @@ async def run_install(
     and yield progress events: one ``{"phase":"start"}``, a ``{"phase":"log"}``
     per output line, then ``{"phase":"done"}`` (returncode 0) or
     ``{"phase":"error"}``. `on_success` (hot-reload) fires only on success.
+
+    `install_spec` is the recorder's `--install-spec` (ADR-0015), forwarded so a
+    Bundle installs extras from the wheel it shipped instead of an editable
+    checkout that isn't there. `None` (a dev checkout) keeps the historical argv.
 
     `spawn` / `write_state` are injectable for tests; they default to the real
     asyncio subprocess and the on-disk picker-state writer at call time.
@@ -161,7 +237,7 @@ async def run_install(
     yield {"phase": "start"}
     try:
         write_state(to_picker_state(selection))
-        proc = await spawn(picker_install_argv(no_mlx=no_mlx))
+        proc = await spawn(picker_install_argv(no_mlx=no_mlx, install_spec=install_spec))
         async for raw in proc.stdout:
             line = raw.decode("utf-8", "replace").rstrip("\n")
             yield {"phase": "log", "line": line}

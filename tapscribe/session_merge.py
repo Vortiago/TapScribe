@@ -89,7 +89,10 @@ def select_session_wavs(
         `SILENT_RMS_DBFS_FLOOR`. Otherwise the WAV is recorded in
         `skipped_silent` — Whisper hallucinates on near-silent audio.
       - `from_iso` / `to_iso` filter by the timestamp embedded in the
-        filename. Raises `ValueError` if either is unparseable.
+        filename. Raises `ValueError` if either is unparseable. Applied
+        BEFORE the health/silence gates above, so a narrow range over a
+        long meeting opens only the WAVs it asked for, and `skipped_bad` /
+        `skipped_silent` describe only in-range files.
     """
     base_dir = session_dir
     owner_by_clip: dict[str, str] = {}
@@ -139,6 +142,18 @@ def select_session_wavs(
             skipped_bad.append(wav.name)
             continue
 
+        # Range filter FIRST — it is the only filename-only gate, and every
+        # gate below opens the file (`wav_duration_s` reads the header,
+        # `wav_rms_dbfs` reads every frame). Filtering afterwards made a 3-WAV
+        # range against a 400-WAV meeting read all 400 end-to-end before
+        # discarding 397, and let out-of-range files land in
+        # `skipped_bad`/`skipped_silent`, whose counts are persisted into
+        # `session-transcript.json` describing files the caller never asked for.
+        if from_dt and wav_start < from_dt:
+            continue
+        if to_dt and wav_start > to_dt:
+            continue
+
         try:
             size = wav.stat().st_size
         except OSError:
@@ -167,11 +182,6 @@ def select_session_wavs(
             original_path = wav
         if wav_rms_dbfs(original_path) < config.SILENT_RMS_DBFS_FLOOR:
             skipped_silent.append(wav.name)
-            continue
-
-        if from_dt and wav_start < from_dt:
-            continue
-        if to_dt and wav_start > to_dt:
             continue
 
         selected.append(wav)

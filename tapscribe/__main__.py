@@ -13,7 +13,7 @@ import argparse
 
 import uvicorn
 
-from . import config
+from . import config, install_target
 from .app import app
 from .live import LiveConfig
 from .recorder import Recorder
@@ -156,11 +156,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit one JSON line per log record instead of uvicorn's plaintext format. "
         "Useful when piping into journalctl -o json / vector / fluent-bit.",
     )
+    p.add_argument(
+        "--install-spec",
+        default=None,
+        help="What pip installs TapScribe from when /setup installs model "
+        "backends: omitted (a dev checkout, the default), a path to the "
+        "Windows Bundle's shipped .whl, or a pinned 'tapscribe==X.Y.Z'. "
+        "The Bundle's Launcher passes its wheel. See ADR-0015.",
+    )
     return p
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # Validate before anything boots. This value is a CLI string that ends up in
+    # a pip argv (via `/setup` → `picker_install_argv`), which CodeQL treats as
+    # external input regardless of who launched the process (CLAUDE.md). Failing
+    # here beats discovering a Bundle's wheel is missing on the operator's first
+    # model install. `parser.error` so a bad value exits 2 on stderr like every
+    # other malformed flag, rather than inventing a second failure convention.
+    try:
+        install_target.resolve_install_spec(args.install_spec)
+    except install_target.InstallSpecError as exc:
+        parser.error(str(exc))
 
     # Boot-time constants that affect every transcribe-call route the
     # Recorder hands out. `backend` is the per-Recorder preference;
@@ -203,6 +223,9 @@ def main() -> None:
         recorder.tap.rotate()
 
     app.state.recorder = recorder
+    # Handed to `picker_install_argv` when /setup installs model backends, so a
+    # Bundle installs from the wheel it shipped rather than an absent checkout.
+    app.state.install_spec = args.install_spec
     app.state.log_json = bool(args.log_json)
 
     if args.host == "0.0.0.0":

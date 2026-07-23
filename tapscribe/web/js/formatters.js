@@ -8,23 +8,39 @@
 // (escapeHtml/cssEscape/fmtElapsed* were removed with the classic dashboard —
 // their only callers were classic main.js / ribbon.js / session-detail.js.)
 
+// Unit choice happens on the ROUNDED value, not the raw one. Testing the raw
+// value first and rounding afterwards renders an impossible carry at every unit
+// boundary — 1048570 B is below 1 MB but rounds to "1024.0 KB", and 119.96 s
+// rounded to one decimal is "1m 60.0s". Both windows are crossed on a live tap:
+// active-taps.js renders a growing duration AND a growing byte count on every
+// ~500 ms poll, so each row passes through [1048524, 1048576) B and
+// [59.95, 60) s on its way up.
+
 /** @param {number | null | undefined} b */
 export function fmtBytes(b) {
-  if (b == null) return "0 B";
+  if (b == null || !isFinite(b)) return "0 B";
   if (b < 1024) return b + " B";
-  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
+  const kb = b / 1024;
+  if (Number(kb.toFixed(1)) < 1024) return kb.toFixed(1) + " KB";
   return (b / 1024 / 1024).toFixed(2) + " MB";
 }
 
 /** @param {number | null | undefined} s */
 export function fmtDur(s) {
-  if (s == null || isNaN(s)) return "?";
-  return s < 60 ? s.toFixed(2) + " s" : Math.floor(s / 60) + "m " + (s % 60).toFixed(1) + "s";
+  if (s == null || !isFinite(s)) return "?";
+  if (Number(s.toFixed(2)) < 60) return s.toFixed(2) + " s";
+  const mins = Math.floor(s / 60);
+  const rem = s % 60;
+  // The seconds part rounding UP to a full minute carries into the minutes.
+  if (Number(rem.toFixed(1)) >= 60) return `${mins + 1}m 0.0s`;
+  return `${mins}m ${rem.toFixed(1)}s`;
 }
 
 /** @param {number | null | undefined} ms */
 export function fmtMs(ms) {
-  if (ms == null) return "?";
+  if (ms == null || !isFinite(ms)) return "?";
+  // No carry guard needed here: the sub-1000 branch prints ms verbatim rather
+  // than rounding it, so no value can round up INTO the next unit.
   return ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " s";
 }
 
@@ -64,13 +80,20 @@ export function fmtMmSs(seconds) {
 }
 
 /**
+ * Elide the MIDDLE of an over-long string, keeping both ends: the filename form
+ * (`averylongfilename.wav` → `avery…e.wav`). Never returns more than `max`
+ * characters.
  * @param {string | null | undefined} s
  * @param {number} max
  */
 export function truncMid(s, max) {
   if (!s) return "";
   if (s.length <= max) return s;
+  if (max <= 1) return "…";
   const half = Math.floor((max - 1) / 2);
+  // At max = 2 the tail slice is `s.slice(-0)` — which is the WHOLE string, so
+  // the "truncation" came back LONGER than the input. Keep a head + the ellipsis.
+  if (half === 0) return s.slice(0, max - 1) + "…";
   return s.slice(0, half) + "…" + s.slice(-half);
 }
 

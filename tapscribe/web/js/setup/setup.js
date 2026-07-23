@@ -63,7 +63,33 @@ async function boot() {
     ? "Pick the model families to install. Everything runs locally; nothing leaves this machine."
     : "Add or change models. Already-installed families are marked; only new picks download.";
 
+  renderStaleSelection(state.stale_selection);
   buildCard(state.families);
+}
+
+/**
+ * Warn about families the install picker had to SKIP because their saved
+ * backend left the catalog (ADR-0015).
+ *
+ * The picker has always reported this on stderr, which a Bundle operator never
+ * sees — the Launcher pipes it to a log file. Without this banner an upgrade
+ * silently stops installing someone's models with nothing to point at. The
+ * remedy is re-picking below, which is exactly where they already are.
+ *
+ * @param {Array<Record<string, any>>|undefined} stale
+ */
+function renderStaleSelection(stale) {
+  const host = byId("stale");
+  if (!stale?.length) return;
+  const names = stale.map((s) => `${s.label || s.family} (${s.backend})`).join(", ");
+  host.append(
+    createAlertSync({
+      tone: "warn",
+      message:
+        `Not installed on the last run: ${names}. The saved backend is no longer ` +
+        `in this version's catalog, so the family was skipped. Re-pick it below.`,
+    }).el,
+  );
 }
 
 /** @param {Array<Record<string, any>>} families */
@@ -73,7 +99,17 @@ function buildCard(families) {
 
   // Built synchronously after warm + state, so it can be enabled from the start.
   const install = createButtonSync(
-    { label: "Install & launch", variant: "primary", onClick: () => void runInstall(install) },
+    {
+      label: "Install & launch",
+      variant: "primary",
+      // .catch, not `void`: runInstall handles its own failures, but a bug in
+      // its terminal path must not leave the wizard silently spinning with the
+      // button disabled — re-enable and say so.
+      onClick: () => runInstall(install).catch((e) => {
+        console.error("install failed", e);
+        install.setDisabled(false);
+      }),
+    },
     ac.signal,
   );
   const log = el("pre", "setup__log");
@@ -178,34 +214,48 @@ async function runInstall(install) {
   }
 
   // Parse the SSE stream: events are "data: <json>\n\n".
+  //
+  // The read loop is wrapped because the install is pip-installing into the
+  // very venv serving this page: a worker restart, an OOM-kill or a proxy
+  // timeout breaks the stream mid-flight and rejects reader.read(). Unwrapped,
+  // that escaped as an unhandled rejection — finish() never ran, the Install
+  // button stayed disabled, and the first-run wizard sat on the spinner FOREVER
+  // on the one surface that has no other UI to recover from (only a reload).
+  // Route it through the same terminal path as a rejected POST instead.
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   let ok = false;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n\n")) !== -1) {
-      const frame = buf.slice(0, nl);
-      buf = buf.slice(nl + 2);
-      if (!frame.startsWith("data:")) continue;
-      let ev;
-      try {
-        ev = JSON.parse(frame.slice(5).trim());
-      } catch {
-        continue;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, nl);
+        buf = buf.slice(nl + 2);
+        if (!frame.startsWith("data:")) continue;
+        let ev;
+        try {
+          ev = JSON.parse(frame.slice(5).trim());
+        } catch {
+          continue;
+        }
+        if (ev.phase === "log") append(ev.line);
+        else if (ev.phase === "start") append("· installing…");
+        else if (ev.phase === "done") {
+          ok = true;
+          append("· done");
+        } else if (ev.phase === "error") append(`· error: ${ev.message || "exit " + ev.returncode}`);
       }
-      if (ev.phase === "log") append(ev.line);
-      else if (ev.phase === "start") append("· installing…");
-      else if (ev.phase === "done") {
-        ok = true;
-        append("· done");
-      } else if (ev.phase === "error") append(`· error: ${ev.message || "exit " + ev.returncode}`);
     }
+  } catch (e) {
+    append(`install stream failed: ${e}`);
+    ok = false;
+  } finally {
+    finish(ok, install, result);
   }
-  finish(ok, install, result);
 }
 
 /**

@@ -174,18 +174,27 @@ class PeopleRegistry:
 
     def detach(self, person_id: str, identity: str) -> dict[str, Any]:
         """Pull `identity` out of its Person into a fresh blank-named Person
-        (the undo for an over-eager merge). Returns the new Person."""
+        (the undo for an over-eager merge). Returns the resulting Person.
+
+        Detaching a Person's SOLE Identity is a no-op that returns it
+        unchanged. There is nothing to separate it from, and the alternative —
+        dropping the emptied Person and minting a blank-named replacement —
+        silently discarded the operator's chosen name and changed the person
+        id, with no undo. That is the information loss ADR-0009 decision 7
+        rules out for merge, and it reached `POST /api/people/{id}/detach`
+        unguarded; `web/js/next/views/people.js` already documents the intended
+        contract ("detaching a sole identity would be a no-op, so no ✕ then")
+        and only hides the button.
+        """
         person = self.get(person_id)
         if person is None:
             raise KeyError(person_id)
         if identity not in person["identities"]:
             raise ValueError(f"{identity!r} is not a member of {person_id!r}")
+        if person["identities"] == [identity]:
+            return person
         person["identities"].remove(identity)
         new_person = {"id": _new_person_id(), "name": "", "identities": [identity]}
-        # An emptied Person (detaching its sole Identity) is dropped — it would
-        # own nothing and clutter the registry.
-        if not person["identities"]:
-            self._people.remove(person)
         self._people.append(new_person)
         self._reindex()
         return new_person

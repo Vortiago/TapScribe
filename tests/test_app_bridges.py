@@ -90,3 +90,24 @@ def test_api_bridges_matches_catalog(client):
     provably one source of truth."""
     body = client.get("/api/bridges").json()
     assert [row["id"] for row in body] == [a.id for a in BRIDGE_ARTIFACTS]
+
+
+# ---------------------------------------------------------------------------
+# The HARD contract with the release build
+# ---------------------------------------------------------------------------
+
+
+def test_every_catalog_filename_is_an_asset_release_yml_uploads():
+    """`BridgeArtifact.filename` is documented as a HARD CONTRACT with
+    `.github/workflows/release.yml`: the dashboard composes permanent
+    `releases/latest/download/<filename>` URLs from it (ADR-0012). Rename an
+    asset in the workflow and nothing else notices — every "Get a bridge" link
+    404s from the next tagged release onwards. Read as TEXT (a substring check
+    needs no YAML dependency, and the names are literals in the workflow, not
+    assembled from variables)."""
+    release_yml = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+    assert release_yml.is_file(), f"release workflow missing at {release_yml}"
+    text = release_yml.read_text(encoding="utf-8")
+    assert BRIDGE_ARTIFACTS, "the catalog must not be empty or this test proves nothing"
+    missing = [a.filename for a in BRIDGE_ARTIFACTS if a.filename not in text]
+    assert not missing, f"catalog filenames not produced by release.yml: {missing}"

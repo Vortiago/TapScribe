@@ -142,18 +142,28 @@ def _check_hallucinations(content: str) -> None:
 def _check_batch_model(model_id: str) -> None:
     """WRITE-time check for the "batch-model" key: the batch default feeds
     the end-of-meeting pipeline's model loader with no operator in the loop,
-    so an unknown id must never land on disk (`ValueError` → the config PUT's
+    so an unusable id must never land on disk (`ValueError` → the config PUT's
     400). Empty clears the override (back to the bundled default). The
     catalog import is lazy to keep this module free of the transcribers
     dependency for every other caller.
+
+    "In the catalog" is NOT enough: a LIVE-ONLY entry (`contexts={"live"}` —
+    the Moonshine rows) has no batch adapter at all, so resolving it for batch
+    raises a raw `NotImplementedError` at the pipeline's transcribe stage. The
+    id must also `supports_context("batch")`. Deliberately NOT gated on
+    `entry.available`: batch resolves its backend at call time, so an operator
+    may legitimately set an id before installing the extra —
+    `live_control.plan_live` checks availability because the live channel
+    starts immediately.
 
     Deliberately NOT applied to "live-model": there an unknown id surfaces
     as a clear error at /api/live/start time, not silently."""
     if model_id:
         from .transcribers.catalog import REGISTRY
 
-        if REGISTRY.get(model_id) is None:
-            raise ValueError(f"unknown batch model id: {model_id!r} (not in the catalog)")
+        entry = REGISTRY.get(model_id)
+        if entry is None or not entry.supports_context("batch"):
+            raise ValueError(f"unusable batch model id: {model_id!r} (no batch model by that name)")
 
 
 def _check_idle_ttl(content: str) -> None:
@@ -234,12 +244,7 @@ def write_config(key: str, content: str) -> None:
         content = content.strip()
     if spec.check is not None:
         spec.check(content)
-    path = getattr(config, spec.attr)
-    _write_text_file_atomic(path, validate_config_text(content))
-    # Structural invalidation: our own write must never be served stale, even
-    # if the filesystem's stat signature failed to move — the next read
-    # re-reads what we just wrote.
-    _CONFIG_TEXT_CACHE.pop(str(path), None)
+    _write_text_file_atomic(getattr(config, spec.attr), validate_config_text(content))
 
 
 # Cap pasted prompts/hotwords at 4000 chars. Whisper's init_prompt is
@@ -269,7 +274,14 @@ def atomic_write_text(path: Path, content: str) -> None:
 
     Shared by `_write_text_file_atomic` (prompt/hotwords files, with CRLF
     normalisation) and `tapscribe.sessions.write_session_meta` (JSON, no
-    normalisation needed because json.dumps escapes any literal CR)."""
+    normalisation needed because json.dumps escapes any literal CR).
+
+    Invalidates `_CONFIG_TEXT_CACHE` for `path` on the way out (a no-op pop
+    for uncached paths): our own write must never be served stale, even when
+    the filesystem's stat signature failed to move (coarse-mtime filesystem +
+    same-size rewrite). Living HERE rather than in a wrapper is what keeps the
+    next writer that reaches for `atomic_write_text` from reintroducing that
+    bug."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
@@ -288,11 +300,14 @@ def atomic_write_text(path: Path, content: str) -> None:
             # and the outer `raise` below propagates the original error.
             pass
         raise
+    _CONFIG_TEXT_CACHE.pop(str(path), None)
 
 
 def _write_text_file_atomic(path: Path, content: str) -> None:
-    """Atomic write of a config text file. CRLF is normalised to LF so
-    the Whisper CLI doesn't see literal `\r` in the prompt."""
+    """`atomic_write_text` for a config TEXT file: CRLF is normalised to LF so
+    the Whisper CLI doesn't see literal `\r` in the prompt. (The JSON writer
+    skips the normalisation — json.dumps escapes any literal CR — and calls
+    `atomic_write_text` directly.)"""
     normalised = content.replace("\r\n", "\n").replace("\r", "\n")
     atomic_write_text(path, normalised)
 
@@ -376,7 +391,15 @@ def write_summarizer_config(cfg: dict) -> dict:
     prompt = validate_config_text(str(cfg.get("prompt") or ""))
     command = validate_config_text(str(cfg.get("command") or ""))
     model = str(cfg.get("model") or "").strip()
-    if model:
+    # Allowlist the LOCAL model only. The allowlist exists because a local
+    # model id reaches `mlx_lm.load` / `Llama.from_pretrained`, i.e. a network
+    # fetch keyed on attacker-controllable text. The `api` source's model is by
+    # design free text (an Ollama/OpenAI-compatible name the operator types)
+    # and never reaches a loader — it is a JSON field POSTed to the operator's
+    # own base_url. Gating it on the catalog anyway made saving an api default
+    # impossible ("isn't a known gguf model"), which in turn meant the
+    # end-of-meeting pipeline — operator-defaults-only — could never run one.
+    if model and source in ("", "local"):
         from .summarizers.catalog import (
             is_allowed_local_model,
             resolve_local_backend,

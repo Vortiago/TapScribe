@@ -34,7 +34,7 @@ import time
 import wave
 from collections import deque
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from functools import partial
 from itertools import islice
@@ -83,8 +83,15 @@ from .batch_transcribe import (
     transcribe_one,
     transcribe_session,
 )
-from .live import GATE_KINDS, gate_kind_error
-from .moonshine_live import resolve_live_channel_for_model
+from .live_control import (
+    DesiredLiveState,
+    GateKindUnsupported,
+    LiveModelUnknown,
+    LiveReconcileError,
+    LiveStartFailed,
+    apply_live,
+    plan_live,
+)
 from .name_resolution import attach_people, attach_people_mutation, attach_people_view
 from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
@@ -214,6 +221,26 @@ async def _json_body(req: Request) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
+async def _require_json_object_body(req: Request, *, allow_empty: bool) -> dict[str, Any]:
+    """`_json_body`'s strict twin: a body that isn't a JSON object is a 400
+    rather than a silent `{}`. Routes where the empty dict would DESTROY state
+    (rotate the global session, wipe the summarizer default) use this.
+    `allow_empty=True` still accepts a missing body as `{}` — the legacy
+    no-body call."""
+    raw = await req.body()
+    if not raw:
+        if allow_empty:
+            return {}
+        raise HTTPException(400, "a JSON object body is required (send {} to clear the config)")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "malformed JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "JSON body must be an object")
+    return body
+
+
 def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | None:
     """Parse an optional numeric body field with range enforcement.
     None / missing → returned unchanged so the downstream "field not
@@ -340,21 +367,21 @@ async def _lifespan(app: FastAPI):
 
     recorder: Recorder | None = getattr(app.state, "recorder", None)
     if recorder is not None and config.AUTO_START_LIVE:
-        # The Recorder always constructs a WhisperLiveKitChannel at boot
-        # (see Recorder.__init__); if the operator's persisted default
-        # live model (config/live-model.txt) names a Moonshine model, the
-        # SAME family-swap the /api/live/start route applies must run
-        # here too — otherwise auto-start would try to spawn
-        # whisperlivekit-server with an unsupported --model and fail
-        # exactly the way issue #259 originally described.
-        new_channel = resolve_live_channel_for_model(
-            recorder.live, target_model=recorder.live.config.model, use_mlx=recorder.use_mlx
-        )
-        if new_channel is not None:
-            recorder.live = new_channel
-        ok, msg = recorder.live.start()
-        if not ok:
-            print(f"[tapscribe] live auto-start skipped: {msg}", flush=True)
+        # Reconcile the boot channel toward the operator's persisted default
+        # live model (config/live-model.txt) — the SAME transition
+        # /api/live/start runs. The Recorder always constructs a
+        # WhisperLiveKitChannel at boot, so a persisted Moonshine default
+        # needs a family swap even though config.model is unchanged (#259);
+        # `plan_live` resolves that swap unconditionally. Auto-start stays
+        # best-effort: a reconcile failure (e.g. a weights fetch) is logged
+        # and skipped, never crashing startup.
+        rec = recorder
+        desired = DesiredLiveState(model=rec.live.config.model)
+        try:
+            plan = plan_live(rec.live, desired, use_mlx=rec.use_mlx)
+            await asyncio.to_thread(apply_live, rec.live, plan, set_live=lambda ch: setattr(rec, "live", ch))
+        except LiveReconcileError as exc:
+            print(f"[tapscribe] live auto-start skipped: {exc}", flush=True)
     try:
         yield
     finally:
@@ -440,6 +467,12 @@ _DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
     AbsorbCollision: 409,
     InvalidAbsorbRequest: 400,
     SessionDeleteError: 500,
+    # Live-channel reconcile (live_control) — the /api/live/start route and
+    # the boot auto-start both surface these; registering the concrete
+    # subclasses keeps `type(exc)` lookups in `_domain_error_handler` exact.
+    LiveModelUnknown: 400,
+    GateKindUnsupported: 400,
+    LiveStartFailed: 500,
 }
 
 
@@ -689,16 +722,7 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     # present, must parse as a JSON object: a malformed {"detached": true}
     # falling through to the legacy branch would silently rotate the GLOBAL
     # session out from under every plain tap — reject so the bridge retries.
-    raw_body = await req.body()
-    if raw_body:
-        try:
-            body = json.loads(raw_body)
-        except ValueError:
-            return JSONResponse({"detail": "malformed JSON body"}, status_code=400)
-        if not isinstance(body, dict):
-            return JSONResponse({"detail": "JSON body must be an object"}, status_code=400)
-    else:
-        body = {}
+    body = await _require_json_object_body(req, allow_empty=True)
     if body.get("detached"):
         session_id, session_dir = recorder.create_detached_session()
         print(
@@ -1005,134 +1029,45 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
 
 @app.post("/api/live/start")
 async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder)):
-    """Start the live channel (whisperlivekit-server). If already running
-    with a different model/language, restarts it; if already running with
-    the same config, no-op.
+    """Reconcile the live channel toward the requested model / language /
+    gate config. Boundary parsing + numeric bounds happen here (the HTTP
+    edge); the domain transition — family swap, catalog allowlist, restart
+    choreography — lives in `live_control`, so this route is a thin shim and
+    a rejected request cannot disturb a running channel (#334: `plan_live`
+    is pure and raises before `apply_live` touches anything).
 
-    Spawn/stop are synchronous and can block for several seconds — so we
-    offload to a worker thread to keep /api/state polling responsive.
+    `apply_live` spawn/stop is synchronous and can block for several
+    seconds, so it is offloaded to a worker thread to keep /api/state
+    polling responsive.
     """
     body = await _json_body(req)
-    model = _parse_opt_str(body.get("model"), "model")
-    language = _parse_opt_str(body.get("language"), "language")
-    conf = _parse_opt_bool(body.get("confidence_validation"), "confidence_validation")
-
-    # Boundary validation FIRST — before the family swap below stops or
-    # replaces anything. CodeQL treats Request.json() as untrusted input;
-    # the dashboard's HTML min/max attributes are only client-side hints.
-    # Anything that fails the checks here returns 400, and a 400 must
-    # leave the running channel exactly as it was — pre-#334 the swap ran
-    # first and a rejected request killed the operator's healthy channel.
-    gate_speech_threshold = _parse_bounded_float(
-        body.get("gate_speech_threshold"), "gate_speech_threshold", lo=0.0, hi=1.0
+    # Boundary parsing FIRST — non-strings and out-of-range numbers 400 at
+    # the HTTP edge (CodeQL treats Request.json() as untrusted; the
+    # dashboard's min/max attrs are client-side hints only) while building
+    # the DesiredLiveState, before any domain logic runs. Nothing downstream
+    # can mutate on a rejected request.
+    desired = DesiredLiveState(
+        model=_parse_opt_str(body.get("model"), "model"),
+        language=_parse_opt_str(body.get("language"), "language"),
+        gate_kind=_parse_opt_str(body.get("gate_kind"), "gate_kind"),
+        conf=_parse_opt_bool(body.get("confidence_validation"), "confidence_validation"),
+        gate_speech_threshold=_parse_bounded_float(
+            body.get("gate_speech_threshold"), "gate_speech_threshold", lo=0.0, hi=1.0
+        ),
+        gate_hangover_ms=_parse_bounded_int(
+            body.get("gate_hangover_ms"), "gate_hangover_ms", lo=0, hi=10_000
+        ),
+        gate_pre_roll_ms=_parse_bounded_int(body.get("gate_pre_roll_ms"), "gate_pre_roll_ms", lo=0, hi=5_000),
+        gate_min_speech_ms=_parse_bounded_int(
+            body.get("gate_min_speech_ms"), "gate_min_speech_ms", lo=0, hi=5_000
+        ),
     )
-    gate_hangover_ms = _parse_bounded_int(body.get("gate_hangover_ms"), "gate_hangover_ms", lo=0, hi=10_000)
-    gate_pre_roll_ms = _parse_bounded_int(body.get("gate_pre_roll_ms"), "gate_pre_roll_ms", lo=0, hi=5_000)
-    gate_min_speech_ms = _parse_bounded_int(
-        body.get("gate_min_speech_ms"), "gate_min_speech_ms", lo=0, hi=5_000
+    # Pure: validates (raising a LiveReconcileError the domain-error handler
+    # maps) and decides the transition without touching the running channel.
+    plan = plan_live(recorder.live, desired, use_mlx=recorder.use_mlx)
+    return await asyncio.to_thread(
+        apply_live, recorder.live, plan, set_live=lambda ch: setattr(recorder, "live", ch)
     )
-
-    # The catalog is the allowlist (PRD #120 story 23 — the same rule as
-    # the summarizer SUMMARY_MODELS gate): a model id from the request
-    # body must resolve to a registered live-context entry before it can
-    # reach a channel spawn, an engine loader, or an HF Hub download
-    # (nb-whisper models resolve their HF repo from this same registry).
-    # Two operator-state exemptions, mirroring the summarizer rule's
-    # "operator-controlled, not external input" carve-out: `None` (key
-    # absent / blank) means "reuse the channel's current model", and
-    # re-sending the CURRENT model verbatim is allowed even when it's
-    # uncataloged — the operator can pin an arbitrary WhisperLiveKit name
-    # via `--live-model` / live-model.txt, and the dashboard echoes the
-    # running selection back on every Apply (live-channel.js keeps it
-    # selectable via unregisteredFallback), so gate-knob/language tweaks
-    # on a pinned model must not 400. Only a CHANGED id must be in the
-    # catalog. `available` guards future "coming soon" placeholders.
-    if model is not None and model != recorder.live.config.model:
-        entry = REGISTRY.get(model)
-        if entry is None or not entry.available or not entry.supports_context("live"):
-            raise HTTPException(
-                400,
-                f"unknown live model {model!r} — not a live-context entry in the "
-                f"model catalog (see GET /api/models?context=live)",
-            )
-
-    # Compute (but don't yet apply) the family swap: whether the requested
-    # model needs a DIFFERENT concrete LiveChannel than the one currently
-    # installed (Whisper/NB-Whisper <-> Moonshine — see PRD #120). The
-    # Recorder holds `live` typed as the `LiveChannel` Protocol
-    # specifically so this works with no Recorder change. Construction is
-    # side-effect-free (no engine load, no bind); the returned instance is
-    # also what gate_kind validation must be judged against — the TARGET
-    # channel's capabilities, not the pre-swap one's.
-    new_channel = resolve_live_channel_for_model(
-        recorder.live, target_model=model or recorder.live.config.model, use_mlx=recorder.use_mlx
-    )
-    target_channel = new_channel if new_channel is not None else recorder.live
-
-    gate_kind = _parse_opt_str(body.get("gate_kind"), "gate_kind")
-    if gate_kind is not None and gate_kind not in GATE_KINDS:
-        raise HTTPException(400, gate_kind_error(gate_kind))
-    if gate_kind == "backend" and not getattr(target_channel, "supports_native_vad", False):
-        # Stale-dashboard guard: a channel with no native VAD (Moonshine
-        # today, a future Parakeet) means "backend" gating would silently
-        # leave no gate at all. UI auto-greys this, but old clients won't.
-        raise HTTPException(
-            400,
-            "requested live channel has no native VAD; gate_kind='backend' is not supported",
-        )
-
-    # Validation passed — now the swap may actually touch the recorder.
-    if new_channel is not None:
-        if recorder.live.running():
-            await asyncio.to_thread(recorder.live.stop)
-        recorder.live = new_channel
-
-    if recorder.live.matches(
-        model=model,
-        language=language,
-        gate_kind=gate_kind,
-        conf=conf,
-    ):
-        # Child-side config matches — no restart needed. Apply any gate-knob
-        # changes to the config so the next /tap open's SpeechGate uses them.
-        recorder.live.apply_gate_knobs(
-            gate_speech_threshold=gate_speech_threshold,
-            gate_hangover_ms=gate_hangover_ms,
-            gate_pre_roll_ms=gate_pre_roll_ms,
-            gate_min_speech_ms=gate_min_speech_ms,
-        )
-        return {
-            "ok": True,
-            "msg": "already running; any gate-knob change applied without restart",
-            "state": recorder.live.info["state"],
-        }
-
-    # Announce the transition (replaces gate config + conf in LiveConfig,
-    # flips info to "starting" with the new model/language) BEFORE we
-    # tear down the old child or fetch weights — otherwise dashboards
-    # polling /api/state during the stop→start window would render the
-    # previous selection.
-    recorder.live.begin_transition(
-        model=model,
-        language=language,
-        gate_kind=gate_kind,
-        conf=conf,
-        gate_speech_threshold=gate_speech_threshold,
-        gate_hangover_ms=gate_hangover_ms,
-        gate_pre_roll_ms=gate_pre_roll_ms,
-        gate_min_speech_ms=gate_min_speech_ms,
-    )
-
-    if recorder.live.running():
-        await asyncio.to_thread(recorder.live.stop)
-        # stop() sets state="stopped"; re-announce so the dashboard stays
-        # on "starting" with the new model.
-        recorder.live.begin_transition(model=model, language=language)
-
-    ok, msg = await asyncio.to_thread(recorder.live.start, model=model, language=language)
-    if not ok:
-        raise HTTPException(500, msg)
-    return {"ok": True, "msg": msg, "state": recorder.live.info["state"]}
 
 
 @app.post("/api/live/stop")
@@ -1175,7 +1110,7 @@ async def api_models(context: str = "batch"):
     if context not in ("batch", "live"):
         raise HTTPException(400, f"context must be 'batch' or 'live' (got {context!r})")
     # `only_installed` filters out families whose adapter packages weren't
-    # selected at install time (the picker in tools/install_picker.py only
+    # selected at install time (the picker in tapscribe/install_picker.py only
     # pulls in extras the operator ticks). Without this filter, the
     # dashboard would advertise Parakeet even on machines that skipped the
     # transformers install — and the operator would only find out by
@@ -1242,7 +1177,7 @@ async def api_setup_install(request: Request):
     Events. Body: ``{"families": {"<family>": "<mlx|cuda|cpu>", ...}}``.
 
     Delegates the actual pip work to the dependency-free install picker
-    (`tools/install_picker.py --non-interactive`) against a selection written
+    (`tapscribe/install_picker.py --non-interactive`) against a selection written
     from the validated request, streaming one SSE `data:` event per output line
     then a terminal `done`/`error`. On success the backend probes are refreshed
     so `/api/models` + `/api/setup/state` reflect the new install without a
@@ -1262,7 +1197,13 @@ async def api_setup_install(request: Request):
 
     async def events():
         try:
-            async for ev in run_install(selection, on_success=refresh_backend_probes):
+            async for ev in run_install(
+                selection,
+                # Set by `python -m tapscribe --install-spec` (the Bundle's
+                # Launcher passes its wheel); absent in a checkout.
+                install_spec=getattr(request.app.state, "install_spec", None),
+                on_success=refresh_backend_probes,
+            ):
                 yield sse(ev)
         finally:
             request.app.state.setup_install_active = False
@@ -1320,12 +1261,12 @@ async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_re
     identity = body.get("identity")
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity required")
-    record = body.get("record")
-    live = body.get("live")
+    # _parse_opt_bool, not bool(): see api_recording_toggle — "false" from a
+    # client that stringifies its flags must 400, never silently mean True.
     setting = recorder.tap_settings.set(
         identity,
-        record=bool(record) if record is not None else None,
-        live=bool(live) if live is not None else None,
+        record=_parse_opt_bool(body.get("record"), "record"),
+        live=_parse_opt_bool(body.get("live"), "live"),
     )
     return {
         "ok": True,
@@ -1344,7 +1285,11 @@ async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_re
     on the bridge's normal trackMuted close."""
     body = await _json_body(req)
     if "enabled" in body:
-        enabled = recorder.toggle_recording(enabled=bool(body["enabled"]))
+        # _parse_opt_bool, not bool(): a client that stringifies its flags would
+        # otherwise turn {"enabled": "false"} into ENABLED (bool("false") is
+        # True) and keep recording every participant after the operator asked
+        # to pause — a wrong-direction privacy bug, not just a bad request.
+        enabled = recorder.toggle_recording(enabled=_parse_opt_bool(body["enabled"], "enabled"))
     else:
         enabled = recorder.toggle_recording()
     print(f"[tapscribe] recording {'enabled' if enabled else 'paused'}", flush=True)
@@ -1525,7 +1470,12 @@ async def api_summarize_config_put(req: Request):
     one structured object. ALL validation (source/model allowlists, text
     caps, max_tokens int + bounds) lives in `write_summarizer_config`; its
     ValueError is the 400."""
-    body = await _json_body(req)
+    # Strict parse rather than `_json_body` (which turns ANY parse failure into
+    # {}): combined with the full-object semantics above, a dropped or
+    # truncated body would WIPE the operator's saved summarizer default —
+    # taking the end-of-meeting pipeline's summarize stage with it — and answer
+    # {"ok": true}. Only a deliberate `{}` clears.
+    body = await _require_json_object_body(req, allow_empty=False)
     try:
         stored = write_summarizer_config(body)
     except ValueError as e:
@@ -1536,16 +1486,35 @@ async def api_summarize_config_put(req: Request):
 
 
 @app.delete("/api/sessions/{session}/stripped")
-async def api_session_stripped_delete(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
-    """Remove a session's stripped/ folder so it can be regenerated."""
-    resolve_session_dir(session)
-    d = stripped_dir(session)
-    if not d.is_dir():
-        return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
-    try:
-        shutil.rmtree(d)
-    except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from None
+async def api_session_stripped_delete(session: str, recorder: Recorder = Depends(get_recorder)):
+    """Remove a session's stripped/ folder so it can be regenerated.
+
+    Deliberately NOT the full `_refuse_current_or_busy`: stripped/ is a
+    derived artefact, so clearing the CURRENT session's copy — including
+    while a tap is writing ORIGINALS into that session — is legitimate, and
+    only the busy-job guard applies. `batch_strip.strip_session` holds the
+    session's job slot for its whole run and is writing region clips into
+    exactly this directory, so an rmtree underneath it would delete half of
+    what it just wrote and leave the strip-meta describing clips that are
+    gone."""
+    # `jobs.run` IS the busy guard (SessionBusy → 409) and holds the slot for
+    # the walk, so a strip can't claim it mid-rmtree. The path work is inside
+    # the block for the same reason.
+    async with recorder.jobs.run(session, kind="delete", total=1):
+        resolve_session_dir(session)
+        d = stripped_dir(session)
+        if not d.is_dir():
+            return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
+        try:
+            await asyncio.to_thread(shutil.rmtree, d)
+        except FileNotFoundError:
+            # Someone cleared stripped/ between the is_dir() above and here
+            # (a second dashboard tab, an absorb). The caller's goal — no
+            # stripped/ folder — already holds, so report it as a no-op
+            # rather than 500ing on a check-then-act window.
+            return {"ok": True, "deleted": False, "reason": "no stripped/ folder"}
+        except OSError as e:
+            raise HTTPException(500, f"delete failed: {e}") from None
     print(f"[tapscribe] removed stripped/ from session: {session}", flush=True)
     return {"ok": True, "deleted": True}
 
@@ -2011,6 +1980,33 @@ async def api_set_primary(
     return {"ok": True, "primary": {"backend": backend, "model": model}}
 
 
+def _translate_registry_rejection(model: str, backend: str) -> None:
+    """Translate the catalog's rejection of `(model, backend)` into a 400 — or
+    return, leaving the caller's exception to propagate as the 500 it is.
+
+    The lazy resolve inside `load_transcriber` raises plain KeyError /
+    RuntimeError, neither a domain error; re-resolving here is what tells a bad
+    model id apart from an unrelated failure on a good one."""
+    try:
+        REGISTRY.resolve(model, preference=backend)  # type: ignore[arg-type]
+    except KeyError:
+        raise HTTPException(400, f"unknown model {model!r} — not in the catalog") from None
+    except RuntimeError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@contextmanager
+def _translating_registry_rejection(model: str, backend: str):
+    """Wrap a batch transcribe so a catalog rejection of `(model, backend)`
+    surfaces as a 400 (see `_translate_registry_rejection`) instead of a 500.
+    One copy, so a third transcribe route can't become a third paste."""
+    try:
+        yield
+    except (KeyError, RuntimeError):
+        _translate_registry_rejection(model, backend)
+        raise
+
+
 @app.post("/api/transcribe")
 async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
     body = await _json_body(req)
@@ -2034,7 +2030,8 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
         # the session's candidate languages decide (ADR-0010/0011).
         source_lang=(body.get("source_lang") or "").strip() or None,
     )
-    payload = await transcribe_one(recorder, request)
+    with _translating_registry_rejection(request.model, request.backend):
+        payload = await transcribe_one(recorder, request)
     print(
         f"[tapscribe] transcribed {request.name} ({request.source}) with {request.model}",
         flush=True,
@@ -2061,7 +2058,8 @@ async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_
         force=bool(body.get("force")),
         source_lang=(body.get("source_lang") or "").strip() or None,
     )
-    return JSONResponse(await transcribe_session(recorder, request))
+    with _translating_registry_rejection(request.model, request.backend):
+        return JSONResponse(await transcribe_session(recorder, request))
 
 
 # ---------------------------------------------------------------------------

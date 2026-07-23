@@ -121,6 +121,34 @@ def test_transcribe_falls_back_when_kwargs_unsupported(tmp_path: Path):
     assert "hotwords" not in second_call_kwargs
 
 
+def test_transcribe_does_not_retry_on_a_decode_time_type_error(tmp_path: Path):
+    """`WhisperModel.transcribe` returns a LAZY generator, so the decode
+    happens when the adapter drains it. A TypeError raised THERE (an upstream
+    bug, a None field on a segment, a numpy dtype mismatch on one CPU/CUDA
+    build) is not the kwarg-compatibility signal the fallback exists for.
+
+    Catching it re-transcoded the entire WAV without hotwords /
+    repetition_penalty / hallucination_silence_threshold — double the
+    wall-clock for a lower-quality transcript, with `quality_settings`
+    recording the reduced set and no warning anywhere. It must propagate.
+    """
+
+    def _exploding_segments():
+        yield _FakeSegment(start=0.0, end=1.0, text="ok")
+        raise TypeError("bad segment payload from the decoder")
+
+    model = MagicMock()
+    info = SimpleNamespace(language="en", language_probability=0.9, duration=1.0)
+    model.transcribe.return_value = (_exploding_segments(), info)
+    t = FasterWhisperTranscriber(model_name="small.en", model=model, device="CPU")
+
+    with pytest.raises(TypeError, match="bad segment payload"):
+        t.transcribe(tmp_path / "x.wav", hotwords="Acme")
+
+    # No silent second transcode of the whole file.
+    assert model.transcribe.call_count == 1
+
+
 def test_transcribe_handles_none_prompt_and_hotwords(tmp_path: Path):
     """Caller can pass None and the adapter still produces a clean result —
     the prompt/hotwords echo fields end up empty strings."""

@@ -6,7 +6,7 @@ constructions because the parts come from HTTP requests; the two-layer
 sanitiser lives here ONCE so every caller crosses it instead of re-deriving the
 guard:
 
-1. `_safe_part` rejects path separators, `.`/`..`, NUL, empty, and
+1. `_safe_part` rejects path separators, `.`/`..`, NUL, empty, over-long, and
    platform-absolute parts at the lowest path-building level.
 2. each `resolve_*` then realpaths the candidate via `_assert_contained` and
    confirms it stays under `RECORDINGS_DIR`. (CodeQL's `py/path-injection`
@@ -65,9 +65,25 @@ class StrippedMissing(SessionPathError):
 # the guard rather than relying on each route to remember it.
 _UNSAFE_PART_RE = re.compile(r"[\\/\x00]|^\.\.?$|^$")
 
+# Upper bound on one path component. Without it an over-NAME_MAX part clears
+# both sanitiser layers and only fails deep inside the filesystem call —
+# `create_session_dir("a" * 300)`'s `os.makedirs` raises a bare
+# `OSError: [Errno 36] File name too long`, which is not a `SessionPathError`
+# and so is absent from `app._DOMAIN_ERROR_STATUS`: `PUT /api/sessions/<300
+# chars>/meta` answered 500 while `resolve_session_dir` on the same id answered
+# 404. Length is just one more unsafe-input class, so it is refused here at
+# layer 1 with every other one.
+#
+# 128 clears real input by a wide margin: session ids are ISO stamps (~22
+# chars), and the longest WAV name `build_recorder_wav_name` can mint is 109
+# (20-char stamp + 64-char `safe_name` speaker cap + the 10-char
+# `safe_name(identity)[:10]` slug + an 8-char uuid + separators). It also stays
+# well under Windows' 260-char MAX_PATH once the recordings root is prefixed.
+_MAX_PART_LEN = 128
+
 
 def _safe_part(part: object, what: str = "session") -> str:
-    if not isinstance(part, str) or _UNSAFE_PART_RE.search(part):
+    if not isinstance(part, str) or len(part) > _MAX_PART_LEN or _UNSAFE_PART_RE.search(part):
         raise SessionNotFound(f"{what} not found")
     # Defense-in-depth: pathlib's `/` operator treats an absolute argument
     # as overriding the parent — `Path("D:/rec") / "C:foo"` is `C:foo` on
@@ -92,8 +108,27 @@ def _assert_contained(
     ONE copy of the containment check — every resolver crosses this, none
     re-derives the idiom."""
     root = os.path.realpath(config.RECORDINGS_DIR)
+    return _assert_under(candidate, root, message, exc=exc)
+
+
+def _assert_under(
+    candidate: Path | str,
+    base: str,
+    message: str,
+    *,
+    exc: type[SessionPathError] = SessionNotFound,
+) -> str:
+    """`_assert_contained` generalised to any `base` — the shared realpath walk.
+
+    STRICTLY below `base`: a candidate that realpaths to `base` itself is an
+    escape, not a hit. Every resolver joins at least one component under its
+    base, so none has a legitimate base-equal result — while accepting one let a
+    session symlinked to RECORDINGS_DIR come back as a session dir, and
+    `absorb_session` ends in `shutil.rmtree(source_dir)`, i.e. it would delete
+    the whole archive.
+    """
     real = os.path.realpath(candidate)
-    if real != root and not real.startswith(root + os.sep):
+    if not real.startswith(base + os.sep):
         raise exc(message)
     return real
 
@@ -106,6 +141,31 @@ def _contained_path(*parts: str, message: str = "session not found") -> Path:
     path = config.RECORDINGS_DIR.joinpath(*parts)
     _assert_contained(path, message)
     return path
+
+
+def _session_root(session: str, message: str = "session not found") -> str:
+    """The realpathed `<RECORDINGS_DIR>/<session>`, proven contained.
+
+    The base every PER-SESSION resolver scopes against. Root-scoped
+    containment is not enough for them: a `<session>/<name> -> <other
+    session>/<name>` symlink is genuinely under RECORDINGS_DIR, so the
+    root-scoped check passed it and the resolver handed back a path belonging
+    to a DIFFERENT session — `read_session_meta` returning another session's
+    label, the transcribe path reading another session's audio under this
+    session's identity, and `strip_session_locked` rmtree'ing a sibling.
+    """
+    return _assert_contained(config.RECORDINGS_DIR / _safe_part(session, "session"), message)
+
+
+def _in_session(session: str, *parts: str, message: str = "session not found") -> Path:
+    """Resolve `<session>/<parts...>`, proven contained under THAT session.
+
+    Use this for anything a session OWNS — its meta file, its roster, its
+    stripped/ dir, one of its WAVs. `_contained_path` (root-scoped) is only
+    correct for the session directory itself.
+    """
+    root = _session_root(session, message)
+    return Path(_assert_under(Path(root).joinpath(*parts), root, message))
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +187,22 @@ DIRNAME_STRIPPED = "stripped"
 
 
 def session_meta_path(session: str) -> Path:
-    return _contained_path(_safe_part(session, "session"), FILENAME_META_JSON)
+    return _in_session(session, FILENAME_META_JSON)
 
 
 def stripped_dir(session: str) -> Path:
     """Build `<RECORDINGS_DIR>/<session>/stripped` after validating the
     session id against path traversal. Returns the realpathed Path so
-    downstream filesystem operations can use it without re-checking."""
-    session = _safe_part(session, "session")
-    return Path(_assert_contained(config.RECORDINGS_DIR / session / DIRNAME_STRIPPED))
+    downstream filesystem operations can use it without re-checking.
+
+    Containment is scoped to the SESSION, not just the archive root: a
+    `<session>/stripped -> <other session>` symlink is contained under
+    RECORDINGS_DIR and so passed the root-scoped check, but
+    `batch_strip.strip_session_locked` rmtree's this directory — it would
+    delete a sibling session's WAVs. A resolver must never hand back a path
+    belonging to a different session.
+    """
+    return _in_session(session, DIRNAME_STRIPPED)
 
 
 def resolve_session_dir(session: str) -> Path:
@@ -180,11 +247,7 @@ def resolve_original_wav(session: str, name: str) -> Path:
     missing originals) — it is `resolve_wav(..., source='original')` minus the
     existence/extension checks. The file-level 404 body ("not found") matches
     `resolve_wav` for the identical name-escape class."""
-    return _contained_path(
-        _safe_part(session, "session"),
-        _safe_part(name, "file"),
-        message="not found",
-    )
+    return _in_session(session, _safe_part(name, "file"), message="not found")
 
 
 def resolve_wav(session: str, name: str, source: str = "original") -> Path:
@@ -193,7 +256,10 @@ def resolve_wav(session: str, name: str, source: str = "original") -> Path:
     can't escape RECORDINGS_DIR. 404 on any failure."""
     name = _safe_part(name, "file")
     source_dir = resolve_source_dir(session, source)
-    real = _assert_contained(source_dir / name, "not found", exc=WavNotFound)
+    # Scoped to the SOURCE dir (already proven session-contained), not the
+    # archive root: a `<session>/x.wav -> <other session>/y.wav` symlink is
+    # root-contained and would otherwise resolve to another session's audio.
+    real = _assert_under(source_dir / name, os.path.realpath(source_dir), "not found", exc=WavNotFound)
     if not os.path.isfile(real) or not real.lower().endswith(".wav"):
         raise WavNotFound("not found")
     return Path(real)

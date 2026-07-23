@@ -169,9 +169,11 @@ def test_resolve_explicit_kind_raises_when_unavailable():
 def test_resolve_returns_correct_loader_for_parakeet_on_cuda():
     set_available_backends_for_testing(frozenset({"cuda", "cpu"}))
     # Pin install-state so this stays box-independent: the parakeet cuda/cpu
-    # binding probes `transformers` (an optional extra, not a base/dev dep),
-    # so on a lean install the new is_installed() gate would otherwise skip it.
-    set_installed_modules_for_testing(frozenset({"transformers"}))
+    # binding probes `librosa` (declared by `parakeet-cpu` ALONE — probing the
+    # shared `transformers` advertised Parakeet as ready on a Voxtral-only
+    # venv), so on a lean install the is_installed() gate would otherwise
+    # skip it.
+    set_installed_modules_for_testing(frozenset({"librosa"}))
     rb = REGISTRY.resolve("parakeet-tdt-0.6b-v3", preference="auto")
     assert isinstance(rb, ResolvedBinding)
     assert rb.kind == "cuda"
@@ -179,6 +181,26 @@ def test_resolve_returns_correct_loader_for_parakeet_on_cuda():
     # binding's loader is _load_parakeet_hf (the transformers CUDA/CPU
     # adapter).
     assert rb.loader.__name__ == "_load_parakeet_hf"
+
+
+def test_voxtral_only_install_does_not_advertise_parakeet_as_installed():
+    """A Voxtral-only venv has `transformers` + `mistral_common` and no
+    librosa. While the Parakeet HF binding probed bare `transformers`,
+    `/api/models` and `/setup` both reported Parakeet INSTALLED — and picking
+    it took the deliberately-non-install-gated explicit-preference branch of
+    `resolve()` straight into a `from transformers import AutoModelForTDT`
+    ImportError at the FIRST TRANSCRIBE, long after the operator committed.
+
+    The probe moved to `librosa`, which only the `parakeet-cpu` extra
+    declares — the same discriminating-probe trick the Voxtral binding
+    already uses with `mistral_common`.
+    """
+    set_available_backends_for_testing(frozenset({"cuda", "cpu"}))
+    set_installed_modules_for_testing(frozenset({"transformers", "mistral_common"}))
+
+    by_id = {e.model_id: e for e in REGISTRY.entries()}
+    assert by_id["voxtral-mini"].is_installed() is True
+    assert by_id["parakeet-tdt-0.6b-v3"].is_installed() is False
 
 
 def test_resolve_returns_correct_loader_for_parakeet_on_mlx():

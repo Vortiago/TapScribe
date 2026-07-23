@@ -75,6 +75,25 @@ class ActiveStream:
 _ACTIVE_STREAM_FIELDS = frozenset(f.name for f in fields(ActiveStream))
 
 
+def _apply_fields(target: Any, updates: dict[str, Any], allowed: frozenset[str], what: str) -> None:
+    """Allowlist-check `updates`, then set them on `target` (None = the entry
+    is gone: nothing to set). ONE copy of the rule for the two in-place
+    updaters (`ActiveStreams._apply`, `JobTracker.update`); each keeps its own
+    lock + lookup.
+
+    A typo'd field raises `AttributeError` — silently dropping it left the
+    dashboard's job bar frozen at 0/N with no error anywhere. The check runs
+    BEFORE the target is touched (and regardless of whether it still exists),
+    so a rejected call can never half-apply."""
+    for k in updates:
+        if k not in allowed:
+            raise AttributeError(f"{what} has no updatable field {k!r}")
+    if target is None:
+        return
+    for k, v in updates.items():
+        setattr(target, k, v)
+
+
 class ActiveStreams:
     """Encapsulates the active-WS dict + its asyncio.Lock.
 
@@ -101,16 +120,9 @@ class ActiveStreams:
         against close() and call us after the entry's been removed.
 
         Typo'd field names raise `AttributeError` rather than silently
-        setting a phantom attribute on the dataclass."""
-        for k in fields:
-            if k not in _ACTIVE_STREAM_FIELDS:
-                raise AttributeError(f"ActiveStream has no field {k!r}")
+        setting a phantom attribute on the dataclass (see `_apply_fields`)."""
         async with self._lock:
-            existing = self._by_id.get(conn_id)
-            if existing is None:
-                return
-            for k, v in fields.items():
-                setattr(existing, k, v)
+            _apply_fields(self._by_id.get(conn_id), fields, _ACTIVE_STREAM_FIELDS, "ActiveStream")
 
     async def update_bytes(
         self,
@@ -232,6 +244,12 @@ class JobState:
     stage: str | None = None
 
 
+# Which JobState fields `JobTracker.update` may set. `session` is excluded on
+# purpose: it is the dict KEY the job is filed under, so rewriting it would
+# leave /api/state reporting the job against the wrong session.
+_JOB_STATE_UPDATABLE_FIELDS = frozenset(f.name for f in fields(JobState)) - {"session"}
+
+
 class _JobHandle:
     """The handle `JobTracker.run` yields: a thin per-session progress updater
     so the body reports progress with `await job.update(current=i,
@@ -263,14 +281,19 @@ class JobTracker:
             self._by_session[state.session] = state
             return True
 
-    async def update(self, session: str, **fields) -> None:
+    async def update(self, session: str, /, **updates) -> None:
+        """Set one or more fields on the session's in-flight JobState.
+        No-op when the session has no job — the update can land after the
+        job released its slot.
+
+        Typo'd field names raise `AttributeError` rather than being silently
+        dropped (see `_apply_fields`, shared with `ActiveStreams._apply`).
+
+        `session` is positional-only so a `session=` kwarg lands in `updates`
+        and is rejected there rather than silently rewriting `JobState.session`
+        out from under the dict key it is filed by."""
         async with self._lock:
-            existing = self._by_session.get(session)
-            if existing is None:
-                return
-            for k, v in fields.items():
-                if hasattr(existing, k):
-                    setattr(existing, k, v)
+            _apply_fields(self._by_session.get(session), updates, _JOB_STATE_UPDATABLE_FIELDS, "JobState")
 
     async def release(self, session: str) -> None:
         async with self._lock:

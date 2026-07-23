@@ -23,7 +23,7 @@
 #      choose Whisper / Voxtral / Parakeet there. First run base-installs the
 #      package only.
 #   4. Re-runs re-apply the saved selection (.tapscribe-install.json) via
-#      `tools/install_picker.py --non-interactive`, running pip only when the
+#      `python -m tapscribe.install_picker --non-interactive`, running pip only when the
 #      selection or pyproject.toml changed. On Apple Silicon MLX-flavoured
 #      extras are added automatically (`--no-mlx` opts out).
 #   5. Launch the TapScribe recorder (port 8001) — which then spawns
@@ -147,9 +147,9 @@ python -m pip install --quiet --upgrade pip
 # recorder can boot:
 #   * First run, interactive: base-install the package; pick models at /setup.
 #   * Re-run, or --non-interactive: re-apply the saved selection via
-#     `install_picker.py --non-interactive` (pip runs only on a changed
+#     `install_picker --non-interactive` (pip runs only on a changed
 #     selection / pyproject). To pick models in the terminal, run
-#     `python tools/install_picker.py` directly.
+#     `python -m tapscribe.install_picker` directly.
 BROWSER_SETUP=0
 if [ ! -f .tapscribe-install.json ] && [ "$NON_INTERACTIVE" -eq 0 ]; then
     echo "[start] First run — installing the base package; you'll choose models in the browser."
@@ -165,80 +165,39 @@ else
     if [ "$NO_MLX" -eq 1 ]; then
         PICKER_ARGS+=(--no-mlx)
     fi
-    if ! python tools/install_picker.py "${PICKER_ARGS[@]}"; then
+    if ! python -m tapscribe.install_picker "${PICKER_ARGS[@]}"; then
         echo "[start] install picker failed; aborting." >&2
         exit 1
     fi
 fi
 
 # --- Runtime python deps ----------------------------------------------------
-# The TapScribe per-tap silence gate (`gate_kind="tapscribe"`, which is
-# the default) imports `silero_vad` lazily on the first /tap WS. Missing
-# → the tap falls back to passthrough mode ("gate construction failed …
-# falling back to passthrough"), which silently disables the gate the
-# operator picked. silero-vad is a CORE dependency (no `[vad]` extra —
-# it installs unconditionally with a plain `pip install -e .`), so this
-# branch is a venv-repair fallback for an environment created before
-# silero-vad became core; on a fresh install the probe below already
-# passes and the branch no-ops.
+# Probe-then-repair for the runtime deps the install picker does NOT cover:
+# onnxruntime (the backend for the vendored Silero model behind `tapscribe.vad`,
+# i.e. the per-tap silence gate; a core dependency, so this only repairs an
+# incomplete venv) and the `[summarize]` extra (the Local
+# summarizer's offline backend — mlx_lm on Apple Silicon, llama_cpp elsewhere,
+# the latter needing the maintainer's prebuilt wheel index because it builds
+# from source by default).
 #
-# (No ffmpeg branch here: the array-accepting backends — mlx-whisper,
-# parakeet-mlx, and the transformers Parakeet path — pre-decode the
-# recorder's WAV via `tapscribe.wav_predecode.load_recorder_wav_as_pcm`
-# and hand the model a numpy array, skipping the ffmpeg-shelling audio
-# loaders the upstream packages would otherwise use. There is no ffmpeg
-# fallback; non-recorder WAVs raise a clear "convert the file" error at
-# request time.)
-# `find_spec` instead of `import silero_vad` so we don't pay the
-# ~1-2s torch import on every recorder bring-up just to probe
-# whether silero-vad is on the import path. The actual import is
-# deferred to `tapscribe.speech_gate` on the first /tap WS.
-if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('silero_vad') else 1)" 2>/dev/null; then
-    echo "[start] silero-vad missing — repairing this venv with 'pip install -e .' (it's a core dependency)…"
-    # NOT --quiet: the install pulls torch (~700MB), which can take
-    # minutes and occasionally fails on wheel resolution. Visible
-    # pip output makes the failure reason recoverable; a silent
-    # warning + no diagnostic would just frustrate the operator.
-    if ! python -m pip install -e .; then
-        echo "[start] 'pip install -e .' failed. The recorder will still boot, but the" >&2
-        echo "        TapScribe silence gate will fall back to passthrough on every /tap." >&2
-    fi
-fi
-
-# The Local summarizer source (Summary stage, #86) runs a bundled offline model
-# — an MLX backend on Apple Silicon, a GGUF/llama.cpp backend on CPU/CUDA. The
-# adapter lazy-imports the routed backend on the first Generate; missing → the
-# Local source reports "needs the [summarize] extra" instead of summarizing.
-# Pull the `[summarize]` extra here so the first Generate just works. No-op on
-# re-runs once installed. (Like the [vad] extra above, NOT via the install
-# picker, which covers transcription model extras only.)
+# These used to be inlined here and, near-identically, in start.ps1. They now
+# live in `tapscribe.preflight` so the Windows Bundle's Launcher — which has no
+# start.ps1 to inherit them from — runs the SAME steps rather than a C#
+# reimplementation that drifts (ADR-0015). `plan_steps` is pure and unit-tested;
+# `--dry-run` prints what it would do.
 #
-# Probe the module the extra installs ON THIS PLATFORM (mirrors
-# LocalSummarizer's `resolve_local_backend`): mlx_lm on Apple Silicon, else
-# llama_cpp. find_spec, not import, to skip the heavy backend import on bring-up.
-if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
-    SUMMARIZE_PROBE="mlx_lm"
-else
-    SUMMARIZE_PROBE="llama_cpp"
-fi
-if ! python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$SUMMARIZE_PROBE') else 1)" 2>/dev/null; then
-    echo "[start] $SUMMARIZE_PROBE missing — installing the [summarize] extra (bundled offline summarizer)…"
-    # NOT --quiet: the install pulls a text-gen backend (and, on first Generate,
-    # a multi-GB model), so visible output makes a failure recoverable.
-    SUMMARIZE_PIP_ARGS=()
-    if [ "$SUMMARIZE_PROBE" = "llama_cpp" ]; then
-        # llama-cpp-python builds from source by default (needs cmake + a C++
-        # toolchain). Add the maintainer's prebuilt CPU-wheel index so a box
-        # without a compiler still installs. (CUDA-accelerated summary inference
-        # is opt-in: swap in the cuXXX wheel index from
-        # https://abetlen.github.io/llama-cpp-python/whl/ if you want it.)
-        SUMMARIZE_PIP_ARGS+=(--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu)
-    fi
-    if ! python -m pip install -e ".[summarize]" "${SUMMARIZE_PIP_ARGS[@]}"; then
-        echo "[start] 'pip install -e .[summarize]' failed. The recorder will still boot, but the" >&2
-        echo "        Local summarizer source will report the [summarize] extra is missing." >&2
-    fi
-fi
+# `-m` works even in a venv where tapscribe isn't installed yet: we cd'd to the
+# repo root above, and `-m` puts the cwd on sys.path. Non-fatal by design —
+# every step here degrades a feature, so a failure warns and the recorder still
+# boots.
+#
+# (No ffmpeg branch: the array-accepting backends — mlx-whisper, parakeet-mlx,
+# and the transformers Parakeet path — pre-decode the recorder's WAV via
+# `tapscribe.wav_predecode.load_recorder_wav_as_pcm` and hand the model a numpy
+# array, skipping the ffmpeg-shelling loaders upstream would otherwise use.
+# There is no ffmpeg fallback; non-recorder WAVs raise a clear "convert the
+# file" error at request time.)
+python -m tapscribe.preflight || true
 
 # --- Configuration ----------------------------------------------------------
 MODEL="${SX_MODEL:-tiny.en}"

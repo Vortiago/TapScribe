@@ -75,13 +75,9 @@ function buildEditor({ key, content, placeholder, overrideCount }) {
  */
 export function render(j, { gridEl, headerNoteEl, supportOverride = null, showOverrideCounts = true }) {
   // The grid swap goes through renderRegion (focus-guarded + per-host sig),
-  // which covers a focused editor textarea. One case it deliberately can't
-  // see: BUTTONS. While a save is in flight, focus sits on its [data-cfg-key]
-  // save button — swapping then would detach the status span the awaiting
-  // putJson writes to. Hold the grid for that one case here.
-  const active = /** @type {HTMLElement | null} */ (document.activeElement);
-  if (active && active.dataset && active.dataset.cfgKey && gridEl.contains(active)) return;
-
+  // which covers a focused editor textarea AND — since the seam folded
+  // [data-cfg-key] into its interactive test — a focused save button mid-save,
+  // whose status span the awaiting putJson still writes to. No guard here.
   const p = j.prompt || { path: "", content: "", length: 0 };
   const h = j.hotwords || { path: "", content: "", length: 0 };
   const hl = j.hallucinations || { path: "", content: "", count: 0 };

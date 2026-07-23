@@ -49,14 +49,24 @@ GATE_KNOB_TEST_VALUES: dict[str, float] = {
 # Silero stub for strip-silence tests
 # ---------------------------------------------------------------------------
 #
-# tapscribe.strip_silence.detect_speech_silero loads the real silero-vad
-# model, which pulls torch into the import graph — too heavy for CI. The
-# fixture below monkeypatches it with a deterministic RMS-windowed detector
-# that produces the same region boundaries silero would on the synthetic
-# square-wave-and-silence fixtures the tests use.
+# The fixture below monkeypatches tapscribe.strip_silence.detect_speech_silero
+# with a deterministic RMS-windowed detector that produces the same region
+# boundaries the real VAD would on the synthetic square-wave-and-silence
+# fixtures the tests use.
+#
+# The reason is DETERMINISM, not cost. It used to be cost — the real detector
+# pulled torch into the import graph — but #374 replaced that with
+# `tapscribe.vad` (onnxruntime + a vendored 2.3 MB ONNX model, both core), so
+# the real path is now cheap enough to run in CI. What the stub still buys is
+# exact, stable region boundaries for the planning/splitting assertions.
+#
+# The cost of that: because this fixture is AUTOUSE, no production speech
+# detection runs anywhere in the unit suite, so every region-boundary
+# assertion is a statement about the stub. Tests that need the real detector
+# opt out with @pytest.mark.real_silero (see pyproject's marker list).
 #
 # Keep this strictly a test-side helper: production must always run the real
-# silero (any TapScribe install that has the live channel already does).
+# detector (it is core, so every TapScribe install has it).
 
 
 def _stub_detect_speech_silero(samples_int16, min_silence_ms: int, pad_ms: int):
@@ -388,7 +398,28 @@ class FakeWlkThread:
         try:
             loop.run_until_complete(self._serve())
         finally:
-            loop.close()
+            # Drain BEFORE closing. `run_until_complete` returns the moment
+            # `_serve` does, but `_serve`'s own cleanup (`connection.close()`,
+            # `server.close()`) leaves work behind: the per-connection
+            # `_handler` tasks are still unwinding, and websockets/asyncio
+            # schedule the actual transport teardown as callbacks. Closing the
+            # loop here abandoned all of it, so the sockets were only finalized
+            # later by the GARBAGE COLLECTOR — which emits
+            # `ResourceWarning: unclosed transport`. With
+            # `filterwarnings = ["error"]` pytest turns that into an error and
+            # blames whichever test happened to be running when the GC fired,
+            # so this surfaced as a ~1-in-8 failure that moved between tests in
+            # this file and vanished under `-k` isolation. Draining makes
+            # teardown deterministic and the warning impossible.
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
 
     async def _serve(self) -> None:
         # One pre-bound socket (first resolved address): host+port=0
@@ -695,7 +726,12 @@ def atomic_extras(extra_name: str) -> list[str]:
     resolution tests and install-matrix.yml's family-axis meta-test — both
     need "does this extra exist in pyproject.toml", so it lives here rather
     than in either test file alone."""
-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    # `tomllib.load` on a BINARY handle, not `loads(read_text())`: TOML is
+    # utf-8 by spec, but `read_text()` with no encoding uses the platform
+    # default (cp1252 on all three Windows CI legs), so the first curly quote
+    # or non-ASCII character in a pyproject comment would redden Windows only.
+    with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
+        data = tomllib.load(fh)
     extras = data["project"]["optional-dependencies"]
     assert extra_name in extras, f"no `{extra_name}` extra in pyproject.toml"
     return list(extras[extra_name])

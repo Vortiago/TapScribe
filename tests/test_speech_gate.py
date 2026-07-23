@@ -352,7 +352,7 @@ def test_silero_vad_analyzer_accepts_pcm_chunks() -> None:
     Silero's behavior on synthetic silence/noise is sensitive enough
     that committing to a specific outcome would make this test flaky.
     """
-    pytest.importorskip("silero_vad")
+    pytest.importorskip("onnxruntime")
     from tapscribe.speech_gate import make_silero_vad
 
     analyze = make_silero_vad(threshold=0.5, hangover_ms=400)
@@ -378,7 +378,7 @@ def test_every_gate_gets_its_own_silero_model(monkeypatch: pytest.MonkeyPatch) -
     two taps' audio through a single LSTM state, and every new gate
     construction would zero the state under every other open tap. Each
     `make_silero_vad` call (= each SpeechGate) must load its OWN model."""
-    pytest.importorskip("silero_vad")
+    pytest.importorskip("onnxruntime")
     from tapscribe import speech_gate as sg
 
     loaded: list[object] = []
@@ -399,7 +399,7 @@ def test_load_silero_model_is_uncached() -> None:
     """`load_silero_model` must hand out a FRESH instance every call —
     a cached instance is exactly the shared-state bug the per-gate /
     per-thread ownership exists to prevent."""
-    pytest.importorskip("silero_vad")
+    pytest.importorskip("onnxruntime")
     from tapscribe.speech_gate import load_silero_model
 
     assert load_silero_model() is not load_silero_model()

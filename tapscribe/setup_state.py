@@ -23,12 +23,16 @@ an Apple-Silicon box that installed Whisper via MLX *only*, NB-Whisper stays
 not-installed (it needs faster-whisper). Model weights download lazily on first
 use. The install-EXECUTION slice (separate) maps a family to its backend extra
 and dedups shared extras; it lives with the dependency-free
-`tools/install_picker.py`, which must not import this package (it runs before
+`tapscribe/install_picker.py`, which must not import this package (it runs before
 the package is installed).
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+from . import config
 from .runtime_probe import available_backend_strs
 from .transcribers.catalog import REGISTRY, TranscriberRegistry
 
@@ -37,11 +41,11 @@ from .transcribers.catalog import REGISTRY, TranscriberRegistry
 # sense as a FIRST-RUN install surface here. Moonshine (PRD #120, shipped in
 # #334) is implemented but live-only — it can't be an operator's only
 # transcriber, so the first-run flow deliberately doesn't offer it; it installs
-# via the terminal picker (`tools/install_picker.py`) or
+# via the terminal picker (`tapscribe/install_picker.py`) or
 # `pip install "tapscribe[moonshine]"` once a batch family is in place.
 # Surfacing live-only extras in /setup as an add-on section is a follow-up.
 # Labels + sizes are setup-facing display data, intentionally independent of
-# tools/install_picker.py's FamilyDef list (which can't import this package).
+# tapscribe/install_picker.py's FamilyDef list (which can't import this package).
 # Sizes are approximate (vary by backend/host) — expectation-setting, not a
 # contract.
 FAMILY_META: tuple[tuple[str, str, str], ...] = (
@@ -95,13 +99,36 @@ def _family_state(
     }
 
 
-def build_setup_state(registry: TranscriberRegistry = REGISTRY) -> dict:
+def read_stale_selection(path: Path) -> list[dict]:
+    """Families the last picker run SKIPPED because their saved backend left the
+    catalog, read from the sidecar the picker writes (ADR-0015).
+
+    Degrades to ``[]`` on anything unreadable. /setup is how an operator
+    recovers from exactly this situation, so a corrupt sidecar must never be
+    what stops the page from rendering.
+    """
+    try:
+        # utf-8 explicitly: family labels carry non-ASCII, and Windows would
+        # otherwise decode this cp1252 and blow up the setup page.
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    entries = blob.get("stale_backends") if isinstance(blob, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict) and "family" in entry]
+
+
+def build_setup_state(registry: TranscriberRegistry = REGISTRY, *, warnings_file: Path | None = None) -> dict:
     """Assemble the setup state the first-run / manage surface renders from.
 
-    Returns ``{first_run, available_backends, families}`` where each family is
-    ``{family, label, size_hint, live, batch, installed, backends, models}``.
-    Only curated ``FAMILY_META`` families with at least one available catalog
-    entry are included, in display order.
+    Returns ``{first_run, available_backends, families, stale_selection}`` where
+    each family is ``{family, label, size_hint, live, batch, installed,
+    backends, models}``. Only curated ``FAMILY_META`` families with at least one
+    available catalog entry are included, in display order.
+
+    ``stale_selection`` is the picker's skipped-family report — see
+    ``read_stale_selection``.
     """
     avail = available_backend_strs()
     families = [
@@ -113,4 +140,5 @@ def build_setup_state(registry: TranscriberRegistry = REGISTRY) -> dict:
         "first_run": is_first_run(registry),
         "available_backends": sorted(avail),
         "families": families,
+        "stale_selection": read_stale_selection(warnings_file or config.INSTALL_WARNINGS_FILE),
     }

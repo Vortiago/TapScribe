@@ -197,23 +197,58 @@ def test_assert_feature_extractor_sample_rate_mismatch_raises():
         t._assert_feature_extractor_sample_rate()
 
 
-def test_load_fails_fast_without_transformers(monkeypatch):
-    """No `transformers` installed → an actionable RuntimeError naming the
-    package, not a deep ImportError chain."""
+def _hide_modules(monkeypatch, *names: str, present: tuple[str, ...] = ()) -> None:
+    """Make `find_spec` report `names` as missing and `present` as installed.
+
+    `present` is not optional sugar: a test that only HIDES a package asserts
+    nothing about the ones it left alone, and the CI matrix installs neither
+    `transformers` nor `librosa`. So hiding librosa alone produced
+    "missing: transformers, librosa" there — a test meaning "only librosa is
+    missing" has to pin the other side of that too, or it passes locally and
+    fails on all nine legs.
+    """
     import importlib.util as importlib_util
 
     real_find_spec = importlib_util.find_spec
 
     def fake_find_spec(name, *args, **kwargs):
-        if name == "transformers":
+        if name in names:
             return None
+        if name in present:
+            return object()  # a truthy spec — load() only checks for None
         return real_find_spec(name, *args, **kwargs)
 
     monkeypatch.setattr(importlib_util, "find_spec", fake_find_spec)
 
+
+def test_load_fails_fast_without_transformers(monkeypatch):
+    """No `transformers` installed → an actionable RuntimeError naming the
+    package, not a deep ImportError chain."""
+    _hide_modules(monkeypatch, "transformers", present=("librosa",))
+
     from tapscribe.transcribers.parakeet import ParakeetTranscriber
 
-    with pytest.raises(RuntimeError, match="transformers"):
+    # Anchored on the trailing PERIOD: a bare "missing: transformers" is also a
+    # prefix of "missing: transformers, librosa", so it would pass in a venv
+    # missing BOTH and stop distinguishing the two cases — which is exactly how
+    # the librosa-only test came to be red on every CI leg.
+    with pytest.raises(RuntimeError, match=r"missing: transformers\."):
+        ParakeetTranscriber.load("parakeet-tdt-0.6b-v3", kind="cpu")
+
+
+def test_load_fails_fast_when_only_librosa_is_missing(monkeypatch):
+    """The Voxtral-only venv: `transformers` IS installed (voxtral-cpu
+    declares it) but `librosa` — declared by `parakeet-cpu` alone — is not.
+
+    Guarding on transformers alone let this venv sail past `load()` and die
+    inside `AutoProcessor.from_pretrained`, deep in the feature extractor,
+    with no mention of the package the operator actually needs.
+    """
+    _hide_modules(monkeypatch, "librosa", present=("transformers",))
+
+    from tapscribe.transcribers.parakeet import ParakeetTranscriber
+
+    with pytest.raises(RuntimeError, match=r"missing: librosa\b"):
         ParakeetTranscriber.load("parakeet-tdt-0.6b-v3", kind="cpu")
 
 
@@ -238,3 +273,45 @@ def test_transformers_parakeet_upstream_contract():
     assert "durations" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()), (
         "ParakeetProcessor.decode no longer accepts durations="
     )
+
+
+# ── chunk/overlap joint constraint ──────────────────────────────────
+
+
+def test_incompatible_chunk_overlap_env_pair_clamps_at_construction(tmp_path, monkeypatch, capsys):
+    """`env_float` validates the two knobs INDEPENDENTLY, so a legal-but-
+    incompatible PAIR used to sail through construction and then kill every
+    transcribe: `chunk_windows` raises `ValueError: overlap_s (15.0) must be
+    <= chunk_s * 0.9 (9.0)`, which isn't in `_DOMAIN_ERROR_STATUS` (a bare
+    500) and aborts the whole job in `transcribe_session`.
+
+    A chunk of 10 s is inside `_CHUNK_S_BOUNDS` and the default 15 s overlap
+    is inside `_OVERLAP_S_BOUNDS` — neither knob is individually wrong.
+    """
+    monkeypatch.setenv("TAPSCRIBE_PARAKEET_CHUNK_S", "10")
+    monkeypatch.delenv("TAPSCRIBE_PARAKEET_OVERLAP_S", raising=False)
+
+    t = _adapter([[_tok(" hi", 0.0, 0.2)]])
+
+    assert t.chunk_duration_s == 10.0
+    assert t.overlap_duration_s == 9.0  # clamped to chunk * 0.9
+    # Degraded LOUDLY, matching env_float's own "ignoring …; using …" notice.
+    out = capsys.readouterr().out
+    assert "ignoring overlap" in out and "using 9.0" in out
+
+    # And the adapter actually transcribes instead of dying per-WAV.
+    result = t.transcribe(_wav(tmp_path / "x.wav", seconds=1.0))
+    assert result.text == "hi"
+    assert result.quality_settings["overlap_duration_s"] == 9.0
+
+
+def test_compatible_chunk_overlap_pair_is_left_alone(monkeypatch, capsys):
+    """The clamp must not touch a pair that `chunk_windows` already accepts —
+    otherwise it would quietly re-tune every default install."""
+    monkeypatch.delenv("TAPSCRIBE_PARAKEET_CHUNK_S", raising=False)
+    monkeypatch.delenv("TAPSCRIBE_PARAKEET_OVERLAP_S", raising=False)
+
+    t = _adapter([[]])
+
+    assert (t.chunk_duration_s, t.overlap_duration_s) == (120.0, 15.0)
+    assert "ignoring overlap" not in capsys.readouterr().out

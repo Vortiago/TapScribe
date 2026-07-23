@@ -1,25 +1,17 @@
-"""Tests for tools/ensure_cuda_torch.py.
+"""Tests for tapscribe/cuda_torch.py.
 
-Like the install picker, this is a standalone stdlib-only bring-up script
-that runs before/around TapScribe's install, so it's imported via path
-manipulation rather than as a package module. The GPU probe, the torch
-import, and pip itself are all monkeypatched — these tests never touch a
-real GPU or run pip.
+Like the install picker, this is a stdlib-only bring-up step that runs
+before/around TapScribe's install — but it now lives in the package, because
+`tapscribe.preflight` needs it and `tools/` isn't shipped in the wheel
+(ADR-0015). The GPU probe, the torch import, and pip itself are all
+monkeypatched — these tests never touch a real GPU or run pip.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-# tools/ isn't a package — make ensure_cuda_torch importable by name.
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-import ensure_cuda_torch as ect  # noqa: E402
+from tapscribe import cuda_torch as ect
 
 CU = "https://download.pytorch.org/whl/"
 

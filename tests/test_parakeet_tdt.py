@@ -76,3 +76,56 @@ def test_words_carry_pinned_probability():
     # downstream can distinguish "not reported" from "low confidence".
     segs = build_segments_from_tdt_tokens([_tok(" word", 0.0, 0.3)])
     assert segs[0].words[0].prob == 1.0
+
+
+# ── whitespace-only timing tokens ───────────────────────────────────
+#
+# The HF TDT stream can end on a token with no text but a real `end` — a
+# trailing gap the model still timed. `_build_words` extends the previous
+# word's end from it rather than dropping it. Nothing pinned that, so the
+# plausible simplification `if not stripped: continue` passed the whole suite
+# while silently shortening the last word's (and the segment's) end.
+
+
+def test_trailing_whitespace_only_token_extends_the_last_word_end():
+    tokens = [_tok(" hi", 0.0, 0.2), _tok("", 0.2, 0.5)]
+
+    segs = build_segments_from_tdt_tokens(tokens)
+
+    assert [s.text for s in segs] == ["hi"]
+    assert segs[0].words[0].end == 0.5
+    assert segs[0].end == 0.5
+    # It contributes timing only — never a word of its own.
+    assert [w.word for w in segs[0].words] == ["hi"]
+
+
+def test_whitespace_only_token_never_shortens_an_already_longer_word():
+    """`max(prev.end, end)` — a gap token that ends EARLIER than the word it
+    follows must not pull the alignment backwards."""
+    tokens = [_tok(" hi", 0.0, 0.9), _tok(" ", 0.2, 0.3)]
+
+    segs = build_segments_from_tdt_tokens(tokens)
+
+    assert segs[0].words[0].end == 0.9
+
+
+def test_whitespace_only_token_is_shifted_by_the_window_offset():
+    tokens = [_tok(" hi", 0.0, 0.2), _tok("", 0.2, 0.5)]
+
+    segs = build_segments_from_tdt_tokens(tokens, offset_s=10.0)
+
+    assert segs[0].words[0].end == 10.5
+
+
+def test_leading_whitespace_only_token_is_dropped_without_raising():
+    """No preceding word to extend — `words[-1]` would be an IndexError."""
+    tokens = [_tok("  ", 0.0, 0.3), _tok(" hi", 0.3, 0.5)]
+
+    segs = build_segments_from_tdt_tokens(tokens)
+
+    assert [s.text for s in segs] == ["hi"]
+    assert segs[0].start == 0.3
+
+
+def test_all_whitespace_token_list_yields_no_segments():
+    assert build_segments_from_tdt_tokens([_tok(" ", 0.0, 0.1), _tok("", 0.1, 0.4)]) == ()

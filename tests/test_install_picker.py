@@ -1,8 +1,10 @@
-"""Tests for tools/install_picker.py — per-family + per-backend bootstrap.
+"""Tests for tapscribe/install_picker.py — per-family + per-backend bootstrap.
 
-The picker is a standalone stdlib-only script (it runs before TapScribe's
-extras are installed), so these tests import it via path manipulation
-rather than as a package module.
+The picker is stdlib-only (it runs before TapScribe's extras are installed) but
+now lives in the package, because `tools/` isn't shipped in the wheel and a
+Bundle installs a wheel (ADR-0015). Importing it is free — `tapscribe/__init__.py`
+has no imports — so these tests import it normally rather than via the old
+`sys.path` manipulation.
 """
 
 from __future__ import annotations
@@ -17,13 +19,8 @@ from conftest import atomic_extras
 from packaging.requirements import Requirement
 from packaging.version import Version
 
-# tools/ isn't a package — make install_picker importable by name.
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-import install_picker  # noqa: E402
-from install_picker import (  # noqa: E402
+from tapscribe import install_picker
+from tapscribe.install_picker import (
     BACKEND_BOTH,
     BACKEND_CPU,
     BACKEND_MLX,
@@ -40,6 +37,24 @@ def _caps(*, mlx: bool = False, cuda: bool = False) -> MachineCaps:
 
 def _apple_caps() -> MachineCaps:
     return MachineCaps(os_name="Darwin", arch="arm64", mlx=True, cuda=False)
+
+
+def _cpu_only_family() -> install_picker.FamilyDef:
+    """A hypothetical single-backend family.
+
+    Every SHIPPED family now declares both a CPU/CUDA and an MLX backend, so
+    the "only one option" contracts — `declares_backend(BOTH)` is False, the
+    ←/→ cycle offers no "Both", `effective_backends` can't combine — need a
+    CONSTRUCTED family. Pinning them to whichever real family happens to be
+    single-backend today is what made these tests break when Voxtral gained
+    its MLX backend; the contract didn't change, only the catalog did."""
+    return install_picker.FamilyDef(
+        key="stubfam",
+        label="Stub family",
+        description="single-backend family used to pin the one-option contract",
+        size_hint="~0 MB",
+        backends=(install_picker.BackendDef(key=BACKEND_CPU, label="CPU/CUDA", extras=("stub-cpu",)),),
+    )
 
 
 @pytest.fixture
@@ -66,7 +81,11 @@ def test_selection_load_returns_defaults_when_file_missing(tmp_state):
 def test_selection_default_backend_is_mlx_on_apple_silicon(tmp_state):
     sel = Selection.load(tmp_state, _apple_caps())
     assert sel.choices["whisper"].backend == BACKEND_MLX
-    # Voxtral has no MLX path, so even on Apple Silicon it defaults to CPU.
+    # Every family that declares an MLX backend defaults to it on Apple
+    # Silicon — Voxtral included, since `mlx_voxtral` is a shipped adapter.
+    # Voxtral is CPU/CUDA-only in the picker by design — the voxtral-mlx
+    # extra exists so the adapter is installable, but a 0.0.x port is not
+    # something to hand every Apple-Silicon operator by default.
     assert sel.choices["voxtral"].backend == BACKEND_CPU
 
 
@@ -97,8 +116,11 @@ def test_selection_load_migrates_v1_format(tmp_state):
     # preserve that explicitly so the migration doesn't silently shrink
     # the install on first re-launch.
     assert sel.choices["whisper"].backend == BACKEND_BOTH
-    # Voxtral has no MLX path, so even after v1 migration it's CPU.
+    # …but voxtral has no MLX backend in the picker, so "both" is not
+    # available to it and it migrates to CPU.
     assert sel.choices["voxtral"].backend == BACKEND_CPU
+    # …but a family they had NOT ticked just gets the machine-natural pick.
+    assert sel.choices["parakeet"].backend == BACKEND_MLX
 
 
 def test_selection_load_ignores_stale_backend_values(tmp_state):
@@ -130,6 +152,71 @@ def test_selection_load_handles_malformed_file(tmp_state):
     assert sel.choices["whisper"].enabled is True
 
 
+# A syntactically valid but wrong-SHAPED state file must degrade the same way
+# unparsable JSON already does. `Selection.load` catches only
+# OSError/JSONDecodeError, so an AttributeError/TypeError raised while walking
+# the shape escapes `main()`: `python -m tapscribe.install_picker` exits
+# non-zero, `start.sh` prints "install picker failed; aborting" and `exit 1` —
+# the Recorder never boots, and in a Bundle the Launcher just logs a traceback
+# (ADR-0015). These are realistic hand-edits, not fuzz: the picker's own
+# non-interactive warning tells operators to "edit .tapscribe-install.json".
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"version": 2, "choices": ["whisper"]},  # a list of family names
+        {"version": 2, "choices": "whisper"},  # a bare string
+        {"version": 2, "choices": None},
+        {"version": 2},  # key absent entirely
+    ],
+    ids=["list", "string", "null", "absent"],
+)
+def test_selection_load_wrong_shaped_choices_falls_back_to_defaults(tmp_state, body):
+    tmp_state.write_text(json.dumps(body))
+
+    sel = Selection.load(tmp_state, _caps())
+
+    assert sel.choices == Selection.defaults_for(_caps()).choices
+
+
+def test_selection_load_wrong_shaped_family_value_does_not_poison_its_siblings(tmp_state):
+    """`"whisper": "mlx"` (the shape an operator reaches for first) used to
+    raise `AttributeError: 'str' object has no attribute 'get'`. It must now
+    read as "no choice recorded for whisper" while every well-shaped sibling
+    in the SAME file is still honoured."""
+    tmp_state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {
+                    "whisper": "mlx",
+                    "parakeet": {"enabled": True, "backend": BACKEND_CPU},
+                },
+            }
+        )
+    )
+
+    sel = Selection.load(tmp_state, _caps())
+
+    assert sel.choices["whisper"].enabled is False
+    assert sel.choices["whisper"].backend == BACKEND_CPU
+    # The sibling the operator DID write correctly survives intact.
+    assert sel.choices["parakeet"].enabled is True
+    assert install_picker.resolve_extras(sel, _caps()) == ["parakeet-cpu"]
+
+
+def test_selection_load_v1_non_iterable_families_reads_as_nothing_selected(tmp_state):
+    """The v1 migration path has the same hazard: `"families": 3` would blow
+    up on iteration. Treat it as an empty tick-list rather than aborting."""
+    tmp_state.write_text(json.dumps({"version": 1, "families": 3}))
+
+    sel = Selection.load(tmp_state, _caps())
+
+    assert set(sel.choices) == {f.key for f in FAMILIES}
+    assert not any(c.enabled for c in sel.choices.values())
+
+
 # ── Backend availability + cycling ──────────────────────────────────
 
 
@@ -140,9 +227,9 @@ def test_available_backends_filters_by_caps():
         BACKEND_CPU,
         BACKEND_MLX,
     ]
-    voxtral = next(f for f in FAMILIES if f.key == "voxtral")
-    # Voxtral has no MLX path even on Apple Silicon.
-    assert [b.key for b in install_picker.available_backends(voxtral, _apple_caps())] == [BACKEND_CPU]
+    # A family that declares only CPU/CUDA offers exactly that, MLX host or not.
+    stub = _cpu_only_family()
+    assert [b.key for b in install_picker.available_backends(stub, _apple_caps())] == [BACKEND_CPU]
 
 
 def test_cycleable_backend_keys_includes_both_when_two_backends_available():
@@ -156,8 +243,7 @@ def test_cycleable_backend_keys_includes_both_when_two_backends_available():
 
 def test_cycleable_backend_keys_no_both_when_only_one_available():
     """No point cycling through 'Both' when there's nothing to combine."""
-    voxtral = next(f for f in FAMILIES if f.key == "voxtral")
-    assert install_picker.cycleable_backend_keys(voxtral, _apple_caps()) == [BACKEND_CPU]
+    assert install_picker.cycleable_backend_keys(_cpu_only_family(), _apple_caps()) == [BACKEND_CPU]
 
 
 # ── Extras resolution ───────────────────────────────────────────────
@@ -248,7 +334,8 @@ def test_removed_backend_families_surfaces_only_removed_catalog(monkeypatch):
     _patch_whisper_without_mlx(monkeypatch)
     sel = Selection()
     _enable(sel, "whisper", BACKEND_MLX)  # removed from catalog → surfaces
-    _enable(sel, "voxtral", BACKEND_MLX)  # not in catalog (Voxtral has no MLX) → also surfaces
+    _enable(sel, "voxtral", "canary-mlx")  # never in the catalog → also surfaces
+    _enable(sel, "parakeet", BACKEND_MLX)  # still in the catalog → must NOT surface
     keys = {f.key for f in sel.removed_backend_families()}
     assert keys == {"whisper", "voxtral"}
 
@@ -259,17 +346,17 @@ def test_removed_backend_families_surfaces_only_removed_catalog(monkeypatch):
 
 def test_familydef_declares_backend():
     whisper = next(f for f in FAMILIES if f.key == "whisper")
-    voxtral = next(f for f in FAMILIES if f.key == "voxtral")
-    # Voxtral has only one backend declared; 'Both' is meaningless and
-    # `declares_backend` rejects it. Same for MLX.
+    # A single-backend family: 'Both' is meaningless and `declares_backend`
+    # rejects it, as does MLX which it never declared.
+    single = _cpu_only_family()
     assert whisper.declares_backend(BACKEND_BOTH) is True
-    assert voxtral.declares_backend(BACKEND_BOTH) is False
+    assert single.declares_backend(BACKEND_BOTH) is False
     assert whisper.declares_backend(BACKEND_CPU) is True
     assert whisper.declares_backend(BACKEND_MLX) is True
-    assert voxtral.declares_backend(BACKEND_MLX) is False
+    assert single.declares_backend(BACKEND_MLX) is False
     # has_mlx is the BACKEND_MLX special case of declares_backend.
     assert whisper.has_mlx() is True
-    assert voxtral.has_mlx() is False
+    assert single.has_mlx() is False
 
 
 def test_resolve_extras_preserves_family_order_for_reproducibility():
@@ -387,6 +474,138 @@ def test_build_pip_argv_drops_extras_brackets_when_empty():
     assert argv[-1] == "."
 
 
+def test_build_pip_argv_installs_the_bundled_wheel_when_given_one(tmp_path):
+    """The Bundle topology: install the wheel the installer shipped, not an
+    editable checkout that doesn't exist in `%LOCALAPPDATA%` (ADR-0015)."""
+    wheel = tmp_path / "tapscribe-1.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    argv = install_picker.build_pip_argv(
+        ["whisper-live", "whisper-cpu"], python="py", install_spec=str(wheel)
+    )
+    assert "-e" not in argv
+    assert argv[-1] == f"{wheel.resolve()}[whisper-live,whisper-cpu]"
+
+
+def test_main_forwards_install_spec_to_the_install(tmp_path, monkeypatch, tmp_stamp):
+    """End of the thread: `--install-spec` on the picker's own CLI reaches the
+    pip argv. Without this the flag would parse and be silently ignored, and a
+    Bundle would quietly try (and fail) to install an editable checkout."""
+    wheel = tmp_path / "tapscribe-1.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    state = tmp_path / ".tapscribe-install.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_CPU}},
+            }
+        )
+    )
+    monkeypatch.setattr(install_picker, "STATE_FILE", state)
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _caps())
+    seen: list[list[str]] = []
+    monkeypatch.setattr(install_picker.subprocess, "call", lambda argv, **kw: seen.append(argv) or 0)
+
+    assert install_picker.main(["--non-interactive", "--install-spec", str(wheel)]) == 0
+    assert seen, "pip was never invoked"
+    assert "-e" not in seen[0]
+    assert str(wheel.resolve()) in seen[0][-1]
+
+
+def test_main_reads_and_writes_the_state_file_given_on_the_cli(tmp_path, monkeypatch, tmp_stamp):
+    """`--state-file` relocates the saved selection. A Bundle keeps it under
+    TAPSCRIBE_BASE_DIR so it survives an upgrade; the module-level default
+    (repo root) is what a dev checkout keeps using."""
+    state = tmp_path / "elsewhere" / ".tapscribe-install.json"
+    state.parent.mkdir()
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_MLX}},
+            }
+        )
+    )
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _apple_caps())
+    monkeypatch.setattr(install_picker, "run_install", lambda *a, **k: 0)
+
+    assert install_picker.main(["--non-interactive", "--state-file", str(state)]) == 0
+    # Read from the given path (mlx would be absent had it loaded defaults)…
+    reloaded = install_picker.Selection.load(state, _apple_caps())
+    assert reloaded.choices["whisper"].backend == BACKEND_MLX
+    # …and written back there, not to the module-level default.
+    assert not install_picker.STATE_FILE.exists() or install_picker.STATE_FILE != state
+
+
+def test_main_records_removed_backends_to_a_sidecar(tmp_path, monkeypatch, tmp_stamp):
+    """`removed_backend_families()` has always warned to STDERR — invisible in a
+    Bundle, where the Launcher pipes output to a log file nobody opens. The
+    operator upgrades, their models quietly stop installing, and nothing they'd
+    look at says so. Record it where the dashboard can read it."""
+    state = tmp_path / ".tapscribe-install.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                # 'mlx' is real today; monkeypatching the family's declared
+                # backends below is what makes it "removed by a later version".
+                "choices": {"parakeet": {"enabled": True, "backend": BACKEND_MLX}},
+            }
+        )
+    )
+    shrunk = tuple(
+        install_picker.FamilyDef(
+            key=f.key,
+            label=f.label,
+            description=f.description,
+            size_hint=f.size_hint,
+            shared_extras=f.shared_extras,
+            default_selected=f.default_selected,
+            backends=tuple(b for b in f.backends if b.key != BACKEND_MLX),
+        )
+        for f in FAMILIES
+    )
+    monkeypatch.setattr(install_picker, "FAMILIES", shrunk)
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _apple_caps())
+    monkeypatch.setattr(install_picker, "run_install", lambda *a, **k: 0)
+
+    assert install_picker.main(["--non-interactive", "--state-file", str(state)]) == 0
+
+    sidecar = state.parent / install_picker.WARNINGS_FILENAME
+    assert sidecar.exists(), "expected a warnings sidecar next to the state file"
+    stale = json.loads(sidecar.read_text())["stale_backends"]
+    assert {entry["family"] for entry in stale} == {"parakeet"}
+    assert stale[0]["backend"] == BACKEND_MLX
+
+
+def test_main_clears_a_stale_sidecar_once_the_selection_is_valid(tmp_path, monkeypatch, tmp_stamp):
+    """The banner must disappear when the operator re-picks — a warning file
+    that outlives its cause is worse than no warning."""
+    state = tmp_path / ".tapscribe-install.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_CPU}},
+            }
+        )
+    )
+    sidecar = state.parent / install_picker.WARNINGS_FILENAME
+    sidecar.write_text(json.dumps({"stale_backends": [{"family": "parakeet", "backend": "mlx"}]}))
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _caps())
+    monkeypatch.setattr(install_picker, "run_install", lambda *a, **k: 0)
+
+    assert install_picker.main(["--non-interactive", "--state-file", str(state)]) == 0
+    assert not sidecar.exists()
+
+
+def test_main_rejects_a_bogus_install_spec(tmp_path, capsys):
+    """Validated at the boundary, not handed to pip — CLAUDE.md's CodeQL rule
+    for argparse values that flow onward."""
+    assert install_picker.main(["--non-interactive", "--install-spec", "requests"]) == 2
+    assert "install spec" in capsys.readouterr().err
+
+
 # ── Skip-install stamp ──────────────────────────────────────────────
 
 
@@ -471,19 +690,59 @@ def test_pyproject_fingerprint_changes_when_file_content_changes(tmp_repo_root):
     assert before != after
 
 
-def test_pyproject_fingerprint_empty_string_when_missing(monkeypatch, tmp_path):
-    """No readable pyproject → sentinel "" that can never equal a stored
-    fingerprint, so we never skip on the strength of a missing file."""
+def test_pyproject_fingerprint_falls_back_to_the_installed_version(monkeypatch, tmp_path):
+    """No pyproject.toml is the NORMAL state of a Bundle (it installs a wheel,
+    not a checkout), so "" would be recorded in the stamp AND computed on every
+    later run — they'd match, and pip would be skipped forever.
+
+    That is exactly the upgrade bug: after installing a new Bundle, the
+    operator's model extras would never be re-resolved against the new wheel's
+    dependency pins. Fall back to the installed version so an upgrade
+    invalidates the stamp the way a pyproject edit does in a checkout.
+    """
     empty = tmp_path / "no-repo"
     empty.mkdir()
     monkeypatch.setattr(install_picker, "REPO_ROOT", empty)
+
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: "1.1.0")
+    before = install_picker.pyproject_fingerprint()
+    assert before  # not the empty sentinel — it must be able to CHANGE
+
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: "1.2.0")
+    assert install_picker.pyproject_fingerprint() != before
+
+
+def test_fingerprint_is_empty_only_when_nothing_identifies_the_install(monkeypatch, tmp_path):
+    """Neither a pyproject nor a resolvable version → "" so we never skip pip on
+    the strength of an install we can't identify at all."""
+    empty = tmp_path / "no-repo"
+    empty.mkdir()
+    monkeypatch.setattr(install_picker, "REPO_ROOT", empty)
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: None)
     assert install_picker.pyproject_fingerprint() == ""
 
 
-def test_package_is_installed_true_for_importable_module():
-    # Exercises the real importlib.find_spec wiring against a stdlib module
-    # that is always importable.
-    assert install_picker.package_is_installed("json") is True
+def test_bundle_upgrade_invalidates_a_current_looking_stamp(monkeypatch, tmp_path):
+    """The whole point, at the seam that decides: same extras, no pyproject, but
+    a newer wheel ⇒ NOT current, so the picker re-runs pip."""
+    empty = tmp_path / "no-repo"
+    empty.mkdir()
+    monkeypatch.setattr(install_picker, "REPO_ROOT", empty)
+
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: "1.1.0")
+    stamp = {"extras": ["whisper-live"], "pyproject": install_picker.pyproject_fingerprint()}
+    assert install_picker.install_is_current(stamp, ["whisper-live"], install_picker.pyproject_fingerprint())
+
+    monkeypatch.setattr(install_picker, "_installed_version", lambda: "1.2.0")
+    assert not install_picker.install_is_current(
+        stamp, ["whisper-live"], install_picker.pyproject_fingerprint()
+    )
+
+
+def test_package_is_installed_true_for_a_real_distribution():
+    # Exercises the real importlib.metadata wiring against a distribution that
+    # is always present wherever the test suite runs.
+    assert install_picker.package_is_installed("pytest") is True
 
 
 def test_package_is_installed_false_for_absent_module():
@@ -502,7 +761,7 @@ def _patch_run_install_counter(monkeypatch) -> list[list[str]]:
     """Replace run_install with a no-op that records each call's extras."""
     calls: list[list[str]] = []
 
-    def fake_run_install(extras, *, dry_run=False):
+    def fake_run_install(extras, *, dry_run=False, install_spec=None):
         calls.append(list(extras))
         return 0
 
@@ -531,7 +790,7 @@ def _package_missing():
     return False
 
 
-def _pip_install_fails(extras, *, dry_run=False):
+def _pip_install_fails(extras, *, dry_run=False, install_spec=None):
     """Stand-in for `install_picker.run_install` that pretends pip exited
     non-zero, so tests can verify failure paths without invoking real pip."""
     return 1
@@ -763,11 +1022,12 @@ def test_render_shows_backend_selector_with_radio_markers():
 
 
 def test_render_shows_only_option_label_when_one_backend():
-    """Voxtral has no MLX adapter, so the picker shouldn't pretend there's
-    a backend choice to make."""
-    sel = Selection.defaults_for(_apple_caps())
-    text = install_picker.render(sel, _apple_caps())
+    """On a non-Apple host the MLX backends filter out, leaving one option per
+    family — the picker must say so rather than pretend there's a choice."""
+    sel = Selection.defaults_for(_caps())
+    text = install_picker.render(sel, _caps())
     assert "CPU/CUDA (only option" in text
+    assert "○ Both" not in text
 
 
 def test_render_with_cursor_marks_current_row_and_shows_arrow_help():
@@ -1065,6 +1325,7 @@ def test_pyproject_whisper_mlx_admits_a_real_release():
         ("whisper-mlx", "mlx-whisper"),
         ("parakeet-mlx", "parakeet-mlx"),
         ("moonshine-mlx", "mlx-audio"),
+        ("voxtral-mlx", "mlx-voxtral"),
     ],
 )
 def test_pyproject_mlx_extras_stay_platform_gated(extra_name, pkg):
@@ -1087,48 +1348,75 @@ def test_pyproject_cpu_extras_do_not_pull_mlx_packages():
     assert not any("mlx" in line for line in cpu), cpu
 
 
-def test_pyproject_parakeet_alias_is_mlx_only_on_apple_silicon():
-    """On Apple Silicon, `tapscribe[parakeet]` should resolve to
-    parakeet-mlx alone (GPU via Metal, faster than torch); everywhere else
-    to the transformers `parakeet-cpu` backend. The alias gates the CPU
-    atom out on darwin+arm64 via a PEP 508 marker so a mac install doesn't
-    pull transformers when MLX is the path, and the two backends never
-    coexist in one resolve."""
-    parakeet_lines = atomic_extras("parakeet")
+@pytest.mark.parametrize("alias", ["parakeet", "moonshine"])
+def test_pyproject_alias_is_mlx_only_on_apple_silicon(alias):
+    """On Apple Silicon, `tapscribe[<family>]` resolves to the family's MLX
+    atom ALONE (GPU via Metal, no torch download); everywhere else to its
+    CPU/CUDA atom. The alias gates the CPU atom out on darwin+arm64 via a
+    PEP 508 marker so a mac install doesn't pull transformers when MLX is the
+    path, and the two backends never coexist in one resolve."""
+    lines = atomic_extras(alias)
     # Exactly two marker-gated self-references: one Apple-Silicon-only,
     # one everywhere-else.
-    assert len(parakeet_lines) == 2, (
-        f"parakeet alias must declare two marker-gated entries; got: {parakeet_lines}"
-    )
-    darwin_line = next((line for line in parakeet_lines if "parakeet-mlx" in line), None)
-    other_line = next((line for line in parakeet_lines if "parakeet-cpu" in line), None)
+    assert len(lines) == 2, f"{alias} alias must declare two marker-gated entries; got: {lines}"
+    darwin_line = next((line for line in lines if f"{alias}-mlx" in line), None)
+    other_line = next((line for line in lines if f"{alias}-cpu" in line), None)
     assert darwin_line is not None, (
-        f"parakeet alias must include a parakeet-mlx-only entry for Apple Silicon; got: {parakeet_lines}"
+        f"{alias} alias must include a {alias}-mlx-only entry for Apple Silicon; got: {lines}"
     )
     assert other_line is not None, (
-        f"parakeet alias must include a parakeet-cpu entry for non-Apple-Silicon hosts; got: {parakeet_lines}"
+        f"{alias} alias must include a {alias}-cpu entry for non-Apple-Silicon hosts; got: {lines}"
     )
-    # The darwin/arm64 line must NOT mention parakeet-cpu — that's the
+    # The darwin/arm64 line must NOT mention the CPU atom — that's the
     # whole point of the split.
-    assert "parakeet-cpu" not in darwin_line, (
-        "parakeet alias's Apple-Silicon branch pulled in parakeet-cpu, which "
-        "would drag transformers onto a mac where MLX is the path. The atom "
-        f"must be MLX-only on darwin+arm64. Got: {darwin_line!r}"
+    assert f"{alias}-cpu" not in darwin_line, (
+        f"{alias} alias's Apple-Silicon branch pulled in {alias}-cpu, which would "
+        "drag torch/transformers onto a mac where MLX is the path. The atom must "
+        f"be MLX-only on darwin+arm64. Got: {darwin_line!r}"
     )
 
 
-def test_pyproject_moonshine_alias_is_mlx_only_on_apple_silicon():
-    """Same split as Parakeet: `tapscribe[moonshine]` resolves to
-    moonshine-mlx alone on Apple Silicon, moonshine-cpu everywhere else."""
-    moonshine_lines = atomic_extras("moonshine")
-    assert len(moonshine_lines) == 2, (
-        f"moonshine alias must declare two marker-gated entries; got: {moonshine_lines}"
+# Every version-volatile upstream whose SYMBOLS an adapter imports directly
+# (CLAUDE.md, "Upstream adapter symbols"): a rename breaks the adapter at
+# request time, weeks after a green unit run that mocked the model object. The
+# narrow upper bound is the primary defence — the importorskip smoke test in
+# each `tests/test_transcribers_*.py` is the secondary one. `whisperlivekit`
+# is deliberately absent: the live channel spawns it as a SUBPROCESS
+# (`tapscribe.live.build_live_cmd`), importing none of its symbols.
+_CAPPED_UPSTREAMS: tuple[tuple[str, str], ...] = (
+    ("whisper-cpu", "faster-whisper"),
+    ("whisper-mlx", "mlx-whisper"),
+    ("voxtral-cpu", "transformers"),
+    ("voxtral-mlx", "mlx-voxtral"),
+    ("parakeet-cpu", "transformers"),
+    ("parakeet-mlx", "parakeet-mlx"),
+    ("moonshine-cpu", "useful-moonshine-onnx"),
+    ("moonshine-mlx", "mlx-audio"),
+)
+
+
+@pytest.mark.parametrize("extra_name, pkg", _CAPPED_UPSTREAMS)
+def test_pyproject_adapter_upstreams_carry_an_upper_bound(extra_name, pkg):
+    req = _requirement_for(atomic_extras(extra_name), pkg)
+    upper = [s for s in req.specifier if s.operator in ("<", "<=", "==", "~=")]
+    assert upper, (
+        f"{extra_name} → {pkg} has no upper bound ({str(req.specifier)!r}). An "
+        "adapter imports undocumented symbols from it, so an upstream major "
+        "bump silently breaks transcription at request time. Add a narrow cap "
+        "and audit the changelog when you raise it."
     )
-    darwin_line = next((line for line in moonshine_lines if "moonshine-mlx" in line), None)
-    other_line = next((line for line in moonshine_lines if "moonshine-cpu" in line), None)
-    assert darwin_line is not None, f"missing moonshine-mlx entry; got: {moonshine_lines}"
-    assert other_line is not None, f"missing moonshine-cpu entry; got: {moonshine_lines}"
-    assert "moonshine-cpu" not in darwin_line
+
+
+def test_pyproject_voxtral_and_parakeet_share_one_transformers_window():
+    """Both extras can land in the same venv, and both adapters import
+    version-sensitive `transformers` symbols. A LOOSER Voxtral window was
+    worse than none: a Voxtral-only install resolved transformers<5, which
+    still satisfied the Parakeet HF binding's probe, so /api/models and /setup
+    reported Parakeet INSTALLED and `from transformers import AutoModelForTDT`
+    only blew up at the first transcribe."""
+    voxtral = _requirement_for(atomic_extras("voxtral-cpu"), "transformers")
+    parakeet = _requirement_for(atomic_extras("parakeet-cpu"), "transformers")
+    assert str(voxtral.specifier) == str(parakeet.specifier)
 
 
 def test_picker_moonshine_family_registered_with_cpu_and_mlx_backends():
@@ -1200,3 +1488,102 @@ def test_detect_caps_cuda_false_when_nvidia_smi_missing(monkeypatch):
     caps = install_picker.detect_caps()
     assert caps.cuda is False
     assert caps.mlx is False
+
+
+# ── review findings: dry-run purity, state-file topology, install probe ──────
+
+
+def test_dry_run_does_not_touch_the_warnings_sidecar(tmp_path, monkeypatch, tmp_stamp):
+    """`--dry-run` is documented as "purely read-only: don't persist the selection
+    or stamp". The sidecar write/clear escaped that gate, so previewing the pip
+    command DELETED the stale-selection banner an operator still needed — and a
+    dry run started needing write permission on the state dir."""
+    state = tmp_path / ".tapscribe-install.json"
+    state.write_text(
+        json.dumps(
+            {
+                "version": install_picker.STATE_VERSION,
+                "choices": {"whisper": {"enabled": True, "backend": BACKEND_CPU}},
+            }
+        )
+    )
+    sidecar = tmp_path / install_picker.WARNINGS_FILENAME
+    sidecar.write_text(json.dumps({"stale_backends": [{"family": "parakeet", "backend": "mlx"}]}))
+    monkeypatch.setattr(install_picker, "detect_caps", lambda **_: _caps())
+
+    assert install_picker.main(["--non-interactive", "--dry-run", "--state-file", str(state)]) == 0
+    assert sidecar.exists(), "dry-run must not clear the sidecar"
+
+
+def test_state_file_default_follows_the_data_dir(tmp_path):
+    """start.sh/start.ps1 invoke the picker with NO --state-file, so its default
+    must land where the app's `setup_install._STATE_FILE` does. Before this they
+    diverged the moment TAPSCRIBE_BASE_DIR was set — a documented topology
+    (config.py names Docker/systemd, and systemd runs start.sh) — so /setup wrote
+    the selection to the data dir while the next start.sh silently re-applied a
+    stale one from the repo root.
+
+    Driven in a SUBPROCESS: both values are module-level constants resolved at
+    import, and reloading the modules in-process would hand other tests a fresh
+    `InstallSelectionError` class their `pytest.raises` no longer matches.
+    """
+    import os
+    import subprocess
+
+    probe = (
+        "from tapscribe import install_picker, setup_install, config;"
+        "print(install_picker.STATE_FILE);"
+        "print(setup_install._STATE_FILE);"
+        "print(config.BASE_DIR)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).resolve().parent.parent,
+        env={**os.environ, "TAPSCRIBE_BASE_DIR": str(tmp_path)},
+    )
+    picker_state, app_state, base_dir = out.stdout.split("\n")[:3]
+    assert picker_state == app_state, "picker default and /setup must write the same file"
+    assert Path(picker_state).parent == Path(base_dir)
+
+
+def test_package_is_installed_asks_for_a_distribution_not_an_import(monkeypatch):
+    """The guard exists to catch "the stamp outlived its package" (a manual
+    `pip uninstall`, a recreated venv). `find_spec` stopped answering that once
+    the picker moved INTO the package and callers switched to `-m` from the repo
+    root: cwd lands on sys.path, so the module is importable whether or not it
+    was ever installed, and the guard could never return False again."""
+    assert install_picker.package_is_installed("tapscribe_not_a_real_pkg_zzz") is False
+    # `json` is importable but is NOT an installed distribution — the old
+    # find_spec probe answered True here, which is exactly the wrong answer.
+    assert install_picker.package_is_installed("json") is False
+
+
+# ── Every extra the picker can emit must exist in pyproject ─────────
+
+
+def test_every_picker_extra_is_declared_in_pyproject():
+    """pip does NOT fail on an undeclared extra — it prints a warning and
+    installs the base package — so a renamed or deleted extra produces a GREEN
+    install with the family silently missing at runtime. #263 was exactly this
+    (`canary` outliving its extra), and a live instance (`.[whisper-cpu,vad]`,
+    an extra that never existed) shipped in ci.yml and the docs.
+
+    `atomic_extras` asserts the extra exists in pyproject.toml's
+    `[project.optional-dependencies]` and names it on failure, so this sweep
+    fails on the PR that drops one rather than in an operator's venv.
+    """
+    emitted: set[str] = {install_picker.CUDA_RUNTIME_EXTRA, install_picker.WHISPER_CPU_EXTRA}
+    for fam in FAMILIES:
+        emitted.update(fam.shared_extras)
+        for backend in fam.backends:
+            emitted.update(backend.extras)
+
+    # Sanity: the sweep must actually be walking something, or a future
+    # refactor that empties FAMILIES would make this test vacuous.
+    assert len(emitted) >= 2 * len(FAMILIES)
+
+    for extra in sorted(emitted):
+        assert atomic_extras(extra), f"picker extra {extra!r} resolves to an EMPTY pyproject extra"

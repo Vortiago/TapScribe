@@ -56,8 +56,8 @@ Write-Host "[start] Upgrading pip…"
 # a model is installed). This script only makes the package importable:
 #   * First run, interactive: base-install the package; pick models at /setup.
 #   * Re-run, or -NonInteractive: re-apply the saved selection via
-#     `install_picker.py --non-interactive`. To pick models in the terminal, run
-#     `python tools\install_picker.py` directly.
+#     `install_picker --non-interactive`. To pick models in the terminal, run
+#     `python -m tapscribe.install_picker` directly.
 $BrowserSetup = $false
 if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
     Write-Host "[start] First run — installing the base package; you'll choose models in the browser."
@@ -71,88 +71,40 @@ if (-not (Test-Path ".tapscribe-install.json") -and -not $NonInteractive) {
     # Always non-interactive: re-apply the saved selection with no prompt.
     $PickerArgs = @("--non-interactive")
     if ($NoMlx) { $PickerArgs += "--no-mlx" }
-    & python tools\install_picker.py @PickerArgs
+    & python -m tapscribe.install_picker @PickerArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Error "[start] install picker failed; aborting."
         exit 1
     }
 }
 
-# --- Runtime python deps ----------------------------------------------------
-# The TapScribe per-tap silence gate (gate_kind="tapscribe", which is the
-# default) imports silero_vad lazily on the first /tap WS. Missing → the tap
-# falls back to passthrough mode ("gate construction failed … falling back to
-# passthrough"), which silently disables the gate the operator picked.
-# silero-vad is a CORE dependency (no [vad] extra — it installs
-# unconditionally with a plain `pip install -e .`), so this branch is a
-# venv-repair fallback for an environment created before silero-vad became
-# core; on a fresh install the probe below already passes and the branch
-# no-ops. (No ffmpeg branch here: the array-accepting backends —
-# mlx-whisper, parakeet-mlx, and the transformers Parakeet path —
-# pre-decode the recorder's WAV via tapscribe/wav_predecode.py and skip the
-# ffmpeg-shelling audio loaders the upstream packages would otherwise use. See
-# CLAUDE.md.)
+# --- Runtime python deps + CUDA torch ---------------------------------------
+# Probe-then-repair for everything the install picker does NOT cover:
+#   * onnxruntime — the backend for the vendored Silero model behind
+#     `tapscribe.vad`, i.e. the per-tap silence gate. A CORE dependency, so this
+#     only repairs an incomplete venv; missing → every /tap falls back to
+#     passthrough, silently disabling the gate the operator picked.
+#   * the [summarize] extra — the Local summarizer's offline backend (mlx_lm on
+#     Apple Silicon, llama_cpp elsewhere; the latter needs the maintainer's
+#     prebuilt wheel index because it builds from source by default).
+#   * CUDA torch — pip's default `torch` wheel is CPU-only on Windows (the Linux
+#     wheel bundles CUDA), so on an NVIDIA box the GPU goes unused: the probe
+#     reports "Available backends: ['cpu']" and whisperlivekit's warmup can't
+#     load cublas64_12.dll. No-op without nvidia-smi or when torch is already a
+#     CUDA build. Force one channel with $env:TAPSCRIBE_TORCH_CUDA (e.g. cu128);
+#     skip with $env:TAPSCRIBE_NO_CUDA_TORCH=1.
 #
-# `find_spec` instead of `import silero_vad` so we don't pay the ~1-2s torch
-# import on every recorder bring-up just to probe whether silero-vad is on
-# the import path.
-& python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('silero_vad') else 1)" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[start] silero-vad missing — repairing this venv with 'pip install -e .' (it's a core dependency)…"
-    # NOT --quiet: torch is ~700MB and wheel resolution sometimes fails; visible
-    # pip output gives the operator something to act on instead of a mute warning.
-    & python -m pip install -e .
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "[start] 'pip install -e .' failed. The recorder will still boot, but the TapScribe silence gate will fall back to passthrough on every /tap."
-    }
-}
-
-# The Local summarizer source (Summary stage, #86) runs a bundled offline model
-# — an MLX backend on Apple Silicon, a GGUF/llama.cpp backend on CPU/CUDA. The
-# adapter lazy-imports the routed backend on the first Generate; missing → the
-# Local source reports "needs the [summarize] extra" instead of summarizing.
-# Pull the [summarize] extra here so the first Generate just works. No-op on
-# re-runs once installed. (Like [vad] above, NOT via the install picker, which
-# covers transcription model extras only.)
+# These used to be inlined here and, near-identically, in start.sh. They now
+# live in `tapscribe.preflight` so the Windows Bundle's Launcher — which has no
+# start.ps1 to inherit them from — runs the SAME steps rather than a C#
+# reimplementation that drifts (ADR-0015). `plan_steps` is pure and unit-tested;
+# `--dry-run` prints what it would do.
 #
-# Probe the module the extra installs on THIS platform (mirrors
-# LocalSummarizer's resolve_local_backend): mlx_lm on Apple Silicon, else
-# llama_cpp. find_spec, not import, to skip the heavy backend import on bring-up.
-$SummarizeProbe = "llama_cpp"
-if ($IsMacOS) {
-    if ((uname -m) -eq "arm64") { $SummarizeProbe = "mlx_lm" }
-}
-& python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$SummarizeProbe') else 1)" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[start] $SummarizeProbe missing — installing the [summarize] extra (bundled offline summarizer)…"
-    # NOT --quiet: pulls a text-gen backend (and, on first Generate, a multi-GB
-    # model), so visible output makes a failure recoverable.
-    $SummarizePipArgs = @()
-    if ($SummarizeProbe -eq "llama_cpp") {
-        # llama-cpp-python builds from source by default (needs cmake + MSVC).
-        # Use the maintainer's prebuilt CPU-wheel index so a box without a C++
-        # toolchain still installs. (CUDA-accelerated summary inference is
-        # opt-in: swap in a cuXXX wheel index from
-        # https://abetlen.github.io/llama-cpp-python/whl/ if you want it.)
-        $SummarizePipArgs = @("--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cpu")
-    }
-    & python -m pip install -e ".[summarize]" @SummarizePipArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "[start] 'pip install -e .[summarize]' failed. The recorder will still boot, but the Local summarizer source will report the [summarize] extra is missing."
-    }
-}
-
-# --- CUDA Torch (Windows) ---------------------------------------------------
-# pip's default `torch` wheel is CPU-only on Windows (the Linux wheel bundles
-# CUDA), so on an NVIDIA box the GPU goes unused — TapScribe's probe reports
-# "Available backends: ['cpu']" and the live channel's whisperlivekit warmup
-# can't load cublas64_12.dll. When a GPU is present and the venv's torch is the
-# CPU build, install the newest CUDA torch from PyTorch's index (searching
-# newest→oldest CUDA channels). No-op without nvidia-smi, or when torch is
-# already a CUDA build. Force a single channel with $env:TAPSCRIBE_TORCH_CUDA
-# (e.g. cu128); skip entirely with $env:TAPSCRIBE_NO_CUDA_TORCH=1. Non-fatal:
-# CPU fallback on failure.
-& python tools\ensure_cuda_torch.py
+# `-m` works even in a venv where tapscribe isn't installed yet: we Set-Location
+# to $PSScriptRoot above, and `-m` puts the cwd on sys.path. Non-fatal by
+# design — every step degrades a feature, so a failure warns and the recorder
+# still boots.
+& python -m tapscribe.preflight
 
 # --- Configuration ----------------------------------------------------------
 $Model = if ($env:SX_MODEL) { $env:SX_MODEL } else { "tiny.en" }

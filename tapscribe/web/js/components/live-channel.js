@@ -1,8 +1,11 @@
 // @ts-check
 // gate-allow: signal-listener — handlers ride nodes this component builds; replaced subtrees take their listeners with them, and the few persistent targets are wired exactly once per page.
 // Live channel panel — model/lang form + start/stop/apply controls + recent
-// log. Body rebuild is skipped while the user is editing the form or the
-// payload hasn't actually changed, so open <details>/<select> stay open.
+// log. The body rebuild is skipped while the operator is editing the form or
+// the payload hasn't actually changed, so a focused <select> stays open; the
+// init-prompt <details> is the one piece renderRegion's guards can't protect
+// (they cover popovers and <dialog>, not <details>), so its open state is
+// carried across the rebuild explicitly — see buildBody.
 
 import { tpl, pick, renderRegion, selectionInside } from "../templates.js";
 import { getJson, wireConfigSave } from "../api.js";
@@ -38,14 +41,11 @@ export function render(j, ctx) {
 
   // The body swap goes through renderRegion (focus-guarded + per-host sig):
   // it skips while any <select>/<input>/<textarea> inside the body is focused,
-  // so an open dropdown or mid-edit gate knob survives the poll tick. One case
-  // it deliberately can't see: BUTTONS. While an init-prompt save is in
-  // flight, focus sits on its [data-cfg-key] save button — swapping then would
-  // detach the status span the awaiting putJson writes to. Hold the body for
-  // that one case here.
-  const focused = /** @type {HTMLElement | null} */ (document.activeElement);
-  if (focused && focused.dataset && focused.dataset.cfgKey && bodyEl.contains(focused)) return;
-
+  // so an open dropdown or mid-edit gate knob survives the poll tick — and,
+  // since the seam folded [data-cfg-key] into its interactive test, while an
+  // init-prompt save is in flight and focus sits on its save button (swapping
+  // then would detach the status span the awaiting putJson writes to).
+  //
   // NOTE: the log tail is deliberately NOT in this sig. Folding it in
   // rebuilt the whole body on every WlK log line — snapping shut an
   // operator-opened init-prompt <details> and churning the form for a
@@ -174,9 +174,20 @@ function buildBody(j, { onAction, liveCatalog, bodyEl }) {
     initRow.hidden = false;
     pick(frag, "initPromptCount").textContent = lp.length ? `· ${lp.length} chars` : "";
     /** @type {HTMLTextAreaElement} */ (frag.querySelector("#liveInitPromptText")).value = lp.content || "";
-    // Default-open the editor when populated so the operator sees what's
-    // in effect; collapsed when empty to keep the panel compact.
-    initRow.open = !!lp.length;
+    // Default-open the editor when populated so the operator sees what's in
+    // effect; collapsed when empty to keep the panel compact — but ONLY on the
+    // first mount. This body is rebuilt on any change to state / pid / port /
+    // backend / device / last_error / the five gate knobs, and re-forcing
+    // `open` on every rebuild undid the operator's manual collapse (and
+    // re-collapsed one they'd opened on an empty prompt). renderRegion's
+    // overlay guard covers `:popover-open` / `dialog[open]` but NOT
+    // `details[open]`, so the hold doesn't protect it — ADR-0004's third listed
+    // bug, re-entering through the rebuild path. Carry the live DOM's current
+    // state across the swap instead.
+    const mounted = /** @type {HTMLDetailsElement | null} */ (
+      bodyEl.querySelector('[data-slot="initPromptRow"]')
+    );
+    initRow.open = mounted ? mounted.open : !!lp.length;
   }
 
   // Wire actions against the fragment's nodes (they survive the mount swap).

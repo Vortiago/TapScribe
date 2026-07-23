@@ -124,6 +124,74 @@ test("4401 close does not schedule a reconnect", async () => {
   assert.equal(ch.error, "tap-auth-failed", "auth failure surfaces in status");
 });
 
+test("PCM frames after a 4401 do not redial with the rejected token", async () => {
+  // The onclose ladder declining to retry is only HALF the guard: onclose
+  // nulls ch.tapWs and arms no reconnect timer, so the pcm handler's
+  // "no socket and no timer → dial" path opened a brand-new socket on the
+  // very next frame — one rejected upgrade per 20 ms of speech, forever,
+  // with no backoff at all. The 4401 guard test above passes only because
+  // it stops posting PCM after the close; a real speaker keeps talking.
+  const b = createBridge();
+  await ready(b);
+  setupChannel(b);
+
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  const ws1 = b.lastSocket();
+  ws1.triggerOpen();
+  ws1.triggerClose({ code: 4401, reason: "missing or invalid tap token", wasClean: false });
+  const socketsBefore = b.openSockets().length;
+
+  // Five more frames, virtual clock NEVER advanced — no backoff can be
+  // credited for the quiet, so any new socket here is an immediate redial.
+  for (let i = 0; i < 5; i++) {
+    b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  }
+  assert.equal(
+    b.openSockets().length, socketsBefore,
+    "tap-auth-failed is sticky — no redial while the token is still rejected",
+  );
+
+  // …and the sticky error must still be recoverable: saving a fresh token
+  // clears it (reconnectAllForSettingsChange) so the next frame dials again.
+  b.setTapToken("fresh-token");
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  assert.equal(
+    b.openSockets().length, socketsBefore + 1,
+    "a fresh token redials — the guard is sticky, not terminal",
+  );
+});
+
+test("tls-required survives a gap-buffer overflow instead of degrading to recorder-unreachable", async () => {
+  // MAX_BUFFER_BYTES is 96 000 B = 150 frames = 3 s of speech. Past the cap
+  // bufferPush re-derives ch.error, and tls-required was not in
+  // isTransportError — so the one ACTIONABLE configuration error was
+  // overwritten with "recorder-unreachable", whose tooltip sends the
+  // operator to the popup's Test connection. That's a dead end: the popup
+  // runs on chrome-extension://, where the cleartext guard is inactive by
+  // design, so it reports the recorder reachable and the token accepted
+  // while no audio can ever flow. The existing tls-required test posts a
+  // SINGLE frame, so it never crosses the cap.
+  const b = createBridge({
+    settings: { recorderHost: "macmini", recorderPort: 8001, useTls: false, tapToken: "tok" },
+  });
+  await ready(b);
+  setupChannel(b);
+
+  for (let i = 0; i < 200; i++) {
+    b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  }
+  assert.equal(b.openSockets().length, 0, "still never dialed");
+  // bufferPush doesn't publish, so force the 2 Hz snapshot the popup reads —
+  // otherwise this would just re-read the pre-overflow write and pass
+  // vacuously.
+  b.publishTick();
+  const ch = b.status().channels.find((c) => c.identity === "u1");
+  assert.equal(
+    ch.error, "tls-required",
+    "the sticky configuration diagnosis outranks the derived overflow label",
+  );
+});
+
 test("ws:// to a non-trustworthy host from https:// is refused with tls-required, not silently thrown", async () => {
   // Chrome/Edge block `new WebSocket("ws://macmini:8001/...")` from an
   // https:// page as mixed content — the constructor throws
@@ -287,4 +355,28 @@ test("forwarded frame body is the same bytes the page-script sent", async () => 
   for (let i = 0; i < sentView.length; i++) {
     assert.equal(sentView[i], i & 0xff, "byte " + i + " preserved");
   }
+});
+
+test("a capture-failed signal from the page world lands on the speaker's channel", async () => {
+  // page-script.js posts this when a tapped MediaStreamTrack fires `ended`
+  // (mic unplugged, permission revoked, device switched away). It arrives
+  // immediately before the tap-stop that closes the Utterance, so the reason
+  // has to be recorded while the channel is still live — a tombstoned
+  // channel is filtered out of every operator-facing list.
+  const b = createBridge();
+  await ready(b);
+  setupChannel(b);
+  b.post({ kind: "pcm", identity: "u1", name: "Alice", buffer: pcmFrame() });
+  b.lastSocket().triggerOpen();
+
+  b.post({ kind: "capture-failed", identity: "u1", reason: "track-ended" });
+  const ch = b.status().channels.find((c) => c.identity === "u1");
+  assert.equal(ch.error, "capture-track-ended", "the popup row carries WHY capture stopped");
+
+  // A rebind (reconcile taps the replacement track) re-arms the channel and
+  // clears the error — a channel with a fresh live track is not failed.
+  b.post({ kind: "tap-stop", identity: "u1" });
+  b.post({ kind: "tap-start", identity: "u1", name: "Alice" });
+  const rearmed = b.status().channels.find((c) => c.identity === "u1");
+  assert.equal(rearmed.error, null, "a successful rebind clears the capture failure");
 });

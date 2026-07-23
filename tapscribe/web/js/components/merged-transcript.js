@@ -71,7 +71,6 @@ function buildItems(t) {
 function buildSpkBar(frag, speakers, speakingByName, aliases) {
   const totalRaw = speakers.reduce((acc, name) => acc + (speakingByName[name] || 0), 0);
   if (!speakers.length || !totalRaw) return;
-  const total = totalRaw || 1;
 
   const bar = pick(frag, "spkBar");
   const legend = pick(frag, "spkLegend");
@@ -81,7 +80,7 @@ function buildSpkBar(frag, speakers, speakingByName, aliases) {
   for (let i = 0; i < speakers.length; i++) {
     const spkName = speakers[i] ?? "";
     const sec = speakingByName[spkName] || 0;
-    const pct = ((sec / total) * 100).toFixed(2);
+    const pct = ((sec / totalRaw) * 100).toFixed(2);
     const display = aliasOf(spkName, aliases);
 
     const cell = /** @type {HTMLElement} */ (tpl("tpl-spk-bar-cell").firstElementChild);
@@ -96,7 +95,7 @@ function buildSpkBar(frag, speakers, speakingByName, aliases) {
     const nameEl = pick(root, "name");
     nameEl.textContent = display;
     nameEl.dataset.spk = String(i % 5);
-    pick(root, "pct").textContent = `${((sec / total) * 100).toFixed(0)}%`;
+    pick(root, "pct").textContent = `${((sec / totalRaw) * 100).toFixed(0)}%`;
     legend.appendChild(entry);
   }
 }

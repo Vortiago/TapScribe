@@ -243,6 +243,36 @@ async def test_job_tracker_update_modifies_fields():
 
 
 @pytest.mark.asyncio
+async def test_job_tracker_update_rejects_unknown_field():
+    """A typo'd progress field must raise, not be silently dropped: with the
+    old `hasattr` filter `await job.update(current_fil=name)` was a no-op and
+    the dashboard's job bar sat frozen at 0/N with no error anywhere. Same
+    contract as `ActiveStreams._apply`."""
+    tracker = JobTracker()
+    state = JobState(session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC))
+    await tracker.claim(state)
+    with pytest.raises(AttributeError):
+        await tracker.update("s1", current_fil="x.wav")
+    got = tracker.get("s1")
+    assert got is not None
+    assert got.current_file is None  # nothing was written under the typo
+
+
+@pytest.mark.asyncio
+async def test_job_tracker_update_refuses_to_rewrite_the_session_key():
+    """`session` is the dict key the job is filed under. Letting `update`
+    rewrite it would leave /api/state reporting the job against a session id
+    that no longer matches its key."""
+    tracker = JobTracker()
+    state = JobState(session="s1", kind="transcribe", current=0, total=5, started_at=datetime.now(UTC))
+    await tracker.claim(state)
+    with pytest.raises(AttributeError):
+        await tracker.update("s1", session="s2")
+    got = tracker.get("s1")
+    assert got is not None and got.session == "s1"
+
+
+@pytest.mark.asyncio
 async def test_job_tracker_get_missing_returns_none():
     tracker = JobTracker()
     assert tracker.get("nonexistent") is None
@@ -482,3 +512,28 @@ def test_resume_transfers_ownership_to_the_resuming_connection(tmp_path: Path):
     assert resumed.owner == "conn-b"
     idx.release("u1", owner="conn-a", bytes_received=7, kept=True)  # stale, ignored
     assert idx.snapshot()["u1"].bytes_received == 100
+
+
+def test_try_resume_refuses_a_record_from_another_session_dir(tmp_path: Path):
+    """A reconnect that arrives AFTER the Recorder rotated sessions must not
+    resume a record whose WAV lives in the previous session's folder —
+    appending there puts the resumed audio in a session nobody is looking at.
+    The record is dropped from the index so a fresh registration under the
+    same utterance_id can take its place.
+
+    The WAV is created on disk on purpose: without it the later
+    `rec.path.exists()` check would return None too, and the test would pass
+    with the cross-session guard removed."""
+    old_session = tmp_path / "session-old"
+    new_session = tmp_path / "session-new"
+    old_session.mkdir()
+    new_session.mkdir()
+    (old_session / "u1.wav").write_bytes(b"RIFF")  # the record's WAV really exists
+
+    idx = UtteranceIndex()
+    rec = _utt_record("u1", owner="conn-a", session_dir=old_session)
+    idx.register_new(rec)
+    idx.release("u1", owner="conn-a", bytes_received=100, kept=True)
+
+    assert idx.try_resume("u1", identity="alice", session_dir=new_session, owner="conn-b") is None
+    assert "u1" not in idx.snapshot()

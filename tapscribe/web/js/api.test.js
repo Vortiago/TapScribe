@@ -258,4 +258,58 @@ describe("_resource: bounded cache", () => {
       assert.deepEqual(sessionSummary.peek("cap-s", `stamp${N - 1}`), { text: "x" }); // newest kept
     });
   });
+
+  it("keeps the session in USE last-good under pressure from other sessions", async () => {
+    // The MRU eviction rule and the #266 blink behind it: see `_setMru`'s JSDoc
+    // in api.js. This pins it end-to-end through `loadSessionFiles`.
+    //
+    // The filler sessions come in through the empty-files_sig branch: it records
+    // a last-good WITHOUT touching the network or the resource cache, so this
+    // exercises `_lastGoodFiles`' eviction order in isolation (a fetching filler
+    // would evict the hot session's RESOURCE entry too, which is a different
+    // cache and a different question). N overshoots any plausible cap rather
+    // than pinning `_TX_CACHE_MAX`.
+    const N = 200;
+    await withFetch(
+      (_url, n) => jsonRes({ files: n === 1 ? [{ name: "hot.wav" }] : [{ name: "hot2.wav" }] }),
+      async (calls) => {
+        const hot = "mru-hot";
+        const pending = new Set();
+        const onLand = () => {};
+
+        assert.equal(loadSessionFiles(hot, "sig1", pending, onLand), null); // cold
+        await flush();
+        assert.deepEqual(loadSessionFiles(hot, "sig1", pending, onLand), [{ name: "hot.wav" }]);
+        assert.equal(calls.length, 1);
+
+        for (let i = 0; i < N; i++) {
+          // Each "tick" re-records the focused session's listing…
+          loadSessionFiles(hot, "sig1", pending, onLand);
+          // …while another session (no WAVs yet → empty files_sig) is recorded
+          // for the first time, pushing the cap.
+          assert.deepEqual(loadSessionFiles(`mru-fill-${i}`, "", pending, onLand), []);
+          // Read the focused session's hold WITHOUT recording it: one fixed,
+          // never-settling probe sig, so every call after the first is deduped
+          // by `pending` and just returns `_lastGoodFiles.get(hot) ?? null`.
+          // (This loop is synchronous, so nothing settles inside it.) The hold
+          // must survive every one of the N other sessions — the buggy
+          // insertion-order refresh dropped it the moment the cap was passed.
+          assert.deepEqual(
+            loadSessionFiles(hot, "probe", pending, onLand),
+            [{ name: "hot.wav" }],
+            `the focused session's last-good was evicted after ${i + 1} other sessions`,
+          );
+        }
+        assert.equal(calls.length, 2); // sig1 + the single probe; the fillers never hit the network
+
+        // A sibling WAV finishes → the focused session's files_sig flips. Its
+        // last-good must still be there to hold the list steady during the
+        // refetch; with the eviction bug this came back null and blanked it.
+        const stale = loadSessionFiles(hot, "sig2", pending, onLand);
+        assert.deepEqual(stale, [{ name: "hot.wav" }]);
+        await flush();
+        assert.deepEqual(loadSessionFiles(hot, "sig2", pending, onLand), [{ name: "hot2.wav" }]);
+      },
+    );
+  });
 });

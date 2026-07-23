@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 import json
+import sys
 import wave
 from pathlib import Path
 
 import numpy as np
+import pytest
 from wav_builders import seed_wav  # type: ignore[import-not-found]
 
 from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 from tapscribe.wav_cache import (
+    _PRIMARY_POINTER,
     CachedTranscription,
+    _read_entry,
     cache_listing,
     cached_transcribe,
     read_all_cached,
     read_cached,
+    read_primary_marker,
+    read_primary_payload,
     set_primary_transcript,
+    transcripts_dir,
 )
 
 SAMPLE_RATE = 16000
@@ -43,6 +50,9 @@ class _StubTranscriber:
             segments=(TranscriptionSegment(start=0.0, end=1.0, text="stub transcript"),),
             initial_prompt_used=initial_prompt or "",
             hotwords_used=hotwords or "",
+            # Real adapters echo the pin they decoded under; the cache compares
+            # it against the caller's `source_lang` on the next call.
+            source_language=source_lang or "",
             quality_settings={},
         )
 
@@ -332,10 +342,20 @@ class _StubByKey:
     name = "fake"
     device = "test-device"
 
-    def __init__(self, *, backend: str, model: str, text: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        backend: str,
+        model: str,
+        text: str | None = None,
+        segment_texts: tuple[str, ...] = (),
+    ) -> None:
         self.backend = backend
         self.model_name = model
         self.text = text or f"hello from {backend} {model}"
+        # One segment carrying `text` unless the test wants several (the
+        # hallucination-filter cases need a mix of keepers and matches).
+        self.segment_texts = segment_texts or (self.text,)
         self.call_count = 0
 
     def transcribe(self, path, *, initial_prompt=None, hotwords=None, source_lang=None):  # noqa: ARG002
@@ -349,9 +369,13 @@ class _StubByKey:
             language_probability=1.0,
             duration=1.0,
             text=self.text,
-            segments=(TranscriptionSegment(start=0.0, end=1.0, text=self.text),),
+            segments=tuple(
+                TranscriptionSegment(start=float(i), end=float(i) + 1.0, text=t)
+                for i, t in enumerate(self.segment_texts)
+            ),
             initial_prompt_used=initial_prompt or "",
             hotwords_used=hotwords or "",
+            source_language=source_lang or "",
             quality_settings={},
         )
 
@@ -580,3 +604,328 @@ def test_legacy_sidecar_still_serves_cache_hits_for_matching_backend_and_model(t
     stub = _StubByKey(backend="fake-backend", model="fake-model")
     cached_transcribe(wav, stub, initial_prompt=None, hotwords=None, hallucination_rules=[])
     assert stub.call_count == 0, "legacy sidecar must satisfy a cache hit"
+
+
+def test_primary_read_parses_at_most_the_primary_sidecar(tmp_path: Path, monkeypatch):
+    """Hot-path ceiling: resolving/streaming the primary must parse only the
+    primary sidecar, never every sibling. `read_primary_payload` bypasses the
+    dataclass build entirely (0 `_read_entry` calls — it streams the raw dict),
+    and `read_cached` parses exactly ONE sidecar (the primary). This is the
+    HARM-layer pin the structural seam contract can't see: a future reroute of
+    `_primary_sidecar_path` back through the parse-all `_resolve_sidecars`
+    would re-parse every sibling here (3 / 4 instead of 0 / 1) and redden."""
+    wc = sys.modules[_read_entry.__module__]
+
+    wav = seed_wav(tmp_path / "x.wav")
+    for i in range(3):
+        cached_transcribe(
+            wav,
+            _StubByKey(backend=f"backend-{i}", model=f"model-{i}"),
+            initial_prompt=None,
+            hotwords=None,
+            hallucination_rules=[],
+        )
+    assert len(read_all_cached(wav)) == 3
+
+    calls = {"n": 0}
+    real_read_entry = _read_entry
+
+    def counting(path):
+        calls["n"] += 1
+        return real_read_entry(path)
+
+    monkeypatch.setattr(wc, "_read_entry", counting)
+
+    calls["n"] = 0
+    payload = read_primary_payload(wav)
+    assert isinstance(payload, dict)
+    assert calls["n"] == 0, (
+        "read_primary_payload must build no dataclass — parse-free resolve + one raw json.loads"
+    )
+
+    calls["n"] = 0
+    primary = read_cached(wav)
+    assert primary is not None
+    assert calls["n"] == 1, "read_cached must parse only the primary sidecar, not every sibling"
+
+
+def test_read_primary_payload_streams_incomplete_valid_json_primary(tmp_path: Path):
+    """A primary sidecar that is valid JSON but fails the dataclass build
+    (here: missing `device`/`transcriber`) must STILL stream its raw dict —
+    `read_primary_payload` bypasses the dataclass on purpose so an older- or
+    partially-written sidecar keeps showing on the dashboard. `read_cached`,
+    which builds the dataclass, returns None for the same input — the
+    documented asymmetry."""
+    from tapscribe.wav_cache import _PRIMARY_POINTER, read_primary_payload, transcripts_dir
+
+    wav = seed_wav(tmp_path / "x.wav")
+    d = transcripts_dir(wav)
+    d.mkdir(parents=True, exist_ok=True)
+    incomplete = {"backend": "b", "model": "m", "transcribed_at": "2026-05-01T00:00:00+00:00"}
+    (d / "b__m.json").write_text(json.dumps(incomplete), encoding="utf-8")
+    (d / _PRIMARY_POINTER).write_text("b__m", encoding="utf-8")
+
+    assert read_primary_payload(wav) == incomplete
+    assert read_cached(wav) is None
+
+
+# ---------------------------------------------------------------------------
+# Match key: an entry written under one prompt / hotwords / language pin must
+# not be served when the caller now wants another. These are the guarantees
+# `cached_transcribe`'s docstring makes; without them the 5-clause match
+# condition could collapse back to the size/mtime fingerprint with CI green.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kwarg", "first", "second", "result_attr"),
+    [
+        ("initial_prompt", "A", "B", "initial_prompt_used"),
+        ("hotwords", "Kubernetes", "Kubernetes,Grafana", "hotwords_used"),
+        # The language pin (ADR-0010): an entry decoded as Norwegian must not
+        # be served when the operator re-pins to English.
+        ("source_lang", "no", "en", "source_language"),
+    ],
+)
+def test_cached_transcribe_re_runs_when_a_match_key_input_changes(
+    tmp_path: Path, kwarg: str, first: str, second: str, result_attr: str
+):
+    """Each input is its own match-key clause: re-calling with the ORIGINAL
+    value must still HIT (otherwise this passes by always missing), and the
+    changed value must MISS and write the new value into the fresh entry."""
+    wav = seed_wav(tmp_path / "x.wav")
+    stub = _StubByKey(backend="faster-whisper", model="small.en")
+    base = {"initial_prompt": None, "hotwords": None, "hallucination_rules": []}
+
+    cached_transcribe(wav, stub, **{**base, kwarg: first})
+    assert stub.call_count == 1
+
+    # Same value → cache hit.
+    cached_transcribe(wav, stub, **{**base, kwarg: first})
+    assert stub.call_count == 1
+
+    # Changed value → must re-run, not serve the stale transcript.
+    cached_transcribe(wav, stub, **{**base, kwarg: second})
+    assert stub.call_count == 2
+    fresh = read_cached(wav)
+    assert fresh is not None
+    assert getattr(fresh.result, result_attr) == second
+
+
+# ---------------------------------------------------------------------------
+# Hallucination rules on a CACHE HIT — an edited rules file must change what
+# the dashboard shows without re-running the model.
+# ---------------------------------------------------------------------------
+
+_AMARA_RULE = {"raw": "amara.org", "kind": "substr", "matcher": "amara.org"}
+
+
+def _transcribe_two_segments(wav: Path, stub, rules: list) -> None:
+    cached_transcribe(wav, stub, initial_prompt=None, hotwords=None, hallucination_rules=rules)
+
+
+def test_cache_hit_applies_a_newly_added_hallucination_rule(tmp_path: Path):
+    """Operator spots a hallucination, adds a rule, clicks Transcribe session
+    WITHOUT force: every WAV is a cache hit, so the filter has to be re-applied
+    over the stored raw result (segments + suppressed) — otherwise the merged
+    transcript comes back byte-identical and the rule looks broken.
+
+    No model run: the transcriber's call count must not move."""
+    wav = seed_wav(tmp_path / "x.wav")
+    stub = _StubByKey(
+        backend="faster-whisper",
+        model="small.en",
+        segment_texts=("real speech here", "Subtitles by the Amara.org community"),
+    )
+    _transcribe_two_segments(wav, stub, [])
+    assert stub.call_count == 1
+    before = read_cached(wav)
+    assert before is not None
+    assert len(before.result.segments) == 2
+
+    _transcribe_two_segments(wav, stub, [_AMARA_RULE])
+    assert stub.call_count == 1, "re-filtering must not re-run the model"
+
+    # The SIDECAR must change — session_merge re-reads it, so a return-value-
+    # only fix would leave the merged transcript stale.
+    after = read_cached(wav)
+    assert after is not None
+    assert [s.text for s in after.result.segments] == ["real speech here"]
+    assert [s.text for s in after.result.suppressed_hallucinations] == [
+        "Subtitles by the Amara.org community"
+    ]
+    assert after.result.suppressed_hallucinations[0].matched_rule == "amara.org"
+    # The envelope is untouched — no model ran.
+    assert after.transcribed_at == before.transcribed_at
+    assert after.transcribe_ms == before.transcribe_ms
+
+
+def test_cache_hit_restores_a_segment_when_its_rule_is_removed(tmp_path: Path):
+    """The dual direction: deleting an over-eager rule must bring the segment
+    back into `segments`, in TEMPORAL order, again without a model run."""
+    wav = seed_wav(tmp_path / "x.wav")
+    stub = _StubByKey(
+        backend="faster-whisper",
+        model="small.en",
+        segment_texts=("Subtitles by the Amara.org community", "real speech here"),
+    )
+    _transcribe_two_segments(wav, stub, [_AMARA_RULE])
+    assert stub.call_count == 1
+    suppressed_first = read_cached(wav)
+    assert suppressed_first is not None
+    assert [s.text for s in suppressed_first.result.segments] == ["real speech here"]
+
+    _transcribe_two_segments(wav, stub, [])
+    assert stub.call_count == 1, "restoring a segment must not re-run the model"
+
+    restored = read_cached(wav)
+    assert restored is not None
+    assert [s.text for s in restored.result.segments] == [
+        "Subtitles by the Amara.org community",
+        "real speech here",
+    ], "the restored segment belongs at its own start time, not appended at the end"
+    assert restored.result.suppressed_hallucinations == ()
+    assert restored.result.segments[0].matched_rule is None, "stale rule annotation must be cleared"
+    # `text` must agree with `segments`. `hallucinations.apply` recomputes it,
+    # but SHORT-CIRCUITS on an empty rule set — exactly this case — so the
+    # restored line reappeared in `segments` while `text` still omitted it, and
+    # a non-empty edit joined kept-then-restored, which the temporal sort then
+    # reordered. Either way the persisted sidecar scalar disagreed with the list
+    # beside it, which is what `/api/transcribe` hands back.
+    assert restored.result.text == " ".join(s.text for s in restored.result.segments), (
+        f"text {restored.result.text!r} disagrees with segments "
+        f"{[s.text for s in restored.result.segments]!r}"
+    )
+
+
+def test_cache_hit_with_unchanged_rules_does_not_rewrite_the_entry(tmp_path: Path):
+    """A plain re-run must stay a pure cache hit. The observable consequence
+    of a needless rewrite is primary theft: `_write_entry` re-points `_primary`
+    at the entry it writes, so an operator's pinned primary would silently flip
+    on every unchanged re-transcribe."""
+    wav = seed_wav(tmp_path / "x.wav")
+    a = _StubByKey(backend="faster-whisper", model="small.en", text="whisper text")
+    b = _StubByKey(backend="mlx-voxtral", model="voxtral-mini", text="voxtral text")
+    cached_transcribe(wav, a, initial_prompt=None, hotwords=None, hallucination_rules=[_AMARA_RULE])
+    cached_transcribe(wav, b, initial_prompt=None, hotwords=None, hallucination_rules=[_AMARA_RULE])
+    # Operator pins A as the primary even though B was written last.
+    set_primary_transcript(wav, backend="faster-whisper", model="small.en")
+
+    cached_transcribe(wav, b, initial_prompt=None, hotwords=None, hallucination_rules=[_AMARA_RULE])
+
+    primary = read_cached(wav)
+    assert primary is not None
+    assert primary.result.backend == "faster-whisper", "an unchanged re-run must not steal the primary"
+
+
+# ---------------------------------------------------------------------------
+# Failure paths: a partially-applied migration and a concurrently-deleted
+# sidecar both used to make a transcript that IS on disk unreachable.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_payload(wav: Path, *, backend: str, model: str, text: str) -> dict:
+    st = wav.stat()
+    return {
+        "transcriber": "fake",
+        "backend": backend,
+        "device": "test-device",
+        "model": model,
+        "language": "en",
+        "language_probability": 1.0,
+        "duration": 1.0,
+        "segments": [],
+        "text": text,
+        "initial_prompt_used": "",
+        "hotwords_used": "",
+        "quality_settings": {},
+        "suppressed_hallucinations": [],
+        "transcribed_at": "2026-05-01T00:00:00+00:00",
+        "transcribe_ms": 10,
+        "source": "original",
+        "speaker_name": "",
+        "wav_size": st.st_size,
+        "wav_mtime_ns": st.st_mtime_ns,
+    }
+
+
+def test_failed_legacy_migration_leaves_the_legacy_layout_readable(tmp_path: Path, monkeypatch):
+    """If the move AND the copy fallback both fail (the Windows sharing
+    violation the code's own comment names, or a read-only FS), the migration
+    must leave NO empty `<wav>.transcripts/` behind.
+
+    An empty directory is permanent data loss from the operator's point of
+    view: `_resolve_sidecar_paths` takes the `is_dir()` branch, globs zero
+    sidecars, and the migration never retries because it early-returns on
+    `if d.exists()` — the transcript is on disk but gone from the dashboard
+    forever."""
+    from tapscribe.wav_cache import legacy_sidecar
+
+    wc = sys.modules[_read_entry.__module__]
+    wav = seed_wav(tmp_path / "x.wav")
+    payload = _legacy_payload(wav, backend="faster-whisper", model="small.en", text="from legacy file")
+    legacy_sidecar(wav).write_text(json.dumps(payload), encoding="utf-8")
+
+    def _boom_replace(self, target):  # noqa: ARG001
+        raise OSError(32, "The process cannot access the file because it is being used by another process")
+
+    def _boom_write(path, content):  # noqa: ARG001
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(Path, "replace", _boom_replace)
+    monkeypatch.setattr(wc, "atomic_write_text", _boom_write)
+
+    # A write for a DIFFERENT (backend, model) triggers the migration. Here the
+    # whole filesystem is read-only, so the triggering write raises too — the
+    # point is what it leaves BEHIND.
+    other = _StubByKey(backend="mlx-voxtral", model="voxtral-mini")
+    with pytest.raises(OSError):
+        cached_transcribe(wav, other, initial_prompt=None, hotwords=None, hallucination_rules=[])
+
+    assert not transcripts_dir(wav).exists(), "an aborted migration must not leave an empty directory"
+    assert legacy_sidecar(wav).is_file(), "the legacy sidecar must survive a failed migration"
+    still_there = read_cached(wav)
+    assert still_there is not None
+    assert still_there.result.text == "from legacy file"
+
+    # Once the failure clears, the next write retries the migration.
+    monkeypatch.undo()
+    cached_transcribe(wav, other, initial_prompt=None, hotwords=None, hallucination_rules=[])
+    assert not legacy_sidecar(wav).is_file()
+    assert {(c.result.backend, c.result.model) for c in read_all_cached(wav)} == {
+        ("faster-whisper", "small.en"),
+        ("mlx-voxtral", "voxtral-mini"),
+    }
+
+
+def test_read_cached_survives_a_sidecar_deleted_between_glob_and_stat(tmp_path: Path, monkeypatch):
+    """`gather_sessions` walks sidecars on one worker thread while
+    `delete_session_audio` rmtrees `<wav>.transcripts/` on another, so the
+    newest-mtime fallback can stat a path that has just vanished. A bare
+    `max(sidecars, key=p.stat)` let that FileNotFoundError escape and 500 the
+    500 ms /api/state poll for the duration of a delete."""
+    wav = seed_wav(tmp_path / "x.wav")
+    a = _StubByKey(backend="faster-whisper", model="small.en", text="whisper text")
+    b = _StubByKey(backend="mlx-voxtral", model="voxtral-mini", text="voxtral text")
+    cached_transcribe(wav, a, initial_prompt=None, hotwords=None, hallucination_rules=[])
+    cached_transcribe(wav, b, initial_prompt=None, hotwords=None, hallucination_rules=[])
+
+    d = transcripts_dir(wav)
+    (d / _PRIMARY_POINTER).unlink()  # force the newest-mtime fallback
+    victim = d / "mlx-voxtral__voxtral-mini.json"
+    survivor = d / "faster-whisper__small.en.json"
+    assert victim.is_file() and survivor.is_file()
+
+    real_stat = Path.stat
+
+    def _racing_stat(self, **kwargs):
+        if self == victim:
+            raise FileNotFoundError(2, "No such file or directory", str(victim))
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _racing_stat)
+
+    entry = read_cached(wav)
+    assert entry is not None, "a vanished sibling must not take the whole read down"
+    assert entry.result.backend == "faster-whisper"
+    assert read_primary_marker(wav) is not None

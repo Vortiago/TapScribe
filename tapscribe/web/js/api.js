@@ -82,6 +82,58 @@ function _capCache(cache) {
 }
 
 /**
+ * Insert/refresh `key` as the MOST-recently-used entry, then cap. `Map.set` on
+ * an EXISTING key does NOT move it in insertion order, so a key re-set every
+ * tick sat at the OLDEST position and was the first thing `_capCache` dropped —
+ * i.e. the entry IN USE was evicted first, resurrecting #266 (a sig flip found
+ * no hold, so the region blanked to "loading…") for exactly the session being
+ * worked on. Deleting first makes the hot key most-recently-used before the cap
+ * runs.
+ * @template T
+ * @param {Map<string, T>} cache
+ * @param {string} key
+ * @param {T} value
+ */
+function _setMru(cache, key, value) {
+  cache.delete(key);
+  cache.set(key, value);
+  _capCache(cache);
+}
+
+/**
+ * @template T
+ * @typedef {{
+ *   hold(key: string, value: T): void,
+ *   get(key: string): T | null,
+ * }} LastGoodHold
+ */
+
+/**
+ * A bounded, MRU-ordered **last-good hold** — the stale-while-revalidate memory
+ * a lazily-fetched, signature-keyed region needs so a sig FLIP refreshes it in
+ * place instead of blanking it (#266). `hold(key, value)` records the latest
+ * resolved value; `get(key)` returns it, or `null` when nothing was EVER
+ * resolved for that key — the cold-load sentinel, the one case a caller may
+ * render as a placeholder.
+ *
+ * ONE implementation for all three holds (this module's `_lastGoodFiles`, the
+ * Transcript view's merged body, the Summary view's persisted summary): they are
+ * the same cache with different payloads, and when they were three hand-rolled
+ * Maps the MRU fix below landed in one of them while the other two — carrying
+ * the BIGGER payloads and unbounded — kept both bugs. A future fix lands once.
+ * @template T
+ * @returns {LastGoodHold<T>}
+ */
+export function createLastGoodHold() {
+  /** @type {Map<string, T>} */
+  const cache = new Map();
+  return {
+    hold(key, value) { _setMru(cache, key, value); },
+    get(key) { return cache.get(key) ?? null; },
+  };
+}
+
+/**
  * One lazily-fetched, signature-keyed resource: a bounded cache Map plus a
  * get-or-fetch and a synchronous peek that share the same key function, so
  * the two can never drift apart. `fetch` fires `load()` once per key and
@@ -194,22 +246,15 @@ export const sessionFiles = _resource(
 );
 
 /**
- * Last resolved WAV listing per session — the stale-while-revalidate memory that
- * keeps a files_sig FLIP from blanking the view. `files_sig` flips whenever a
- * WAV is added / re-recorded / (re-)transcribed, so during a batch transcribe it
- * flips ONCE PER TRACK as each finishes. Returning `null` on every flip made both
- * multi-track views (Recordings, Transcript) blank the whole WAV list — and the
- * Recordings header + waveform + stats — to a "loading…" placeholder for the
- * round-trip until the fresh listing landed, then rebuild it: a visible blink on
- * every per-WAV completion. Holding the last good listing here refreshes the list
- * IN PLACE instead (the view reconciles by key when the fresh data lands via
- * onLand). Capped via `_capCache` like the sibling resource caches, so a
- * long-lived tab that browses many sessions doesn't retain every listing.
+ * Last resolved WAV listing per session — a `createLastGoodHold` (see its doc
+ * for the eviction rule and the #266 blink it exists to prevent). `files_sig`
+ * flips once per TRACK during a batch transcribe, so without the hold both
+ * multi-track views blanked their WAV list on every per-WAV completion.
  * The stored array is the resource's own value BY REFERENCE (the same array the
  * view assigns to `currentFiles`), so callers must treat the listing as
  * read-only — mutating it in place would corrupt every holder of it.
- * @type {Map<string, import('./types.js').WavFile[]>} */
-const _lastGoodFiles = new Map();
+ * @type {LastGoodHold<import('./types.js').WavFile[]>} */
+const _lastGoodFiles = createLastGoodHold();
 
 /**
  * Keys (`session@files_sig`) whose last /files fetch REJECTED — the failure
@@ -230,7 +275,7 @@ const _failedFiles = new Set();
  * the Recordings and Transcript views need: returns the cached array when it's
  * in hand, `[]` when there's nothing to fetch (empty `filesSig` → no folder /
  * no WAVs yet), the session's last-good listing while a NEWER sig's fetch is in
- * flight (stale-while-revalidate — a refresh must not blank the view), or `null`
+ * flight (stale-while-revalidate via `_lastGoodFiles`), or `null`
  * only on a genuine COLD load (a session with no last-good listing yet → the
  * caller shows a loading placeholder). On a cache miss it fires the fetch ONCE
  * (deduped via the caller's `pending` set across the ticks before it lands) and
@@ -252,14 +297,12 @@ export function loadSessionFiles(session, filesSig, pending, onLand) {
     // this session's last-good IS now empty. Record that, so a later non-empty
     // flip (a new tap records in) shows the empty state through the stale path
     // rather than resurrecting the pre-deletion rows as ghosts.
-    _lastGoodFiles.set(session, []);
-    _capCache(_lastGoodFiles);
+    _lastGoodFiles.hold(session, []);
     return [];
   }
   const cached = sessionFiles.peek(session, filesSig);
   if (cached !== undefined) {
-    _lastGoodFiles.set(session, cached);
-    _capCache(_lastGoodFiles);
+    _lastGoodFiles.hold(session, cached);
     return cached;
   }
   const k = `${session}@${filesSig}`;
@@ -280,7 +323,7 @@ export function loadSessionFiles(session, filesSig, pending, onLand) {
   }
   // Stale-while-revalidate: hold this session's last-good listing during the
   // refetch; `null` only on a cold load (a session that never resolved yet).
-  return _lastGoodFiles.get(session) ?? null;
+  return _lastGoodFiles.get(session);
 }
 
 // ---- Waveform peaks fetch + client cache ---------------------------------

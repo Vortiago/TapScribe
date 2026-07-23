@@ -83,8 +83,16 @@ def open_recorder_wav_append(path: Path) -> wave.Wave_write:
     # field that matches, instead of seeking past EOF and injecting a silent
     # gap. For a well-formed prior (data is the last chunk) these are equal.
     on_disk_bytes = path.stat().st_size - data_offset
-    prior_data_bytes = min(header_data_bytes, on_disk_bytes)
-    prior_nframes = prior_data_bytes // _FRAME_BYTES
+    # Round DOWN to a whole frame. A prior WAV can end mid-frame (a partial
+    # flush when the disk filled — the case `tap_fan_out._close`'s OSError
+    # handler covers), and appending at an odd byte offset would put every
+    # following int16 half a sample off the grid: each appended sample decodes
+    # as the high byte of one and the low byte of the next (loud noise for the
+    # rest of the utterance) and close() would patch an odd `data` size.
+    # Dropping the torn trailing frame keeps seek, _datawritten and
+    # _nframeswritten in agreement.
+    prior_nframes = min(header_data_bytes, on_disk_bytes) // _FRAME_BYTES
+    prior_data_bytes = prior_nframes * _FRAME_BYTES
 
     f = open(path, "r+b")
     try:

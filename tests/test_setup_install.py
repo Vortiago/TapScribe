@@ -12,20 +12,14 @@ extras logic — if the picker's family/backend model changes, these fail.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
-# tools/ isn't a package — make install_picker importable by name (same as
-# tests/test_install_picker.py). Only the TEST imports it; the app never does.
-_TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(_TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIR))
+import pytest
+from conftest import fake_install_spawn  # type: ignore[import-not-found]
 
-import install_picker  # noqa: E402
-import pytest  # noqa: E402
-from conftest import fake_install_spawn  # type: ignore[import-not-found]  # noqa: E402
-
-from tapscribe.setup_install import (  # noqa: E402
+# The picker lives in the package since ADR-0015 (the wheel doesn't ship
+# `tools/`). Only the TEST imports it; the app still only ever spawns it.
+from tapscribe import install_picker
+from tapscribe.setup_install import (
     InstallSelectionError,
     picker_install_argv,
     run_install,
@@ -99,15 +93,45 @@ def test_empty_selection_installs_nothing():
     assert _extras({}, _CPU) == set()
 
 
-def test_picker_install_argv_runs_the_picker_non_interactively():
+def test_picker_install_argv_runs_the_picker_as_a_module():
+    """`-m tapscribe.install_picker`, not a script path. A Bundle installs a
+    wheel into a venv — there is no repo-relative `tools/install_picker.py` to
+    point at, and `-m` resolves wherever the package actually landed
+    (ADR-0015)."""
     argv = picker_install_argv(python="/venv/bin/python")
-    assert argv[0] == "/venv/bin/python"
-    # path-separator agnostic (Windows uses backslashes)
-    assert Path(argv[1]).name == "install_picker.py"
-    assert Path(argv[1]).parent.name == "tools"
+    assert argv[:3] == ["/venv/bin/python", "-m", "tapscribe.install_picker"]
     assert "--non-interactive" in argv
     assert "--no-mlx" not in argv
     assert "--no-mlx" in picker_install_argv(python="py", no_mlx=True)
+
+
+def test_picker_install_argv_forwards_the_install_spec(tmp_path):
+    """The Bundle's wheel path reaches the picker as an argument, so the
+    subprocess installs from the SAME wheel the installer shipped rather than
+    falling back to an editable checkout that isn't there."""
+    wheel = tmp_path / "tapscribe-1.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    argv = picker_install_argv(python="py", install_spec=str(wheel))
+    assert "--install-spec" in argv
+    assert argv[argv.index("--install-spec") + 1] == str(wheel)
+
+
+def test_picker_install_argv_omits_install_spec_by_default():
+    """Absent flag = checkout topology. Devs launch on Windows without the
+    installer, so the default argv must stay exactly as it was."""
+    assert "--install-spec" not in picker_install_argv(python="py")
+
+
+def test_picker_install_argv_pins_the_state_file_to_the_data_dir():
+    """The saved model selection must survive a Bundle upgrade, so it lives
+    under TAPSCRIBE_BASE_DIR — not beside the package, which in a wheel install
+    is `site-packages`. In a checkout BASE_DIR *is* the repo root, so this is
+    the same path devs have always had."""
+    from tapscribe import config
+
+    argv = picker_install_argv(python="py")
+    assert "--state-file" in argv
+    assert argv[argv.index("--state-file") + 1] == str(config.BASE_DIR / ".tapscribe-install.json")
 
 
 def test_write_picker_state_roundtrips_through_picker_load(tmp_path):
@@ -119,6 +143,52 @@ def test_write_picker_state_roundtrips_through_picker_load(tmp_path):
     assert sel.choices["whisper"].backend == "mlx"
     assert sel.choices["parakeet"].enabled is True
     assert sel.choices["voxtral"].enabled is False
+
+
+def test_write_picker_state_preserves_families_setup_does_not_manage(tmp_path):
+    """A /setup install must not silently clear a family /setup has no row for.
+
+    `_PICKER_FAMILIES` is a deliberate SUBSET of `install_picker.FAMILIES`
+    (moonshine is live-only, so /setup shows no row for it). A wholesale
+    rewrite of the state file dropped the `moonshine` key, the picker read the
+    absence back as `enabled=False`, and its next `Selection.save` re-persisted
+    that — the operator's terminal-picker choice was gone for good. It kept
+    WORKING until the venv was rebuilt (pip doesn't uninstall), so nothing
+    surfaced the loss.
+    """
+    path = tmp_path / ".tapscribe-install.json"
+
+    # The operator's terminal picker run: everything on, MLX where offered.
+    prior = install_picker.Selection.defaults_for(_MAC)
+    for fam in install_picker.FAMILIES:
+        prior.choices[fam.key].enabled = True
+    prior.save(path)
+
+    # Now they use /setup, which only knows about Whisper.
+    write_picker_state(to_picker_state({"whisper": "mlx"}), path=path)
+
+    reloaded = install_picker.Selection.load(path, _MAC)
+    # Every family the picker declares still has a key on disk...
+    on_disk = json.loads(path.read_text(encoding="utf-8"))["choices"]
+    assert set(on_disk) == {fam.key for fam in install_picker.FAMILIES}
+    # ...and the one /setup doesn't manage kept BOTH its flag and its backend.
+    assert reloaded.choices["moonshine"].enabled is True
+    assert reloaded.choices["moonshine"].backend == prior.choices["moonshine"].backend
+    # The families /setup DOES manage are still overwritten by the new pick.
+    assert reloaded.choices["whisper"].backend == "mlx"
+    assert reloaded.choices["parakeet"].enabled is False
+
+
+def test_write_picker_state_ignores_a_corrupt_prior_file(tmp_path):
+    """Merging must not make a hand-mangled state file fail the install —
+    /setup falls back to writing its own selection alone."""
+    path = tmp_path / ".tapscribe-install.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    write_picker_state(to_picker_state({"whisper": "cpu"}), path=path)
+
+    sel = install_picker.Selection.load(path, _CPU)
+    assert sel.choices["whisper"].enabled is True
 
 
 # ── validation ──────────────────────────────────────────────────────────────
