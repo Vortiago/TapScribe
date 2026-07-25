@@ -7,8 +7,10 @@
 // badge duration and the guardedness of the "saved" promotion.
 //
 // DOM-free: `statusTarget` only ever touches `.textContent`, so a plain object
-// stands in for a status cell, and only setTimeout is mocked so the awaited PUT
-// can be drained through a real setImmediate.
+// stands in for a status cell. Only setTimeout is mocked, so the badge timers are
+// driven by mock.timers.tick while each case simply awaits the save's own promise
+// (no macrotask drain needed here — unlike field-saver.test.js, where the save is
+// started by a debounce timer rather than by the test).
 //
 // The frontend tsconfig excludes *.test.js, so this file is never typechecked.
 
@@ -26,7 +28,6 @@ import {
 
 /** A stand-in for a status cell (Element.textContent, not an HTMLElement API). */
 const fakeCell = (textContent = "") => ({ textContent });
-const drain = () => new Promise((resolve) => setImmediate(resolve));
 
 describe("statusTarget", () => {
   it("writes every cell the resolver returns", () => {
