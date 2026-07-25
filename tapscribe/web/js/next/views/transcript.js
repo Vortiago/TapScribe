@@ -110,6 +110,9 @@ export function build(ctx) {
   const txNote = pick(frag, "txNote");
   const srcSwHost = pick(frag, "srcSwHost");
   const wavList = pick(frag, "wavList");
+  /** The empty/loading placeholder — a hidden-toggled SIBLING of `wavList`, so
+   * the rows host's children belong to reconcileList alone (views.html). */
+  const wavEmpty = /** @type {HTMLElement} */ (pick(frag, "wavEmpty"));
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
   const jobCount = pick(frag, "jobCount");
@@ -758,21 +761,23 @@ export function build(ctx) {
     }
 
     // ---- Per-WAV picker LIST (own gate) -------------------------------------
-    // Keyed reconcile gated on the file SET + inflight; content-visibility on
-    // the rows (next.css .wavrow) skips off-screen layout/paint; selection is
-    // applied in place. Deferred while text is selected inside the list (don't
-    // advance the gate) — deferIfSelectionInside also marks the deferred-render
-    // flag, so main.js retries even if the poll goes quiet (304s) before the
-    // selection clears (issue #245). The empty / loading placeholder is gated
-    // the same way so it isn't re-set each tick.
+    // `wavList` holds ONLY keyed rows: the empty/loading placeholder is a
+    // hidden-toggled SIBLING (views.html), so reconcileList owns the host's
+    // children outright and an empty picker is `reconcileList(host, [])` rather
+    // than a swap. Keyed reconcile gated on the file SET + inflight;
+    // content-visibility on the rows (next.css .wavrow) skips off-screen
+    // layout/paint; selection is applied in place. Both branches defer while
+    // text is selected inside the list, WITHOUT advancing the gate, so the held
+    // render keeps the previous state intact — deferIfSelectionInside also marks
+    // the deferred-render flag, so main.js retries even if the poll goes quiet
+    // (304s) before the selection clears (issue #245).
     const inflightSig = [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(",");
     const pickState = !sess ? "none" : filesLoading ? "loading" : srcFiles.length ? "rows" : "empty";
     const pickerSig = [pickState, sid, src, filesSig, inflightSig].join("§");
     if (pickState === "rows") {
       if (pickerSig !== lastPickerSig && !deferIfSelectionInside(wavList)) {
-        // Clear any leftover placeholder so reconcileList owns the host.
-        if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated picker gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
         reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
+        wavEmpty.hidden = true;
         lastPickerSig = pickerSig;
         // Rows were just (re)built — force the next line to reapply
         // regardless of whether the selected name itself changed.
@@ -785,16 +790,18 @@ export function build(ctx) {
         applyPickerSelection(pickSelName);
         appliedPickerSel = pickSelName;
       }
-    } else if (pickerSig !== lastPickerSig) {
+    } else if (pickerSig !== lastPickerSig && !deferIfSelectionInside(wavList)) {
       lastPickerSig = pickerSig;
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = filesLoading
+      reconcileList(wavList, [], pickKey, buildPickRow);
+      wavEmpty.textContent = filesLoading
         ? "loading recordings…"
         : sess
           ? (src === "stripped" ? "No stripped clips — strip silence in Recordings first." : "No WAVs recorded yet.")
           : "Pick a session from the spine.";
-      wavList.replaceChildren(empty); // gate-allow: raw-swap — same pickerSig-gated placeholder swap
+      wavEmpty.hidden = false;
+      // A placeholder means no rows to highlight; reset so returning to `rows`
+      // reapplies the selection even if the selected name never changed.
+      appliedPickerSel = null;
     }
   };
 

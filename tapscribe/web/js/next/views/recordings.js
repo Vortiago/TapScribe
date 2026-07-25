@@ -80,6 +80,9 @@ export function build(ctx) {
   const jobWav = pick(frag, "jobWav");
   const wavHint = pick(frag, "wavHint");
   const wavList = pick(frag, "wavList");
+  /** The empty/loading placeholder — a hidden-toggled SIBLING of `wavList`, so
+   * the rows host's children belong to reconcileList alone (recordings.html). */
+  const wavEmpty = /** @type {HTMLElement} */ (pick(frag, "wavEmpty"));
 
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
@@ -851,23 +854,25 @@ export function build(ctx) {
     renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job);
 
     // ---- WAV list (own gate) ------------------------------------------------
-    // The list owns its host's content: a placeholder when there's nothing to
-    // reconcile, else the keyed reconcile. Each row carries content-visibility
-    // (next.css .wavrow) so the browser skips off-screen layout/paint, and the
-    // reconcile only runs when the file SET changes (files_sig / source) — never
-    // on a poll tick, a job tick, or a selection (selection is applied in
-    // place). It's deferred while text is selected inside the list (don't
-    // advance the gate) — deferIfSelectionInside also marks the deferred-render
-    // flag, so main.js retries even if the poll goes quiet (304s) before the
-    // selection clears (issue #245).
+    // `wavList` holds ONLY keyed rows: the empty/loading placeholder is a
+    // hidden-toggled SIBLING (recordings.html), so reconcileList owns the host's
+    // children outright and no state ever has to be swapped into it — an empty
+    // list is `reconcileList(host, [])`, which removes exactly the rows it
+    // created. Each row carries content-visibility (next.css .wavrow) so the
+    // browser skips off-screen layout/paint, and the reconcile only runs when
+    // the file SET changes (files_sig / source) — never on a poll tick, a job
+    // tick, or a selection (selection is applied in place). Both branches defer
+    // while text is selected inside the list, WITHOUT advancing the gate — so
+    // the held render keeps showing the previous state (rows or placeholder)
+    // intact rather than half-applying. deferIfSelectionInside also marks the
+    // deferred-render flag, so main.js retries even if the poll goes quiet
+    // (304s) before the selection clears (issue #245).
     const listState = !sess ? "none" : filesLoading ? "loading" : files.length ? "rows" : "empty";
     const listSig = `${sid}§${src}§${filesSig}§${listState}`;
     if (listState === "rows") {
       if (listSig !== lastListSig && !deferIfSelectionInside(wavList)) {
-        // Clear any leftover empty/loading placeholder (a non-reconcile child)
-        // so reconcileList owns the host's children outright.
-        if (!wavList.querySelector(".wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated view-level WAV-list gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
         reconcileList(wavList, buildRowModels(files, src, isCurrent), rowKey, buildRow);
+        wavEmpty.hidden = true;
         lastListSig = listSig;
         // Rows were just (re)built — force the next line to reapply
         // regardless of whether the selected name itself changed.
@@ -881,17 +886,20 @@ export function build(ctx) {
         applySelection(selName);
         appliedSel = selName;
       }
-    } else if (listSig !== lastListSig) {
+    } else if (listSig !== lastListSig && !deferIfSelectionInside(wavList)) {
       lastListSig = listSig;
-      const ph = document.createElement("div");
-      ph.className = listState === "loading" ? "empty dim" : "empty";
-      ph.textContent =
+      reconcileList(wavList, [], rowKey, buildRow);
+      wavEmpty.classList.toggle("dim", listState === "loading");
+      wavEmpty.textContent =
         listState === "loading"
           ? "loading recordings…"
           : listState === "empty"
             ? "No recordings yet. Once taps record into this session, each WAV appears here."
             : "Pick a session from the spine to manage its recordings.";
-      wavList.replaceChildren(ph); // gate-allow: raw-swap — same listSig-gated gate: placeholder swap that cannot route through renderRegion
+      wavEmpty.hidden = false;
+      // A placeholder means no rows to highlight; reset so returning to `rows`
+      // reapplies the selection even if the selected name never changed.
+      appliedSel = null;
     }
   };
 
