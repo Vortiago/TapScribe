@@ -636,6 +636,16 @@ declare global {
   // covered but never exercised.
   // eslint-disable-next-line no-var
   var __TAPSCRIBE_SIG_PROBES: number | undefined;
+  // Per-KIND probe counts. A single total is not enough to prove the audit
+  // covered anything in particular: the keyed-list probes alone satisfied a
+  // `probes > 0` assertion while the renderRegion half stayed entirely
+  // unexercised, and the list probe satisfied it while no ROW was ever probed.
+  // eslint-disable-next-line no-var
+  var __TAPSCRIBE_SIG_REGION_PROBES: number | undefined;
+  // eslint-disable-next-line no-var
+  var __TAPSCRIBE_SIG_LIST_PROBES: number | undefined;
+  // eslint-disable-next-line no-var
+  var __TAPSCRIBE_SIG_ROW_PROBES: number | undefined;
   // Dev/test-only: how many times renderAll (next/main.js) has actually run —
   // an e2e test's evidence that idle 304 ticks stop re-running it (issue #245).
   // eslint-disable-next-line no-var

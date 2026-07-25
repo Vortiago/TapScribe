@@ -53,6 +53,7 @@ import {
   editSessionLabel,
   forgetSessionLabel,
   pendingOr,
+  pendingSessionLabel,
   sessionLabelFor,
 } from "../session-labels.js";
 
@@ -499,10 +500,25 @@ export function build(ctx) {
    */
   const matches = (s) => {
     if (!filter) return true;
-    // Purely a filter: keeping a row the operator is typing in is `renderList`'s
-    // removal hold, not this predicate's business — the seam defers the whole
-    // render when a focused row's key would leave the list, so the node (and the
-    // focus in it) survives until blur.
+    // A session with a pending rename stays in the filtered set. This is NOT
+    // redundant with `renderList`'s removal hold, and removing it on the grounds
+    // that the seam covers it was wrong twice over:
+    //
+    //   - The seam's hold protects the RECONCILE path. Emptying `shown` sends
+    //     syncRows down the search-mode branch instead, which raw-swaps the body
+    //     and never reaches the seam at all — so the input being typed in is
+    //     detached mid-keystroke. And `sessionLabelFor` reads the optimistic
+    //     overlay, so typing a name that no longer matches the filter empties
+    //     `shown` on the very next tick.
+    //   - The hold keys on FOCUS; this keys on an unsettled SAVE. After blur with
+    //     the PUT still in flight the row would leave, taking the status cell a
+    //     `failed: …` needs to land in (see statusCellsFor) with it — the save
+    //     would fail silently and the operator would never learn the rename
+    //     didn't stick.
+    //
+    // The row rejoins the filter's verdict once the save settles and the catch-up
+    // sweep retires the entry.
+    if (pendingSessionLabel(s.session) !== undefined) return true;
     const hay = [
       sessionLabelFor(s), // per-tick filter — same value as labelFor, no metaFor allocation
       s.session,
@@ -616,6 +632,13 @@ export function build(ctx) {
       }
       return;
     }
+
+    // Guard the raw swap below BEFORE it happens. `renderList` defers on a
+    // selection too (rule 2), but it runs AFTER this line: by then the selected
+    // nodes are detached, and `selectionInside` reports false so the seam does not
+    // even defer. Deleting this guard on the grounds that the seam covers it left
+    // the search-mode exit clobbering a mid-copy selection (ADR-0004).
+    if (deferIfSelectionInside(body)) return;
 
     // The search branch above raw-swaps keyless nodes (search-hit rows,
     // snippets, the no-match placeholder) into the body. renderList's reconcile

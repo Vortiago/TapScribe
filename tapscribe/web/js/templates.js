@@ -120,15 +120,43 @@ function _selectionStraddles(host) {
  * call — the shape that made `[data-cfg-key]` a hold two callers applied and
  * every future one would forget) means the seam holds the swap automatically,
  * and `interactionHeld()` reports a mid-save button to the poll pacer too.
+ *
+ * This is the EDITABLE-STATE predicate: elements a re-render would clobber
+ * something out of. It gates the holds that skip a WRITE — renderRegion's focus
+ * hold, renderList's per-row hold — and `interactionHeld()`. A scripted
+ * `role="button"` is deliberately NOT here: it has no value, no caret and no open
+ * dropdown, so writing to its row disturbs nothing. Treating it as editable held
+ * the update of the very row the operator had just clicked, so the selection
+ * highlight their click asked for never appeared until they clicked away.
  * @param {Element} el
  */
 function _isInteractive(el) {
   const tag = el.tagName;
-  return (
-    tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA" ||
-    /** @type {HTMLElement} */ (el).dataset?.cfgKey != null ||
-    /** @type {HTMLElement} */ (el).isContentEditable === true
-  );
+  if (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return true;
+  const html = /** @type {HTMLElement} */ (el);
+  return html.dataset?.cfgKey != null || html.isContentEditable === true;
+}
+
+/**
+ * The wider FOCUSABLE predicate: anything a keyboard can land on, including the
+ * scripted controls the dashboard builds (`role="button"`, or any non-negative
+ * `tabindex` — a WAV row's waveform-select handle is a
+ * `<span data-wav-select role="button" tabindex="0">`).
+ *
+ * Only the REMOVAL hold uses this, and the distinction is the point: removing a
+ * node destroys focus on anything focusable, so removal must respect all of it;
+ * updating a node in place only threatens EDITABLE state, so the write holds stay
+ * on the narrow predicate above. Conflating the two breaks click-to-select;
+ * omitting this one dumps a keyboard operator to the document root when a
+ * transcribe landing re-keys the row they were on. `tabindex="-1"` is excluded —
+ * programmatically focusable, not keyboard-reachable.
+ * @param {Element} el
+ */
+function _isFocusable(el) {
+  if (_isInteractive(el)) return true;
+  if (el.getAttribute?.("role") === "button") return true;
+  const tabindex = el.getAttribute?.("tabindex");
+  return tabindex != null && tabindex !== "-1";
 }
 
 /**
@@ -260,6 +288,8 @@ function _holdInside(host) {
  * @param {string} sig
  */
 function _auditSigCoversOutput(host, build, sig) {
+  globalThis.__TAPSCRIBE_SIG_PROBES = (globalThis.__TAPSCRIBE_SIG_PROBES || 0) + 1;
+  globalThis.__TAPSCRIBE_SIG_REGION_PROBES = (globalThis.__TAPSCRIBE_SIG_REGION_PROBES || 0) + 1;
   const probe = /** @type {Element} */ (document.createElement(host.tagName || "div"));
   probe.replaceChildren(build());
   if (probe.innerHTML === host.innerHTML) return;
@@ -368,6 +398,10 @@ const _listSig = new WeakMap();
 const _itemSig = new WeakMap();
 /** @type {WeakMap<Element, string>} */
 const _rowKey = new WeakMap();
+/** The item a row was last rendered from — what the removal hold re-inserts so a
+ * focused row survives WITHOUT freezing the rest of the list.
+ * @type {WeakMap<Element, any>} */
+const _rowItem = new WeakMap();
 
 /** Resolve `renderList`'s `items`, which may be a thunk so a caller can keep an
  * O(rows) build behind the gates.
@@ -378,13 +412,15 @@ function _resolveItems(items) {
 
 /** The DIRECT CHILD of `host` containing the focused interactive control, or
  * null. Rows are host children, so this is "which row is the operator in".
- * Defers the PREDICATE to `_focusedInside` rather than re-testing it, so a future
- * widening of what counts as interactive reaches the removal hold too, not just
- * renderRegion's hold and the per-row hold.
+ * Uses `_isFocusable`, NOT `_focusedInside`'s narrower editable-state test: this
+ * feeds the REMOVAL hold, and removal destroys focus on anything focusable, not
+ * just on things with a value to lose.
  * @param {Element} host @returns {Element | null} */
 function _focusedRow(host) {
-  if (!_focusedInside(host)) return null;
-  let row = /** @type {Element} */ (document.activeElement);
+  const active = document.activeElement;
+  if (!active || active === document.body) return null;
+  if (!host.contains(active) || !_isFocusable(active)) return null;
+  let row = /** @type {Element} */ (active);
   while (row.parentElement && row.parentElement !== host) row = row.parentElement;
   return row.parentElement === host ? row : null;
 }
@@ -401,6 +437,7 @@ function _auditListSigCoversRows(host, items, opts, sig) {
   const expected = items.map((it) => `${opts.key(it)}§${opts.itemSig ? opts.itemSig(it) : ""}`);
   const actual = [...host.children].map((n) => `${_rowKey.get(n) ?? "?"}§${_itemSig.get(n) ?? ""}`);
   globalThis.__TAPSCRIBE_SIG_PROBES = (globalThis.__TAPSCRIBE_SIG_PROBES || 0) + 1;
+  globalThis.__TAPSCRIBE_SIG_LIST_PROBES = (globalThis.__TAPSCRIBE_SIG_LIST_PROBES || 0) + 1;
   if (expected.length === actual.length && expected.every((s, i) => s === actual[i])) return;
   // Joined, not arrays: __TAPSCRIBE_SIG_DRIFT is one record shape shared with
   // renderRegion's probe (types.d.ts), and one row per line reads fine.
@@ -432,9 +469,14 @@ function _auditListSigCoversRows(host, items, opts, sig) {
  */
 function _auditItemSigCoversRow(node, item, opts, sig) {
   globalThis.__TAPSCRIBE_SIG_PROBES = (globalThis.__TAPSCRIBE_SIG_PROBES || 0) + 1;
+  globalThis.__TAPSCRIBE_SIG_ROW_PROBES = (globalThis.__TAPSCRIBE_SIG_ROW_PROBES || 0) + 1;
   const probe = opts.create(item);
   if (opts.update) opts.update(probe, item);
-  if (probe.innerHTML === node.innerHTML) return;
+  // outerHTML, not innerHTML: every adapter's `update` writes the row ROOT's own
+  // class (is-sel, is-focused), which innerHTML excludes — so an innerHTML diff
+  // could never catch the drift this probe exists for. A dropped selection term
+  // in an itemSig compared byte-identical and the audit stayed silent.
+  if (probe.outerHTML === node.outerHTML) return;
   (globalThis.__TAPSCRIBE_SIG_DRIFT ||= []).push({ sig, expected: probe.innerHTML, actual: node.innerHTML });
   console.error(
     `renderList item sig drift: row output changed but itemSig ${JSON.stringify(sig)} did not — ` +
@@ -516,7 +558,9 @@ export function renderList(host, items, opts) {
 
   // Past the gates — NOW build the list (see the `items` param docs: a thunk is
   // how a caller avoids paying O(rows) for a tick that skips).
-  const list = _resolveItems(items);
+  let list = _resolveItems(items);
+  // True once any row's render was held back, so rule 5 leaves `sig` unadvanced.
+  let held = false;
 
   // One key per item per call, shared by the removal scan and the create path.
   // Canon recomputes keys internally (its own map isn't exported), but this at
@@ -532,16 +576,39 @@ export function renderList(host, items, opts) {
   };
 
   // Removal hold (rule 3). Only costs anything when a row actually holds focus.
+  //
+  // The held row is SPLICED BACK INTO the list at the position it already
+  // occupies, rather than the whole render being skipped. Skipping was the
+  // obvious reading of "defer, don't destroy" and it was wrong: focus that is
+  // never released (an operator who walks away mid-edit while that session is
+  // deleted elsewhere) froze the ENTIRE list forever — no new rows, no counts, no
+  // progress, a row for a session that no longer exists still on screen, and
+  // `markDeferredRender` firing every tick, which pins main.js to a full
+  // renderAll on every 304. Rule 4's hold is bounded to one row; this one has to
+  // be too. Re-inserting bounds the deferral to exactly the row holding the
+  // focus, which is all ADR-0004 asks for, and the row leaves on the retry after
+  // blur.
   const focused = _focusedRow(host);
   if (focused) {
     const k = _rowKey.get(focused);
     if (k !== undefined && !list.some((it) => keyFor(it) === k)) {
+      const heldItem = _rowItem.get(focused);
+      if (heldItem === undefined) {
+        // No remembered item to re-insert (a row this seam never created). Fall
+        // back to skipping — still better than tearing the focus out.
+        markDeferredRender();
+        return false;
+      }
+      // Its current DOM position, so re-inserting doesn't make the row jump.
+      const at = [...host.children].indexOf(focused);
+      list = list.slice();
+      list.splice(at < 0 ? list.length : at, 0, heldItem);
+      keyed.set(heldItem, k);
+      held = true;
       markDeferredRender();
-      return false;
     }
   }
 
-  let held = false;
   canonReconcileList(
     host,
     list,
@@ -549,19 +616,19 @@ export function renderList(host, items, opts) {
     (item) => {
       const node = create(item);
       _rowKey.set(node, keyFor(item));
+      _rowItem.set(node, item);
       if (update) update(node, item);
       if (itemSig) _itemSig.set(node, itemSig(item));
       return node;
     },
     (node, item) => {
-      if (_focusedInside(node)) {
-        // This row's update is held. Marking the flag is what earns it a retry
-        // at all: main.js skips the whole render pass on a 304, and the poll
-        // goes quiet exactly while the operator types.
-        held = true;
-        markDeferredRender();
-        return;
-      }
+      // The sig check comes FIRST, even for a focused row: a row with nothing to
+      // write needs no hold and — critically — must not mark a retry. Marking
+      // unconditionally on focus meant an idle caret in a rename box defeated
+      // main.js's 304 short-circuit (issue #245) for as long as it sat there,
+      // re-running the whole renderAll pass (spine sig, view, rail, a full
+      // O(rows) walk) at the poll rate, with interactionHeld() also holding the
+      // pacer fast. There is nothing to defer when the row is already correct.
       /** @type {string | undefined} */
       let stamp;
       if (itemSig) {
@@ -573,6 +640,15 @@ export function renderList(host, items, opts) {
           return;
         }
       }
+      if (_focusedInside(node)) {
+        // This row HAS a pending write and holds focus. Marking the flag is what
+        // earns it a retry at all: main.js skips the whole render pass on a 304,
+        // and the poll goes quiet exactly while the operator types.
+        held = true;
+        markDeferredRender();
+        return;
+      }
+      _rowItem.set(node, item);
       if (update) update(node, item);
       // Stamp AFTER the write, never before: an `update` that throws must leave
       // the row's gate UNADVANCED so the next tick retries it. Stamping first

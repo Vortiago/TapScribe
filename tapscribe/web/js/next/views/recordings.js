@@ -885,7 +885,12 @@ export function build(ctx) {
       create: buildRow,
       update: (node, m) => { applyRowSelection(/** @type {HTMLElement} */ (node), m, selName); },
       itemSig: (m) => (m.kind === "clip" ? "" : m.file.name === selName ? "sel" : ""),
-      sig: `${sid}§${src}§${filesSig}§${state}§${selName}`,
+      // isCurrent is folded into `rowKey` and gates the row's Delete button, so it
+      // MUST be a sig term: without it, a session ceasing to be current while its
+      // files_sig held still left every row keyed on the stale value, permanently
+      // Delete-button-less. The chrome sig has it, which is what made the view
+      // look live while the rows were stale.
+      sig: `${sid}§${src}§${filesSig}§${state}§${selName}§${isCurrent ? 1 : 0}`,
       auditRows: false,
     });
     if (rendered) {

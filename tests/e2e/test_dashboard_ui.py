@@ -2945,11 +2945,25 @@ async def test_next_wav_list_rows_are_untouched_on_quiet_ticks(running_recorder:
                 arg=polls_baseline,
                 timeout=10000,
             )
+            # …and force REAL render passes. Crossing 304s alone proves nothing:
+            # main.js's tick() returns before renderAll on an unchanged 304, so an
+            # idle window renders zero times and a zero-mutation assertion holds
+            # even with the list sig deleted. gotoView re-renders synchronously
+            # from the cached state, so each call is a full render whose only
+            # correct outcome is "the sig gate skipped and no row was touched".
+            renders_before = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
+            for _ in range(3):
+                await page.evaluate("() => window.gotoView('recordings')")
+            renders_after = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
+            assert renders_after >= renders_before + 3, (
+                f"expected >= 3 forced render passes, got {renders_after - renders_before} — "
+                "the assertion below would be vacuous"
+            )
             muts = await page.evaluate("() => window.__rowMuts")
             assert muts == 0, (
-                f"the WAV list mutated its rows {muts} time(s) across purely-304 idle polls — "
-                "renderList's list sig must skip the reconcile entirely when nothing changed "
-                "(issue #213)"
+                f"the WAV list mutated its rows {muts} time(s) across idle polls and "
+                f"{renders_after - renders_before} unchanged render passes — renderList's list "
+                "sig must skip the reconcile entirely when nothing changed (issue #213)"
             )
             assert await page.evaluate("(sel) => window.stampsIntact(sel)", rows_sel), (
                 "an idle 304 tick rebuilt WAV rows — the identity stamps are gone"
@@ -3268,11 +3282,21 @@ async def test_next_transcript_picker_rows_are_untouched_on_quiet_ticks(running_
                 arg=polls_baseline,
                 timeout=10000,
             )
+            # Force REAL render passes — see the WAV-list twin for why crossing
+            # 304s alone cannot fail.
+            renders_before = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
+            for _ in range(3):
+                await page.evaluate("() => window.gotoView('transcript')")
+            renders_after = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
+            assert renders_after >= renders_before + 3, (
+                f"expected >= 3 forced render passes, got {renders_after - renders_before} — "
+                "the assertion below would be vacuous"
+            )
             muts = await page.evaluate("() => window.__rowMuts")
             assert muts == 0, (
-                f"the picker mutated its rows {muts} time(s) across purely-304 idle polls — "
-                "renderList's list sig must skip the reconcile entirely when nothing changed "
-                "(issue #213)"
+                f"the picker mutated its rows {muts} time(s) across idle polls and "
+                f"{renders_after - renders_before} unchanged render passes — renderList's list "
+                "sig must skip the reconcile entirely when nothing changed (issue #213)"
             )
             assert await page.evaluate("(sel) => window.stampsIntact(sel)", rows_sel), (
                 "an idle 304 tick rebuilt picker rows — the identity stamps are gone"
@@ -5554,7 +5578,8 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
             # prior sig remembered) doesn't produce false positives.
             await page.evaluate(
                 "() => { window.__TAPSCRIBE_SIG_AUDIT = true; window.__TAPSCRIBE_SIG_DRIFT = []; "
-                "window.__TAPSCRIBE_SIG_PROBES = 0; }"
+                "window.__TAPSCRIBE_SIG_PROBES = 0; window.__TAPSCRIBE_SIG_REGION_PROBES = 0; "
+                "window.__TAPSCRIBE_SIG_LIST_PROBES = 0; window.__TAPSCRIBE_SIG_ROW_PROBES = 0; }"
             )
 
             # Drive through each view TWICE, because the audit only probes a
@@ -5575,13 +5600,23 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
                     )
                 await page.wait_for_timeout(_NEXT_POLL_CROSS_MS)
 
-            # The probes must have RUN, or "no drift" says nothing at all.
-            probes = await page.evaluate("() => window.__TAPSCRIBE_SIG_PROBES || 0")
-            assert probes > 0, (
-                "the sig audit recorded no drift but never probed anything — the views were "
-                "empty, so this assertion was vacuous. Seed rows the audited regions and keyed "
-                "lists actually render."
+            # Each probe KIND must have run. A single total is not enough: the
+            # keyed-list probes alone satisfied `probes > 0` while the renderRegion
+            # half went entirely unexercised, and the LIST probe satisfied it while
+            # no row was ever probed — so a real drift in either unprobed half
+            # would have shipped green under a passing anti-vacuity assertion.
+            kinds = await page.evaluate(
+                "() => ({"
+                " region: window.__TAPSCRIBE_SIG_REGION_PROBES || 0,"
+                " list: window.__TAPSCRIBE_SIG_LIST_PROBES || 0,"
+                " row: window.__TAPSCRIBE_SIG_ROW_PROBES || 0 })"
             )
+            for kind, n in kinds.items():
+                assert n > 0, (
+                    f"the sig audit never ran a {kind} probe ({kinds}) — 'no drift' says nothing "
+                    f"about {kind} signatures. Seed state those regions/rows actually render, and "
+                    "make sure a SKIPPED render happens (an unchanged 304 renders nothing at all)."
+                )
 
             # Assert no drift was recorded across any view.
             drift = await page.evaluate("() => (window.__TAPSCRIBE_SIG_DRIFT || []).length")
