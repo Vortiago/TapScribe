@@ -875,11 +875,23 @@ The two shapes a held render takes, and the words for them:
 
 Both need the interaction hold; `renderList` additionally owns two rules a
 region has no equivalent for. **The removal hold**: a row holding a focused
-control whose key has left `items` would be removed outright, so the whole
-render defers instead — "never destroy interaction state" applies most to
-removal. And **the per-row hold**: a focused control freezes its own row's
-`update` and leaves that row's `itemSig` unstamped. That hold is deliberately
-coarser than a per-control guard, matching a region holding whole.
+control whose key has left `items` is **retained** — spliced back at its
+position, so it stays on screen (and keeps its focus) while every other row
+updates, and drops on a one-shot `focusout`. "Never destroy interaction state"
+applies most to removal. Note a retained row is on screen but NOT in `items`, so
+a caller narrating the list is describing `items`, not the DOM. And **the per-row
+hold**: a focused control freezes its own row's `update` and leaves that row's
+`itemSig` unstamped. That hold is deliberately coarser than a per-control guard,
+matching a region holding whole.
+
+Which hold fires is a two-predicate question, and the distinction is the point:
+removal destroys focus on anything **focusable** (including a scripted
+`role="button"`), while an in-place write only threatens **editable** state — a
+value, a caret, an open dropdown. So the removal hold takes the wide predicate
+and the write holds take the narrow one. A **raw swap** is neither: it detaches
+everything under the host, so it takes the full hold via
+`deferIfInteractionInside` (focus or selection), not `deferIfSelectionInside`,
+which covers only half.
 
 A call site uses whichever change detector it has, and may use both or
 neither: a list-level `sig` pays only where a **cheap aggregate stamp** already
@@ -907,14 +919,16 @@ signature — without it a stale pending edit masks a later change made
 elsewhere forever. Deleting a pending edit is also the ONLY way to
 cancel its save: the saver re-reads the overlay when its timer fires.
 
-A pending edit does **not** pin its row into a filtered list. The row it lives in
-survives a reconcile while its input holds FOCUS — that is the [keyed
-list](#region--keyed-list)'s removal hold — but once focus leaves, a row that no
-longer matches the filter goes, even with the PUT still in flight. Nothing is
-lost: the saver reads the overlay, not the DOM, so the save completes and the
-sweep retires the entry either way. (An earlier version of the Sessions filter
-kept such a row explicitly; that made a filter predicate depend on save state to
-do a job the hold now does by focus.)
+A pending edit **pins its row into a filtered list** until the save settles —
+`sessions.js`'s filter returns true for any session with an unsettled rename.
+This is NOT the mid-edit case: protecting the node being typed in is the
+[interaction hold](#interaction-hold)'s job and keys on FOCUS. The pin keys on the
+unsettled SAVE, covering the window after blur where the row would otherwise
+leave and take with it the status cell a `failed: …` must land in — so a failed
+rename would report itself into nothing and the operator would never learn it
+did not stick. A filter predicate that reads save state is the shallow fix; the
+deep one is a fallback in the save-status lifecycle for a status with no live
+cell, which would retire the pin.
 
 Every save that reports itself — a field saver's, and a save BUTTON's —
 narrates into **status cells** through the one **save-status lifecycle**

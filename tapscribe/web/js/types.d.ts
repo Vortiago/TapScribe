@@ -630,22 +630,13 @@ declare global {
   var __TAPSCRIBE_SIG_AUDIT: boolean | undefined;
   // eslint-disable-next-line no-var
   var __TAPSCRIBE_SIG_DRIFT: Array<{ sig: string; expected: string; actual: string }> | undefined;
-  // Dev/test-only: how many drift probes actually RAN. Zero drift is only
-  // evidence when the probes fired at all — an audit test over empty views
-  // passes vacuously, which is how the keyed-list row probe was nominally
-  // covered but never exercised.
+  // Dev/test-only census of drift probes that actually RAN, by kind. Zero drift
+  // is only evidence when the probe fired: an audit over empty views passes
+  // vacuously, which is how the keyed-list row probe was nominally covered but
+  // never exercised. Per KIND, not one total — a total was satisfied by whichever
+  // probe happened to fire, leaving the other kinds' "no drift" meaningless.
   // eslint-disable-next-line no-var
-  var __TAPSCRIBE_SIG_PROBES: number | undefined;
-  // Per-KIND probe counts. A single total is not enough to prove the audit
-  // covered anything in particular: the keyed-list probes alone satisfied a
-  // `probes > 0` assertion while the renderRegion half stayed entirely
-  // unexercised, and the list probe satisfied it while no ROW was ever probed.
-  // eslint-disable-next-line no-var
-  var __TAPSCRIBE_SIG_REGION_PROBES: number | undefined;
-  // eslint-disable-next-line no-var
-  var __TAPSCRIBE_SIG_LIST_PROBES: number | undefined;
-  // eslint-disable-next-line no-var
-  var __TAPSCRIBE_SIG_ROW_PROBES: number | undefined;
+  var __TAPSCRIBE_SIG_PROBES: { region: number; list: number; row: number } | undefined;
   // Dev/test-only: how many times renderAll (next/main.js) has actually run —
   // an e2e test's evidence that idle 304 ticks stop re-running it (issue #245).
   // eslint-disable-next-line no-var

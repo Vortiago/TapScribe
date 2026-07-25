@@ -877,19 +877,14 @@ export function build(ctx) {
     const selName = sel?.name || "";
     // A THUNK, not an array: buildRowModels walks every file (plus every stripped
     // region clip), and rule 1 skips before the thunk runs — so a quiet tick on a
-    // thousand-WAV session allocates nothing at all. No `state === "rows"` guard
-    // needed: `state` is derived from `files.length` two lines up, so every
-    // non-rows state already has an empty `files` and an empty row set.
+    // thousand-WAV session allocates nothing at all.
     const rendered = renderList(wavList, () => buildRowModels(files, src, isCurrent), {
       key: rowKey,
       create: buildRow,
       update: (node, m) => { applyRowSelection(/** @type {HTMLElement} */ (node), m, selName); },
       itemSig: (m) => (m.kind === "clip" ? "" : m.file.name === selName ? "sel" : ""),
-      // isCurrent is folded into `rowKey` and gates the row's Delete button, so it
-      // MUST be a sig term: without it, a session ceasing to be current while its
-      // files_sig held still left every row keyed on the stale value, permanently
-      // Delete-button-less. The chrome sig has it, which is what made the view
-      // look live while the rows were stale.
+      // isCurrent gates the row's Delete button and is folded into `rowKey`, so it
+      // must be a sig term or the rows stay keyed on a stale value.
       sig: `${sid}§${src}§${filesSig}§${state}§${selName}§${isCurrent ? 1 : 0}`,
       auditRows: false,
     });

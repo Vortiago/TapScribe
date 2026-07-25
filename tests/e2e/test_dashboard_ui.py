@@ -2951,19 +2951,12 @@ async def test_next_wav_list_rows_are_untouched_on_quiet_ticks(running_recorder:
             # even with the list sig deleted. gotoView re-renders synchronously
             # from the cached state, so each call is a full render whose only
             # correct outcome is "the sig gate skipped and no row was touched".
-            renders_before = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
-            for _ in range(3):
-                await page.evaluate("() => window.gotoView('recordings')")
-            renders_after = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
-            assert renders_after >= renders_before + 3, (
-                f"expected >= 3 forced render passes, got {renders_after - renders_before} — "
-                "the assertion below would be vacuous"
-            )
+            renders = await _force_render_passes(page, "recordings")
             muts = await page.evaluate("() => window.__rowMuts")
             assert muts == 0, (
-                f"the WAV list mutated its rows {muts} time(s) across idle polls and "
-                f"{renders_after - renders_before} unchanged render passes — renderList's list "
-                "sig must skip the reconcile entirely when nothing changed (issue #213)"
+                f"the WAV list mutated its rows {muts} time(s) across idle polls and {renders} "
+                "unchanged render passes — renderList's list sig must skip the reconcile "
+                "entirely when nothing changed (issue #213)"
             )
             assert await page.evaluate("(sel) => window.stampsIntact(sel)", rows_sel), (
                 "an idle 304 tick rebuilt WAV rows — the identity stamps are gone"
@@ -3284,19 +3277,12 @@ async def test_next_transcript_picker_rows_are_untouched_on_quiet_ticks(running_
             )
             # Force REAL render passes — see the WAV-list twin for why crossing
             # 304s alone cannot fail.
-            renders_before = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
-            for _ in range(3):
-                await page.evaluate("() => window.gotoView('transcript')")
-            renders_after = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
-            assert renders_after >= renders_before + 3, (
-                f"expected >= 3 forced render passes, got {renders_after - renders_before} — "
-                "the assertion below would be vacuous"
-            )
+            renders = await _force_render_passes(page, "transcript")
             muts = await page.evaluate("() => window.__rowMuts")
             assert muts == 0, (
-                f"the picker mutated its rows {muts} time(s) across idle polls and "
-                f"{renders_after - renders_before} unchanged render passes — renderList's list "
-                "sig must skip the reconcile entirely when nothing changed (issue #213)"
+                f"the picker mutated its rows {muts} time(s) across idle polls and {renders} "
+                "unchanged render passes — renderList's list sig must skip the reconcile "
+                "entirely when nothing changed (issue #213)"
             )
             assert await page.evaluate("(sel) => window.stampsIntact(sel)", rows_sel), (
                 "an idle 304 tick rebuilt picker rows — the identity stamps are gone"
@@ -5553,7 +5539,7 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
     vacuous, and that is exactly what this test used to be for the keyed lists:
     it seeded no sessions, so the Sessions rows and the Transcript picker had no
     rows to probe and the row audit never ran once. The seeding below and the
-    `__TAPSCRIBE_SIG_PROBES > 0` assertion are what make "no drift" mean
+    per-kind probe assertions are what make "no drift" mean
     something."""
     rec = running_recorder.recorder
     base = running_recorder.base_url
@@ -5578,8 +5564,7 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
             # prior sig remembered) doesn't produce false positives.
             await page.evaluate(
                 "() => { window.__TAPSCRIBE_SIG_AUDIT = true; window.__TAPSCRIBE_SIG_DRIFT = []; "
-                "window.__TAPSCRIBE_SIG_PROBES = 0; window.__TAPSCRIBE_SIG_REGION_PROBES = 0; "
-                "window.__TAPSCRIBE_SIG_LIST_PROBES = 0; window.__TAPSCRIBE_SIG_ROW_PROBES = 0; }"
+                "window.__TAPSCRIBE_SIG_PROBES = { region: 0, list: 0, row: 0 }; }"
             )
 
             # Drive through each view TWICE, because the audit only probes a
@@ -5592,13 +5577,14 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
             # keyed list skips, and each skip is what gets probed. A poll period
             # is still crossed for realism.
             for view in _NEXT_VIEWS:
-                for _ in range(2):
-                    await page.evaluate("(v) => window.gotoView(v)", view)
-                    await page.wait_for_function(
-                        "() => document.querySelector('#viewRoot')?.childElementCount > 0",
-                        timeout=5000,
-                    )
-                await page.wait_for_timeout(_NEXT_POLL_CROSS_MS)
+                await page.evaluate("(v) => window.gotoView(v)", view)
+                await page.wait_for_function(
+                    "() => document.querySelector('#viewRoot')?.childElementCount > 0",
+                    timeout=5000,
+                )
+                # A second pass over identical state is what makes every sig-gated
+                # region and keyed list SKIP, and a skip is what gets probed.
+                await _force_render_passes(page, view, 1)
 
             # Each probe KIND must have run. A single total is not enough: the
             # keyed-list probes alone satisfied `probes > 0` while the renderRegion
@@ -5606,10 +5592,7 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
             # no row was ever probed — so a real drift in either unprobed half
             # would have shipped green under a passing anti-vacuity assertion.
             kinds = await page.evaluate(
-                "() => ({"
-                " region: window.__TAPSCRIBE_SIG_REGION_PROBES || 0,"
-                " list: window.__TAPSCRIBE_SIG_LIST_PROBES || 0,"
-                " row: window.__TAPSCRIBE_SIG_ROW_PROBES || 0 })"
+                "() => window.__TAPSCRIBE_SIG_PROBES || { region: 0, list: 0, row: 0 }"
             )
             for kind, n in kinds.items():
                 assert n > 0, (
@@ -5665,6 +5648,26 @@ def _seed_named_session(rec, sid: str, *, speaker: str) -> Path:
         encoding="utf-8",
     )
     return d
+
+
+async def _force_render_passes(page, view: str, n: int = 3) -> int:
+    """Drive `n` REAL render passes of `view` and return how many actually ran.
+
+    Crossing poll ticks renders nothing: main.js's tick() returns before renderAll
+    when /api/state 304s unchanged, so a test that waits out idle polls and then
+    asserts "nothing was touched" cannot fail. gotoView re-renders synchronously
+    from the cached state, so each call is a full pass whose only correct outcome
+    is that the sig gates skipped. Asserts the counter moved, so the caller's
+    assertion can never be vacuous.
+    """
+    before = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
+    await page.evaluate("([v, n]) => { for (let i = 0; i < n; i++) window.gotoView(v); }", [view, n])
+    ran = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0") - before
+    assert ran >= n, (
+        f"expected >= {n} forced render passes of {view!r}, got {ran} — the assertion "
+        "that follows would be vacuous"
+    )
+    return ran
 
 
 async def _focus_session_view(page, sid: str, view: str) -> None:

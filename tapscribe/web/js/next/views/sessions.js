@@ -45,7 +45,7 @@
 // (with its live counts) repaints every tick; the prune button lives in the
 // static panel head, wired once.
 
-import { tpl, pick, mount, renderList, deferIfSelectionInside } from "../../templates.js";
+import { tpl, pick, mount, renderList, deferIfInteractionInside } from "../../templates.js";
 import { postJson, del, getJson, errText } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline, newestFirst } from "../shell.js";
@@ -500,24 +500,14 @@ export function build(ctx) {
    */
   const matches = (s) => {
     if (!filter) return true;
-    // A session with a pending rename stays in the filtered set. This is NOT
-    // redundant with `renderList`'s removal hold, and removing it on the grounds
-    // that the seam covers it was wrong twice over:
-    //
-    //   - The seam's hold protects the RECONCILE path. Emptying `shown` sends
-    //     syncRows down the search-mode branch instead, which raw-swaps the body
-    //     and never reaches the seam at all — so the input being typed in is
-    //     detached mid-keystroke. And `sessionLabelFor` reads the optimistic
-    //     overlay, so typing a name that no longer matches the filter empties
-    //     `shown` on the very next tick.
-    //   - The hold keys on FOCUS; this keys on an unsettled SAVE. After blur with
-    //     the PUT still in flight the row would leave, taking the status cell a
-    //     `failed: …` needs to land in (see statusCellsFor) with it — the save
-    //     would fail silently and the operator would never learn the rename
-    //     didn't stick.
-    //
-    // The row rejoins the filter's verdict once the save settles and the catch-up
-    // sweep retires the entry.
+    // A session whose rename hasn't settled stays in the filtered set. NOT for the
+    // mid-edit case — that is the interaction hold's job (deferIfInteractionInside
+    // below, and renderList's removal hold), which keys on FOCUS. This keys on an
+    // unsettled SAVE: after blur, with the filter no longer matching and the PUT
+    // in flight, the row would leave and take with it the status cell a `failed: …`
+    // must land in (statusCellsFor), so the failure would report into nothing.
+    // Shallow, admittedly: the deep fix is a fallback in the save-status layer for
+    // a status with no live cell, which would retire this line.
     if (pendingSessionLabel(s.session) !== undefined) return true;
     const hay = [
       sessionLabelFor(s), // per-tick filter — same value as labelFor, no metaFor allocation
@@ -600,7 +590,14 @@ export function build(ctx) {
         }
       }
 
-      if (deferIfSelectionInside(body)) return;
+      // A raw swap detaches whatever holds FOCUS as well as whatever is selected,
+      // so this path needs the full hold — `deferIfSelectionInside` covers half of
+      // it, and a focused rename input was destroyed mid-keystroke the moment the
+      // filtered set emptied and syncRows switched modes. NOT hoisted above the
+      // mode branch: the reconcile path below must keep updating rows AROUND a
+      // focused input (that is what a keyed list is for), and only the seam's
+      // per-row hold is fine-grained enough to do that.
+      if (deferIfInteractionInside(body)) return;
 
       if (lastSearchResults === null) {
         body.replaceChildren(); // static-render — cold search-mode transition, see docstring
@@ -633,23 +630,18 @@ export function build(ctx) {
       return;
     }
 
-    // Guard the raw swap below BEFORE it happens. `renderList` defers on a
-    // selection too (rule 2), but it runs AFTER this line: by then the selected
-    // nodes are detached, and `selectionInside` reports false so the seam does not
-    // even defer. Deleting this guard on the grounds that the seam covers it left
-    // the search-mode exit clobbering a mid-copy selection (ADR-0004).
-    if (deferIfSelectionInside(body)) return;
-
-    // The search branch above raw-swaps keyless nodes (search-hit rows,
-    // snippets, the no-match placeholder) into the body. renderList's reconcile
-    // only tracks and removes nodes it created itself, so returning from search
-    // mode must clear those foreign nodes first or they dangle below the real
-    // rows forever. Normal rows all carry data-sid (sessionRow), so
-    // "no [data-sid] child" ⇔ the body holds only foreign nodes (or nothing).
-    // This stays HERE rather than in the seam: it exists because THIS view has a
-    // second, cold rendering mode, which no other keyed list has — one adapter is
-    // a hypothetical seam.
-    if (!body.querySelector("[data-sid]")) body.replaceChildren(); // gate-allow: raw-swap — clears the search branch's keyless nodes so renderList owns the host
+    // Leaving search mode: the branch above raw-swapped keyless nodes into the
+    // body, and renderList's reconcile only removes nodes it created itself, so
+    // they must be cleared or they dangle below the real rows forever. Normal rows
+    // carry data-sid, so "no [data-sid] child" ⇔ the body holds only foreign nodes.
+    // The guard sits on the swap it protects: renderList's own rule 2 runs after
+    // it, by which point the selected nodes are detached and `selectionInside`
+    // reads false. This stays in the view because only THIS keyed list has a
+    // second, cold rendering mode.
+    if (!body.querySelector("[data-sid]")) {
+      if (deferIfInteractionInside(body)) return;
+      body.replaceChildren(); // gate-allow: raw-swap — clears the search branch's keyless nodes so renderList owns the host
+    }
 
     // Absorb targets: archived sessions only — the current (recording) one is
     // never a merge endpoint, and a row can't absorb into itself. Computed
@@ -669,9 +661,7 @@ export function build(ctx) {
     // row has targets iff some OTHER archived session exists.
     const targetsSig = archived.map((t) => `${t.session}·${sessionLabelFor(t)}·${t.wav_count || 0}`).join(",");
     // No list-level `sig` — see rowSig's docstring: this list has no cheap
-    // aggregate stamp, so it gates per row instead. The row probe stays on (the
-    // seam's default) — a row's entire content comes from sessionRow + fillRow,
-    // so a probe row is a sound comparison.
+    // aggregate stamp, so it gates per row instead.
     const rendered = renderList(body, shown, {
       key: (s) => `${s.session}·c${s.is_current ? 1 : 0}·w${(s.wav_count || 0) > 0 ? 1 : 0}·t${!s.is_current && archived.length > 1 ? 1 : 0}`,
       create: (s) => /** @type {HTMLElement} */ (sessionRow(s, archived).firstElementChild),
@@ -679,12 +669,10 @@ export function build(ctx) {
       itemSig: (s) => rowSig(s, targetsSig),
     });
 
-    // The placeholder and the counts describe the ROWS, so they only move when
-    // the rows did — gated on renderList's return, like both WAV lists. Written
-    // unconditionally (and above the reconcile) they narrated a list that wasn't
-    // there: delete the only session while its rename input is focused and the
-    // removal hold keeps the row, but the header said "0 total" and the
-    // placeholder "No sessions yet" directly above it.
+    // The counts and placeholder describe the ROWS, so gate them on renderList's
+    // return — written unconditionally they narrated a list that wasn't there.
+    // Note a RETAINED row (the seam's removal hold) is on screen but not in
+    // `shown`, so during a hold the counts describe `shown`, not the DOM.
     if (rendered) {
       if (counts) {
         counts.textContent = filter ? `${shown.length} of ${sessions.length}` : `${sessions.length} total`;
