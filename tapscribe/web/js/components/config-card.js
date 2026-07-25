@@ -12,7 +12,7 @@
 // skips its per-second rebuild so polling can't blow away unsaved edits.
 
 import { tpl, pick, renderRegion } from "../templates.js";
-import { wireConfigSave } from "../api.js";
+import { SAVED, SAVING, wireConfigSave } from "../save-status.js";
 
 /**
  * @param {{
@@ -62,7 +62,7 @@ function buildEditor({ key, content, placeholder, overrideCount }) {
   // a successful save, so a failed save leaves the badge unsaved.
   let baseline = content || "";
   ta.addEventListener("input", () => {
-    if (status.textContent === "saving…" || status.textContent === "saved") return;
+    if (status.textContent === SAVING || status.textContent === SAVED) return;
     status.textContent = ta.value !== baseline ? "unsaved" : "";
   });
   wireConfigSave({ key, btn, textarea: ta, status, onSuccess: (v) => { baseline = v; } });

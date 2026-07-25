@@ -7,64 +7,14 @@
 // real data where we have it.
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { putJson, errText } from "../../api.js";
 import { fmtSessionLabel, fmtDur } from "../../formatters.js";
-import { GLOBAL_VIEWS, newestFirst, labelSigFor } from "../shell.js";
+import { GLOBAL_VIEWS, newestFirst } from "../shell.js";
+import { editSessionLabel, pendingOr, sessionLabelFor } from "../session-labels.js";
 
-// Optimistic rename overlay (sid → edited label) so a rename typed in the
-// Session Information card shows instantly in the name field AND the session
-// picker, without waiting for the next /api/state poll. Cleared once the
-// server's meta catches up (the every-session sweep at the top of render()).
-/** @type {Map<string, string>} */
-const localLabels = new Map();
-/** @type {Map<string, ReturnType<typeof setTimeout>>} */
-const labelSaveTimers = new Map();
-
-/**
- * The LIVE status cells for `sid`, resolved at call time. The card that holds
- * them is rebuilt by the interaction hold's blur flush (and by any spine sig
- * change) well within the 600 ms rename debounce, so a node captured at
- * build time is DETACHED by the time the save settles — a `failed: …` written
- * there is invisible, and the operator reads the rename as saved while the
- * `localLabels` overlay keeps showing the typed value. Re-query instead, the
- * same way people.js's row-status path does.
- * @param {string} sid
- */
-function statusCellsFor(sid) {
-  return document.querySelectorAll(`[data-status-sid="${CSS.escape(sid)}"]`);
-}
-
-/**
- * Debounced PUT /api/session-meta/{sid} {label}. The server merges partial meta,
- * so aliases/prompt/hotwords are preserved. Mirrors sessions.js's rename save.
- * @param {string} sid
- */
-function persistLabel(sid) {
-  clearTimeout(labelSaveTimers.get(sid));
-  labelSaveTimers.set(sid, setTimeout(async () => {
-    labelSaveTimers.delete(sid);
-    const label = localLabels.get(sid);
-    if (label == null) return;
-    /** @param {string} text */
-    const setStatus = (text) => {
-      for (const el of statusCellsFor(sid)) {
-        if (el instanceof HTMLElement) el.textContent = text;
-      }
-    };
-    setStatus("saving…");
-    try {
-      await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { label });
-      for (const el of statusCellsFor(sid)) {
-        if (el instanceof HTMLElement && el.textContent === "saving…") {
-          el.textContent = "saved";
-          setTimeout(() => { if (el.textContent === "saved") el.textContent = ""; }, 1400);
-        }
-      }
-    } catch (e) {
-      setStatus(`failed: ${errText(e)}`);
-    }
-  }, 600));
-}
+// Renames typed in the Session Information card go through
+// next/session-labels.js (#355), which owns the pending edit, the debounced PUT,
+// the catch-up sweep AND the status cells it narrates into — shared with the
+// Sessions view, which renames the same session through the same endpoint.
 
 /**
  * @typedef {{ tone: "live"|"good"|"warn"|"mute", text: string }} Chip
@@ -242,16 +192,15 @@ function buildSessInfo(session, metaFor) {
   const card = tpl("tpl-next-sessinfo");
   const nameInput = /** @type {HTMLInputElement} */ (pick(card, "name"));
   const statusEl = pick(card, "status");
-  // Stamp the cell with the session it reports on, so persistLabel can find
-  // the LIVE one at timer-fire time rather than writing into this (by then
-  // possibly detached) node — see statusCellsFor.
+  // Stamp the cell with the session it reports on, so a settling save can
+  // re-resolve the LIVE one rather than writing into this (by then possibly
+  // detached) node — see session-labels.js's statusCellsFor.
   statusEl.dataset.statusSid = sid;
 
-  nameInput.value = localLabels.get(sid) ?? metaFor(session).label ?? "";
+  nameInput.value = pendingOr(sid, metaFor(session).label ?? "");
   nameInput.placeholder = fmtSessionLabel(sid) || "name this session";
   nameInput.addEventListener("input", () => {
-    localLabels.set(sid, nameInput.value);
-    persistLabel(sid);
+    editSessionLabel(sid, nameInput.value);
   });
 
   const live = !!session.is_current;
@@ -286,24 +235,6 @@ function buildSessInfo(session, metaFor) {
 export function render(host, j, ctx) {
   const { currentView, session, metaFor, onSelectView, onSelectSession, onNewSession } = ctx;
 
-  // Drop rename overlays the server has caught up to — for EVERY session,
-  // every tick, not just the focused one. An overlay stranded on a
-  // non-focused session (rename, then switch focus inside the debounce+poll
-  // window) would otherwise mask a later rename made elsewhere (the Sessions
-  // view, another tab) FOREVER: the sig below reads overlay-first, so the
-  // server's new label could never even trigger a rebuild, and refocusing
-  // would seed the name input with the stale value, inviting a save that
-  // reverts the external rename. The debounce window is safe: an entry the
-  // operator just typed differs from the server label until its PUT lands
-  // (so it survives), and when it equals the server label there is nothing
-  // left to save — persistLabel re-reads the overlay at timer-fire and
-  // no-ops once it's gone. Mirrors people.js's catch-up sweep.
-  for (const s of j.sessions || []) {
-    if (localLabels.get(s.session) === (s.session_meta?.label || "")) {
-      localLabels.delete(s.session);
-    }
-  }
-
   // Build the whole spine fragment. Invoked by renderRegion only when it
   // actually swaps, so a skipped tick (operator interacting with a control
   // inside the spine) never builds.
@@ -323,7 +254,7 @@ export function render(host, j, ctx) {
     } else {
       for (const s of sessions) {
         const meta = metaFor(s);
-        const label = (localLabels.get(s.session) ?? meta.label) || fmtSessionLabel(s.session) || s.session;
+        const label = pendingOr(s.session, meta.label) || fmtSessionLabel(s.session) || s.session;
         const tag = s.is_current ? " ● live" : s.session_transcript ? " · tx" : "";
         const opt = new Option(`${label}${tag}`, s.session, false, s.session === session?.session);
         pickSel.add(opt);
@@ -394,7 +325,7 @@ export function render(host, j, ctx) {
     // (value-identical to what buildFrag paints, no throwaway EffectiveMeta
     // per session per tick); buildFrag itself keeps metaFor and only runs
     // past the gate.
-    sessions.map((s) => `${s.session}~${labelSigFor(localLabels, s)}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
+    sessions.map((s) => `${s.session}~${sessionLabelFor(s)}~${s.is_current ? 1 : 0}~${s.session_transcript ? 1 : 0}`).join(","),
     session
       ? `${session.session}~${session.wav_count || 0}~${tx ? 1 : 0}~${tx?.suppressed_count || 0}~${session.stripped ? 1 : 0}~${session.is_current ? 1 : 0}~${session.session_summary?.summarized_at || ""}`
       : "",

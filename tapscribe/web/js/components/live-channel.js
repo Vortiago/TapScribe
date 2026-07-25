@@ -8,7 +8,8 @@
 // carried across the rebuild explicitly — see buildBody.
 
 import { tpl, pick, renderRegion, selectionInside } from "../templates.js";
-import { getJson, wireConfigSave } from "../api.js";
+import { getJson } from "../api.js";
+import { wireConfigSave } from "../save-status.js";
 import { LIVE_FAMILY_LABELS, buildModelSelect } from "../model-select.js";
 
 /** @type {ReturnType<typeof setInterval> | null} */

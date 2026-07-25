@@ -20,6 +20,7 @@ import { warmProgress } from "../vc/components/progress/progress.js";
 import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import { createPollPacer, FAST_MS } from "./poll-pacer.js";
+import { dropCaughtUpSessionLabels, setSessionLabelRepaint } from "./session-labels.js";
 import * as spine from "./components/spine.js";
 import * as engine from "./components/engine.js";
 import * as activeTaps from "../components/active-taps.js";
@@ -563,6 +564,12 @@ function renderAll(j) {
   // session even before the operator explicitly picks one.
   if (session && selectedSessionId == null) selectedSessionId = session.session;
   adoptSavedBatchModel(j);
+  // Drop pending renames the server has caught up to, ONCE per tick and BEFORE
+  // anything computes a label sig — two views read the same overlay (#355), so
+  // the sweep belongs to the tick's owner rather than to whichever of them
+  // happens to render first (ADR-0004: the hold lives at shared seams, not per
+  // view). Its doc carries the why.
+  dropCaughtUpSessionLabels(sessions);
   renderSpine(j, session);
   renderView(j, session);
   // The active-taps rail is global — render it every tick regardless of the
@@ -672,6 +679,11 @@ async function loadModelCatalogs() {
 
 viewFromHash();
 initRail();
+// The session-label saver's repaint kick — the same `afterMutate` every view
+// build gets, wired once here because the saver is a module singleton shared by
+// the Sessions list and the spine's rename card (#355). Without it a settled
+// rename would wait out the poll backoff in one of the two places.
+setSessionLabelRepaint(() => { refresh(); });
 
 // Expose a screenshot/automation hook (parity with the prototype's gotoView).
 /** @type {any} */ (window).gotoView = gotoView;

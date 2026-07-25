@@ -24,6 +24,8 @@ import { tpl, pick, renderRegion } from "../../templates.js";
 import { putJson, postJson, errText } from "../../api.js";
 import { speakerIndex } from "../../speakers.js";
 import { header, strong, inline, sessionLabel } from "../shell.js";
+import { statusTarget } from "../../save-status.js";
+import { createFieldSaver, createOverlay } from "../field-saver.js";
 
 /** spk palette index → the avatar class suffix next.css `.av.spk-N` paints. */
 /** @param {number} spk */
@@ -45,53 +47,45 @@ export function build(ctx) {
   const hint = pick(frag, "hint");
   const peopleHost = pick(frag, "people");
 
-  // Optimistic local name overlay, per person id, so a rename's save + re-poll
-  // round trip doesn't clear the field the operator just typed.
-  /** @type {Map<string, string>} */
-  const localNames = new Map();
-  /** @type {Map<string, ReturnType<typeof setTimeout>>} */
-  const saveTimers = new Map();
-
-  /** The name to SHOW in the input: local overlay > chosen name > "" (so an
-   * unnamed Person shows its default only as the placeholder, inviting a name). */
   /** The value the input shows absent a local edit: the chosen name, or "" for
    * an unnamed Person (its default then surfaces as the placeholder). Also the
-   * baseline update() compares the overlay against — one source for the rule. */
-  /** @param {import('../../types.js').Person} p */
+   * baseline the catch-up sweep compares a pending edit against — one source for
+   * the rule.
+   * @param {import('../../types.js').Person} p */
   const serverName = (p) => (p.named ? p.name : "");
-  /** @param {import('../../types.js').Person} p */
-  const inputValue = (p) => {
-    const local = localNames.get(p.id);
-    return local !== undefined ? local : serverName(p);
-  };
 
-  /** Debounced PUT /api/people/{id} {name}. */
+  // Pending renames, so a save + re-poll round trip doesn't clear the field the
+  // operator just typed. Per-view (unlike session labels, shared by two editors)
+  // because this view is the only place a Person is renamed — but the same
+  // overlay contract, so the catch-up sweep comes with it (#355).
+  const pendingNames = createOverlay({
+    idOf: (/** @type {import('../../types.js').Person} */ p) => p.id,
+    baselineFor: serverName,
+  });
+
+  /** The name to SHOW in the input: pending edit > chosen name > "" (so an
+   * unnamed Person shows its default only as the placeholder, inviting a name).
+   * @param {import('../../types.js').Person} p */
+  const inputValue = (p) => pendingNames.get(p.id) ?? serverName(p);
+
+  /** Where a row's status/error text goes. Resolved per write, not captured:
+   * renderRegion can rebuild the row between a PUT starting and settling, and a
+   * captured cell is detached by then (see `statusTarget`). The ONE writer for a
+   * row's status cell — the rename save and the merge/detach failures below both
+   * go through it.
+   * @param {string} pid */
+  const rowStatus = (pid) =>
+    statusTarget(() => peopleHost.querySelectorAll(`[data-status-pid="${CSS.escape(pid)}"]`));
+
+  /** Debounced PUT /api/people/{id} {name} — the shared saver (#355), the same
+   * overlay + debounce + saving/saved/failed lifecycle the session renames use. */
+  const saver = createFieldSaver({
+    overlay: pendingNames,
+    put: (pid, name) => putJson(`/api/people/${encodeURIComponent(pid)}`, { name }),
+    afterSave: afterMutate,
+  });
   /** @param {string} pid */
-  const persist = (pid) => {
-    clearTimeout(saveTimers.get(pid));
-    saveTimers.set(pid, setTimeout(async () => {
-      saveTimers.delete(pid);
-      const name = localNames.get(pid);
-      if (name === undefined) return;
-      const statusEls = peopleHost.querySelectorAll(`[data-status-pid="${CSS.escape(pid)}"]`);
-      for (const el of statusEls) if (el instanceof HTMLElement) el.textContent = "saving…";
-      try {
-        await putJson(`/api/people/${encodeURIComponent(pid)}`, { name });
-        for (const el of statusEls) {
-          if (el instanceof HTMLElement && el.textContent === "saving…") {
-            el.textContent = "saved";
-            setTimeout(() => { if (el.textContent === "saved") el.textContent = ""; }, 1400);
-          }
-        }
-      } catch (e) {
-        for (const el of statusEls) {
-          if (el instanceof HTMLElement) el.textContent = `failed: ${errText(e)}`;
-        }
-      } finally {
-        afterMutate();
-      }
-    }, 600));
-  };
+  const persist = (pid) => saver.save(pid, rowStatus(pid));
 
   /**
    * @param {import('../../types.js').Person} p
@@ -114,7 +108,7 @@ export function build(ctx) {
     name.value = inputValue(p);
     name.placeholder = p.name || p.identities[0] || "name…";
     name.addEventListener("input", () => {
-      localNames.set(p.id, name.value);
+      pendingNames.set(p.id, name.value);
       av.textContent = avatarText(name.value);
       persist(p.id);
     });
@@ -127,7 +121,7 @@ export function build(ctx) {
       try {
         await req();
       } catch (e) {
-        status.textContent = `failed: ${errText(e)}`;
+        rowStatus(p.id).set(`failed: ${errText(e)}`);
       } finally {
         afterMutate();
       }
@@ -177,6 +171,11 @@ export function build(ctx) {
     merge.addEventListener("change", () => {
       const survivor = merge.value;
       if (!survivor) return;
+      // This Person is about to stop existing, so drop any pending rename for it
+      // — the saver re-reads the overlay at timer-fire, so forgetting IS the
+      // cancellation, and a queued PUT would otherwise 404 against a dead id and
+      // report the failure into a row that has already been removed.
+      pendingNames.forget(p.id);
       mutate(() => postJson("/api/people/merge", { survivor, absorbed: p.id }));
     });
 
@@ -196,7 +195,7 @@ export function build(ctx) {
   const sig = (people, here) =>
     here + "§" + people
       .map((p) =>
-        `${p.id}:${p.named ? 1 : 0}:${p.name}:${localNames.get(p.id) ?? ""}:`
+        `${p.id}:${p.named ? 1 : 0}:${p.name}:${pendingNames.get(p.id) ?? ""}:`
         + `${p.identities.join(",")}:${p.sessions.join(",")}:${p.live ? 1 : 0}:${p.recorded ? 1 : 0}`)
       .join("|");
 
@@ -220,11 +219,9 @@ export function build(ctx) {
     });
 
     const people = j.people || [];
-    // Drop a local name overlay once the server has caught up to it — otherwise
-    // a stale overlay would mask a later external change to that name.
-    for (const p of people) {
-      if (localNames.get(p.id) === serverName(p)) localNames.delete(p.id);
-    }
+    // Retire pending renames the server has caught up to (the overlay's own
+    // sweep — its doc carries the why).
+    pendingNames.sweep(people);
     const liveN = people.filter((p) => p.live).length;
     hint.textContent = `${people.length} ${people.length === 1 ? "person" : "people"}${liveN ? ` · ${liveN} live` : ""}`;
 

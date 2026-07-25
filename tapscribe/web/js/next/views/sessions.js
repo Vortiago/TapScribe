@@ -45,9 +45,16 @@
 // panel head, wired once.
 
 import { tpl, pick, mount, reconcileList, deferIfSelectionInside, markDeferredRender } from "../../templates.js";
-import { putJson, postJson, del, getJson, errText } from "../../api.js";
+import { postJson, del, getJson, errText } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
-import { header, strong, inline, newestFirst, labelSigFor } from "../shell.js";
+import { header, strong, inline, newestFirst } from "../shell.js";
+import {
+  editSessionLabel,
+  forgetSessionLabel,
+  pendingOr,
+  pendingSessionLabel,
+  sessionLabelFor,
+} from "../session-labels.js";
 
 /**
  * A session's total original-WAV bytes. Precomputed server-side as
@@ -127,13 +134,8 @@ export function build(ctx) {
   /** Current filter text (lower-cased). The search <input> is built once with
    * the region chrome and never rebuilt, so it persists trivially. */
   let filter = "";
-  /** Optimistic local label overlay, per session id, so a save + re-poll round
-   * trip doesn't clear the field the operator just typed (mirrors people.js). */
-  /** @type {Map<string, string>} */
-  const localLabels = new Map();
-  /** Debounce timers per session id (debounced PUT, like the alias editor). */
-  /** @type {Map<string, ReturnType<typeof setTimeout>>} */
-  const saveTimers = new Map();
+  // Renames go through next/session-labels.js (#355) — it owns the pending
+  // edit, the debounced PUT and the sweep, shared with the spine's rename card.
   /** The sessions array from the most recent tick — the absorb confirm() reads
     * it to resolve the target's display label. Kept in step with `update`. */
   /** @type {import('../../types.js').Session[]} */
@@ -153,18 +155,8 @@ export function build(ctx) {
 
   /** Effective label for a session = local overlay (if any) else server meta. */
   /** @param {import('../../types.js').Session} s */
-  const labelFor = (s) => {
-    const local = localLabels.get(s.session);
-    if (local != null) return local;
-    return metaFor(s).label;
-  };
+  const labelFor = (s) => pendingOr(s.session, metaFor(s).label);
 
-  /** `labelFor` for PER-TICK sig/filter computations — the shared shell.js
-   * helper bound to THIS view's rename overlay. Its doc carries the
-   * metaFor-equivalence rationale (value-identical to labelFor, no throwaway
-   * EffectiveMeta per session per tick). Render paths keep labelFor/metaFor. */
-  /** @param {import('../../types.js').Session} s */
-  const labelSig = (s) => labelSigFor(localLabels, s);
 
   /** Fire a transcript-search query when the local filter yields no results.
     * Results are cached per query string. */
@@ -190,35 +182,14 @@ export function build(ctx) {
   };
 
   /** Debounce fireSearch so per-keystroke syncRows calls don't each hit
-    * GET /api/search (a full-corpus transcript scan server-side). Mirrors the
-    * saveTimers debounce used for label persistence above. */
+    * GET /api/search (a full-corpus transcript scan server-side). Same debounce
+    * shape as the shared field saver, but single-slot: one query at a time. */
   const scheduleSearch = (/** @type {string} */ q) => {
     pendingSearch = q;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => fireSearch(q), 250);
   };
 
-  /** @param {string} sid @param {HTMLElement} statusEl */
-  const persistLabel = (sid, statusEl) => {
-    clearTimeout(saveTimers.get(sid));
-    saveTimers.set(sid, setTimeout(async () => {
-      saveTimers.delete(sid);
-      const label = localLabels.get(sid);
-      if (label == null) return;
-      statusEl.textContent = "saving…";
-      try {
-        await putJson(`/api/session-meta/${encodeURIComponent(sid)}`, { label });
-        if (statusEl.textContent === "saving…") {
-          statusEl.textContent = "saved";
-          setTimeout(() => { if (statusEl.textContent === "saved") statusEl.textContent = ""; }, 1400);
-        }
-      } catch (e) {
-        statusEl.textContent = `failed: ${errText(e)}`;
-      } finally {
-        afterMutate();
-      }
-    }, 600));
-  };
 
   /** Human label for a session id, for confirm() copy. */
   /** @param {import('../../types.js').Session} s */
@@ -268,9 +239,7 @@ export function build(ctx) {
     } finally {
       // Drop any optimistic label / pending save for the gone session so a
       // debounced PUT can't 404 after the folder's deleted.
-      clearTimeout(saveTimers.get(s.session));
-      saveTimers.delete(s.session);
-      localLabels.delete(s.session);
+      forgetSessionLabel(s.session);
       afterMutate();
     }
   };
@@ -320,9 +289,7 @@ export function build(ctx) {
       // into the target's Transcript view, yanking the operator out of the
       // Sessions list mid-management (absorbing several sessions in a row is
       // the normal flow). The row's "open" button is the explicit way in.
-      clearTimeout(saveTimers.get(source.session));
-      saveTimers.delete(source.session);
-      localLabels.delete(source.session);
+      forgetSessionLabel(source.session);
       afterMutate();
     }
   };
@@ -347,7 +314,7 @@ export function build(ctx) {
     // template fragment, which is drained when the row is appended to the DOM,
     // so re-`pick`ing it later (e.g. from the rename input handler) would throw
     // "template slot not found" — the bug that silently broke inline rename.
-    const label = labelFor(s) || fmtSessionLabel(s.session) || s.session;
+    const label = displayName(s);
     const labelEl = pick(node, "label");
     labelEl.textContent = label;
     const idEl = pick(node, "id");
@@ -370,12 +337,16 @@ export function build(ctx) {
     // ---- Rename (inline editable label) ----
     const nameInput = /** @type {HTMLInputElement} */ (pick(node, "rename"));
     const renameStatus = pick(node, "renameStatus");
+    // Stamp the cell with the session it reports on so a settling save can
+    // re-resolve the LIVE one (session-labels.js's statusCellsFor) instead of
+    // writing into this node, which is detached once the row is rebuilt or
+    // filtered out.
+    renameStatus.dataset.statusSid = s.session;
     nameInput.addEventListener("input", () => {
-      localLabels.set(s.session, nameInput.value);
+      editSessionLabel(s.session, nameInput.value);
       // keep the row's display label in step with the typed value (use the
       // captured element — `node` is drained once the row is in the DOM)
       labelEl.textContent = nameInput.value || fmtSessionLabel(s.session) || s.session;
-      persistLabel(s.session, renameStatus);
     });
 
     // ---- Open (focus + route into the session) ----
@@ -465,7 +436,7 @@ export function build(ctx) {
    */
   const fillRow = (row, s, archived, targetsSig) => {
     const rowSig = [
-      labelSig(s),
+      sessionLabelFor(s),
       s.session === focusedId ? 1 : 0,
       s.wav_count || 0,
       s.stripped ? 1 : 0,
@@ -535,8 +506,14 @@ export function build(ctx) {
    */
   const matches = (s) => {
     if (!filter) return true;
+    // A pending rename must never filter its own row away: reconcileList would
+    // remove() the node the operator is typing in, taking the focused input with
+    // it (ADR-0004 — fillRow's renameHeld guard covers field writes, not row
+    // removal). The row rejoins the filter's verdict once the save settles and
+    // the catch-up sweep retires the entry.
+    if (pendingSessionLabel(s.session) !== undefined) return true;
     const hay = [
-      labelSig(s), // per-tick filter — same value as labelFor, no metaFor allocation
+      sessionLabelFor(s), // per-tick filter — same value as labelFor, no metaFor allocation
       s.session,
       fmtSessionLabel(s.session),
     ].join(" ").toLowerCase();
@@ -684,7 +661,7 @@ export function build(ctx) {
     // already re-fill it); the options loop skips self when painting. The
     // key's has-targets bit is arithmetic, not an allocation: a non-current
     // row has targets iff some OTHER archived session exists.
-    const targetsSig = archived.map((t) => `${t.session}·${labelSig(t)}·${t.wav_count || 0}`).join(",");
+    const targetsSig = archived.map((t) => `${t.session}·${sessionLabelFor(t)}·${t.wav_count || 0}`).join(",");
     reconcileList(
       body,
       shown,
@@ -705,20 +682,6 @@ export function build(ctx) {
     // Newest first (shared shell.js comparator — same ordering as the spine picker).
     const sessions = [...(j.sessions || [])].sort(newestFirst);
     lastSessions = sessions;
-    // Drop a rename overlay once the server's label has caught up to it —
-    // for EVERY session, every tick (people.js's catch-up sweep). Without
-    // this the overlay was only dropped on delete/absorb, so labelSig kept
-    // preferring the stale typed value forever and a later rename made
-    // elsewhere (the spine card, another tab) never repainted this list.
-    // The debounce window is safe: an entry the operator just typed differs
-    // from the server label until its PUT lands (so it survives), and when
-    // it EQUALS the server label there is nothing left to save — persistLabel
-    // re-reads the overlay when the timer fires and no-ops once it's gone.
-    for (const s of sessions) {
-      if (localLabels.get(s.session) === (s.session_meta?.label || "")) {
-        localLabels.delete(s.session);
-      }
-    }
     const total = sessions.length;
     const transcribed = sessions.filter((s) => s.session_transcript).length;
 

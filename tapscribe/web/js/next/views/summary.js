@@ -33,7 +33,8 @@
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
-import { postJson, putJson, wireSave, sessionSummary, createLastGoodHold, errText } from "../../api.js";
+import { postJson, putJson, sessionSummary, createLastGoodHold, errText } from "../../api.js";
+import { wireSave } from "../../save-status.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar, sessionLabel } from "../shell.js";
 

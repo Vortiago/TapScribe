@@ -464,60 +464,7 @@ export function mutateButton(btn, mutate, { afterMutate, failMessage }) {
     .finally(() => { btn.disabled = false; afterMutate(); });
 }
 
-// Wire a save button to an async PUT with the shared status-badge lifecycle
-// (saving… / saved / failed, success badge clears after 1.5s). The generic
-// core under wireConfigSave; structured saves (the #84 summarizer-default
-// card, the Summary view's per-session override) call it with their own
-// `put` instead of the /api/config/{key} content shape.
-/**
- * `onSuccess` fires only on a successful put; `afterSettle` runs in the
- * finally (success OR failure) — for callers that re-poll either way (e.g.
- * the Capture view's per-session override saves).
- * @param {{
- *   btn: HTMLButtonElement,
- *   status: HTMLElement | null,
- *   put: () => Promise<unknown>,
- *   onSuccess?: (() => void) | undefined,
- *   afterSettle?: (() => void) | undefined,
- * }} opts
- */
-export function wireSave({ btn, status, put, onSuccess, afterSettle }) {
-  btn.addEventListener("click", async () => { // gate-allow: signal-listener — wireSave wires the button once when the caller builds it; the listener dies with the button
-    if (!status) return;
-    btn.disabled = true;
-    status.textContent = "saving…";
-    try {
-      await put();
-      status.textContent = "saved";
-      onSuccess?.();
-      setTimeout(() => { if (status.textContent === "saved") status.textContent = ""; }, 1500);
-    } catch (e) {
-      status.textContent = `failed: ${errText(e)}`;
-    } finally {
-      btn.disabled = false;
-      afterSettle?.();
-    }
-  });
-}
-
-// Wire a textarea + save button to PUT /api/config/{key}. Used by both the
-// "default config" card editors and the live-channel's init-prompt
-// expandable. The {content: textarea.value} specialisation of wireSave.
-/**
- * @param {{
- *   key: string,
- *   btn: HTMLButtonElement,
- *   textarea: HTMLTextAreaElement | HTMLInputElement | null,
- *   status: HTMLElement | null,
- *   onSuccess?: ((value: string) => void) | undefined,
- * }} opts
- */
-export function wireConfigSave({ key, btn, textarea, status, onSuccess }) {
-  if (!textarea) return;
-  wireSave({
-    btn,
-    status,
-    put: () => putJson(`/api/config/${key}`, { content: textarea.value }),
-    onSuccess: () => onSuccess?.(textarea.value),
-  });
-}
+// The save-status lifecycle (saving…/saved/failed) and the button + config-card
+// wirings that use it live in ./save-status.js — this module stays the fetch /
+// data layer, and that one imports errText + putJson from here (one direction,
+// no cycle). `mutateButton` above stays: it's alert()-based, with no status cell.
