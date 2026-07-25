@@ -127,10 +127,13 @@ from math import gcd
 
 data, sr = sf.read("input.ogg", dtype="float32", always_2d=True)
 mono = data.mean(axis=1)
-g = gcd(int(sr), 16000); resampled = resample_poly(mono, 16000 // g, int(sr) // g)
+g = gcd(int(sr), 16000)
+resampled = resample_poly(mono, 16000 // g, int(sr) // g)
 int16 = (resampled / max(abs(resampled).max(), 1e-9) * 0.9 * 32767).astype(np.int16)
 with wave.open("output.wav", "wb") as w:
-    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(16000)
     w.writeframes(int16.tobytes())
 ```
 
