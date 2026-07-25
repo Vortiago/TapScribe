@@ -630,6 +630,12 @@ declare global {
   var __TAPSCRIBE_SIG_AUDIT: boolean | undefined;
   // eslint-disable-next-line no-var
   var __TAPSCRIBE_SIG_DRIFT: Array<{ sig: string; expected: string; actual: string }> | undefined;
+  // Dev/test-only: how many drift probes actually RAN. Zero drift is only
+  // evidence when the probes fired at all — an audit test over empty views
+  // passes vacuously, which is how the keyed-list row probe was nominally
+  // covered but never exercised.
+  // eslint-disable-next-line no-var
+  var __TAPSCRIBE_SIG_PROBES: number | undefined;
   // Dev/test-only: how many times renderAll (next/main.js) has actually run —
   // an e2e test's evidence that idle 304 ticks stop re-running it (issue #245).
   // eslint-disable-next-line no-var

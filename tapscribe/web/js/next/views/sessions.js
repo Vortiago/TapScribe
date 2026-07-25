@@ -617,14 +617,6 @@ export function build(ctx) {
       return;
     }
 
-    if (counts) {
-      counts.textContent = filter ? `${shown.length} of ${sessions.length}` : `${sessions.length} total`;
-    }
-    if (ph) {
-      ph.hidden = !!shown.length;
-      ph.textContent = "No sessions yet — start recording to see them here.";
-    }
-
     // The search branch above raw-swaps keyless nodes (search-hit rows,
     // snippets, the no-match placeholder) into the body. renderList's reconcile
     // only tracks and removes nodes it created itself, so returning from search
@@ -654,16 +646,31 @@ export function build(ctx) {
     // row has targets iff some OTHER archived session exists.
     const targetsSig = archived.map((t) => `${t.session}·${sessionLabelFor(t)}·${t.wav_count || 0}`).join(",");
     // No list-level `sig` — see rowSig's docstring: this list has no cheap
-    // aggregate stamp, so it gates per row instead. `auditRows` is ON because a
-    // row's entire content comes from sessionRow + fillRow, making a probe row a
-    // sound comparison.
-    renderList(body, shown, {
+    // aggregate stamp, so it gates per row instead. The row probe stays on (the
+    // seam's default) — a row's entire content comes from sessionRow + fillRow,
+    // so a probe row is a sound comparison.
+    const rendered = renderList(body, shown, {
       key: (s) => `${s.session}·c${s.is_current ? 1 : 0}·w${(s.wav_count || 0) > 0 ? 1 : 0}·t${!s.is_current && archived.length > 1 ? 1 : 0}`,
       create: (s) => /** @type {HTMLElement} */ (sessionRow(s, archived).firstElementChild),
       update: (row, s) => fillRow(/** @type {HTMLElement} */ (row), s, archived),
       itemSig: (s) => rowSig(s, targetsSig),
-      auditRows: true,
     });
+
+    // The placeholder and the counts describe the ROWS, so they only move when
+    // the rows did — gated on renderList's return, like both WAV lists. Written
+    // unconditionally (and above the reconcile) they narrated a list that wasn't
+    // there: delete the only session while its rename input is focused and the
+    // removal hold keeps the row, but the header said "0 total" and the
+    // placeholder "No sessions yet" directly above it.
+    if (rendered) {
+      if (counts) {
+        counts.textContent = filter ? `${shown.length} of ${sessions.length}` : `${sessions.length} total`;
+      }
+      if (ph) {
+        ph.hidden = !!shown.length;
+        ph.textContent = "No sessions yet — start recording to see them here.";
+      }
+    }
   };
 
   // ---- Per-tick update ------------------------------------------------------

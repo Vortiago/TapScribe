@@ -86,6 +86,17 @@ export function build(ctx) {
    * the rows host's children belong to renderList alone (recordings.html). */
   const wavEmpty = /** @type {HTMLElement} */ (pick(frag, "wavEmpty"));
 
+  /** Invalidate BOTH of this view's gates and repaint. One owner for "what a
+   * mutate invalidates", so a new gate is added here rather than at five call
+   * sites. Used where the server-side `files_sig` may still lag the mutation
+   * (a strip, a clear, a delete, a landed listing fetch) — never where the
+   * changed value is already a term in the list's `sig`. */
+  const repaintAfterMutate = () => {
+    lastChromeSig = " ";
+    markListStale(wavList);
+    afterMutate();
+  };
+
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
   let session = null;
@@ -107,9 +118,7 @@ export function build(ctx) {
    * in-flight dedupe and the cold-vs-stale sentinel (next/session-files.js). */
   const filesSource = createFilesSource({
     onLoaded: () => {
-      lastChromeSig = " ";
-      markListStale(wavList);
-      afterMutate();
+      repaintAfterMutate();
     },
   });
   /** Last strip-silence response stats, per session id (overlay on s.stripped). */
@@ -376,9 +385,7 @@ export function build(ctx) {
       stripBtn.disabled = false;
       // Force the next tick to repaint chrome + reconcile the list with the new
       // stripped clips (the new files_sig will refetch the listing).
-      lastChromeSig = " ";
-      markListStale(wavList);
-      afterMutate();
+      repaintAfterMutate();
     }
   });
 
@@ -391,9 +398,7 @@ export function build(ctx) {
     lastStrip.delete(sid);
     dropPreview();
     if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
-    lastChromeSig = " ";
-    markListStale(wavList);
-    afterMutate();
+    repaintAfterMutate();
   });
 
   // ---- Per-WAV transcript expand (native <details>, lazy body) --------------
@@ -532,9 +537,7 @@ export function build(ctx) {
     // The next /api/state poll carries a new files_sig (the digest drops the
     // deleted WAV), so currentFiles refetches and the reconcile removes the
     // row. Force both gates so that lands on the first tick.
-    lastChromeSig = " ";
-    markListStale(wavList);
-    afterMutate();
+    repaintAfterMutate();
   };
 
   /** Trigger a WAV download WITHOUT toggling the row's <details>: a plain
@@ -867,20 +870,23 @@ export function build(ctx) {
     // Rows carry content-visibility
     // (next.css .wavrow) so off-screen layout/paint is skipped either way.
     //
-    // `auditRows` stays OFF here: these rows are <details> whose bodies
-    // lazy-load a transcript on expand, so a fresh probe row legitimately
-    // differs from an expanded one and would report drift that isn't there.
+    // `auditRows: false` — the one opt-out: these rows are <details> whose bodies
+    // lazy-load a transcript on expand, so a fresh probe row legitimately differs
+    // from an expanded one and would report drift that isn't there.
     const state = listState({ hasSession: !!sess, loading: filesLoading, count: files.length });
     const selName = sel?.name || "";
     // A THUNK, not an array: buildRowModels walks every file (plus every stripped
     // region clip), and rule 1 skips before the thunk runs — so a quiet tick on a
-    // thousand-WAV session allocates nothing at all.
-    const rendered = renderList(wavList, () => (state === "rows" ? buildRowModels(files, src, isCurrent) : []), {
+    // thousand-WAV session allocates nothing at all. No `state === "rows"` guard
+    // needed: `state` is derived from `files.length` two lines up, so every
+    // non-rows state already has an empty `files` and an empty row set.
+    const rendered = renderList(wavList, () => buildRowModels(files, src, isCurrent), {
       key: rowKey,
       create: buildRow,
       update: (node, m) => { applyRowSelection(/** @type {HTMLElement} */ (node), m, selName); },
       itemSig: (m) => (m.kind === "clip" ? "" : m.file.name === selName ? "sel" : ""),
       sig: `${sid}§${src}§${filesSig}§${state}§${selName}`,
+      auditRows: false,
     });
     if (rendered) {
       wavEmpty.hidden = state === "rows";

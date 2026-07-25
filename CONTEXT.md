@@ -907,6 +907,15 @@ signature — without it a stale pending edit masks a later change made
 elsewhere forever. Deleting a pending edit is also the ONLY way to
 cancel its save: the saver re-reads the overlay when its timer fires.
 
+A pending edit does **not** pin its row into a filtered list. The row it lives in
+survives a reconcile while its input holds FOCUS — that is the [keyed
+list](#region--keyed-list)'s removal hold — but once focus leaves, a row that no
+longer matches the filter goes, even with the PUT still in flight. Nothing is
+lost: the saver reads the overlay, not the DOM, so the save completes and the
+sweep retires the entry either way. (An earlier version of the Sessions filter
+kept such a row explicitly; that made a filter predicate depend on save state to
+do a job the hold now does by focus.)
+
 Every save that reports itself — a field saver's, and a save BUTTON's —
 narrates into **status cells** through the one **save-status lifecycle**
 (`web/js/save-status.js`): `saving…`, then `saved` (auto-clearing) or

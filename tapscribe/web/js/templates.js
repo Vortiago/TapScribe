@@ -400,6 +400,7 @@ function _focusedRow(host) {
 function _auditListSigCoversRows(host, items, opts, sig) {
   const expected = items.map((it) => `${opts.key(it)}§${opts.itemSig ? opts.itemSig(it) : ""}`);
   const actual = [...host.children].map((n) => `${_rowKey.get(n) ?? "?"}§${_itemSig.get(n) ?? ""}`);
+  globalThis.__TAPSCRIBE_SIG_PROBES = (globalThis.__TAPSCRIBE_SIG_PROBES || 0) + 1;
   if (expected.length === actual.length && expected.every((s, i) => s === actual[i])) return;
   // Joined, not arrays: __TAPSCRIBE_SIG_DRIFT is one record shape shared with
   // renderRegion's probe (types.d.ts), and one row per line reads fine.
@@ -418,16 +419,19 @@ function _auditListSigCoversRows(host, items, opts, sig) {
  * Row-level drift probe: rebuild the row from scratch and diff it against the
  * live one, so an `update` that writes a value missing from `itemSig` is caught.
  *
- * OPT-IN (`auditRows`) because it is only SOUND for rows nothing mutates out of
- * band. The Recordings WAV rows are `<details>` whose bodies lazy-load a
- * transcript on expand, so a fresh probe legitimately differs from an expanded
- * row and would report drift that isn't there. Rows whose entire content comes
- * from `create` + `update` (the Sessions rows, the Transcript picker buttons)
- * can turn it on. Like renderRegion's probe, this re-runs `create`, so a
- * `create` with side effects pays them once per audited skip — dev/test only.
+ * ON by default; a caller OPTS OUT with `auditRows: false` and a reason, the same
+ * shape as the gate-allow suppressions — so a new keyed list is audited unless
+ * its author says why it can't be, rather than unaudited unless they know the
+ * flag exists. It is only SOUND for rows nothing mutates out of band: the
+ * Recordings WAV rows are `<details>` whose bodies lazy-load a transcript on
+ * expand, so a fresh probe legitimately differs from an expanded row and would
+ * report drift that isn't there. Like renderRegion's probe, this re-runs
+ * `create`, so a `create` with side effects pays them once per audited skip —
+ * dev/test only.
  * @param {Element} node @param {any} item @param {any} opts @param {string} sig
  */
 function _auditItemSigCoversRow(node, item, opts, sig) {
+  globalThis.__TAPSCRIBE_SIG_PROBES = (globalThis.__TAPSCRIBE_SIG_PROBES || 0) + 1;
   const probe = opts.create(item);
   if (opts.update) opts.update(probe, item);
   if (probe.innerHTML === node.innerHTML) return;
@@ -464,10 +468,14 @@ function _auditItemSigCoversRow(node, item, opts, sig) {
  *  5. Advance `sig` only if no row was held.
  *
  * A held render lands via the tick-retry (`markDeferredRender` →
- * `consumeDeferredRender` in next/main.js), NOT a self-flush: the rows come from
- * `items`, which is derived from live state, so replaying a captured list after
- * blur could paint data older than the last poll. Re-deriving on the next tick
- * cannot.
+ * `consumeDeferredRender` in next/main.js), NOT the self-flush renderRegion uses.
+ * The honest trade-off: renderRegion captures a `build` CLOSURE, which re-reads
+ * view state whenever it is finally invoked, so flushing it on focusout is safe
+ * by construction. A list is driven by `items` — materialized data, and even as a
+ * thunk it closes over one tick's locals — so a flush would need the view to
+ * re-derive anyway. Going through the tick does that with no second mechanism,
+ * at a cost of one poll interval; `interactionHeld()` keeps the pacer fast while
+ * the hold lasts, so that interval is the fast one.
  *
  * `create` builds a row's shell and `update` fills it; the seam runs `update` on
  * a freshly created row too, so a `create` need not call its own filler.
@@ -488,7 +496,8 @@ function _auditItemSigCoversRow(node, item, opts, sig) {
  *   itemSig?: (item: T) => string,
  *   sig?: string,
  *   auditRows?: boolean,
- * }} opts
+ * }} opts — `auditRows: false` opts THIS list's rows out of the dev-only row
+ *   probe; say why at the call site.
  * @returns {boolean} whether the rows were reconciled on this call — false for
  *   every skip and every deferral, so a caller can gate sibling work (a
  *   placeholder's visibility) on the render having actually happened.
@@ -556,7 +565,7 @@ export function renderList(host, items, opts) {
       if (itemSig) {
         const s = itemSig(item);
         if (_itemSig.get(node) === s) {
-          if (globalThis.__TAPSCRIBE_SIG_AUDIT && opts.auditRows) _auditItemSigCoversRow(node, item, opts, s);
+          if (globalThis.__TAPSCRIBE_SIG_AUDIT && opts.auditRows !== false) _auditItemSigCoversRow(node, item, opts, s);
           return;
         }
         _itemSig.set(node, s);

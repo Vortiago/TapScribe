@@ -5516,10 +5516,27 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
     skipped rebuild re-invokes build() into a detached probe and pushes any
     mismatch to globalThis.__TAPSCRIBE_SIG_DRIFT.
 
+    `renderList` (keyed lists) records into the same array from two probes of its
+    own — the list-level one (do the rows on screen still match what `items`
+    would produce?) and the per-row one (does `update` write anything `itemSig`
+    doesn't name?).
+
     This test turns the audit on, exercises real views across several poll
     cycles, and asserts zero drift was recorded: any future sig-drift will
-    trip it as soon as a region's build output changes without its sig changing."""
+    trip it as soon as a region's build output changes without its sig changing.
+
+    It ALSO asserts the probes actually FIRED. Zero drift over empty views is
+    vacuous, and that is exactly what this test used to be for the keyed lists:
+    it seeded no sessions, so the Sessions rows and the Transcript picker had no
+    rows to probe and the row audit never ran once. The seeding below and the
+    `__TAPSCRIBE_SIG_PROBES > 0` assertion are what make "no drift" mean
+    something."""
+    rec = running_recorder.recorder
     base = running_recorder.base_url
+    # Two sessions with WAVs: gives the Sessions view real rows (and a non-empty
+    # absorb-target set) and the Recordings/Transcript views a real WAV list.
+    for sid in ("2025-03-01T09-00-00Z", "2025-03-02T09-00-00Z"):
+        _seed_multi_wav_session(rec, sid, n=2)
 
     async with playwright_session() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -5536,19 +5553,35 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
             # Turn audit on AFTER the initial render so the first paint (no
             # prior sig remembered) doesn't produce false positives.
             await page.evaluate(
-                "() => { window.__TAPSCRIBE_SIG_AUDIT = true; window.__TAPSCRIBE_SIG_DRIFT = []; }"
+                "() => { window.__TAPSCRIBE_SIG_AUDIT = true; window.__TAPSCRIBE_SIG_DRIFT = []; "
+                "window.__TAPSCRIBE_SIG_PROBES = 0; }"
             )
 
-            # Drive through each view and let >1 poll cross per view so any
-            # sig-gated region would get skipped (and re-checked by the audit).
+            # Drive through each view TWICE, because the audit only probes a
+            # render that was SKIPPED, and an idle tab produces none: main.js's
+            # tick() returns before renderAll when /api/state 304s unchanged, so
+            # waiting out poll periods on a quiet tab re-renders nothing and the
+            # probes never run (which is how this test passed vacuously). gotoView
+            # calls renderAll synchronously from the cached state, so a second
+            # visit re-renders with IDENTICAL state — every sig-gated region and
+            # keyed list skips, and each skip is what gets probed. A poll period
+            # is still crossed for realism.
             for view in _NEXT_VIEWS:
-                await page.evaluate("(v) => window.gotoView(v)", view)
-                await page.wait_for_function(
-                    "() => document.querySelector('#viewRoot')?.childElementCount > 0",
-                    timeout=5000,
-                )
-                # Cross at least one poll period (500ms in main.js).
+                for _ in range(2):
+                    await page.evaluate("(v) => window.gotoView(v)", view)
+                    await page.wait_for_function(
+                        "() => document.querySelector('#viewRoot')?.childElementCount > 0",
+                        timeout=5000,
+                    )
                 await page.wait_for_timeout(_NEXT_POLL_CROSS_MS)
+
+            # The probes must have RUN, or "no drift" says nothing at all.
+            probes = await page.evaluate("() => window.__TAPSCRIBE_SIG_PROBES || 0")
+            assert probes > 0, (
+                "the sig audit recorded no drift but never probed anything — the views were "
+                "empty, so this assertion was vacuous. Seed rows the audited regions and keyed "
+                "lists actually render."
+            )
 
             # Assert no drift was recorded across any view.
             drift = await page.evaluate("() => (window.__TAPSCRIBE_SIG_DRIFT || []).length")

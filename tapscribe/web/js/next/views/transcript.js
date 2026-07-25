@@ -114,6 +114,14 @@ export function build(ctx) {
   /** The empty/loading placeholder — a hidden-toggled SIBLING of `wavList`, so
    * the rows host's children belong to renderList alone (views.html). */
   const wavEmpty = /** @type {HTMLElement} */ (pick(frag, "wavEmpty"));
+
+  /** Invalidate BOTH of this view's gates and repaint — see recordings.js's twin.
+   * Only for mutations the picker's `sig` doesn't already name. */
+  const repaintAfterMutate = () => {
+    lastCtlSig = " ";
+    markListStale(wavList);
+    afterMutate();
+  };
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
   const jobCount = pick(frag, "jobCount");
@@ -208,9 +216,7 @@ export function build(ctx) {
    * in-flight dedupe and the cold-vs-stale sentinel (next/session-files.js). */
   const filesSource = createFilesSource({
     onLoaded: () => {
-      lastCtlSig = " ";
-      markListStale(wavList);
-      afterMutate();
+      repaintAfterMutate();
     },
   });
 
@@ -759,10 +765,10 @@ export function build(ctx) {
     // name is therefore a term in BOTH signatures — the list sig so a click gets
     // past the skip at all, the item sig so only the two rows that flipped are
     // WRITTEN to rather than every row (the reconcile walk itself is still
-    // O(rows), but per click, never per tick — issue #213). `auditRows` is ON: these rows
-    // are plain buttons whose whole content comes from create + update, so a
-    // probe row is a sound comparison (unlike the Recordings <details> rows,
-    // whose bodies lazy-load).
+    // O(rows), but per click, never per tick — issue #213). The row probe stays
+    // on (the seam's default): these rows are plain buttons whose whole content
+    // comes from create + update, so a probe row is a sound comparison — unlike
+    // the Recordings <details> rows, whose bodies lazy-load.
     const inflightSig = [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(",");
     const pickState = listState({ hasSession: !!sess, loading: filesLoading, count: srcFiles.length });
     const pickSelName = sel?.name || "";
@@ -771,14 +777,14 @@ export function build(ctx) {
       // A THUNK — see recordings.js. In "original" mode sourceFiles() returns
       // currentFiles by reference, so this map is the ONLY per-tick O(rows)
       // allocation on the path; behind the gate it costs nothing on a quiet tick.
-      () => (pickState === "rows" ? srcFiles.map((f) => ({ file: f, src })) : []),
+      // No `pickState === "rows"` guard: pickState derives from srcFiles.length.
+      () => srcFiles.map((f) => ({ file: f, src })),
       {
         key: pickKey,
         create: buildPickRow,
         update: (node, m) => { node.classList.toggle("is-sel", m.file.name === pickSelName); },
         itemSig: (m) => (m.file.name === pickSelName ? "sel" : ""),
         sig: [pickState, sid, src, filesSig, inflightSig, pickSelName].join("§"),
-        auditRows: true,
       },
     );
     if (pickRendered) {
