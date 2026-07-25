@@ -3,23 +3,32 @@
 // needs but that belongs to neither the render seam (templates.js) nor the
 // data layer (api.js).
 
+import { cellStatus } from "../save-status.js";
+
 /**
  * Build a transient status flasher bound to `el`: shows `msg`, then clears it
- * after `ms` unless a newer message superseded it in the meantime (the
- * textContent equality check). Each flasher owns its own timer slot, so two
- * status elements never clobber each other's pending clears.
+ * after `ms` unless a newer message superseded it in the meantime.
+ *
+ * A specialisation of the shared save-status target (`replace(msg, "")` is the
+ * "unless superseded" rule), but it still owns a timer SLOT: the common case is
+ * re-flashing the SAME string (clicking Copy twice), and there the text guard
+ * can't tell the old message from the new one — the first timer would blank the
+ * second flash early. Cancelling the pending clear gives every message its full
+ * `ms`. Unlike a save's status (`runSaveWithStatus`), EVERY message here clears
+ * — these are copy/reveal confirmations, not save outcomes to be read.
  * @param {HTMLElement} el
  * @param {number} [ms]
  * @returns {(msg: string) => void}
  */
 export function makeStatusFlasher(el, ms = 1500) {
+  const target = cellStatus(el);
   /** @type {ReturnType<typeof setTimeout> | null} */
   let timer = null;
   return (msg) => {
     if (timer != null) clearTimeout(timer);
-    el.textContent = msg;
+    target.set(msg);
     timer = setTimeout(() => {
-      if (el.textContent === msg) el.textContent = "";
+      target.replace(msg, "");
       timer = null;
     }, ms);
   };

@@ -132,6 +132,31 @@
   mutated via a per-row sig with focused-control guards) are the pattern
   to copy — `sessions.js`'s old whole-list `listSig` swap was the last
   offender.
+- **Every save that shows a status** goes through `web/js/save-status.js`
+  (`runSaveWithStatus`): `saving…` → a GUARDED promotion to `saved` (so a save
+  settling late can't stomp a newer message) → auto-clear, or a `failed: …`
+  that never auto-clears. `statusTarget(resolve)` writes the cells, re-resolved
+  on every write because the card holding them is routinely rebuilt mid-save
+  (a captured node is detached by then, making a `failed: …` invisible); the
+  save BUTTONS (`wireSave` / `wireConfigSave`, which live there too — api.js
+  stays the fetch layer) and `next/ui.js`'s `makeStatusFlasher` are all
+  specialisations of it. #355 was four hand-rolled copies of this, already
+  drifted on badge duration and guardedness; add a fifth trigger by writing a
+  wrapper over `runSaveWithStatus`, never a new lifecycle.
+- **Optimistic inline editing** on `/next` is `web/js/next/field-saver.js`'s
+  two halves: `createOverlay({idOf, baselineFor})` holds the pending edits and
+  owns the per-tick **catch-up sweep** (retire an entry once the server agrees
+  — without it a stranded edit masks a later change made elsewhere forever),
+  and `createFieldSaver({overlay, put, afterSave})` does one debounced PUT per
+  id through the lifecycle above. `overlay.forget(id)` is the ONLY way to
+  cancel a pending save (the saver re-reads the overlay at timer-fire), so
+  there is deliberately no `cancel`. Both are generic: a new editable field
+  BINDS them in one owner module rather than re-rolling either.
+  `next/session-labels.js` is the reference (pending edit + one saver + the
+  label read + the sweep; the Sessions list and the spine's rename card import
+  verbs from it, never its Map), and its sweep runs once per tick from
+  `main.js`'s `renderAll`, not per view. All DOM-free and unit-tested under
+  `node --test` with `mock.timers`.
 
 ## Runtime deps the install picker does NOT cover
 

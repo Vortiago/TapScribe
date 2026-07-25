@@ -862,6 +862,37 @@ alternatives (DOM-diffing, capture-and-restore, pausing the poll) are
 ADR-0004. Say "this region needs the interaction hold," not ad-hoc
 descriptions of focus/selection guards.
 
+## Pending edit
+
+An inline edit the operator has typed but the server has not confirmed:
+held in an **optimistic overlay** (id → value) so the field, and every
+other region showing the same value, reads the typed text immediately
+instead of snapping back to the server's on the next poll tick. Distinct
+from the render canon's "overlay" (a popover/`<dialog>`) — say "pending
+edit" or "optimistic overlay", never bare "overlay".
+
+A pending edit is saved by a **field saver**
+(`web/js/next/field-saver.js`): one debounced PUT per id. It is cleared
+by the **catch-up sweep**, which drops every pending edit the server has
+caught up to, once per tick, before anything computes a render
+signature — without it a stale pending edit masks a later change made
+elsewhere forever. Deleting a pending edit is also the ONLY way to
+cancel its save: the saver re-reads the overlay when its timer fires.
+
+Every save that reports itself — a field saver's, and a save BUTTON's —
+narrates into **status cells** through the one **save-status lifecycle**
+(`web/js/save-status.js`): `saving…`, then `saved` (auto-clearing) or
+`failed: <reason>` (which stays until superseded, so the operator can
+read it). Say "wire it through the save-status lifecycle", not
+"set the status text".
+
+Each editable resource has ONE owner module binding those pieces
+together — `next/session-labels.js` for session labels (shared by the
+Sessions list and the spine's rename card, which PUT the same endpoint);
+People names are owned by `people.js`, whose editor is the only one.
+Say "this needs a field saver" / "the catch-up sweep dropped it", and add
+a new editor by writing an owner, not another copy of the machine (#355).
+
 ## Per-WAV transcript cache
 
 Each transcribed WAV gets one or more cached transcripts stored next to

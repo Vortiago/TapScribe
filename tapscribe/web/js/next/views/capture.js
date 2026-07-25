@@ -17,7 +17,8 @@
 // stream survives scroll across ticks.
 
 import { tpl, pick } from "../../templates.js";
-import { putJson, del, wireSave } from "../../api.js";
+import { putJson, del } from "../../api.js";
+import { wireSave } from "../../save-status.js";
 import { header, strong, inline, wireRecPill, paintRecPill, sessionLabel } from "../shell.js";
 import { setDimmable } from "../ui.js";
 import * as liveFeed from "../../components/live-feed.js";
@@ -142,7 +143,7 @@ export function build(ctx) {
       title: "Capture",
       sub: {
         // sessionLabel reads session_meta.label raw (== metaFor(sess).label —
-        // the shell.js labelSigFor doc owns that equivalence), so the per-tick
+        // session-labels.js's serverSessionLabel owns that equivalence), so the per-tick
         // sig allocates no throwaway EffectiveMeta and mirrors exactly what
         // build() renders below.
         sig: `${recEnabled ? 1 : 0}§${sess ? sessionLabel(sess) : ""}`,

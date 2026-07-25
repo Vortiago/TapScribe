@@ -21,7 +21,8 @@
 // change).
 
 import { tpl, pick, renderRegion } from "../../templates.js";
-import { getJson, putJson, wireConfigSave, wireSave, errText, getBridgeCatalog } from "../../api.js";
+import { getJson, putJson, errText, getBridgeCatalog } from "../../api.js";
+import { wireConfigSave, wireSave } from "../../save-status.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 import { header } from "../shell.js";

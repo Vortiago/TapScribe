@@ -25,8 +25,9 @@
 import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside, selectionInside } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import {
-  postJson, putJson, sessionTranscript, loadSessionFiles, wireSave, createLastGoodHold, errText,
+  postJson, putJson, sessionTranscript, loadSessionFiles, createLastGoodHold, errText,
 } from "../../api.js";
+import { wireSave } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
