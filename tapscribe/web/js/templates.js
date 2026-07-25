@@ -28,13 +28,21 @@
 //     summaries.
 
 export { loadTemplates, tpl, slot, pick, mount, loadCSS, every, withPending } from "./lib/templates.js";
-export { reconcileList, withTransition } from "./lib/render.js";
+export { withTransition } from "./lib/render.js";
 export { wireTheme, wireErrorBar } from "./lib/chrome.js";
 
+// Canon `reconcileList` is deliberately NOT re-exported: `renderList` below is
+// the only door to it, so a keyed list cannot be added un-held (the same
+// gated-by-construction stance ADR-0008 takes for the tap-bearer scheme). This
+// module is the sole importer of ./lib/render.js, so the raw reconcile is
+// genuinely unreachable from a view rather than merely discouraged. If a
+// user-initiated reorder ever needs the ungated call, re-export it then — with
+// a note saying why it isn't a polled render.
 import {
   renderRegion as canonRenderRegion,
   markRegionStale as canonMarkRegionStale,
   selectionInside as canonSelectionInside,
+  reconcileList as canonReconcileList,
 } from "./lib/render.js";
 
 // A per-tick render can be DEFERRED (skipped without advancing its signature
@@ -317,6 +325,226 @@ export function renderRegion(host, build, opts = {}) {
 export function markRegionStale(host) {
   canonMarkRegionStale(host);
   _auditSig.delete(host);
+}
+
+// ── Keyed lists (the reconcile dual of renderRegion) ────────────────────────
+//
+// `renderRegion` holds a region that is SWAPPED whole. A **keyed list** is the
+// other shape: rows keyed and updated in place, never swapped (canon
+// `reconcileList`). Both need the interaction hold, and before this seam existed
+// all three keyed lists — the Recordings WAV list, the Transcript per-WAV
+// picker, and the Sessions rows — hand-rolled it, each with its own copy of the
+// same rules and its own `gate-allow` suppression. `sessions.js` got one of them
+// wrong: it advanced a row's signature ABOVE the focus guards, which stranded
+// the skipped update forever (the next tick recomputed the identical sig and
+// early-returned), so a focused row kept a stale label and a later keystroke
+// persisted the stale value back over an external rename.
+//
+// TWO OPTIONAL GATES, because a call site uses whichever change detector it
+// actually has:
+//   - `sig` — a list-level stamp. Pays only when a CHEAP aggregate already
+//     exists: the WAV lists have `files_sig` (computed server-side, one string
+//     in /api/state), so a quiet tick skips the reconcile walk entirely.
+//   - `itemSig` — a per-row stamp. What you use when no aggregate exists:
+//     `sessions.js`'s rows each change independently (label, bytes, tx status,
+//     progress) and no server digest covers them, so BUILDING a list-level sig
+//     would itself be the O(rows) walk the gate is meant to skip.
+// Neither is required; a call site may use one, both, or neither.
+
+/** Per-host remembered LIST signature. Advanced ONLY when the reconcile ran and
+ * no row was held — ADR-0004: a skip must never advance a gate.
+ * @type {WeakMap<Element, string>} */
+const _listSig = new WeakMap();
+
+/** Per-row remembered item signature and reconcile key, stamped by the seam on
+ * every node it creates. Kept off the DOM rather than in `data-` attributes so a
+ * row's own markup (and anything asserting on it) stays untouched.
+ * @type {WeakMap<Element, string>} */
+const _itemSig = new WeakMap();
+/** @type {WeakMap<Element, string>} */
+const _rowKey = new WeakMap();
+
+/** The DIRECT CHILD of `host` containing the focused interactive control, or
+ * null. Rows are host children, so this is "which row is the operator in".
+ * @param {Element} host @returns {Element | null} */
+function _focusedRow(host) {
+  const active = document.activeElement;
+  if (!active || active === document.body) return null;
+  if (!host.contains(active) || !_isInteractive(active)) return null;
+  let row = /** @type {Element} */ (active);
+  while (row.parentElement && row.parentElement !== host) row = row.parentElement;
+  return row.parentElement === host ? row : null;
+}
+
+/**
+ * List-level drift probe. On a `sig` SKIP the rows on screen must already be
+ * what `items` would produce, so compare row COUNT plus each row's remembered
+ * key and item signature IN ORDER — no detached list build needed. A mismatch
+ * means `sig` is missing a value the list reads, so the whole list silently goes
+ * stale. Catches the case a row probe cannot: a term missing from `sig` itself.
+ * @param {Element} host @param {any[]} items @param {any} opts @param {string} sig
+ */
+function _auditListSigCoversRows(host, items, opts, sig) {
+  const expected = items.map((it) => `${String(opts.key(it))}§${opts.itemSig ? opts.itemSig(it) : ""}`);
+  const actual = [...host.children].map((n) => `${_rowKey.get(n) ?? "?"}§${_itemSig.get(n) ?? ""}`);
+  if (expected.length === actual.length && expected.every((s, i) => s === actual[i])) return;
+  // Joined, not arrays: __TAPSCRIBE_SIG_DRIFT is one record shape shared with
+  // renderRegion's probe (types.d.ts), and one row per line reads fine.
+  (globalThis.__TAPSCRIBE_SIG_DRIFT ||= []).push({
+    sig,
+    expected: expected.join("\n"),
+    actual: actual.join("\n"),
+  });
+  console.error(
+    `renderList sig drift: the row set changed but sig ${JSON.stringify(sig)} did not — the list ` +
+      `reads a value missing from its sig, so it will silently go stale. Add that value to the sig.`,
+  );
+}
+
+/**
+ * Row-level drift probe: rebuild the row from scratch and diff it against the
+ * live one, so an `update` that writes a value missing from `itemSig` is caught.
+ *
+ * OPT-IN (`auditRows`) because it is only SOUND for rows nothing mutates out of
+ * band. The Recordings WAV rows are `<details>` whose bodies lazy-load a
+ * transcript on expand, so a fresh probe legitimately differs from an expanded
+ * row and would report drift that isn't there. Rows whose entire content comes
+ * from `create` + `update` (the Sessions rows, the Transcript picker buttons)
+ * can turn it on. Like renderRegion's probe, this re-runs `create`, so a
+ * `create` with side effects pays them once per audited skip — dev/test only.
+ * @param {Element} node @param {any} item @param {any} opts @param {string} sig
+ */
+function _auditItemSigCoversRow(node, item, opts, sig) {
+  const probe = opts.create(item);
+  if (opts.update) opts.update(probe, item);
+  if (probe.innerHTML === node.innerHTML) return;
+  (globalThis.__TAPSCRIBE_SIG_DRIFT ||= []).push({ sig, expected: probe.innerHTML, actual: node.innerHTML });
+  console.error(
+    `renderList item sig drift: row output changed but itemSig ${JSON.stringify(sig)} did not — ` +
+      `update() reads a value missing from itemSig, so this row will silently go stale.`,
+  );
+}
+
+/**
+ * Render a **keyed list** into `host` under the interaction hold. The keyed dual
+ * of `renderRegion`: rows are created once, matched by key, and updated in
+ * place; the host's children belong to this seam alone, so a placeholder must be
+ * a SIBLING of `host`, never swapped into it (see recordings.html / views.html /
+ * sessions.html).
+ *
+ * The rules, in order — every one of them a rule a call site used to re-derive:
+ *  1. `sig` unchanged → return without touching the DOM.
+ *  2. A text selection inside or straddling `host` → defer (mark the tick-retry
+ *     flag) and leave `sig` UNADVANCED, so the held render keeps showing the
+ *     previous state intact instead of half-applying.
+ *  3. A row holding a focused control whose key is absent from `items` → defer
+ *     the whole render. Canon `reconcileList` removes every key not present,
+ *     which would take the focused control with it — and CONTEXT.md defines the
+ *     interaction hold as never destroying interaction state, so removal is the
+ *     case it most has to cover.
+ *  4. Reconcile. Per row: a focused control inside the row holds that row's
+ *     `update` (defer, and do NOT stamp its `itemSig`); otherwise an unchanged
+ *     `itemSig` skips it; otherwise update and stamp. The hold is deliberately
+ *     COARSER than a per-control guard — one focused control freezes its whole
+ *     row for a tick — which is consistent with renderRegion holding a whole
+ *     region, and means a control added to a row later is covered for free.
+ *  5. Advance `sig` only if no row was held.
+ *
+ * A held render lands via the tick-retry (`markDeferredRender` →
+ * `consumeDeferredRender` in next/main.js), NOT a self-flush: the rows come from
+ * `items`, which is derived from live state, so replaying a captured list after
+ * blur could paint data older than the last poll. Re-deriving on the next tick
+ * cannot.
+ *
+ * `create` builds a row's shell and `update` fills it; the seam runs `update` on
+ * a freshly created row too, so a `create` need not call its own filler.
+ *
+ * @template T
+ * @param {Element} host
+ * @param {T[]} items
+ * @param {{
+ *   key: (item: T) => string,
+ *   create: (item: T) => Element,
+ *   update?: (node: Element, item: T) => void,
+ *   itemSig?: (item: T) => string,
+ *   sig?: string,
+ *   auditRows?: boolean,
+ * }} opts
+ * @returns {boolean} whether the rows were reconciled on this call — false for
+ *   every skip and every deferral, so a caller can gate sibling work (a
+ *   placeholder's visibility) on the render having actually happened.
+ */
+export function renderList(host, items, opts) {
+  const { key, create, update, itemSig, sig } = opts;
+
+  if (sig !== undefined && _listSig.get(host) === sig) {
+    if (globalThis.__TAPSCRIBE_SIG_AUDIT && !_holdInside(host)) {
+      _auditListSigCoversRows(host, items, opts, sig);
+    }
+    return false;
+  }
+
+  if (deferIfSelectionInside(host)) return false;
+
+  // Removal hold (rule 3). Only costs anything when a row actually holds focus.
+  const focused = _focusedRow(host);
+  if (focused !== undefined && focused !== null) {
+    const k = _rowKey.get(focused);
+    if (k !== undefined && !items.some((it) => String(key(it)) === k)) {
+      markDeferredRender();
+      return false;
+    }
+  }
+
+  let held = false;
+  canonReconcileList(
+    host,
+    items,
+    key,
+    (item) => {
+      const node = create(item);
+      _rowKey.set(node, String(key(item)));
+      if (update) update(node, item);
+      if (itemSig) _itemSig.set(node, itemSig(item));
+      return node;
+    },
+    (node, item) => {
+      if (_focusedInside(node)) {
+        // This row's update is held. Marking the flag is what earns it a retry
+        // at all: main.js skips the whole render pass on a 304, and the poll
+        // goes quiet exactly while the operator types.
+        held = true;
+        markDeferredRender();
+        return;
+      }
+      if (itemSig) {
+        const s = itemSig(item);
+        if (_itemSig.get(node) === s) {
+          if (globalThis.__TAPSCRIBE_SIG_AUDIT && opts.auditRows) _auditItemSigCoversRow(node, item, opts, s);
+          return;
+        }
+        if (update) update(node, item);
+        _itemSig.set(node, s);
+        return;
+      }
+      if (update) update(node, item);
+    },
+  );
+
+  if (sig !== undefined && !held) _listSig.set(host, sig);
+  return true;
+}
+
+/**
+ * Invalidate `host`'s remembered LIST signature so the next `renderList`
+ * reconciles even if its `sig` is unchanged — the keyed-list twin of
+ * `markRegionStale`, and the "defer, don't force" reset: it does NOT bypass the
+ * interaction guards the way a force flag would. Reach for it after a mutate
+ * whose effect the sig might not name.
+ * @param {Element} host
+ */
+export function markListStale(host) {
+  _listSig.delete(host);
 }
 
 // ── Markdown (LLM summaries) ────────────────────────────────────────────────

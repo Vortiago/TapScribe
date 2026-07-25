@@ -44,7 +44,7 @@
 // its live counts) repaints every tick; the prune button lives in the static
 // panel head, wired once.
 
-import { tpl, pick, mount, reconcileList, deferIfSelectionInside, markDeferredRender } from "../../templates.js";
+import { tpl, pick, mount, renderList, deferIfSelectionInside } from "../../templates.js";
 import { postJson, del, getJson, errText } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
 import { header, strong, inline, newestFirst } from "../shell.js";
@@ -52,7 +52,6 @@ import {
   editSessionLabel,
   forgetSessionLabel,
   pendingOr,
-  pendingSessionLabel,
   sessionLabelFor,
 } from "../session-labels.js";
 
@@ -413,47 +412,58 @@ export function build(ctx) {
     }
 
     // Mutable content (label, counts, tx status, size, absorb options…) is
-    // owned by fillRow — shared with the per-tick reconcile update path.
-    fillRow(row, s, archived, targetsSig);
+    // owned by fillRow, which renderList runs for us — on a freshly created row
+    // as well as on the per-tick update path — so this builds the shell only.
     return node;
   };
 
   /**
-   * Refresh a row's mutable cells IN PLACE — the reconcileList update path
-   * (and the tail of sessionRow). Structural bits (is_current, has-WAVs, the
-   * absorb-target id set) are folded into the reconcile KEY, so a flip
-   * recreates the row via sessionRow (its wiring differs); this touches only
-   * content. Focus guards: the rename input's value and the absorb <select>'s
-   * options are left alone while focused — updating around interaction is the
-   * point of the in-place path (ADR-0004).
-   * @param {HTMLElement} row
+   * This list has NO cheap list-level stamp — every row's content (label, bytes,
+   * tx status, progress) changes independently and no server-side digest covers
+   * them, so building one would itself be the O(rows) walk a gate is meant to
+   * skip. Hence the per-row gate: `renderList` compares this signature and runs
+   * `fillRow` only for rows whose content actually moved.
    * @param {import('../../types.js').Session} s
-   * @param {import('../../types.js').Session[]} archived — shared per-tick
-   *   array of all archived sessions; the options loop skips this row itself.
    * @param {string} targetsSig — per-tick content signature of `archived`
    *   (ids · labels · wav counts — ids too, so a target-set change with
    *   identical labels still repaints the option VALUES).
    */
-  const fillRow = (row, s, archived, targetsSig) => {
-    const rowSig = [
-      sessionLabelFor(s),
-      s.session === focusedId ? 1 : 0,
-      s.wav_count || 0,
-      s.stripped ? 1 : 0,
-      s.session_transcript ? s.session_transcript.segment_count || 0 : -1,
-      totalBytes(s),
-      s.progress ? 1 : 0,
-      targetsSig,
-    ].join("§");
-    if (row.dataset.rowSig === rowSig) return;
+  const rowSig = (s, targetsSig) => [
+    sessionLabelFor(s),
+    s.session === focusedId ? 1 : 0,
+    s.wav_count || 0,
+    s.stripped ? 1 : 0,
+    s.session_transcript ? s.session_transcript.segment_count || 0 : -1,
+    totalBytes(s),
+    s.progress ? 1 : 0,
+    targetsSig,
+  ].join("§");
 
+  /**
+   * Refresh a row's mutable cells IN PLACE — `renderList`'s `update`, run both on
+   * a freshly created row and on the per-tick path. Structural bits (is_current,
+   * has-WAVs, the absorb-target id set) are folded into the reconcile KEY, so a
+   * flip recreates the row via sessionRow (its wiring differs); this touches only
+   * content.
+   *
+   * NO focus guards and no signature bookkeeping of their own: the seam holds a
+   * whole row whose control is focused (deferring without stamping its sig, so
+   * the held write lands on the first tick after blur) and stamps the sig only
+   * when this ran to completion. That is the ADR-0004 trap this view used to own
+   * by hand and got wrong — the sig was advanced ABOVE the guards, so the skipped
+   * update was stranded forever: the next tick recomputed the identical sig and
+   * early-returned, the row kept a stale label, and a later keystroke persisted
+   * the stale value back over an external rename.
+   * @param {HTMLElement} row
+   * @param {import('../../types.js').Session} s
+   * @param {import('../../types.js').Session[]} archived — shared per-tick
+   *   array of all archived sessions; the options loop skips this row itself.
+   */
+  const fillRow = (row, s, archived) => {
     row.classList.toggle("is-focused", s.session === focusedId);
 
     const nameInput = /** @type {HTMLInputElement} */ (row.querySelector('[data-slot="rename"]'));
-    // ADR-0004: a write held back by focus must NOT advance the row's gate —
-    // the sig is recorded at the BOTTOM, only when every guarded write ran.
-    const renameHeld = !!nameInput && document.activeElement === nameInput;
-    if (nameInput && !renameHeld) {
+    if (nameInput) {
       nameInput.value = labelFor(s);
       nameInput.placeholder = fmtSessionLabel(s.session) || s.session;
       const labelEl = row.querySelector('[data-slot="label"]');
@@ -473,8 +483,7 @@ export function build(ctx) {
     pick(row, "size").textContent = wavs ? fmtBytes(totalBytes(s)) : "—";
 
     const absorbSel = /** @type {HTMLSelectElement | null} */ (row.querySelector('[data-slot="absorb"]'));
-    const absorbHeld = !!absorbSel && document.activeElement === absorbSel;
-    if (absorbSel && !absorbHeld) {
+    if (absorbSel) {
       while (absorbSel.options.length > 1) absorbSel.remove(1);
       for (const t of archived) {
         if (t.session === s.session) continue; // a row can't absorb into itself
@@ -482,21 +491,6 @@ export function build(ctx) {
         absorbSel.add(new Option(`${lbl} (${t.wav_count || 0}w)`, t.session));
       }
     }
-
-    // Record the gate ONLY when every guarded write actually ran (ADR-0004's
-    // named trap). Advancing it above the guards stranded the skipped update
-    // FOREVER: on blur nothing re-runs, because the next tick recomputes the
-    // identical rowSig and early-returns — the row kept a stale label / stale
-    // absorb targets, and a later keystroke persisted the stale value back over
-    // an external rename. reconcileList's update path has no focus guard of its
-    // own, so nothing upstream compensates. Marking the deferred-render flag is
-    // what gets the retry a tick at all: main.js skips the whole renderAll pass
-    // on a 304, and the poll goes quiet exactly while the operator types.
-    if (renameHeld || absorbHeld) {
-      markDeferredRender();
-      return;
-    }
-    row.dataset.rowSig = rowSig;
   };
 
   /**
@@ -506,12 +500,10 @@ export function build(ctx) {
    */
   const matches = (s) => {
     if (!filter) return true;
-    // A pending rename must never filter its own row away: reconcileList would
-    // remove() the node the operator is typing in, taking the focused input with
-    // it (ADR-0004 — fillRow's renameHeld guard covers field writes, not row
-    // removal). The row rejoins the filter's verdict once the save settles and
-    // the catch-up sweep retires the entry.
-    if (pendingSessionLabel(s.session) !== undefined) return true;
+    // Purely a filter: keeping a row the operator is typing in is `renderList`'s
+    // removal hold, not this predicate's business — the seam defers the whole
+    // render when a focused row's key would leave the list, so the node (and the
+    // focus in it) survives until blur.
     const hay = [
       sessionLabelFor(s), // per-tick filter — same value as labelFor, no metaFor allocation
       s.session,
@@ -634,16 +626,16 @@ export function build(ctx) {
       ph.textContent = "No sessions yet — start recording to see them here.";
     }
 
-    if (deferIfSelectionInside(body)) return;
-
     // The search branch above raw-swaps keyless nodes (search-hit rows,
-    // snippets, the no-match placeholder) into the body. reconcileList only
-    // tracks and removes nodes it created itself, so returning from search
-    // mode must clear those foreign nodes first or they dangle below the
-    // real rows forever. Normal rows all carry data-sid (sessionRow), so
+    // snippets, the no-match placeholder) into the body. renderList's reconcile
+    // only tracks and removes nodes it created itself, so returning from search
+    // mode must clear those foreign nodes first or they dangle below the real
+    // rows forever. Normal rows all carry data-sid (sessionRow), so
     // "no [data-sid] child" ⇔ the body holds only foreign nodes (or nothing).
-    // Same guard as recordings.js / transcript.js keep on their WAV lists.
-    if (!body.querySelector("[data-sid]")) body.replaceChildren(); // gate-allow: raw-swap — clears the search branch's keyless nodes so reconcileList owns the host (same guard as the WAV lists)
+    // This stays HERE rather than in the seam: it exists because THIS view has a
+    // second, cold rendering mode, which no other keyed list has — one adapter is
+    // a hypothetical seam.
+    if (!body.querySelector("[data-sid]")) body.replaceChildren(); // gate-allow: raw-swap — clears the search branch's keyless nodes so renderList owns the host
 
     // Absorb targets: archived sessions only — the current (recording) one is
     // never a merge endpoint, and a row can't absorb into itself. Computed
@@ -662,13 +654,17 @@ export function build(ctx) {
     // key's has-targets bit is arithmetic, not an allocation: a non-current
     // row has targets iff some OTHER archived session exists.
     const targetsSig = archived.map((t) => `${t.session}·${sessionLabelFor(t)}·${t.wav_count || 0}`).join(",");
-    reconcileList(
-      body,
-      shown,
-      (s) => `${s.session}·c${s.is_current ? 1 : 0}·w${(s.wav_count || 0) > 0 ? 1 : 0}·t${!s.is_current && archived.length > 1 ? 1 : 0}`,
-      (s) => /** @type {HTMLElement} */ (sessionRow(s, archived, targetsSig).firstElementChild),
-      (row, s) => fillRow(/** @type {HTMLElement} */ (row), s, archived, targetsSig),
-    );
+    // No list-level `sig` — see rowSig's docstring: this list has no cheap
+    // aggregate stamp, so it gates per row instead. `auditRows` is ON because a
+    // row's entire content comes from sessionRow + fillRow, making a probe row a
+    // sound comparison.
+    renderList(body, shown, {
+      key: (s) => `${s.session}·c${s.is_current ? 1 : 0}·w${(s.wav_count || 0) > 0 ? 1 : 0}·t${!s.is_current && archived.length > 1 ? 1 : 0}`,
+      create: (s) => /** @type {HTMLElement} */ (sessionRow(s, archived, targetsSig).firstElementChild),
+      update: (row, s) => fillRow(/** @type {HTMLElement} */ (row), s, archived),
+      itemSig: (s) => rowSig(s, targetsSig),
+      auditRows: true,
+    });
   };
 
   // ---- Per-tick update ------------------------------------------------------

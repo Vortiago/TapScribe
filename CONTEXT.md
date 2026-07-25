@@ -855,12 +855,40 @@ remembered signature so the NEXT `renderRegion` re-renders after a mutate /
 lazy-body load — the "defer, don't force" reset (`force:true` would bypass the
 guards and clobber a selection). Swap-based copy-target panes render through
 `renderRegion` (the Summary output pane, the Transcript merged pane, plus the
-spine/settings/live-channel/config-card regions); a few **view-level** gates
-that guard a whole `update()` body rather than one host swap (the Recordings
-WAV list) apply `selectionInside` directly. The decision and its rejected
+spine/settings/live-channel/config-card regions). The decision and its rejected
 alternatives (DOM-diffing, capture-and-restore, pausing the poll) are
 ADR-0004. Say "this region needs the interaction hold," not ad-hoc
 descriptions of focus/selection guards.
+
+### Region · keyed list
+
+The two shapes a held render takes, and the words for them:
+
+- A **region** is rendered by being **swapped whole** — `renderRegion`
+  `replaceChildren`s a freshly built subtree in.
+- A **keyed list** has its rows **created once, matched by key, and updated in
+  place**, and is never swapped. `renderList(host, items, {key, create, update,
+  itemSig, sig})` is its primitive; `markListStale(host)` is its
+  `markRegionStale`. The host's children belong to the seam alone, so a keyed
+  list's empty/loading **placeholder is a SIBLING** of the host, toggled in
+  place — never swapped into it.
+
+Both need the interaction hold; `renderList` additionally owns two rules a
+region has no equivalent for. **The removal hold**: a row holding a focused
+control whose key has left `items` would be removed outright, so the whole
+render defers instead — "never destroy interaction state" applies most to
+removal. And **the per-row hold**: a focused control freezes its own row's
+`update` and leaves that row's `itemSig` unstamped. That hold is deliberately
+coarser than a per-control guard, matching a region holding whole.
+
+A call site uses whichever change detector it has, and may use both or
+neither: a list-level `sig` pays only where a **cheap aggregate stamp** already
+exists (`files_sig` for the WAV lists), while `itemSig` is the answer where one
+doesn't (the Sessions rows change independently and no server digest covers
+them, so building a list-level sig would itself be the O(rows) walk the gate is
+meant to skip).
+
+Say "this is a keyed list" / "it needs the removal hold", not "the list gate".
 
 ## Pending edit
 
