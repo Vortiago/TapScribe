@@ -562,15 +562,26 @@ export function renderList(host, items, opts) {
         markDeferredRender();
         return;
       }
+      /** @type {string | undefined} */
+      let stamp;
       if (itemSig) {
-        const s = itemSig(item);
-        if (_itemSig.get(node) === s) {
-          if (globalThis.__TAPSCRIBE_SIG_AUDIT && opts.auditRows !== false) _auditItemSigCoversRow(node, item, opts, s);
+        stamp = itemSig(item);
+        if (_itemSig.get(node) === stamp) {
+          if (globalThis.__TAPSCRIBE_SIG_AUDIT && opts.auditRows !== false) {
+            _auditItemSigCoversRow(node, item, opts, stamp);
+          }
           return;
         }
-        _itemSig.set(node, s);
       }
       if (update) update(node, item);
+      // Stamp AFTER the write, never before: an `update` that throws must leave
+      // the row's gate UNADVANCED so the next tick retries it. Stamping first
+      // reads as tidier — one exit instead of two — but it strands the row
+      // forever, because every later tick recomputes the same signature and
+      // skips. That is the ADR-0004 trap this seam exists to remove, and the
+      // throw is real: fillRow reaches slots via `pick`, which throws when one
+      // is missing, and exceptions on the poll path are swallowed.
+      if (stamp !== undefined) _itemSig.set(node, stamp);
     },
   );
 
