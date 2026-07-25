@@ -615,8 +615,8 @@ export function build(ctx) {
     // Resolve the focused session's WAV listing — the array /api/state no
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight; `[]` → nothing to fetch (empty files_sig).
-    const { files: fetchedFiles, loading: filesLoading } = filesSource.resolve(sid, filesSig);
-    currentFiles = fetchedFiles;
+    const { files, loading: filesLoading } = filesSource.resolve(sid, filesSig);
+    currentFiles = files;
 
     // ---- Job progress (one job per session). renderJobBar does in-place writes
     // on prebuilt nodes, EVERY tick — deliberately outside both signature gates.
@@ -721,8 +721,9 @@ export function build(ctx) {
         onPick: (which) => {
           if (!session) return;
           sourcePick.set(session.session, which);
+          // No markListStale: `src` is a term in the picker's sig, so the
+          // synchronous afterMutate repaint crosses the gate on its own.
           lastCtlSig = " ";
-          markListStale(wavList);
           afterMutate();
         },
       }));
@@ -756,8 +757,9 @@ export function build(ctx) {
     // per-row itemSig). Everything a picker row DISPLAYS is folded into
     // `pickKey`, so `update` has one job: the selection highlight. The selected
     // name is therefore a term in BOTH signatures — the list sig so a click gets
-    // past the skip at all, the item sig so only the two rows that flipped
-    // repaint rather than every row (issue #213). `auditRows` is ON: these rows
+    // past the skip at all, the item sig so only the two rows that flipped are
+    // WRITTEN to rather than every row (the reconcile walk itself is still
+    // O(rows), but per click, never per tick — issue #213). `auditRows` is ON: these rows
     // are plain buttons whose whole content comes from create + update, so a
     // probe row is a sound comparison (unlike the Recordings <details> rows,
     // whose bodies lazy-load).
@@ -766,7 +768,10 @@ export function build(ctx) {
     const pickSelName = sel?.name || "";
     const pickRendered = renderList(
       wavList,
-      pickState === "rows" ? srcFiles.map((f) => ({ file: f, src })) : [],
+      // A THUNK — see recordings.js. In "original" mode sourceFiles() returns
+      // currentFiles by reference, so this map is the ONLY per-tick O(rows)
+      // allocation on the path; behind the gate it costs nothing on a quiet tick.
+      () => (pickState === "rows" ? srcFiles.map((f) => ({ file: f, src })) : []),
       {
         key: pickKey,
         create: buildPickRow,

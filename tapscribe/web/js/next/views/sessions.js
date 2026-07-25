@@ -32,17 +32,18 @@
 //     (POST /api/sessions/prune-empty — deletes every session with 0 WAVs, no
 //     merged transcript, no label; skips the current one), surfacing the count.
 //
-// The list renders KEYED AND IN PLACE (reconcileList, #312): the region chrome
-// (search box, column header, placeholder sibling) mounts exactly once, and
-// rows reconcile per tick — content ticks mutate cells via fillRow (per-row
-// sig short-circuit; focused rename/absorb values are left alone), structural
-// flips (is_current, has-WAVs, absorb-target set) are folded into the row KEY
-// and recreate just that row. The 500ms poll therefore never clobbers an open
-// edit: reconcileList preserves the focused row's node (moveBefore), and a
-// text selection inside the list defers the reconcile via
-// deferIfSelectionInside (ADR-0004, same as the WAV lists). The header (with
-// its live counts) repaints every tick; the prune button lives in the static
-// panel head, wired once.
+// The list is a KEYED LIST rendered through `renderList` (#312): the region
+// chrome (search box, column header, placeholder sibling) mounts exactly once,
+// and rows reconcile per tick — content ticks mutate cells via fillRow, gated by
+// the seam on each row's `itemSig`, while structural flips (is_current,
+// has-WAVs, absorb-target set) are folded into the row KEY and recreate just
+// that row. It passes NO list-level sig, deliberately: see rowSig's docstring.
+// The 500ms poll therefore never clobbers an open edit, and none of that
+// discipline lives here — the seam holds a row whose control is focused, holds
+// the whole render when a focused row would be REMOVED, and defers on a text
+// selection, each without advancing the gate it skipped (ADR-0004). The header
+// (with its live counts) repaints every tick; the prune button lives in the
+// static panel head, wired once.
 
 import { tpl, pick, mount, renderList, deferIfSelectionInside } from "../../templates.js";
 import { postJson, del, getJson, errText } from "../../api.js";
@@ -300,10 +301,8 @@ export function build(ctx) {
    * @param {import('../../types.js').Session[]} archived — ALL archived
    *   sessions (shared per-tick array; the picker skips this row itself).
    *   A row can absorb into any OTHER archived session.
-   * @param {string} targetsSig — per-tick content signature of `archived`
-   *   (ids · labels · wav counts), shared by every row's fillRow sig.
    */
-  const sessionRow = (s, archived, targetsSig) => {
+  const sessionRow = (s, archived) => {
     const node = tpl("tpl-next-sessrow");
     const row = /** @type {HTMLElement} */ (node.firstElementChild);
     row.dataset.sid = s.session; // stable per-row hook (e2e + debugging)
@@ -377,10 +376,10 @@ export function build(ctx) {
     }
 
     // ---- Absorb into… (fold THIS session, as source, into a target) ----
-    // While the select is focused (dropdown open), fillRow leaves its options
-    // alone — the poll updates around it. The backend refuses the CURRENT
-    // session as a source, so we drop the picker entirely on the current row
-    // (and when there is no other session to absorb into).
+    // While the select is focused (dropdown open), renderList holds this whole
+    // row's update, so its options are left alone until blur. The backend
+    // refuses the CURRENT session as a source, so we drop the picker entirely on
+    // the current row (and when there is no other session to absorb into).
     const absorbSel = /** @type {HTMLSelectElement} */ (pick(node, "absorb"));
     if (s.is_current || archived.length <= 1) {
       // No target: the current session can't be a source, and an archived
@@ -392,8 +391,8 @@ export function build(ctx) {
         const targetId = absorbSel.value;
         if (!targetId) return;
         // Reset + blur before firing so a refused merge doesn't pin the select
-        // to the failed choice, and so fillRow's focused-select guard doesn't
-        // hold back the post-merge option refresh.
+        // to the failed choice, and so the seam's per-row hold doesn't keep
+        // holding back the post-merge option refresh.
         absorbSel.value = "";
         absorbSel.blur();
         absorbInto(s, targetId);
@@ -533,14 +532,14 @@ export function build(ctx) {
   /**
    * Reconcile the rows INTO THE LIVE REGION in place (no host swap): the
    * shown-count, the empty/filtered placeholder (a hidden-toggled SIBLING of
-   * the rows host — reconcileList owns the host's children outright), and the
-   * keyed row list. Safe per tick AND from the filter handler. Content ticks
-   * (bytes, tx status, labels) mutate cells via fillRow; structural flips
-   * (is_current, has-WAVs, the absorb-target set) change the KEY and recreate
-   * just that row. Defers — marking the tick-retry flag — while a text
-   * selection is inside the list, like the WAV lists (ADR-0004); a focused
-   * control alone never defers, because reconcileList updates AROUND it
-   * (moveBefore preserves the node, fillRow guards its value).
+   * the rows host — renderList owns the host's children outright), and the keyed
+   * row list. Safe per tick AND from the filter handler. Content ticks (bytes,
+   * tx status, labels) mutate cells via fillRow; structural flips (is_current,
+   * has-WAVs, the absorb-target set) change the KEY and recreate just that row.
+   * Every hold is the seam's: a text selection inside the list defers, a focused
+   * control holds ITS OWN ROW's update (coarser than a per-field guard — see
+   * fillRow), and a focused row that would be removed defers the whole render
+   * (ADR-0004).
    *
    * When the local (label/id/date) filter yields zero matches, the rows host
    * falls over to cross-session transcript search instead (#315): that's a
@@ -660,7 +659,7 @@ export function build(ctx) {
     // sound comparison.
     renderList(body, shown, {
       key: (s) => `${s.session}·c${s.is_current ? 1 : 0}·w${(s.wav_count || 0) > 0 ? 1 : 0}·t${!s.is_current && archived.length > 1 ? 1 : 0}`,
-      create: (s) => /** @type {HTMLElement} */ (sessionRow(s, archived, targetsSig).firstElementChild),
+      create: (s) => /** @type {HTMLElement} */ (sessionRow(s, archived).firstElementChild),
       update: (row, s) => fillRow(/** @type {HTMLElement} */ (row), s, archived),
       itemSig: (s) => rowSig(s, targetsSig),
       auditRows: true,

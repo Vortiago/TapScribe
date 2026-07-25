@@ -901,7 +901,7 @@ body::before { display: none; }
 .wavlist { padding: 2px 0; }
 .panel--fill > .panel__body.flush > .wavlist { flex: 1; min-height: 0; overflow-y: auto; }
 /* The empty/loading placeholder is a hidden-toggled SIBLING of .wavlist, not a
-   child of it (the rows host belongs to reconcileList alone), so this cannot be
+   child of it (the rows host belongs to renderList alone), so this cannot be
    a `.wavlist .empty` descendant rule. flex: 0 0 auto keeps it at its content
    height inside the fill panel's flex column while .wavlist takes the rest. */
 .wavlist__empty { padding: 22px 12px; font-size: 10.5px; flex: 0 0 auto; }

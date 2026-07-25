@@ -2843,13 +2843,10 @@ async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_reco
             await browser.close()
 
 
-# JS init script for the two tests below: wraps Element.prototype.querySelectorAll
-# to count how many times each view's selection painter walks its list
-# (recordings.js's `.wavrow:not(.is-clip)` and transcript.js's `button.wavrow`),
-# alongside the same real-304 confirmation as _COUNT_STATE_304S_JS — so a flat
-# walk count across a window of CONFIRMED 304s means the painter is genuinely
-# skipping quiet ticks, not just getting lucky with an unchanged-looking DOM.
-# Watch the rows of a keyed list for ANY DOM churn, and count confirmed 304s.
+# Watch the rows of a keyed list for ANY DOM churn. Pairs with
+# _COUNT_STATE_304S_JS (installed alongside it), so a flat mutation count across a
+# window of CONFIRMED 304s means the seam is genuinely skipping quiet ticks rather
+# than getting lucky with an unchanged-looking DOM.
 #
 # `installRowWatch(rowSelector)` stamps every current row and observes the rows
 # host for attribute/child mutations, recording which rows were touched by
@@ -2886,17 +2883,6 @@ window.installRowWatch = (rowSelector) => {
 };
 window.stampsIntact = (rowSelector) =>
   Array.from(document.querySelectorAll(rowSelector)).every((r) => !!r.dataset.stamp);
-window.__statePolls = 0;
-window.__state304s = 0;
-const _fetch = window.fetch;
-window.fetch = (...args) => {
-  const u = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-  const isState = u.includes('/api/state');
-  if (isState) window.__statePolls++;
-  const p = _fetch.apply(window, args);
-  if (isState) p.then((r) => { if (r.status === 304) window.__state304s++; }).catch(() => {});
-  return p;
-};
 """
 
 
@@ -2924,6 +2910,7 @@ async def test_next_wav_list_rows_are_untouched_on_quiet_ticks(running_recorder:
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.add_init_script(_WATCH_ROW_MUTATIONS_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
 
@@ -3249,6 +3236,7 @@ async def test_next_transcript_picker_rows_are_untouched_on_quiet_ticks(running_
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
             await page.add_init_script(_WATCH_ROW_MUTATIONS_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
 

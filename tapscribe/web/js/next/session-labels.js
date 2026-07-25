@@ -73,6 +73,14 @@ export function sessionLabelFor(s) {
 
 /** The pending rename for `sid`, or undefined. For render paths that fall back
  * to something other than the server label (a placeholder, an id).
+ *
+ * NOTE: no production caller today. Its last one was `sessions.js`'s filter
+ * predicate, which kept a row with a pending rename in the list so the reconcile
+ * couldn't remove the node being typed in; `renderList`'s removal hold owns that
+ * now, and does it by focus rather than by save state. Kept as the overlay's
+ * direct read accessor — it is what `session-labels.test.js` observes the edit /
+ * forget / catch-up-sweep semantics through, and asserting those through
+ * `sessionLabelFor` instead would only observe them indirectly.
  * @param {string} sid */
 export function pendingSessionLabel(sid) {
   return pending.get(sid);

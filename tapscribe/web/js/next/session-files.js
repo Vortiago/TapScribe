@@ -58,7 +58,7 @@ export function listState({ hasSession, loading, count }) {
  *            => import('../types.js').WavFile[] | null,
  * }} ctx — `load` is injectable so the resolve logic is testable without api.js.
  */
-export function createFilesSource({ onLoaded, load }) {
+export function createFilesSource({ onLoaded, load = loadSessionFiles }) {
   /** (session@files_sig) fetches in flight — dedupes across the ticks before
    * one lands (the api.js cache dedupes the REQUEST itself; this dedupes the
    * per-view bookkeeping around it). Per source, so two views watching the same
@@ -75,7 +75,7 @@ export function createFilesSource({ onLoaded, load }) {
      *   `loading`, never handed back as a value a caller could iterate.
      */
     resolve(session, filesSig) {
-      const fetched = (load ?? loadSessionFiles)(session, filesSig, pending, onLoaded);
+      const fetched = load(session, filesSig, pending, onLoaded);
       return { files: fetched || [], loading: fetched === null };
     },
   };

@@ -692,7 +692,7 @@ export function build(ctx) {
 
   /** Reconcile key for a WAV row. It folds EVERYTHING buildRow renders or binds
    * (session, name, size, dur, source, current-ness, transcript stamp) EXCEPT
-   * selection (applied in place via applySelection) — a changed key drops the
+   * selection (which is the row's itemSig instead) — a changed key drops the
    * old row and builds a fresh one (so its listeners close over the right
    * file), while a truly-unchanged row keeps its key and its open-<details>
    * state across the moveBefore reconcile. The session id is in the key because
@@ -763,9 +763,8 @@ export function build(ctx) {
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight (show a loading placeholder); `[]` → nothing to
     // fetch (empty files_sig = no folder / no WAVs yet).
-    const { files: fetchedFiles, loading: filesLoading } = filesSource.resolve(sid, filesSig);
-    currentFiles = fetchedFiles;
-    const files = currentFiles;
+    const { files, loading: filesLoading } = filesSource.resolve(sid, filesSig);
+    currentFiles = files;
     const sel = selectedFor();
 
     // ---- Chrome (header + waveform header + stats + strip buttons) ----------
@@ -810,8 +809,9 @@ export function build(ctx) {
             // would otherwise survive the toggle and overlay the stripped
             // view's committed cut instead of being dropped.
             dropPreview();
+            // No markListStale: `src` is a term in the list's sig, so the
+            // synchronous afterMutate repaint crosses the gate on its own.
             lastChromeSig = " ";
-            markListStale(wavList);
             afterMutate();
           },
         }) : undefined,
@@ -860,9 +860,11 @@ export function build(ctx) {
     // already folded into `rowKey`, so a content change recreates the row and
     // `update` has exactly one job — the selection highlight. That is why the
     // selected name is a term in BOTH signatures: the list sig so a click gets
-    // past rule 1 at all, the item sig so only the two affected rows repaint
-    // instead of the whole list (this replaced a full O(rows) walk per
-    // selection change — issue #213). Rows carry content-visibility
+    // past rule 1 at all, the item sig so only the two affected rows are WRITTEN
+    // to instead of all of them (issue #213). Note the reconcile WALK a selection
+    // triggers is still O(rows) — that part is a wash against the querySelectorAll
+    // walk it replaced; what changed is that it happens per click, never per tick.
+    // Rows carry content-visibility
     // (next.css .wavrow) so off-screen layout/paint is skipped either way.
     //
     // `auditRows` stays OFF here: these rows are <details> whose bodies
@@ -870,7 +872,10 @@ export function build(ctx) {
     // differs from an expanded one and would report drift that isn't there.
     const state = listState({ hasSession: !!sess, loading: filesLoading, count: files.length });
     const selName = sel?.name || "";
-    const rendered = renderList(wavList, state === "rows" ? buildRowModels(files, src, isCurrent) : [], {
+    // A THUNK, not an array: buildRowModels walks every file (plus every stripped
+    // region clip), and rule 1 skips before the thunk runs — so a quiet tick on a
+    // thousand-WAV session allocates nothing at all.
+    const rendered = renderList(wavList, () => (state === "rows" ? buildRowModels(files, src, isCurrent) : []), {
       key: rowKey,
       create: buildRow,
       update: (node, m) => { applyRowSelection(/** @type {HTMLElement} */ (node), m, selName); },
