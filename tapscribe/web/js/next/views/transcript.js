@@ -25,8 +25,9 @@
 import { tpl, pick, renderRegion, markRegionStale, renderList, markListStale, selectionInside } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import {
-  postJson, putJson, sessionTranscript, loadSessionFiles, createLastGoodHold, errText,
+  postJson, putJson, sessionTranscript, createLastGoodHold, errText,
 } from "../../api.js";
+import { createFilesSource, listState } from "../session-files.js";
 import { wireSave } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -203,9 +204,15 @@ export function build(ctx) {
    * (sid, files_sig) client cache; sourceFiles()/recordingFor read it. */
   /** @type {import('../../types.js').WavFile[]} */
   let currentFiles = [];
-  /** (sid@files_sig) lazy-files fetches in flight — dedupes across ticks. */
-  /** @type {Set<string>} */
-  const pendingFiles = new Set();
+  /** The lazily-fetched WAV listing for the focused session — owns the
+   * in-flight dedupe and the cold-vs-stale sentinel (next/session-files.js). */
+  const filesSource = createFilesSource({
+    onLoaded: () => {
+      lastCtlSig = " ";
+      markListStale(wavList);
+      afterMutate();
+    },
+  });
 
   // ---- Helpers --------------------------------------------------------------
 
@@ -608,13 +615,8 @@ export function build(ctx) {
     // Resolve the focused session's WAV listing — the array /api/state no
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight; `[]` → nothing to fetch (empty files_sig).
-    const fetched = loadSessionFiles(sid, filesSig, pendingFiles, () => {
-      lastCtlSig = " ";
-      markListStale(wavList);
-      afterMutate();
-    });
-    const filesLoading = fetched === null;
-    currentFiles = fetched || [];
+    const { files: fetchedFiles, loading: filesLoading } = filesSource.resolve(sid, filesSig);
+    currentFiles = fetchedFiles;
 
     // ---- Job progress (one job per session). renderJobBar does in-place writes
     // on prebuilt nodes, EVERY tick — deliberately outside both signature gates.
@@ -760,7 +762,7 @@ export function build(ctx) {
     // probe row is a sound comparison (unlike the Recordings <details> rows,
     // whose bodies lazy-load).
     const inflightSig = [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(",");
-    const pickState = !sess ? "none" : filesLoading ? "loading" : srcFiles.length ? "rows" : "empty";
+    const pickState = listState({ hasSession: !!sess, loading: filesLoading, count: srcFiles.length });
     const pickSelName = sel?.name || "";
     const pickRendered = renderList(
       wavList,

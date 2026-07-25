@@ -134,6 +134,13 @@
   hold their last-good body instead of blanking to "loading…" on a
   re-transcribe / external re-summarize. A new lazy pane keyed on a
   content stamp inherits the requirement: copy one of the three holds.
+  The bookkeeping AROUND `loadSessionFiles` — the per-view in-flight key set,
+  the `null`-means-COLD sentinel, and the four states a listing region can be in
+  (`none`/`loading`/`rows`/`empty`, where a cold load must beat emptiness or the
+  region says "nothing here" mid-fetch) — has ONE owner in
+  `web/js/next/session-files.js` (`createFilesSource` + `listState`), which both
+  WAV lists cross. It is DOM-free and unit-tested under `node --test`; the
+  placeholder WORDING stays per view, since that is content, not behaviour.
   The DUAL requirement: a multi-item
   region gated on such an aggregate is a **keyed list** and must render through
   `renderList` (keyed, in-place) — a full `replaceChildren` rebuild on the sig,

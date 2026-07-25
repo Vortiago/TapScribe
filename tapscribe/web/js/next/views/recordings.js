@@ -14,25 +14,27 @@
 //
 // The WAV list itself is built for HUGE sessions (hundreds–thousands of
 // files). Two pieces keep it snappy:
-//   1. The file listing is NOT on /api/state — it's fetched lazily via
-//      sessionFiles.fetch(sid, files_sig) and cached, so it crosses the wire
-//      once per change, not every poll. `currentFiles` holds the resolved
-//      list for the focused session.
-//   2. The list is rendered through `reconcileList` (keyed, in-place — never
-//      replaceChildren) and each row carries `content-visibility: auto`
-//      (next.css `.wavrow`), so the browser skips layout/paint of off-screen
-//      rows and a selection / expand / poll tick never rebuilds thousands of
-//      nodes. Selection is an in-place `.is-sel` toggle; the per-row
-//      transcript expand is a native <details> that lazy-fetches its body on
-//      first open.
+//   1. The file listing is NOT on /api/state — it's fetched lazily through
+//      next/session-files.js, which owns the in-flight dedupe and the
+//      cold-vs-stale sentinel, so it crosses the wire once per change, not
+//      every poll. `currentFiles` holds the resolved list for the focused
+//      session.
+//   2. The list is a KEYED LIST rendered through `renderList` (templates.js —
+//      keyed, in-place, never replaceChildren) and each row carries
+//      `content-visibility: auto` (next.css `.wavrow`), so the browser skips
+//      layout/paint of off-screen rows and a selection / expand / poll tick
+//      never rebuilds thousands of nodes. Selection is a term in the row's
+//      itemSig, so picking a WAV repaints two rows; the per-row transcript
+//      expand is a native <details> that lazy-fetches its body on first open.
 //
 // Built once for the page; `update(j, session)` refreshes stats / strip-job
-// progress each tick and reconciles the list only when the file set changes
-// (files_sig / source), deferring while a control is focused or text is being
-// selected inside the list.
+// progress each tick and hands the list to `renderList`, which reconciles only
+// when the file set or selection changes (files_sig / source / selected name)
+// and defers while text is selected inside it.
 
 import { tpl, mount, pick, renderList, markListStale } from "../../templates.js";
-import { postJson, del, loadSessionFiles, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, errText } from "../../api.js";
+import { postJson, del, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, errText } from "../../api.js";
+import { createFilesSource, listState } from "../session-files.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
 import { setDimmable } from "../ui.js";
@@ -81,7 +83,7 @@ export function build(ctx) {
   const wavHint = pick(frag, "wavHint");
   const wavList = pick(frag, "wavList");
   /** The empty/loading placeholder — a hidden-toggled SIBLING of `wavList`, so
-   * the rows host's children belong to reconcileList alone (recordings.html). */
+   * the rows host's children belong to renderList alone (recordings.html). */
   const wavEmpty = /** @type {HTMLElement} */ (pick(frag, "wavEmpty"));
 
   // ---- View-local state -----------------------------------------------------
@@ -101,10 +103,15 @@ export function build(ctx) {
    * helper that used to read session.files reads this instead. */
   /** @type {import('../../types.js').WavFile[]} */
   let currentFiles = [];
-  /** (sid@files_sig) fetches in flight — dedupes the lazy files fetch across
-   * the ticks before it lands (the api.js cache dedupes the request itself). */
-  /** @type {Set<string>} */
-  const pendingFiles = new Set();
+  /** The lazily-fetched WAV listing for the focused session — owns the
+   * in-flight dedupe and the cold-vs-stale sentinel (next/session-files.js). */
+  const filesSource = createFilesSource({
+    onLoaded: () => {
+      lastChromeSig = " ";
+      markListStale(wavList);
+      afterMutate();
+    },
+  });
   /** Last strip-silence response stats, per session id (overlay on s.stripped). */
   /** @type {Map<string, import('../../types.js').StripSilenceResult>} */
   const lastStrip = new Map();
@@ -600,7 +607,7 @@ export function build(ctx) {
   /** Build one WAV-list row as a native <details>: the <summary> is the always-
    * visible row (name selects the waveform; the rest of the summary toggles
    * expand), the body lazy-fetches the transcript on first open. Returns the
-   * <details> Element so `reconcileList` can key + reuse it. */
+   * <details> Element so `renderList` can key + reuse it. */
   /** @param {RowModel} m @returns {HTMLElement} */
   const buildRow = (m) => {
     const { kind, file: f, src, isCurrent } = m;
@@ -756,13 +763,8 @@ export function build(ctx) {
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight (show a loading placeholder); `[]` → nothing to
     // fetch (empty files_sig = no folder / no WAVs yet).
-    const fetched = loadSessionFiles(sid, filesSig, pendingFiles, () => {
-      lastChromeSig = " ";
-      markListStale(wavList);
-      afterMutate();
-    });
-    const filesLoading = fetched === null;
-    currentFiles = fetched || [];
+    const { files: fetchedFiles, loading: filesLoading } = filesSource.resolve(sid, filesSig);
+    currentFiles = fetchedFiles;
     const files = currentFiles;
     const sel = selectedFor();
 
@@ -866,23 +868,23 @@ export function build(ctx) {
     // `auditRows` stays OFF here: these rows are <details> whose bodies
     // lazy-load a transcript on expand, so a fresh probe row legitimately
     // differs from an expanded one and would report drift that isn't there.
-    const listState = !sess ? "none" : filesLoading ? "loading" : files.length ? "rows" : "empty";
+    const state = listState({ hasSession: !!sess, loading: filesLoading, count: files.length });
     const selName = sel?.name || "";
-    const rendered = renderList(wavList, listState === "rows" ? buildRowModels(files, src, isCurrent) : [], {
+    const rendered = renderList(wavList, state === "rows" ? buildRowModels(files, src, isCurrent) : [], {
       key: rowKey,
       create: buildRow,
       update: (node, m) => { applyRowSelection(/** @type {HTMLElement} */ (node), m, selName); },
       itemSig: (m) => (m.kind === "clip" ? "" : m.file.name === selName ? "sel" : ""),
-      sig: `${sid}§${src}§${filesSig}§${listState}§${selName}`,
+      sig: `${sid}§${src}§${filesSig}§${state}§${selName}`,
     });
     if (rendered) {
-      wavEmpty.hidden = listState === "rows";
-      if (listState !== "rows") {
-        wavEmpty.classList.toggle("dim", listState === "loading");
+      wavEmpty.hidden = state === "rows";
+      if (state !== "rows") {
+        wavEmpty.classList.toggle("dim", state === "loading");
         wavEmpty.textContent =
-          listState === "loading"
+          state === "loading"
             ? "loading recordings…"
-            : listState === "empty"
+            : state === "empty"
               ? "No recordings yet. Once taps record into this session, each WAV appears here."
               : "Pick a session from the spine to manage its recordings.";
       }
