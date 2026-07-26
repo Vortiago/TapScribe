@@ -11,23 +11,24 @@
 //   - renderList — the KEYED-LIST dual of renderRegion (rows updated in place,
 //     never swapped). Canon reconcileList is not re-exported, so this is the
 //     only door to it.
-//   - the ADR-0004 interaction-hold flag for the per-tick gates that render
-//     neither a region nor a keyed list — the IN-PLACE updaters (active-taps.js,
-//     live-feed.js, the live-log dialog) plus sessions.js's cold search-mode
-//     swap: markDeferredRender / consumeDeferredRender / deferIfSelectionInside.
-//     A renderRegion swap needs none of this — it flushes ITSELF the instant
-//     the interaction clears (one-shot listener per host), tick or no tick;
-//     the exceptions are the straddling-selection case below, which has no
-//     listener of its own, and every renderList deferral (its rows come from
-//     live state, so it re-derives on the next tick rather than replaying).
-//   - the two interaction-hold guards the canon gets WRONG, pre-empted here
-//     rather than patched in the vendored file: the focus hold (canon flushes
-//     onto the incoming focus — see the "Focus hold" block) and the widened
-//     `selectionInside` (canon only tests the selection's endpoints).
+//   - the ADR-0004 interaction hold, as ONE mechanism for every render shape:
+//     a held render marks the tick-retry flag (markDeferredRender /
+//     consumeDeferredRender) and re-derives on the next poll pass. The region
+//     gate below, every renderList deferral, and the bespoke gates behind the
+//     IN-PLACE updaters (active-taps.js, live-feed.js, the live-log dialog)
+//     plus sessions.js's cold search-mode swap all land that way. ADR-0016 has
+//     the why; the short version is that only a REGION could ever self-flush (a
+//     keyed list re-derives from live state rather than replaying a captured
+//     build, and an in-place updater has no build closure to replay at all), so
+//     a second mechanism bought one shape a sub-tick head start at the price of
+//     two independent hold registries per host.
+//   - the region gate itself: this seam owns the per-host render signature AND
+//     all three interaction holds; canon renderRegion performs the swap. The
+//     sig is read BEFORE the holds — see `renderRegion` for why that ordering
+//     is what makes one mechanism affordable (#245).
 //   - interactionHeld() — the document-wide hold predicate the poll pacer
 //     uses to keep the /api/state cadence fast while the operator works.
-//   - the dev/test-only sig-drift audit (__TAPSCRIBE_SIG_AUDIT), wrapped
-//     around canon renderRegion.
+//   - the dev/test-only sig-drift audit (__TAPSCRIBE_SIG_AUDIT).
 //   - renderMarkdown — the safe, textContent-only markdown subset for LLM
 //     summaries.
 
@@ -42,9 +43,11 @@ export { wireTheme, wireErrorBar } from "./lib/chrome.js";
 // genuinely unreachable from a view rather than merely discouraged. If a
 // user-initiated reorder ever needs the ungated call, re-export it then — with
 // a note saying why it isn't a polled render.
+// Canon `markRegionStale` is not imported either: this seam passes NO `sig` to
+// canon renderRegion (it owns the gate), so canon's own per-host sig is never
+// written and forgetting it would be a no-op on an empty map.
 import {
   renderRegion as canonRenderRegion,
-  markRegionStale as canonMarkRegionStale,
   selectionInside as canonSelectionInside,
   reconcileList as canonReconcileList,
 } from "./lib/render.js";
@@ -57,10 +60,11 @@ import {
 // hold has cleared. Without this flag, a render a BESPOKE gate held back while
 // a selection was live would never get retried once the server stopped
 // changing, stranding it even after the operator released the selection.
-// The in-place gates mark this (via deferIfSelectionInside below), and so does
-// every renderList deferral; canon renderRegion deferrals flush themselves the
-// instant the hold clears and never need the tick-retry. main.js consumes it right before a retry so a
-// render that lands this pass doesn't force another retry next tick.
+// EVERY hold in this module marks it — the region gate, every renderList
+// deferral, and the in-place gates (via deferIfSelectionInside below). That is
+// the whole retry mechanism; there is no second one (ADR-0016). main.js consumes
+// it right before a retry so a render that lands this pass doesn't force another
+// retry next tick.
 let _deferredRender = false;
 
 /** Mark that a render was skipped to protect operator interaction state and
@@ -83,23 +87,32 @@ export function consumeDeferredRender() {
  * ⌘A over a panel, a drag from the header past the last card — reports false
  * and the region is rebuilt out of the MIDDLE of the operator's selection
  * mid-copy: exactly the bug ADR-0004 names, just approached from outside.
- * Endpoint containment stays the fast path; `intersectsNode` covers the
- * straddle. Every app consumer imports the predicate from this module
- * (active-taps.js / live-feed.js / sessions.js's search branch via
- * deferIfSelectionInside, the live-log dialog directly, and every keyed list via
- * renderList), so widening it here covers all of them at once.
+ * `intersectsNode` covers that. Canon's endpoint test still runs FIRST — it is
+ * the cheap path, and it is the only one that answers at all where `Range` is
+ * missing (the node tests' fake documents), though everything it catches the
+ * widened test would catch too. Every app
+ * consumer imports the predicate from this module (active-taps.js /
+ * live-feed.js / sessions.js's search branch via deferIfSelectionInside, the
+ * live-log dialog directly, every keyed list via renderList, and the region gate
+ * via `_holdInside`), so widening it here covers all of them at once.
  * @param {Element} host
  */
 export function selectionInside(host) {
   if (canonSelectionInside(host)) return true;
-  return _selectionStraddles(host);
+  return _selectionIntersects(host);
 }
 
-/** The DELTA the canon guard can't see: a range that contains `host` outright
- * (neither endpoint inside it). Split out so renderRegion can hold for exactly
- * that case without re-testing what the canon already handles.
+/** True when ANY live range intersects `host` — which INCLUDES a selection
+ * wholly inside it, not only one straddling it. That is deliberate but easy to
+ * misread, and the comment here used to claim the opposite ("the delta canon
+ * can't see: a range that contains `host` outright"): `Range.intersectsNode`
+ * compares boundary points, so a range nested inside `host` intersects it too,
+ * making this a strict SUPERSET of canon's endpoint test rather than a disjoint
+ * delta. Two consequences worth stating, because the old wording hid both:
+ * canon's selection branch is unreachable from this seam, and a caller cannot
+ * use this to ask "straddling only".
  * @param {Element} host */
-function _selectionStraddles(host) {
+function _selectionIntersects(host) {
   const sel = document.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
   for (let i = 0; i < sel.rangeCount; i++) {
@@ -139,8 +152,11 @@ function _isInteractive(el) {
  *
  * TWO PREDICATES, one distinction: removing a node destroys focus on anything
  * focusable, so the REMOVAL hold uses this one; an in-place write only threatens
- * editable state, so the WRITE holds (renderRegion's, renderList's per-row) and
- * `interactionHeld()` use `_isInteractive`. Conflating them breaks click-to-select
+ * editable state, so the WRITE holds (renderRegion's, renderList's per-row) use
+ * `_isInteractive`. `interactionHeld()` is the odd one out and takes the WIDE
+ * predicate on purpose — its own doc says why (the pacer must not back off while
+ * ANY render is owed, including one the removal hold is sitting on).
+ * Conflating them breaks click-to-select
  * (a `role="button"` row handle holds its own row's update); omitting this one
  * dumps a keyboard operator to the document root when a re-key rebuilds their row.
  * @param {Element} el
@@ -211,34 +227,6 @@ export function deferIfInteractionInside(host) {
   return true;
 }
 
-// ── Focus hold (seam-owned, pre-empts the canon's) ──────────────────────────
-//
-// Canon renderRegion defers a swap while a control inside the host is focused
-// and arms a ONE-SHOT `focusout` listener to flush it. That listener re-enters
-// renderRegion — but during `focusout` `document.activeElement` is <body>, so
-// the re-checked guard sees NO hold and the swap lands ON TOP of the INCOMING
-// focus. Verified in headless Chromium: two inputs in one host, focus the
-// first, defer, Tab to the second → the host is rebuilt and focus is lost
-// entirely. It bites hardest on live-channel.js's body, which holds the model
-// <select>, the language input, the gate-kind <select>, four number inputs and
-// the init-prompt textarea in ONE host: an operator tabbing between gate knobs
-// mid-transition loses un-Applied edits.
-//
-// `focusout`'s `relatedTarget` IS populated (unlike activeElement) and names
-// the element RECEIVING focus, so it answers the question the flush actually
-// needs to ask. The canon can't be patched here (it's a copy-verbatim vendored
-// file — CLAUDE.md), so the seam takes the focus branch over entirely and
-// leaves the canon its overlay/selection/sig branches: when we delegate below,
-// no control inside the host is focused, so the canon's focus branch is never
-// reached. Drop this block once the fix lands upstream in vanilla-web.
-
-/** @typedef {{ build: () => Node, sig: string | undefined, controller: AbortController }} HeldSwap */
-/** One entry per host with a swap held back by focus — latest-wins, exactly
- * like the canon's `_pendingFlush`: a repeat skip on an already-held host
- * replaces `build`/`sig` in place and keeps the SAME controller, so one
- * listener is armed per host, never appended. @type {WeakMap<Element, HeldSwap>} */
-const _focusHeld = new WeakMap();
-
 /** True while a control INSIDE `host` holds focus. `isMatch` selects WHICH holds
  * this answers for: the default editable-state test gates WRITES (renderRegion's
  * hold, renderList's per-row hold); `_isFocusable` gates REMOVAL. One containment
@@ -249,50 +237,23 @@ function _focusedInside(host, isMatch = _isInteractive) {
   return !!active && active !== document.body && host.contains(active) && isMatch(active);
 }
 
-/** Stash the latest skipped build for `host` and, if nothing is armed yet,
- * attach the listener that flushes it once focus leaves the host FOR REAL.
- * Not `once`, so focus moving BETWEEN controls inside the host re-arms for
- * free rather than needing a second registration.
- * @param {Element} host @param {() => Node} build @param {string | undefined} sig */
-function _holdForFocus(host, build, sig) {
-  const held = _focusHeld.get(host);
-  if (held) { held.build = build; held.sig = sig; return; }
-  const controller = new AbortController();
-  _focusHeld.set(host, { build, sig, controller });
-  host.addEventListener("focusout", (e) => {
-    const to = /** @type {Node | null} */ (/** @type {FocusEvent} */ (e).relatedTarget);
-    if (to && host.contains(to)) return; // focus moved to a sibling control INSIDE the host — still held
-    const pending = _focusHeld.get(host);
-    if (!pending) return;
-    _focusHeld.delete(host);
-    controller.abort();
-    // Re-enter through the full guard set: another interaction (an overlay, a
-    // selection) may have started meanwhile, in which case this just re-defers.
-    // A DETACHED host drops its held swap — nothing may render into DOM that
-    // left the document, and the entry must not pin its build closure.
-    if (host.isConnected) renderRegion(host, pending.build, { sig: pending.sig });
-  }, { signal: controller.signal }); // gate-allow: signal-listener — armed only while a swap is held; the same controller detaches it on flush
-}
+// ── The region gate (seam-owned) ────────────────────────────────────────────
 
-/** Drop `host`'s held swap — a swap happening NOW (or a canon-side deferral
- * that supersedes it) makes the held one moot. @param {Element} host */
-function _releaseFocusHold(host) {
-  const held = _focusHeld.get(host);
-  if (!held) return;
-  _focusHeld.delete(host);
-  held.controller.abort();
-}
+/** Per-host remembered REGION signature — the gate `renderRegion` reads and
+ * advances. It lives HERE, not in canon, for the ordering reason spelled out on
+ * `renderRegion`: the seam must be able to answer "is a render even owed?"
+ * BEFORE it decides whether to hold, and canon checks its sig only AFTER its own
+ * guards. Advanced solely when the swap actually happened — ADR-0004: a skip
+ * must never advance a gate. @type {WeakMap<Element, string>} */
+const _regionSig = new WeakMap();
 
-// ── Sig-drift audit (dev/test only) ─────────────────────────────────────────
-
-/** App-side mirror of the canon's per-host sig, used ONLY to decide when the
- * audit should probe. Advanced only when no interaction hold is live inside
- * the host at call time, so a canon-DEFERRED swap (sig not yet rendered)
- * can't be mistaken for a sig-gated skip. @type {WeakMap<Element, string>} */
-const _auditSig = new WeakMap();
-
-/** Mirror of the canon guards' predicates, for the audit gate only: a hold
- * means the canon deferred (or would defer) rather than sig-skipped.
+/** The region's FULL interaction hold: every state a whole-region swap would
+ * destroy. One predicate, three terms, matching ADR-0004's three named bugs —
+ * a focused control (the dropdown that snaps shut), an open popover/`<dialog>`
+ * (destroyed mid-use), a text selection touching the host (dissolved mid-copy).
+ *
+ * Uses the EDITABLE predicate, not the focusable one: a region swap is a write,
+ * and `_isFocusable` is the removal hold's (see `_isInteractive`'s doc).
  * @param {Element} host */
 function _holdInside(host) {
   if (_focusedInside(host)) return true;
@@ -324,63 +285,72 @@ function _auditSigCoversOutput(host, build, sig) {
 }
 
 /**
- * Canon renderRegion (lib/render.js) plus the two guards the seam owns and the
- * dev/test-only sig-drift audit.
+ * Render a **region** — a host swapped WHOLE — under the interaction hold.
+ * `renderList` is the keyed dual; CONTEXT.md → "Region · keyed list" has the
+ * distinction. This seam owns the gate and the holds; canon renderRegion
+ * (lib/render.js) performs the swap.
  *
- * The guards run BEFORE the canon and, when they hold, the canon is never
- * called (so it never records `sig` — a skip must not advance the gate,
- * ADR-0004):
- *   - a focused control inside `host` (see the "Focus hold" block above — the
- *     canon flushes such a swap onto the INCOMING focus);
- *   - a selection that STRADDLES `host` without either endpoint inside it,
- *     which the canon's own selection guard can't see. That one defers through
- *     the bespoke tick-retry flag rather than a listener: it's rare, and the
- *     canon already self-flushes every case where an endpoint IS inside.
+ * The rules, in the order they run, because THE ORDER IS THE DESIGN:
+ *  1. `sig` unchanged → return. Nothing is owed, so nothing is held and no
+ *     retry is marked. This MUST come first: an operator's caret parked in a
+ *     region with nothing changing server-side would otherwise mark the retry
+ *     flag on every tick, defeating main.js's 304 short-circuit and re-running
+ *     the whole renderAll pass forever (#245). `renderList` orders its own gates
+ *     the same way and for the same reason.
+ *  2. An interaction hold inside `host` (`_holdInside`) → defer: mark the
+ *     tick-retry and leave `sig` UNADVANCED, so the next poll pass re-derives
+ *     and re-offers the render. ADR-0004's "defer, never destroy"; ADR-0016 for
+ *     why the tick is the only retry mechanism.
+ *  3. Swap, then advance `sig`.
  *
- * Everything else is the canon's — the overlay guard, the sig gate, the swap,
- * and the instant deferred-flush (a swap held back lands the moment the hold
- * clears, not on the next poll tick).
+ * Canon is handed NO `sig` and no `force`, so it never gates and never records a
+ * signature of its own. Its three guards re-evaluate as provably false here —
+ * its `_isInteractive` is a subset of this module's, its endpoint-based
+ * `selectionInside` a subset of the widened one, its overlay selector identical
+ * — so it never defers, never populates its `_pendingFlush`, and always swaps.
+ * That is what keeps ONE hold registry in the app: two of them, on the same
+ * host, is how a canon-side deferral could flush a build that went stale while
+ * this seam absorbed the newer ticks (ADR-0016 records the sequence).
+ *
+ * There is no `force`: it would bypass the guards, which is never what a caller
+ * wants (`markRegionStale` is the "rebuild next time, THROUGH the guards" verb).
  *
  * The audit: when __TAPSCRIBE_SIG_AUDIT is set and a call is about to sig-skip
  * (same sig, no interaction hold inside the host), the build is probed against
  * the live DOM and any divergence is recorded to __TAPSCRIBE_SIG_DRIFT.
  * @param {Element} host
  * @param {() => Node} build
- * @param {{ sig?: string, force?: boolean }} [opts]
+ * @param {{ sig?: string }} [opts]
  */
 export function renderRegion(host, build, opts = {}) {
-  if (!opts.force) {
-    if (_focusedInside(host)) {
-      _holdForFocus(host, build, opts.sig);
-      return;
+  const { sig } = opts;
+  if (sig !== undefined && _regionSig.get(host) === sig) {
+    if (globalThis.__TAPSCRIBE_SIG_AUDIT && !_holdInside(host)) {
+      _auditSigCoversOutput(host, build, sig);
     }
-    if (_selectionStraddles(host)) {
-      markDeferredRender();
-      return;
-    }
+    return;
   }
-  // This call reaches the canon: whatever it does with the build (swap, or
-  // defer on an overlay / an endpoint-inside selection) supersedes a held one.
-  _releaseFocusHold(host);
-  if (globalThis.__TAPSCRIBE_SIG_AUDIT && !opts.force && opts.sig != null &&
-      _auditSig.get(host) === opts.sig && !_holdInside(host)) {
-    _auditSigCoversOutput(host, build, opts.sig);
+  if (_holdInside(host)) {
+    markDeferredRender();
+    return;
   }
-  canonRenderRegion(host, build, opts);
-  if (opts.sig != null && (opts.force || !_holdInside(host))) _auditSig.set(host, opts.sig);
+  canonRenderRegion(host, build);
+  if (sig !== undefined) _regionSig.set(host, sig);
 }
 
 /**
- * Canon markRegionStale (lib/render.js) — invalidate `host`'s remembered
- * render signature so the NEXT renderRegion call re-renders even if its `sig`
- * is unchanged, WITHOUT bypassing the interaction guards the way `force:true`
- * would (ADR-0004). Also resets the audit mirror so the next sig-skip isn't
- * mis-probed.
+ * Invalidate `host`'s remembered render signature so the NEXT `renderRegion`
+ * call re-renders even though its `sig` is unchanged — for the out-of-band
+ * changes a sig cannot see (a lazy body landed, a mutate just changed what
+ * `build()` would produce). The rebuild still arrives THROUGH the interaction
+ * hold, which is the whole point: it is the "defer, don't force" reset, not an
+ * escape hatch (ADR-0004).
+ *
+ * The keyed-list twin is `markListStale`.
  * @param {Element} host
  */
 export function markRegionStale(host) {
-  canonMarkRegionStale(host);
-  _auditSig.delete(host);
+  _regionSig.delete(host);
 }
 
 // ── Keyed lists (the reconcile dual of renderRegion) ────────────────────────
@@ -435,12 +405,10 @@ const _removalHeld = new WeakSet();
 /** A retained row drops out the moment focus leaves it: invalidate the host's
  * list signature and ask for a retry, so the NEXT tick reconciles it away.
  *
- * This is not the self-flush renderRegion does — nothing captured is replayed.
- * It only invalidates, and the tick re-derives from live state, which is the
- * property that made the tick-retry the right choice for lists in the first
- * place. Without it the hold would have to keep `sig` unadvanced to guarantee a
- * later reconcile, which costs a full O(rows) rebuild every tick for as long as
- * the focus lasts.
+ * It only INVALIDATES — nothing captured is replayed, and the tick re-derives
+ * from live state. Without it the hold would have to keep `sig` unadvanced to
+ * guarantee a later reconcile, which costs a full O(rows) rebuild every tick for
+ * as long as the focus lasts.
  * @param {Element} row @param {Element} host */
 function _armRemovalFlush(row, host) {
   if (_removalHeld.has(row)) return;
@@ -587,11 +555,11 @@ function _auditItemSigCoversRow(node, item, opts, sig) {
  *     would re-run a full O(rows) reconcile every tick until focus left.
  *
  * A held render lands via the tick-retry (`markDeferredRender` →
- * `consumeDeferredRender` in next/main.js), not renderRegion's self-flush:
- * renderRegion captures a `build` CLOSURE that re-reads state whenever it runs,
- * while a list is driven by materialized `items`, so the view must re-derive
- * either way and the tick does that with no second mechanism. (A retained row's
- * focusout, rule 3, only INVALIDATES — it replays nothing.)
+ * `consumeDeferredRender` in next/main.js) — the same one mechanism `renderRegion`
+ * uses, and the reason lists are the shape that settled it: a list is driven by
+ * materialized `items`, so the view must re-derive on the next pass no matter
+ * what, and a captured replay would only serve stale rows sooner (ADR-0016).
+ * (A retained row's focusout, rule 3, only INVALIDATES — it replays nothing.)
  *
  * `create` builds a row's shell and `update` fills it; the seam runs `update` on
  * a freshly created row too, so a `create` need not call its own filler.

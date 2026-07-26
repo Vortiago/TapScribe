@@ -110,3 +110,10 @@ plus one exported predicate replaced all of them.
 - The People editor has since adopted `renderRegion` too (`web/js/next/views/people.js`)
   — the exception this section originally left open is closed; there is no
   remaining bespoke-guard carve-out.
+- **Amended by ADR-0016.** Two mechanism details above are now stated the
+  other way round. `renderRegion` checks its per-host signature **before**
+  the holds, not after: a region with nothing to render must not mark a
+  retry, or an idle focused control re-runs `renderAll` on every tick. And
+  a held render lands via the tick-retry only — the seam no longer reaches
+  canon's listener-based self-flush. The *rule* in this ADR is unchanged;
+  only where the gate sits and how the held render comes back.

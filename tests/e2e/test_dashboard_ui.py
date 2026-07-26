@@ -2051,6 +2051,266 @@ async def test_next_idle_304_ticks_skip_render_all(running_recorder: RunningReco
             await browser.close()
 
 
+async def test_next_idle_focus_in_a_region_does_not_rerun_render_all(
+    running_recorder: RunningRecorder,
+):
+    """A caret parked in a region with nothing changing must not re-run renderAll
+    on every tick (ADR-0016, #245).
+
+    renderRegion checks its `sig` BEFORE its interaction hold, precisely so a
+    region with nothing to render marks no tick-retry. Get that order backwards
+    — hold first, mark the retry, then check the sig — and the pass becomes
+    self-sustaining: every 304 tick sees `wasDeferred`, re-runs renderAll, holds
+    again on the same focus, and re-marks, for as long as the operator's cursor
+    sits there. The DOM stays correct throughout, so no other test in this file
+    notices; only the work is unbounded.
+
+    The trigger has to be a state change that leaves the SPINE's sig alone,
+    because a change the spine genuinely needs to render is owed a retry under
+    either ordering (that is the hold working). Adding a WAV to a session the
+    spine is not focused on is exactly that: /api/state changes (bytes,
+    wav_count), while the spine's sig — view, backend, tap counts, session
+    count, people count, per-session label/current/transcript flags, and the
+    FOCUSED session's own counters — does not move.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+
+    for sid in ("2025-03-01T10-00-00Z", "2025-03-02T10-00-00Z"):
+        d = rec.recordings_dir / sid
+        d.mkdir(parents=True)
+        synth_speech_like_wav(d / f"{sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                "() => document.querySelectorAll('[data-sid]').length >= 2",
+                timeout=10000,
+            )
+
+            # Park focus in the spine — a control INSIDE the renderRegion host.
+            # `input[…]`, not `[…]`: the spine's nav items each carry a
+            # data-slot="name" SPAN, and only the session-name field is focusable.
+            name_input = '#spine input[data-slot="name"]'
+            await page.click(name_input)
+            assert await page.evaluate(
+                "(sel) => document.activeElement === document.querySelector(sel)", name_input
+            )
+
+            # Move /api/state WITHOUT moving the spine's sig: a new WAV under a
+            # session the spine is not focused on. This is what starts the loop
+            # under a hold-first ordering — one real change, then quiet.
+            focused_sid = await page.evaluate(
+                "() => document.querySelector('#spine [data-slot=\"sessionPick\"]').value"
+            )
+            other = next(s for s in ("2025-03-01T10-00-00Z", "2025-03-02T10-00-00Z") if s != focused_sid)
+            synth_speech_like_wav(
+                rec.recordings_dir / other / f"{other}_seed_speaker_00000002.wav",
+                seconds=0.3,
+                freq_hz=330.0,
+            )
+
+            # Let that change land and the server go quiet again, then measure.
+            await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
+            polls_baseline = await page.evaluate("() => window.__state304s")
+            render_count_0 = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT")
+
+            await page.wait_for_function(
+                "(base) => window.__state304s >= base + 3",
+                arg=polls_baseline,
+                timeout=10000,
+            )
+            render_count_1 = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT")
+
+            assert render_count_1 == render_count_0, (
+                f"renderAll ran {render_count_1 - render_count_0} extra time(s) across idle "
+                "304 polls while a control in the spine held focus — an unchanged sig must "
+                "short-circuit BEFORE the interaction hold, so an idle caret marks no "
+                "tick-retry (ADR-0016, #245)"
+            )
+            # Focus is still where the operator left it.
+            assert await page.evaluate(
+                "(sel) => document.activeElement === document.querySelector(sel)", name_input
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_next_region_hold_lands_after_blur_across_304_ticks(
+    running_recorder: RunningRecorder,
+):
+    """A region swap held by focus lands on the first tick after blur, even when
+    the poll has gone 304-quiet in the meantime (ADR-0016).
+
+    The region analogue of the keyed-list guarantee: renderRegion no longer
+    self-flushes on `focusout`, so the ONLY thing that lands the held swap is
+    the tick-retry flag surviving main.js's 304 short-circuit. If a future
+    change held a render without marking the flag, the spine would stay stale
+    indefinitely once the server went quiet — the failure mode that made the
+    flag exist. Deliberately blurs only AFTER 304s resume, so the retry is the
+    only mechanism that can be under test.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    for sid in ("2025-03-01T10-00-00Z", "2025-03-02T10-00-00Z"):
+        d = rec.recordings_dir / sid
+        d.mkdir(parents=True)
+        synth_speech_like_wav(d / f"{sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+            picker = '#spine [data-slot="sessionPick"]'
+            await page.wait_for_function(
+                "(sel) => document.querySelectorAll(sel + ' option').length >= 2",
+                arg=picker,
+                timeout=10000,
+            )
+
+            # Baseline the option count rather than hardcoding it: the picker
+            # lists the seeded sessions AND the recorder's own current session.
+            baseline = await page.evaluate(
+                "(sel) => document.querySelectorAll(sel + ' option').length", picker
+            )
+
+            # Focus a control inside the spine, then change what the spine
+            # renders: another session moves its sig (sessions.length + the
+            # per-session label term).
+            await page.click('#spine input[data-slot="name"]')
+            sid_c = "2025-03-05T10-00-00Z"
+            d = rec.recordings_dir / sid_c
+            d.mkdir(parents=True)
+            synth_speech_like_wav(d / f"{sid_c}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+
+            # The spine is HELD: the new session must not appear while focus
+            # sits inside it, however many polls carry the new state.
+            await page.wait_for_function("() => window.__statePolls >= 4", timeout=10000)
+            held_options = await page.evaluate(
+                "(sel) => document.querySelectorAll(sel + ' option').length", picker
+            )
+            assert held_options == baseline, (
+                f"the spine rebuilt to {held_options} options (from {baseline}) while a control "
+                "inside it held focus — a region swap must defer to the interaction hold "
+                "(ADR-0004)"
+            )
+
+            # Let the server go quiet again, so only the tick-retry can land it.
+            polls_baseline = await page.evaluate("() => window.__state304s")
+            await page.wait_for_function(
+                "(base) => window.__state304s >= base + 2", arg=polls_baseline, timeout=10000
+            )
+            still_held = await page.evaluate(
+                "(sel) => document.querySelectorAll(sel + ' option').length", picker
+            )
+            assert still_held == baseline, "the spine rebuilt under the focus once the poll went quiet"
+
+            # Release focus — the held render lands on the next tick.
+            await page.evaluate("() => document.activeElement.blur()")
+            await page.wait_for_function(
+                "([sel, want]) => document.querySelectorAll(sel + ' option').length >= want",
+                arg=[picker, baseline + 1],
+                timeout=10000,
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_next_region_hold_covers_an_open_popover_inside_the_host(
+    running_recorder: RunningRecorder,
+):
+    """A popover or <dialog> open INSIDE a region host holds the swap, and the
+    held render lands once it closes (ADR-0016).
+
+    This pins a hazard rather than reproducing a shipped bug: today every
+    overlay in the dashboard is appended to document.body (live-channel.js's log
+    dialog), so no renderRegion host contains one and the guard is never
+    exercised by a real flow. The seam owns this term precisely so the first
+    overlay someone puts inside a region is covered on arrival — before this
+    consolidation the overlay branch was the one hold still delegated to the
+    vendored copy, where a deferral could flush a build that went stale while
+    the seam absorbed newer ticks. The overlay is injected here for the same
+    reason the hazard is latent: there is no other way to reach the branch.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    for sid in ("2025-03-01T10-00-00Z", "2025-03-02T10-00-00Z"):
+        d = rec.recordings_dir / sid
+        d.mkdir(parents=True)
+        synth_speech_like_wav(d / f"{sid}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+            picker = '#spine [data-slot="sessionPick"]'
+            await page.wait_for_function(
+                "(sel) => document.querySelectorAll(sel + ' option').length >= 2",
+                arg=picker,
+                timeout=10000,
+            )
+
+            baseline = await page.evaluate(
+                "(sel) => document.querySelectorAll(sel + ' option').length", picker
+            )
+
+            # Put an OPEN popover inside the spine (the region host).
+            await page.evaluate(
+                """() => {
+                    const pop = document.createElement('div');
+                    pop.id = 'probePopover';
+                    pop.popover = 'manual';
+                    pop.textContent = 'open';
+                    document.getElementById('spine').appendChild(pop);
+                    pop.showPopover();
+                }"""
+            )
+            assert await page.evaluate("() => !!document.querySelector('#spine :popover-open')"), (
+                "the probe popover did not open — the browser lacks Popover API support"
+            )
+
+            # Move the spine's sig while the popover is open.
+            sid_c = "2025-03-05T10-00-00Z"
+            d = rec.recordings_dir / sid_c
+            d.mkdir(parents=True)
+            synth_speech_like_wav(d / f"{sid_c}_seed_speaker_00000001.wav", seconds=0.3, freq_hz=220.0)
+
+            await page.wait_for_function("() => window.__statePolls >= 4", timeout=10000)
+            assert await page.evaluate("() => !!document.querySelector('#spine :popover-open')"), (
+                "the region was swapped out from under an open popover inside it"
+            )
+            held_options = await page.evaluate(
+                "(sel) => document.querySelectorAll(sel + ' option').length", picker
+            )
+            assert held_options == baseline, (
+                f"the spine rebuilt to {held_options} options (from {baseline}) with a popover open inside it"
+            )
+
+            # Close it — the held render lands on the next tick.
+            await page.evaluate("() => document.getElementById('probePopover').hidePopover()")
+            await page.wait_for_function(
+                "([sel, want]) => document.querySelectorAll(sel + ' option').length >= want",
+                arg=[picker, baseline + 1],
+                timeout=10000,
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
 async def test_next_deferred_render_lands_after_focus_clears_across_304_ticks(
     running_recorder: RunningRecorder,
 ):

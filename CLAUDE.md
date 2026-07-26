@@ -30,14 +30,13 @@
   rather than raw `replaceChildren` — it skips the swap while a control
   inside the host is focused, while a popover/`<dialog>` inside the host
   is open, OR while a text selection starts/ends inside it (clobbering a
-  selection mid-copy is the same bug as snapping a dropdown shut), and a
-  deferred swap flushes ITSELF the instant the hold clears (one-shot
-  listener per host — no next poll tick needed); see `spine.js` for the
-  reference adoption; `summary.js` output pane and `transcript.js` merged
-  pane render through it too, calling `markRegionStale(host)` (now canon,
-  upstreamed) to force the next render after a mutate / lazy-body load
-  WITHOUT bypassing the guards — never `force:true`, which would clobber
-  a mid-copy selection).
+  selection mid-copy is the same bug as snapping a dropdown shut). A
+  deferred swap lands on the NEXT poll pass via the tick-retry — the one
+  retry mechanism every held render in the app uses (ADR-0016); see
+  `spine.js` for the reference adoption; `summary.js` output pane and
+  `transcript.js` merged pane render through it too, calling
+  `markRegionStale(host)` to force the next render after a mutate /
+  lazy-body load WITHOUT bypassing the guards. There is no force flag.
   A **keyed list** (rows keyed and updated in place, never swapped) is the
   other shape, and it has its own primitive: `renderList(host, items, {key,
   create, update, itemSig, sig})` plus `markListStale(host)`, which the three
@@ -54,15 +53,16 @@
   keyed list (the live log dialog, `active-taps.js`, `live-feed.js`) apply the
   exported `selectionInside(host)` for the same rule — defer WITHOUT updating
   the gate's signature, so the held-back render lands on the first
-  tick after the selection clears. Users of the
-  `markDeferredRender`/`consumeDeferredRender` tick-retry are those BESPOKE
-  gates (the live log dialog, `active-taps.js`, `live-feed.js`), every
-  `renderList` deferral (its rows come from live state, so a held render
-  re-derives on the next tick rather than replaying a captured list), PLUS one
-  case inside `renderRegion` itself: a swap held because a text selection
-  STRADDLES the host has no focusout/selectionchange listener of its own to
-  flush it, so it needs the next tick. Every other `renderRegion` deferral
-  flushes itself. `live-channel.js` and `config-card.js`
+  tick after the selection clears. EVERY held render in the app lands through
+  the `markDeferredRender`/`consumeDeferredRender` tick-retry — those BESPOKE
+  gates, every `renderList` deferral, and every `renderRegion` deferral alike.
+  One mechanism, no exceptions to remember; ADR-0016 has the why, including why
+  a listener-based instant flush (which canon `lib/render.js` still implements
+  and this seam no longer reaches) fits only one of the four render shapes.
+  Corollary worth internalising before touching the seam: `renderRegion` checks
+  its `sig` BEFORE the holds, so an idle focused control marks no retry — invert
+  that order and every 304 tick re-runs `renderAll` for as long as a caret sits
+  in a region (#245). `live-channel.js` and `config-card.js`
   render through it too, with NO bespoke guard of their own: a focused
   `[data-cfg-key]` save button mid-`putJson` counts as an interactive
   control in the seam's `_isInteractive`, so `renderRegion` holds the
