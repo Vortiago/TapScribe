@@ -855,12 +855,52 @@ remembered signature so the NEXT `renderRegion` re-renders after a mutate /
 lazy-body load — the "defer, don't force" reset (`force:true` would bypass the
 guards and clobber a selection). Swap-based copy-target panes render through
 `renderRegion` (the Summary output pane, the Transcript merged pane, plus the
-spine/settings/live-channel/config-card regions); a few **view-level** gates
-that guard a whole `update()` body rather than one host swap (the Recordings
-WAV list) apply `selectionInside` directly. The decision and its rejected
+spine/settings/live-channel/config-card regions). The decision and its rejected
 alternatives (DOM-diffing, capture-and-restore, pausing the poll) are
 ADR-0004. Say "this region needs the interaction hold," not ad-hoc
 descriptions of focus/selection guards.
+
+### Region · keyed list
+
+The two shapes a held render takes, and the words for them:
+
+- A **region** is rendered by being **swapped whole** — `renderRegion`
+  `replaceChildren`s a freshly built subtree in.
+- A **keyed list** has its rows **created once, matched by key, and updated in
+  place**, and is never swapped. `renderList(host, items, {key, create, update,
+  itemSig, sig})` is its primitive; `markListStale(host)` is its
+  `markRegionStale`. The host's children belong to the seam alone, so a keyed
+  list's empty/loading **placeholder is a SIBLING** of the host, toggled in
+  place — never swapped into it.
+
+Both need the interaction hold; `renderList` additionally owns two rules a
+region has no equivalent for. **The removal hold**: a row holding a focused
+control whose key has left `items` is **retained** — spliced back at its
+position, so it stays on screen (and keeps its focus) while every other row
+updates, and drops on a one-shot `focusout`. "Never destroy interaction state"
+applies most to removal. Note a retained row is on screen but NOT in `items`, so
+a caller narrating the list is describing `items`, not the DOM. And **the per-row
+hold**: a focused control freezes its own row's `update` and leaves that row's
+`itemSig` unstamped. That hold is deliberately coarser than a per-control guard,
+matching a region holding whole.
+
+Which hold fires is a two-predicate question, and the distinction is the point:
+removal destroys focus on anything **focusable** (including a scripted
+`role="button"`), while an in-place write only threatens **editable** state — a
+value, a caret, an open dropdown. So the removal hold takes the wide predicate
+and the write holds take the narrow one. A **raw swap** is neither: it detaches
+everything under the host, so it takes the full hold via
+`deferIfInteractionInside` (focus or selection), not `deferIfSelectionInside`,
+which covers only half.
+
+A call site uses whichever change detector it has, and may use both or
+neither: a list-level `sig` pays only where a **cheap aggregate stamp** already
+exists (`files_sig` for the WAV lists), while `itemSig` is the answer where one
+doesn't (the Sessions rows change independently and no server digest covers
+them, so building a list-level sig would itself be the O(rows) walk the gate is
+meant to skip).
+
+Say "this is a keyed list" / "it needs the removal hold", not "the list gate".
 
 ## Pending edit
 
@@ -878,6 +918,17 @@ caught up to, once per tick, before anything computes a render
 signature — without it a stale pending edit masks a later change made
 elsewhere forever. Deleting a pending edit is also the ONLY way to
 cancel its save: the saver re-reads the overlay when its timer fires.
+
+A pending edit **pins its row into a filtered list** until the save settles —
+`sessions.js`'s filter returns true for any session with an unsettled rename.
+This is NOT the mid-edit case: protecting the node being typed in is the
+[interaction hold](#interaction-hold)'s job and keys on FOCUS. The pin keys on the
+unsettled SAVE, covering the window after blur where the row would otherwise
+leave and take with it the status cell a `failed: …` must land in — so a failed
+rename would report itself into nothing and the operator would never learn it
+did not stick. A filter predicate that reads save state is the shallow fix; the
+deep one is a fallback in the save-status lifecycle for a status with no live
+cell, which would retire the pin.
 
 Every save that reports itself — a field saver's, and a save BUTTON's —
 narrates into **status cells** through the one **save-status lifecycle**

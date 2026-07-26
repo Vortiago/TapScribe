@@ -900,7 +900,11 @@ body::before { display: none; }
    variant in the Transcript aside keeps its own cap (further down). */
 .wavlist { padding: 2px 0; }
 .panel--fill > .panel__body.flush > .wavlist { flex: 1; min-height: 0; overflow-y: auto; }
-.wavlist .empty { padding: 22px 12px; font-size: 10.5px; }
+/* The empty/loading placeholder is a hidden-toggled SIBLING of .wavlist, not a
+   child of it (the rows host belongs to renderList alone), so this cannot be
+   a `.wavlist .empty` descendant rule. flex: 0 0 auto keeps it at its content
+   height inside the fill panel's flex column while .wavlist takes the rest. */
+.wavlist__empty { padding: 22px 12px; font-size: 10.5px; flex: 0 0 auto; }
 /* A WAV row. content-visibility lets the browser skip layout + paint of
    off-screen rows, so a session with thousands of WAVs stays cheap to hold in
    the DOM; contain-intrinsic-size's `auto` remembers each row's real height,

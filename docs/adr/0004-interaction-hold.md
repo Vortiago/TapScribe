@@ -35,10 +35,35 @@ The hold lives at shared seams, not per view:
   primitive — checks focused controls AND text selections before its
   per-host signature, so every region rendered through it gets the hold
   for free.
+- `renderList` (same module) — the per-tick **keyed list** primitive, the
+  dual of `renderRegion` for rows created once, matched by key, and
+  updated in place rather than swapped. It adds two holds a swapped
+  region has no equivalent for. A row whose control is focused has its
+  own update held (coarser than a per-control guard, matching a region
+  holding whole). And a focused row whose key has left the incoming items
+  is **retained** — spliced back at its position so it survives while
+  every other row updates, dropping on a one-shot `focusout` — because
+  removal is the most destructive case of "never destroy interaction
+  state". Deferring the whole render instead froze the list for as long
+  as the focus lasted. Canon `reconcileList` is not re-exported, so a
+  keyed list cannot be rendered un-held.
+
+  Which holds fire on what is a two-predicate question: removing a node
+  destroys focus on anything **focusable**, while an in-place write only
+  threatens **editable** state (a value, a caret, an open dropdown). The
+  removal hold therefore takes the wider predicate and the write holds
+  the narrower one; treating a scripted `role="button"` as editable
+  holds the update of the row the operator just clicked.
+
+  A raw swap is neither, and needs the full hold explicitly:
+  `deferIfInteractionInside` (focus **or** selection) is for a per-tick
+  gate that replaces a host's children outright, `deferIfSelectionInside`
+  only where the write cannot detach a focused node.
 - `selectionInside(host)` (same module) — for updaters that mutate
-  text/rows in place rather than swapping a region (`active-taps.js`,
-  `live-feed.js`, the live log dialog) and for view-level render gates
-  (`transcript.js` merged pane, `recordings.js` WAV list).
+  text/rows in place rather than swapping a region or rendering a keyed
+  list (`active-taps.js`, `live-feed.js`, the live log dialog) and for the
+  one cold, discrete mode switch that raw-swaps into a keyed list's host
+  (`sessions.js`'s cross-session transcript search).
 - Tail-follow scrolling is sticky (`wasAtBottom` read before the
   rewrite), never unconditional.
 - Render-signature hygiene (CLAUDE.md) is the hold's complement: a

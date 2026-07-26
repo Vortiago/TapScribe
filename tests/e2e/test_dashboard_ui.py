@@ -45,6 +45,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -54,6 +55,7 @@ import pytest
 
 from tapscribe import transcribers as _transcribers
 from tapscribe.recorder import JobState
+from tapscribe.session_paths import FILENAME_META_JSON
 
 from .conftest import FakeAliveProc, RunningRecorder
 from .fake_transcriber import FakeTranscriber
@@ -2841,53 +2843,75 @@ async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_reco
             await browser.close()
 
 
-# JS init script for the two tests below: wraps Element.prototype.querySelectorAll
-# to count how many times each view's selection painter walks its list
-# (recordings.js's `.wavrow:not(.is-clip)` and transcript.js's `button.wavrow`),
-# alongside the same real-304 confirmation as _COUNT_STATE_304S_JS — so a flat
-# walk count across a window of CONFIRMED 304s means the painter is genuinely
-# skipping quiet ticks, not just getting lucky with an unchanged-looking DOM.
-_COUNT_SELECTION_WALKS_JS = """
-window.__selWalks = { recordings: 0, transcript: 0 };
-const _qsa = Element.prototype.querySelectorAll;
-Element.prototype.querySelectorAll = function (sel) {
-  if (sel === '.wavrow:not(.is-clip)') window.__selWalks.recordings++;
-  else if (sel === 'button.wavrow') window.__selWalks.transcript++;
-  return _qsa.call(this, sel);
+# Watch the rows of a keyed list for ANY DOM churn. Pairs with
+# _COUNT_STATE_304S_JS (installed alongside it), so a flat mutation count across a
+# window of CONFIRMED 304s means the seam is genuinely skipping quiet ticks rather
+# than getting lucky with an unchanged-looking DOM.
+#
+# `installRowWatch(rowSelector)` stamps every current row and observes the rows
+# host for attribute/child mutations, recording which rows were touched by
+# data-wav. This replaced a querySelectorAll counter that hooked the two
+# hand-rolled selection walkers by their exact selector strings — renderList owns
+# the selection repaint now, gated per row, so the question the guard asks is no
+# longer "did the walker run" but the stronger "was any row touched at all".
+_WATCH_ROW_MUTATIONS_JS = """
+window.__rowMuts = 0;
+window.__rowMutTargets = [];
+window.installRowWatch = (rowSelector) => {
+  const rows = Array.from(document.querySelectorAll(rowSelector));
+  if (!rows.length) return 0;
+  const host = rows[0].parentElement;
+  rows.forEach((r, i) => { r.dataset.stamp = 'S' + i; });
+  window.__rowMuts = 0;
+  window.__rowMutTargets = [];
+  const note = (node) => {
+    const row = node && node.nodeType === 1 ? node.closest(rowSelector) : null;
+    window.__rowMuts++;
+    const name = row && row.dataset ? row.dataset.wav : null;
+    if (name && !window.__rowMutTargets.includes(name)) window.__rowMutTargets.push(name);
+  };
+  new MutationObserver((records) => {
+    for (const r of records) {
+      // The stamps themselves are ours; never count them as churn.
+      if (r.type === 'attributes' && r.attributeName === 'data-stamp') continue;
+      note(r.target);
+      for (const n of r.addedNodes) note(n);
+      for (const n of r.removedNodes) note(n);
+    }
+  }).observe(host, { subtree: true, childList: true, attributes: true });
+  return rows.length;
 };
-window.__statePolls = 0;
-window.__state304s = 0;
-const _fetch = window.fetch;
-window.fetch = (...args) => {
-  const u = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-  const isState = u.includes('/api/state');
-  if (isState) window.__statePolls++;
-  const p = _fetch.apply(window, args);
-  if (isState) p.then((r) => { if (r.status === 304) window.__state304s++; }).catch(() => {});
-  return p;
-};
+window.stampsIntact = (rowSelector) =>
+  Array.from(document.querySelectorAll(rowSelector)).every((r) => !!r.dataset.stamp);
 """
 
 
-async def test_next_apply_selection_skips_walk_on_quiet_tick(running_recorder: RunningRecorder):
-    """Issue #213: recordings.js's `applySelection` walked every `.wavrow` with
-    querySelectorAll + per-row classList/attribute writes on EVERY poll tick,
-    even when the selection hadn't changed and the list wasn't reconciled — an
-    O(rows) cost paid at 2Hz forever on a quiet tab. Guard: confirm several REAL
-    304s land with the walk count flat (the early-exit is skipping genuinely
-    quiet ticks), then select a DIFFERENT WAV and confirm the walk count moves
-    (responsiveness is unchanged — the click path still repaints)."""
+async def test_next_wav_list_rows_are_untouched_on_quiet_ticks(running_recorder: RunningRecorder):
+    """Issue #213, re-pinned against the keyed-list seam. The Recordings WAV list
+    used to repaint every row's `.is-sel` class + aria-pressed on EVERY poll tick
+    (an O(rows) cost paid at 2Hz forever on a quiet tab); the fix was a
+    change-detection guard, and `renderList` now owns it as the list `sig` plus a
+    per-row `itemSig`.
+
+    Stronger guard than the walk counter it replaced: cross several REAL 304s and
+    assert NO row was touched at all (no attribute write, no child churn, every
+    identity stamp intact) — then select a DIFFERENT WAV and assert not only that
+    the highlight moved, but that ONLY the two rows whose selected-state actually
+    flipped were touched. That last part is what the per-row gate buys over the
+    old whole-list walk."""
     rec = running_recorder.recorder
     base = running_recorder.base_url
     sid = "2025-02-03T09-00-00Z"
-    _session_dir, names = _seed_multi_wav_session(rec, sid, n=2)
+    _session_dir, names = _seed_multi_wav_session(rec, sid, n=3)
+    rows_sel = "#viewRoot .wavrow[data-wav]"
 
     async with playwright_session() as pw:
         browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
-            await page.add_init_script(_COUNT_SELECTION_WALKS_JS)
+            await page.add_init_script(_COUNT_STATE_304S_JS)
+            await page.add_init_script(_WATCH_ROW_MUTATIONS_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
 
             await page.wait_for_function(
@@ -2901,38 +2925,46 @@ async def test_next_apply_selection_skips_walk_on_quiet_tick(running_recorder: R
             await _focus_session_view(page, sid, "recordings")
 
             await page.wait_for_function(
-                """() => document.querySelectorAll('#viewRoot .wavrow[data-wav]').length >= 2""",
+                f"() => document.querySelectorAll('{rows_sel}').length >= 3",
                 timeout=15000,
             )
             # A selection exists (defaults to the first WAV) before the baseline.
             await page.wait_for_function(
-                """() => !!document.querySelector('#viewRoot .wavrow.is-sel')""",
+                "() => !!document.querySelector('#viewRoot .wavrow.is-sel')",
                 timeout=10000,
             )
+            watched = await page.evaluate("(sel) => window.installRowWatch(sel)", rows_sel)
+            assert watched >= 3, f"expected to watch >= 3 rows, watched {watched}"
 
-            # Confirm real 304s are landing before the baseline — proves the
-            # server has genuinely gone quiet, not merely that nothing looks
-            # different in the payload.
+            # Confirm real 304s are landing — proves the server has genuinely gone
+            # quiet, not merely that nothing looks different in the payload.
             await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
             polls_baseline = await page.evaluate("() => window.__state304s")
-            walks_0 = await page.evaluate("() => window.__selWalks.recordings")
-
-            # Cross several more purely-idle, confirmed-304 polls.
             await page.wait_for_function(
                 "(base) => window.__state304s >= base + 3",
                 arg=polls_baseline,
                 timeout=10000,
             )
-            walks_1 = await page.evaluate("() => window.__selWalks.recordings")
-            assert walks_1 == walks_0, (
-                f"applySelection walked the WAV list {walks_1 - walks_0} extra "
-                "time(s) across purely-304 idle polls — it must skip the "
-                "querySelectorAll walk entirely when the selection is unchanged "
-                "and the list wasn't reconciled (issue #213)"
+            # …and force REAL render passes. Crossing 304s alone proves nothing:
+            # main.js's tick() returns before renderAll on an unchanged 304, so an
+            # idle window renders zero times and a zero-mutation assertion holds
+            # even with the list sig deleted. gotoView re-renders synchronously
+            # from the cached state, so each call is a full render whose only
+            # correct outcome is "the sig gate skipped and no row was touched".
+            renders = await _force_render_passes(page, "recordings")
+            muts = await page.evaluate("() => window.__rowMuts")
+            assert muts == 0, (
+                f"the WAV list mutated its rows {muts} time(s) across idle polls and {renders} "
+                "unchanged render passes — renderList's list sig must skip the reconcile "
+                "entirely when nothing changed (issue #213)"
+            )
+            assert await page.evaluate("(sel) => window.stampsIntact(sel)", rows_sel), (
+                "an idle 304 tick rebuilt WAV rows — the identity stamps are gone"
             )
 
-            # Selecting a DIFFERENT WAV must still repaint (responsiveness is
-            # unchanged) — the walk count moves.
+            # Selecting a DIFFERENT WAV must still repaint, and touch ONLY the two
+            # rows whose selected-state flipped.
+            await page.evaluate("() => { window.__rowMuts = 0; window.__rowMutTargets = []; }")
             other = page.locator(f'#viewRoot .wavrow[data-wav="{names[1]}"]')
             await other.locator("[data-wav-select]").click()
             await page.wait_for_function(
@@ -2943,29 +2975,276 @@ async def test_next_apply_selection_skips_walk_on_quiet_tick(running_recorder: R
                 arg=names[1],
                 timeout=10000,
             )
-            walks_2 = await page.evaluate("() => window.__selWalks.recordings")
-            assert walks_2 > walks_1, "selecting a different WAV did not repaint the selection highlight"
+            assert await page.evaluate("() => window.__rowMuts") > 0, (
+                "selecting a different WAV did not repaint the selection highlight"
+            )
+            touched = set(await page.evaluate("() => window.__rowMutTargets"))
+            assert touched <= {names[0], names[1]}, (
+                f"selecting a WAV touched rows beyond the two that flipped: {sorted(touched)} — "
+                "the per-row itemSig gate should leave every other row alone"
+            )
+            assert await page.evaluate("(sel) => window.stampsIntact(sel)", rows_sel), (
+                "selecting a WAV rebuilt rows instead of updating them in place"
+            )
             await context.close()
         finally:
             await browser.close()
 
 
-async def test_next_apply_picker_selection_skips_walk_on_quiet_tick(running_recorder: RunningRecorder):
-    """The Transcript stage's per-WAV picker mirrors the Recordings list's
-    selection-painter shape (`applyPickerSelection` in transcript.js) — same
-    guard as test_next_apply_selection_skips_walk_on_quiet_tick, pinned on the
-    second surface."""
+async def test_renderlist_holds_focused_row_and_lands_after_blur(running_recorder: RunningRecorder):
+    """renderList rule 4 — the coarse per-row hold, and the ADR-0004 trap it
+    exists for.
+
+    sessions.js used to own this by hand and got it wrong: it stamped a row's
+    signature ABOVE its focus guards, so a write skipped because the rename input
+    was focused was stranded FOREVER — the next tick recomputed the identical sig
+    and early-returned, the row kept a stale label, and a later keystroke
+    persisted the stale value back over an external rename.
+
+    Focus a row's rename input, change that session's label EXTERNALLY, and assert
+    the row does not update while focused; then blur and assert it catches up on
+    the next tick (the sig was not advanced, and markDeferredRender earned the
+    retry even though the poll went quiet)."""
     rec = running_recorder.recorder
     base = running_recorder.base_url
-    sid = "2025-02-04T09-00-00Z"
-    _session_dir, names = _seed_multi_wav_session(rec, sid, n=2)
+    sid = "2025-02-05T09-00-00Z"
+    _seed_multi_wav_session(rec, sid, n=1)
+    row_sel = f'#viewRoot [data-sid="{sid}"]'
 
     async with playwright_session() as pw:
         browser = await pw.chromium.launch(headless=True)
         try:
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
-            await page.add_init_script(_COUNT_SELECTION_WALKS_JS)
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+
+            await page.wait_for_selector(row_sel, timeout=15000)
+            rename = page.locator(f'{row_sel} [data-slot="rename"]')
+            await rename.focus()
+            await page.wait_for_function(
+                """(sel) => {
+                    const i = document.querySelector(sel + ' [data-slot="rename"]');
+                    return !!i && document.activeElement === i;
+                }""",
+                arg=row_sel,
+                timeout=5000,
+            )
+
+            # An EXTERNAL rename: written straight to the session's meta sidecar
+            # (via the layout constant — hand-typing the filename is how the first
+            # cut of this test silently asserted nothing), so it arrives through the
+            # poll rather than through this row's own saver.
+            (rec.recordings_dir / sid / FILENAME_META_JSON).write_text(
+                json.dumps({"label": "renamed elsewhere"}), encoding="utf-8"
+            )
+
+            # CONTROL: wait until the SERVER is actually serving the new label, so
+            # the hold assertion below cannot pass vacuously because nothing changed.
+            await page.wait_for_function(
+                """async (sid) => {
+                    const r = await fetch('/api/state', { cache: 'no-store' });
+                    if (!r.ok) return false;
+                    const j = await r.json();
+                    const s = (j.sessions || []).find((x) => x.session === sid);
+                    return !!s && (s.session_meta || {}).label === 'renamed elsewhere';
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+
+            # Several polls must now cross with the row NOT updated — the label cell
+            # is written by fillRow, which the seam holds for a focused row.
+            await page.wait_for_timeout(2500)
+            label_held = await page.evaluate(
+                """(sel) => {
+                    const el = document.querySelector(sel + ' [data-slot="label"]');
+                    return el ? el.textContent : null;
+                }""",
+                row_sel,
+            )
+            assert label_held is not None and "renamed elsewhere" not in label_held, (
+                f"the row updated while its rename input was focused (label={label_held!r}) — "
+                "renderList must hold a row whose control holds focus"
+            )
+            assert await page.evaluate(
+                """(sel) => {
+                    const i = document.querySelector(sel + ' [data-slot="rename"]');
+                    return !!i && document.activeElement === i;
+                }""",
+                row_sel,
+            ), "the focused rename input was torn out from under the operator"
+
+            # Blur → the held write must land, without needing a server change to
+            # wake the poll (the sig was never advanced).
+            await page.evaluate("() => document.activeElement.blur()")
+            await page.wait_for_function(
+                """(sel) => {
+                    const el = document.querySelector(sel + ' [data-slot="label"]');
+                    return !!el && el.textContent.includes('renamed elsewhere');
+                }""",
+                arg=row_sel,
+                timeout=10000,
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_renderlist_keeps_focused_row_that_left_the_list(running_recorder: RunningRecorder):
+    """renderList rule 3 — the removal hold. Canon reconcileList removes every key
+    absent from `items`, which would take a focused control with it, and
+    CONTEXT.md defines the interaction hold as never destroying interaction state.
+
+    Focus a row's rename input, then make that session vanish from the listing
+    (its directory is removed, so the next gather_sessions drops it) and assert the
+    row — and the focus inside it — survives. Blur, and it goes."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    keep, doomed = "2025-02-06T09-00-00Z", "2025-02-06T10-00-00Z"
+    _seed_multi_wav_session(rec, keep, n=1)
+    _seed_multi_wav_session(rec, doomed, n=1)
+    row_sel = f'#viewRoot [data-sid="{doomed}"]'
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+
+            await page.wait_for_selector(row_sel, timeout=15000)
+            await page.locator(f'{row_sel} [data-slot="rename"]').focus()
+            await page.wait_for_function(
+                """(sel) => {
+                    const i = document.querySelector(sel + ' [data-slot="rename"]');
+                    return !!i && document.activeElement === i;
+                }""",
+                arg=row_sel,
+                timeout=5000,
+            )
+
+            shutil.rmtree(rec.recordings_dir / doomed)
+            # Wait until the SERVER has genuinely dropped it, so the held row is
+            # demonstrably a client-side hold and not a slow poll.
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && !Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=doomed,
+                timeout=10000,
+            )
+
+            assert await page.evaluate("(sel) => !!document.querySelector(sel)", row_sel), (
+                "the row was removed while its rename input held focus — renderList must "
+                "defer the whole render when a focused row's key leaves the list"
+            )
+            assert await page.evaluate(
+                """(sel) => {
+                    const i = document.querySelector(sel + ' [data-slot="rename"]');
+                    return !!i && document.activeElement === i;
+                }""",
+                row_sel,
+            ), "focus was lost even though the row survived"
+
+            await page.evaluate("() => document.activeElement.blur()")
+            await page.wait_for_function("(sel) => !document.querySelector(sel)", arg=row_sel, timeout=10000)
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_renderlist_selection_hold_defers_reconcile_without_advancing_sig(
+    running_recorder: RunningRecorder,
+):
+    """renderList rule 2 — a text selection inside the host defers the reconcile
+    WITHOUT advancing the list sig, so the held render lands once the selection
+    clears rather than being lost.
+
+    Select text inside the Recordings WAV list, then add a WAV on disk (which
+    flips files_sig, so the list genuinely wants to reconcile). The selection must
+    survive and the new row must NOT appear; collapsing the selection must let the
+    held reconcile land — on a tick, via markDeferredRender, since by then the
+    poll is 304ing again."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-07T09-00-00Z"
+    session_dir, names = _seed_multi_wav_session(rec, sid, n=2)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/", wait_until="domcontentloaded")
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "recordings")
+            await page.wait_for_function(
+                "() => document.querySelectorAll('#viewRoot .wavrow[data-wav]').length >= 2",
+                timeout=15000,
+            )
+
+            selected = await page.evaluate("""() => {
+                const el = document.querySelector('#viewRoot .wavrow [data-slot="name"]');
+                const r = document.createRange();
+                r.selectNodeContents(el);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(r);
+                return sel.toString();
+            }""")
+            assert selected, "failed to select text inside a WAV row"
+
+            # A third WAV on disk → a new files_sig → the list wants to reconcile.
+            extra = f"{sid}_spk9_id9_0000aa99.wav"
+            synth_speech_like_wav(session_dir / extra, seconds=0.4, freq_hz=300.0)
+            await page.wait_for_timeout(3000)  # crosses several polls
+
+            still = await page.evaluate("() => window.getSelection().toString()")
+            assert still == selected, (
+                "reconciling the WAV list dissolved the operator's text selection — "
+                "renderList must defer while a selection is inside the host"
+            )
+            assert await page.evaluate(
+                "(n) => !document.querySelector(`#viewRoot .wavrow[data-wav='${n}']`)", extra
+            ), "the list reconciled despite the selection hold"
+
+            # Collapse it → the held reconcile must land on a following tick.
+            await page.evaluate("() => window.getSelection().removeAllRanges()")
+            await page.wait_for_function(
+                "(n) => !!document.querySelector(`#viewRoot .wavrow[data-wav='${n}']`)",
+                arg=extra,
+                timeout=10000,
+            )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_next_transcript_picker_rows_are_untouched_on_quiet_ticks(running_recorder: RunningRecorder):
+    """The Transcript stage's per-WAV picker is the seam's second adapter — same
+    guard as test_next_wav_list_rows_are_untouched_on_quiet_ticks, pinned on that
+    surface (its rows are <button class="wavrow">)."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-04T09-00-00Z"
+    _session_dir, names = _seed_multi_wav_session(rec, sid, n=3)
+    rows_sel = "#viewRoot button.wavrow[data-wav]"
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.add_init_script(_COUNT_STATE_304S_JS)
+            await page.add_init_script(_WATCH_ROW_MUTATIONS_JS)
             await page.goto(base + "/", wait_until="domcontentloaded")
 
             await page.wait_for_function(
@@ -2979,33 +3258,38 @@ async def test_next_apply_picker_selection_skips_walk_on_quiet_tick(running_reco
             await _focus_session_view(page, sid, "transcript")
 
             await page.wait_for_function(
-                """() => document.querySelectorAll('#viewRoot button.wavrow[data-wav]').length >= 2""",
+                f"() => document.querySelectorAll('{rows_sel}').length >= 3",
                 timeout=15000,
             )
             await page.wait_for_function(
-                """() => !!document.querySelector('#viewRoot button.wavrow.is-sel')""",
+                "() => !!document.querySelector('#viewRoot button.wavrow.is-sel')",
                 timeout=10000,
             )
+            watched = await page.evaluate("(sel) => window.installRowWatch(sel)", rows_sel)
+            assert watched >= 3, f"expected to watch >= 3 picker rows, watched {watched}"
 
             await page.wait_for_function("() => window.__state304s >= 3", timeout=10000)
             polls_baseline = await page.evaluate("() => window.__state304s")
-            walks_0 = await page.evaluate("() => window.__selWalks.transcript")
-
             await page.wait_for_function(
                 "(base) => window.__state304s >= base + 3",
                 arg=polls_baseline,
                 timeout=10000,
             )
-            walks_1 = await page.evaluate("() => window.__selWalks.transcript")
-            assert walks_1 == walks_0, (
-                f"applyPickerSelection walked the picker list {walks_1 - walks_0} "
-                "extra time(s) across purely-304 idle polls — it must skip the "
-                "querySelectorAll walk entirely when the selection is unchanged "
-                "and the list wasn't reconciled (issue #213)"
+            # Force REAL render passes — see the WAV-list twin for why crossing
+            # 304s alone cannot fail.
+            renders = await _force_render_passes(page, "transcript")
+            muts = await page.evaluate("() => window.__rowMuts")
+            assert muts == 0, (
+                f"the picker mutated its rows {muts} time(s) across idle polls and {renders} "
+                "unchanged render passes — renderList's list sig must skip the reconcile "
+                "entirely when nothing changed (issue #213)"
+            )
+            assert await page.evaluate("(sel) => window.stampsIntact(sel)", rows_sel), (
+                "an idle 304 tick rebuilt picker rows — the identity stamps are gone"
             )
 
-            other = page.locator(f'#viewRoot button.wavrow[data-wav="{names[1]}"]')
-            await other.click()
+            await page.evaluate("() => { window.__rowMuts = 0; window.__rowMutTargets = []; }")
+            await page.locator(f'#viewRoot button.wavrow[data-wav="{names[1]}"]').click()
             await page.wait_for_function(
                 """(name) => {
                     const row = document.querySelector(`#viewRoot button.wavrow[data-wav="${name}"]`);
@@ -3014,9 +3298,12 @@ async def test_next_apply_picker_selection_skips_walk_on_quiet_tick(running_reco
                 arg=names[1],
                 timeout=10000,
             )
-            walks_2 = await page.evaluate("() => window.__selWalks.transcript")
-            assert walks_2 > walks_1, (
+            assert await page.evaluate("() => window.__rowMuts") > 0, (
                 "selecting a different WAV did not repaint the picker's selection highlight"
+            )
+            touched = set(await page.evaluate("() => window.__rowMutTargets"))
+            assert touched <= {names[0], names[1]}, (
+                f"selecting a WAV touched picker rows beyond the two that flipped: {sorted(touched)}"
             )
             await context.close()
         finally:
@@ -5239,10 +5526,27 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
     skipped rebuild re-invokes build() into a detached probe and pushes any
     mismatch to globalThis.__TAPSCRIBE_SIG_DRIFT.
 
+    `renderList` (keyed lists) records into the same array from two probes of its
+    own — the list-level one (do the rows on screen still match what `items`
+    would produce?) and the per-row one (does `update` write anything `itemSig`
+    doesn't name?).
+
     This test turns the audit on, exercises real views across several poll
     cycles, and asserts zero drift was recorded: any future sig-drift will
-    trip it as soon as a region's build output changes without its sig changing."""
+    trip it as soon as a region's build output changes without its sig changing.
+
+    It ALSO asserts the probes actually FIRED. Zero drift over empty views is
+    vacuous, and that is exactly what this test used to be for the keyed lists:
+    it seeded no sessions, so the Sessions rows and the Transcript picker had no
+    rows to probe and the row audit never ran once. The seeding below and the
+    per-kind probe assertions are what make "no drift" mean
+    something."""
+    rec = running_recorder.recorder
     base = running_recorder.base_url
+    # Two sessions with WAVs: gives the Sessions view real rows (and a non-empty
+    # absorb-target set) and the Recordings/Transcript views a real WAV list.
+    for sid in ("2025-03-01T09-00-00Z", "2025-03-02T09-00-00Z"):
+        _seed_multi_wav_session(rec, sid, n=2)
 
     async with playwright_session() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -5259,19 +5563,43 @@ async def test_renderregion_sig_audit_finds_no_drift(running_recorder: RunningRe
             # Turn audit on AFTER the initial render so the first paint (no
             # prior sig remembered) doesn't produce false positives.
             await page.evaluate(
-                "() => { window.__TAPSCRIBE_SIG_AUDIT = true; window.__TAPSCRIBE_SIG_DRIFT = []; }"
+                "() => { window.__TAPSCRIBE_SIG_AUDIT = true; window.__TAPSCRIBE_SIG_DRIFT = []; "
+                "window.__TAPSCRIBE_SIG_PROBES = { region: 0, list: 0, row: 0 }; }"
             )
 
-            # Drive through each view and let >1 poll cross per view so any
-            # sig-gated region would get skipped (and re-checked by the audit).
+            # Drive through each view TWICE, because the audit only probes a
+            # render that was SKIPPED, and an idle tab produces none: main.js's
+            # tick() returns before renderAll when /api/state 304s unchanged, so
+            # waiting out poll periods on a quiet tab re-renders nothing and the
+            # probes never run (which is how this test passed vacuously). gotoView
+            # calls renderAll synchronously from the cached state, so a second
+            # visit re-renders with IDENTICAL state — every sig-gated region and
+            # keyed list skips, and each skip is what gets probed. A poll period
+            # is still crossed for realism.
             for view in _NEXT_VIEWS:
                 await page.evaluate("(v) => window.gotoView(v)", view)
                 await page.wait_for_function(
                     "() => document.querySelector('#viewRoot')?.childElementCount > 0",
                     timeout=5000,
                 )
-                # Cross at least one poll period (500ms in main.js).
-                await page.wait_for_timeout(_NEXT_POLL_CROSS_MS)
+                # A second pass over identical state is what makes every sig-gated
+                # region and keyed list SKIP, and a skip is what gets probed.
+                await _force_render_passes(page, view, 1)
+
+            # Each probe KIND must have run. A single total is not enough: the
+            # keyed-list probes alone satisfied `probes > 0` while the renderRegion
+            # half went entirely unexercised, and the LIST probe satisfied it while
+            # no row was ever probed — so a real drift in either unprobed half
+            # would have shipped green under a passing anti-vacuity assertion.
+            kinds = await page.evaluate(
+                "() => window.__TAPSCRIBE_SIG_PROBES || { region: 0, list: 0, row: 0 }"
+            )
+            for kind, n in kinds.items():
+                assert n > 0, (
+                    f"the sig audit never ran a {kind} probe ({kinds}) — 'no drift' says nothing "
+                    f"about {kind} signatures. Seed state those regions/rows actually render, and "
+                    "make sure a SKIPPED render happens (an unchanged 304 renders nothing at all)."
+                )
 
             # Assert no drift was recorded across any view.
             drift = await page.evaluate("() => (window.__TAPSCRIBE_SIG_DRIFT || []).length")
@@ -5320,6 +5648,26 @@ def _seed_named_session(rec, sid: str, *, speaker: str) -> Path:
         encoding="utf-8",
     )
     return d
+
+
+async def _force_render_passes(page, view: str, n: int = 3) -> int:
+    """Drive `n` REAL render passes of `view` and return how many actually ran.
+
+    Crossing poll ticks renders nothing: main.js's tick() returns before renderAll
+    when /api/state 304s unchanged, so a test that waits out idle polls and then
+    asserts "nothing was touched" cannot fail. gotoView re-renders synchronously
+    from the cached state, so each call is a full pass whose only correct outcome
+    is that the sig gates skipped. Asserts the counter moved, so the caller's
+    assertion can never be vacuous.
+    """
+    before = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0")
+    await page.evaluate("([v, n]) => { for (let i = 0; i < n; i++) window.gotoView(v); }", [view, n])
+    ran = await page.evaluate("() => window.__TAPSCRIBE_RENDER_ALL_COUNT || 0") - before
+    assert ran >= n, (
+        f"expected >= {n} forced render passes of {view!r}, got {ran} — the assertion "
+        "that follows would be vacuous"
+    )
+    return ran
 
 
 async def _focus_session_view(page, sid: str, view: str) -> None:

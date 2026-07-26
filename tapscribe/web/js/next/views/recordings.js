@@ -14,25 +14,27 @@
 //
 // The WAV list itself is built for HUGE sessions (hundreds–thousands of
 // files). Two pieces keep it snappy:
-//   1. The file listing is NOT on /api/state — it's fetched lazily via
-//      sessionFiles.fetch(sid, files_sig) and cached, so it crosses the wire
-//      once per change, not every poll. `currentFiles` holds the resolved
-//      list for the focused session.
-//   2. The list is rendered through `reconcileList` (keyed, in-place — never
-//      replaceChildren) and each row carries `content-visibility: auto`
-//      (next.css `.wavrow`), so the browser skips layout/paint of off-screen
-//      rows and a selection / expand / poll tick never rebuilds thousands of
-//      nodes. Selection is an in-place `.is-sel` toggle; the per-row
-//      transcript expand is a native <details> that lazy-fetches its body on
-//      first open.
+//   1. The file listing is NOT on /api/state — it's fetched lazily through
+//      next/session-files.js, which owns the in-flight dedupe and the
+//      cold-vs-stale sentinel, so it crosses the wire once per change, not
+//      every poll. `currentFiles` holds the resolved list for the focused
+//      session.
+//   2. The list is a KEYED LIST rendered through `renderList` (templates.js —
+//      keyed, in-place, never replaceChildren) and each row carries
+//      `content-visibility: auto` (next.css `.wavrow`), so the browser skips
+//      layout/paint of off-screen rows and a selection / expand / poll tick
+//      never rebuilds thousands of nodes. Selection is a term in the row's
+//      itemSig, so picking a WAV repaints two rows; the per-row transcript
+//      expand is a native <details> that lazy-fetches its body on first open.
 //
 // Built once for the page; `update(j, session)` refreshes stats / strip-job
-// progress each tick and reconciles the list only when the file set changes
-// (files_sig / source), deferring while a control is focused or text is being
-// selected inside the list.
+// progress each tick and hands the list to `renderList`, which reconciles only
+// when the file set or selection changes (files_sig / source / selected name)
+// and defers while text is selected inside it.
 
-import { tpl, mount, pick, reconcileList, deferIfSelectionInside } from "../../templates.js";
-import { postJson, del, loadSessionFiles, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, errText } from "../../api.js";
+import { tpl, mount, pick, renderList, markListStale } from "../../templates.js";
+import { postJson, del, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, errText } from "../../api.js";
+import { createFilesSource, listState } from "../session-files.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
 import { setDimmable } from "../ui.js";
@@ -80,6 +82,20 @@ export function build(ctx) {
   const jobWav = pick(frag, "jobWav");
   const wavHint = pick(frag, "wavHint");
   const wavList = pick(frag, "wavList");
+  /** The empty/loading placeholder — a hidden-toggled SIBLING of `wavList`, so
+   * the rows host's children belong to renderList alone (recordings.html). */
+  const wavEmpty = /** @type {HTMLElement} */ (pick(frag, "wavEmpty"));
+
+  /** Invalidate BOTH of this view's gates and repaint. One owner for "what a
+   * mutate invalidates", so a new gate is added here rather than at five call
+   * sites. Used where the server-side `files_sig` may still lag the mutation
+   * (a strip, a clear, a delete, a landed listing fetch) — never where the
+   * changed value is already a term in the list's `sig`. */
+  const repaintAfterMutate = () => {
+    lastChromeSig = " ";
+    markListStale(wavList);
+    afterMutate();
+  };
 
   // ---- View-local state -----------------------------------------------------
   /** @type {import('../../types.js').Session | null} */
@@ -98,23 +114,13 @@ export function build(ctx) {
    * helper that used to read session.files reads this instead. */
   /** @type {import('../../types.js').WavFile[]} */
   let currentFiles = [];
-  /** (sid@files_sig) fetches in flight — dedupes the lazy files fetch across
-   * the ticks before it lands (the api.js cache dedupes the request itself). */
-  /** @type {Set<string>} */
-  const pendingFiles = new Set();
-  /** Last (sid · source · files_sig) the WAV list was reconciled for — the
-   * list-level gate so reconcileList runs only when the file SET changes, not
-   * every poll tick. NOT advanced on a deferred reconcile (selection/focus
-   * hold) so the held-back render lands once the interaction clears. */
-  let lastListSig = " ";
-  /** Last selection name `applySelection` painted onto the list — the
-   * change-detection guard so a quiet tick (selection unchanged, list not
-   * reconciled) skips the O(rows) querySelectorAll walk entirely. Reset to
-   * `null` right after a reconcile (below) so freshly-built/reused rows
-   * always get the class flip applied at least once, even when the selected
-   * name itself didn't change. */
-  /** @type {string | null} */
-  let appliedSel = null;
+  /** The lazily-fetched WAV listing for the focused session — owns the
+   * in-flight dedupe and the cold-vs-stale sentinel (next/session-files.js). */
+  const filesSource = createFilesSource({
+    onLoaded: () => {
+      repaintAfterMutate();
+    },
+  });
   /** Last strip-silence response stats, per session id (overlay on s.stripped). */
   /** @type {Map<string, import('../../types.js').StripSilenceResult>} */
   const lastStrip = new Map();
@@ -379,9 +385,7 @@ export function build(ctx) {
       stripBtn.disabled = false;
       // Force the next tick to repaint chrome + reconcile the list with the new
       // stripped clips (the new files_sig will refetch the listing).
-      lastChromeSig = " ";
-      lastListSig = " ";
-      afterMutate();
+      repaintAfterMutate();
     }
   });
 
@@ -394,9 +398,7 @@ export function build(ctx) {
     lastStrip.delete(sid);
     dropPreview();
     if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
-    lastChromeSig = " ";
-    lastListSig = " ";
-    afterMutate();
+    repaintAfterMutate();
   });
 
   // ---- Per-WAV transcript expand (native <details>, lazy body) --------------
@@ -535,9 +537,7 @@ export function build(ctx) {
     // The next /api/state poll carries a new files_sig (the digest drops the
     // deleted WAV), so currentFiles refetches and the reconcile removes the
     // row. Force both gates so that lands on the first tick.
-    lastChromeSig = " ";
-    lastListSig = " ";
-    afterMutate();
+    repaintAfterMutate();
   };
 
   /** Trigger a WAV download WITHOUT toggling the row's <details>: a plain
@@ -555,18 +555,19 @@ export function build(ctx) {
     a.remove();
   };
 
-  /** Reflect the current selection on the originals in place — `.is-sel` drives
-   * the "🌊 viewing" badge + highlight (pure CSS), `aria-pressed` the name
-   * button. No row rebuild, so selecting in a thousands-row list is O(rows) DOM
-   * attribute flips, not a reconcile. */
-  /** @param {string} selName */
-  const applySelection = (selName) => {
-    for (const row of /** @type {NodeListOf<HTMLElement>} */ (wavList.querySelectorAll(".wavrow:not(.is-clip)"))) {
-      const isSel = row.dataset.wav === selName;
-      row.classList.toggle("is-sel", isSel);
-      const selEl = row.querySelector("[data-wav-select]");
-      if (selEl) selEl.setAttribute("aria-pressed", String(isSel));
-    }
+  /** Reflect the selection on ONE original row in place — `.is-sel` drives the
+   * "🌊 viewing" badge + highlight (pure CSS), `aria-pressed` the name button.
+   * This is `renderList`'s `update` for the list: no row rebuild, and because
+   * the selected name is a term in each row's `itemSig`, only the two rows whose
+   * state actually flipped are touched rather than all of them.
+   * Clips are never the waveform-select target, so they have nothing to reflect.
+   * @param {HTMLElement} row @param {RowModel} m @param {string} selName */
+  const applyRowSelection = (row, m, selName) => {
+    if (m.kind === "clip") return;
+    const isSel = m.file.name === selName;
+    row.classList.toggle("is-sel", isSel);
+    const selEl = row.querySelector("[data-wav-select]");
+    if (selEl) selEl.setAttribute("aria-pressed", String(isSel));
   };
 
   // ---- WAV list -------------------------------------------------------------
@@ -609,7 +610,7 @@ export function build(ctx) {
   /** Build one WAV-list row as a native <details>: the <summary> is the always-
    * visible row (name selects the waveform; the rest of the summary toggles
    * expand), the body lazy-fetches the transcript on first open. Returns the
-   * <details> Element so `reconcileList` can key + reuse it. */
+   * <details> Element so `renderList` can key + reuse it. */
   /** @param {RowModel} m @returns {HTMLElement} */
   const buildRow = (m) => {
     const { kind, file: f, src, isCurrent } = m;
@@ -647,13 +648,17 @@ export function build(ctx) {
         if (!session) return;
         const sid2 = session.session;
         selectedWav.set(sid2, f.name);
-        applySelection(f.name);
-        appliedSel = f.name;
         // paintWaveHeader (not just waveName + drawWaveform) so the clips /
         // speech / in / kept stat quartet is repainted too — otherwise selecting
         // away from a WAV that had a live strip preview leaves its stale preview
-        // numbers in the stat row until the next poll tick.
+        // numbers in the stat row until the next poll tick. The chrome sig
+        // deliberately omits the selection, so this stays a direct call.
         paintWaveHeader(selectedFor(), session.stripped || null);
+        // The ROW highlight is the seam's job now: afterMutate repaints from the
+        // cached state synchronously before it polls (main.js refresh), so the
+        // new selection lands through renderList's per-row gate on this click —
+        // no second painter, and no O(rows) walk (only the two flipped rows).
+        afterMutate();
       };
       selectEl.addEventListener("click", (e) => { e.preventDefault(); select(); });
       selectEl.addEventListener("keydown", (e) => {
@@ -690,7 +695,7 @@ export function build(ctx) {
 
   /** Reconcile key for a WAV row. It folds EVERYTHING buildRow renders or binds
    * (session, name, size, dur, source, current-ness, transcript stamp) EXCEPT
-   * selection (applied in place via applySelection) — a changed key drops the
+   * selection (which is the row's itemSig instead) — a changed key drops the
    * old row and builds a fresh one (so its listeners close over the right
    * file), while a truly-unchanged row keeps its key and its open-<details>
    * state across the moveBefore reconcile. The session id is in the key because
@@ -761,14 +766,8 @@ export function build(ctx) {
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight (show a loading placeholder); `[]` → nothing to
     // fetch (empty files_sig = no folder / no WAVs yet).
-    const fetched = loadSessionFiles(sid, filesSig, pendingFiles, () => {
-      lastChromeSig = " ";
-      lastListSig = " ";
-      afterMutate();
-    });
-    const filesLoading = fetched === null;
-    currentFiles = fetched || [];
-    const files = currentFiles;
+    const { files, loading: filesLoading } = filesSource.resolve(sid, filesSig);
+    currentFiles = files;
     const sel = selectedFor();
 
     // ---- Chrome (header + waveform header + stats + strip buttons) ----------
@@ -813,8 +812,9 @@ export function build(ctx) {
             // would otherwise survive the toggle and overlay the stripped
             // view's committed cut instead of being dropped.
             dropPreview();
+            // No markListStale: `src` is a term in the list's sig, so the
+            // synchronous afterMutate repaint crosses the gate on its own.
             lastChromeSig = " ";
-            lastListSig = " ";
             afterMutate();
           },
         }) : undefined,
@@ -850,48 +850,55 @@ export function build(ctx) {
     // ---- Job progress bar (in place, every tick — render-signature hygiene) -
     renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }, job);
 
-    // ---- WAV list (own gate) ------------------------------------------------
-    // The list owns its host's content: a placeholder when there's nothing to
-    // reconcile, else the keyed reconcile. Each row carries content-visibility
-    // (next.css .wavrow) so the browser skips off-screen layout/paint, and the
-    // reconcile only runs when the file SET changes (files_sig / source) — never
-    // on a poll tick, a job tick, or a selection (selection is applied in
-    // place). It's deferred while text is selected inside the list (don't
-    // advance the gate) — deferIfSelectionInside also marks the deferred-render
-    // flag, so main.js retries even if the poll goes quiet (304s) before the
-    // selection clears (issue #245).
-    const listState = !sess ? "none" : filesLoading ? "loading" : files.length ? "rows" : "empty";
-    const listSig = `${sid}§${src}§${filesSig}§${listState}`;
-    if (listState === "rows") {
-      if (listSig !== lastListSig && !deferIfSelectionInside(wavList)) {
-        // Clear any leftover empty/loading placeholder (a non-reconcile child)
-        // so reconcileList owns the host's children outright.
-        if (!wavList.querySelector(".wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated view-level WAV-list gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
-        reconcileList(wavList, buildRowModels(files, src, isCurrent), rowKey, buildRow);
-        lastListSig = listSig;
-        // Rows were just (re)built — force the next line to reapply
-        // regardless of whether the selected name itself changed.
-        appliedSel = null;
+    // ---- WAV list -----------------------------------------------------------
+    // One `renderList` call for both states: rows when there are any, an empty
+    // `items` when there aren't (which removes exactly the rows the seam
+    // created). `wavList` holds ONLY keyed rows — the empty/loading placeholder
+    // is a hidden-toggled SIBLING (recordings.html) — so the seam owns the host
+    // outright and needs no marker to tell rows from placeholders.
+    //
+    // The seam owns the gate: the list `sig` skips a quiet tick entirely, a
+    // selection inside the list defers WITHOUT advancing it, and each row's
+    // `itemSig` decides whether `update` runs. Everything a row DISPLAYS is
+    // already folded into `rowKey`, so a content change recreates the row and
+    // `update` has exactly one job — the selection highlight. That is why the
+    // selected name is a term in BOTH signatures: the list sig so a click gets
+    // past rule 1 at all, the item sig so only the two affected rows are WRITTEN
+    // to instead of all of them (issue #213). Note the reconcile WALK a selection
+    // triggers is still O(rows) — that part is a wash against the querySelectorAll
+    // walk it replaced; what changed is that it happens per click, never per tick.
+    // Rows carry content-visibility
+    // (next.css .wavrow) so off-screen layout/paint is skipped either way.
+    //
+    // `auditRows: false` — the one opt-out: these rows are <details> whose bodies
+    // lazy-load a transcript on expand, so a fresh probe row legitimately differs
+    // from an expanded one and would report drift that isn't there.
+    const state = listState({ hasSession: !!sess, loading: filesLoading, count: files.length });
+    const selName = sel?.name || "";
+    // A THUNK, not an array: buildRowModels walks every file (plus every stripped
+    // region clip), and rule 1 skips before the thunk runs — so a quiet tick on a
+    // thousand-WAV session allocates nothing at all.
+    const rendered = renderList(wavList, () => buildRowModels(files, src, isCurrent), {
+      key: rowKey,
+      create: buildRow,
+      update: (node, m) => { applyRowSelection(/** @type {HTMLElement} */ (node), m, selName); },
+      itemSig: (m) => (m.kind === "clip" ? "" : m.file.name === selName ? "sel" : ""),
+      // isCurrent gates the row's Delete button and is folded into `rowKey`, so it
+      // must be a sig term or the rows stay keyed on a stale value.
+      sig: `${sid}§${src}§${filesSig}§${state}§${selName}§${isCurrent ? 1 : 0}`,
+      auditRows: false,
+    });
+    if (rendered) {
+      wavEmpty.hidden = state === "rows";
+      if (state !== "rows") {
+        wavEmpty.classList.toggle("dim", state === "loading");
+        wavEmpty.textContent =
+          state === "loading"
+            ? "loading recordings…"
+            : state === "empty"
+              ? "No recordings yet. Once taps record into this session, each WAV appears here."
+              : "Pick a session from the spine to manage its recordings.";
       }
-      // Keep the selection highlight correct across reconciles + idle ticks,
-      // but skip the O(rows) walk on a quiet tick where neither the selection
-      // nor the list changed (issue #213).
-      const selName = sel?.name || "";
-      if (selName !== appliedSel) {
-        applySelection(selName);
-        appliedSel = selName;
-      }
-    } else if (listSig !== lastListSig) {
-      lastListSig = listSig;
-      const ph = document.createElement("div");
-      ph.className = listState === "loading" ? "empty dim" : "empty";
-      ph.textContent =
-        listState === "loading"
-          ? "loading recordings…"
-          : listState === "empty"
-            ? "No recordings yet. Once taps record into this session, each WAV appears here."
-            : "Pick a session from the spine to manage its recordings.";
-      wavList.replaceChildren(ph); // gate-allow: raw-swap — same listSig-gated gate: placeholder swap that cannot route through renderRegion
     }
   };
 

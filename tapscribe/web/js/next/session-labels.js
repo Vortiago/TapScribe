@@ -73,6 +73,15 @@ export function sessionLabelFor(s) {
 
 /** The pending rename for `sid`, or undefined. For render paths that fall back
  * to something other than the server label (a placeholder, an id).
+ *
+ * `sessions.js`'s filter predicate is the production caller: it pins a row whose
+ * rename has not settled so the row cannot leave a filtered list while its PUT is
+ * in flight, taking the status cell a `failed: …` needs with it. Note this is
+ * about the SAVE, not the edit — protecting the node being typed in is the
+ * interaction hold's job (`deferIfInteractionInside` / `renderList`'s removal
+ * hold), which keys on focus. Also the overlay's direct read accessor, which is
+ * how `session-labels.test.js` observes the edit / forget / catch-up-sweep
+ * semantics.
  * @param {string} sid */
 export function pendingSessionLabel(sid) {
   return pending.get(sid);

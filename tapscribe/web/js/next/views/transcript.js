@@ -22,11 +22,12 @@
 // control column (signature-gated so an in-progress range edit isn't
 // clobbered) and repaints the languages readout in place.
 
-import { tpl, pick, renderRegion, markRegionStale, reconcileList, deferIfSelectionInside, selectionInside } from "../../templates.js";
+import { tpl, pick, renderRegion, markRegionStale, renderList, markListStale, selectionInside } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import {
-  postJson, putJson, sessionTranscript, loadSessionFiles, createLastGoodHold, errText,
+  postJson, putJson, sessionTranscript, createLastGoodHold, errText,
 } from "../../api.js";
+import { createFilesSource, listState } from "../session-files.js";
 import { wireSave } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -110,6 +111,10 @@ export function build(ctx) {
   const txNote = pick(frag, "txNote");
   const srcSwHost = pick(frag, "srcSwHost");
   const wavList = pick(frag, "wavList");
+  /** The empty/loading placeholder — a hidden-toggled SIBLING of `wavList`, so
+   * the rows host's children belong to renderList alone (views.html). */
+  const wavEmpty = /** @type {HTMLElement} */ (pick(frag, "wavEmpty"));
+
   const jobBar = pick(frag, "jobBar");
   const jobLabel = pick(frag, "jobLabel");
   const jobCount = pick(frag, "jobCount");
@@ -172,15 +177,6 @@ export function build(ctx) {
   // own sig (txSig) is held by `renderRegion(mergedHost, …)`; only the control
   // column keeps a closure sig here.
   let lastCtlSig = " "; // control column chrome: toggle/range/note/selected/cache
-  let lastPickerSig = " "; // the per-WAV picker list (its own files-set gate)
-  /** Last selection name `applyPickerSelection` painted onto the picker rows —
-   * the change-detection guard so a quiet tick (selection unchanged, list not
-   * reconciled) skips the O(rows) querySelectorAll walk entirely. Reset to
-   * `null` right after a reconcile (below) so freshly-built/reused rows always
-   * get the class flip applied at least once, even when the selected name
-   * itself didn't change. */
-  /** @type {string | null} */
-  let appliedPickerSel = null;
   // Keys (session@stamp) we've already scheduled a re-render for after the
   // lazy merged-transcript fetch lands — dedupes repeated misses.
   /** @type {Set<string>} */
@@ -209,9 +205,17 @@ export function build(ctx) {
    * (sid, files_sig) client cache; sourceFiles()/recordingFor read it. */
   /** @type {import('../../types.js').WavFile[]} */
   let currentFiles = [];
-  /** (sid@files_sig) lazy-files fetches in flight — dedupes across ticks. */
-  /** @type {Set<string>} */
-  const pendingFiles = new Set();
+  /** The lazily-fetched WAV listing for the focused session — owns the
+   * in-flight dedupe and the cold-vs-stale sentinel (next/session-files.js). */
+  const filesSource = createFilesSource({
+    // Invalidate BOTH gates: a landed listing changes rows the picker's `sig` may
+    // already have advanced past.
+    onLoaded: () => {
+      lastCtlSig = " ";
+      markListStale(wavList);
+      afterMutate();
+    },
+  });
 
   // ---- Helpers --------------------------------------------------------------
 
@@ -502,8 +506,8 @@ export function build(ctx) {
   /** @typedef {{ file: import('../../types.js').WavFile | import('../../types.js').WavRegion, src: "original"|"stripped" }} PickRow */
 
   /** Build one picker row (a <button class="wavrow">). Selection (`.is-sel`) is
-   * NOT set here — it's applied in place by `applyPickerSelection` so picking a
-   * WAV never rebuilds the list. */
+   * NOT set here — it is renderList's `update`, gated on the row's own itemSig,
+   * so picking a WAV repaints two rows instead of rebuilding the list. */
   /** @param {PickRow} m @returns {HTMLElement} */
   const buildPickRow = (m) => {
     const f = m.file;
@@ -526,9 +530,10 @@ export function build(ctx) {
   };
 
   /** Reconcile key for a picker row — folds everything buildPickRow renders
-   * EXCEPT selection (applied in place), including the inflight flag so a
-   * "⟳ tx" busy state recreates that one row. A changed key rebuilds the row;
-   * unchanged rows keep their key (and state) across the moveBefore reconcile. */
+   * EXCEPT selection (which is the row's itemSig instead), including the
+   * inflight flag so a "⟳ tx" busy state recreates that one row. A changed key
+   * rebuilds the row; unchanged rows keep their key (and state) across the
+   * moveBefore reconcile. */
   /** @param {PickRow} m */
   const pickKey = (m) =>
     [
@@ -536,14 +541,6 @@ export function build(ctx) {
       m.file.transcript?.transcribed_at || "", m.file.transcript ? 1 : 0,
       txInflight.has(wavKey(m.file.name, m.src)) ? 1 : 0,
     ].join("|");
-
-  /** Reflect the selected WAV on the picker rows in place. */
-  /** @param {string} selName */
-  const applyPickerSelection = (selName) => {
-    for (const btn of /** @type {NodeListOf<HTMLElement>} */ (wavList.querySelectorAll("button.wavrow"))) {
-      btn.classList.toggle("is-sel", btn.dataset.wav === selName);
-    }
-  };
 
   // ---- Transcript cache (REAL — moved from recordings.js) -------------------
 
@@ -621,13 +618,8 @@ export function build(ctx) {
     // Resolve the focused session's WAV listing — the array /api/state no
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight; `[]` → nothing to fetch (empty files_sig).
-    const fetched = loadSessionFiles(sid, filesSig, pendingFiles, () => {
-      lastCtlSig = " ";
-      lastPickerSig = " ";
-      afterMutate();
-    });
-    const filesLoading = fetched === null;
-    currentFiles = fetched || [];
+    const { files, loading: filesLoading } = filesSource.resolve(sid, filesSig);
+    currentFiles = files;
 
     // ---- Job progress (one job per session). renderJobBar does in-place writes
     // on prebuilt nodes, EVERY tick — deliberately outside both signature gates.
@@ -732,8 +724,9 @@ export function build(ctx) {
         onPick: (which) => {
           if (!session) return;
           sourcePick.set(session.session, which);
+          // No markListStale: `src` is a term in the picker's sig, so the
+          // synchronous afterMutate repaint crosses the gate on its own.
           lastCtlSig = " ";
-          lastPickerSig = " ";
           afterMutate();
         },
       }));
@@ -757,44 +750,45 @@ export function build(ctx) {
       renderCache(sel);
     }
 
-    // ---- Per-WAV picker LIST (own gate) -------------------------------------
-    // Keyed reconcile gated on the file SET + inflight; content-visibility on
-    // the rows (next.css .wavrow) skips off-screen layout/paint; selection is
-    // applied in place. Deferred while text is selected inside the list (don't
-    // advance the gate) — deferIfSelectionInside also marks the deferred-render
-    // flag, so main.js retries even if the poll goes quiet (304s) before the
-    // selection clears (issue #245). The empty / loading placeholder is gated
-    // the same way so it isn't re-set each tick.
+    // ---- Per-WAV picker LIST ------------------------------------------------
+    // One `renderList` call for both states: rows when there are any, an empty
+    // `items` when there aren't. `wavList` holds ONLY keyed rows — the
+    // empty/loading placeholder is a hidden-toggled SIBLING (views.html) — so
+    // the seam owns the host outright.
+    //
+    // The seam owns the gate (sig skip · selection defer without advancing ·
+    // per-row itemSig). Everything a picker row DISPLAYS is folded into
+    // `pickKey`, so `update` has one job: the selection highlight. The selected
+    // name is therefore a term in BOTH signatures — the list sig so a click gets
+    // past the skip at all, the item sig so only the two rows that flipped are
+    // WRITTEN to rather than every row (the reconcile walk itself is still
+    // O(rows), but per click, never per tick — issue #213).
     const inflightSig = [...txInflight].filter((k) => k.startsWith(`${sid}/`)).sort().join(",");
-    const pickState = !sess ? "none" : filesLoading ? "loading" : srcFiles.length ? "rows" : "empty";
-    const pickerSig = [pickState, sid, src, filesSig, inflightSig].join("§");
-    if (pickState === "rows") {
-      if (pickerSig !== lastPickerSig && !deferIfSelectionInside(wavList)) {
-        // Clear any leftover placeholder so reconcileList owns the host.
-        if (!wavList.querySelector("button.wavrow")) wavList.replaceChildren(); // gate-allow: raw-swap — deferIfSelectionInside-gated picker gate (CLAUDE.md); clears a placeholder so reconcileList owns the host
-        reconcileList(wavList, srcFiles.map((f) => ({ file: f, src })), pickKey, buildPickRow);
-        lastPickerSig = pickerSig;
-        // Rows were just (re)built — force the next line to reapply
-        // regardless of whether the selected name itself changed.
-        appliedPickerSel = null;
+    const pickState = listState({ hasSession: !!sess, loading: filesLoading, count: srcFiles.length });
+    const pickSelName = sel?.name || "";
+    const pickRendered = renderList(
+      wavList,
+      // A THUNK — see recordings.js. In "original" mode sourceFiles() returns
+      // currentFiles by reference, so this map is the ONLY per-tick O(rows)
+      // allocation on the path; behind the gate it costs nothing on a quiet tick.
+      () => srcFiles.map((f) => ({ file: f, src })),
+      {
+        key: pickKey,
+        create: buildPickRow,
+        update: (node, m) => { node.classList.toggle("is-sel", m.file.name === pickSelName); },
+        itemSig: (m) => (m.file.name === pickSelName ? "sel" : ""),
+        sig: [pickState, sid, src, filesSig, inflightSig, pickSelName].join("§"),
+      },
+    );
+    if (pickRendered) {
+      wavEmpty.hidden = pickState === "rows";
+      if (pickState !== "rows") {
+        wavEmpty.textContent = filesLoading
+          ? "loading recordings…"
+          : sess
+            ? (src === "stripped" ? "No stripped clips — strip silence in Recordings first." : "No WAVs recorded yet.")
+            : "Pick a session from the spine.";
       }
-      // Skip the O(rows) walk on a quiet tick where neither the selection nor
-      // the list changed (issue #213).
-      const pickSelName = sel?.name || "";
-      if (pickSelName !== appliedPickerSel) {
-        applyPickerSelection(pickSelName);
-        appliedPickerSel = pickSelName;
-      }
-    } else if (pickerSig !== lastPickerSig) {
-      lastPickerSig = pickerSig;
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = filesLoading
-        ? "loading recordings…"
-        : sess
-          ? (src === "stripped" ? "No stripped clips — strip silence in Recordings first." : "No WAVs recorded yet.")
-          : "Pick a session from the spine.";
-      wavList.replaceChildren(empty); // gate-allow: raw-swap — same pickerSig-gated placeholder swap
     }
   };
 

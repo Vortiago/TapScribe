@@ -74,7 +74,14 @@
       <div class="panel__title"><span class="ic">📁</span>WAVs &amp; stripped clips</div>
       <div class="panel__hint mono" data-slot="wavHint"></div>
     </div>
-    <div class="panel__body flush"><div class="wavlist" data-slot="wavList"></div></div>
+    <div class="panel__body flush">
+      <!-- Placeholder SIBLING of the rows host (hidden-toggled in place): the
+           host's children belong to renderList alone, so an empty/loading
+           state never has to be swapped INTO it. Same arrangement as
+           sessions.html's rowsEmpty. -->
+      <div class="empty wavlist__empty" data-slot="wavEmpty" hidden></div>
+      <div class="wavlist" data-slot="wavList"></div>
+    </div>
   </div>
 </template>
 

@@ -37,17 +37,28 @@
   pane render through it too, calling `markRegionStale(host)` (now canon,
   upstreamed) to force the next render after a mutate / lazy-body load
   WITHOUT bypassing the guards — never `force:true`, which would clobber
-  a mid-copy selection). Per-tick
-  updaters that mutate text/rows in place instead of swapping a region (the
-  live log dialog, `active-taps.js`, `live-feed.js`) and the `recordings.js`
-  WAV-list view-level gate (it gates the whole view body, not a single host
-  swap, so it can't use `renderRegion`) apply the exported
-  `selectionInside(host)` for the same rule — defer WITHOUT updating
+  a mid-copy selection).
+  A **keyed list** (rows keyed and updated in place, never swapped) is the
+  other shape, and it has its own primitive: `renderList(host, items, {key,
+  create, update, itemSig, sig})` plus `markListStale(host)`, which the three
+  keyed lists (`recordings.js`' WAV list, `transcript.js`' per-WAV picker,
+  `sessions.js`' rows) all render through. Canon `reconcileList` is NOT
+  re-exported from `templates.js` — `renderList` is the only door, so a keyed
+  list cannot be added un-held. It owns two rules a region has no equivalent
+  for (the removal hold and the per-row hold) — see CONTEXT.md → Region ·
+  keyed list, and don't re-derive either at a call site. Its
+  empty/loading placeholder must be a **sibling** of the rows host, toggled in
+  place, so the host's children belong to the seam alone.
+  Per-tick
+  updaters that mutate text/rows in place instead of rendering a region or a
+  keyed list (the live log dialog, `active-taps.js`, `live-feed.js`) apply the
+  exported `selectionInside(host)` for the same rule — defer WITHOUT updating
   the gate's signature, so the held-back render lands on the first
   tick after the selection clears. Users of the
   `markDeferredRender`/`consumeDeferredRender` tick-retry are those BESPOKE
-  gates (the live log dialog, `active-taps.js`, `live-feed.js`, the
-  `recordings.js` view-level gate, and `sessions.js`' per-row gate), PLUS one
+  gates (the live log dialog, `active-taps.js`, `live-feed.js`), every
+  `renderList` deferral (its rows come from live state, so a held render
+  re-derives on the next tick rather than replaying a captured list), PLUS one
   case inside `renderRegion` itself: a swap held because a text selection
   STRADDLES the host has no focusout/selectionchange listener of its own to
   flush it, so it needs the next tick. Every other `renderRegion` deferral
@@ -110,7 +121,7 @@
   nothing was ever resolved for that session. `loadSessionFiles` is the
   reference: a per-session `_lastGoodFiles` cache returns the previous
   listing while the new `files_sig` refetches, so the Recordings +
-  Transcript WAV lists (both `reconcileList`-backed) refresh in place
+  Transcript WAV lists (both `renderList`-backed) refresh in place
   instead of flashing. Pin it with an identity-stamp e2e that stamps an
   UNRELATED row, flips the sig via a sibling, and asserts the stamped node
   survives the poll (`test_next_files_sig_flip_does_not_blank_wav_list`,
@@ -123,15 +134,22 @@
   hold their last-good body instead of blanking to "loading…" on a
   re-transcribe / external re-summarize. A new lazy pane keyed on a
   content stamp inherits the requirement: copy one of the three holds.
+  The bookkeeping AROUND `loadSessionFiles` — the per-view in-flight key set,
+  the `null`-means-COLD sentinel, and the four states a listing region can be in
+  (`none`/`loading`/`rows`/`empty`, where a cold load must beat emptiness or the
+  region says "nothing here" mid-fetch) — has ONE owner in
+  `web/js/next/session-files.js` (`createFilesSource` + `listState`), which both
+  WAV lists cross. It is DOM-free and unit-tested under `node --test`; the
+  placeholder WORDING stays per view, since that is content, not behaviour.
   The DUAL requirement: a multi-item
-  region gated on such an aggregate must render through `reconcileList`
-  (keyed, in-place) — a full `replaceChildren` rebuild on the sig, even
-  WITHOUT a placeholder blank, still churns O(content) nodes + row
-  listeners on every sibling/tick change. The WAV lists AND `sessions.js`
-  (#312: chrome mounted once, rows keyed by id + structural bits, cells
-  mutated via a per-row sig with focused-control guards) are the pattern
-  to copy — `sessions.js`'s old whole-list `listSig` swap was the last
-  offender.
+  region gated on such an aggregate is a **keyed list** and must render through
+  `renderList` (keyed, in-place) — a full `replaceChildren` rebuild on the sig,
+  even WITHOUT a placeholder blank, still churns O(content) nodes + row
+  listeners on every sibling/tick change. All three keyed lists are the pattern
+  to copy: the two WAV lists pass a list-level `sig` (they have `files_sig`),
+  `sessions.js` passes a per-row `itemSig` instead (chrome mounted once, rows
+  keyed by id + structural bits, cells mutated per row — #312) because it has no
+  cheap aggregate stamp to gate on.
 - **Every save that shows a status** goes through `web/js/save-status.js`
   (`runSaveWithStatus`): `saving…` → a GUARDED promotion to `saved` (so a save
   settling late can't stomp a newer message) → auto-clear, or a `failed: …`
