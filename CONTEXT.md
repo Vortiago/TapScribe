@@ -840,20 +840,31 @@ one, document why and update this list.
 
 The dashboard-wide rule that a per-tick render defers to operator
 interaction state instead of destroying it: a region is **held** (not
-re-rendered) while a control inside it is focused, a text selection
-starts or ends inside it, or — for tail-following panels — the operator
-has scrolled away from the tail. Deferral always skips **without
-advancing the render gate**, so the held render lands on the first tick
-after the interaction clears; updates are delayed by the operator's own
-interaction, never lost.
+re-rendered) while a control inside it is focused, a popover or
+`<dialog>` inside it is open, a text selection touches it, or — for
+tail-following panels — the operator has scrolled away from the tail.
+Deferral always skips **without advancing the render gate**, so the held
+render lands on the first tick after the interaction clears; updates are
+delayed by the operator's own interaction, never lost.
+
+A held render lands exactly one way: the **tick-retry**. The deferral
+marks a flag (`markDeferredRender`), and the next poll pass consumes it
+(`consumeDeferredRender` in `next/main.js`) and re-derives the render
+from live state — which is why the flag has to survive an unchanged
+`/api/state`, since the server going quiet is not the operator letting
+go. There is no second mechanism, and adding one is a decision, not a
+detail: ADR-0016 records why the alternative (a per-host listener
+replaying a captured build the instant the hold clears) fits only one of
+the four render shapes and cost two hold registries per host.
 
 Mechanics live in `web/js/templates.js`: `renderRegion(host, build, {sig})`
-is the swap-based primitive (gates on a focus/selection guard + an optional
-perf signature, replaceChildren on render), `selectionInside(host)` is the
-shared selection predicate, and `markRegionStale(host)` invalidates a host's
-remembered signature so the NEXT `renderRegion` re-renders after a mutate /
-lazy-body load — the "defer, don't force" reset (`force:true` would bypass the
-guards and clobber a selection). Swap-based copy-target panes render through
+is the swap-based primitive (it owns the per-host signature and all three
+holds, and checks the signature FIRST so an idle focused control marks no
+retry), `selectionInside(host)` is the shared selection predicate, and
+`markRegionStale(host)` invalidates a host's remembered signature so the NEXT
+`renderRegion` re-renders after a mutate / lazy-body load — the "defer, don't
+force" reset. There is no force flag: a render that skips the guards is never
+what a call site wants. Swap-based copy-target panes render through
 `renderRegion` (the Summary output pane, the Transcript merged pane, plus the
 spine/settings/live-channel/config-card regions). The decision and its rejected
 alternatives (DOM-diffing, capture-and-restore, pausing the poll) are

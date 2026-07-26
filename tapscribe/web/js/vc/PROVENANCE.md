@@ -1,9 +1,20 @@
 # Vendored vanilla-components
 
 Copied **verbatim** from the `vanilla-components` skill (the Verktoykasse
-toolkit) for the standalone `/setup` page, which is served before the
-dashboard's machinery is guaranteed loadable and so can't share the dashboard's
-`templates.js` / BEM stylesheet.
+toolkit). It arrived for the standalone `/setup` page — served before the
+dashboard's machinery is guaranteed loadable, so it can't reach for the
+dashboard's seam — but the dashboard composes these components too (#306), and
+the copy stays whole for a different reason: `vanilla-components` ships its own
+`lib/`, and its components import `../../lib/templates.js` relative to
+themselves. Re-pointing them at `web/js/lib/` would mean editing vendored files,
+which is the one thing this layout forbids.
+
+The visible cost is that `lib/templates.js` exists twice in this repo — here and
+at `web/js/lib/templates.js` (the vanilla-web copy the dashboard seam builds
+on). The two are byte-identical apart from their stamped revision, so the drift
+gate reports the older one as `stale`, which is accurate and harmless. Do not
+"fix" it by deleting one and re-pointing imports; the fix belongs upstream, in
+how the toolkit distributes a shared `lib/` to an app that vendors both skills.
 
 Distribution is copy-verbatim (the vanilla-web way): **do not hand-edit** files
 under this directory — re-copy from the skill to update, never fork. Every file
