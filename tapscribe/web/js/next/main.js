@@ -20,6 +20,7 @@ import { warmProgress } from "../vc/components/progress/progress.js";
 import { warmEmptyState } from "../vc/components/empty-state/empty-state.js";
 import { ALL_VIEWS, resolveSession, placeholderView } from "./shell.js";
 import { createPollPacer, FAST_MS } from "./poll-pacer.js";
+import { createPlayerHost } from "./player-host.js";
 import { dropCaughtUpSessionLabels, setSessionLabelRepaint } from "./session-labels.js";
 import * as spine from "./components/spine.js";
 import * as engine from "./components/engine.js";
@@ -424,6 +425,7 @@ function buildView(view, session) {
       metaFor,
       languageCatalog,
       afterMutate: () => { refresh(); },
+      player,
     });
     return { ...b, key: viewKey("transcript", session) };
   }
@@ -436,6 +438,7 @@ function buildView(view, session) {
   if (view === "recordings") {
     const b = recordingsView.build({
       afterMutate: () => { refresh(); },
+      player,
     });
     return { ...b, key: "recordings" };
   }
@@ -462,6 +465,7 @@ function buildView(view, session) {
       // the spine picker drive the exact same flow.
       onSelectSession,
       afterMutate: () => { refresh(); },
+      player,
     });
     return { ...b, key: "sessions" };
   }
@@ -632,6 +636,16 @@ async function refresh() {
 // truncated copy to POST /api/client-errors — the one place an LLM session
 // maintaining the dashboard can actually read a browser-side failure.
 wireErrorBar();
+
+/** The dashboard's ONE Player, bound to the shell's static audio element (it is
+ * declared in next.html, outside #viewRoot, precisely so no render can detach
+ * it — ADR-0017). Views receive it through their build ctx. */
+const player = createPlayerHost({
+  bar: $("playerBar"),
+  media: pick(document, "player"),
+  name: pick(document, "playerName"),
+  msg: pick(document, "playerMsg"),
+});
 
 await Promise.all([
   loadTemplates(

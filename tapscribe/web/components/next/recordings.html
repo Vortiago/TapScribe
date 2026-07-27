@@ -50,6 +50,12 @@
         <div class="kfield__rng"><span>-120 dB</span><span>0 dB</span></div>
       </div>
       <div class="knobbar__act">
+        <!-- Hear what ✂ would LEAVE: plays only the kept spans the canvas is
+             showing, skipping every gap the cut would drop. The judgement the
+             knobs are actually asking for ("did that cut speech?") is an
+             listening question, so it gets a listening answer. -->
+        <button class="act act--sm" type="button" data-slot="playKeptBtn"
+                title="Play only the audio this cut would keep">▶ kept</button>
         <button class="act act--sm act--primary" type="button" data-slot="stripBtn"
                 title="Strip silence from every WAV in this session">✂ strip all</button>
         <button class="act act--sm" type="button" data-slot="clearBtn">clear</button>
@@ -92,6 +98,11 @@
   <div class="wave">
     <div class="wave-canvas-wrap">
       <canvas class="wave-canvas" data-slot="canvas"></canvas>
+      <!-- Playhead: an ELEMENT over the canvas, positioned by percentage, so a
+           position moving at frame rate never repaints the O(bins) peaks (the
+           draw stays behind `lastWaveSig`). Shown only while the Player holds
+           the very file this canvas is drawing — ADR-0017. -->
+      <div class="wave-playhead" data-slot="playhead" hidden></div>
       <div class="wave-msg" data-slot="msg" hidden></div>
       <span class="wave-cutbadge mono" data-slot="cutBadge" hidden>✂ committed cut</span>
     </div>
@@ -133,6 +144,10 @@
         <span class="wavrow__viewing mono">🌊 viewing</span>
         <span class="wavrow__dur mono" data-slot="dur"></span>
         <span class="wavrow__tx" data-slot="txTag"></span>
+        <!-- Play affordance: hands the shell-owned Player a seek target. The
+             row owns NO audio element — a row is rebuilt whenever its key
+             changes (size, transcript stamp), which would kill playback. -->
+        <button class="btn tiny ghost" type="button" data-slot="play">▶</button>
         <a class="btn tiny ghost" download title="Download WAV" data-slot="download">⬇</a>
         <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this WAV">🗑</button>
       </span>
@@ -154,6 +169,7 @@
       <span class="wavrow__r">
         <span class="wavrow__dur mono" data-slot="dur"></span>
         <span class="wavrow__tx" data-slot="txTag"></span>
+        <button class="btn tiny ghost" type="button" data-slot="play">▶</button>
         <a class="btn tiny ghost" download title="Download stripped clip" data-slot="download">⬇</a>
         <button class="btn tiny ghost" type="button" data-wav-delete title="Delete this stripped clip">🗑</button>
       </span>

@@ -616,8 +616,27 @@ async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
         jobs={k: asdict(v) for k, v in recorder.jobs.snapshot().items()},
         # Same open-WAV masking as /api/state so files_sig stays consistent
         # across the two endpoints during a recording.
-        open_wavs={s.filename for s in active_streams if s.record and s.filename},
+        open_wavs=open_wav_names(active_streams),
     )
+
+
+def open_wav_names(active_streams, *, session: str | None = None) -> set[str]:
+    """The WAVs a tap is writing RIGHT NOW — `s.record and s.filename` is the
+    definition of "open", named once so the three callers can't drift.
+
+    `session=None` is the whole-recorder set the `files_sig` maskers want (a
+    growing WAV must not flip the digest ~2 Hz — `sessions._files_signature`);
+    an over-broad match there only costs an extra refetch. Pass `session` where
+    the answer is USER-VISIBLE — the lazy listing's `open` flag disables the
+    dashboard's play affordance (ADR-0017), and two sessions can legitimately
+    hold the same filename, so an unscoped match would mark an idle session's
+    WAV unplayable.
+    """
+    return {
+        s.filename
+        for s in active_streams
+        if s.record and s.filename and (session is None or s.session == session)
+    }
 
 
 def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
@@ -969,7 +988,7 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
     live_identities = {s.identity for s in active_streams}
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
-    open_wavs = {s.filename for s in active_streams if s.record and s.filename}
+    open_wavs = open_wav_names(active_streams)
 
     # Active rows with tap_settings overlay (on loop, unchanged)
     active = []
@@ -1767,7 +1786,7 @@ async def api_session_transcript(session: str, recorder: Recorder = Depends(get_
 
 
 @app.get("/api/sessions/{session}/files")
-async def api_session_files(session: str, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
+async def api_session_files(session: str, recorder: Recorder = Depends(get_recorder)):
     """The FULL per-session WAV listing (originals + their stripped region
     clips), the `files[]` array `/api/state` no longer embeds.
 
@@ -1777,8 +1796,17 @@ async def api_session_files(session: str, recorder: Recorder = Depends(get_recor
     client-side, so a huge session's per-WAV array crosses the wire on open +
     on change — not on every poll. `resolve_session_dir` (inside
     `read_session_files`) validates the id against path traversal; the disk walk
-    is offloaded with to_thread like the rest of the poll path."""
-    return await asyncio.to_thread(read_session_files, session)
+    is offloaded with to_thread like the rest of the poll path.
+
+    Each descriptor carries `open` for the WAVs a tap is writing into THIS
+    session right now: an open WAV's RIFF header is patched only at tap close,
+    so the dashboard's Player refuses it (ADR-0017). Scoped by session because
+    two sessions can hold the same filename — unlike `/api/state`'s masking
+    set, where an over-broad match would only affect refetch cadence."""
+    active_streams = await recorder.streams.snapshot()
+    return await asyncio.to_thread(
+        read_session_files, session, open_wav_names(active_streams, session=session)
+    )
 
 
 @app.get("/api/sessions/{session}/summary")

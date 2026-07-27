@@ -89,11 +89,12 @@ function txStatus(s) {
  *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
  *   onSelectSession: (id: string) => void,
  *   afterMutate: () => void,
+ *   player: ReturnType<typeof import('../components/player.js').createPlayer>,
  * }} ctx
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { metaFor, onSelectSession, afterMutate } = ctx;
+  const { metaFor, onSelectSession, afterMutate, player } = ctx;
   const frag = tpl("tpl-next-view-sessions");
 
   const headHost = pick(frag, "head");
@@ -208,6 +209,12 @@ export function build(ctx) {
     )) return;
     try {
       await del(`/api/sessions/${encodeURIComponent(s.session)}/audio`);
+      // Every WAV of this session went, originals and clips. Buffered playback
+      // survives a delete with no media error, so the Player is told (ADR-0017).
+      // On the SUCCESS path only: a refused delete (409 on a live tap) leaves the
+      // files on disk, and unloading there would stop the audio and blame a
+      // deletion that never happened.
+      player.forgetWhere((f) => f.session === s.session);
     } catch (e) {
       alert(`Delete audio failed: ${errText(e)}`);
       return;
@@ -234,6 +241,8 @@ export function build(ctx) {
     )) return;
     try {
       await del(`/api/sessions/${encodeURIComponent(s.session)}`);
+      // Success path only — see deleteAudio.
+      player.forgetWhere((f) => f.session === s.session);
     } catch (e) {
       alert(`Delete session failed: ${errText(e)}`);
       return;
@@ -250,6 +259,13 @@ export function build(ctx) {
   const processSession = async (s) => {
     try {
       await postJson(`/api/sessions/${encodeURIComponent(s.session)}/pipeline`);
+      // The pipeline's strip stage rmtree's stripped/ and REGENERATES the clips,
+      // so any clip of this session is about to be deleted and replaced —
+      // possibly under the same filename with different bytes, which is worse
+      // than a plain delete because the audio would no longer match the file the
+      // dashboard, the transcript and the download button point at. Buffered
+      // playback raises no media error, so the Player has to be told (ADR-0017).
+      player.forgetWhere((f) => f.session === s.session && f.source === "stripped");
     } catch (e) {
       alert(`Process failed: ${errText(e)}`);
       return;

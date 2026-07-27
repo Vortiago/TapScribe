@@ -27,6 +27,16 @@
    control surface reads flat. */
 body::before { display: none; }
 
+/* How much viewport height the docked Player is currently occupying. Zero
+   unless the bar is actually up, so a dashboard with no audio loaded is
+   byte-for-byte the layout it always was.
+   Keyed off the bar's OWN `hidden` attribute via :has() rather than a class the
+   JS has to remember to toggle: there is then no second source of truth to
+   drift out of sync with whether the bar is visible. A browser without :has()
+   simply keeps 0 and the bar overlays, which is the pre-fix behaviour. */
+:root { --next-player-h: 0px; }
+:root:has(#playerBar:not([hidden])) { --next-player-h: 52px; }
+
 .next-app {
   display: grid;
   grid-template-columns: var(--next-spine-w) 1fr var(--next-rail-w);
@@ -37,7 +47,7 @@ body::before { display: none; }
      internally only when a stacked/narrow layout overflows (`.work__inner`
      overflow below). The mobile rail is position:fixed, so overflow:hidden
      here doesn't clip its overlay. */
-  height: 100vh;
+  height: calc(100vh - var(--next-player-h));
   overflow: hidden;
 }
 /* Collapsed: the rail track shrinks to 0 so the workspace takes the full
@@ -56,7 +66,7 @@ body::before { display: none; }
   flex-direction: column;
   position: sticky;
   top: 0;
-  height: 100vh;
+  height: calc(100vh - var(--next-player-h));
   align-self: start;
   overflow: hidden;
 }
@@ -199,7 +209,7 @@ body::before { display: none; }
   flex-direction: column;
   position: sticky;
   top: 0;
-  height: 100vh;
+  height: calc(100vh - var(--next-player-h));
   align-self: start;
   overflow: hidden;
   /* When the track collapses to 0 the rail must not bleed its content into
@@ -315,8 +325,8 @@ body::before { display: none; }
 @media (max-width: 1100px) {
   .next-app { grid-template-columns: var(--next-spine-w) 1fr; }
   .rail {
-    position: fixed; top: 0; right: 0; bottom: 0;
-    width: min(300px, 86vw); height: 100vh;
+    position: fixed; top: 0; right: 0; bottom: var(--next-player-h);
+    width: min(300px, 86vw); height: calc(100vh - var(--next-player-h));
     z-index: 45; box-shadow: -2px 0 16px rgba(0,0,0,.4);
   }
   /* The grid no longer owns a rail track, so the open/closed switch is purely
@@ -839,7 +849,8 @@ body::before { display: none; }
   border: 1px solid var(--hairline); border-radius: var(--next-r);
   background: var(--bg); overflow: hidden;
 }
-.wave-canvas { display: block; width: 100%; height: 100%; }
+/* `cursor: pointer` because the canvas is a seek control, not just a picture. */
+.wave-canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
 .wave-msg {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
@@ -1323,4 +1334,106 @@ button.wavrow {
   color: var(--text);
   border-top: 1px solid var(--rec);
   white-space: pre-wrap;
+}
+
+/* ── Player bar ───────────────────────────────────────────────────────────
+   The shell-owned Player's chrome (next.html #playerBar). Docked bottom and
+   position:fixed rather than a grid row: `.next-app` is a 100vh grid with
+   overflow:hidden, so a new row would rework the height math every panel's
+   internal scrolling depends on. Instead the shell gives up exactly
+   --next-player-h while the bar is up (see the :has() rule above), so the bar
+   never covers the spine's session card / the workspace / the rail. Clear of the
+   floating .rail-show button (top-right). Hidden until the Player holds a file,
+   so it costs nothing on the views where audio is meaningless. */
+.playerbar {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  /* Pinned, not content-sized: the shell shrinks by exactly --next-player-h, so
+     a bar taller than that would occlude again and a shorter one would leave a
+     gap. Change the two together. */
+  height: var(--next-player-h);
+  box-sizing: border-box;
+  background: var(--bg);
+  border-top: 1px solid var(--hairline);
+}
+/* The attribute MUST beat the display above — the Player toggles `hidden`, and
+   a bare `display:flex` would render a "hidden" bar permanently visible. */
+.playerbar[hidden] { display: none; }
+.playerbar__name {
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.playerbar__audio {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 34px;
+}
+.playerbar__msg {
+  color: var(--warn);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* The Player's position on the Recordings waveform. An overlay ELEMENT moved by
+   `transform: translateX()`, so a position updating at frame rate never repaints
+   the O(bins) peaks canvas (whose draw is gated by `lastWaveSig` for exactly that
+   reason). Shown only while the Player holds the file the canvas is drawing. */
+.wave-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* FULL WIDTH with the mark drawn as a left border: a percentage translateX
+     resolves against the element's own border box, so spanning the canvas is
+     what lets `transform: translateX(<pct>%)` position the mark. That keeps the
+     per-frame move compositor-only — `left` would invalidate layout on every
+     frame, which is the whole reason this is an overlay element and not a canvas
+     repaint. */
+  width: 100%;
+  border-left: 2px solid var(--ok);
+  pointer-events: none;
+  z-index: 3;
+  /* Promote to its own layer. Without this the transform is a paint-property
+     update and Blink re-rasters (old rect ∪ new rect) — and since the border
+     box spans the whole wave, that union IS the whole wave box, ~60 times a
+     second. Free when idle: the element is `hidden` unless audio is playing, so
+     no layer exists to keep around. */
+  will-change: transform;
+}
+
+/* ── Seekable timestamps ──────────────────────────────────────────────────
+   The merged transcript's `[hh:mm:ss]` and the hallucination-audit table's time
+   cell are BUTTONS (they seek the Player). Reusing the existing timestamp node
+   keeps the node count of an O(segments) region unchanged, but it also means up
+   to a few thousand native buttons land in a pre-wrap monospace flow — so the
+   platform chrome has to go while the affordance stays. */
+button.ts {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  /* The line is pre-wrap; an inline button must not introduce its own box. */
+  display: inline;
+  text-align: left;
+}
+button.ts:hover:enabled,
+button.ts:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+}
+/* A line with no `source_wav` (a transcript from before provenance was recorded)
+   has nothing to seek to: inert, and visibly so. */
+button.ts:disabled {
+  cursor: default;
+  opacity: 0.65;
 }

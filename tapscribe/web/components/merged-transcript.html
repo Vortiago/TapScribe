@@ -36,7 +36,12 @@
   any indentation/newlines we'd add for readability would render as
   literal whitespace and split each segment across multiple lines.
 -->
-<template id="tpl-merged-line"><div><span class="ts" data-slot="ts"></span> <span data-slot="speakerLabel"></span> <span data-slot="body"></span></div></template>
+<!-- The timestamp is a BUTTON, not a span: it seeks the Player to this line's
+     audio (ADR-0017). Reusing the node the line already had keeps the node count
+     of this O(segments) region unchanged, and a real button is keyboard-reachable
+     where a clickable span isn't. One delegated listener on the lines host does
+     the work — never one per line. -->
+<template id="tpl-merged-line"><div><button class="ts" type="button" data-slot="ts"></button> <span data-slot="speakerLabel"></span> <span data-slot="body"></span></div></template>
 
 <template id="tpl-merged-seg-ok"><span data-slot="text"></span></template>
 
@@ -64,7 +69,11 @@
 
 <template id="tpl-audit-row">
   <tr>
-    <td class="muted tnum" data-slot="time"></td>
+    <!-- The time cell seeks, exactly like a merged line's timestamp: this table
+         is "the filter dropped this line" — the sharpest reason to want the
+         audio. It sits inside mergedHost, so the view's ONE delegated listener
+         already serves it. -->
+    <td class="muted tnum"><button class="ts" type="button" data-slot="time"></button></td>
     <td data-slot="speaker"></td>
     <td class="wrap"><code data-slot="text"></code></td>
     <td class="muted"><code data-slot="rule"></code></td>
