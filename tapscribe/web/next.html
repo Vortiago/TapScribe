@@ -38,6 +38,24 @@
           <div class="taps" id="tapsRailBody" data-slot="activeTapsBody"></div>
         </div>
       </aside>
+
+      <!-- ============ PLAYER (every view) ============
+           The dashboard's ONE audio element, owned by the shell and living
+           OUTSIDE #viewRoot on purpose: a view host is detached on stage
+           navigation and removing a media element from a Document pauses it,
+           so a per-view player would stop the moment the operator walks from
+           Recordings to Transcript. Views own only play affordances, which
+           hand this a seek target. Hidden until a WAV is loaded (the #errbar
+           pattern); driven by media events, never by the poll — so it carries
+           no render signature and no interaction hold. See CONTEXT.md
+           "Player · seek target · open WAV · playhead" and ADR-0017.
+           Native <audio controls>: the platform's scrubbing, keyboard access,
+           a11y labelling and media keys are not worth rebuilding. -->
+      <div class="playerbar" id="playerBar" hidden>
+        <span class="playerbar__name mono" data-slot="playerName"></span>
+        <audio class="playerbar__audio" data-slot="player" controls preload="none"></audio>
+        <span class="playerbar__msg" data-slot="playerMsg"></span>
+      </div>
     </div>
 
     <!-- Floating "show taps" button — only visible while the rail is hidden. -->

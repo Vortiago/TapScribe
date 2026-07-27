@@ -285,6 +285,10 @@ export interface WavFile {
   wav_end: string | null;
   speaker_name: string;
   regions: WavRegion[];               // strip-silence output segments
+  // True while a tap is writing this WAV. Its RIFF header is patched only at tap
+  // close, so it is NOT playable yet (ADR-0017). Absent on region clips, which a
+  // tap never writes.
+  open?: boolean;
 }
 
 // A stripped-silence region — same shape as WavFile, no sub-regions.

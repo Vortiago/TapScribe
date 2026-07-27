@@ -28,6 +28,7 @@ import {
   postJson, putJson, sessionTranscript, createLastGoodHold, errText,
 } from "../../api.js";
 import { createFilesSource, listState } from "../session-files.js";
+import { resolveSeekTarget } from "../seek-target.js";
 import { wireSave } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
@@ -82,11 +83,12 @@ export function recordingVariants(rec) {
  *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
  *   languageCatalog: import('../../types.js').LanguageCatalog,
  *   afterMutate: () => void,
+ *   player: ReturnType<typeof import('../components/player.js').createPlayer>,
  * }} ctx
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { metaFor, languageCatalog, afterMutate } = ctx;
+  const { metaFor, languageCatalog, afterMutate, player } = ctx;
   const frag = tpl("tpl-next-view-transcript");
 
   const headHost = pick(frag, "head");
@@ -94,6 +96,43 @@ export function build(ctx) {
   const txCopyBtn = /** @type {HTMLButtonElement} */ (pick(frag, "txCopyBtn"));
   const txCopyStatus = pick(frag, "txCopyStatus");
   const mergedHost = pick(frag, "mergedHost");
+  // ONE delegated seek listener for the whole merged pane, attached to the
+  // stable host rather than to lines. The host outlives every render (the
+  // region swaps its CHILDREN), so this survives re-renders — and a 3000-segment
+  // transcript costs one listener, not 3000. Resolution happens HERE, at click
+  // time, because the view holds the file listing: pre-disabling stale lines
+  // would put `files_sig` into the pane's render signature, and a
+  // hand-maintained sig with a forgotten dependency goes stale invisibly
+  // (ADR-0004 / ADR-0016). A source file that's gone reports itself instead.
+  mergedHost.addEventListener("click", (e) => {
+    const btn = /** @type {HTMLElement | null} */ (
+      // Selected on the seek-target IDENTITY, not on a slot name: the merged
+      // lines' timestamps and the hallucination-audit table's time cells are
+      // different templates that both carry it.
+      /** @type {HTMLElement} */ (e.target).closest("[data-wav][data-ts]")
+    );
+    if (!btn || !session) return;
+    const target = resolveSeekTarget(btn.dataset.wav || "", btn.dataset.ts || "", currentFiles);
+    if (!target) {
+      // Say so where the operator is looking. Distinguish "still fetching the
+      // listing" from "gone": claiming a file is deleted while it's merely
+      // mid-load is a wrong answer, not a slow one.
+      // Read the listing's OWN loading flag. `currentFiles.length` conflates
+      // "still fetching" with "resolved and genuinely empty" — and a session
+      // whose audio was deleted keeps its transcript, so the empty-and-resolved
+      // case is exactly when the operator most needs the honest answer.
+      player.report(
+        filesLoading ? "still loading recordings…" : "that recording is no longer on disk",
+      );
+      return;
+    }
+    player.load({
+      session: session.session,
+      name: target.name,
+      source: target.source,
+      offsetS: target.offsetS,
+    });
+  });
   // Meeting-languages control (ADR-0011): declare the candidate languages; the
   // generalist model is the global default, resolved server-side.
   const txLanguages = /** @type {HTMLSelectElement} */ (pick(frag, "txLanguages"));
@@ -205,6 +244,10 @@ export function build(ctx) {
    * (sid, files_sig) client cache; sourceFiles()/recordingFor read it. */
   /** @type {import('../../types.js').WavFile[]} */
   let currentFiles = [];
+  /** Whether the listing behind `currentFiles` is still in flight. Kept beside it
+   * because "no files" and "not yet fetched" need different answers at click
+   * time, and `currentFiles.length` cannot tell them apart. */
+  let filesLoading = false;
   /** The lazily-fetched WAV listing for the focused session — owns the
    * in-flight dedupe and the cold-vs-stale sentinel (next/session-files.js). */
   const filesSource = createFilesSource({
@@ -618,8 +661,9 @@ export function build(ctx) {
     // Resolve the focused session's WAV listing — the array /api/state no
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight; `[]` → nothing to fetch (empty files_sig).
-    const { files, loading: filesLoading } = filesSource.resolve(sid, filesSig);
+    const { files, loading } = filesSource.resolve(sid, filesSig);
     currentFiles = files;
+    filesLoading = loading;
 
     // ---- Job progress (one job per session). renderJobBar does in-place writes
     // on prebuilt nodes, EVERY tick — deliberately outside both signature gates.

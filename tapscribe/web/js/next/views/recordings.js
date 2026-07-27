@@ -33,7 +33,7 @@
 // and defers while text is selected inside it.
 
 import { tpl, mount, pick, renderList, markListStale } from "../../templates.js";
-import { postJson, del, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, errText } from "../../api.js";
+import { postJson, del, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, wavUrl, errText } from "../../api.js";
 import { createFilesSource, listState } from "../session-files.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
@@ -49,11 +49,12 @@ const STRIP_DEFAULTS = Object.freeze({ min_silence_ms: 500, pad_ms: 200, speech_
 /**
  * @param {{
  *   afterMutate: () => void,
+ *   player: ReturnType<typeof import('../components/player.js').createPlayer>,
  * }} ctx
  * @returns {{ node: DocumentFragment, update: (j: import('../../types.js').AppState, session: import('../../types.js').Session | null) => void }}
  */
 export function build(ctx) {
-  const { afterMutate } = ctx;
+  const { afterMutate, player } = ctx;
   const frag = tpl("tpl-next-view-recordings");
 
   const headHost = pick(frag, "head");
@@ -61,7 +62,51 @@ export function build(ctx) {
   // Isolated canvas waveform — mounted once into the hero; update() feeds it
   // the selected WAV's peaks (lazy + client-cached) as the selection changes.
   const waveform = createWaveform();
-  pick(frag, "waveHost").appendChild(waveform.node);
+  const waveHost = pick(frag, "waveHost");
+  waveHost.appendChild(waveform.node);
+
+  // The waveform is a CONTROL surface too (#191): a click on it is a seek target
+  // on the ORIGINAL the hero is showing — the hero shows an original in both
+  // toggle states, so that is the only file a click here can mean.
+  waveform.onSeek((offsetS) => {
+    const sel = selectedFor();
+    if (!session || !sel) return;
+    const loaded = player.loaded();
+    const sid = session.session;
+    // Already playing this exact file? Then a click is a SEEK, not a reload —
+    // reloading would drop the buffer and restart the fetch mid-listen.
+    if (loaded && loaded.session === sid && loaded.name === sel.name && loaded.source === "original") {
+      player.seek(offsetS);
+      return;
+    }
+    player.load({ session: sid, name: sel.name, source: "original", offsetS });
+  });
+
+  // STRICT IDENTITY: draw a position only while the Player holds the very file
+  // the canvas is drawing (always an original of the focused session). Playing a
+  // stripped clip, another WAV, or another session's audio draws nothing rather
+  // than a position on a timeline that isn't running (ADR-0017). Driven by the
+  // Player's frame loop, never by the poll — so it costs nothing when idle.
+  player.onTick((loaded, currentTime) => {
+    // SKIP while this view's host is off-document — do NOT unsubscribe. Views are
+    // CACHED and re-mounted (main.js keeps this instance under "recordings"), so
+    // "detached" means "the operator is on another stage", not "dead". Retiring
+    // the subscription here killed the playhead permanently for the rest of the
+    // page — on the very stage walk ADR-0017 exists to support. Staying
+    // subscribed costs one bounded closure per evicted view.
+    if (!waveHost.isConnected) return;
+    // Cheap identity terms FIRST, and compare against `shownWav` — the name
+    // `drawWaveform` recorded — rather than re-deriving the selection. This runs
+    // once per animation frame, and `selectedFor()` is a linear scan of the
+    // session's WAV listing; the canvas already knows what it drew.
+    const shown =
+      !!loaded
+      && loaded.source === "original"
+      && !!session
+      && loaded.session === session.session
+      && loaded.name === shownWav;
+    waveform.setPlayhead(shown ? currentTime : null);
+  });
   const stats = {
     clips: pick(frag, "sClips"),
     speech: pick(frag, "sSpeech"),
@@ -73,6 +118,7 @@ export function build(ctx) {
     pad_ms: pick(frag, "kvPad"),
     speech_floor_db: pick(frag, "kvFloor"),
   };
+  const playKeptBtn = /** @type {HTMLButtonElement} */ (pick(frag, "playKeptBtn"));
   const stripBtn = /** @type {HTMLButtonElement} */ (pick(frag, "stripBtn"));
   const clearBtn = /** @type {HTMLButtonElement} */ (pick(frag, "clearBtn"));
   const jobBar = pick(frag, "jobBar");
@@ -137,6 +183,17 @@ export function build(ctx) {
   // remembers an unreadable WAV so it shows a message instead of refetching
   // every tick.
   let lastWaveSig = " ";
+  /** The ORIGINAL WAV name the canvas is currently drawing, recorded by
+   * `drawWaveform` — the one owner of what the canvas shows. The playhead's
+   * strict-identity rule compares against this instead of re-resolving the
+   * selection on every animation frame. */
+  /** @type {string | null} */
+  let shownWav = null;
+  /** The COMMITTED cut spans the canvas is drawing, or null. The live preview
+   * (`livePreview`) takes precedence over this when one is up — together they
+   * answer "which cut is on screen right now", which is what ▶ kept plays. */
+  /** @type {import('../../types.js').CutSpan[] | null} */
+  let shownCut = null;
   /** @type {Set<string>} */
   const pendingWave = new Set();
   /** @type {Map<string, string>} */
@@ -168,6 +225,47 @@ export function build(ctx) {
   /** @param {string} sid @param {string} name @param {number} size */
   const waveKey = (sid, name, size) => `${sid}/${name}@original@${size}`;
 
+  /** The live knob preview IF it belongs to the focused session, else null.
+   * `livePreview` is pinned to the exact waveKey it was computed for, so this
+   * one predicate is what stops a stale preview being read against the wrong
+   * session — spelled once here rather than at each reader. */
+  const sessionPreview = () => {
+    const sid = session?.session || "";
+    return livePreview && sid && livePreview.key.startsWith(`${sid}/`) ? livePreview.p : null;
+  };
+
+  /** The cut spans the canvas is CURRENTLY showing: a live knob preview when
+   * one is up, else the committed cut, else none. One resolver so ▶ kept's
+   * enablement and its click can never disagree about what would play. */
+  const shownSpans = () => sessionPreview()?.spans ?? shownCut;
+
+  /** ▶ kept is offered only when there IS a cut on screen and a WAV to play it
+   * from — with nothing drawn there is no "kept audio" to mean anything. */
+  const syncPlayKept = () => {
+    const spans = shownSpans();
+    // The cut on screen just changed. If kept playback is live on the WAV this
+    // canvas is drawing, re-aim it: otherwise the audio keeps hopping the
+    // PREVIOUS cut's gaps while the overlay shows the new one, so the operator
+    // isn't hearing the cut they're judging. Inert when not playing kept audio.
+    const loaded = player.loaded();
+    if (loaded && loaded.name === shownWav && loaded.source === "original") {
+      player.setKeptSpans(spans);
+    }
+    const enabled = !!shownWav && !!spans && spans.length > 0;
+    playKeptBtn.disabled = !enabled;
+    playKeptBtn.title = enabled
+      ? "Play only the audio this cut would keep"
+      : "Drag a knob (or strip this session) to preview a cut first";
+  };
+
+  playKeptBtn.addEventListener("click", () => {
+    const spans = shownSpans();
+    if (!session || !shownWav || !spans || !spans.length) return;
+    // The ORIGINAL is what the cut is measured against — the hero always draws
+    // the original, and the kept spans are offsets into it.
+    player.load({ session: session.session, name: shownWav, source: "original", keptSpans: spans });
+  });
+
   /** Resolve the selected original WAV for the focused session (first if
    * unset). Reads the lazily-fetched `currentFiles`, not session.files (which
    * /api/state no longer ships). */
@@ -190,11 +288,22 @@ export function build(ctx) {
   /** @param {import('../../types.js').WavFile | null} sel */
   const drawWaveform = (sel) => {
     const sid = session?.session || "";
+    // What the canvas is (or is about to be) drawing. Recorded here because this
+    // function is the single owner of that decision; the playhead's
+    // strict-identity rule reads it once per frame instead of re-resolving the
+    // selection. Set before the early returns so a sig-unchanged pass keeps it
+    // accurate rather than stale.
+    shownWav = sel && sid ? sel.name : null;
     if (!sel || !sid) {
       if (livePreview) {
         livePreview = null;
         waveform.setPreview(null);
       }
+      // Nothing drawn means nothing to play — and this has to happen BEFORE the
+      // sig-unchanged early return below, or ▶ kept keeps a stale enabled state
+      // (and a stale tooltip) over an empty canvas.
+      shownCut = null;
+      syncPlayKept();
       const wsig = `none:${session ? "nofiles" : "nosession"}`;
       if (wsig === lastWaveSig) return;
       lastWaveSig = wsig;
@@ -275,6 +384,8 @@ export function build(ctx) {
     const wsig = `${key}@${state}@cut:${cutStamp}:${cut ? cut.length : 0}`;
     if (wsig === lastWaveSig) return;
     lastWaveSig = wsig;
+    shownCut = cut && cut.length ? cut : null;
+    syncPlayKept();
     if (state === "ok" && data) waveform.showWaveform(data.peaks, data.duration_s, cut);
     else if (state === "loading") waveform.showMessage("loading waveform…");
     else waveform.showMessage(message);
@@ -328,6 +439,7 @@ export function build(ctx) {
         if (waveKey(session.session, cur.name, cur.size) !== key) return;
         livePreview = { key, p };
         waveform.setPreview({ spans: p.spans, speech_floor_db: p.knobs.speech_floor_db });
+        syncPlayKept();
         paintPreviewStats(p);
       })
       .catch(() => { /* transient — the next knob input refires */ });
@@ -351,6 +463,7 @@ export function build(ctx) {
     previewToken++;
     livePreview = null;
     waveform.setPreview(null);
+    syncPlayKept();
   };
 
   for (const inp of /** @type {NodeListOf<HTMLInputElement>} */ (frag.querySelectorAll("[data-strip-knob]"))) {
@@ -374,6 +487,15 @@ export function build(ctx) {
       const res = /** @type {import('../../types.js').StripSilenceResult} */ (
         await postJson(`/api/sessions/${encodeURIComponent(sid)}/strip-silence`, { ...knobs }));
       lastStrip.set(sid, res);
+      // A re-strip rmtree's stripped/ before rewriting it (batch_strip.py), so a
+      // clip playing right now was just deleted — the same eviction `clear` does.
+      // This IS the strip-knob-tuning loop: listen to a clip, adjust, re-strip.
+      // SUCCESS path only: `strip_session` raises SessionBusy / NoUsableWavs
+      // BEFORE touching stripped/ and StrippedDirUnclearable when the rmtree
+      // itself failed, so on a failure every clip survives and evicting would
+      // stop the audio while blaming a deletion that never happened (the rule
+      // sessions.js's delete paths already follow).
+      player.forgetWhere((f) => f.session === sid && f.source === "stripped");
       // The committed cut now reflects these knobs — drop the live preview.
       dropPreview();
       // Flip to the cleaned audio on success so the operator can act on it.
@@ -398,6 +520,8 @@ export function build(ctx) {
     lastStrip.delete(sid);
     dropPreview();
     if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
+    // Every stripped clip of this session just went; the originals are kept.
+    player.forgetWhere((f) => f.session === sid && f.source === "stripped");
     repaintAfterMutate();
   });
 
@@ -534,6 +658,10 @@ export function build(ctx) {
       alert(`Delete failed: ${errText(e)}`);
       return;
     }
+    // Stop the audio if this is what's playing. The browser has the bytes
+    // buffered, so without this the deleted recording keeps talking to the end
+    // with no error (ADR-0017) — the row would vanish under a still-playing bar.
+    player.forget({ session: sid, name, source: src });
     // The next /api/state poll carries a new files_sig (the digest drops the
     // deleted WAV), so currentFiles refetches and the reconcile removes the
     // row. Force both gates so that lands on the first tick.
@@ -666,11 +794,30 @@ export function build(ctx) {
       });
     }
 
+    // Play — hands the shell-owned Player a seek target. preventDefault stops
+    // the <summary> toggle a click inside the summary would otherwise fire.
+    // An OPEN WAV is refused: its RIFF/data-size header is patched only when
+    // the tap closes, so the bytes on disk declare a length that isn't there
+    // and the browser would decode ~nothing (ADR-0017). The listing's `open`
+    // flag flips exactly once, when the tap closes, so this re-enables itself.
+    const playBtn = /** @type {HTMLButtonElement} */ (pick(node, "play"));
+    const isOpen = "open" in f && f.open === true;
+    playBtn.setAttribute("aria-label", `Play ${f.name}`);
+    if (isOpen) {
+      playBtn.disabled = true;
+      playBtn.title = "still recording — playable once the tap closes";
+    } else {
+      playBtn.title = "Play this audio";
+      playBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        player.load({ session: sid, name: f.name, source: src });
+      });
+    }
+
     // Download — preventDefault stops the summary toggle; triggerDownload
     // navigates via a synthetic anchor outside the <summary>.
     const dl = /** @type {HTMLAnchorElement} */ (pick(node, "download"));
-    const dlQs = src === "stripped" ? "?source=stripped" : "";
-    dl.href = `/api/wav/${encodeURIComponent(sid)}/${encodeURIComponent(f.name)}${dlQs}`;
+    dl.href = wavUrl({ session: sid, name: f.name, source: src });
     dl.addEventListener("click", (e) => { e.preventDefault(); triggerDownload(dl.href); });
 
     // Delete — the backend refuses the current session (409), so hide it there.
@@ -707,6 +854,10 @@ export function build(ctx) {
   const rowKey = (m) =>
     [
       session?.session || "", m.kind, m.file.name, m.file.size, m.file.duration_s,
+      // `open` gates the ▶, so it belongs in the key: without it, re-enabling
+      // after a tap closes rides on size/duration changing, which is silent for a
+      // recording that captured no audio.
+      "open" in m.file && m.file.open ? 1 : 0,
       m.src, m.isCurrent ? 1 : 0, m.file.transcript?.transcribed_at || "", m.file.transcript ? 1 : 0,
       m.kind === "clip"
         ? `${/** @type {import('../../types.js').WavRegion} */ (m.file).wav_start || ""}-${/** @type {import('../../types.js').WavRegion} */ (m.file).wav_end || ""}`
@@ -733,7 +884,7 @@ export function build(ctx) {
     drawWaveform(sel);
     // drawWaveform already dropped a preview that no longer matches the shown
     // WAV, so a surviving livePreview is this session's by construction.
-    const pv = livePreview && livePreview.key.startsWith(`${sid}/`) ? livePreview.p : null;
+    const pv = sessionPreview();
     const ls = lastStrip.get(sid);
     if (pv) {
       paintPreviewStats(pv);
@@ -788,7 +939,7 @@ export function build(ctx) {
       stripped ? `${stripped.count}:${stripped.stripped_at}` : "",
       stripInflight.has(sid) ? "S" : "",
       job?.kind === "strip" ? "J" : "",
-      livePreview && livePreview.key.startsWith(`${sid}/`) ? "P" : "",
+      sessionPreview() ? "P" : "",
       lastStrip.has(sid) ? "R" : "",
       isCurrent ? "CUR" : "",
     ].join("§");

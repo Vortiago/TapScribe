@@ -5930,9 +5930,21 @@ async def _force_render_passes(page, view: str, n: int = 3) -> int:
     return ran
 
 
-async def _focus_session_view(page, sid: str, view: str) -> None:
-    """Pick `sid` in the spine, then open one of the Stages `view`s for it —
-    the spine-select + gotoView pattern several tests share."""
+async def _pick_session(page, sid: str) -> None:
+    """Select `sid` in the spine picker, waiting for its option to land first.
+
+    The ONE spelling of this — the raw select-and-dispatch was drifting into
+    several near-copies, and only some of them waited for the option, so the
+    flake fix covered half the call sites.
+    """
+    await page.wait_for_function(
+        """(sid) => {
+            const s = document.querySelector('[data-slot="sessionPick"]');
+            return !!s && Array.from(s.options).some((o) => o.value === sid);
+        }""",
+        arg=sid,
+        timeout=10000,
+    )
     await page.evaluate(
         """(sid) => {
             const s = document.querySelector('[data-slot="sessionPick"]');
@@ -5941,6 +5953,12 @@ async def _focus_session_view(page, sid: str, view: str) -> None:
         }""",
         sid,
     )
+
+
+async def _focus_session_view(page, sid: str, view: str) -> None:
+    """Pick `sid` in the spine, then open one of the Stages `view`s for it —
+    the spine-select + gotoView pattern several tests share."""
+    await _pick_session(page, sid)
     await page.evaluate("(v) => window.gotoView(v)", view)
 
 
@@ -6675,5 +6693,741 @@ async def test_get_by_test_id_is_wired_to_data_slot() -> None:
             assert (await by_test_id.text_content()) == "Start"
             # Resolves the same node the suite's existing CSS-attribute locators target.
             assert await page.locator('[data-slot="startMeeting"]').count() == 1
+        finally:
+            await browser.close()
+
+
+# ---------------------------------------------------------------------------
+# Playback (#191) — the Player is shell-owned and outside the tick.
+# ---------------------------------------------------------------------------
+
+
+def _seed_wav_session(rec, sid: str, *, names: list[str], seconds: float = 1.0) -> Path:
+    """A non-current on-disk session holding real, decodable WAVs.
+
+    `seconds` matters when a test seeks mid-file: the browser clamps a seek to
+    the media duration, so a 1 s WAV can't prove a 3 s offset landed.
+    """
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    for n in names:
+        synth_speech_like_wav(d / n, seconds=seconds, freq_hz=220.0)
+    return d
+
+
+async def _focus_session(page, sid: str, *, stage: str | None = None) -> None:
+    """Pin the spine to a seeded session (the recorder's own current session
+    also lists, and the spine focuses that by default).
+
+    Selecting a session reuses the spine's session-switch, which ROUTES into
+    Capture/Transcript — so a caller that needs a specific stage passes it and
+    navigates there afterwards.
+    """
+    await _pick_session(page, sid)
+    if stage:
+        await _goto_stage(page, stage)
+
+
+async def _goto_stage(page, stage: str) -> None:
+    """Switch stages the way an operator does: click the spine's nav item.
+
+    Writing `location.hash` does NOT work — `viewFromHash()` runs once at boot
+    and there is no hashchange listener, so the hash is an output of navigation
+    (`syncHash`), not an input to it. A test that sets the hash asserts nothing.
+    """
+    # The nav item's accessible name carries its step number and status chip
+    # ("2 Recordings · 3 WAVs"), so match on the label within the spine.
+    await page.locator("#spine").get_by_role("button", name=re.compile(stage, re.I)).first.click()
+    await page.wait_for_function("(s) => location.hash.slice(1) === s", arg=stage.lower(), timeout=5000)
+
+
+async def test_next_player_is_shell_owned_and_survives_a_stage_switch(
+    running_recorder: RunningRecorder,
+):
+    """The Player is ONE element, owned by the shell, outside `#viewRoot`.
+
+    This is the invariant every other playback behaviour rests on. A per-view
+    `<audio>` is detached on stage navigation (`mount(root, built.host)`), and
+    removing a media element from a Document PAUSES it — so a player mounted
+    inside a view silently stops the moment the operator walks from Recordings
+    to Transcript, which is the walk the feature exists to support. An identity
+    stamp catches that structurally, with no timing threshold (ADR-0017).
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-01T09-00-00Z"
+    _seed_wav_session(rec, sid, names=[f"{sid}_alice_speaker_0000aaaa.wav"])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            player = page.get_by_test_id("player")
+            await player.wait_for(state="attached", timeout=10000)
+
+            # LOAD something first, so "survives" means the playback survives —
+            # not merely that an empty element wasn't rebuilt.
+            play = page.get_by_role("button", name=re.compile("^play ", re.I)).first
+            await play.wait_for(state="visible", timeout=10000)
+            await play.click()
+            await page.wait_for_function(
+                """() => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a && a.getAttribute('src') && a.readyState >= 1;
+                }""",
+                timeout=15000,
+            )
+            src_before = await page.evaluate(
+                """() => document.querySelector('[data-slot="player"]').getAttribute('src')"""
+            )
+
+            # Owned by the shell, not by the view that shows the affordances.
+            assert await page.evaluate(
+                """() => {
+                    const el = document.querySelector('[data-slot="player"]');
+                    const root = document.getElementById('viewRoot');
+                    return !!el && !!root && !root.contains(el);
+                }"""
+            ), "the Player must live outside #viewRoot"
+            # Exactly one, so there can be no two-players-at-once state.
+            assert await page.locator('[data-slot="player"]').count() == 1
+
+            await page.evaluate(
+                """() => { document.querySelector('[data-slot="player"]').__guardMark = 1; }"""
+            )
+
+            # Walk Recordings -> Transcript -> Recordings, crossing polls. Real
+            # spine clicks, so the view host is genuinely detached and
+            # re-mounted — which is what would pause a per-view player.
+            for stage in ("transcript", "recordings"):
+                await _goto_stage(page, stage)
+                await asyncio.sleep(1.2)
+
+            assert await page.evaluate(
+                """() => document.querySelector('[data-slot="player"]')?.__guardMark === 1"""
+            ), "the Player was rebuilt across a stage switch"
+            # Same node AND same source: a rebuilt-but-identical element would
+            # have lost the src, and a detached one would have been paused.
+            src_after = await page.evaluate(
+                """() => document.querySelector('[data-slot="player"]').getAttribute('src')"""
+            )
+            assert src_after == src_before, f"{src_before!r} -> {src_after!r}"
+        finally:
+            await browser.close()
+
+
+async def test_next_row_play_loads_the_wav_and_decodes_it(running_recorder: RunningRecorder):
+    """▶ on a WAV row loads that exact file and the browser decodes it.
+
+    Event-driven, not timed: `loadedmetadata` + `duration > 0` proves the route,
+    the HTTP Basic path a media element can't help with, and the decode, end to
+    end. Deliberately NOT asserted: that `currentTime` advances — headless
+    Chromium has no audio device, so that would be a wall-clock assertion.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-02T09-00-00Z"
+    wav = f"{sid}_alice_speaker_0000aaaa.wav"
+    _seed_wav_session(rec, sid, names=[wav])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            play = page.get_by_role("button", name=re.compile("^play ", re.I)).first
+            await play.wait_for(state="visible", timeout=10000)
+            await play.click()
+
+            # The bar reveals itself only once something is loaded.
+            await page.wait_for_function(
+                """() => !document.getElementById('playerBar').hidden""",
+                timeout=5000,
+            )
+            src = await page.evaluate(
+                """() => document.querySelector('[data-slot="player"]').getAttribute('src')"""
+            )
+            assert src is not None
+            assert f"/api/wav/{sid}/{wav}" in src, src
+            assert "source=original" in src, src
+
+            await page.wait_for_function(
+                """() => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a && a.readyState >= 1 && a.duration > 0;
+                }""",
+                timeout=15000,
+            )
+        finally:
+            await browser.close()
+
+
+def _seed_seekable_session(rec, sid: str, wav: str) -> None:
+    """A session whose merged transcript names its source WAV, with a WAV long
+    enough that a mid-file seek isn't clamped to the end by the browser."""
+    d = _seed_wav_session(rec, sid, names=[wav], seconds=6.0)
+    (d / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "transcribed_at": "2025-03-03T10:00:00+00:00",
+                "segments": [
+                    {
+                        "speaker": "Alice",
+                        "text": "First line, right at the top of the recording.",
+                        "abs_start": "2025-03-03T09:00:00+00:00",
+                        "source_wav": wav,
+                    },
+                    {
+                        "speaker": "Alice",
+                        "text": "Suspect line, three seconds in.",
+                        "abs_start": "2025-03-03T09:00:03+00:00",
+                        "source_wav": wav,
+                    },
+                ],
+                "speakers": ["Alice"],
+                "speaking_seconds": {"Alice": 6.0},
+                "suppressed": [],
+                "suppressed_count": 0,
+                "wav_count": 1,
+                "transcribe_ms": 1000,
+                "model": "tiny.en",
+                "backend": "fake",
+                "device": "cpu",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+async def test_next_transcript_timestamp_seeks_its_source_wav(running_recorder: RunningRecorder):
+    """Clicking a merged line's timestamp plays THAT line's audio, at its offset.
+
+    The whole point of the feature: "this line looks wrong — did she really say
+    that?". The seek target names the file the words came from (`source_wav`) and
+    the offset is `abs_start` minus that file's `wav_start`, so a stripped-source
+    transcript lands on the right syllable too (ADR-0017).
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-03T09-00-00Z"
+    wav = f"{sid}_alice_speaker_0000aaaa.wav"
+    _seed_seekable_session(rec, sid, wav)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#transcript", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="transcript")
+
+            # The merged body arrives via the lazy per-(session, stamp) fetch.
+            await page.wait_for_function(
+                f"""() => document.querySelectorAll('{_MERGED_FIRST_LINE}').length >= 2""",
+                timeout=15000,
+            )
+
+            # The second line's timestamp — a real button, so it's clickable and
+            # keyboard-reachable, and it reuses the node the line already had.
+            ts = page.locator(f'{_MERGED_FIRST_LINE} [data-slot="ts"]').nth(1)
+            await ts.click()
+
+            await page.wait_for_function(
+                """() => !document.getElementById('playerBar').hidden""",
+                timeout=5000,
+            )
+            src = await page.evaluate(
+                """() => document.querySelector('[data-slot="player"]').getAttribute('src')"""
+            )
+            assert f"/api/wav/{sid}/{wav}" in src, src
+            assert "source=original" in src, src
+
+            # The seek must survive a cold load: assigning currentTime before
+            # metadata exists is unreliable, so the Player queues it.
+            await page.wait_for_function(
+                """() => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a && a.readyState >= 1 && Math.abs(a.currentTime - 3) < 0.35;
+                }""",
+                timeout=15000,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_next_deleting_the_playing_wav_stops_the_player(running_recorder: RunningRecorder):
+    """Deleting the WAV you're listening to must stop the audio.
+
+    The browser has the bytes BUFFERED — a local WAV is usually fetched whole —
+    so no media `error` fires and playback of a deleted recording otherwise runs
+    to the end. "I deleted it and it kept talking." Hence explicit eviction from
+    the mutating verb, not just an error listener (ADR-0017).
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-04T09-00-00Z"
+    wav = f"{sid}_alice_speaker_0000aaaa.wav"
+    _seed_wav_session(rec, sid, names=[wav])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            page.on("dialog", lambda d: asyncio.ensure_future(d.accept()))
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            play = page.get_by_role("button", name=re.compile("^play ", re.I)).first
+            await play.wait_for(state="visible", timeout=10000)
+            await play.click()
+            await page.wait_for_function(
+                """() => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a && a.getAttribute('src') && a.readyState >= 1;
+                }""",
+                timeout=15000,
+            )
+
+            await page.locator(".wavrow [data-wav-delete]").first.click()
+
+            await page.wait_for_function(
+                """() => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a && !a.getAttribute('src') && a.paused;
+                }""",
+                timeout=10000,
+            )
+            # And it says why, rather than silently going quiet.
+            msg = await page.locator('[data-slot="playerMsg"]').text_content()
+            assert msg and "delet" in msg.lower(), msg
+        finally:
+            await browser.close()
+
+
+async def test_next_waveform_click_seeks_and_draws_a_playhead(running_recorder: RunningRecorder):
+    """Clicking the waveform plays the displayed WAV from that point, and the
+    playhead appears on it.
+
+    The waveform is a control surface as well as a display one (#191 decision 8).
+    The playhead is a transform-driven overlay element, never a canvas repaint —
+    the peaks draw stays behind `lastWaveSig`, so a position moving at frame rate
+    cannot drag an O(bins) rebuild along with it (ADR-0017).
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-05T09-00-00Z"
+    wav = f"{sid}_alice_speaker_0000aaaa.wav"
+    _seed_wav_session(rec, sid, names=[wav])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            # The hero canvas draws once the lazy peaks land.
+            canvas = page.locator('[data-slot="canvas"]')
+            await canvas.wait_for(state="visible", timeout=10000)
+            box = await canvas.bounding_box()
+            assert box and box["width"] > 40
+
+            # Click at ~40% across: a 6s… (1s) WAV, so assert the FRACTION, not
+            # an absolute second — the seeded WAV's duration is the source of
+            # truth and the browser clamps to it.
+            await page.mouse.click(box["x"] + box["width"] * 0.4, box["y"] + box["height"] / 2)
+
+            await page.wait_for_function(
+                """() => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a && a.getAttribute('src') && a.readyState >= 1 && a.duration > 0;
+                }""",
+                timeout=15000,
+            )
+            frac = await page.evaluate(
+                """() => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a.currentTime / a.duration;
+                }"""
+            )
+            assert 0.3 < frac < 0.5, f"clicked 40% across, landed at {frac:.2f}"
+
+            # The playhead is drawn, and it is an ELEMENT (not canvas pixels).
+            head = page.locator('[data-slot="playhead"]')
+            await head.wait_for(state="visible", timeout=5000)
+            # Positioned by TRANSFORM, not `left`: the move must stay
+            # compositor-only so a frame-rate playhead can't drag layout (and
+            # certainly not an O(bins) canvas repaint) along with it.
+            transform = await page.evaluate(
+                """() => document.querySelector('[data-slot="playhead"]').style.transform"""
+            )
+            assert "translateX(" in transform, f"expected a translateX, got {transform!r}"
+        finally:
+            await browser.close()
+
+
+async def test_next_playhead_is_absent_while_playing_another_wav(
+    running_recorder: RunningRecorder,
+):
+    """Strict identity: the playhead appears ONLY on the file being played.
+
+    The hero always shows the selected ORIGINAL, but the Player may hold a
+    different WAV (or a stripped clip, or another session's file). Drawing a
+    position on a timeline that isn't playing would be a confident lie, so it
+    draws nothing (#191 decision 9).
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-06T09-00-00Z"
+    first = f"{sid}_alice_speaker_0000aaaa.wav"
+    second = "2025-03-06T09-05-00Z_bob_speaker_0000bbbb.wav"
+    _seed_wav_session(rec, sid, names=[first, second])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            # Hero shows `first` (the default selection); play `second` instead.
+            row_two = page.locator(f'.wavrow[data-wav="{second}"]')
+            await row_two.wait_for(state="attached", timeout=10000)
+            await row_two.locator('[data-slot="play"]').click()
+
+            await page.wait_for_function(
+                """(name) => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a && (a.getAttribute('src') || '').includes(name) && a.readyState >= 1;
+                }""",
+                arg=second,
+                timeout=15000,
+            )
+
+            # The hero is still showing `first`, so there must be no playhead.
+            assert await page.evaluate(
+                """() => {
+                    const h = document.querySelector('[data-slot="playhead"]');
+                    return !h || h.hidden;
+                }"""
+            ), "a playhead was drawn on a WAV that isn't the one playing"
+        finally:
+            await browser.close()
+
+
+async def test_next_playhead_clears_when_the_selection_moves_while_paused(
+    running_recorder: RunningRecorder,
+):
+    """A PAUSED playhead must not survive the canvas being redrawn for another WAV.
+
+    Strict identity (#191 decision 9) is enforced from the Player's position
+    ticks, which only fire while audio is moving. Pause, then select a different
+    WAV: the canvas redraws for the new file but no media event fires, so nothing
+    re-runs the identity check and the old position would sit there pointing at a
+    file the Player isn't holding — the "confident lie" the rule forbids.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-07T09-00-00Z"
+    first = f"{sid}_alice_speaker_0000aaaa.wav"
+    second = "2025-03-07T09-05-00Z_bob_speaker_0000bbbb.wav"
+    _seed_wav_session(rec, sid, names=[first, second])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            # Play the WAV the hero is showing, so the playhead is legitimately up.
+            row_one = page.locator(f'.wavrow[data-wav="{first}"]')
+            await row_one.wait_for(state="attached", timeout=10000)
+            await row_one.locator('[data-slot="play"]').click()
+            await page.wait_for_selector('[data-slot="playhead"]:not([hidden])', timeout=15000)
+
+            # Pause, then select the OTHER WAV — the hero redraws for `second`.
+            await page.evaluate("""() => { document.querySelector('[data-slot="player"]').pause(); }""")
+            await page.locator(f'.wavrow[data-wav="{second}"] [data-wav-select]').click()
+
+            await page.wait_for_function(
+                """() => {
+                    const h = document.querySelector('[data-slot="playhead"]');
+                    return !h || h.hidden;
+                }""",
+                timeout=5000,
+            )
+        finally:
+            await browser.close()
+
+
+def _seed_suppressed_session(rec, sid: str, wav: str) -> None:
+    """A session whose merged transcript has a hallucination-filtered segment."""
+    d = _seed_wav_session(rec, sid, names=[wav], seconds=6.0)
+    (d / "session-transcript.json").write_text(
+        json.dumps(
+            {
+                "transcribed_at": "2025-03-08T10:00:00+00:00",
+                "segments": [
+                    {
+                        "speaker": "Alice",
+                        "text": "A kept line.",
+                        "abs_start": "2025-03-08T09:00:00+00:00",
+                        "source_wav": wav,
+                    }
+                ],
+                "speakers": ["Alice"],
+                "speaking_seconds": {"Alice": 6.0},
+                "suppressed": [
+                    {
+                        "speaker": "Alice",
+                        "text": "Thanks for watching!",
+                        "abs_start": "2025-03-08T09:00:02+00:00",
+                        "matched_rule": "outro",
+                        "source_wav": wav,
+                    }
+                ],
+                "suppressed_count": 1,
+                "wav_count": 1,
+                "transcribe_ms": 1000,
+                "model": "tiny.en",
+                "backend": "fake",
+                "device": "cpu",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+async def test_next_audit_table_time_cell_seeks_the_dropped_lines_audio(
+    running_recorder: RunningRecorder,
+):
+    """The hallucination audit's time cell seeks too (#191 decision 10).
+
+    "The filter dropped this line — was there speech there at all?" is the
+    sharpest version of the loop, and a suppressed segment carries `source_wav`
+    just like a kept one. The table lives inside `mergedHost`, so the view's ONE
+    delegated listener serves it: this test is here because that wiring is the
+    part that silently doesn't happen.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-08T09-00-00Z"
+    wav = f"{sid}_alice_speaker_0000aaaa.wav"
+    _seed_suppressed_session(rec, sid, wav)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#transcript", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="transcript")
+
+            cell = page.locator('.audit-tbl tbody [data-slot="time"]')
+            await cell.wait_for(state="visible", timeout=15000)
+            await cell.click()
+
+            await page.wait_for_function(
+                """(name) => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a
+                        && (a.getAttribute('src') || '').includes(name)
+                        && a.readyState >= 1
+                        && Math.abs(a.currentTime - 2) < 0.35;
+                }""",
+                arg=wav,
+                timeout=15000,
+            )
+        finally:
+            await browser.close()
+
+
+async def test_next_player_bar_does_not_cover_the_shell(running_recorder: RunningRecorder):
+    """The docked Player must SHORTEN the shell, not sit on top of it.
+
+    The bar is `position: fixed` (a grid row would rework the 100vh height math
+    every panel's internal scrolling depends on), so without the shell giving up
+    the same height the bar occludes the bottom of the spine, the workspace and
+    the rail — the session-info card at the bottom of the spine goes unreadable.
+    Geometric assertion: once the bar is visible, no shell column may extend
+    past its top edge.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-10T09-00-00Z"
+    wav = f"{sid}_alice_speaker_0000aaaa.wav"
+    _seed_wav_session(rec, sid, names=[wav])
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            # Baseline: with nothing loaded the shell owns the whole viewport.
+            assert await page.evaluate(
+                """() => Math.round(document.getElementById('next-app').getBoundingClientRect().bottom)
+                        >= window.innerHeight - 1"""
+            ), "with no audio loaded the shell should still fill the viewport"
+
+            play = page.get_by_role("button", name=re.compile("^play ", re.I)).first
+            await play.wait_for(state="visible", timeout=10000)
+            await play.click()
+            await page.wait_for_function(
+                """() => !document.getElementById('playerBar').hidden""", timeout=5000
+            )
+
+            overlap = await page.evaluate(
+                """() => {
+                    const bar = document.getElementById('playerBar').getBoundingClientRect();
+                    const worst = [];
+                    for (const sel of ['#next-app', '#spine', '#work', '#tapsRail']) {
+                        const el = document.querySelector(sel);
+                        if (!el) continue;
+                        const r = el.getBoundingClientRect();
+                        if (r.bottom > bar.top + 1) {
+                            worst.push({sel, bottom: Math.round(r.bottom)});
+                        }
+                    }
+                    return {barTop: Math.round(bar.top), worst};
+                }"""
+            )
+            assert not overlap["worst"], (
+                f"shell columns extend under the player bar (top={overlap['barTop']}): {overlap['worst']}"
+            )
+        finally:
+            await browser.close()
+
+
+async def test_next_play_kept_starts_at_the_first_kept_span(running_recorder: RunningRecorder):
+    """▶ kept plays what ✂ would LEAVE, starting at the first kept region.
+
+    The strip knobs ask "did that cut real speech?", which is a listening
+    question — so the preview gets a listening answer. The gap-hopping itself is
+    unit-tested (`spanPlaybackStep`); what this pins is the wiring: the button
+    is inert until a cut is on screen, and once one is it loads the ORIGINAL and
+    lands at the first kept span rather than at 0:00.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-11T09-00-00Z"
+    wav = f"{sid}_alice_speaker_0000aaaa.wav"
+    # REAL speech that begins with silence. A synthesised tone is continuous, so
+    # its only kept span starts at 0.00 and the "skips the lead-in" claim would
+    # pass vacuously — and Silero scores pure tones unreliably anyway.
+    d = rec.recordings_dir / sid
+    d.mkdir(parents=True)
+    shutil.copy(Path(__file__).resolve().parents[1] / "fixtures" / "audio" / "solen-da.wav", d / wav)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            kept = page.get_by_test_id("playKeptBtn")
+            await kept.wait_for(state="visible", timeout=10000)
+            # Nothing cut yet: the affordance must not pretend it can play.
+            assert await kept.is_disabled(), "▶ kept should be inert with no cut on screen"
+
+            # Drag a knob to produce a live preview (the debounced strip-preview
+            # fetch is what puts spans on the canvas).
+            await page.evaluate(
+                """() => {
+                    const r = document.querySelector('[data-strip-knob="min_silence_ms"]');
+                    r.value = '300';
+                    r.dispatchEvent(new Event('input', { bubbles: true }));
+                    r.dispatchEvent(new Event('change', { bubbles: true }));
+                }"""
+            )
+            await page.wait_for_function(
+                """() => !document.querySelector('[data-slot="playKeptBtn"]').disabled""",
+                timeout=15000,
+            )
+
+            await kept.click()
+            await page.wait_for_function(
+                """(name) => {
+                    const a = document.querySelector('[data-slot="player"]');
+                    return a && (a.getAttribute('src') || '').includes(name)
+                        && a.getAttribute('src').includes('source=original')
+                        && a.readyState >= 1;
+                }""",
+                arg=wav,
+                timeout=15000,
+            )
+            started_at = await page.evaluate(
+                """() => document.querySelector('[data-slot="player"]').currentTime"""
+            )
+            assert started_at > 0.05, f"kept playback must skip the lead-in silence, started at {started_at}"
+        finally:
+            await browser.close()
+
+
+async def test_next_playhead_still_works_after_a_stage_walk(running_recorder: RunningRecorder):
+    """The playhead must survive leaving Recordings and coming back.
+
+    Regression pin for the exact failure the rest of the playback suite missed:
+    the ticker retired itself the first frame the (CACHED, later re-mounted) view
+    host was detached, so after one walk to Transcript and back the waveform
+    never drew a playhead again for the life of the page — on the very
+    navigation ADR-0017's shell-owned Player exists to support.
+    """
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-03-12T09-00-00Z"
+    wav = f"{sid}_alice_speaker_0000aaaa.wav"
+    _seed_wav_session(rec, sid, names=[wav], seconds=6.0)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#recordings", wait_until="domcontentloaded")
+            await _focus_session(page, sid, stage="recordings")
+
+            row = page.locator(f'.wavrow[data-wav="{wav}"]')
+            await row.wait_for(state="attached", timeout=10000)
+            await row.locator('[data-slot="play"]').click()
+            await page.wait_for_selector('[data-slot="playhead"]:not([hidden])', timeout=15000)
+
+            # Walk away and back while it keeps playing.
+            await _goto_stage(page, "transcript")
+            await asyncio.sleep(1.0)
+            await _goto_stage(page, "recordings")
+
+            # The playhead must be LIVE, not merely left visible with a stale
+            # transform from before the walk — a dead ticker leaves exactly that,
+            # so "is it visible" passes vacuously. Assert it MOVES.
+            await page.wait_for_selector('[data-slot="playhead"]:not([hidden])', timeout=10000)
+            before = await page.evaluate(
+                """() => document.querySelector('[data-slot="playhead"]').style.transform"""
+            )
+            moved = await page.wait_for_function(
+                """(prev) => {
+                    const h = document.querySelector('[data-slot="playhead"]');
+                    return !h.hidden && h.style.transform !== prev ? h.style.transform : false;
+                }""",
+                arg=before,
+                timeout=8000,
+            )
+            assert moved, "the playhead never advanced after the stage walk"
         finally:
             await browser.close()

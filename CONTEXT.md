@@ -955,6 +955,56 @@ People names are owned by `people.js`, whose editor is the only one.
 Say "this needs a field saver" / "the catch-up sweep dropped it", and add
 a new editor by writing an owner, not another copy of the machine (#355).
 
+## Player · seek target · open WAV · playhead
+
+The dashboard's audio playback. Playback belongs to the operator's
+**session work**, not to a view: there is exactly ONE **Player** — a single
+audio element owned by the shell and mounted outside `#viewRoot`, never
+inside a region, a keyed-list row or a view host, all three of which are
+detached or swapped out from under a playing element. Views own only
+**play affordances** (a per-WAV control in Recordings, a per-line control
+in Transcript) that hand the Player a seek target; a view that mounts its
+own element is the bug this term exists to prevent. The Player is driven by
+media events, NOT by the poll, so it sits outside the render-signature and
+interaction-hold machinery entirely.
+_Avoid_: audio widget, per-view player, transport.
+
+A **seek target** is what a play affordance hands the Player: the triple
+(`source_wav`, source, `offset_s`) naming the exact file the audio is in and
+where in it to land. Every merged segment already carries `source_wav`, so a
+transcript line plays the file its words actually came from — a stripped
+clip when the session was transcribed from stripped audio, the original
+otherwise — and the offset is `abs_start` minus that file's `wav_start`. A
+segment is never mapped onto a *different* file's timeline.
+_Avoid_: timestamp jump, seeking to a time (a time alone is not a target —
+concurrent per-speaker WAVs make session-relative time ambiguous).
+
+**Every verb that removes audio must tell the Player** — `player.forget(file)`
+for one WAV, `player.forgetWhere(pred)` for the bulk ones (clear stripped,
+re-strip, delete a session's audio, delete a session). This is a convention, not
+something the seam can enforce: each caller knows *which* files went and nothing
+downstream can derive that. Skipping it fails **silently and alarmingly** — the
+browser has the bytes buffered, so a deleted recording keeps playing to the end
+with no media error at all. Say "that delete path needs to evict the Player".
+
+The **playhead** is the Player's position drawn on the Recordings waveform.
+It is shown ONLY while the file the Player has loaded is exactly the file the
+canvas is displaying — never projected onto another file's timeline, for the
+same reason a seek target names a file. Clicking the waveform is itself a
+seek target on the displayed WAV. Both directions make the canvas a control
+surface as well as a display one; the cut overlay and the peaks remain
+display only.
+_Avoid_: cursor, position marker, scrubber (the scrubber is the Player's own
+native control).
+
+An **open WAV** is one a tap is writing right now. It is **not playable**:
+the RIFF/data-size header is patched only when the tap closes, so the bytes
+on disk declare a length that isn't there yet. Open-ness is already what
+`files_sig` masks (a growing size would flip it ~2 Hz); the same set drives
+the affordance, so playability turns itself on exactly once, when the tap
+closes and the listing refetches.
+_Avoid_: live WAV, current WAV (the *current session* is a different thing).
+
 ## Per-WAV transcript cache
 
 Each transcribed WAV gets one or more cached transcripts stored next to

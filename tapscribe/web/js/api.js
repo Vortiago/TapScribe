@@ -377,6 +377,24 @@ export const wavStripMeta = _resource(
 );
 
 /**
+ * The bare-WAV route's URL — `GET /api/wav/{session}/{name}?source=…`.
+ *
+ * Here rather than at its callers because this module owns every other
+ * /api/wav/* URL (wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview),
+ * and this one has TWO consumers that must not drift: the Recordings row's
+ * download href and the Player's `src`. It builds a URL and fetches nothing, so
+ * the DOM-free Player can import it without pulling in a request.
+ * @param {{ session: string, name: string, source: "original" | "stripped" }} f
+ * @returns {string}
+ */
+export function wavUrl(f) {
+  return (
+    `/api/wav/${encodeURIComponent(f.session)}/${encodeURIComponent(f.name)}` +
+    `?source=${encodeURIComponent(f.source)}`
+  );
+}
+
+/**
  * What ✂ strip WOULD cut for one WAV at the given knobs — the live
  * strip-preview (#89). Deliberately NOT cached: the knob space is unbounded
  * and the caller debounces; latest-wins is the view's request token's job.

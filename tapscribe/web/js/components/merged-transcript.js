@@ -8,13 +8,15 @@ import { aliasOf } from "../speakers.js";
 import { fmtClock, fmtDur, fmtMs, truncMid } from "../formatters.js";
 
 /**
+ * `wav` is the segment's `source_wav` — the file its words came out of, which
+ * the timestamp button carries so a click can be turned into a seek target.
  * @typedef {{
  *   kind: "ok",
- *   ts: string, hms: string, speaker: string, text: string,
+ *   ts: string, hms: string, speaker: string, text: string, wav: string,
  *   lowConf: boolean, confidence: number | null,
  * } | {
  *   kind: "sup",
- *   ts: string, hms: string, speaker: string, text: string, rule: string,
+ *   ts: string, hms: string, speaker: string, text: string, wav: string, rule: string,
  * }} MergedItem
  */
 
@@ -42,6 +44,8 @@ function buildItems(t) {
       kind: "ok",
       ts: seg.abs_start || "",
       hms: fmtClock(seg.abs_start),
+      // The file these words came out of — the identity half of a seek target.
+      wav: seg.source_wav || "",
       speaker: seg.speaker || "",
       text: seg.text || "",
       lowConf: !!seg.low_confidence,
@@ -53,6 +57,7 @@ function buildItems(t) {
       kind: "sup",
       ts: sup.abs_start || "",
       hms: fmtClock(sup.abs_start),
+      wav: sup.source_wav || "",
       speaker: sup.speaker || "",
       text: sup.text || "",
       rule: sup.matched_rule || "",
@@ -134,7 +139,19 @@ function coloredSpan(cls, text) {
 function buildLine(it, speakers, aliases) {
   const node = tpl("tpl-merged-line");
   const row = /** @type {HTMLElement} */ (node.firstElementChild);
-  pick(row, "ts").textContent = `[${it.hms}]`;
+  // The timestamp seeks: it carries the seek target's IDENTITY only. The offset
+  // is resolved at CLICK time by the view (which holds the file listing), so a
+  // deleted source file never needs to be reflected in this region's signature.
+  const tsEl = pick(row, "ts");
+  tsEl.textContent = `[${it.hms}]`;
+  if (it.wav) {
+    tsEl.dataset.wav = it.wav;
+    tsEl.dataset.ts = it.ts;
+    tsEl.title = "Play this line's audio";
+  } else {
+    // No provenance (a pre-source_wav transcript): inert, not misleading.
+    /** @type {HTMLButtonElement} */ (tsEl).disabled = true;
+  }
   const label = pick(row, "speakerLabel");
   label.className = spkClassOf(speakers, it.speaker);
   // No trailing space — the template carries a literal " " between spans
@@ -182,13 +199,25 @@ function buildAudit(host, t) {
   const tbl = tpl("tpl-audit-table");
   const rows = pick(tbl, "rows");
   for (const sup of t.suppressed) {
-    rows.appendChild(slot(tpl("tpl-audit-row"), {
+    const row = slot(tpl("tpl-audit-row"), {
       time: fmtClock(sup.abs_start),
       speaker: sup.speaker || "",
       text: sup.text || "",
       rule: sup.matched_rule || "",
       from: truncMid(sup.source_wav || "", 28),
-    }));
+    });
+    // Same seek-target identity the merged lines carry, resolved at click time by
+    // the delegated listener — which selects on the IDENTITY attributes, not on a
+    // slot marker, so this cell needs nothing renamed.
+    const timeBtn = /** @type {HTMLButtonElement} */ (pick(row, "time"));
+    if (sup.source_wav) {
+      timeBtn.dataset.wav = sup.source_wav;
+      timeBtn.dataset.ts = sup.abs_start || "";
+      timeBtn.title = "Play the audio this dropped line came from";
+    } else {
+      timeBtn.disabled = true;
+    }
+    rows.appendChild(row);
   }
   pick(wrapper, "table").appendChild(tbl);
   host.hidden = false;

@@ -1,4 +1,5 @@
 // @ts-check
+// gate-allow: signal-listener — the seek listener attaches to the <canvas> THIS component builds and owns. It has no lifetime of its own: dropping the component's subtree drops the listener with it, and there is no document/window target here. Same reasoning as the host view's file-level allowance.
 // Isolated canvas waveform renderer for the Recordings hero.
 //
 // Hand it server-computed peaks (api.wavePeaks.fetch → normalised [0,1]
@@ -34,6 +35,34 @@ export function axisTicks(durationS, count) {
 }
 
 /**
+ * Where the playhead sits, as a percentage of the drawn width, or null when
+ * there is no honest answer (no duration yet, no position). Pure: the playhead
+ * is a transform-driven overlay ELEMENT, so its geometry needs no canvas — which
+ * is the point, since repainting O(bins) peaks four times a second is the stall
+ * `lastWaveSig` exists to prevent (ADR-0017).
+ * @param {number} offsetS
+ * @param {number} durationS
+ * @returns {number | null}
+ */
+export function playheadPercent(offsetS, durationS) {
+  if (!Number.isFinite(offsetS) || !Number.isFinite(durationS) || durationS <= 0) return null;
+  return Math.min(100, Math.max(0, (offsetS / durationS) * 100));
+}
+
+/**
+ * A click's x offset within the canvas box as a 0..1 fraction of its width, or
+ * null when the box has no width (never laid out). Clamped, because a click on
+ * the border can report a pixel outside.
+ * @param {number} offsetX
+ * @param {number} width
+ * @returns {number | null}
+ */
+export function seekFractionFromClick(offsetX, width) {
+  if (!Number.isFinite(offsetX) || !Number.isFinite(width) || width <= 0) return null;
+  return Math.min(1, Math.max(0, offsetX / width));
+}
+
+/**
  * Build an isolated waveform component. Returns the node to mount plus
  * imperative draw methods. The component retains the last peaks so a
  * ResizeObserver repaint (container width change, or the initial layout pass
@@ -43,11 +72,14 @@ export function axisTicks(durationS, count) {
  *   showWaveform: (peaks: number[], durationS: number, cut?: import('../../types.js').CutSpan[] | null) => void,
  *   showMessage: (text: string) => void,
  *   setPreview: (preview: { spans: import('../../types.js').CutSpan[], speech_floor_db: number } | null) => void,
+ *   setPlayhead: (offsetS: number | null) => void,
+ *   onSeek: (cb: (offsetS: number) => void) => void,
  * }}
  */
 export function createWaveform() {
   const frag = tpl("tpl-next-waveform");
   const canvas = /** @type {HTMLCanvasElement} */ (pick(frag, "canvas"));
+  const playhead = /** @type {HTMLElement} */ (pick(frag, "playhead"));
   const axisHost = pick(frag, "axis");
   const msgHost = pick(frag, "msg");
   const cutBadge = pick(frag, "cutBadge");
@@ -62,6 +94,10 @@ export function createWaveform() {
   let previewSpans = null;
   /** @type {number | null} */
   let previewFloorDb = null;
+  /** Last playhead position written, so an unchanged frame writes no DOM.
+   * `undefined` (not null) is the never-written sentinel. */
+  /** @type {number | null | undefined} */
+  let lastPct;
 
   const paint = () => {
     const ctx = canvas.getContext("2d");
@@ -203,6 +239,12 @@ export function createWaveform() {
    * spans; the canvas exposes it on data-cut-spans as a stable e2e hook. */
   /** @param {number[]} p @param {number} d @param {import('../../types.js').CutSpan[] | null} [cut] */
   const showWaveform = (p, d, cut) => {
+    // A position measured against the OLD duration is void the moment the canvas
+    // is asked to draw something else. The caller re-asserts a live position on
+    // its next tick; while PAUSED no tick ever comes, so not clearing here
+    // strands a playhead on a file the Player isn't holding (strict identity,
+    // ADR-0017).
+    setPlayhead(null);
     peaks = p;
     durationS = d;
     cutSpans = cut && cut.length ? cut : null;
@@ -217,6 +259,8 @@ export function createWaveform() {
    * canvas stays visible (baseline only) so the panel doesn't jump. */
   /** @param {string} text */
   const showMessage = (text) => {
+    setPlayhead(null); // nothing drawn = no position to point at
+
     peaks = null;
     durationS = 0;
     cutSpans = null;
@@ -247,5 +291,46 @@ export function createWaveform() {
   const ro = new ResizeObserver(() => paint());
   ro.observe(canvas);
 
-  return { node: frag, showWaveform, showMessage, setPreview };
+  /** Draw (or erase) the playhead. `null` erases — the caller passes null
+   * whenever the Player isn't holding the file this canvas is drawing, which is
+   * the strict-identity rule: a position on another file's timeline would be a
+   * confident lie (ADR-0017). Positioned by percentage on an overlay element, so
+   * this never touches the canvas and never invalidates `lastWaveSig`.
+   * @param {number | null} offsetS */
+  const setPlayhead = (offsetS) => {
+    const pct = offsetS == null ? null : playheadPercent(offsetS, durationS);
+    // Called once per animation frame, including with an unchanged value — the
+    // "playing a file this canvas isn't showing" case would otherwise re-assert
+    // `hidden = true` 60 times a second. `null` is a real value here, so the
+    // sentinel has to start as something else.
+    if (pct === lastPct) return;
+    lastPct = pct;
+    if (pct == null) {
+      playhead.hidden = true;
+      return;
+    }
+    playhead.hidden = false;
+    // translateX on a FULL-WIDTH element: a percentage translate resolves
+    // against the element's own border box, so the playhead spans the canvas and
+    // draws its 2px mark with a border (see .wave-playhead). That keeps the move
+    // compositor-only — `left` would invalidate layout on every frame, which is
+    // the cost this overlay exists to avoid.
+    playhead.style.transform = `translateX(${pct}%)`;
+  };
+
+  /** Register the seek handler: a click on the waveform is a seek target on
+   * whatever this canvas is currently showing. The component stays ignorant of
+   * the Player and of sessions — it reports "this many seconds in" and the view
+   * decides which file that is. */
+  /** @param {(offsetS: number) => void} cb */
+  const onSeek = (cb) => {
+    canvas.addEventListener("click", (e) => {
+      if (!peaks || durationS <= 0) return; // nothing drawn = nothing to seek
+      const frac = seekFractionFromClick(e.offsetX, canvas.clientWidth);
+      if (frac == null) return;
+      cb(frac * durationS);
+    });
+  };
+
+  return { node: frag, showWaveform, showMessage, setPreview, setPlayhead, onSeek };
 }
