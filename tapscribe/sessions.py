@@ -515,6 +515,7 @@ def build_session_files(
     sd: Path,
     *,
     visited: set[str] | None = None,
+    open_wavs: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """The per-session WAV listing: each original WAV descriptor with its
     strip-silence region clips attached as `regions`, plus the directory-level
@@ -528,11 +529,22 @@ def build_session_files(
 
     `visited`, when supplied by `gather_sessions`, accumulates the str(path)
     of every WAV described so the per-WAV cache can be pruned to the on-disk
-    set after the walk. Direct callers (the endpoint, tests) may omit it."""
+    set after the walk. Direct callers (the endpoint, tests) may omit it.
+
+    `open_wavs` is the set of WAV filenames a tap is writing right now; each
+    descriptor carries `open` so the dashboard can refuse to play one (its
+    RIFF/data-size header is patched only at tap close, so the bytes on disk
+    declare a length that isn't there yet — ADR-0017). The stamp lands on the
+    per-walk copy `_describe_wav` returns, NOT on the memoised descriptor: an
+    open WAV is the one file whose stats churn every tick, and a cached `open`
+    would outlive the tap and disable playback forever."""
     originals = sorted(sd.glob("*.wav"))
     if visited is not None:
         visited.update(str(w) for w in originals)
+    open_wavs = open_wavs or set()
     wavs = [_describe_wav(w) for w in originals]
+    for w in wavs:
+        w["open"] = w["name"] in open_wavs
 
     # Attach each original WAV's strip-silence region clips as sub-rows.
     #
@@ -640,13 +652,18 @@ def _files_signature(
     return h.hexdigest()[:16]
 
 
-def read_session_files(session: str) -> dict[str, Any]:
+def read_session_files(session: str, open_wavs: set[str] | None = None) -> dict[str, Any]:
     """The lazy companion to `/api/state`: the full per-session WAV listing the
     poll no longer embeds, fetched once per `files_sig` change when a session is
     opened. `resolve_session_dir` validates the id against path traversal; the
-    descriptors come from the same cached `build_session_files` the poll uses."""
+    descriptors come from the same cached `build_session_files` the poll uses.
+
+    `open_wavs` must already be scoped to THIS session's live taps — the caller
+    holds the ActiveStream snapshot and each stream names the session it writes
+    into. Two sessions can legitimately hold the same filename, and an unscoped
+    set would mark an idle session's WAV unplayable (ADR-0017)."""
     session_dir = resolve_session_dir(session)
-    wavs, _stripped = build_session_files(session_dir)
+    wavs, _stripped = build_session_files(session_dir, open_wavs=open_wavs)
     return {"files": wavs}
 
 
