@@ -296,6 +296,18 @@ def _require_opt_str(raw, field: str) -> str | None:
     return raw
 
 
+def _require_str(raw, field: str) -> str:
+    """`_require_opt_str`'s REQUIRED sibling, for body fields where an absent
+    key is NOT a valid request. The optional form reads a missing key as None
+    and lets it through; here None fails the same 400 a non-string does, so
+    the `body.get(field, "")` idiom — which turns a malformed body into a
+    silent write of the default — has no way back in. Returns the string
+    VERBATIM; strip/blank policy stays with the caller."""
+    if not isinstance(raw, str):
+        raise HTTPException(400, f"{field} must be a string")
+    return raw
+
+
 def _parse_opt_str(raw, field: str) -> str | None:
     """Optional string body field: absent/blank → None, non-string → 400,
     otherwise the stripped value."""
@@ -473,8 +485,8 @@ _DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
     LiveModelUnknown: 400,
     GateKindUnsupported: 400,
     LiveStartFailed: 500,
-    # People CRUD (people) — rename, merge, detach raise these;
-    # the routes no longer translate builtins.
+    # People CRUD (people) — the registry's rename / merge / detach raise
+    # these, so the three routes stay thin shims over this map.
     PersonNotFound: 404,
     InvalidMergeRequest: 400,
     IdentityNotAMember: 400,
@@ -1709,8 +1721,9 @@ async def api_session_meta_put(session: str, req: Request, recorder: Recorder = 
 # explicit fetch + the rename / merge / detach mutations. people.json is
 # mutated ONLY here and in the /api/state sync — both on the event loop, so
 # they can't race. A person_id / identity from the body is validated against
-# the loaded registry (PersonNotFound→404 via _DOMAIN_ERROR_STATUS) before anything is written; nothing here
-# builds a filesystem path from request input (people.json is a fixed path).
+# the loaded registry (PersonNotFound→404) before anything is written; nothing
+# here builds a filesystem path from request input (people.json is a fixed
+# path).
 # ---------------------------------------------------------------------------
 
 
@@ -1730,10 +1743,12 @@ async def api_people_get(recorder: Recorder = Depends(get_recorder)):
 
 @app.put("/api/people/{person_id}")
 async def api_people_rename(person_id: str, req: Request, recorder: Recorder = Depends(get_recorder)):
-    body = await _json_body(req)
-    name = body.get("name", "")
-    if not isinstance(name, str):
-        raise HTTPException(400, "name must be a string")
+    # Strict parse + a REQUIRED `name`: a blank stored name is how the registry
+    # says "fall back to the roster default", so a body that never parsed — or
+    # one without the key — must not read as a deliberate rename-to-blank and
+    # DESTROY the operator's chosen name. Only an explicit `{"name": ""}` clears.
+    body = await _require_json_object_body(req, allow_empty=False)
+    name = _require_str(body.get("name"), "name")
     registry = PeopleRegistry.load()
     registry.rename(person_id, name.strip())
     registry.save()

@@ -46,13 +46,25 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from tapscribe import live_control, session_maintenance, session_merge, session_paths, sessions
+from tapscribe import live_control, people, session_maintenance, session_merge, session_paths, sessions
 
 # ---------------------------------------------------------------------------
 # 1. Completeness — every domain module is FastAPI-free.
+#
+# This list is where a module JOINS the FastAPI-free domain layer: extend it in
+# the same slice that gives the module its domain errors (#370 added
+# `live_control`, #368 added `people`), so the enumeration stays the one answer
+# to "which modules are the domain layer".
 # ---------------------------------------------------------------------------
 
-_DOMAIN_MODULES = [session_paths, sessions, session_maintenance, session_merge, live_control]
+_DOMAIN_MODULES = [
+    session_paths,
+    sessions,
+    session_maintenance,
+    session_merge,
+    live_control,
+    people,
+]
 
 
 def _references_httpexception(module) -> bool:

@@ -272,6 +272,7 @@ def test_route_detach_non_member_identity_is_400(client: TestClient) -> None:
     ("method", "path", "body"),
     [
         ("put", "/api/people/{alice}", {"name": 123}),
+        ("put", "/api/people/{alice}", {}),
         ("post", "/api/people/merge", {"survivor": "only"}),
         ("post", "/api/people/merge", {"survivor": "", "absorbed": "x"}),
         ("post", "/api/people/merge", {"survivor": "a", "absorbed": 7}),
@@ -284,26 +285,120 @@ def test_route_body_validation_still_rejects_with_400(
 ) -> None:
     """The request-shape guards are the routes' OWN job — no domain error covers
     them, and collapsing the handlers must not take them along. A dropped guard
-    turns a malformed body into a 500 (or a rename to the string "123")."""
+    turns a malformed body into a 500 (or a rename to the string "123").
+
+    `name` is REQUIRED, exactly like merge's `survivor`/`absorbed` and detach's
+    `identity`: a `body.get("name", "")` default would make the key-less body
+    above a silent rename-to-blank instead of a 400 (see the non-object case
+    below for why that destroys state)."""
     alice, _ = _seed_two_people()
     r = getattr(client, method)(path.format(alice=alice), json=body)
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"[]", b"3", b'"garbage"', b"null", b"", b"not json at all"],
+    ids=["array", "number", "string", "null", "empty", "unparseable"],
+)
+def test_rename_with_a_non_object_body_is_a_400_not_a_name_wipe(client: TestClient, raw: bytes) -> None:
+    """The bodies the parametrize above CANNOT reach: `_json_body` collapses
+    every parse failure and every non-object body to `{}`, so the guard has to
+    survive a body that never was a dict.
+
+    This is the destructive case. A blank stored name means "fall back to the
+    roster default" (`name_resolution.name_for_identity`), so a rename to `""`
+    DESTROYS the operator's chosen name with no undo — and a malformed request
+    must never be read as asking for that. Asserted against people.json on
+    disk, not through `PeopleRegistry.load()`, whose stat-sig memo could answer
+    from a pre-request snapshot."""
+    reg = PeopleRegistry.load()
+    alice, _ = _two_people(reg)
+    reg.rename(alice, "Operator Chosen Name")
+    reg.save()
+
+    r = client.put(f"/api/people/{alice}", content=raw, headers={"content-type": "application/json"})
+    assert r.status_code == 400
+
+    stored = json.loads((config.RECORDINGS_DIR / PEOPLE_JSON).read_text(encoding="utf-8"))
+    assert next(p for p in stored["people"] if p["id"] == alice)["name"] == "Operator Chosen Name"
+
+
+def test_rename_to_an_explicit_blank_still_clears_the_name(client: TestClient) -> None:
+    """The positive counterpart the two guards above are drawn around, and the
+    reason neither may harden into "reject blank names": clearing the chosen
+    name is how the operator hands a Person back to the roster default, so
+    `{"name": ""}` is a legitimate 200. The line is the KEY, not the value —
+    absent or malformed is a 400, present-and-blank is a deliberate clear, and
+    the dashboard's rename field (`web/js/next/views/people.js`) sends exactly
+    this when the operator empties the input."""
+    reg = PeopleRegistry.load()
+    alice, _ = _two_people(reg)
+    reg.rename(alice, "Operator Chosen Name")
+    reg.save()
+
+    assert client.put(f"/api/people/{alice}", json={"name": ""}).status_code == 200
+
+    stored = json.loads((config.RECORDINGS_DIR / PEOPLE_JSON).read_text(encoding="utf-8"))
+    assert next(p for p in stored["people"] if p["id"] == alice)["name"] == ""
 
 
 def test_route_404_detail_still_says_not_found(client: TestClient) -> None:
     """Today the operator gets `{"detail": "person not found"}`. After the
     migration the handler returns `str(exc)`, so an error whose `__str__` is the
     inherited `KeyError` repr would answer `"'p_nope'"` — a 404 body that no
-    longer says what went wrong. The id may be added; the meaning must survive."""
+    longer says what went wrong.
+
+    DECIDED HERE (this contract owns the taxonomy): the 404 detail is a FIXED
+    string that does NOT echo the request-supplied id back. That is the repo's
+    not-found convention — `session_paths.SessionNotFound("session not found")`
+    and `WavNotFound("not found")` both drop the input — and it is what the
+    pre-migration routes already did (`HTTPException(404, "person not found")`
+    swallowed `KeyError`'s argument). See the cross-branch test below."""
     _seed_two_people()
     detail = client.put("/api/people/p_nope", json={"name": "X"}).json()["detail"]
     assert isinstance(detail, str)
     assert "not found" in detail.lower()
+    assert "p_nope" not in detail
+
+
+def test_every_404_branch_answers_the_same_fixed_detail(client: TestClient) -> None:
+    """The other half of the decision above: because the detail carries no id,
+    `merge`'s two lookups are INDISTINGUISHABLE by design, not by accident.
+
+    `KeyError(survivor_id)` vs `KeyError(absorbed_id)` used to differ at the
+    raise site (and got flattened by the route anyway); a reader of two now
+    byte-identical branches needs to know that is the intended terminal state.
+    Pinning all four branches to one literal also means the message has exactly
+    one owner — `PeopleRegistry._require` — so a reword cannot land on three of
+    four sites and ship green. To make a branch nameable again, amend THIS test
+    first: naming which side is missing is a new API behaviour, and echoing a
+    request-supplied id into a response body is a decision, not a detail."""
+    alice, bob = _seed_two_people()
+    responses = [
+        client.put("/api/people/p_nope", json={"name": "X"}),
+        client.post("/api/people/merge", json={"survivor": "p_nope", "absorbed": bob}),
+        client.post("/api/people/merge", json={"survivor": alice, "absorbed": "p_nope"}),
+        client.post("/api/people/p_nope/detach", json={"identity": "alice"}),
+    ]
+    assert [r.status_code for r in responses] == [404, 404, 404, 404]
+    assert {r.json()["detail"] for r in responses} == {"person not found"}
 
 
 def test_route_400_details_are_preserved_verbatim(client: TestClient) -> None:
     """Both 400s pass `str(e)` through today, so these exact strings are the
-    current API contract."""
+    current API contract.
+
+    Note what the second assertion locks in, deliberately: unlike the 404s
+    above, the 400 detail REFLECTS request-supplied strings (`'bob'`, the
+    person id) verbatim into the response body. Preserving that was right for a
+    translation slice — it is the pre-migration behaviour — but it is an
+    exact-literal pin at the display boundary, so a future de-echo slice must
+    AMEND this test rather than work around it. What makes the echo safe today
+    is that the dashboard renders `detail` through `el.textContent`
+    (`tapscribe/web/js/save-status.js`) under the app's strict CSP — verified by
+    hand, not by any test; a future consumer that interpolates `detail` into
+    HTML would turn this pin into an injection surface."""
     alice, _ = _seed_two_people()
     merged = client.post("/api/people/merge", json={"survivor": alice, "absorbed": alice})
     assert merged.json()["detail"] == "cannot merge a Person into itself"

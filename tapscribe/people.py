@@ -14,7 +14,10 @@ aggregating the rosters and overlaying this registry — it is not stored here.
 Invariant: every Identity belongs to **exactly one** Person. `sync` auto-binds
 each newly-seen Identity to its own Person (blank name); `merge` joins two
 Persons (survivor's name wins); `detach` pulls one Identity back into its own
-Person; `rename` sets the chosen name.
+Person; `rename` sets the chosen name. Those three CRUD mutators reject bad
+input with a named domain error from this module, never a builtin — the route
+layer maps each to its status centrally (app._DOMAIN_ERROR_STATUS) and stays a
+thin shim. (`sync` takes anything: a non-str identity is skipped, not an error.)
 
 Concurrency mirrors the Roster: every mutator is a synchronous read-modify-write
 the caller follows with `save()`, with no `await` between load and save, so the
@@ -34,16 +37,23 @@ from .text import atomic_write_text, file_stat_sig
 PEOPLE_JSON = "people.json"
 
 
+# ---------------------------------------------------------------------------
+# Domain errors — FastAPI-free registry exceptions. The HTTP status for each
+# lives ONCE in app._DOMAIN_ERROR_STATUS (the handler's only source); the
+# arrows below are a reader's hint, never a second source of truth.
+# ---------------------------------------------------------------------------
+
+
 class PersonNotFound(Exception):
-    """No Person with that id."""
+    """No Person with that id (→ 404)."""
 
 
 class InvalidMergeRequest(Exception):
-    """Cannot merge a Person into itself."""
+    """Cannot merge a Person into itself (→ 400)."""
 
 
 class IdentityNotAMember(Exception):
-    """Detaching an identity that does not belong to the Person."""
+    """Detaching an identity that does not belong to the Person (→ 400)."""
 
 
 # Single-slot memoisation cache for `load()`. Stores `(sig, raw_data)` where
@@ -136,6 +146,22 @@ class PeopleRegistry:
     def get(self, person_id: str) -> dict[str, Any] | None:
         return next((p for p in self._people if p["id"] == person_id), None)
 
+    def _require(self, person_id: str) -> dict[str, Any]:
+        """`get` or raise — the one lookup guard every mutator shares.
+
+        The message is FIXED and deliberately does not echo `person_id`: it
+        reaches the operator as the 404 `detail`, and this repo's not-found
+        bodies never reflect request-supplied input back (session_paths.py's
+        `SessionNotFound("session not found")` / `WavNotFound("not found")`).
+        One owner means `merge`'s two lookups answer identically by
+        construction rather than by four hand-synced copies — pinned by
+        tests/test_people_domain_errors.py.
+        """
+        person = self.get(person_id)
+        if person is None:
+            raise PersonNotFound("person not found")
+        return person
+
     def person_for_identity(self, identity: str) -> dict[str, Any] | None:
         return self._by_identity.get(identity)
 
@@ -163,21 +189,17 @@ class PeopleRegistry:
         return changed
 
     def rename(self, person_id: str, name: str) -> dict[str, Any]:
-        person = self.get(person_id)
-        if person is None:
-            raise PersonNotFound("person not found")
+        person = self._require(person_id)
         person["name"] = name
         return person
 
     def merge(self, survivor_id: str, absorbed_id: str) -> dict[str, Any]:
+        # The self-merge check runs BEFORE either lookup: two identical
+        # UNKNOWN ids are an invalid request (400), not a missing Person.
         if survivor_id == absorbed_id:
             raise InvalidMergeRequest("cannot merge a Person into itself")
-        survivor = self.get(survivor_id)
-        absorbed = self.get(absorbed_id)
-        if survivor is None:
-            raise PersonNotFound("person not found")
-        if absorbed is None:
-            raise PersonNotFound("person not found")
+        survivor = self._require(survivor_id)
+        absorbed = self._require(absorbed_id)
         for identity in absorbed["identities"]:
             if identity not in survivor["identities"]:
                 survivor["identities"].append(identity)
@@ -199,9 +221,7 @@ class PeopleRegistry:
         contract ("detaching a sole identity would be a no-op, so no ✕ then")
         and only hides the button.
         """
-        person = self.get(person_id)
-        if person is None:
-            raise PersonNotFound("person not found")
+        person = self._require(person_id)
         if identity not in person["identities"]:
             raise IdentityNotAMember(f"{identity!r} is not a member of {person_id!r}")
         if person["identities"] == [identity]:
