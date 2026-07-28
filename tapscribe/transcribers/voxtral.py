@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+from . import base
 from ._voxtral_common import VoxtralTranscriberBase, inputs_kwargs, split_voxtral_text_into_segments
 
 __all__ = ["VoxtralTranscriber", "split_voxtral_text_into_segments"]
@@ -23,18 +24,15 @@ _VOXTRAL_REPO = "mistralai/Voxtral-Mini-3B-2507"
 
 def _resolve_repo(model_name: str) -> str:
     # Registry-carried repo (single source, #206/#337), falling back to the
-    # canonical Voxtral-Mini repo for off-registry names. Lazy import: the
-    # catalog imports this module's class through its loader hooks.
-    from .catalog import repo_for
-
-    return repo_for(model_name, "voxtral-hf") or _VOXTRAL_REPO
+    # canonical Voxtral-Mini repo for off-registry names.
+    return base.resolve_repo(model_name, "voxtral-hf", lambda _: _VOXTRAL_REPO)
 
 
 class VoxtralTranscriber(VoxtralTranscriberBase):
     """A Voxtral model wrapped to satisfy the `Transcriber` Protocol."""
 
     name: ClassVar[str] = "voxtral"
-    backend: ClassVar[str] = "hf-transformers"
+    backend: ClassVar[str] = "voxtral-hf"
 
     def __init__(
         self, *, model_name: str, processor: Any, model: Any, device: str, fixed_language: str | None = None

@@ -19,6 +19,8 @@ forwards only the values the registry says the model accepts.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import asdict as _asdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
@@ -139,6 +141,9 @@ class TranscriptionResult:
     # the cache match key. Empty = the model auto-detected; `language`
     # carries what it decided.
     source_language: str = ""
+
+    def to_mapping(self) -> dict[str, Any]:
+        return _asdict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -290,3 +295,19 @@ def default_language_for(model_name: str) -> str | None:
     if n.startswith("nb-"):
         return "no"
     return None
+
+
+def resolve_repo(model_name: str, backend_key: str, fallback: Callable[[str], str | None]) -> str | None:
+    """Resolve a model's HF repo: registry first, then construct-by-convention fallback.
+
+    ``repo_for`` is imported inside to keep ``base`` a leaf module
+    (no ``base`` ↔ ``catalog`` cycle).
+    """
+    from .catalog import repo_for
+
+    return repo_for(model_name, backend_key) or fallback(model_name)
+
+
+def resolve_language(source_lang: str | None, fixed_language: str | None, model_name: str) -> str | None:
+    """Three-rung language precedence: explicit pin > registry fixed > name heuristic."""
+    return source_lang or fixed_language or default_language_for(model_name)

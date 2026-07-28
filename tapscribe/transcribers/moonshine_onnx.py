@@ -30,6 +30,8 @@ from typing import Any
 
 import numpy as np
 
+from . import base
+
 _UPSTREAM_MODEL_NAMES: dict[str, str] = {
     "moonshine-tiny": "tiny",
     "moonshine-base": "base",
@@ -61,10 +63,8 @@ class OnnxMoonshineEngine:
         """Load Moonshine via `useful-moonshine-onnx`. Raises a clear,
         actionable `RuntimeError` if the optional dependency isn't
         installed — same convention as every other adapter."""
-        from .catalog import repo_for
-
         # Registry-first per #206, module mapping as the convention fallback.
-        upstream_name = repo_for(model_id, "moonshine-onnx") or _UPSTREAM_MODEL_NAMES.get(model_id)
+        upstream_name = base.resolve_repo(model_id, "moonshine-onnx", lambda m: _UPSTREAM_MODEL_NAMES.get(m))
         if upstream_name is None:
             raise ValueError(
                 f"{model_id!r} is not a known Moonshine model. Known: {sorted(_UPSTREAM_MODEL_NAMES)!r}"

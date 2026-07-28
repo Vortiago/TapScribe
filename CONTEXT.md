@@ -46,7 +46,7 @@ Each Transcriber declares its `device`, `name`, and `backend`. The
 `name` is the family label (`"faster-whisper"`, `"mlx-whisper"`,
 `"voxtral"`, `"parakeet"`) — the same string lands in result JSON
 under `"transcriber"`. The `backend` field (`"faster-whisper"`,
-`"mlx-whisper"`, `"hf-transformers"`, `"mlx-voxtral"`,
+`"mlx-whisper"`, `"voxtral-hf"`, `"mlx-voxtral"`,
 `"parakeet-mlx"`, `"parakeet-hf"`) disambiguates which runtime did
 the work.
 

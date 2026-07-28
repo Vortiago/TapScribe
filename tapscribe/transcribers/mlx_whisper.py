@@ -16,11 +16,11 @@ from typing import Any, ClassVar
 
 from ..audio import wav_duration_s
 from ..wav_predecode import load_recorder_wav_as_pcm
+from . import base
 from .base import (
     TranscriptionResult,
     TranscriptionSegment,
     build_transcription_result,
-    default_language_for,
 )
 
 # Used when folding hotwords into the initial prompt.
@@ -31,9 +31,7 @@ def mlx_whisper_repo(name: str) -> str:
     """Map an OpenAI-style Whisper model name to its mlx-community HF repo.
     Reads from the registry; falls back to the construction pattern for
     unknown models."""
-    from .catalog import repo_for
-
-    return repo_for(name, "mlx-whisper") or f"mlx-community/whisper-{name}-mlx"
+    return base.resolve_repo(name, "mlx-whisper", lambda n: f"mlx-community/whisper-{n}-mlx")
 
 
 class MlxWhisperTranscriber:
@@ -129,7 +127,7 @@ class MlxWhisperTranscriber:
 
         kwargs: dict[str, Any] = dict(
             path_or_hf_repo=self._hf_repo,
-            language=source_lang or self.fixed_language or default_language_for(self.model_name),
+            language=base.resolve_language(source_lang, self.fixed_language, self.model_name),
             initial_prompt=prompt_arg,
             condition_on_previous_text=False,
             word_timestamps=True,
