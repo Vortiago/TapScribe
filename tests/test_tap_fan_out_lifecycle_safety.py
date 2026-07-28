@@ -3,7 +3,8 @@ exception/cancellation-safe: a failure in `open()` must unwind ALL partial
 state, and `_close` must remove the ActiveStream row even when the awaited
 relay teardown is cancelled.
 
-The `/tap` route composes `async with await TapFanOut.open(...)` (app.py) — the
+The `/tap` route composes `async with await TapFanOut.open(...)`
+(`routes/tap.py`) — the
 `await` is OUTSIDE the context manager, so if `_open` raises after partial
 setup, `__aexit__`/`_close` never runs and the partial state leaks for the whole
 process lifetime. `_open` opens the WAV, indexes the `UtteranceRecord`

@@ -37,20 +37,24 @@ router = APIRouter()
 @router.get("/api/state")
 async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     active_streams = await recorder.streams.snapshot()
+    # One read of the live session id for the whole tick: reading it again inside
+    # the thread hop below (as this route used to, through a closure) let a
+    # rotation land between the two, so the listing and the payload's
+    # `current_session` could disagree for one poll.
+    session_start = recorder.session_start
     live_identities = {s.identity for s in active_streams}
     jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
     open_wavs = open_wav_names(active_streams)
 
-    # Active rows with tap_settings overlay (on loop, unchanged)
+    # Active rows with the tap_settings overlay: cheap, stays on the event loop.
     active = active_rows(active_streams, recorder.tap_settings.get)
 
     # Thread hop 1: gather_sessions (disk walk, off the loop)
     sessions_list = await asyncio.to_thread(
-        lambda: gather_sessions(
-            current_session=recorder.session_start,
-            jobs=jobs_snapshot,
-            open_wavs=open_wavs,
-        )
+        gather_sessions,
+        current_session=session_start,
+        jobs=jobs_snapshot,
+        open_wavs=open_wavs,
     )
 
     # Mutation: load → sync → save (on event loop, serialised with /api/people)
@@ -59,21 +63,21 @@ async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
     # Thread hop 2: config reads + people joins + payload build + serialize + ETag
     body, etag = await asyncio.to_thread(
         build_state_blob,
-        recorder.session_start,
-        active,
-        sessions_list,
-        registry,
-        occs,
-        live_identities,
-        recorder.transcripts.snapshot(),
-        dict(recorder.live.info),
+        current_session=session_start,
+        active=active,
+        sessions_list=sessions_list,
+        registry=registry,
+        occs=occs,
+        live_identities=live_identities,
+        live_feed=recorder.transcripts.snapshot(),
+        live_info=dict(recorder.live.info),
         # Last 30 lines without copying the whole 200-entry deque on every
         # poll tick — islice walks straight to the tail.
-        list(islice(recorder.live.log, max(0, len(recorder.live.log) - 30), None)),
-        bool(getattr(recorder.live, "supports_native_vad", False)),
-        recorder.recording_enabled,
-        recorder.backend,
-        sorted(available_backend_strs()),
+        live_log=list(islice(recorder.live.log, max(0, len(recorder.live.log) - 30), None)),
+        live_supports_native_vad=bool(getattr(recorder.live, "supports_native_vad", False)),
+        recording_enabled=recorder.recording_enabled,
+        backend=recorder.backend,
+        available_backends=sorted(available_backend_strs()),
     )
 
     headers = {"ETag": etag, "Cache-Control": "no-cache"}

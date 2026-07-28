@@ -12,7 +12,7 @@ What this module owns, in the order it happens:
   1. the app object, with the lifespan from `tapscribe/lifespan.py`
   2. middleware: gzip, CORS, Basic auth, security headers (the CSP below)
   3. the domain error to HTTP status handlers (`routes/errors.py`)
-  4. every router, then the two StaticFiles mounts
+  4. every router (the dashboard's StaticFiles mounts ride one of them)
 
 Routes receive the running `Recorder` via `Depends(get_recorder)`, which reads
 from `request.app.state.recorder`. `__main__.py` constructs the Recorder and
@@ -31,7 +31,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from . import auth
 from .lifespan import lifespan
-from .routes import ALL_ROUTERS, mount_static
+from .routes import ALL_ROUTERS
 from .routes.deps import get_recorder
 from .routes.errors import register_domain_errors
 
@@ -101,4 +101,3 @@ register_domain_errors(app)
 # tests/test_route_surface.py.
 for _router in ALL_ROUTERS:
     app.include_router(_router)
-mount_static(app)

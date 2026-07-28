@@ -38,11 +38,7 @@ router = APIRouter()
 # needing the browser console. Storage-free by design — log-and-drop, capped
 # and flood-guarded, mirroring the toolkit's serve.mjs endpoint.
 _CLIENT_ERR_WINDOW_S = 60.0
-
-
 _CLIENT_ERR_MAX_PER_WINDOW = 30
-
-
 _client_err_times: deque[float] = deque()
 
 

@@ -226,7 +226,7 @@ class LocalSummarizer:
         window. `_build_generate_fn`'s try wraps only the model LOAD, so an
         overflow raised during generation had no domain-error mapping at all
         and reached the route as an untyped 500 (it isn't in
-        `_DOMAIN_ERROR_STATUS`). Mapping it to `SummarizerFailed` (→ 502) hands
+        `DOMAIN_ERROR_STATUS`). Mapping it to `SummarizerFailed` (→ 502) hands
         the operator the knob to raise instead of a traceback.
 
         GGUF only: the MLX path has no `n_ctx` cap (it feeds the model the whole

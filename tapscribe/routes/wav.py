@@ -23,26 +23,18 @@ from fastapi import (
     HTTPException,
     Request,
 )
-from fastapi.responses import (
-    FileResponse,
-)
+from fastapi.responses import FileResponse
 
 from ..audio import compute_peaks
 from ..recorder import Recorder
-from ..session_maintenance import (
-    delete_session_wav,
-)
+from ..session_maintenance import delete_session_wav
 from ..session_paths import (
     resolve_session_dir,
     resolve_wav,
 )
-from ..sessions import (
-    read_wav_transcript,
-)
+from ..sessions import read_wav_transcript
 from ..wav_cache import set_primary_transcript
-from .body import (
-    json_body,
-)
+from .body import json_body
 from .deps import get_recorder
 from .guards import refuse_current_or_busy
 

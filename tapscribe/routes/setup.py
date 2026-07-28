@@ -16,16 +16,12 @@ from fastapi import (
     HTTPException,
     Request,
 )
-from fastapi.responses import (
-    StreamingResponse,
-)
+from fastapi.responses import StreamingResponse
 
 from ..runtime_probe import refresh_backend_probes
 from ..setup_install import InstallSelectionError, run_install, sse, validate_live, validate_selection
 from ..setup_state import build_setup_state
-from .body import (
-    json_body,
-)
+from .body import json_body
 
 router = APIRouter()
 

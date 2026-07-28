@@ -19,9 +19,7 @@ from fastapi import (
 from ..recorder import Recorder
 from ..runtime_probe import available_backend_strs
 from ..transcribers import evict_idle_now, run_on_model_thread
-from ..transcribers.catalog import (
-    REGISTRY,
-)
+from ..transcribers.catalog import REGISTRY
 from .deps import get_recorder
 
 router = APIRouter()

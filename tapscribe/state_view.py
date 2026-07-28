@@ -15,9 +15,11 @@ Two derivations have no other owner:
 - the `default_override_counts` loop, which tells the config card how many
   sessions override each global default.
 
-FastAPI-free by design, like the batch orchestrators: the HTTP status of a
-failure is the route's business, and a CLI or queue worker can render the same
-projection.
+Request-free and Recorder-free by design, like the batch orchestrators: every
+input arrives as a snapshot, the HTTP status of a failure is the route's
+business, and a CLI or queue worker can render the same projection. It is not
+literally fastapi-free: `jsonable_encoder` is what gives the payload its
+datetime-aware encoding, and that IS the wire format.
 """
 
 from __future__ import annotations
@@ -109,6 +111,7 @@ def active_rows(
 
 
 def build_state_blob(
+    *,
     current_session: str,
     active: list[dict[str, Any]],
     sessions_list: list[dict[str, Any]],
@@ -127,7 +130,17 @@ def build_state_blob(
 
     `sessions_list` is pre-gathered; the registry is pre-synced (mutation ran on
     the event loop). All recorder-owned inputs are snapshotted. Returns
-    (body_bytes, etag_string)."""
+    (body_bytes, etag_string).
+
+    Keyword-only, deliberately: thirteen parameters with two adjacent same-typed
+    pairs (`active`/`sessions_list`, `live_supports_native_vad`/
+    `recording_enabled`) means a transposition at the call site would type-check,
+    lint clean and ship a wrong payload, and no test of the serialized bytes
+    could see it.
+
+    `live_identities` MUST be the identity set of `active` (the route derives
+    both from one `streams.snapshot()`); it is passed rather than derived here
+    because the route needs it for the People mutation anyway."""
     prompt = read_config("prompt")
     live_prompt = read_config("live-prompt")
     live_model_default = read_config("live-model")

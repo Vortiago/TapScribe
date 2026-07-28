@@ -502,7 +502,7 @@ def test_recording_toggle_rejects_a_non_bool_enabled(client, recorder_under_test
     `String(bool)`, a URL param) returned `{"ok": true, "enabled": true}` and
     kept recording every participant after the operator asked to pause. That is
     a wrong-DIRECTION privacy bug, not merely a rejected request —
-    `_parse_opt_bool`'s own docstring names the trap ("bool('false') is True").
+    `parse_opt_bool`'s own docstring names the trap ("bool('false') is True").
     """
     recorder_under_test.recording_enabled = True
     r = client.post("/api/recording/toggle", json={"enabled": raw})
@@ -3416,7 +3416,7 @@ def test_summarizer_config_put_empty_object_clears(client):
 
 
 def test_summarizer_config_put_rejects_a_bodyless_or_malformed_write(client):
-    """Full-object semantics + `_json_body`'s "any parse failure → {}" used to
+    """Full-object semantics + `json_body`'s "any parse failure → {}" used to
     mean a client that dropped or truncated the body WIPED the operator's
     saved default — taking the end-of-meeting pipeline's summarize stage with
     it — and was told the save worked. Only a deliberate `{}` may clear."""

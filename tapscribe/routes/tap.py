@@ -44,12 +44,8 @@ from ..session_maintenance import (
     prune_empty_sessions,
     session_is_empty,
 )
-from ..session_paths import (
-    resolve_session_dir,
-)
-from ..sessions import (
-    read_session_summary,
-)
+from ..session_paths import resolve_session_dir
+from ..sessions import read_session_summary
 from ..tap_fan_out import TapFanOut
 from .body import (
     json_body,

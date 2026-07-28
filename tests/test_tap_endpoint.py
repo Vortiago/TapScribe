@@ -20,8 +20,9 @@ from conftest import (
     FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
     build_tap_recorder,
 )
-from fastapi.routing import APIRoute, iter_route_contexts
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from route_inventory import registered_routes  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
 from tapscribe.app import app, get_recorder
@@ -75,24 +76,23 @@ def auth_client(recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatc
 #
 # Enforcement of the tap bearer lives in the auth middleware, keyed on
 # TAP_PREFIX, so EVERY registered route under it is gated by construction.
-# This sweep discovers those routes from the app, so a future tap route
-# is covered the moment it's registered — no per-route 401 test to remember.
-#
-# Via `iter_route_contexts`, not `app.routes`: since #229 the tap routes live in
-# `tapscribe/routes/tap.py` and FastAPI keeps an included router as ONE lazy
-# entry in `app.routes`, so walking that directly would match nothing and the
-# parametrised sweep below would vacuously pass (which is what
-# `test_tap_route_inventory_is_non_empty` guards).
+# This sweep discovers those routes from the app (via `route_inventory`, which
+# owns the traversal), so a future tap route is covered the moment it's
+# registered — no per-route 401 test to remember. Walking `app.routes` directly
+# would match nothing since #229 (an included router is one lazy entry there),
+# which is what `test_tap_route_inventory_is_non_empty` guards against.
 # ---------------------------------------------------------------------------
+
+_UNDER_TAP_PREFIX = [r for r in registered_routes(app) if r.path.startswith(_config.TAP_PREFIX + "/")]
 
 _TAP_ROUTES = sorted(
     {
         (
-            next(m for m in sorted(ctx.methods) if m not in {"HEAD", "OPTIONS"}),
-            re.sub(r"\{[^}]+\}", "x", ctx.path),  # concrete path-param value
+            next(m for m in r.methods if m not in {"HEAD", "OPTIONS"}),
+            re.sub(r"\{[^}]+\}", "x", r.path),  # concrete path-param value
         )
-        for ctx in iter_route_contexts(app.routes)
-        if isinstance(ctx.original_route, APIRoute) and ctx.path.startswith(_config.TAP_PREFIX + "/")
+        for r in _UNDER_TAP_PREFIX
+        if isinstance(r.route, APIRoute)
     }
 )
 
@@ -101,6 +101,15 @@ def test_tap_route_inventory_is_non_empty() -> None:
     # Guard the guard: if the filter matched nothing, the parametrised sweep
     # below would vacuously pass.
     assert _TAP_ROUTES, "expected at least the new-session + pipeline tap routes"
+
+
+def test_every_route_under_the_tap_prefix_is_swept() -> None:
+    """The sweep below drives routes over HTTP, so it can only cover `APIRoute`s.
+    A websocket or a mounted sub-app under TAP_PREFIX would be gated by the same
+    middleware branch but silently absent from the parametrised list, so it has
+    to fail HERE and get its own bearer test rather than pass unnoticed."""
+    other = [(r.kind, r.path) for r in _UNDER_TAP_PREFIX if not isinstance(r.route, APIRoute)]
+    assert other == [], f"non-HTTP route under {_config.TAP_PREFIX}/ needs its own bearer test: {other}"
 
 
 @pytest.mark.parametrize("method,path", _TAP_ROUTES)
@@ -1036,7 +1045,7 @@ class TestTapSessionParam:
         (mirroring token rejection) — a misconfigured bridge fails loudly
         instead of silently recording into the wrong session. The id
         crosses resolve_session_dir (the canonical path-safety seam), whose
-        SessionNotFound (mapped to 404 by app._DOMAIN_ERROR_STATUS) denies the
+        SessionNotFound (mapped to 404 by routes.errors.DOMAIN_ERROR_STATUS) denies the
         upgrade with an HTTP 404 WebSocketDenialResponse before accept."""
         from starlette.testclient import WebSocketDenialResponse
 

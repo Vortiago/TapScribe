@@ -1,5 +1,6 @@
 """Coverage for `tapscribe/logging_setup.py` (#236) — the `--log-json`
-path, imported at `app.py:274` but never exercised: no test constructed a
+path, imported inside the lifespan (`tapscribe/lifespan.py`) but never
+exercised: no test constructed a
 `JsonFormatter` or called `install_json_logging()` before this file, so a
 broken field name or a formatter that silently drops handlers shipped
 with the rest of the suite green.

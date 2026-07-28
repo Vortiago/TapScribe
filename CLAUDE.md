@@ -17,7 +17,10 @@
   `guards`), or if the registered surface changes without its golden
   table changing too. ADR-0018 has the why. Note `app.routes` no longer
   enumerates routes (FastAPI keeps an included router as one lazy
-  entry): walk `fastapi.routing.iter_route_contexts` instead.
+  entry, and the effective path of a websocket or mount lives on the
+  context's `starlette_route`): a test that sweeps the surface goes
+  through `tests/route_inventory.py`, which owns that traversal, rather
+  than re-deriving it.
 - `frontend/` — TypeScript-via-JSDoc gate for `tapscribe/web/js/`. The
   `stop.sh` hook silently skips when `frontend/node_modules/.bin/tsc` is
   absent (fresh worktree before `session-start.sh` has finished), so if

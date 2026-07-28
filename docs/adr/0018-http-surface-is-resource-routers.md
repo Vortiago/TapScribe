@@ -21,7 +21,7 @@ the largest module is the real cost (#229).
 
 Every route lives in a **route module** under `tapscribe/routes/`, grouped by
 **domain concern**. `app.py` owns app construction, middleware, the domain-error
-registry, the router includes and the mounts, and nothing else.
+registry and the router includes, and nothing else.
 
 Four decisions inside that, each of which had a plausible alternative:
 
@@ -61,23 +61,38 @@ session-identity; neither is worth it for a guard whose whole job is to answer a
 HTTP request with a 409.
 
 Alongside the split, the `/api/state` assembly becomes the **State view**
-(`tapscribe/state_view.py`): FastAPI-free, pure given snapshots, so the
-projection, the override counts and the byte bucketing are unit-testable without
-a route or a Recorder, matching what the batch orchestrators already do.
+(`tapscribe/state_view.py`): Request-free and Recorder-free, pure given
+snapshots, so the projection, the override counts and the byte bucketing are
+unit-testable without a route or a Recorder, matching what the batch
+orchestrators already do. (Not literally fastapi-free: `jsonable_encoder` is
+what gives the payload its datetime-aware encoding, and that is the wire
+format.)
 
 ## The map is enforced, not encouraged
 
 A route map that can decay is worth nothing, which is what #229 demonstrated.
-`tests/test_route_surface.py` pins five properties:
+`tests/test_route_surface.py` pins:
 
 - each route module's docstring route map equals what that module registers,
   both directions, so a route added without a map line fails CI;
 - `routes/__init__.py`'s index names every module in the package;
-- `app.py` registers no routes itself (AST check for `@app.<verb>`);
-- no route module imports another route module (only `deps`, `body`, `errors`,
-  `guards`);
+- every registered route's endpoint is defined in a `routes/` module, which says
+  "app.py registers nothing" without depending on HOW a stray route was
+  registered (`@app.get`, `add_api_route`, `@app.router.post` all fail it);
+- no module in the package imports a router, in any of the four import forms,
+  support modules included (there, it would be a cycle);
+- no router is included under a prefix, so a path in a module's map is the URL
+  it serves;
+- the FastAPI routing contract the sweeps read (`iter_route_contexts` plus the
+  effective path of a non-`APIRoute`), which fails OPEN if it ever changes, hence
+  the `fastapi<0.140` cap;
 - the whole registered surface matches a golden `(kind, path, endpoint)` table,
   which is what made a 2300-line relocation reviewable.
+
+The dashboard's two StaticFiles mounts ride the assets router like any other
+route (an `APIRouter` holds a mount and `include_router` recomputes its path), so
+there is one registration path and the map test needs no exemption for a route
+kind.
 
 Include order is left free, and a test pins the premise that makes that safe: no
 two registered routes are match-ambiguous (no literal-versus-parameter collision

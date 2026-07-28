@@ -2,7 +2,7 @@
 
 The batch orchestrators establish the convention that the domain layer raises
 plain domain errors and a single handler in `app.py` maps each to its HTTP
-status (`_DOMAIN_ERROR_STATUS`). But the path/validation seam every orchestrator
+status (`DOMAIN_ERROR_STATUS`). But the path/validation seam every orchestrator
 crosses still raises `fastapi.HTTPException` directly — in `session_paths`,
 `sessions`, `session_maintenance`, and (as a catch-site) `session_merge`. So a
 non-HTTP caller (a CLI / queue worker — the stated reason for the FastAPI-free
@@ -33,7 +33,7 @@ What THIS file pins is what those boundary tests structurally cannot see:
      session to `[]` via its `except`; after the migration that `except` must
      catch the domain type, else it propagates. Pinned behaviourally.
 
-Registration in `_DOMAIN_ERROR_STATUS` (the third failure mode) is caught by the
+Registration in `DOMAIN_ERROR_STATUS` (the third failure mode) is caught by the
 existing route tests kept in this slice's scoped gate: an unregistered domain
 error falls to the handler's 500, flipping their 404/400/409 to 500.
 """
@@ -76,7 +76,7 @@ def test_domain_module_is_fastapi_free(module):
     assert not _references_httpexception(module), (
         f"{module.__name__} still references fastapi.HTTPException in code — the "
         f"domain layer must be FastAPI-free (#228): raise a domain error and map it "
-        f"in app._DOMAIN_ERROR_STATUS. This also forces the two `except HTTPException` "
+        f"in routes.errors.DOMAIN_ERROR_STATUS. This also forces the two `except HTTPException` "
         f"catch-sites (sessions.known_names_for_session, "
         f"session_merge.select_session_wavs) onto the domain type."
     )

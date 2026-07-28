@@ -17,6 +17,7 @@
   bridges          bridge onboarding: the tap token and the download catalog
   diagnostics      /health, /healthz, the browser error relay
   assets           the page shells, top-level stylesheets, /web/* mounts
+                   (mounted on its own router, so app.py has one include path)
 
 Support modules (never a route between them, so a router imports only these):
 
@@ -40,7 +41,6 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from .assets import mount_static
 from .assets import router as assets_router
 from .bridges import router as bridges_router
 from .diagnostics import router as diagnostics_router
@@ -76,4 +76,4 @@ ALL_ROUTERS: tuple[APIRouter, ...] = (
     assets_router,
 )
 
-__all__ = ["ALL_ROUTERS", "mount_static"]
+__all__ = ["ALL_ROUTERS"]

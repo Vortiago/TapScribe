@@ -282,7 +282,7 @@ def test_incompatible_chunk_overlap_env_pair_clamps_at_construction(tmp_path, mo
     """`env_float` validates the two knobs INDEPENDENTLY, so a legal-but-
     incompatible PAIR used to sail through construction and then kill every
     transcribe: `chunk_windows` raises `ValueError: overlap_s (15.0) must be
-    <= chunk_s * 0.9 (9.0)`, which isn't in `_DOMAIN_ERROR_STATUS` (a bare
+    <= chunk_s * 0.9 (9.0)`, which isn't in `DOMAIN_ERROR_STATUS` (a bare
     500) and aborts the whole job in `transcribe_session`.
 
     A chunk of 10 s is inside `_CHUNK_S_BOUNDS` and the default 15 s overlap

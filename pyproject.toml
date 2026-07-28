@@ -21,7 +21,18 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastapi>=0.110",
+    # Upper bound because the TEST suite reads FastAPI's routing internals:
+    # since 0.139 an included router stays one lazily-resolved entry in
+    # `app.routes`, so the surface sweeps (tests/route_inventory.py, used by
+    # test_route_surface.py and test_tap_endpoint.py's tap-bearer sweep) walk
+    # `fastapi.routing.iter_route_contexts` and read the effective path off each
+    # context. Neither is covered by a stability promise, and a sweep that goes
+    # blind fails OPEN (it stops finding routes), so
+    # `test_iter_route_contexts_reports_effective_paths` pins the contract and
+    # the cap keeps a resolve from silently crossing it. Bump both together
+    # after auditing the changelog. Production code uses only the stable
+    # surface (APIRouter / include_router / Depends), hence the unchanged floor.
+    "fastapi>=0.110,<0.140",
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
     "numpy>=1.24",

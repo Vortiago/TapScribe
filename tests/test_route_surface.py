@@ -39,30 +39,27 @@ import re
 from pathlib import Path
 
 import pytest
-from fastapi.routing import _IncludedRouter, iter_route_contexts
-from starlette.routing import Mount, WebSocketRoute
+from fastapi import APIRouter, FastAPI
+from route_inventory import registered_routes, route_kind  # type: ignore[import-not-found]
 
-from tapscribe import app as tapscribe_app
 from tapscribe import routes as routes_pkg
 from tapscribe.app import app
 
-#: Decorators that register a route. `middleware` is deliberately absent: the
-#: security-header middleware IS app.py's business.
-_ROUTE_DECORATORS = {
-    "get",
-    "post",
-    "put",
-    "delete",
-    "patch",
-    "head",
-    "options",
-    "websocket",
-    "api_route",
-    "route",
-}
+#: Support modules of the `routes` package: shared seams, no routes of their own.
+_SUPPORT_MODULES = {"body", "deps", "errors", "guards"}
 
-# FastAPI's own docs endpoints, not part of TapScribe's surface.
-_FASTAPI_DOCS = {"openapi", "swagger_ui_html", "swagger_ui_redirect", "redoc_html"}
+#: Every kind a map line may name. ONE source, so the vocabulary a contributor
+#: may write can't drift from what `route_kind` emits: a HEAD route or a
+#: multi-method `api_route(methods=["GET", "POST"])` must be WRITABLE as a map
+#: line ("GET,POST", comma-joined and sorted exactly as `route_kind` joins it),
+#: or the map assertion would be unsatisfiable no matter what gets documented.
+_KINDS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "WS", "MOUNT")
+
+#: A route-map line: exactly two spaces of indent, the kind, the path.
+#: Continuation notes wrap deeper than that, so prose can never be mistaken for
+#: a map entry.
+_MAP_LINE = re.compile(rf"^ {{2}}((?:{'|'.join(_KINDS)})(?:,(?:{'|'.join(_KINDS)}))*) +(/\S*)", re.MULTILINE)
+
 
 #: Every route TapScribe registers, as (kind, path, endpoint name). `kind` is
 #: the sorted method list for an HTTP route, "WS" for a websocket, "MOUNT" for
@@ -136,86 +133,86 @@ _GOLDEN = frozenset(
 )
 
 
-def _kind(route) -> str:
-    if isinstance(route, Mount):
-        return "MOUNT"
-    if isinstance(route, WebSocketRoute):
-        return "WS"
-    return ",".join(sorted(route.methods))
-
-
 def _route_rows() -> list[tuple[str, str, str]]:
-    """Every TapScribe-owned route as (kind, path, endpoint name). A LIST, not
-    a set, so a double registration shows up as a duplicate row.
+    """Every TapScribe-owned route as (kind, path, endpoint name).
 
-    Goes through `iter_route_contexts` rather than `app.routes` directly:
-    FastAPI keeps an included router as ONE `_IncludedRouter` entry and resolves
-    its routes lazily per request, so walking `app.routes` after the #229 split
-    would see routers, not routes.
-
-    `ctx.path or route.path`: FastAPI leaves the context path empty for an
-    included WEBSOCKET route. Falling back to the route's own path is exact
-    because every router is included WITHOUT a prefix, which
-    `test_routers_are_included_without_a_prefix` pins.
+    `route_inventory.registered_routes` owns the traversal (and the reason it
+    can't just walk `app.routes` any more); this file compares its output
+    against the golden table.
     """
-    rows = []
-    for ctx in iter_route_contexts(app.routes):
-        route = ctx.original_route
-        name = ctx.name or route.name
-        if name in _FASTAPI_DOCS:
-            continue
-        rows.append((_kind(route), ctx.path or route.path, name))
-    return rows
+    return [(r.kind, r.path, r.name) for r in registered_routes(app)]
 
 
-def test_app_module_registers_no_routes_itself():
+def test_every_route_is_served_from_the_routes_package():
     """`app.py` is assembly: app object, middleware, error registry, includes.
 
-    Enforced structurally rather than by convention, because a single
-    `@app.get(...)` in app.py is how the 2298-line module grew in the first
-    place. The route it registers would be invisible to the map test (which
-    walks the `routes` package), which is exactly the drift the maps exist to
-    prevent.
+    Asserted on the route TABLE rather than on app.py's syntax, because the
+    mechanism is not the point: `@app.get(...)`, `app.add_api_route(...)` and
+    `@app.router.post(...)` all register a route that no router module owns, and
+    such a route is invisible to the map test (which walks the `routes` package),
+    which is the drift the maps exist to prevent. Every endpoint's defining
+    module answers the question directly.
     """
-    source = (Path(tapscribe_app.__file__)).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        for dec in node.decorator_list:
-            call = dec.func if isinstance(dec, ast.Call) else dec
-            if not isinstance(call, ast.Attribute) or not isinstance(call.value, ast.Name):
-                continue
-            if call.value.id == "app" and call.attr in _ROUTE_DECORATORS:
-                offenders.append(f"@app.{call.attr} on {node.name}")
-    assert offenders == [], (
-        f"app.py registers routes directly (move them into tapscribe/routes/): {offenders}"
+    strays = []
+    for row in registered_routes(app):
+        endpoint = getattr(row.route, "endpoint", None)
+        if endpoint is None:  # a mount: its app is the endpoint
+            module = type(getattr(row.route, "app", None)).__module__
+        else:
+            module = getattr(endpoint, "__module__", "")
+        if not module.startswith(f"{routes_pkg.__name__}.") and not module.startswith("starlette."):
+            strays.append(f"{row.kind} {row.path} from {module}")
+    assert strays == [], (
+        f"routes not owned by a router module (move them into {routes_pkg.__name__}/): {strays}"
     )
 
 
-def test_no_router_imports_another_router():
-    """A router imports the shared seams, never a sibling router.
+def _sibling_imports(path: Path) -> set[str]:
+    """Names inside `tapscribe.routes` that this file imports, whatever form the
+    import takes. All four reach a sibling and all four have to be caught, or the
+    rule is enforced only for the spelling someone happened to think of:
+
+        from .strip import x        ImportFrom(module="strip", level=1)
+        from . import strip        ImportFrom(module=None, level=1), name in names
+        from tapscribe.routes.strip import x   ImportFrom(level=0)
+        import tapscribe.routes.strip          Import
+    """
+    pkg = routes_pkg.__name__
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom):
+            if node.level == 1:
+                found.add(node.module.split(".")[0] if node.module else "")
+                if not node.module:
+                    found |= {alias.name for alias in node.names}
+            elif node.level == 0 and node.module and node.module.startswith(f"{pkg}."):
+                found.add(node.module[len(pkg) + 1 :].split(".")[0])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(f"{pkg}."):
+                    found.add(alias.name[len(pkg) + 1 :].split(".")[0])
+    return found - {""}
+
+
+def test_no_module_in_the_package_imports_a_router():
+    """A module in `routes/` imports the shared seams, never a router.
 
     That is what makes each module readable on its own, and it is the property
     that keeps the grouping decision honest: if two resource groups need the
     same helper, the answer is either to group them together (what
     `routes/strip.py` did) or to put the helper in a support module, never to
-    reach across.
+    reach across. The rule covers the SUPPORT modules as well, where importing a
+    router would be an import cycle rather than merely untidy.
     """
     package_dir = Path(routes_pkg.__path__[0])
     violations = []
     for path in sorted(package_dir.glob("*.py")):
-        module_name = path.stem
-        if module_name in _SUPPORT_MODULES or module_name == "__init__":
+        if path.stem == "__init__":  # the index: importing every router is its job
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
-                target = node.module.split(".")[0]
-                if target not in _SUPPORT_MODULES:
-                    violations.append(f"{module_name} imports {target}")
-    assert violations == [], f"router-to-router imports: {violations}"
+        for target in sorted(_sibling_imports(path)):
+            if target not in _SUPPORT_MODULES:
+                violations.append(f"{path.stem} imports {target}")
+    assert violations == [], f"imports of a router from inside the package: {violations}"
 
 
 def test_routes_package_index_names_every_module():
@@ -241,20 +238,11 @@ def test_routers_are_included_without_a_prefix():
     branch matches `TAP_PREFIX`, both against the FINAL path. It would also make
     a module's route map a half-truth.
     """
-    prefixes = [
-        (r.include_context.prefix, r.original_router) for r in app.routes if isinstance(r, _IncludedRouter)
-    ]
-    assert prefixes, "no router is included: the split regressed"
-    assert [p for p, _ in prefixes if p] == [], f"router included with a prefix: {prefixes}"
-
-
-#: Support modules of the `routes` package: shared seams, no routes of their own.
-_SUPPORT_MODULES = {"body", "deps", "errors", "guards"}
-
-#: A route-map line: exactly two spaces of indent, a method token, the path.
-#: Continuation notes wrap deeper than that, so prose can never be mistaken for
-#: a map entry.
-_MAP_LINE = re.compile(r"^ {2}(GET|POST|PUT|DELETE|PATCH|WS|MOUNT) +(/\S*)")
+    served = {(row.kind, row.path) for row in registered_routes(app)}
+    declared = {row for module in _router_modules() for row in _registered(module)}
+    assert declared, "no router declares a route: the split regressed"
+    moved = sorted(declared - served)
+    assert moved == [], f"a router is included under a prefix, so these paths are not what it says: {moved}"
 
 
 def _router_modules():
@@ -268,17 +256,13 @@ def _router_modules():
 
 
 def _documented(module) -> set[tuple[str, str]]:
-    doc = module.__doc__ or ""
-    return {(m.group(1), m.group(2)) for m in (_MAP_LINE.match(line) for line in doc.split("\n")) if m}
+    return {m.groups() for m in _MAP_LINE.finditer(module.__doc__ or "")}
 
 
 def _registered(module) -> set[tuple[str, str]]:
-    """What the module actually serves: its router's routes, plus any
-    StaticFiles mounts it declares (an APIRouter cannot hold a mount, so
-    `STATIC_MOUNTS` is how a module owns one declaratively)."""
-    rows = {(_kind(r), r.path) for r in module.router.routes}
-    rows |= {("MOUNT", path) for path, _dir, _name in getattr(module, "STATIC_MOUNTS", ())}
-    return rows
+    """What the module serves, mounts included: an `APIRouter` holds a mount, so
+    there is one list to read and no exemption for a route kind."""
+    return {(route_kind(r), r.path) for r in module.router.routes}
 
 
 @pytest.mark.parametrize("module", _router_modules(), ids=lambda m: m.__name__.rsplit(".", 1)[-1])
@@ -299,6 +283,33 @@ def test_every_route_is_documented_in_its_router(module):
     )
     assert documented - registered == set(), (
         f"documented but not registered in {module.__name__}: {sorted(documented - registered)}"
+    )
+
+
+def test_iter_route_contexts_reports_effective_paths():
+    """The FastAPI contract `route_inventory` is built on, pinned directly.
+
+    Two facts, neither promised by FastAPI: `iter_route_contexts` flattens an
+    included router, and the effective (prefix-applied) path of a NON-`APIRoute`
+    lives on `starlette_route` while the context's own `path` is empty. If either
+    changes, every sweep over the surface fails OPEN, quietly finding fewer
+    routes than the app serves, so it is worth a test of its own next to the
+    `fastapi<0.140` cap in pyproject.toml.
+    """
+    inner = APIRouter()
+
+    @inner.websocket("/ws")
+    async def _ws(sock):  # pragma: no cover - never connected to
+        await sock.accept()
+
+    outer = APIRouter()
+    outer.include_router(inner, prefix="/inner")
+    probe = FastAPI()
+    probe.include_router(outer, prefix="/outer")
+
+    rows = {(r.kind, r.path) for r in registered_routes(probe)}
+    assert ("WS", "/outer/inner/ws") in rows, (
+        f"effective-path reading is broken for a nested websocket route: {sorted(rows)}"
     )
 
 

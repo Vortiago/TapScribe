@@ -2,7 +2,8 @@
 
 A fresh Recorder boot must spawn NO WhisperLiveKit child and load no live
 model, so memory is only spent when an operator actually wants captions. The
-lifespan already gates the spawn on `config.AUTO_START_LIVE` (app.py) — the
+lifespan already gates the spawn on `config.AUTO_START_LIVE`
+(`tapscribe/lifespan.py`) — the
 change is that this flag DEFAULTS to off, and a fresh boot with no flags no
 longer auto-starts the channel.
 

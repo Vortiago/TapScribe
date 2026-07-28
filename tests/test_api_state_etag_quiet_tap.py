@@ -1,7 +1,8 @@
 """RED contract for issue #217 — a quiet-but-OPEN tap must stop busting the
 /api/state weak ETag every ~0.5 s.
 
-The ETag hashes the whole compact `/api/state` body (app.py), and each open
+The ETag hashes the whole compact `/api/state` body (`tapscribe/state_view.py`),
+and each open
 tap's `active` row embeds a raw `bytes_received` (incremented per 20 ms frame)
 and a raw float `level` (per-frame volume meter). So while any tap is open,
 every 2 Hz poll produces a fresh ETag and reships the ENTIRE state — the full

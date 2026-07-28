@@ -19,8 +19,6 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from conftest import repoint_config_files  # type: ignore[import-not-found]
-
 from tapscribe.people import PeopleRegistry
 from tapscribe.recorder import ActiveStream, TapSetting
 from tapscribe.state_view import TAP_BYTES_BUCKET, active_rows, build_state_blob
@@ -47,8 +45,25 @@ def _blob(**overrides):
     return build_state_blob(**kwargs)
 
 
-def test_state_blob_is_json_with_an_etag_over_its_own_bytes(tmp_path, monkeypatch):
-    repoint_config_files(monkeypatch, tmp_path)
+def _stream(**overrides) -> ActiveStream:
+    """One open tap, defaulted; `overrides` names only what the test is about."""
+    fields = dict(
+        conn_id="c1",
+        identity="alice",
+        name="Alice",
+        filename="a.wav",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        session="s1",
+        record=True,
+        live=True,
+        level=0.0,
+        bytes_received=0,
+    )
+    fields.update(overrides)
+    return ActiveStream(**fields)
+
+
+def test_state_blob_is_json_with_an_etag_over_its_own_bytes(tmp_config_dir):
     body, etag = _blob()
     payload = json.loads(body)
     assert payload["current_session"] == "20260101T000000Z"
@@ -59,8 +74,7 @@ def test_state_blob_is_json_with_an_etag_over_its_own_bytes(tmp_path, monkeypatc
     assert _blob()[1] == etag
 
 
-def test_state_blob_etag_changes_when_any_input_changes(tmp_path, monkeypatch):
-    repoint_config_files(monkeypatch, tmp_path)
+def test_state_blob_etag_changes_when_any_input_changes(tmp_config_dir):
     _, baseline = _blob()
     assert _blob(recording_enabled=False)[1] != baseline
     assert _blob(current_session="20260101T010000Z")[1] != baseline
@@ -68,11 +82,10 @@ def test_state_blob_etag_changes_when_any_input_changes(tmp_path, monkeypatch):
     assert _blob(backend="cuda")[1] != baseline
 
 
-def test_state_blob_counts_per_session_default_overrides(tmp_path, monkeypatch):
+def test_state_blob_counts_per_session_default_overrides(tmp_config_dir):
     """`default_override_counts` tells the config card how many sessions
     override each global default. A summarizer override is EITHER a source or a
     prompt, so a session that sets both still counts once."""
-    repoint_config_files(monkeypatch, tmp_path)
     sessions = [
         {"session": "a", "session_meta": {"prompt": "hi"}},
         {"session": "b", "session_meta": {"prompt": "yo", "hotwords": "TapScribe"}},
@@ -95,21 +108,8 @@ def test_active_rows_overlay_tap_settings_and_bucket_bytes():
     preference (not the value captured at WS open) and a bucketed byte count:
     the raw counter is bumped per 20 ms frame, so shipping it verbatim would
     bust the response ETag on every poll of a quiet-but-open tap (#217)."""
-    streams = [
-        ActiveStream(
-            conn_id="c1",
-            identity="alice",
-            name="Alice",
-            filename="a.wav",
-            started_at=datetime(2026, 1, 1, tzinfo=UTC),
-            session="s1",
-            record=True,
-            live=True,
-            level=0.123456,
-            bytes_received=TAP_BYTES_BUCKET + 10,
-        )
-    ]
-    rows = active_rows(streams, {"alice": TapSetting(record=False, live=True)}.get)
+    stream = _stream(identity="alice", name="Alice", level=0.123456, bytes_received=TAP_BYTES_BUCKET + 10)
+    rows = active_rows([stream], {"alice": TapSetting(record=False, live=True)}.get)
     assert len(rows) == 1
     assert rows[0]["record"] is False
     assert rows[0]["live"] is True
@@ -123,18 +123,7 @@ def test_active_rows_bucketing_rounds_to_nearest():
     bucket rather than under-reporting by almost a whole one."""
 
     def row(byte_count):
-        stream = ActiveStream(
-            conn_id="c1",
-            identity="a",
-            name="A",
-            filename="a.wav",
-            started_at=datetime(2026, 1, 1, tzinfo=UTC),
-            session="s",
-            record=True,
-            live=True,
-            level=0.0,
-            bytes_received=byte_count,
-        )
+        stream = _stream(bytes_received=byte_count)
         return active_rows([stream], lambda _identity: TapSetting(record=True, live=True))[0]
 
     assert row(0)["bytes_received"] == 0

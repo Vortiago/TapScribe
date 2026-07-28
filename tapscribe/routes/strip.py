@@ -35,9 +35,7 @@ from ..session_paths import (
     resolve_wav,
     stripped_dir,
 )
-from ..sessions import (
-    read_wav_strip_meta,
-)
+from ..sessions import read_wav_strip_meta
 from ..strip_silence import plan_strip_regions, read_wav_int16
 from .body import (
     json_body,

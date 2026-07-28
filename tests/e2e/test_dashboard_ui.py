@@ -6542,7 +6542,7 @@ async def test_taps_toggle_and_recording_pill_wired_in_both_hosts(
 
     A single streamed tap (identity "alice") stays open long enough to
     interact with. `/api/state`'s `active[].record`/`.live` mirror the LIVE
-    per-identity preference on every poll (app.py `api_state`), not a
+    per-identity preference on every poll (`routes/state.py`), not a
     connection-open-time snapshot, so a toggle click's effect is visible via
     a fresh GET even while the WS is still streaming.
     """

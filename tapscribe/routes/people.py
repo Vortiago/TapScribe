@@ -28,12 +28,8 @@ from fastapi import (
 from ..name_resolution import attach_people
 from ..people import PeopleRegistry
 from ..recorder import Recorder
-from ..sessions import (
-    gather_sessions,
-)
-from .body import (
-    json_body,
-)
+from ..sessions import gather_sessions
+from .body import json_body
 from .deps import get_recorder
 
 router = APIRouter()

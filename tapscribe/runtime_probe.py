@@ -108,7 +108,7 @@ _INSTALLED_MODULES_OVERRIDE: frozenset[str] | None = None
 # Memoised find_spec() results, keyed by module name. Installed packages
 # don't appear or vanish within a running process, so a probe's answer is
 # stable for the process lifetime — yet `/api/models` and the once-per-second
-# /api/state poll (via `_compute_inputs_support`) probe every registry entry
+# /api/state poll (via `state_view.compute_inputs_support`) probe every registry entry
 # on every call. Cache the real-probe answer; the test override is checked
 # first and never cached, and `set_installed_modules_for_testing` clears this
 # so a test that toggles between override and real probing starts clean.

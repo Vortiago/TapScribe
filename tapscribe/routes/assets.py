@@ -13,16 +13,16 @@ The Stages dashboard ("/next" during its incubation; promoted to "/" once the
 classic dashboard was retired). The shell is next.html; it layers next.css on
 top of dashboard.css, and loads everything else through the /web/... mounts.
 
-The two mounts are declared in `STATIC_MOUNTS` and attached by
-`mount_static(app)`: an `APIRouter` cannot mount, so this module hands `app.py`
-a function rather than hiding the mounts in an import side effect.
+The two mounts ride the router like every other route here: an `APIRouter`
+holds a mount fine, and `include_router` recomputes its path, so they need no
+second registration path in `app.py` and no exemption in the route-map test.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -42,14 +42,6 @@ SETUP_HTML_PATH = config.WEB_DIR / "setup.html"
 # other page stylesheets.
 TOKENS_CSS_PATH = config.WEB_DIR / "tokens.css"
 TONES_CSS_PATH = config.WEB_DIR / "tones.css"
-
-#: (mount path, directory, mount name) for each StaticFiles mount this module
-#: owns. The route-map test reads this, so a new mount has to be documented in
-#: the docstring above like any route.
-STATIC_MOUNTS: tuple[tuple[str, Path, str], ...] = (
-    ("/web/js", DASHBOARD_JS_DIR, "web_js"),
-    ("/web/components", DASHBOARD_COMPONENTS_DIR, "web_components"),
-)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -111,11 +103,13 @@ async def tones_css():
     return _css_response(TONES_CSS_PATH, "tones.css")
 
 
-def mount_static(app: FastAPI) -> None:
-    """Mount the dashboard JS modules and HTML component templates.
-    StaticFiles handles path-traversal protection and content-type detection.
-    A missing directory is skipped: a source checkout always has both, but a
-    trimmed install should not fail to boot over a missing asset dir."""
-    for path, directory, name in STATIC_MOUNTS:
-        if directory.is_dir():
-            app.mount(path, StaticFiles(directory=str(directory)), name=name)
+# Dashboard JS modules and HTML component templates. StaticFiles handles
+# path-traversal protection and content-type detection. A missing directory is
+# skipped: a source checkout always has both, but a trimmed install should not
+# fail to boot over a missing asset dir.
+for _path, _dir, _name in (
+    ("/web/js", DASHBOARD_JS_DIR, "web_js"),
+    ("/web/components", DASHBOARD_COMPONENTS_DIR, "web_components"),
+):
+    if _dir.is_dir():
+        router.mount(_path, StaticFiles(directory=str(_dir)), name=_name)

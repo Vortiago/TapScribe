@@ -153,7 +153,7 @@ def test_plan_rejects_backend_gate_kind_without_native_vad():
 
 def test_reconcile_errors_share_the_registered_base():
     """All three map through `LiveReconcileError` — the base whose
-    subclasses `app._DOMAIN_ERROR_STATUS` registers."""
+    subclasses `routes.errors.DOMAIN_ERROR_STATUS` registers."""
     for exc in (LiveModelUnknown, GateKindUnsupported, LiveStartFailed):
         assert issubclass(exc, LiveReconcileError)
 

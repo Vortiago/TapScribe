@@ -146,7 +146,8 @@ def test_config_store_imports_nothing_from_text() -> None:
 
 # Every symbol the text.py re-export block promises stays importable from
 # tapscribe.text — its comment: "Existing callers (from .text import X) keep
-# working without change". Consumers (app.py, sessions.py, batch_transcribe.py,
+# working without change". Consumers (the route modules, sessions.py,
+# batch_transcribe.py,
 # and many tests) rely on this surface, currently guarded only incidentally by
 # the full suite; pin it so API preservation is stated, not accidental.
 _RE_EXPORTED = (

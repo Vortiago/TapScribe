@@ -21,9 +21,7 @@ from fastapi import (
     HTTPException,
     Request,
 )
-from fastapi.responses import (
-    JSONResponse,
-)
+from fastapi.responses import JSONResponse
 
 from ..batch_transcribe import (
     BatchOneRequest,
@@ -33,12 +31,8 @@ from ..batch_transcribe import (
     transcribe_session,
 )
 from ..recorder import Recorder
-from ..transcribers.catalog import (
-    REGISTRY,
-)
-from .body import (
-    json_body,
-)
+from ..transcribers.catalog import REGISTRY
+from .body import json_body
 from .deps import get_recorder
 
 router = APIRouter()

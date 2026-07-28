@@ -41,7 +41,7 @@ import { setDimmable } from "../ui.js";
 import { createWaveform } from "../components/waveform.js";
 
 /** Strip-silence knob defaults — mirror STRIP_OPT_DEFAULTS / the server-side
- * fallbacks in api_session_strip_silence (tapscribe/app.py). */
+ * fallbacks in api_session_strip_silence (tapscribe/routes/strip.py). */
 const STRIP_DEFAULTS = Object.freeze({ min_silence_ms: 500, pad_ms: 200, speech_floor_db: -45 });
 
 /** @typedef {{ min_silence_ms: number, pad_ms: number, speech_floor_db: number }} StripKnobs */

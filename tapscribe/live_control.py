@@ -40,7 +40,7 @@ from .transcribers.catalog import REGISTRY
 
 class LiveReconcileError(Exception):
     """Base for live-channel reconcile failures. The concrete subclasses
-    are registered in `app._DOMAIN_ERROR_STATUS`, so a route that calls
+    are registered in `routes.errors.DOMAIN_ERROR_STATUS`, so a route that calls
     `plan_live` stays a thin shim — the shared handler maps each to its
     status, exactly like the batch orchestrators' domain errors."""
 

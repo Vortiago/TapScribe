@@ -13,6 +13,11 @@
   DELETE  /api/sessions/{session}/audio          delete audio, keep transcript + meta
   DELETE  /api/sessions/{session}                delete the folder
 
+Not here: the strip-silence routes on this prefix
+(`POST /api/sessions/{s}/strip-silence`, `DELETE /api/sessions/{s}/stripped`)
+live in `routes/strip.py` with the preview they must not drift from, and the
+pipeline trigger lives in `routes/tap.py` beside its tap-bearer twin.
+
 The three lazy bodies are the companions to `/api/state`'s slim markers: the
 dashboard fetches each once per content stamp instead of shipping it on every
 poll tick. Every destructive route crosses `refuse_current_or_busy`
@@ -40,9 +45,7 @@ from ..session_maintenance import (
     prune_empty_sessions,
     reclaim_audio_older_than,
 )
-from ..session_paths import (
-    resolve_session_dir,
-)
+from ..session_paths import resolve_session_dir
 from ..sessions import (
     gather_sessions,
     read_session_files,
@@ -52,9 +55,7 @@ from ..sessions import (
     search_transcripts,
     write_session_meta,
 )
-from .body import (
-    json_body,
-)
+from .body import json_body
 from .deps import get_recorder
 from .guards import refuse_current_or_busy
 

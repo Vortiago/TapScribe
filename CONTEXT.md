@@ -256,7 +256,7 @@ place instead of each re-deriving it:
   **target** channel's `supports_native_vad`), and decides no-op /
   gate-knob-only / restart. It raises a `LiveReconcileError`
   (`LiveModelUnknown` / `GateKindUnsupported` → 400, `LiveStartFailed` →
-  500, all registered in `app._DOMAIN_ERROR_STATUS`) **before touching
+  500, all registered in `routes.errors.DOMAIN_ERROR_STATUS`) **before touching
   anything**, so a rejected request leaves a running channel exactly as
   it was (#334 — the invariant is now structural, not ordering
   discipline in the route).
@@ -1133,9 +1133,9 @@ with a live tap).
 The **State view** (`tapscribe/state_view.py`) is the read model behind
 `GET /api/state`: given snapshots of everything recorder-owned it produces the
 poll payload and its ETag. Distinct from the `sessions` read model below, which
-supplies the session listing the view joins in. FastAPI-free, so the projection,
-the per-session default-override counts and the open-tap byte bucketing are
-testable without a route.
+supplies the session listing the view joins in. Request-free and Recorder-free,
+so the projection, the per-session default-override counts and the open-tap byte
+bucketing are testable without a route.
 
 ## Session modules — paths · listing · maintenance
 
@@ -1241,7 +1241,7 @@ The module never raises `HTTPException`. It raises domain errors — its own
 `WavTooQuiet` / `WavUnreadable` (under `BatchTranscribeError`), plus
 `SessionBusy` (from `recorder`, via `jobs.run`) and `NoUsableWavs` /
 `InvalidRange` (selection verdicts, from `session_merge`). A single
-domain-error handler registered in `app.py` maps each error type to its HTTP
+domain-error handler registered from `routes/errors.py` maps each error type to its HTTP
 code once (busy → 409, …), so routes are just `return await orchestrator(req)`
 rather than per-route try/except ladders. Keeping the orchestrator FastAPI-free
 means the same code can drive a CLI batch, a queue worker, or future per-region

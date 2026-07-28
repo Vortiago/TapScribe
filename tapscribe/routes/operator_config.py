@@ -34,9 +34,7 @@ from ..transcribers.catalog import (
     candidate_language_codes,
     language_display_name,
 )
-from .body import (
-    json_body,
-)
+from .body import json_body
 
 router = APIRouter()
 
