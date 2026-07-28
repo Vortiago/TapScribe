@@ -37,7 +37,7 @@ import pkgutil
 import re
 
 import pytest
-from fastapi.routing import iter_route_contexts
+from fastapi.routing import _IncludedRouter, iter_route_contexts
 from starlette.routing import Mount, WebSocketRoute
 
 from tapscribe import routes as routes_pkg
@@ -134,6 +134,11 @@ def _route_rows() -> list[tuple[str, str, str]]:
     FastAPI keeps an included router as ONE `_IncludedRouter` entry and resolves
     its routes lazily per request, so walking `app.routes` after the #229 split
     would see routers, not routes.
+
+    `ctx.path or route.path`: FastAPI leaves the context path empty for an
+    included WEBSOCKET route. Falling back to the route's own path is exact
+    because every router is included WITHOUT a prefix, which
+    `test_routers_are_included_without_a_prefix` pins.
     """
     rows = []
     for ctx in iter_route_contexts(app.routes):
@@ -141,8 +146,24 @@ def _route_rows() -> list[tuple[str, str, str]]:
         name = ctx.name or route.name
         if name in _FASTAPI_DOCS:
             continue
-        rows.append((_kind(route), ctx.path, name))
+        rows.append((_kind(route), ctx.path or route.path, name))
     return rows
+
+
+def test_routers_are_included_without_a_prefix():
+    """Every route keeps its absolute path, so a path in a router module reads
+    exactly as the URL it serves.
+
+    A prefix would move the auth boundary without touching any handler:
+    `AUTH_EXEMPT_ROUTES` matches exact (method, path) pairs and the tap-bearer
+    branch matches `TAP_PREFIX`, both against the FINAL path. It would also make
+    a module's route map a half-truth.
+    """
+    prefixes = [
+        (r.include_context.prefix, r.original_router) for r in app.routes if isinstance(r, _IncludedRouter)
+    ]
+    assert prefixes, "no router is included: the split regressed"
+    assert [p for p, _ in prefixes if p] == [], f"router included with a prefix: {prefixes}"
 
 
 #: Support modules of the `routes` package: shared seams, no routes of their own.

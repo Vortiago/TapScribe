@@ -20,7 +20,7 @@ from conftest import (
     FakeWlkThread,  # type: ignore[import-not-found]  # noqa: E402  # pytest puts tests/ on sys.path so `from conftest import` resolves the project's tests/conftest.py
     build_tap_recorder,
 )
-from fastapi.routing import APIRoute
+from fastapi.routing import APIRoute, iter_route_contexts
 from fastapi.testclient import TestClient
 
 from tapscribe import config as _config
@@ -75,18 +75,24 @@ def auth_client(recorder_with_fake_wlk: Recorder, monkeypatch: pytest.MonkeyPatc
 #
 # Enforcement of the tap bearer lives in the auth middleware, keyed on
 # TAP_PREFIX, so EVERY registered route under it is gated by construction.
-# This sweep discovers those routes from `app.routes`, so a future tap route
+# This sweep discovers those routes from the app, so a future tap route
 # is covered the moment it's registered — no per-route 401 test to remember.
+#
+# Via `iter_route_contexts`, not `app.routes`: since #229 the tap routes live in
+# `tapscribe/routes/tap.py` and FastAPI keeps an included router as ONE lazy
+# entry in `app.routes`, so walking that directly would match nothing and the
+# parametrised sweep below would vacuously pass (which is what
+# `test_tap_route_inventory_is_non_empty` guards).
 # ---------------------------------------------------------------------------
 
 _TAP_ROUTES = sorted(
     {
         (
-            next(m for m in sorted(r.methods) if m not in {"HEAD", "OPTIONS"}),
-            re.sub(r"\{[^}]+\}", "x", r.path),  # concrete path-param value
+            next(m for m in sorted(ctx.methods) if m not in {"HEAD", "OPTIONS"}),
+            re.sub(r"\{[^}]+\}", "x", ctx.path),  # concrete path-param value
         )
-        for r in app.routes
-        if isinstance(r, APIRoute) and r.path.startswith(_config.TAP_PREFIX + "/")
+        for ctx in iter_route_contexts(app.routes)
+        if isinstance(ctx.original_route, APIRoute) and ctx.path.startswith(_config.TAP_PREFIX + "/")
     }
 )
 
@@ -888,7 +894,7 @@ class TestTapPipeline:
         async def _spy(recorder, req):  # noqa: ARG001
             seen.append(req)
 
-        monkeypatch.setattr("tapscribe.app.start_pipeline", _spy)
+        monkeypatch.setattr("tapscribe.routes.tap.start_pipeline", _spy)
         token = recorder_with_fake_wlk.tap.value
         r = auth_client.post(
             "/api/tap/sessions/meet1/pipeline",

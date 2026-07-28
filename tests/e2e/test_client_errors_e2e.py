@@ -20,7 +20,7 @@ import logging
 
 import httpx
 
-from tapscribe import app as app_module
+from tapscribe.routes import diagnostics as diagnostics_routes
 
 from .conftest import RunningRecorder
 
@@ -28,7 +28,7 @@ from .conftest import RunningRecorder
 async def test_client_errors_logs_sanitized_and_floods_silently(running_recorder: RunningRecorder, caplog):
     # The flood window is module-global state shared across tests in one
     # process — reset it so this test owns the budget it asserts on.
-    app_module._client_err_times.clear()
+    diagnostics_routes._client_err_times.clear()
 
     payload = {
         "msg": "TypeError: x is undefined\nFAKE LOG LINE injected=true",
@@ -61,8 +61,8 @@ async def test_client_errors_logs_sanitized_and_floods_silently(running_recorder
         # but stops logging.
         with caplog.at_level(logging.WARNING, logger="tapscribe.client"):
             before = len([r for r in caplog.records if r.name == "tapscribe.client"])
-            for _ in range(app_module._CLIENT_ERR_MAX_PER_WINDOW + 10):
+            for _ in range(diagnostics_routes._CLIENT_ERR_MAX_PER_WINDOW + 10):
                 r = await client.post("/api/client-errors", content=json.dumps(payload).encode())
                 assert r.status_code == 204
             after = len([r for r in caplog.records if r.name == "tapscribe.client"])
-        assert after - before <= app_module._CLIENT_ERR_MAX_PER_WINDOW
+        assert after - before <= diagnostics_routes._CLIENT_ERR_MAX_PER_WINDOW
