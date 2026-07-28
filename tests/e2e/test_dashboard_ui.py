@@ -2952,7 +2952,7 @@ async def test_next_files_sig_flip_does_not_blank_wav_list(running_recorder: Run
     flips the session's files_sig. The lazy files listing then refetches under
     the new sig — but the Recordings view must keep showing the LAST-GOOD listing
     while that refetch is in flight, not blank the whole WAV list to a "loading…"
-    placeholder. Pre-fix, loadSessionFiles returned null on every sig change, so
+    placeholder. Pre-fix, the listing resolved to null on every sig change, so
     each per-WAV completion during a batch transcribe wiped + rebuilt every row
     (and the header/waveform) — the "multi-track pages keep blinking while
     transcribing" report."""

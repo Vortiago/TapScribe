@@ -1,7 +1,9 @@
 // @ts-check
 // Unit tests for the session WAV-listing source (next/session-files.js).
-// DOM-free: the module owns the in-flight set, the cold-vs-stale sentinel, and
-// the four-state derivation — none of which needs a document.
+// DOM-free: the module owns the shape of the ANSWER (the cold sentinel is never
+// handed back as a value a caller could iterate) and the four-state derivation —
+// neither needs a document, and an injected `source` stands in for api.js's
+// `sessionFiles` resource.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -24,8 +26,19 @@ test("listState: rows when there are any, empty when there are none", () => {
   assert.equal(listState({ hasSession: true, loading: false, count: 0 }), "empty");
 });
 
+/** A stand-in for api.js's `sessionFiles` resource: one canned `resolve` answer,
+ * plus an optional spy on what the source was asked for. */
+const fakeSource = (answer, spy = (/** @type {unknown[]} */ _a, /** @type {any} */ _o) => {}) => ({
+  watch: (/** @type {any} */ onLand) => ({
+    resolve: (/** @type {any} */ args) => { spy(args, onLand); return answer; },
+  }),
+});
+
 test("resolve: the cold sentinel is reported as loading, never handed back", () => {
-  const src = createFilesSource({ onLoaded: () => {}, load: () => null });
+  const src = createFilesSource({
+    onLoaded: () => {},
+    source: fakeSource({ value: null, loading: true, error: null }),
+  });
   const got = src.resolve("s1", "sig1");
   assert.deepEqual(got.files, [], "a caller must always get an iterable array");
   assert.equal(got.loading, true);
@@ -33,7 +46,10 @@ test("resolve: the cold sentinel is reported as loading, never handed back", () 
 
 test("resolve: a resolved listing is not loading", () => {
   const files = [{ name: "a.wav" }, { name: "b.wav" }];
-  const src = createFilesSource({ onLoaded: () => {}, load: () => files });
+  const src = createFilesSource({
+    onLoaded: () => {},
+    source: fakeSource({ value: files, loading: false, error: null }),
+  });
   const got = src.resolve("s1", "sig1");
   assert.equal(got.files, files);
   assert.equal(got.loading, false);
@@ -42,35 +58,38 @@ test("resolve: a resolved listing is not loading", () => {
 test("resolve: an empty listing is resolved, not loading", () => {
   // `[]` means "nothing to fetch" (no folder / no WAVs yet) — distinct from the
   // cold `null`. Collapsing the two would make an empty session load forever.
-  const src = createFilesSource({ onLoaded: () => {}, load: () => [] });
+  const src = createFilesSource({
+    onLoaded: () => {},
+    source: fakeSource({ value: [], loading: false, error: null }),
+  });
   const got = src.resolve("s1", "");
   assert.deepEqual(got.files, []);
   assert.equal(got.loading, false);
 });
 
-test("resolve: the in-flight set is per source and passed through to the loader", () => {
-  /** @type {Set<string>[]} */
+test("resolve: (session, files_sig) is the resource's key, passed through in that order", () => {
+  /** @type {unknown[][]} */
   const seen = [];
-  const mk = () => createFilesSource({
+  const src = createFilesSource({
     onLoaded: () => {},
-    load: (_s, _sig, pending) => { seen.push(pending); return []; },
+    source: fakeSource({ value: [], loading: false, error: null }, (args) => { seen.push(args); }),
   });
-  const a = mk();
-  const b = mk();
-  a.resolve("s1", "sig1");
-  a.resolve("s1", "sig1");
-  b.resolve("s1", "sig1");
-  assert.equal(seen[0], seen[1], "one source must reuse its own in-flight set across ticks");
-  assert.notEqual(seen[0], seen[2], "two sources must not share a set, or one cancels the other's first fetch");
+  src.resolve("s1", "sig1");
+  assert.deepEqual(seen, [["s1", "sig1"]]);
 });
 
-test("resolve: onLoaded is handed to the loader untouched", () => {
-  let handed = null;
+test("resolve: onLoaded is BOUND to the resource unwrapped, once for the source's life", () => {
+  /** @type {unknown[]} */
+  const bound = [];
   const onLoaded = () => {};
   const src = createFilesSource({
     onLoaded,
-    load: (_s, _sig, _p, onLand) => { handed = onLand; return []; },
+    source: fakeSource({ value: [], loading: false, error: null }, (_a, onLand) => { bound.push(onLand); }),
   });
   src.resolve("s1", "sig1");
-  assert.equal(handed, onLoaded, "the success callback must reach api.js unwrapped");
+  src.resolve("s1", "sig1");
+  // Every tick resolves through the SAME watcher: the resource dedupes waiting
+  // callbacks by identity, and binding at construction is what makes a
+  // fresh-closure-per-tick (one repaint per missed tick) unwritable here.
+  assert.deepEqual(bound, [onLoaded, onLoaded]);
 });

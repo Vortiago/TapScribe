@@ -177,11 +177,10 @@ export function build(ctx) {
   // Waveform render state. `lastWaveSig` is the canvas's OWN small signature
   // (selected WAV · source · size · load-state) so a per-second strip/transcribe
   // job tick — which churns the body's signature — never rebuilds the O(bins)
-  // canvas (render-signature hygiene). `pendingWave` stops a fresh re-render
-  // callback being chained on every tick while one fetch is in flight (the
-  // api.js cache already dedupes the network request itself); `failedWave`
-  // remembers an unreadable WAV so it shows a message instead of refetching
-  // every tick.
+  // canvas (render-signature hygiene). The fetch-once / no-refetch-after-failure
+  // bookkeeping for both lazy bodies the canvas needs (peaks, committed cut) is
+  // the `remember-error` policy on their resources (api.js) — the canvas only
+  // has to say what to do when one lands.
   let lastWaveSig = " ";
   /** The ORIGINAL WAV name the canvas is currently drawing, recorded by
    * `drawWaveform` — the one owner of what the canvas shows. The playhead's
@@ -194,18 +193,21 @@ export function build(ctx) {
    * answer "which cut is on screen right now", which is what ▶ kept plays. */
   /** @type {import('../../types.js').CutSpan[] | null} */
   let shownCut = null;
-  /** @type {Set<string>} */
-  const pendingWave = new Set();
-  /** @type {Map<string, string>} */
-  const failedWave = new Map();
-  /** Committed-cut (strip-meta) fetches in flight / failed, keyed
-   * `sid/name@strippedAt` — same dedupe + no-retry-loop discipline as the
-   * peaks cache above. A failed key never refetches; a re-strip changes the
-   * stamp and therefore the key. */
-  /** @type {Set<string>} */
-  const pendingCutMeta = new Set();
-  /** @type {Set<string>} */
-  const failedCutMeta = new Set();
+
+  /** Either lazy body the canvas draws from landed — OR failed, which is equally
+   * something to show. Redraw the canvas ONLY (the body didn't change):
+   * re-resolve the current selection in case it moved while the fetch was in
+   * flight, and reset just the wave sig so this redraw isn't skipped — no full
+   * body rebuild and no extra /api/state poll. Both watchers share it because the
+   * canvas is what either body feeds. (`drawWaveform`/`selectedFor` are consts
+   * declared further down; this only runs on a landed fetch, never at build.) */
+  const redrawCanvas = () => {
+    lastWaveSig = " ";
+    drawWaveform(selectedFor());
+  };
+  /** The two lazy bodies the hero canvas draws from, watched for this view. */
+  const heroPeaks = wavePeaks.watch(redrawCanvas);
+  const heroCut = wavStripMeta.watch(redrawCanvas);
 
   /** Live strip-preview bookkeeping (#89). At most ONE preview is live at a
    * time: `livePreview` pins the latest response to the exact waveKey it was
@@ -319,37 +321,21 @@ export function build(ctx) {
       livePreview = null;
       waveform.setPreview(null);
     }
+    // Peaks: `remember-error`, so an unreadable WAV shows the reason instead of
+    // being re-asked every poll tick (api.js declares that; the key changes with
+    // the WAV's byte size, which is the only thing that could change the answer).
+    const peaks = heroPeaks.resolve([sid, sel.name, "original", fileSig]);
     /** @type {"ok" | "loading" | "error"} */
-    let state;
+    let state = "loading";
     /** @type {import('../../types.js').WavePeaks | undefined} */
     let data;
     let message = "";
-    if (failedWave.has(key)) {
+    if (peaks.error) {
       state = "error";
-      message = failedWave.get(key) || "could not read waveform";
-    } else {
-      data = wavePeaks.peek(sid, sel.name, "original", fileSig);
-      if (data !== undefined) {
-        state = "ok";
-      } else {
-        state = "loading";
-        if (!pendingWave.has(key)) {
-          pendingWave.add(key);
-          wavePeaks.fetch(sid, sel.name, "original", fileSig)
-            .then(() => { failedWave.delete(key); })
-            .catch((e) => { failedWave.set(key, errText(e)); })
-            .finally(() => {
-              pendingWave.delete(key);
-              // Redraw the canvas ONLY (the body didn't change) now that the
-              // peaks are cached or the fetch failed. Re-resolve the current
-              // selection in case it moved while the fetch was in flight, and
-              // reset just the wave sig so this redraw isn't skipped — no
-              // full body rebuild and no extra /api/state poll.
-              lastWaveSig = " ";
-              drawWaveform(selectedFor());
-            });
-        }
-      }
+      message = errText(peaks.error) || "could not read waveform";
+    } else if (peaks.value) {
+      state = "ok";
+      data = peaks.value;
     }
 
     // Committed strip cut (#90): the hero always carries the overlay when the
@@ -363,22 +349,11 @@ export function build(ctx) {
     /** @type {import('../../types.js').CutSpan[] | null} */
     let cut = null;
     if (stripped) {
-      const mkey = `${sid}/${sel.name}@${cutStamp}`;
-      const meta = wavStripMeta.peek(sid, sel.name, cutStamp);
-      if (meta !== undefined) {
-        cut = meta && meta.spans && meta.spans.length ? meta.spans : null;
-      } else if (!pendingCutMeta.has(mkey) && !failedCutMeta.has(mkey)) {
-        pendingCutMeta.add(mkey);
-        wavStripMeta.fetch(sid, sel.name, cutStamp)
-          .catch(() => { failedCutMeta.add(mkey); })
-          .finally(() => {
-            pendingCutMeta.delete(mkey);
-            // Same redraw-only contract as the peaks fetch above: reset just
-            // the wave sig and re-resolve the current selection.
-            lastWaveSig = " ";
-            drawWaveform(selectedFor());
-          });
-      }
+      // Same `remember-error` policy as the peaks above, and the same
+      // redraw-on-land: an unparseable sidecar draws no overlay rather than
+      // re-asking forever. Still resolving → no spans yet, so no overlay either.
+      const meta = heroCut.resolve([sid, sel.name, cutStamp]).value;
+      cut = meta && meta.spans && meta.spans.length ? meta.spans : null;
     }
 
     const wsig = `${key}@${state}@cut:${cutStamp}:${cut ? cut.length : 0}`;
@@ -917,7 +892,7 @@ export function build(ctx) {
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight (show a loading placeholder); `[]` → nothing to
     // fetch (empty files_sig = no folder / no WAVs yet).
-    const { files, loading: filesLoading } = filesSource.resolve(sid, filesSig);
+    const { files, loading: filesLoading, stale: filesStale } = filesSource.resolve(sid, filesSig);
     currentFiles = files;
     const sel = selectedFor();
 
@@ -1035,8 +1010,10 @@ export function build(ctx) {
       update: (node, m) => { applyRowSelection(/** @type {HTMLElement} */ (node), m, selName); },
       itemSig: (m) => (m.kind === "clip" ? "" : m.file.name === selName ? "sel" : ""),
       // isCurrent gates the row's Delete button and is folded into `rowKey`, so it
-      // must be a sig term or the rows stay keyed on a stale value.
-      sig: `${sid}§${src}§${filesSig}§${state}§${selName}§${isCurrent ? 1 : 0}`,
+      // must be a sig term or the rows stay keyed on a stale value. `filesStale`
+      // likewise: rows held from the PREVIOUS sig and this sig's own rows are
+      // otherwise the same signature, so the swap between them would be skipped.
+      sig: `${sid}§${src}§${filesSig}§${filesStale ? "H" : ""}§${state}§${selName}§${isCurrent ? 1 : 0}`,
       auditRows: false,
     });
     if (rendered) {

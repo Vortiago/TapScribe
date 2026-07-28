@@ -107,35 +107,64 @@
   `globalThis.__TAPSCRIBE_SIG_DRIFT`. The
   `test_renderregion_sig_audit_finds_no_drift` e2e test enables it across
   the views and asserts no drift.
-- Stale-while-revalidate for lazy, sig-keyed listings on `/next`: a
-  lazily-fetched, signature-keyed resource (`web/js/api.js` `_resource`)
-  whose key is a SESSION-LEVEL AGGREGATE that flips when any ONE sibling
-  changes — the canonical case is `files_sig`, which flips when a single
-  WAV of many is (re-)transcribed / stripped / added — must NOT return a
-  bare "loading" sentinel (`null`) on the refetch. The view renders that
-  sentinel exactly like a COLD first load and `replaceChildren`-blanks the
-  whole multi-item region to a "loading…" placeholder, once per sibling
-  change — the "multi-track pages blink while transcribing" bug (#266).
-  Hold the last-good value during the refetch (stale-while-revalidate) so
-  the region reconciles in place; return the cold-load sentinel ONLY when
-  nothing was ever resolved for that session. `loadSessionFiles` is the
-  reference: a per-session `_lastGoodFiles` cache returns the previous
-  listing while the new `files_sig` refetches, so the Recordings +
-  Transcript WAV lists (both `renderList`-backed) refresh in place
-  instead of flashing. Pin it with an identity-stamp e2e that stamps an
-  UNRELATED row, flips the sig via a sibling, and asserts the stamped node
-  survives the poll (`test_next_files_sig_flip_does_not_blank_wav_list`,
-  `…_does_not_blank_transcript_picker`). The same shape recurs for any
-  region fed by a lazy body keyed on a content stamp, and the other two
-  instances are now fixed the same way — the merged transcript pane
-  (`transcript.js`'s `lastGoodMerged`, keyed on `sessionTranscript`'s
-  `transcribed_at`) and the summary output pane (`summary.js`'s
-  `lastGoodSummary`, keyed on `sessionSummary`'s `summarized_at`) each
-  hold their last-good body instead of blanking to "loading…" on a
-  re-transcribe / external re-summarize. A new lazy pane keyed on a
-  content stamp inherits the requirement: copy one of the three holds.
-  The bookkeeping AROUND `loadSessionFiles` — the per-view in-flight key set,
-  the `null`-means-COLD sentinel, and the four states a listing region can be in
+- Every lazily-fetched body on `/next` is a **lazy resource**
+  (`web/js/lazy-resource.js` `createResource`, declared in `web/js/api.js`), and
+  a view reads it by **binding a watcher once at build time**
+  (`const body = resource.watch(() => { markRegionStale(host); afterMutate(); })`)
+  and calling **`body.resolve([...key args])`** each tick — never through
+  hand-rolled `peek`/`fetch` choreography. The resolve owns the whole per-tick
+  state machine: peek-or-fetch-ONCE (in-flight keys deduped across the ticks
+  before one lands, and across WATCHERS — two views waiting on one key share the
+  fetch and each get their own land), the failure policy, and the
+  stale-while-revalidate hold. It returns `{ value, loading, stale, error }`;
+  `loading` is true only on a genuine COLD load, which is the one case a caller
+  may paint a placeholder, and `stale` says `value` is the last-good body rather
+  than this key's own — a render gate keyed on the SIGNATURE must include `stale`
+  as a term, since held rows and that signature's own rows are otherwise the same
+  sig and the swap between them would be skipped (both WAV lists do). The rule is
+  about the PER-TICK path: a one-shot, event-driven read still uses `fetch`
+  directly, because it paints into one specific node and needs its own
+  latest-wins guard rather than a watcher's repaint — `recordings.js`'
+  `fillExpand` (a row's transcript expand, guarded by `host.dataset.txStamp`) is
+  the one such case, and `wavTranscript` accordingly declares neither a hold nor
+  a failure policy. The callback is bound at `watch` rather than passed per resolve for
+  the same reason `createFieldSaver` takes `afterSave` at construction: waiting
+  callbacks are deduped by identity, so a fresh closure per tick would repaint
+  once per missed tick — binding makes that unwritable instead of merely
+  documented. #222 was five copies of this machine with three
+  divergent, unchosen failure policies; add a sixth lazy body by declaring a
+  resource, never by re-rolling the ceremony. The mechanism is DOM-free and
+  fetch-free (injected `load`), unit-tested under `node --test` in
+  `lazy-resource.test.js`; `api.test.js` is the integration half over the real
+  exported resources.
+  Two things a resource DECLARES, both decisions rather than fallout:
+  - `onFailure` — `retry-next-poll` (silent, retries on a later tick; for a body
+    whose absence is transient and whose region has a placeholder) or
+    `remember-error` (reports the rejection, does not refetch until the key
+    changes; for a body whose absence is a property of the file — an unreadable
+    WAV has no peaks, and re-asking every 500 ms answers nothing).
+  - `holdKeyOf` — stale-while-revalidate, and it is REQUIRED when the key is a
+    SESSION-LEVEL AGGREGATE that flips when any ONE sibling changes (the
+    canonical case is `files_sig`, which flips when a single WAV of many is
+    (re-)transcribed / stripped / added). Without the hold, the refetch reports a
+    cold load, the view renders that exactly like a first load and
+    `replaceChildren`-blanks the whole multi-item region to "loading…" once per
+    sibling change — the "multi-track pages blink while transcribing" bug (#266).
+    `holdKeyOf` names the thing the body belongs to (the session); `keyOf` names
+    one VERSION of it. Omit it only when a stale body would be WRONG rather than
+    merely old (peaks belong to one (WAV, byte size)). The three held bodies are
+    `sessionFiles`, `sessionTranscript` and `sessionSummary`; a new lazy pane
+    keyed on a content stamp inherits the requirement. Pin it with an
+    identity-stamp e2e that stamps an UNRELATED row, flips the sig via a sibling,
+    and asserts the stamped node survives the poll
+    (`test_next_files_sig_flip_does_not_blank_wav_list`,
+    `…_does_not_blank_transcript_picker`).
+  `knownValue` is the third hook: an answer available from the args alone (an
+  empty `files_sig` means no folder on disk, so fetching would 404), recorded as
+  the last-good body like a fetched one — otherwise a later non-empty flip
+  resurrects the pre-deletion rows as ghosts.
+  What is left ON TOP of `resolve` for the WAV listing — the `null`-is-never-a-
+  value rule and the four states a listing region can be in
   (`none`/`loading`/`rows`/`empty`, where a cold load must beat emptiness or the
   region says "nothing here" mid-fetch) — has ONE owner in
   `web/js/next/session-files.js` (`createFilesSource` + `listState`), which both

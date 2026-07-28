@@ -1,16 +1,19 @@
-// Unit tests for the api.js resource layer (run via `node --test`).
+// Unit tests for api.js's declared resources (run via `node --test`).
 //
-// These pin the load-bearing caching semantics of the `_resource(keyOf, load)`
-// factory (#188) and `loadSessionFiles`'s stale-while-revalidate, which had no
-// unit test anywhere (#234): in-flight dedup, peek-vs-fetch, and the
-// failure-eviction (api.js `.catch((e) => { cache.delete(key); throw e; })`)
-// that keeps a rejected fetch from staying cached and stranding a pane.
+// These pin the load-bearing caching semantics of the lazy resources (#188) and
+// `sessionFiles`' stale-while-revalidate, which had no unit test anywhere
+// (#234): in-flight dedup, peek-vs-fetch, and the failure-eviction
+// (lazy-resource.js `.catch((e) => { cache.delete(key); throw e; })`) that keeps
+// a rejected fetch from staying cached and stranding a pane.
 //
-// The factory is private, so we drive it through the PUBLIC exports it backs
-// (sessionTranscript / sessionSummary / sessionFiles / loadSessionFiles) with a
-// stubbed globalThis.fetch — same no-deps shape as live-feed.test.js, and it
-// also exercises the real _unwrap wiring (a 500 → thrown Error → eviction). The
-// frontend tsconfig excludes *.test.js, so this file is never typechecked.
+// This file is the INTEGRATION half: it drives the real exported resources
+// (sessionTranscript / sessionSummary / sessionFiles) through a stubbed
+// globalThis.fetch — same no-deps shape as live-feed.test.js — so it also
+// exercises the real _unwrap wiring (a 500 → thrown Error → eviction) and each
+// resource's declared key + policy. The mechanism itself (every `resolve`
+// branch, both failure policies) is unit-tested with an injected loader in
+// lazy-resource.test.js. The frontend tsconfig excludes *.test.js, so this file
+// is never typechecked.
 //
 // The exported resources are module singletons whose caches persist across
 // cases, so each case uses UNIQUE keys (session id / stamp) to stay isolated;
@@ -19,7 +22,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { sessionTranscript, sessionSummary, sessionFiles, loadSessionFiles } from "./api.js";
+import { sessionTranscript, sessionSummary, sessionFiles } from "./api.js";
 
 // A minimal Response-like the real _unwrap accepts. _unwrap reads .ok, .status,
 // .headers.get("content-type") and .json(); an application/json content-type
@@ -60,7 +63,7 @@ async function withFetch(responder, body) {
 // (settle bookkeeping, pending-key cleanup, onLand) have all run.
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-describe("_resource: in-flight dedup", () => {
+describe("lazy resource: in-flight dedup", () => {
   it("shares one promise + one request between concurrent fetches of the same key", async () => {
     await withFetch(() => jsonRes({ text: "hi" }), async (calls) => {
       const p1 = sessionTranscript.fetch("dedup-s", "t1");
@@ -75,7 +78,7 @@ describe("_resource: in-flight dedup", () => {
   });
 });
 
-describe("_resource: peek vs fetch", () => {
+describe("lazy resource: peek vs fetch", () => {
   it("returns undefined before the fetch settles, the resolved value after", async () => {
     await withFetch(() => jsonRes({ text: "body" }), async () => {
       // Never fetched → undefined.
@@ -104,7 +107,7 @@ describe("_resource: peek vs fetch", () => {
   });
 });
 
-describe("_resource: signature keying", () => {
+describe("lazy resource: signature keying", () => {
   it("busts the cache when the stamp changes (one request per (id, stamp))", async () => {
     await withFetch(() => jsonRes({ text: "x" }), async (calls) => {
       await sessionTranscript.fetch("key-s", "stampA");
@@ -116,7 +119,7 @@ describe("_resource: signature keying", () => {
   });
 });
 
-describe("_resource: failure eviction", () => {
+describe("lazy resource: failure eviction", () => {
   it("evicts a rejected fetch so the next call retries (network reject)", async () => {
     await withFetch(
       (_url, n) => {
@@ -149,7 +152,7 @@ describe("_resource: failure eviction", () => {
   });
 });
 
-describe("loadSessionFiles: stale-while-revalidate", () => {
+describe("sessionFiles resolve: stale-while-revalidate", () => {
   it("holds the last-good listing while a newer files_sig refetches (no blank)", async () => {
     // The /files URL carries no sig (it's only in the cache key), so the
     // responder distinguishes the two sigs by call order: 1st = sig1, 2nd = sig2.
@@ -157,92 +160,92 @@ describe("loadSessionFiles: stale-while-revalidate", () => {
       (_url, n) => jsonRes({ files: n === 1 ? [{ name: "a.wav" }] : [{ name: "b.wav" }] }),
       async (calls) => {
         const session = "swr-s";
-        const pending = new Set();
         let landed = 0;
         const onLand = () => { landed++; };
+        const listing = sessionFiles.watch(onLand);
+        const tick = (/** @type {string} */ sig) => listing.resolve([session, sig]);
 
-        // Cold load: nothing last-good yet → null, and it fires exactly one fetch.
-        assert.equal(loadSessionFiles(session, "sig1", pending, onLand), null);
+        // Cold load: nothing last-good yet → the loading sentinel, one fetch.
+        assert.deepEqual(tick("sig1"), { value: null, loading: true, stale: false, error: null });
         assert.equal(calls.length, 1);
-        assert.equal(pending.size, 1); // one in-flight fetch guarded
 
         // A second tick before it lands must NOT fire a duplicate fetch (the
-        // `pending` set dedups across the ticks until it settles).
-        assert.equal(loadSessionFiles(session, "sig1", pending, onLand), null);
+        // resolver's in-flight key dedups across the ticks until it settles).
+        assert.equal(tick("sig1").loading, true);
         assert.equal(calls.length, 1);
 
         await flush();
         assert.equal(landed, 1); // onLand ran when the fetch settled
-        assert.equal(pending.size, 0); // guard cleared
         assert.deepEqual(sessionFiles.peek(session, "sig1"), [{ name: "a.wav" }]);
 
         // Same sig on the next tick → the resolved listing, in hand.
-        assert.deepEqual(loadSessionFiles(session, "sig1", pending, onLand), [{ name: "a.wav" }]);
+        assert.deepEqual(tick("sig1").value, [{ name: "a.wav" }]);
 
         // A sibling re-transcribes → files_sig FLIPS. The new listing is in
         // flight; the view must keep showing the last-good rows, not blank.
-        const stale = loadSessionFiles(session, "sig2", pending, onLand);
-        assert.deepEqual(stale, [{ name: "a.wav" }]); // last-good, NOT null
-        assert.equal(pending.size, 1); // the new sig's fetch is now in flight
+        const stale = tick("sig2");
+        assert.deepEqual(stale.value, [{ name: "a.wav" }]); // last-good, NOT null
+        assert.equal(stale.loading, false, "there are rows to keep showing — not a cold load");
         assert.equal(calls.length, 2);
 
         // Once sig2 lands it reconciles in place to the fresh listing.
         await flush();
-        assert.deepEqual(loadSessionFiles(session, "sig2", pending, onLand), [{ name: "b.wav" }]);
+        assert.deepEqual(tick("sig2").value, [{ name: "b.wav" }]);
       },
     );
   });
 });
 
-describe("loadSessionFiles: empty guards + failure pacing", () => {
-  it("returns [] without fetching for an empty session or empty files_sig", async () => {
+describe("sessionFiles resolve: known-empty guards + failure pacing", () => {
+  it("answers [] without fetching for an empty session or an empty files_sig", async () => {
     await withFetch(() => jsonRes({ files: [] }), async (calls) => {
-      assert.deepEqual(loadSessionFiles("", "sig", new Set(), () => {}), []);
-      assert.deepEqual(loadSessionFiles("empty-s", "", new Set(), () => {}), []);
-      assert.equal(calls.length, 0); // neither guard touches the network
+      const listing = sessionFiles.watch(() => {});
+      assert.deepEqual(listing.resolve(["", "sig"]).value, []);
+      assert.deepEqual(listing.resolve(["empty-s", ""]).value, []);
+      assert.equal(calls.length, 0); // neither known-empty case touches the network
     });
   });
 
-  it("paces a failed fetch: no throw, no onLand, the retry waits for a later call", async () => {
-    // The retry-storm guard (`_failedFiles`): a rejection used to evict the
-    // cache key AND fire onLand, whose re-render synchronously re-entered
-    // loadSessionFiles and refired the fetch at HTTP-response rate. Now a
-    // failure is remembered per key: onLand stays silent, the NEXT call (the
-    // one the failure's own re-render would have been) skips the refetch,
-    // and only a later call — the next poll tick — retries.
+  it("paces a failed fetch: no throw, no onLand, the retry waits for a later tick", async () => {
+    // The retry-storm guard: a rejection evicts the cache key AND used to fire
+    // onLand, whose re-render synchronously re-resolved and refired the fetch at
+    // HTTP-response rate. Under the `retry-next-poll` policy a failure is
+    // remembered per key: onLand stays silent, the NEXT resolve (the one the
+    // failure's own re-render would have been) skips the refetch, and only the
+    // one after that — a later poll tick — retries.
     await withFetch(
       (_url, n) => {
         if (n === 1) throw new Error("net down");
         return jsonRes({ files: [{ name: "ok.wav" }] });
       },
       async (calls) => {
-        const pending = new Set();
         let landed = 0;
         const onLand = () => { landed++; };
+        const listing = sessionFiles.watch(onLand);
+        const tick = () => listing.resolve(["swallow-s", "sig1"]);
+
         // A cold load whose fetch will reject — must not throw to the caller.
-        assert.equal(loadSessionFiles("swallow-s", "sig1", pending, onLand), null);
-        assert.equal(pending.size, 1); // one in-flight fetch guarded
+        assert.equal(tick().value, null);
         await flush();
         assert.equal(landed, 0); // a failure never fires onLand (nothing changed to render)
-        assert.equal(pending.size, 0); // guard freed
-        // Failure remembered: the immediate next call skips the refetch…
-        assert.equal(loadSessionFiles("swallow-s", "sig1", pending, onLand), null);
+        // Failure remembered: the immediate next resolve skips the refetch…
+        assert.equal(tick().value, null);
         assert.equal(calls.length, 1); // no unpaced refire
-        // …and the call after that (a later poll tick) retries for real.
-        assert.equal(loadSessionFiles("swallow-s", "sig1", pending, onLand), null);
+        // …and the resolve after that (a later poll tick) retries for real.
+        assert.equal(tick().value, null);
         assert.equal(calls.length, 2);
         await flush();
         assert.equal(landed, 1); // the successful retry lands via onLand
-        assert.deepEqual(loadSessionFiles("swallow-s", "sig1", pending, onLand), [{ name: "ok.wav" }]);
+        assert.deepEqual(tick().value, [{ name: "ok.wav" }]);
       },
     );
   });
 });
 
-describe("_resource: bounded cache", () => {
+describe("lazy resource: bounded cache", () => {
   it("stays bounded and evicts oldest-first once the cache passes its cap", async () => {
     // The cache is bounded and evicts oldest-first (_capCache). Overshoot the
-    // cap GENEROUSLY rather than pinning its exact value (_TX_CACHE_MAX): fetch
+    // cap GENEROUSLY rather than pinning its exact value (_CACHE_MAX): fetch
     // far more distinct keys than any plausible bound, then assert the earliest
     // keys were evicted while the latest survive. That proves the property
     // without false-failing if the cap is ever retuned. sessionSummary is
@@ -261,41 +264,43 @@ describe("_resource: bounded cache", () => {
 
   it("keeps the session in USE last-good under pressure from other sessions", async () => {
     // The MRU eviction rule and the #266 blink behind it: see `_setMru`'s JSDoc
-    // in api.js. This pins it end-to-end through `loadSessionFiles`.
+    // in lazy-resource.js. This pins it end-to-end through a `sessionFiles` watcher.
     //
-    // The filler sessions come in through the empty-files_sig branch: it records
-    // a last-good WITHOUT touching the network or the resource cache, so this
-    // exercises `_lastGoodFiles`' eviction order in isolation (a fetching filler
-    // would evict the hot session's RESOURCE entry too, which is a different
-    // cache and a different question). N overshoots any plausible cap rather
-    // than pinning `_TX_CACHE_MAX`.
+    // The filler sessions come in through the empty-files_sig branch (the
+    // resource's `knownValue`): it records a last-good WITHOUT touching the
+    // network or the resource cache, so this exercises the last-good hold's
+    // eviction order in isolation (a fetching filler would evict the hot
+    // session's RESOURCE entry too, which is a different cache and a different
+    // question). N overshoots any plausible cap rather than pinning `_CACHE_MAX`.
     const N = 200;
     await withFetch(
       (_url, n) => jsonRes({ files: n === 1 ? [{ name: "hot.wav" }] : [{ name: "hot2.wav" }] }),
       async (calls) => {
         const hot = "mru-hot";
-        const pending = new Set();
         const onLand = () => {};
+        const listing = sessionFiles.watch(onLand);
+        const tick = (/** @type {string} */ sid, /** @type {string} */ sig) =>
+          listing.resolve([sid, sig]);
 
-        assert.equal(loadSessionFiles(hot, "sig1", pending, onLand), null); // cold
+        assert.equal(tick(hot, "sig1").value, null); // cold
         await flush();
-        assert.deepEqual(loadSessionFiles(hot, "sig1", pending, onLand), [{ name: "hot.wav" }]);
+        assert.deepEqual(tick(hot, "sig1").value, [{ name: "hot.wav" }]);
         assert.equal(calls.length, 1);
 
         for (let i = 0; i < N; i++) {
           // Each "tick" re-records the focused session's listing…
-          loadSessionFiles(hot, "sig1", pending, onLand);
+          tick(hot, "sig1");
           // …while another session (no WAVs yet → empty files_sig) is recorded
           // for the first time, pushing the cap.
-          assert.deepEqual(loadSessionFiles(`mru-fill-${i}`, "", pending, onLand), []);
+          assert.deepEqual(tick(`mru-fill-${i}`, "").value, []);
           // Read the focused session's hold WITHOUT recording it: one fixed,
           // never-settling probe sig, so every call after the first is deduped
-          // by `pending` and just returns `_lastGoodFiles.get(hot) ?? null`.
+          // by the resolver's in-flight key and just returns the hold.
           // (This loop is synchronous, so nothing settles inside it.) The hold
           // must survive every one of the N other sessions — the buggy
           // insertion-order refresh dropped it the moment the cap was passed.
           assert.deepEqual(
-            loadSessionFiles(hot, "probe", pending, onLand),
+            tick(hot, "probe").value,
             [{ name: "hot.wav" }],
             `the focused session's last-good was evicted after ${i + 1} other sessions`,
           );
@@ -305,10 +310,9 @@ describe("_resource: bounded cache", () => {
         // A sibling WAV finishes → the focused session's files_sig flips. Its
         // last-good must still be there to hold the list steady during the
         // refetch; with the eviction bug this came back null and blanked it.
-        const stale = loadSessionFiles(hot, "sig2", pending, onLand);
-        assert.deepEqual(stale, [{ name: "hot.wav" }]);
+        assert.deepEqual(tick(hot, "sig2").value, [{ name: "hot.wav" }]);
         await flush();
-        assert.deepEqual(loadSessionFiles(hot, "sig2", pending, onLand), [{ name: "hot2.wav" }]);
+        assert.deepEqual(tick(hot, "sig2").value, [{ name: "hot2.wav" }]);
       },
     );
   });
