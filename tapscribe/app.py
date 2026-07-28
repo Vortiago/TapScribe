@@ -28,7 +28,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import shutil
 import time
 import wave
@@ -38,7 +37,6 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from functools import partial
 from itertools import islice
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -55,21 +53,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
     FileResponse,
-    HTMLResponse,
     JSONResponse,
-    RedirectResponse,
     Response,
     StreamingResponse,
 )
-from fastapi.staticfiles import StaticFiles
 
 from . import auth, bridges_catalog, config
 from . import hallucinations as hallucinations_mod
 from .audio import compute_peaks
 from .batch_pipeline import PipelineRequest, start_pipeline
-from .batch_strip import StrippedDirUnclearable, StripSessionRequest, strip_session
+from .batch_strip import StripSessionRequest, strip_session
 from .batch_summarize import (
-    NoMergedTranscript,
     SummarizeSessionRequest,
     effective_summarizer_config,
     summarize_session,
@@ -77,29 +71,34 @@ from .batch_summarize import (
 from .batch_transcribe import (
     BatchOneRequest,
     BatchSessionRequest,
-    WavTooQuiet,
-    WavUnreadable,
     resolve_batch_model,
     transcribe_one,
     transcribe_session,
 )
 from .live_control import (
     DesiredLiveState,
-    GateKindUnsupported,
-    LiveModelUnknown,
     LiveReconcileError,
-    LiveStartFailed,
     apply_live,
     plan_live,
 )
 from .name_resolution import attach_people, attach_people_mutation, attach_people_view
 from .people import PeopleRegistry
 from .recorder import Recorder, SessionBusy
+from .routes import ALL_ROUTERS, mount_static
+from .routes.body import (
+    json_body,
+    parse_bounded_float,
+    parse_bounded_int,
+    parse_opt_bool,
+    parse_opt_str,
+    parse_opt_str_keep_empty,
+    require_json_object_body,
+    require_opt_str,
+)
+from .routes.deps import get_recorder
+from .routes.errors import register_domain_errors
 from .runtime_probe import available_backend_strs, refresh_backend_probes
 from .session_maintenance import (
-    AbsorbCollision,
-    InvalidAbsorbRequest,
-    SessionDeleteError,
     absorb_session,
     delete_session_audio,
     delete_session_wav,
@@ -107,18 +106,12 @@ from .session_maintenance import (
     reclaim_audio_older_than,
     session_is_empty,
 )
-from .session_merge import InvalidRange, NoUsableWavs
 from .session_paths import (
-    SessionNotFound,
-    StrippedMissing,
-    UnknownSource,
-    WavNotFound,
     resolve_session_dir,
     resolve_wav,
     stripped_dir,
 )
 from .sessions import (
-    MetaValidationError,
     gather_sessions,
     read_session_files,
     read_session_meta,
@@ -130,9 +123,9 @@ from .sessions import (
     write_session_meta,
 )
 from .setup_install import InstallSelectionError, run_install, sse, validate_live, validate_selection
-from .setup_state import build_setup_state, is_first_run
+from .setup_state import build_setup_state
 from .strip_silence import plan_strip_regions, read_wav_int16
-from .summarizers import SummarizerFailed, SummarizerUnavailable, summary_model_catalog
+from .summarizers import summary_model_catalog
 from .summarizers.catalog import MAX_TOKENS_BOUNDS
 from .tap_fan_out import TapFanOut
 from .text import (
@@ -192,136 +185,6 @@ _CONFIG_WRITERS: dict[str, Callable[[str], None]] = {
     **{key: partial(write_config, key) for key in CONFIG_KEYS},
     "languages": write_languages,
 }
-
-
-# ---------------------------------------------------------------------------
-# Dependency injection — every route reads the Recorder via Depends
-# ---------------------------------------------------------------------------
-
-
-def get_recorder(request: Request) -> Recorder:
-    """FastAPI dependency that returns the singleton Recorder attached to
-    the app instance. Tests override this via `app.dependency_overrides[
-    get_recorder] = lambda: my_recorder` for per-test isolation."""
-    recorder = getattr(request.app.state, "recorder", None)
-    if recorder is None:
-        raise HTTPException(503, "Recorder not attached to app.state")
-    return recorder
-
-
-async def _json_body(req: Request) -> dict[str, Any]:
-    """Return the request body parsed as a dict, or {} on any failure.
-    Routes that want to *require* a JSON object body call this then
-    branch on emptiness; routes that treat the body as optional just use
-    the dict directly."""
-    try:
-        body = await req.json()
-    except Exception:
-        return {}
-    return body if isinstance(body, dict) else {}
-
-
-async def _require_json_object_body(req: Request, *, allow_empty: bool) -> dict[str, Any]:
-    """`_json_body`'s strict twin: a body that isn't a JSON object is a 400
-    rather than a silent `{}`. Routes where the empty dict would DESTROY state
-    (rotate the global session, wipe the summarizer default) use this.
-    `allow_empty=True` still accepts a missing body as `{}` — the legacy
-    no-body call."""
-    raw = await req.body()
-    if not raw:
-        if allow_empty:
-            return {}
-        raise HTTPException(400, "a JSON object body is required (send {} to clear the config)")
-    try:
-        body = json.loads(raw)
-    except ValueError:
-        raise HTTPException(400, "malformed JSON body") from None
-    if not isinstance(body, dict):
-        raise HTTPException(400, "JSON body must be an object")
-    return body
-
-
-def _parse_bounded_float(raw, field: str, *, lo: float, hi: float) -> float | None:
-    """Parse an optional numeric body field with range enforcement.
-    None / missing → returned unchanged so the downstream "field not
-    supplied" semantics still work. Anything else must round-trip
-    through `float()`, be finite, and land in [lo, hi]; otherwise
-    raise 400. The explicit finite check matters because
-    `lo <= NaN <= hi` is always False AND `NaN` happily survives
-    `float()` — without the check a `{"gate_speech_threshold": NaN}`
-    payload would slip past with a confusing "must be in […]" error
-    that names NaN as the offending value."""
-    if raw is None:
-        return None
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        # `from None` — CodeQL py/stack-trace-exposure: chain adds nothing
-        # the detail message doesn't already convey.
-        raise HTTPException(400, f"{field} must be a number, got {raw!r}") from None
-    if not math.isfinite(value):
-        raise HTTPException(400, f"{field} must be a finite number, got {value}")
-    if not (lo <= value <= hi):
-        raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
-    return value
-
-
-def _parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
-    if raw is None:
-        return None
-    try:
-        # Accept JSON numerics (which arrive as float in some clients)
-        # by routing through float→int — rejects "3.5" implicitly.
-        value = int(raw)
-    except (TypeError, ValueError):
-        # `from None` — see _parse_bounded_float for the rationale.
-        raise HTTPException(400, f"{field} must be an integer, got {raw!r}") from None
-    if not (lo <= value <= hi):
-        raise HTTPException(400, f"{field} must be in [{lo}, {hi}], got {value}")
-    return value
-
-
-def _require_opt_str(raw, field: str) -> str | None:
-    """The type boundary for optional string body fields — the ONE owner of
-    the non-string 400 (a non-string JSON value 400s like every other
-    malformed field in the _parse_* family; the `(body.get(x) or
-    "").strip()` idiom 500s with an AttributeError before any validation
-    runs). Returns the string VERBATIM — strip/blank policy belongs to the
-    thin wrappers below (or the call site, for fields where whitespace is
-    meaningful, e.g. the summarize route's prompt/api_key)."""
-    if raw is None:
-        return None
-    if not isinstance(raw, str):
-        raise HTTPException(400, f"{field} must be a string, got {type(raw).__name__}")
-    return raw
-
-
-def _parse_opt_str(raw, field: str) -> str | None:
-    """Optional string body field: absent/blank → None, non-string → 400,
-    otherwise the stripped value."""
-    value = _require_opt_str(raw, field)
-    return None if value is None else (value.strip() or None)
-
-
-def _parse_opt_str_keep_empty(raw, field: str) -> str | None:
-    """`_parse_opt_str` for fields where the EMPTY string is meaningful
-    (an explicit clear — e.g. the summarize route's command/base_url
-    overrides): absent → None, non-string → 400, otherwise the stripped
-    value — "" included."""
-    value = _require_opt_str(raw, field)
-    return None if value is None else value.strip()
-
-
-def _parse_opt_bool(raw, field: str) -> bool | None:
-    """Optional boolean body field: absent → None passthrough; anything
-    that isn't a JSON true/false 400s — same strictness as the rest of
-    the _parse_* family. A truthy non-bool like "false" must never
-    silently coerce (bool("false") is True)."""
-    if raw is None:
-        return None
-    if not isinstance(raw, bool):
-        raise HTTPException(400, f"{field} must be a boolean, got {type(raw).__name__}")
-    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -440,50 +303,7 @@ async def _security_headers(request: Request, call_next):  # type: ignore[no-unt
     return response
 
 
-# ---------------------------------------------------------------------------
-# Domain error → HTTP status. ONE source of truth: the orchestrators raise
-# FastAPI-free domain errors (SessionBusy, NoUsableWavs, SummarizerFailed, …)
-# and these handlers translate them, so every batch route is just
-# `return await orchestrator(...)` instead of a per-route try/except ladder. A
-# domain error's HTTP meaning is intrinsic (busy is always 409), so it's
-# registered once here rather than re-mapped in each route that can raise it.
-# ---------------------------------------------------------------------------
-
-_DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
-    SessionBusy: 409,
-    NoUsableWavs: 404,
-    InvalidRange: 400,
-    WavUnreadable: 422,
-    WavTooQuiet: 422,
-    StrippedDirUnclearable: 500,
-    NoMergedTranscript: 422,
-    SummarizerUnavailable: 400,
-    SummarizerFailed: 502,
-    SessionNotFound: 404,
-    UnknownSource: 400,
-    StrippedMissing: 404,
-    WavNotFound: 404,
-    MetaValidationError: 400,
-    AbsorbCollision: 409,
-    InvalidAbsorbRequest: 400,
-    SessionDeleteError: 500,
-    # Live-channel reconcile (live_control) — the /api/live/start route and
-    # the boot auto-start both surface these; registering the concrete
-    # subclasses keeps `type(exc)` lookups in `_domain_error_handler` exact.
-    LiveModelUnknown: 400,
-    GateKindUnsupported: 400,
-    LiveStartFailed: 500,
-}
-
-
-async def _domain_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Translate a known domain error to its status; anything unmapped falls to
-    500, so a new orchestrator error can't silently slip through as a 200."""
-    return JSONResponse(status_code=_DOMAIN_ERROR_STATUS.get(type(exc), 500), content={"detail": str(exc)})
-
-
-for _exc_type in _DOMAIN_ERROR_STATUS:
-    app.add_exception_handler(_exc_type, _domain_error_handler)
+register_domain_errors(app)
 
 
 async def _refuse_current_or_busy(
@@ -741,7 +561,7 @@ async def api_tap_new_session(req: Request, recorder: Recorder = Depends(get_rec
     # present, must parse as a JSON object: a malformed {"detached": true}
     # falling through to the legacy branch would silently rotate the GLOBAL
     # session out from under every plain tap — reject so the bridge retries.
-    body = await _require_json_object_body(req, allow_empty=True)
+    body = await require_json_object_body(req, allow_empty=True)
     if body.get("detached"):
         session_id, session_dir = recorder.create_detached_session()
         print(
@@ -1059,25 +879,23 @@ async def api_live_start(req: Request, recorder: Recorder = Depends(get_recorder
     seconds, so it is offloaded to a worker thread to keep /api/state
     polling responsive.
     """
-    body = await _json_body(req)
+    body = await json_body(req)
     # Boundary parsing FIRST — non-strings and out-of-range numbers 400 at
     # the HTTP edge (CodeQL treats Request.json() as untrusted; the
     # dashboard's min/max attrs are client-side hints only) while building
     # the DesiredLiveState, before any domain logic runs. Nothing downstream
     # can mutate on a rejected request.
     desired = DesiredLiveState(
-        model=_parse_opt_str(body.get("model"), "model"),
-        language=_parse_opt_str(body.get("language"), "language"),
-        gate_kind=_parse_opt_str(body.get("gate_kind"), "gate_kind"),
-        conf=_parse_opt_bool(body.get("confidence_validation"), "confidence_validation"),
-        gate_speech_threshold=_parse_bounded_float(
+        model=parse_opt_str(body.get("model"), "model"),
+        language=parse_opt_str(body.get("language"), "language"),
+        gate_kind=parse_opt_str(body.get("gate_kind"), "gate_kind"),
+        conf=parse_opt_bool(body.get("confidence_validation"), "confidence_validation"),
+        gate_speech_threshold=parse_bounded_float(
             body.get("gate_speech_threshold"), "gate_speech_threshold", lo=0.0, hi=1.0
         ),
-        gate_hangover_ms=_parse_bounded_int(
-            body.get("gate_hangover_ms"), "gate_hangover_ms", lo=0, hi=10_000
-        ),
-        gate_pre_roll_ms=_parse_bounded_int(body.get("gate_pre_roll_ms"), "gate_pre_roll_ms", lo=0, hi=5_000),
-        gate_min_speech_ms=_parse_bounded_int(
+        gate_hangover_ms=parse_bounded_int(body.get("gate_hangover_ms"), "gate_hangover_ms", lo=0, hi=10_000),
+        gate_pre_roll_ms=parse_bounded_int(body.get("gate_pre_roll_ms"), "gate_pre_roll_ms", lo=0, hi=5_000),
+        gate_min_speech_ms=parse_bounded_int(
             body.get("gate_min_speech_ms"), "gate_min_speech_ms", lo=0, hi=5_000
         ),
     )
@@ -1204,7 +1022,7 @@ async def api_setup_install(request: Request):
     then a terminal `done`/`error`. On success the backend probes are refreshed
     so `/api/models` + `/api/setup/state` reflect the new install without a
     restart. Concurrent installs are refused (409)."""
-    body = await _json_body(request)
+    body = await json_body(request)
     try:
         selection = validate_selection(body.get("families", {}))
         live = validate_live(body.get("live"))
@@ -1281,16 +1099,16 @@ async def api_tap_settings_put(req: Request, recorder: Recorder = Depends(get_re
     may be omitted to leave that preference unchanged. Takes effect on
     the NEXT /tap WebSocket open for this identity — already-open WSes
     finish their current utterance on the bridge's normal close."""
-    body = await _json_body(req)
+    body = await json_body(req)
     identity = body.get("identity")
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity required")
-    # _parse_opt_bool, not bool(): see api_recording_toggle — "false" from a
+    # parse_opt_bool, not bool(): see api_recording_toggle — "false" from a
     # client that stringifies its flags must 400, never silently mean True.
     setting = recorder.tap_settings.set(
         identity,
-        record=_parse_opt_bool(body.get("record"), "record"),
-        live=_parse_opt_bool(body.get("live"), "live"),
+        record=parse_opt_bool(body.get("record"), "record"),
+        live=parse_opt_bool(body.get("live"), "live"),
     )
     return {
         "ok": True,
@@ -1307,13 +1125,13 @@ async def api_recording_toggle(req: Request, recorder: Recorder = Depends(get_re
     accepted then immediately closed when disabled — already-open WAVs
     continue to record their current utterance, which finalises cleanly
     on the bridge's normal trackMuted close."""
-    body = await _json_body(req)
+    body = await json_body(req)
     if "enabled" in body:
-        # _parse_opt_bool, not bool(): a client that stringifies its flags would
+        # parse_opt_bool, not bool(): a client that stringifies its flags would
         # otherwise turn {"enabled": "false"} into ENABLED (bool("false") is
         # True) and keep recording every participant after the operator asked
         # to pause — a wrong-direction privacy bug, not just a bad request.
-        enabled = recorder.toggle_recording(enabled=_parse_opt_bool(body["enabled"], "enabled"))
+        enabled = recorder.toggle_recording(enabled=parse_opt_bool(body["enabled"], "enabled"))
     else:
         enabled = recorder.toggle_recording()
     print(f"[tapscribe] recording {'enabled' if enabled else 'paused'}", flush=True)
@@ -1331,7 +1149,7 @@ async def api_config_put(key: str, req: Request):
     writer = _CONFIG_WRITERS.get(key)
     if writer is None:
         raise HTTPException(404, f"unknown config key: {key!r}")
-    body = await _json_body(req)
+    body = await json_body(req)
     content = body.get("content")
     if not isinstance(content, str):
         raise HTTPException(400, "content must be a string")
@@ -1374,13 +1192,13 @@ def _parse_strip_knob_overrides(min_silence_ms: Any, pad_ms: Any, speech_floor_d
     silently falling back to the default; out-of-range values → 400 instead
     of a 500 from int()/float()."""
     overrides: dict[str, Any] = {}
-    bounded_min_silence = _parse_bounded_int(min_silence_ms, "min_silence_ms", lo=100, hi=600_000)
+    bounded_min_silence = parse_bounded_int(min_silence_ms, "min_silence_ms", lo=100, hi=600_000)
     if bounded_min_silence is not None:
         overrides["min_silence_ms"] = bounded_min_silence
-    bounded_pad = _parse_bounded_int(pad_ms, "pad_ms", lo=0, hi=5_000)
+    bounded_pad = parse_bounded_int(pad_ms, "pad_ms", lo=0, hi=5_000)
     if bounded_pad is not None:
         overrides["pad_ms"] = bounded_pad
-    bounded_floor = _parse_bounded_float(speech_floor_db, "speech_floor_db", lo=-120.0, hi=0.0)
+    bounded_floor = parse_bounded_float(speech_floor_db, "speech_floor_db", lo=-120.0, hi=0.0)
     if bounded_floor is not None:
         overrides["speech_floor_db"] = bounded_floor
     return overrides
@@ -1395,7 +1213,7 @@ async def api_session_strip_silence(
     """Non-destructively strip silence from every WAV in <session>/. Thin
     HTTP shim over `batch_strip.strip_session` — parse + range-bound the knobs;
     the registered domain-error handlers map failures to status codes."""
-    body = await _json_body(req)
+    body = await json_body(req)
     overrides = _parse_strip_knob_overrides(
         body.get("min_silence_ms"), body.get("pad_ms"), body.get("speech_floor_db")
     )
@@ -1420,27 +1238,27 @@ async def api_session_summarize(
     saved layers, so a Generate with hand-edited values behaves exactly as
     before. The effective model/source were allowlist-validated at write
     time AND are re-validated inside `load_summarizer` (double guard)."""
-    body = await _json_body(req)
+    body = await json_body(req)
     overrides: dict[str, Any] = await asyncio.to_thread(effective_summarizer_config, session)
-    # Boundary validation through the _parse_* family: a non-string value
+    # Boundary validation through the parse_* family: a non-string value
     # 400s instead of being silently ignored. source/model/api_key treat
     # blank as "not supplied" (fall through to the saved config);
     # command/prompt/base_url keep the empty string — an explicit clear of
     # the saved value is meaningful for them. prompt and api_key values are
     # passed VERBATIM (see their call sites below); the rest are stripped.
-    source = _parse_opt_str(body.get("source"), "source")
+    source = parse_opt_str(body.get("source"), "source")
     if source is not None:
         overrides["source"] = source
-    command = _parse_opt_str_keep_empty(body.get("command"), "command")
+    command = parse_opt_str_keep_empty(body.get("command"), "command")
     if command is not None:
         overrides["command"] = command
-    model = _parse_opt_str(body.get("model"), "model")
+    model = parse_opt_str(body.get("model"), "model")
     if model is not None:
         overrides["model"] = model
     # max_tokens: parse + bounds-check exactly like the other numeric body knobs
     # (gate / strip-silence) — a clear 400 for out-of-range, None when omitted.
     # The adapter also clamps as a final safety net for non-route callers.
-    max_tokens = _parse_bounded_int(
+    max_tokens = parse_bounded_int(
         body.get("max_tokens"), "max_tokens", lo=MAX_TOKENS_BOUNDS[0], hi=MAX_TOKENS_BOUNDS[1]
     )
     if max_tokens is not None:
@@ -1448,16 +1266,16 @@ async def api_session_summarize(
     # prompt is deliberately VERBATIM (no strip): leading/trailing whitespace
     # in an operator-authored prompt template is meaningful, and "" is an
     # explicit clear. Only the type boundary applies.
-    prompt = _require_opt_str(body.get("prompt"), "prompt")
+    prompt = require_opt_str(body.get("prompt"), "prompt")
     if prompt is not None:
         overrides["prompt"] = prompt
-    base_url = _parse_opt_str_keep_empty(body.get("base_url"), "base_url")
+    base_url = parse_opt_str_keep_empty(body.get("base_url"), "base_url")
     if base_url is not None:
         overrides["base_url"] = base_url
     # api_key: blank means "not supplied" (fall through to saved config) but
     # the ACCEPTED value is passed verbatim — keys are opaque tokens and a
     # strip could corrupt one that legitimately contains edge whitespace.
-    api_key = _require_opt_str(body.get("api_key"), "api_key")
+    api_key = require_opt_str(body.get("api_key"), "api_key")
     if api_key is not None and api_key.strip():
         overrides["api_key"] = api_key
     return await summarize_session(recorder, SummarizeSessionRequest(session=session, **overrides))
@@ -1494,12 +1312,12 @@ async def api_summarize_config_put(req: Request):
     one structured object. ALL validation (source/model allowlists, text
     caps, max_tokens int + bounds) lives in `write_summarizer_config`; its
     ValueError is the 400."""
-    # Strict parse rather than `_json_body` (which turns ANY parse failure into
+    # Strict parse rather than `json_body` (which turns ANY parse failure into
     # {}): combined with the full-object semantics above, a dropped or
     # truncated body would WIPE the operator's saved summarizer default —
     # taking the end-of-meeting pipeline's summarize stage with it — and answer
     # {"ok": true}. Only a deliberate `{}` clears.
-    body = await _require_json_object_body(req, allow_empty=False)
+    body = await require_json_object_body(req, allow_empty=False)
     try:
         stored = write_summarizer_config(body)
     except ValueError as e:
@@ -1594,7 +1412,7 @@ async def api_bulk_reclaim_audio(req: Request, recorder: Recorder = Depends(get_
     transcribe/strip job in flight, and any session with a live tap are all
     excluded, so live/busy audio is never touched.
     """
-    body = await _json_body(req)
+    body = await json_body(req)
     older_than_days = body.get("older_than_days")
     if not isinstance(older_than_days, int) or isinstance(older_than_days, bool) or older_than_days <= 0:
         raise HTTPException(400, "older_than_days must be a positive integer")
@@ -1640,7 +1458,7 @@ async def api_session_absorb(
     live session or have a live tap open — absorb only ever moves source's
     files in, it never rewrites target's own files.
     """
-    body = await _json_body(req)
+    body = await json_body(req)
     source = body.get("source") or ""
     if not isinstance(source, str) or not source:
         raise HTTPException(400, "source session id required")
@@ -1694,7 +1512,7 @@ async def api_session_meta_get(session: str, recorder: Recorder = Depends(get_re
 @app.put("/api/session-meta/{session}")
 async def api_session_meta_put(session: str, req: Request, recorder: Recorder = Depends(get_recorder)):  # noqa: ARG001
     resolve_session_dir(session)
-    write_session_meta(session, await _json_body(req))
+    write_session_meta(session, await json_body(req))
     return {"ok": True, "meta": read_session_meta(session)}
 
 
@@ -1725,7 +1543,7 @@ async def api_people_get(recorder: Recorder = Depends(get_recorder)):
 
 @app.put("/api/people/{person_id}")
 async def api_people_rename(person_id: str, req: Request, recorder: Recorder = Depends(get_recorder)):
-    body = await _json_body(req)
+    body = await json_body(req)
     name = body.get("name", "")
     if not isinstance(name, str):
         raise HTTPException(400, "name must be a string")
@@ -1740,7 +1558,7 @@ async def api_people_rename(person_id: str, req: Request, recorder: Recorder = D
 
 @app.post("/api/people/merge")
 async def api_people_merge(req: Request, recorder: Recorder = Depends(get_recorder)):
-    body = await _json_body(req)
+    body = await json_body(req)
     survivor = body.get("survivor")
     absorbed = body.get("absorbed")
     if not isinstance(survivor, str) or not isinstance(absorbed, str) or not survivor or not absorbed:
@@ -1758,7 +1576,7 @@ async def api_people_merge(req: Request, recorder: Recorder = Depends(get_record
 
 @app.post("/api/people/{person_id}/detach")
 async def api_people_detach(person_id: str, req: Request, recorder: Recorder = Depends(get_recorder)):
-    body = await _json_body(req)
+    body = await json_body(req)
     identity = body.get("identity")
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity is required")
@@ -1997,7 +1815,7 @@ async def api_set_primary(
 
     Body: `{"backend": "faster-whisper", "model": "small.en", "source"?: "original"|"stripped"}`.
     """
-    body = await _json_body(req)
+    body = await json_body(req)
     backend = body.get("backend")
     model = body.get("model")
     if not isinstance(backend, str) or not backend:
@@ -2042,7 +1860,7 @@ def _translating_registry_rejection(model: str, backend: str):
 
 @app.post("/api/transcribe")
 async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder)):
-    body = await _json_body(req)
+    body = await json_body(req)
     session = body.get("session") or ""
     name = body.get("name") or ""
     if not session or not name:
@@ -2074,7 +1892,7 @@ async def api_transcribe(req: Request, recorder: Recorder = Depends(get_recorder
 
 @app.post("/api/transcribe-session")
 async def api_transcribe_session(req: Request, recorder: Recorder = Depends(get_recorder)):
-    body = await _json_body(req)
+    body = await json_body(req)
     session = body.get("session") or ""
     if not session:
         raise HTTPException(400, "session is required")
@@ -2207,92 +2025,9 @@ async def tap(ws: WebSocket):
 
 
 # ---------------------------------------------------------------------------
-# Dashboard assets
+# Routers: the HTTP surface lives in tapscribe/routes/ (ADR-0018)
 # ---------------------------------------------------------------------------
 
-# The Stages dashboard ("/next" during its incubation; promoted to "/" once
-# the classic dashboard was retired). The shell is next.html; it layers
-# next.css on top of dashboard.css (the shared design tokens + primitives),
-# and loads everything else through the /web/... mounts below.
-DASHBOARD_CSS_PATH = config.WEB_DIR / "dashboard.css"
-DASHBOARD_JS_DIR = config.WEB_DIR / "js"
-DASHBOARD_COMPONENTS_DIR = config.WEB_DIR / "components"
-NEXT_HTML_PATH = config.WEB_DIR / "next.html"
-NEXT_CSS_PATH = config.WEB_DIR / "next.css"
-SETUP_HTML_PATH = config.WEB_DIR / "setup.html"
-# Vendored toolkit token sheets (canon names; dashboard.css overrides the
-# values) — shared by the dashboard AND /setup, hence top-level like the
-# other page stylesheets.
-TOKENS_CSS_PATH = config.WEB_DIR / "tokens.css"
-TONES_CSS_PATH = config.WEB_DIR / "tones.css"
-
-
-@app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    # First run (no transcription backend installed) → send the operator to the
-    # browser setup surface instead of an empty dashboard. A no-op once any
-    # backend is installed; is_first_run() reads the cached catalog probes.
-    if is_first_run():
-        return RedirectResponse("/setup", status_code=307)
-    try:
-        return HTMLResponse(NEXT_HTML_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return HTMLResponse(
-            "<!doctype html><html><body>"
-            "<h1>Dashboard HTML missing</h1>"
-            "<p>Expected at <code>" + str(NEXT_HTML_PATH) + "</code>.</p>"
-            "</body></html>"
-        )
-
-
-@app.get("/setup", response_class=HTMLResponse)
-async def setup_page():
-    """First-run / manage-models setup surface. Reachable any time (it doubles
-    as "manage models"); the bootstrap directs a fresh install here. The page's
-    JS drives GET /api/setup/state + POST /api/setup/install. A separate route
-    (not gating `/`) so the dashboard is never affected by install state."""
-    try:
-        return HTMLResponse(SETUP_HTML_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise HTTPException(404, f"setup.html missing at {SETUP_HTML_PATH}") from None
-
-
-def _css_response(path: Path, name: str) -> FileResponse:
-    """The one is_file → 404 → FileResponse(text/css) body the four top-level
-    stylesheet routes share. One decorated handler per route stays (explicit
-    routing table); only the body is deduplicated."""
-    if not path.is_file():
-        raise HTTPException(404, f"{name} not found")
-    return FileResponse(path, media_type="text/css")
-
-
-@app.get("/dashboard.css")
-async def dashboard_css():
-    return _css_response(DASHBOARD_CSS_PATH, "dashboard.css")
-
-
-@app.get("/next.css")
-async def next_css():
-    return _css_response(NEXT_CSS_PATH, "next.css")
-
-
-@app.get("/tokens.css")
-async def tokens_css():
-    return _css_response(TOKENS_CSS_PATH, "tokens.css")
-
-
-@app.get("/tones.css")
-async def tones_css():
-    return _css_response(TONES_CSS_PATH, "tones.css")
-
-
-# Dashboard JS modules and HTML component templates. StaticFiles handles
-# path-traversal protection and content-type detection.
-if DASHBOARD_JS_DIR.is_dir():
-    app.mount("/web/js", StaticFiles(directory=str(DASHBOARD_JS_DIR)), name="web_js")
-if DASHBOARD_COMPONENTS_DIR.is_dir():
-    app.mount(
-        "/web/components",
-        StaticFiles(directory=str(DASHBOARD_COMPONENTS_DIR)),
-        name="web_components",
-    )
+for _router in ALL_ROUTERS:
+    app.include_router(_router)
+mount_static(app)

@@ -24,9 +24,10 @@ from fastapi.testclient import TestClient
 from wav_builders import seed_session, seed_wav  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
-from tapscribe.app import _DOMAIN_ERROR_STATUS, app, get_recorder
+from tapscribe.app import app, get_recorder
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import ActiveStream, Recorder
+from tapscribe.routes.errors import DOMAIN_ERROR_STATUS
 from tapscribe.session_maintenance import (
     AbsorbCollision,
     InvalidAbsorbRequest,
@@ -3729,7 +3730,7 @@ def test_api_people_mutation_errors(client):
 
 # --- #228: the domain-error → HTTP status map is the ONE source of truth ------
 # The migrated session domain exceptions carry NO status_code attribute; the
-# handler dispatches solely on app._DOMAIN_ERROR_STATUS by exact type. Pin each
+# handler dispatches solely on routes.errors.DOMAIN_ERROR_STATUS by exact type. Pin each
 # newly-migrated type here so a de-registration or wrong status is caught
 # directly at the map (SessionDeleteError's 500 has no easy route to exercise).
 @pytest.mark.parametrize(
@@ -3747,4 +3748,4 @@ def test_api_people_mutation_errors(client):
     ids=lambda v: getattr(v, "__name__", v),
 )
 def test_migrated_domain_error_status_is_registered(exc_type, status):
-    assert _DOMAIN_ERROR_STATUS[exc_type] == status
+    assert DOMAIN_ERROR_STATUS[exc_type] == status

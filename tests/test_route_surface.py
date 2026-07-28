@@ -31,10 +31,16 @@ request. `test_no_two_routes_are_match_ambiguous` pins that premise.
 
 from __future__ import annotations
 
+import importlib
 import itertools
+import pkgutil
+import re
 
+import pytest
+from fastapi.routing import iter_route_contexts
 from starlette.routing import Mount, WebSocketRoute
 
+from tapscribe import routes as routes_pkg
 from tapscribe.app import app
 
 # FastAPI's own docs endpoints, not part of TapScribe's surface.
@@ -122,8 +128,75 @@ def _kind(route) -> str:
 
 def _route_rows() -> list[tuple[str, str, str]]:
     """Every TapScribe-owned route as (kind, path, endpoint name). A LIST, not
-    a set, so a double registration shows up as a duplicate row."""
-    return [(_kind(r), r.path, r.name) for r in app.routes if getattr(r, "name", "") not in _FASTAPI_DOCS]
+    a set, so a double registration shows up as a duplicate row.
+
+    Goes through `iter_route_contexts` rather than `app.routes` directly:
+    FastAPI keeps an included router as ONE `_IncludedRouter` entry and resolves
+    its routes lazily per request, so walking `app.routes` after the #229 split
+    would see routers, not routes.
+    """
+    rows = []
+    for ctx in iter_route_contexts(app.routes):
+        route = ctx.original_route
+        name = ctx.name or route.name
+        if name in _FASTAPI_DOCS:
+            continue
+        rows.append((_kind(route), ctx.path, name))
+    return rows
+
+
+#: Support modules of the `routes` package: shared seams, no routes of their own.
+_SUPPORT_MODULES = {"body", "deps", "errors", "guards"}
+
+#: A route-map line: exactly two spaces of indent, a method token, the path.
+#: Continuation notes wrap deeper than that, so prose can never be mistaken for
+#: a map entry.
+_MAP_LINE = re.compile(r"^ {2}(GET|POST|PUT|DELETE|PATCH|WS|MOUNT) +(/\S*)")
+
+
+def _router_modules():
+    """Every router module in `tapscribe.routes` (support modules excluded)."""
+    mods = []
+    for info in pkgutil.iter_modules(routes_pkg.__path__):
+        if info.name in _SUPPORT_MODULES:
+            continue
+        mods.append(importlib.import_module(f"{routes_pkg.__name__}.{info.name}"))
+    return mods
+
+
+def _documented(module) -> set[tuple[str, str]]:
+    doc = module.__doc__ or ""
+    return {(m.group(1), m.group(2)) for m in (_MAP_LINE.match(line) for line in doc.split("\n")) if m}
+
+
+def _registered(module) -> set[tuple[str, str]]:
+    """What the module actually serves: its router's routes, plus any
+    StaticFiles mounts it declares (an APIRouter cannot hold a mount, so
+    `STATIC_MOUNTS` is how a module owns one declaratively)."""
+    rows = {(_kind(r), r.path) for r in module.router.routes}
+    rows |= {("MOUNT", path) for path, _dir, _name in getattr(module, "STATIC_MOUNTS", ())}
+    return rows
+
+
+@pytest.mark.parametrize("module", _router_modules(), ids=lambda m: m.__name__.rsplit(".", 1)[-1])
+def test_every_route_is_documented_in_its_router(module):
+    """A router module's docstring route map matches what it registers, exactly.
+
+    This is the fix for the issue's sharpest complaint: app.py's map listed 7 of
+    61 routes and had drifted into describing routes that had moved on. A map is
+    only load-bearing navigation if it cannot decay, so a route with no map line
+    (and a map line naming no route) fails here.
+
+    Format: two spaces, the method, the path, then a note. Wrap continuation
+    lines deeper than two spaces.
+    """
+    documented, registered = _documented(module), _registered(module)
+    assert registered - documented == set(), (
+        f"undocumented routes in {module.__name__}: {sorted(registered - documented)}"
+    )
+    assert documented - registered == set(), (
+        f"documented but not registered in {module.__name__}: {sorted(documented - registered)}"
+    )
 
 
 def test_route_table_is_unchanged():
