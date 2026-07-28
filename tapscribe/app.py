@@ -93,7 +93,7 @@ from .live_control import (
     plan_live,
 )
 from .name_resolution import attach_people, attach_people_mutation, attach_people_view
-from .people import PeopleRegistry
+from .people import IdentityNotAMember, InvalidMergeRequest, PeopleRegistry, PersonNotFound
 from .recorder import Recorder, SessionBusy
 from .runtime_probe import available_backend_strs, refresh_backend_probes
 from .session_maintenance import (
@@ -473,6 +473,11 @@ _DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
     LiveModelUnknown: 400,
     GateKindUnsupported: 400,
     LiveStartFailed: 500,
+    # People CRUD (people) — rename, merge, detach raise these;
+    # the routes no longer translate builtins.
+    PersonNotFound: 404,
+    InvalidMergeRequest: 400,
+    IdentityNotAMember: 400,
 }
 
 
@@ -1704,7 +1709,7 @@ async def api_session_meta_put(session: str, req: Request, recorder: Recorder = 
 # explicit fetch + the rename / merge / detach mutations. people.json is
 # mutated ONLY here and in the /api/state sync — both on the event loop, so
 # they can't race. A person_id / identity from the body is validated against
-# the loaded registry (KeyError→404) before anything is written; nothing here
+# the loaded registry (PersonNotFound→404 via _DOMAIN_ERROR_STATUS) before anything is written; nothing here
 # builds a filesystem path from request input (people.json is a fixed path).
 # ---------------------------------------------------------------------------
 
@@ -1730,10 +1735,7 @@ async def api_people_rename(person_id: str, req: Request, recorder: Recorder = D
     if not isinstance(name, str):
         raise HTTPException(400, "name must be a string")
     registry = PeopleRegistry.load()
-    try:
-        registry.rename(person_id, name.strip())
-    except KeyError:
-        raise HTTPException(404, "person not found") from None
+    registry.rename(person_id, name.strip())
     registry.save()
     return {"ok": True, "people": await _people_view(recorder)}
 
@@ -1746,12 +1748,7 @@ async def api_people_merge(req: Request, recorder: Recorder = Depends(get_record
     if not isinstance(survivor, str) or not isinstance(absorbed, str) or not survivor or not absorbed:
         raise HTTPException(400, "survivor and absorbed person ids are required")
     registry = PeopleRegistry.load()
-    try:
-        registry.merge(survivor, absorbed)
-    except KeyError:
-        raise HTTPException(404, "person not found") from None
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+    registry.merge(survivor, absorbed)
     registry.save()
     return {"ok": True, "people": await _people_view(recorder)}
 
@@ -1763,12 +1760,7 @@ async def api_people_detach(person_id: str, req: Request, recorder: Recorder = D
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity is required")
     registry = PeopleRegistry.load()
-    try:
-        new_person = registry.detach(person_id, identity)
-    except KeyError:
-        raise HTTPException(404, "person not found") from None
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+    new_person = registry.detach(person_id, identity)
     registry.save()
     return {"ok": True, "detached": new_person["id"], "people": await _people_view(recorder)}
 
