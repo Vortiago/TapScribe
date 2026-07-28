@@ -65,7 +65,7 @@ def test_metadata_properties_reflect_constructor_args():
     assert t.model_name == "voxtral-mini"
     # Hardware-only device label; backend identifies the library separately.
     assert t.device == "CPU"
-    assert t.backend == "hf-transformers"
+    assert t.backend == "voxtral-hf"
 
 
 def test_cuda_constructor_uses_cuda_device_label_with_hf_backend():
@@ -77,7 +77,7 @@ def test_cuda_constructor_uses_cuda_device_label_with_hf_backend():
         device="cuda",
     )
     assert t.device == "CUDA"
-    assert t.backend == "hf-transformers"
+    assert t.backend == "voxtral-hf"
 
 
 def test_transcribe_returns_single_segment_with_full_text(tmp_path: Path):
@@ -93,7 +93,7 @@ def test_transcribe_returns_single_segment_with_full_text(tmp_path: Path):
 
     assert isinstance(result, TranscriptionResult)
     assert result.transcriber == "voxtral"
-    assert result.backend == "hf-transformers"
+    assert result.backend == "voxtral-hf"
     assert result.device == "CPU"
     assert result.model == "voxtral-mini"
     assert result.text == "this is the transcript"
