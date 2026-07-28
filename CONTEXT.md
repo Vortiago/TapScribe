@@ -982,7 +982,8 @@ true only on a genuine **cold load**, which is the only state a caller may
 paint a placeholder for; **`stale`** says the value is the last-good body
 rather than this key's own, and a render gate keyed on the signature must
 carry it as a term (held rows and that signature's own rows are otherwise
-the same sig, so the swap between them would be skipped). `onLand` fires
+the same sig, so the swap between them would be skipped) — spelled once by
+whoever owns the resolve, never per view. `onLand` fires
 when there is something new to show and is where the view drops its render
 gates (`markRegionStale` / `markListStale`) and repaints — it is the prompt
 repaint, not the thing correctness rests on. One resource has many

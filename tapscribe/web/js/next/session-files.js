@@ -64,18 +64,20 @@ export function createFilesSource({ onLoaded, source = sessionFiles }) {
      * Resolve the focused session's listing for this tick.
      * @param {string} session — "" when no session is focused
      * @param {string} filesSig — the session's aggregate files stamp
-     * @returns {{ files: import('../types.js').WavFile[], loading: boolean, stale: boolean }}
+     * @returns {{ files: import('../types.js').WavFile[], loading: boolean, sigTerm: string }}
      *   `files` is always an array — the cold sentinel is reported as
      *   `loading`, never handed back as a value a caller could iterate.
-     *   `stale` says the rows are the PREVIOUS sig's, held while this one
-     *   refetches: both WAV lists gate on a signature containing `files_sig`, so
-     *   without it in the gate the swap from held rows to this sig's own rows
-     *   carries no signature change and is skipped (leaving rows that predate a
-     *   failed-then-retried fetch on screen).
+     *   `sigTerm` is this listing's whole contribution to a keyed list's render
+     *   signature: the stamp AND whether the rows are provisional. Both WAV lists
+     *   splice it in place of `files_sig`, and it lives here rather than at each
+     *   call site because a listing HELD from the previous stamp and that stamp's
+     *   own rows are otherwise the same signature — so a view spelling the term
+     *   differently (or omitting it) silently stops reconciling the swap, with no
+     *   signal, which is the shape of bug #222 was filed about.
      */
     resolve(session, filesSig) {
       const { value, loading, stale } = listing.resolve([session, filesSig]);
-      return { files: value || [], loading, stale };
+      return { files: value || [], loading, sigTerm: stale ? `${filesSig}~held` : filesSig };
     },
   };
 }

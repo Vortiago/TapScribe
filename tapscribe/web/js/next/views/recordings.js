@@ -892,7 +892,7 @@ export function build(ctx) {
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight (show a loading placeholder); `[]` → nothing to
     // fetch (empty files_sig = no folder / no WAVs yet).
-    const { files, loading: filesLoading, stale: filesStale } = filesSource.resolve(sid, filesSig);
+    const { files, loading: filesLoading, sigTerm: filesTerm } = filesSource.resolve(sid, filesSig);
     currentFiles = files;
     const sel = selectedFor();
 
@@ -1010,10 +1010,9 @@ export function build(ctx) {
       update: (node, m) => { applyRowSelection(/** @type {HTMLElement} */ (node), m, selName); },
       itemSig: (m) => (m.kind === "clip" ? "" : m.file.name === selName ? "sel" : ""),
       // isCurrent gates the row's Delete button and is folded into `rowKey`, so it
-      // must be a sig term or the rows stay keyed on a stale value. `filesStale`
-      // likewise: rows held from the PREVIOUS sig and this sig's own rows are
-      // otherwise the same signature, so the swap between them would be skipped.
-      sig: `${sid}§${src}§${filesSig}§${filesStale ? "H" : ""}§${state}§${selName}§${isCurrent ? 1 : 0}`,
+      // must be a sig term or the rows stay keyed on a stale value. `filesTerm`
+      // carries the listing's stamp AND its provisional-ness (session-files.js).
+      sig: `${sid}§${src}§${filesTerm}§${state}§${selName}§${isCurrent ? 1 : 0}`,
       auditRows: false,
     });
     if (rendered) {

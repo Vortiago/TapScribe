@@ -377,3 +377,16 @@ test("stale: a provisional body is flagged, so a signature-keyed render gate can
   await flush();
   assert.equal(view.resolve(["s1", "B"]).stale, false, "now they are B's own");
 });
+
+test("fetch: a synchronous throw from load is a rejection for DIRECT callers too", async () => {
+  // The one-shot expand handler (recordings.js `fillExpand`) calls `fetch`
+  // itself, not through a watcher. An escaping synchronous throw lands in a click
+  // listener the dashboard swallows, leaving the row on "loading…" forever with
+  // no error and no retry — so the guard belongs in `fetch`, not at one caller.
+  const res = createResource(
+    (/** @type {string} */ id) => id,
+    () => { throw new URIError("URI malformed"); },
+  );
+  await assert.rejects(res.fetch("k"), /URI malformed/);
+  assert.equal(res.peek("k"), undefined, "a rejected key is evicted, so a later call retries");
+});

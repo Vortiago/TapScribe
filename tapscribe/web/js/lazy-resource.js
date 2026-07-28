@@ -52,7 +52,7 @@ function _setMru(cache, key, value) {
 /**
  * @template T
  * @typedef {{
- *   hold(key: string, value: T): void,
+ *   hold(key: string, value: T, order: number): void,
  *   get(key: string): T | null,
  * }} LastGoodHold
  */
@@ -60,24 +60,39 @@ function _setMru(cache, key, value) {
 /**
  * A bounded, MRU-ordered **last-good hold** — the stale-while-revalidate memory
  * a lazily-fetched, signature-keyed region needs so a sig FLIP refreshes it in
- * place instead of blanking it (#266). `hold(key, value)` records the latest
- * resolved value; `get(key)` returns it, or `null` when nothing was EVER
- * resolved for that key — the cold-load sentinel, the one case a caller may
- * render as a placeholder.
+ * place instead of blanking it (#266). `hold(key, value, order)` records the
+ * value unless a NEWER one (higher `order`) is already held; `get(key)` returns
+ * the held value, or `null` when nothing was EVER held for that key — the
+ * cold-load sentinel, the one case a caller may render as a placeholder.
  *
- * Private to this module: a resource with a `holdKeyOf` policy keeps its own,
- * and `resolve` is the only door. When the three holds were hand-rolled Maps at
- * their call sites, the MRU fix above landed in one of them while the other two —
+ * The `order` lives in the SAME entry as the value on purpose. As two maps kept
+ * in lockstep by convention it was one `_setMru` away from the bug that function
+ * exists to prevent: the order map, written with a plain `set`, evicted its
+ * hot key while the MRU-protected value survived, the guard then read back `0`
+ * and failed OPEN, and a late older response overwrote a current body —
+ * resurrecting #266 through the very counter added to stop it. One entry, one
+ * eviction discipline, nothing to keep in step.
+ *
+ * Private to this module: a resource with a `holdKeyOf` policy keeps its own, and
+ * `resolve` is the only door. When the three holds were hand-rolled Maps at their
+ * call sites, the MRU fix above landed in one of them while the other two —
  * carrying the BIGGER payloads and unbounded — kept both bugs.
  * @template T
  * @returns {LastGoodHold<T>}
  */
 function createLastGoodHold() {
-  /** @type {Map<string, T>} */
+  /** @type {Map<string, { value: T, order: number }>} */
   const cache = new Map();
   return {
-    hold(key, value) { _setMru(cache, key, value); },
-    get(key) { return cache.get(key) ?? null; },
+    hold(key, value, order) {
+      const held = cache.get(key);
+      if (held && order < held.order) return;
+      // Re-`_setMru` even when the value is unchanged: refreshing the hot key's
+      // recency on every quiet tick is what keeps it from being the first thing
+      // `_capCache` drops (see `_setMru`).
+      _setMru(cache, key, { value, order });
+    },
+    get(key) { return cache.get(key)?.value ?? null; },
   };
 }
 
@@ -114,6 +129,20 @@ function createLastGoodHold() {
  * @returns {Resolved<T>}
  */
 const _pending = (held) => ({ value: held, loading: held === null, stale: held !== null, error: null });
+
+/**
+ * Call `load` and always come back with a promise — a synchronous throw becomes a
+ * rejection. Every declared load calls `encodeURIComponent` first, which raises
+ * `URIError` on a lone surrogate in a session id or WAV name, and a future one may
+ * validate its arguments before returning.
+ * @template {unknown[]} A @template T
+ * @param {(...args: A) => Promise<T>} load
+ * @param {A} args
+ * @returns {Promise<T>}
+ */
+function _started(load, args) {
+  try { return load(...args); } catch (e) { return Promise.reject(e); }
+}
 
 /**
  * One lazily-fetched, signature-keyed resource: a bounded cache Map, a
@@ -175,12 +204,10 @@ export function createResource(keyOf, load, policy = {}) {
   const { onFailure = "retry-next-poll", holdKeyOf, knownValue } = policy;
   /** @type {LastGoodHold<T>} */
   const lastGood = createLastGoodHold();
-  /** Hold key → the fire order of the response currently held for it, so a SLOWER
-   * request for an OLDER signature landing after a newer one cannot reconcile the
-   * hold backward (which would serve the older body on the next flip: a deleted
-   * WAV back as a ghost row). Bounded like the cache. @type {Map<string, number>} */
-  const heldOrder = new Map();
-  /** Resource-wide fire counter — see `Entry.order`. */
+  /** Resource-wide fire counter — see `Entry.order`. Orders the responses for one
+   * hold key, so a SLOWER request for an OLDER signature landing after a newer one
+   * cannot reconcile the hold backward (which would serve the older body on the
+   * next flip: a deleted WAV back as a ghost row). */
   let fires = 0;
   /** @type {Map<string, Entry<T>>} */
   const cache = new Map();
@@ -206,6 +233,13 @@ export function createResource(keyOf, load, policy = {}) {
    * rebuild (`viewCache.clear()` at boot, once the model catalogs land) makes a
    * fresh watcher, which is what lets a transient boot-time 503 on `/peaks` be
    * retried instead of pinning "503 …" on the canvas for the life of the tab.
+   *
+   * The pacing it buys is therefore PER WATCHER too. Today that costs nothing —
+   * `main.js` updates only the active view, so the WAV listing's two watchers never
+   * resolve on the same tick — but a resource watched by watchers that ARE
+   * simultaneously live (a header widget plus a body pane, say) would retry a
+   * genuinely-down endpoint once per watcher per tick rather than once. Correct
+   * values, N× the requests: if that case arrives, pace it at the resource.
    * @typedef {{ onLand: () => void, failed: Map<string, unknown> }} Watcher
    */
 
@@ -216,20 +250,23 @@ export function createResource(keyOf, load, policy = {}) {
   };
 
   /**
-   * Record `value` as the last-good body for what `args` names — unless a NEWER
-   * response for the same hold key already is (`order`), or the hold key is empty
-   * (it names nothing: no session is focused), or the value is a resolved
-   * null/undefined, which is an ANSWER ("no transcript") rather than a body to
-   * fall back on.
-   * @param {A} args @param {T | undefined} value @param {number} order
+   * Record `value` as the last-good body for what `args` names. Skipped when the
+   * hold key is empty (it names nothing: no session is focused) or the value is a
+   * resolved null/undefined, which is an ANSWER ("no transcript") rather than a
+   * body to fall back on; the hold itself drops a response older than the one it
+   * already has.
+   * @param {A} args
+   * @param {T | undefined} value
+   * @param {number | "now"} order — `"now"` for an answer derived from THIS tick's
+   *   arguments, which outranks anything already in flight. Resolved to a number
+   *   only once the value is known to be holdable, so an idle tick that holds
+   *   nothing doesn't burn a fire number.
    */
   const holdMaybe = (args, value, order) => {
     if (!holdKeyOf || value === null || value === undefined) return;
     const hk = holdKeyOf(...args);
-    if (!hk || order < (heldOrder.get(hk) ?? 0)) return;
-    heldOrder.set(hk, order);
-    _capCache(heldOrder);
-    lastGood.hold(hk, value);
+    if (!hk) return;
+    lastGood.hold(hk, value, order === "now" ? ++fires : order);
   };
 
   /** This resource's last-good body for what `args` names, or null when nothing
@@ -249,7 +286,13 @@ export function createResource(keyOf, load, policy = {}) {
         value: undefined,
         order: ++fires,
       };
-      entry.promise = load(...args)
+      // `_started` rather than `load(...args)` directly: a load that throws
+      // SYNCHRONOUSLY must reach callers as a rejected promise, because the
+      // signature says it returns one. Un-wrapped, the throw escaped into whatever
+      // called `fetch` — for the one-shot expand handler (recordings.js
+      // `fillExpand`), an exception in a click listener the dashboard swallows,
+      // leaving the row on "loading…" forever with no error and no retry.
+      entry.promise = _started(load, args)
         .then((v) => { entry.settled = true; entry.value = v; return v; })
         .catch((e) => { cache.delete(key); throw e; });
       cache.set(key, entry);
@@ -287,7 +330,7 @@ export function createResource(keyOf, load, policy = {}) {
     // re-resolves synchronously, the two would ping-pong through microtasks.
     const known = knownValue ? knownValue(...args) : undefined;
     if (known !== undefined) {
-      holdMaybe(args, known, ++fires);
+      holdMaybe(args, known, "now");
       return { value: known, loading: false, stale: false, error: null };
     }
     const entry = cache.get(key);
@@ -316,9 +359,15 @@ export function createResource(keyOf, load, policy = {}) {
       // rather than a stale in-flight key. Each callback is isolated — one view's
       // failing repaint must not swallow another view's land, nor escape as an
       // unhandled rejection.
-      const done = (/** @type {unknown} */ err, /** @type {boolean} */ notify) => {
+      // `notify` is derived, never passed: staying quiet under retry-next-poll is
+      // what stops the repaint's own synchronous re-entry refiring the evicted
+      // fetch (the retry storm), and under remember-error the message IS the
+      // change. An `err` with the wrong `notify` would be a state neither policy
+      // has, so there is no second parameter to get wrong.
+      const done = (/** @type {unknown} */ err) => {
         const landed = waiting.get(key) || new Set();
         waiting.delete(key);
+        const notify = err === undefined || onFailure === "remember-error";
         for (const each of landed) {
           if (err !== undefined) { each.failed.set(key, err); _capCache(each.failed); }
           if (notify) {
@@ -326,13 +375,9 @@ export function createResource(keyOf, load, policy = {}) {
           }
         }
       };
-      /** @type {Promise<T>} */
-      let p;
-      // A `load` that throws SYNCHRONOUSLY (every declared one calls
-      // encodeURIComponent first, which raises on a lone surrogate) must land on
-      // the failure path like any rejection — letting it escape here would strand
-      // the key in `waiting` forever, pinning the region at its placeholder.
-      try { p = self.fetch(...args); } catch (e) { p = Promise.reject(e); }
+      // `fetch` never throws synchronously (`_started`), so the key cannot be left
+      // registered in `waiting` with nothing to settle it.
+      const p = self.fetch(...args);
       // This request's place in the fire order — read from the entry `fetch` just
       // stamped, so joining a load already in flight inherits ITS order rather
       // than claiming to be newer than it is.
@@ -345,12 +390,9 @@ export function createResource(keyOf, load, policy = {}) {
           // after it lands (a session switch between the fetch and the repaint
           // would lose it, and the NEXT sig flip would blank).
           holdMaybe(args, v, order);
-          done(undefined, true);
+          done(undefined);
         },
-        // Under retry-next-poll, stay quiet: nothing changed to render, and the
-        // repaint's own synchronous re-entry refiring the evicted fetch was the
-        // retry storm. Under remember-error the message IS the change.
-        (e) => { done(e, onFailure === "remember-error"); },
+        (e) => { done(e); },
       );
     }
     return _pending(stale(...args));

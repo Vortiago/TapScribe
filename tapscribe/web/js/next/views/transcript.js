@@ -617,7 +617,7 @@ export function build(ctx) {
     // Resolve the focused session's WAV listing — the array /api/state no
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight; `[]` → nothing to fetch (empty files_sig).
-    const { files, loading, stale: filesStale } = filesSource.resolve(sid, filesSig);
+    const { files, loading, sigTerm: filesTerm } = filesSource.resolve(sid, filesSig);
     currentFiles = files;
     filesLoading = loading;
 
@@ -777,9 +777,9 @@ export function build(ctx) {
         create: buildPickRow,
         update: (node, m) => { node.classList.toggle("is-sel", m.file.name === pickSelName); },
         itemSig: (m) => (m.file.name === pickSelName ? "sel" : ""),
-        // `filesStale`: rows held from the PREVIOUS files_sig and this sig's own
-        // rows are otherwise the same signature (see recordings.js' WAV list).
-        sig: [pickState, sid, src, filesSig, filesStale ? "H" : "", inflightSig, pickSelName].join("§"),
+        // `filesTerm` carries the listing's stamp AND its provisional-ness in one
+        // term — session-files.js owns that spelling (see its `resolve` doc).
+        sig: [pickState, sid, src, filesTerm, inflightSig, pickSelName].join("§"),
       },
     );
     if (pickRendered) {

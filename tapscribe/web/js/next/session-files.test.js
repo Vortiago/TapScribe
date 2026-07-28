@@ -67,6 +67,24 @@ test("resolve: an empty listing is resolved, not loading", () => {
   assert.equal(got.loading, false);
 });
 
+test("resolve: sigTerm carries the stamp, and marks it when the rows are provisional", () => {
+  // One owner for the spelling: a view that spliced its own term (or omitted it)
+  // would stop reconciling the held-rows -> own-rows swap, silently.
+  const fresh = createFilesSource({
+    onLoaded: () => {},
+    source: fakeSource({ value: [{ name: "a.wav" }], loading: false, stale: false, error: null }),
+  });
+  assert.equal(fresh.resolve("s1", "sig1").sigTerm, "sig1");
+
+  const held = createFilesSource({
+    onLoaded: () => {},
+    source: fakeSource({ value: [{ name: "a.wav" }], loading: false, stale: true, error: null }),
+  });
+  const term = held.resolve("s1", "sig2").sigTerm;
+  assert.notEqual(term, "sig2", "held rows must not share a signature with sig2's own rows");
+  assert.ok(term.startsWith("sig2"), `the stamp stays readable in the term: ${term}`);
+});
+
 test("resolve: (session, files_sig) is the resource's key, passed through in that order", () => {
   /** @type {unknown[][]} */
   const seen = [];

@@ -121,7 +121,12 @@
   may paint a placeholder, and `stale` says `value` is the last-good body rather
   than this key's own — a render gate keyed on the SIGNATURE must include `stale`
   as a term, since held rows and that signature's own rows are otherwise the same
-  sig and the swap between them would be skipped (both WAV lists do). The rule is
+  sig and the swap between them would be skipped. Whoever owns the resolve owns
+  that term's spelling, not each view: `session-files.js` returns a ready-made
+  `sigTerm` (stamp + provisional-ness) that both WAV lists splice in place of
+  `files_sig`, because a view spelling it differently — or omitting it — silently
+  stops reconciling, which is the same class of bug as a forgotten `sig` dep. The
+  rule is
   about the PER-TICK path: a one-shot, event-driven read still uses `fetch`
   directly, because it paints into one specific node and needs its own
   latest-wins guard rather than a watcher's repaint — `recordings.js`'
