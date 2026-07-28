@@ -3033,6 +3033,108 @@ async def test_next_files_sig_flip_does_not_blank_wav_list(running_recorder: Run
             await browser.close()
 
 
+async def test_next_failed_files_fetch_still_reconciles_after_a_stage_switch(
+    running_recorder: RunningRecorder,
+):
+    """Regression (#222 review): a REJECTED /files fetch must not leave a WAV list
+    pinned on rows that predate it.
+
+    The Recordings list and the Transcript picker watch the same lazy listing, and
+    each watcher paces its own retry. So one view can be the one that consumes a
+    paced skip while the OTHER view's retry is the one that succeeds — the first
+    view then never receives that land. Its `renderList` sig contains files_sig,
+    which has not changed since it rendered the HELD rows, so without a term
+    distinguishing held rows from the sig's own rows the swap carries no signature
+    change and is skipped: the list keeps showing the pre-flip listing until some
+    unrelated mutation moves the sig again.
+
+    Staged directly: fail the first /files request that crosses a files_sig flip,
+    switch stages while the failure is remembered, then come back and require the
+    new track's row to be there."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-09T09-00-00Z"
+    session_dir, names = _seed_multi_wav_session(rec, sid, n=2)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            # Fail exactly ONE /files request, and only once armed — the cold load
+            # that paints the initial rows must succeed.
+            state = {"armed": False, "failed": 0}
+
+            async def files_route(route):
+                if state["armed"] and state["failed"] == 0:
+                    state["failed"] += 1
+                    await route.abort("failed")
+                    return
+                await route.continue_()
+
+            await page.route("**/api/sessions/*/files", files_route)
+            await page.goto(base + "/", wait_until="domcontentloaded")
+
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "recordings")
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wavrow[data-wav]').length >= 2""",
+                timeout=15000,
+            )
+
+            # Arm the failure, then flip files_sig by adding a THIRD track, the way
+            # a new tap recording in does.
+            state["armed"] = True
+            third = f"{sid}_spk9_id9_0000aa99.wav"
+            synth_speech_like_wav(session_dir / third, seconds=0.4, freq_hz=300.0)
+
+            # Let the flip be observed and the rejection remembered (the fetch
+            # rejects, the held rows stay up, no repaint). Polled on the route's own
+            # counter rather than a fixed sleep, so this is not a timing race.
+            for _ in range(60):
+                if state["failed"] == 1:
+                    break
+                await page.wait_for_timeout(250)
+            assert state["failed"] == 1, "the /files fetch was never failed — nothing was staged"
+
+            # Switch stages while the failure is remembered: the Transcript
+            # picker's watcher is now the one resolving this listing.
+            await page.evaluate("() => window.gotoView('transcript')")
+            await page.wait_for_timeout(2000)
+
+            # Back to Recordings. The third row MUST be there: the retry landed
+            # while this view was away, and the swap from held rows to the fresh
+            # listing has to cross the render gate on its own.
+            await page.evaluate("() => window.gotoView('recordings')")
+            await page.wait_for_function(
+                """(name) => !!document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`)""",
+                arg=third,
+                timeout=15000,
+            )
+            rows = await page.evaluate(
+                """() => Array.from(document.querySelectorAll('#viewRoot .wavrow[data-wav]'))
+                        .map((r) => r.dataset.wav)"""
+            )
+            assert third in rows, (
+                "the WAV list is stuck on rows that predate a failed /files fetch: "
+                f"{rows}. A watcher that missed the land needs the resolve's `stale` "
+                "term in its render-gate signature, or held rows and the sig's own "
+                "rows are indistinguishable to the gate."
+            )
+            assert len(rows) >= 3, f"expected all three tracks, got {rows}"
+            await context.close()
+        finally:
+            await browser.close()
+
+
 async def test_next_files_sig_flip_does_not_blank_transcript_picker(running_recorder: RunningRecorder):
     """The Transcript stage's per-WAV picker shares the Recordings list's lazy
     files listing, so it has the same blink: a track finishing transcription
