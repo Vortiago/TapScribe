@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..audio import wav_duration_s
-from .base import TranscriptionResult, TranscriptionSegment, build_transcription_result, default_language_for
+from . import base
+from .base import TranscriptionResult, TranscriptionSegment, build_transcription_result
 
 # Sentence boundary: a terminator (`.`, `!`, `?`) followed by whitespace.
 # Lookbehind keeps the terminator with the preceding sentence. The negative
@@ -177,7 +178,7 @@ class VoxtralTranscriberBase:
         # takes language + audio only, so initial_prompt and hotwords have
         # nowhere to go and are dropped. They're still recorded on the result
         # for parity with other transcribers' bookkeeping.
-        language = source_lang or self.fixed_language or default_language_for(self.model_name)
+        language = base.resolve_language(source_lang, self.fixed_language, self.model_name)
         request_kwargs: dict[str, Any] = {"audio": str(path), "model_id": self._repo_id()}
         if language:
             request_kwargs["language"] = language

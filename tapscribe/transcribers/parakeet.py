@@ -52,9 +52,9 @@ from .base import TranscriptionSegment
 
 
 def _resolve_repo(model_name: str) -> str:
-    from .catalog import repo_for
+    from . import catalog
 
-    return repo_for(model_name, "parakeet-hf") or f"nvidia/{model_name}"
+    return catalog.resolve_repo(model_name, "parakeet-hf", lambda n: f"nvidia/{n}")
 
 
 # Upper bound on generated tokens per window, derived from the window's

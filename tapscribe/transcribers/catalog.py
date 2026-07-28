@@ -798,6 +798,21 @@ def repo_for(model_name: str, backend: str) -> str | None:
     return entry.repos.get(backend) if entry is not None else None
 
 
+def resolve_repo(model_name: str, backend_key: str, fallback: Callable[[str], str | None]) -> str | None:
+    """Registry-first repo resolution with a per-adapter fallback.
+
+    The `repo_for(...) or <fallback>` tail every adapter used to carry. It lives
+    here, beside `repo_for`, rather than in `base`: `catalog` already imports
+    `base`, so putting it the other way round would open the `base` <-> `catalog`
+    cycle `base` is deliberately kept free of.
+
+    `fallback` builds the construct-by-convention repo for an off-registry name;
+    it may return None (the Moonshine adapters map a fixed set and raise on a
+    miss), so the result is Optional.
+    """
+    return repo_for(model_name, backend_key) or fallback(model_name)
+
+
 def fixed_language_for(model_name: str) -> str | None:
     """The registry-carried fixed language for `model_name` — the language
     twin of `repo_for`. The single lookup seam the adapters' `load()`s

@@ -30,11 +30,10 @@ _MLX_VOXTRAL_REPO = "mlx-community/Voxtral-Mini-3B-2507-bf16"
 
 
 def _resolve_repo(model_name: str) -> str:
-    # Registry-carried repo (single source, #206/#337). Lazy import: the
-    # catalog imports this module's class through its loader hooks.
-    from .catalog import repo_for
+    # Registry-carried repo (single source, #206/#337).
+    from . import catalog
 
-    return repo_for(model_name, "voxtral-mlx") or _MLX_VOXTRAL_REPO
+    return catalog.resolve_repo(model_name, "voxtral-mlx", lambda _: _MLX_VOXTRAL_REPO)
 
 
 class MlxVoxtralTranscriber(VoxtralTranscriberBase):

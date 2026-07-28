@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..nb_whisper import download_nb_whisper_ct2_dir
+from . import base
 from .base import (
     TranscriptionResult,
     TranscriptionSegment,
@@ -132,7 +133,7 @@ class FasterWhisperTranscriber:
         # model's own fixed language; that in turn is the registry-declared
         # one threaded in at load() (#206), with `default_language_for`'s
         # name heuristic covering directly-constructed adapters.
-        language = source_lang or self.fixed_language or default_language_for(self.model_name)
+        language = base.resolve_language(source_lang, self.fixed_language, self.model_name)
         common = dict(
             language=language,
             beam_size=5,

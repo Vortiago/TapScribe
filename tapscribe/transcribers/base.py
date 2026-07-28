@@ -290,3 +290,8 @@ def default_language_for(model_name: str) -> str | None:
     if n.startswith("nb-"):
         return "no"
     return None
+
+
+def resolve_language(source_lang: str | None, fixed_language: str | None, model_name: str) -> str | None:
+    """Three-rung language precedence: explicit pin > registry fixed > name heuristic."""
+    return source_lang or fixed_language or default_language_for(model_name)

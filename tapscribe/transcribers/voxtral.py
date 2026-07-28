@@ -23,18 +23,17 @@ _VOXTRAL_REPO = "mistralai/Voxtral-Mini-3B-2507"
 
 def _resolve_repo(model_name: str) -> str:
     # Registry-carried repo (single source, #206/#337), falling back to the
-    # canonical Voxtral-Mini repo for off-registry names. Lazy import: the
-    # catalog imports this module's class through its loader hooks.
-    from .catalog import repo_for
+    # canonical Voxtral-Mini repo for off-registry names.
+    from . import catalog
 
-    return repo_for(model_name, "voxtral-hf") or _VOXTRAL_REPO
+    return catalog.resolve_repo(model_name, "voxtral-hf", lambda _: _VOXTRAL_REPO)
 
 
 class VoxtralTranscriber(VoxtralTranscriberBase):
     """A Voxtral model wrapped to satisfy the `Transcriber` Protocol."""
 
     name: ClassVar[str] = "voxtral"
-    backend: ClassVar[str] = "hf-transformers"
+    backend: ClassVar[str] = "voxtral-hf"
 
     def __init__(
         self, *, model_name: str, processor: Any, model: Any, device: str, fixed_language: str | None = None

@@ -54,10 +54,10 @@ class MlxMoonshineEngine:
         """Load Moonshine via mlx-audio. Raises a clear, actionable
         `RuntimeError` if the optional dependency isn't installed —
         same convention as every other MLX adapter."""
-        from .catalog import repo_for
-
         # Registry-first per #206, module mapping as the convention fallback.
-        repo = repo_for(model_id, "moonshine-mlx") or _MODEL_REPOS.get(model_id)
+        from . import catalog
+
+        repo = catalog.resolve_repo(model_id, "moonshine-mlx", lambda m: _MODEL_REPOS.get(m))
         if repo is None:
             raise ValueError(f"{model_id!r} is not a known Moonshine model. Known: {sorted(_MODEL_REPOS)!r}")
         if importlib.util.find_spec("mlx_audio") is None:
