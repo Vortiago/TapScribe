@@ -19,7 +19,6 @@ forwards only the values the registry says the model accepts.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
@@ -291,17 +290,6 @@ def default_language_for(model_name: str) -> str | None:
     if n.startswith("nb-"):
         return "no"
     return None
-
-
-def resolve_repo(model_name: str, backend_key: str, fallback: Callable[[str], str | None]) -> str | None:
-    """Resolve a model's HF repo: registry first, then construct-by-convention fallback.
-
-    ``repo_for`` is imported inside to keep ``base`` a leaf module
-    (no ``base`` ↔ ``catalog`` cycle).
-    """
-    from .catalog import repo_for
-
-    return repo_for(model_name, backend_key) or fallback(model_name)
 
 
 def resolve_language(source_lang: str | None, fixed_language: str | None, model_name: str) -> str | None:

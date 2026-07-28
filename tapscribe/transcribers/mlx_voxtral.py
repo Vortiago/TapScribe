@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from . import base
 from ._voxtral_common import VoxtralTranscriberBase, inputs_kwargs
 
 # Quantised MLX builds live under mlx-community. Default to bf16 — full
@@ -32,7 +31,9 @@ _MLX_VOXTRAL_REPO = "mlx-community/Voxtral-Mini-3B-2507-bf16"
 
 def _resolve_repo(model_name: str) -> str:
     # Registry-carried repo (single source, #206/#337).
-    return base.resolve_repo(model_name, "voxtral-mlx", lambda _: _MLX_VOXTRAL_REPO)
+    from . import catalog
+
+    return catalog.resolve_repo(model_name, "voxtral-mlx", lambda _: _MLX_VOXTRAL_REPO)
 
 
 class MlxVoxtralTranscriber(VoxtralTranscriberBase):

@@ -9,8 +9,10 @@ The two shared helpers this contract pins live in `tapscribe.transcribers.base`
 (named here deliberately — a fully-qualified helper name in the contract
 measurably prevents a reinvented sibling, #241):
 
-  * ``tapscribe.transcribers.base.resolve_repo``   — the ``repo_for(name, key)
-    or <fallback>`` tail (7 copies today).
+  * ``tapscribe.transcribers.catalog.resolve_repo`` — the ``repo_for(name, key)
+    or <fallback>`` tail (7 copies today). It lives in ``catalog``, beside ``repo_for``:
+    ``catalog`` already imports ``base``, so putting it in ``base`` would open the
+    very ``base`` <-> ``catalog`` cycle ``base`` is kept free of.
   * ``tapscribe.transcribers.base.resolve_language`` — the
     ``source_lang or self.fixed_language or default_language_for(...)``
     precedence rule (3 copies today, which must stay in lockstep).
@@ -42,6 +44,7 @@ import pytest
 
 from tapscribe.transcribers import (
     base,
+    catalog,
     mlx_parakeet,
     mlx_voxtral,
     mlx_whisper,
@@ -66,35 +69,35 @@ from tapscribe.transcribers import (
 REPO_SITES = [
     (
         "voxtral",
-        lambda n: voxtral._resolve_repo(n),
+        voxtral._resolve_repo,
         "voxtral-hf",
         "Off-Registry-Voxtral",
         voxtral._VOXTRAL_REPO,
     ),
     (
         "mlx_voxtral",
-        lambda n: mlx_voxtral._resolve_repo(n),
+        mlx_voxtral._resolve_repo,
         "voxtral-mlx",
         "Off-Registry-Voxtral",
         mlx_voxtral._MLX_VOXTRAL_REPO,
     ),
     (
         "mlx_parakeet",
-        lambda n: mlx_parakeet._resolve_repo(n),
+        mlx_parakeet._resolve_repo,
         "parakeet-mlx",
         "off-registry-parakeet",
         "mlx-community/off-registry-parakeet",
     ),
     (
         "parakeet",
-        lambda n: parakeet._resolve_repo(n),
+        parakeet._resolve_repo,
         "parakeet-hf",
         "off-registry-parakeet",
         "nvidia/off-registry-parakeet",
     ),
     (
         "mlx_whisper",
-        lambda n: mlx_whisper.mlx_whisper_repo(n),
+        mlx_whisper.mlx_whisper_repo,
         "mlx-whisper",
         "off-registry-size",
         "mlx-community/whisper-off-registry-size-mlx",
@@ -144,8 +147,10 @@ def test_repo_site_routes_through_the_shared_base_helper(
 ) -> None:
     """THE CONSOLIDATION PIN. Patching `base.resolve_repo` must change every
     site — a mirrored per-adapter copy would not pick this up and fails."""
-    monkeypatch.setattr(base, "resolve_repo", lambda *a, **k: "patched/shared-helper", raising=False)
-    assert resolve(off_name) == "patched/shared-helper", f"{label} does not route through base.resolve_repo"
+    monkeypatch.setattr(catalog, "resolve_repo", lambda *a, **k: "patched/shared-helper", raising=False)
+    assert resolve(off_name) == "patched/shared-helper", (
+        f"{label} does not route through catalog.resolve_repo"
+    )
 
 
 def test_moonshine_onnx_registry_hit_beats_the_module_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,7 +172,7 @@ def test_moonshine_onnx_registry_hit_beats_the_module_mapping(monkeypatch: pytes
     # stand-in needs a real ModuleSpec, not just the attributes.
     fake_mod.__spec__ = importlib.machinery.ModuleSpec("moonshine_onnx", loader=None)
     fake_mod.MoonshineOnnxModel = _FakeModel  # type: ignore[attr-defined]
-    fake_mod.load_tokenizer = lambda: object()  # type: ignore[attr-defined]
+    fake_mod.load_tokenizer = object  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "moonshine_onnx", fake_mod)
 
     moonshine_onnx.OnnxMoonshineEngine.load("not-in-the-mapping")
@@ -501,28 +506,30 @@ def test_no_source_or_doc_still_carries_the_old_label() -> None:
 
 
 def test_base_stays_a_leaf_module() -> None:
-    """`base` must not import `catalog` AT MODULE SCOPE. The repo-fallback
-    helper needs `repo_for`, so the obvious consolidation is exactly the edit
-    that would introduce a `base` ↔ `catalog` cycle (#230: pin the dependency
-    DIRECTION, not just that the module imports).
+    """`base` must not import `catalog` AT ALL — not even inside a function.
 
-    A function-local `from .catalog import repo_for` — today's convention in
-    every adapter — is FINE and is what the helper should keep doing; only a
-    top-level import breaks the leaf rule. So this reads base.py's AST rather
-    than watching `sys.modules`: the `tapscribe.transcribers` package `__init__`
-    imports `catalog` itself, so any import of `base` pulls it in regardless and
-    a sys.modules check could never pass.
+    `catalog` imports `base` at module scope, so ANY `base` -> `catalog` import
+    closes a cycle, and a function-local one closes it just as surely at call
+    time (CodeQL flags it as `Cyclic import`). `base`'s own `default_language_for`
+    docstring states the rule.
+
+    This walks the WHOLE AST, not just module scope. An earlier version of this
+    test checked `tree.body` only; a function-local `from .catalog import
+    repo_for` sailed past it and shipped the very cycle the test exists to
+    prevent. That is why the repo-fallback helper lives in `catalog` (beside
+    `repo_for`) rather than in `base`: the dependency only points one way.
     """
     import ast
+    from pathlib import Path
 
     tree = ast.parse(Path(base.__file__).read_text(encoding="utf-8"))
     offenders = [
         node
-        for node in tree.body  # module scope ONLY — function bodies are not walked
+        for node in ast.walk(tree)
         if isinstance(node, (ast.Import, ast.ImportFrom))
         and "catalog" in (getattr(node, "module", None) or " ".join(a.name for a in node.names))
     ]
     assert not offenders, (
-        f"base.py imports catalog at module scope (line {offenders[0].lineno}) — that is the "
-        "base<->catalog cycle; use a function-local import like the adapters do"
+        f"base.py imports catalog (line {offenders[0].lineno}) — that closes the base<->catalog "
+        "cycle, function-local or not. Registry-dependent helpers belong in catalog."
     )

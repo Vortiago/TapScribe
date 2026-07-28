@@ -37,7 +37,6 @@ from typing import Any, ClassVar
 
 from ..audio import RECORDER_SAMPLE_RATE
 from ..chunking import Window
-from . import base
 from ._chunked import ChunkedTranscriber
 from .base import (
     TranscriptionSegment,
@@ -52,7 +51,9 @@ from .base import (
 
 def _resolve_repo(model_name: str) -> str:
     """Map a catalog model_id to its Hugging Face repo string."""
-    return base.resolve_repo(model_name, "parakeet-mlx", lambda n: f"mlx-community/{n}")
+    from . import catalog
+
+    return catalog.resolve_repo(model_name, "parakeet-mlx", lambda n: f"mlx-community/{n}")
 
 
 def _tokens_to_words(tokens: Any, *, offset_s: float) -> tuple[Word, ...] | None:

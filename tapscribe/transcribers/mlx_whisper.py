@@ -31,7 +31,9 @@ def mlx_whisper_repo(name: str) -> str:
     """Map an OpenAI-style Whisper model name to its mlx-community HF repo.
     Reads from the registry; falls back to the construction pattern for
     unknown models."""
-    return base.resolve_repo(name, "mlx-whisper", lambda n: f"mlx-community/whisper-{n}-mlx")
+    from . import catalog
+
+    return catalog.resolve_repo(name, "mlx-whisper", lambda n: f"mlx-community/whisper-{n}-mlx")
 
 
 class MlxWhisperTranscriber:

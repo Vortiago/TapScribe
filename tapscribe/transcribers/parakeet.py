@@ -43,7 +43,6 @@ from typing import Any, ClassVar
 
 from ..audio import RECORDER_SAMPLE_RATE
 from ..chunking import Window
-from . import base
 from ._chunked import ChunkedTranscriber
 from ._parakeet_tdt import build_segments_from_tdt_tokens
 from .base import TranscriptionSegment
@@ -53,7 +52,9 @@ from .base import TranscriptionSegment
 
 
 def _resolve_repo(model_name: str) -> str:
-    return base.resolve_repo(model_name, "parakeet-hf", lambda n: f"nvidia/{n}")
+    from . import catalog
+
+    return catalog.resolve_repo(model_name, "parakeet-hf", lambda n: f"nvidia/{n}")
 
 
 # Upper bound on generated tokens per window, derived from the window's
