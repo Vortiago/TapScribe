@@ -35,6 +35,7 @@ from __future__ import annotations
 import importlib.machinery
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -468,11 +469,29 @@ def test_voxtral_backend_label_reaches_the_result_json() -> None:
 
 def test_no_source_or_doc_still_carries_the_old_label() -> None:
     """The stale string must not survive anywhere — including CONTEXT.md, which
-    documents the backend vocabulary for future contributors."""
+    documents the backend vocabulary for future contributors.
+
+    THIS file is excluded from the sweep: it names the old label four times on
+    purpose (the prose above, and the grep's own argument list two lines down),
+    so without the exclude the assertion could never go green no matter what the
+    production edit does — an impossible pin, not a contract.
+    """
     out = subprocess.run(
-        ["git", "grep", "-l", "hf-transformers", "--", "*.py", "*.md", "*.js", "*.cs"],
+        [
+            "git",
+            "grep",
+            "-l",
+            "hf-transformers",
+            "--",
+            "*.py",
+            "*.md",
+            "*.js",
+            "*.cs",
+            f":(exclude)tests/{Path(__file__).name}",
+        ],
         capture_output=True,
         text=True,
+        cwd=Path(__file__).resolve().parent.parent,
     )
     assert out.stdout.strip() == "", f"stale 'hf-transformers' label remains in: {out.stdout.split()}"
 
@@ -496,7 +515,6 @@ def test_base_stays_a_leaf_module() -> None:
     a sys.modules check could never pass.
     """
     import ast
-    from pathlib import Path
 
     tree = ast.parse(Path(base.__file__).read_text(encoding="utf-8"))
     offenders = [
