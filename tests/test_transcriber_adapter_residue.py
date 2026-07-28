@@ -464,7 +464,6 @@ def test_voxtral_backend_label_reaches_the_result_json() -> None:
 
     result = base.build_transcription_result(_Adapter(), text="", segments=(), duration=0.0, language="en")
     assert result.backend == "voxtral-hf"
-    assert result.to_mapping()["backend"] == "voxtral-hf"
 
 
 def test_no_source_or_doc_still_carries_the_old_label() -> None:

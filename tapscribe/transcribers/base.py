@@ -20,7 +20,6 @@ forwards only the values the registry says the model accepts.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict as _asdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
@@ -141,9 +140,6 @@ class TranscriptionResult:
     # the cache match key. Empty = the model auto-detected; `language`
     # carries what it decided.
     source_language: str = ""
-
-    def to_mapping(self) -> dict[str, Any]:
-        return _asdict(self)
 
 
 # ---------------------------------------------------------------------------
