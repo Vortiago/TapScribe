@@ -20,8 +20,17 @@ Three properties, none of which any behavioural route test can see:
      issue asked for: a new route with no map line fails CI, so the map can't
      decay to 12% coverage again.
 
-  3. **`app.py` registers nothing itself** and no router imports another
-     router (shared helpers live in `routes/{deps,body,errors,guards}.py`).
+  3. **The split's own rules hold.** Every route's endpoint is defined in a
+     `routes/` module (so `app.py` registers nothing, whatever mechanism a stray
+     route might use), no module in the package imports a router (shared helpers
+     live in `routes/{deps,body,errors,guards}.py`, and for a support module a
+     router import would be a cycle), and no router is included under a prefix,
+     so a path in a module's map is the URL it serves.
+
+One more, one level down: the FastAPI routing contract these sweeps read
+(`iter_route_contexts`, and the effective path of a non-`APIRoute`) is pinned
+directly, because a change there makes every sweep fail OPEN. Hence also the
+`fastapi<0.140` cap in pyproject.toml.
 
 Route ORDER is deliberately not pinned: no two registered routes are
 match-ambiguous (no literal-vs-parameter collision at equal segment depth and
