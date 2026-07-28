@@ -33,7 +33,7 @@
 
 import { tpl, pick, renderRegion, markRegionStale, renderMarkdown } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
-import { postJson, putJson, sessionSummary, createLastGoodHold, errText } from "../../api.js";
+import { postJson, putJson, sessionSummary, errText } from "../../api.js";
 import { wireSave } from "../../save-status.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar, sessionLabel } from "../shell.js";
@@ -127,66 +127,24 @@ export function build(ctx) {
 
   const hasTranscript = () => !!session?.session_transcript;
 
-  /** In-flight lazy summary fetches, keyed `${sid}@${stamp}` (dedup). */
-  const sumPending = new Set();
-  /** Keys (`${sid}@${stamp}`) whose summary fetch REJECTED — failure memory
-   * pacing retries at the poll cadence, same discipline as transcript.js's
-   * failedMerged / api.js loadSessionFiles: a rejection evicts the resource
-   * cache key, so without the memory the next resolve would refetch
-   * immediately; a remembered key skips exactly one resolve (this runs once
-   * per poll tick) so the retry fires on a later tick. A re-generate changes
-   * the stamp — a different key — and fetches at once. @type {Set<string>} */
-  const failedStored = new Set();
-  /** Per-session last-good persisted summary — the shared bounded
-   * stale-while-revalidate hold (api.js `createLastGoodHold`), which keeps an
-   * EXTERNAL re-summarize (the end-of-meeting pipeline, a second tab) from
-   * blanking the output pane to the "No summary yet" empty state for a whole
-   * round trip while the new body refetches. Show the previous summary in place
-   * until the fresh one lands (the fetch's markRegionStale forces the swap);
-   * `get` returns the cold sentinel (null) only when nothing ever resolved for
-   * that session.
-   * @type {import('../../api.js').LastGoodHold<import('../../types.js').PersistedSummary>} */
-  const lastGoodSummary = createLastGoodHold();
+  /** This view's watcher on the persisted summary: when one lands, force the
+   * output pane past its sig gate and render now. */
+  const storedBody = sessionSummary.watch(() => { markRegionStale(sumOut); afterMutate(); });
 
   /**
-   * Resolve the persisted summary behind the session's slim marker: the cached
-   * body when already in hand, else fire ONE lazy fetch and re-cross the
-   * output gate when it lands (the resolveMerged pattern from transcript.js).
-   * Returns the session's last-good body during a refetch, and null only on a
-   * genuine cold load — the placeholder shows meanwhile.
+   * The persisted summary behind the session's slim marker, from the lazy
+   * resource keyed by (session, summarized_at). The resolve owns fetch-once, the
+   * retry pacing, and the per-session last-good hold that keeps an EXTERNAL
+   * re-summarize (the end-of-meeting pipeline, a second tab) from dropping the
+   * output pane to the "No summary yet" empty state for a whole round trip
+   * (#266). null only on a genuine cold load — the placeholder shows meanwhile.
    * @param {import('../../types.js').SummaryMarker | null | undefined} marker
    * @param {string} sid
    * @returns {import('../../types.js').PersistedSummary | null}
    */
   const resolveStored = (marker, sid) => {
     if (!marker || !marker.summarized_at || !sid) return null;
-    const stamp = marker.summarized_at;
-    const cached = sessionSummary.peek(sid, stamp);
-    if (cached !== undefined) {
-      if (cached) lastGoodSummary.hold(sid, cached);
-      return cached;
-    }
-    const key = `${sid}@${stamp}`;
-    // `failedStored.delete(key)` is check-AND-consume: a key whose last fetch
-    // failed skips this one resolve, and the next poll tick's resolve retries.
-    if (!sumPending.has(key) && !failedStored.delete(key)) {
-      sumPending.add(key);
-      sessionSummary.fetch(sid, stamp)
-        .then(
-          // Landed: force the output pane past its sig gate and render now.
-          () => { markRegionStale(sumOut); afterMutate(); },
-          // Failed: remember it and stay quiet — no afterMutate (nothing
-          // changed to render; the failure's own synchronous re-render
-          // refiring the evicted fetch was the unpaced retry storm).
-          () => { failedStored.add(key); },
-        )
-        .finally(() => { sumPending.delete(key); });
-    }
-    // Stale-while-revalidate (#266's shape): hold this session's last-good body
-    // during the refetch instead of the bare loading sentinel, which the pane
-    // renders exactly like a cold load and blanks the whole region to the
-    // empty state for the round trip. null only when nothing ever resolved.
-    return lastGoodSummary.get(sid);
+    return storedBody.resolve([sid, marker.summarized_at]).value;
   };
 
   /** Sync the Generate button + the note line from current state. Never touches

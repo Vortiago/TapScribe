@@ -25,7 +25,7 @@
 import { tpl, pick, renderRegion, markRegionStale, renderList, markListStale, selectionInside } from "../../templates.js";
 import { createEmptyStateSync } from "../../vc/components/empty-state/empty-state.js";
 import {
-  postJson, putJson, sessionTranscript, createLastGoodHold, errText,
+  postJson, putJson, sessionTranscript, errText,
 } from "../../api.js";
 import { createFilesSource, listState } from "../session-files.js";
 import { resolveSeekTarget } from "../seek-target.js";
@@ -216,29 +216,10 @@ export function build(ctx) {
   // own sig (txSig) is held by `renderRegion(mergedHost, …)`; only the control
   // column keeps a closure sig here.
   let lastCtlSig = " "; // control column chrome: toggle/range/note/selected/cache
-  // Keys (session@stamp) we've already scheduled a re-render for after the
-  // lazy merged-transcript fetch lands — dedupes repeated misses.
-  /** @type {Set<string>} */
-  const txRerenderPending = new Set();
-  /** Keys (session@stamp) whose merged-body fetch REJECTED — the failure
-   * memory that paces retries at the poll cadence (same discipline as
-   * api.js loadSessionFiles / recordings.js failedWave). A rejection evicts
-   * the resource cache key, so without the memory the next resolve would
-   * refetch immediately; a remembered key skips exactly one resolve (this
-   * runs once per poll tick) so the retry fires on a later tick. A
-   * re-transcribe changes the stamp — a different key — and fetches at once.
-   * @type {Set<string>} */
-  const failedMerged = new Set();
-  /** Per-session last-good merged body — the shared bounded
-   * stale-while-revalidate hold (api.js `createLastGoodHold`), which keeps a
-   * re-transcribe (a new transcribed_at) from blanking the merged pane to
-   * "loading transcript…" while the new body refetches. Show the previous merged
-   * transcript in place until the fresh one lands (markRegionStale on the fetch
-   * forces the swap), instead of wiping the transcript the operator is reading.
-   * `get` returns the cold-load sentinel (null) only when this session never
-   * resolved a body.
-   * @type {import('../../api.js').LastGoodHold<import('../../types.js').MergedTranscript>} */
-  const lastGoodMerged = createLastGoodHold();
+  /** This view's watcher on the merged body: when one lands, force the pane past
+   * its sig gate and render now, so "loading… → loaded" re-crosses the gate
+   * without a marker change. */
+  const mergedBody = sessionTranscript.watch(() => { markRegionStale(mergedHost); afterMutate(); });
   /** The lazily-fetched WAV listing for the FOCUSED session — the array
    * /api/state no longer embeds. Refreshed at the top of update() from the
    * (sid, files_sig) client cache; sourceFiles()/recordingFor read it. */
@@ -262,10 +243,13 @@ export function build(ctx) {
 
   // ---- Helpers --------------------------------------------------------------
 
-  // Resolve the OPEN session's FULL merged transcript from the lazy cache.
-  // /api/state ships only a slim marker; on a cache miss this fires the fetch
-  // once and re-renders (via afterMutate) when it lands. Returns null until
-  // then. Keyed by (session, transcribed_at) so a re-transcribe re-fetches.
+  // The OPEN session's FULL merged transcript. /api/state ships only a slim
+  // marker; the body is a lazy resource keyed by (session, transcribed_at), so a
+  // re-transcribe refetches and an idle poll fires nothing. The resolve owns the
+  // rest — fetch-once, the retry pacing, and the per-session last-good hold that
+  // keeps a re-transcribe refreshing the pane IN PLACE instead of blanking it to
+  // "loading transcript…" (#266). null only on a genuine cold load, or when there
+  // is no marker to resolve at all.
   /**
    * @param {import('../../types.js').MergedTranscriptMarker | null} marker
    * @param {string} sid
@@ -273,35 +257,7 @@ export function build(ctx) {
    */
   const resolveMerged = (marker, sid) => {
     if (!marker || !marker.transcribed_at || !sid) return null;
-    const stamp = marker.transcribed_at;
-    const cached = sessionTranscript.peek(sid, stamp);
-    if (cached !== undefined) {
-      if (cached) lastGoodMerged.hold(sid, cached);
-      return cached;
-    }
-    const key = `${sid}@${stamp}`;
-    // `failedMerged.delete(key)` is check-AND-consume: a key whose last fetch
-    // failed skips this one resolve, and the next poll tick's resolve retries.
-    if (!txRerenderPending.has(key) && !failedMerged.delete(key)) {
-      txRerenderPending.add(key);
-      sessionTranscript.fetch(sid, stamp)
-        .then(
-          // Landed: force the merged pane past its sig gate and re-render now.
-          () => { markRegionStale(mergedHost); afterMutate(); },
-          // Failed: remember it and stay quiet — no afterMutate (nothing
-          // changed to render, and the failure's own synchronous re-render
-          // refiring the evicted fetch was the unpaced retry storm). The
-          // remembered key defers the retry to a later poll tick.
-          () => { failedMerged.add(key); },
-        )
-        .finally(() => { txRerenderPending.delete(key); });
-    }
-    // Stale-while-revalidate: hold the previous merged body during the refetch
-    // so a re-transcribe refreshes the pane in place instead of blanking it to
-    // "loading transcript…". null (→ cold-load placeholder) only when this
-    // session never resolved a body. markRegionStale (above) forces the swap to
-    // the fresh body once the fetch lands.
-    return lastGoodMerged.get(sid);
+    return mergedBody.resolve([sid, marker.transcribed_at]).value;
   };
 
   /** The WAVs the picker + per-WAV transcribe operate on: the originals, or the
@@ -661,7 +617,7 @@ export function build(ctx) {
     // Resolve the focused session's WAV listing — the array /api/state no
     // longer ships, fetched once per (sid, files_sig) and client-cached. `null`
     // → a fetch is in flight; `[]` → nothing to fetch (empty files_sig).
-    const { files, loading } = filesSource.resolve(sid, filesSig);
+    const { files, loading, sigTerm: filesTerm } = filesSource.resolve(sid, filesSig);
     currentFiles = files;
     filesLoading = loading;
 
@@ -821,7 +777,9 @@ export function build(ctx) {
         create: buildPickRow,
         update: (node, m) => { node.classList.toggle("is-sel", m.file.name === pickSelName); },
         itemSig: (m) => (m.file.name === pickSelName ? "sel" : ""),
-        sig: [pickState, sid, src, filesSig, inflightSig, pickSelName].join("§"),
+        // `filesTerm` carries the listing's stamp AND its provisional-ness in one
+        // term — session-files.js owns that spelling (see its `resolve` doc).
+        sig: [pickState, sid, src, filesTerm, inflightSig, pickSelName].join("§"),
       },
     );
     if (pickRendered) {

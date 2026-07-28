@@ -2,22 +2,22 @@
 // The lazily-fetched per-session WAV listing, as the two views that read it
 // need it: the Recordings WAV list and the Transcript per-WAV picker.
 //
-// `api.js`'s `loadSessionFiles` is the fetch + cache + stale-while-revalidate
-// layer. What both views were re-deriving ON TOP of it, identically, is the
-// small bit around it: an in-flight key set per view, the `null`-means-COLD
-// sentinel, and the four states a listing region can be in. Neither view needs
-// to know that `null` is the cold sentinel and `[]` is "nothing to fetch" — that
-// distinction only exists to answer "which of the four states am I in", so it
-// belongs here rather than being spelled out at each call site.
+// `api.js`'s `sessionFiles` resource is the fetch + cache + failure-policy +
+// stale-while-revalidate layer, and its `resolve` owns the per-tick choreography
+// (lazy-resource.js). What is left here — and it is all both views were
+// re-deriving identically — is the shape of the ANSWER: the cold sentinel must
+// never be handed back as a value a caller could iterate, and "which of the four
+// states is this region in" has a precedence that a view getting it wrong turns
+// into a wrong answer rather than a slow one.
 //
 // DOM-free on purpose: no host, no placeholder, no row builder. The seam that
 // paints rows is `renderList` (templates.js) and the placeholder WORDING is
 // per-view content, not shared behaviour — folding either in here would have
 // bought a ten-parameter factory to hide six lines, which is the shallow shape
 // this module exists to avoid. Unit-tested under `node --test` with a fake
-// loader, like field-saver.js and save-status.js.
+// resource, like field-saver.js and save-status.js.
 
-import { loadSessionFiles } from "../api.js";
+import { sessionFiles } from "../api.js";
 
 /**
  * @typedef {"none" | "loading" | "rows" | "empty"} ListState
@@ -48,35 +48,36 @@ export function listState({ hasSession, loading, count }) {
  * One view's handle on the session WAV listing.
  *
  * `onLoaded` runs after a fetch SUCCEEDS — the view drops its render gates and
- * repaints there. It is not called for a cache hit (nothing changed) nor for a
- * failed fetch (the stale hold stays up and the poll paces the retry), both of
- * which are `loadSessionFiles`' contract, kept intact here.
+ * repaints there. It is bound ONCE here (`watch`), and is not called for a cache
+ * hit (nothing changed) nor for a failed fetch (the stale hold stays up and the
+ * poll paces the retry) — both `sessionFiles`' declared policy.
  *
  * @param {{
  *   onLoaded: () => void,
- *   load?: (session: string, filesSig: string, pending: Set<string>, onLand: () => void)
- *            => import('../types.js').WavFile[] | null,
- * }} ctx — `load` is injectable so the resolve logic is testable without api.js.
+ *   source?: Pick<typeof sessionFiles, "watch">,
+ * }} ctx — `source` is injectable so the answer shape is testable without api.js.
  */
-export function createFilesSource({ onLoaded, load = loadSessionFiles }) {
-  /** (session@files_sig) fetches in flight — dedupes across the ticks before
-   * one lands (the api.js cache dedupes the REQUEST itself; this dedupes the
-   * per-view bookkeeping around it). Per source, so two views watching the same
-   * session don't share a set and cancel each other's first fetch. */
-  const pending = new Set();
-
+export function createFilesSource({ onLoaded, source = sessionFiles }) {
+  const listing = source.watch(onLoaded);
   return {
     /**
      * Resolve the focused session's listing for this tick.
      * @param {string} session — "" when no session is focused
      * @param {string} filesSig — the session's aggregate files stamp
-     * @returns {{ files: import('../types.js').WavFile[], loading: boolean }}
+     * @returns {{ files: import('../types.js').WavFile[], loading: boolean, sigTerm: string }}
      *   `files` is always an array — the cold sentinel is reported as
      *   `loading`, never handed back as a value a caller could iterate.
+     *   `sigTerm` is this listing's whole contribution to a keyed list's render
+     *   signature: the stamp AND whether the rows are provisional. Both WAV lists
+     *   splice it in place of `files_sig`, and it lives here rather than at each
+     *   call site because a listing HELD from the previous stamp and that stamp's
+     *   own rows are otherwise the same signature — so a view spelling the term
+     *   differently (or omitting it) silently stops reconciling the swap, with no
+     *   signal, which is the shape of bug #222 was filed about.
      */
     resolve(session, filesSig) {
-      const fetched = load(session, filesSig, pending, onLoaded);
-      return { files: fetched || [], loading: fetched === null };
+      const { value, loading, stale } = listing.resolve([session, filesSig]);
+      return { files: value || [], loading, sigTerm: stale ? `${filesSig}~held` : filesSig };
     },
   };
 }

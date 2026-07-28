@@ -1,6 +1,13 @@
 // @ts-check
 // Thin wrappers over the backend's HTTP API. Each helper returns the
 // parsed JSON / text or throws an Error with status + server-provided detail.
+//
+// The lazily-fetched, signature-keyed resources below are DECLARATIONS over the
+// mechanism in ./lazy-resource.js — this module owns the URL, the cache key, and
+// the failure policy; that one owns the cache, the stale-while-revalidate hold,
+// and the per-tick `resolve` every view crosses (#222).
+
+import { createResource } from "./lazy-resource.js";
 
 /** The Error a non-OK response throws: `${status} ${detail}`, detail from the
  * JSON body when the server provided one, else the statusText. Async — it
@@ -64,128 +71,24 @@ export async function fetchState() {
 // request.
 
 /**
- * @template T
- * @typedef {{ promise: Promise<T>, settled: boolean, value: T | undefined }} TxEntry
- */
-
-// Bound the caches so a long-lived tab that opens hundreds of (id,
-// transcribed_at) pairs over its lifetime doesn't grow unbounded. Map
-// preserves insertion order, so dropping `keys().next()` evicts the oldest.
-const _TX_CACHE_MAX = 64;
-/** @param {Map<string, unknown> | Set<string>} cache */
-function _capCache(cache) {
-  while (cache.size > _TX_CACHE_MAX) {
-    const oldest = cache.keys().next().value;
-    if (oldest === undefined) break;
-    cache.delete(oldest);
-  }
-}
-
-/**
- * Insert/refresh `key` as the MOST-recently-used entry, then cap. `Map.set` on
- * an EXISTING key does NOT move it in insertion order, so a key re-set every
- * tick sat at the OLDEST position and was the first thing `_capCache` dropped —
- * i.e. the entry IN USE was evicted first, resurrecting #266 (a sig flip found
- * no hold, so the region blanked to "loading…") for exactly the session being
- * worked on. Deleting first makes the hot key most-recently-used before the cap
- * runs.
- * @template T
- * @param {Map<string, T>} cache
- * @param {string} key
- * @param {T} value
- */
-function _setMru(cache, key, value) {
-  cache.delete(key);
-  cache.set(key, value);
-  _capCache(cache);
-}
-
-/**
- * @template T
- * @typedef {{
- *   hold(key: string, value: T): void,
- *   get(key: string): T | null,
- * }} LastGoodHold
- */
-
-/**
- * A bounded, MRU-ordered **last-good hold** — the stale-while-revalidate memory
- * a lazily-fetched, signature-keyed region needs so a sig FLIP refreshes it in
- * place instead of blanking it (#266). `hold(key, value)` records the latest
- * resolved value; `get(key)` returns it, or `null` when nothing was EVER
- * resolved for that key — the cold-load sentinel, the one case a caller may
- * render as a placeholder.
- *
- * ONE implementation for all three holds (this module's `_lastGoodFiles`, the
- * Transcript view's merged body, the Summary view's persisted summary): they are
- * the same cache with different payloads, and when they were three hand-rolled
- * Maps the MRU fix below landed in one of them while the other two — carrying
- * the BIGGER payloads and unbounded — kept both bugs. A future fix lands once.
- * @template T
- * @returns {LastGoodHold<T>}
- */
-export function createLastGoodHold() {
-  /** @type {Map<string, T>} */
-  const cache = new Map();
-  return {
-    hold(key, value) { _setMru(cache, key, value); },
-    get(key) { return cache.get(key) ?? null; },
-  };
-}
-
-/**
- * One lazily-fetched, signature-keyed resource: a bounded cache Map plus a
- * get-or-fetch and a synchronous peek that share the same key function, so
- * the two can never drift apart. `fetch` fires `load()` once per key and
- * records the resolved value on the entry so `peek` can read it without
- * touching the Promise (a render uses the cached value inline without
- * re-rendering when it's already in hand). A rejection evicts the key so a
- * later call retries.
- * @template {unknown[]} A
- * @template T
- * @param {(...args: A) => string} keyOf
- * @param {(...args: A) => Promise<T>} load
- */
-function _resource(keyOf, load) {
-  /** @type {Map<string, TxEntry<T>>} */
-  const cache = new Map();
-  return {
-    /** @param {A} args @returns {Promise<T>} */
-    fetch(...args) {
-      const key = keyOf(...args);
-      const hit = cache.get(key);
-      if (hit) return hit.promise;
-      /** @type {TxEntry<T>} */
-      const entry = { promise: Promise.resolve(/** @type {T} */ (undefined)), settled: false, value: undefined };
-      entry.promise = load(...args)
-        .then((v) => { entry.settled = true; entry.value = v; return v; })
-        .catch((e) => { cache.delete(key); throw e; });
-      cache.set(key, entry);
-      _capCache(cache);
-      return entry.promise;
-    },
-    /** @param {A} args @returns {T | undefined} */
-    peek(...args) {
-      const e = cache.get(keyOf(...args));
-      return e && e.settled ? e.value : undefined;
-    },
-  };
-}
-
-/**
  * Full merged session transcript, cached per (session, transcribedAt).
  * `transcribedAt` comes from the slim marker on /api/state; passing it means a
  * re-transcribe (new stamp) invalidates the cache while an idle poll reuses
  * the cached promise and fires no request. Resolves null when there's no
- * merged transcript. `.fetch(session, transcribedAt)` / `.peek(...)` — peek
- * returns the resolved value if the fetch already settled, else undefined.
+ * merged transcript.
+ *
+ * Held per SESSION: a re-transcribe must refresh the merged pane in place rather
+ * than blanking the transcript the operator is reading (#266). Retries a failed
+ * body on a later poll tick — the pane has a placeholder to sit behind and the
+ * next `transcribed_at` is a fresh key anyway.
  */
-export const sessionTranscript = _resource(
+export const sessionTranscript = createResource(
   (/** @type {string} */ session, /** @type {string} */ transcribedAt) => `${session}@${transcribedAt}`,
   (session) =>
     /** @type {Promise<import('./types.js').MergedTranscript | null>} */ (
       fetch(`/api/sessions/${encodeURIComponent(session)}/transcript`, { cache: "no-store" }).then(_unwrap)
     ),
+  { holdKeyOf: (session) => session },
 );
 
 /**
@@ -193,20 +96,27 @@ export const sessionTranscript = _resource(
  * `summarizedAt` comes from the slim marker on /api/state; a re-generate (new
  * stamp) invalidates, an idle poll reuses the cached promise. Resolves null
  * when the session has no persisted summary.
+ *
+ * Held per SESSION so an EXTERNAL re-summarize (the end-of-meeting pipeline, a
+ * second tab) refreshes the output pane in place instead of dropping it to the
+ * "No summary yet" empty state for a whole round trip.
  */
-export const sessionSummary = _resource(
+export const sessionSummary = createResource(
   (/** @type {string} */ session, /** @type {string} */ summarizedAt) => `${session}@${summarizedAt}`,
   (session) =>
     /** @type {Promise<import('./types.js').PersistedSummary | null>} */ (
       fetch(`/api/sessions/${encodeURIComponent(session)}/summary`, { cache: "no-store" }).then(_unwrap)
     ),
+  { holdKeyOf: (session) => session },
 );
 
 /**
  * Full per-WAV transcript, cached per (session, name, source, transcribedAt).
- * Resolves null when the WAV has no cached transcript.
+ * Resolves null when the WAV has no cached transcript. Read through `fetch` from
+ * a row's expand handler rather than a per-tick `resolve`, so it needs neither a
+ * hold nor a failure policy.
  */
-export const wavTranscript = _resource(
+export const wavTranscript = createResource(
   (
     /** @type {string} */ session,
     /** @type {string} */ name,
@@ -234,97 +144,30 @@ export const wavTranscript = _resource(
 /**
  * The full per-session WAV listing (originals + their stripped regions),
  * cached per (session, filesSig). `filesSig` comes from the slim `files_sig`
- * field on /api/state. Callers MUST skip the call when files_sig is "" (no
- * folder on disk yet → the endpoint would 404).
+ * field on /api/state.
+ *
+ * An empty `filesSig` is a KNOWN empty listing rather than a fetch: there is no
+ * folder on disk yet (or every WAV was just deleted) and the endpoint would 404.
+ * Held per SESSION because `files_sig` flips once per TRACK during a batch
+ * transcribe — without the hold both multi-track views blanked their WAV list on
+ * every per-WAV completion (#266). The held array is the resource's own value BY
+ * REFERENCE (the same array a view assigns to `currentFiles`), so callers must
+ * treat the listing as read-only — mutating it in place would corrupt every
+ * holder of it. Read it through `next/session-files.js`, which owns the
+ * four-state derivation both views need.
  */
-export const sessionFiles = _resource(
+export const sessionFiles = createResource(
   (/** @type {string} */ session, /** @type {string} */ filesSig) => `${session}@${filesSig}`,
   (session) =>
     fetch(`/api/sessions/${encodeURIComponent(session)}/files`, { cache: "no-store" })
       .then(_unwrap)
       .then((r) => /** @type {import('./types.js').SessionFiles} */ (r).files || []),
+  {
+    holdKeyOf: (session) => session,
+    knownValue: (session, filesSig) =>
+      (!session || !filesSig ? /** @type {import('./types.js').WavFile[]} */ ([]) : undefined),
+  },
 );
-
-/**
- * Last resolved WAV listing per session — a `createLastGoodHold` (see its doc
- * for the eviction rule and the #266 blink it exists to prevent). `files_sig`
- * flips once per TRACK during a batch transcribe, so without the hold both
- * multi-track views blanked their WAV list on every per-WAV completion.
- * The stored array is the resource's own value BY REFERENCE (the same array the
- * view assigns to `currentFiles`), so callers must treat the listing as
- * read-only — mutating it in place would corrupt every holder of it.
- * @type {LastGoodHold<import('./types.js').WavFile[]>} */
-const _lastGoodFiles = createLastGoodHold();
-
-/**
- * Keys (`session@files_sig`) whose last /files fetch REJECTED — the failure
- * memory that paces retries at the poll cadence (mirrors the `failedWave` /
- * `failedCutMeta` discipline in recordings.js). Without it, a rejection
- * evicted the cache key (api.js `_resource`) and the settle callback's
- * re-render re-entered here synchronously with `pending` already cleared, so
- * a persistently-failing endpoint was refetched in a tight unpaced loop at
- * HTTP-response rate (plus a full re-render per iteration). A remembered key
- * skips exactly one call — the caller invokes this once per poll tick — so
- * the retry fires on a LATER tick; a sig change is a different key and
- * fetches immediately. Capped like the sibling caches.
- * @type {Set<string>} */
-const _failedFiles = new Set();
-
-/**
- * Resolve a focused session's WAV listing for a per-tick render, the shape both
- * the Recordings and Transcript views need: returns the cached array when it's
- * in hand, `[]` when there's nothing to fetch (empty `filesSig` → no folder /
- * no WAVs yet), the session's last-good listing while a NEWER sig's fetch is in
- * flight (stale-while-revalidate via `_lastGoodFiles`), or `null`
- * only on a genuine COLD load (a session with no last-good listing yet → the
- * caller shows a loading placeholder). On a cache miss it fires the fetch ONCE
- * (deduped via the caller's `pending` set across the ticks before it lands) and
- * calls `onLand` when it SUCCEEDS so the view can drop its render gates and
- * reconcile the fresh list in place. A rejected fetch never calls `onLand`
- * (nothing changed to re-render — the stale hold stays up) and is remembered
- * per key (`_failedFiles`), so the retry is paced by the poll instead of the
- * failure's own re-render refiring it synchronously.
- * @param {string} session
- * @param {string} filesSig
- * @param {Set<string>} pending - per-view in-flight (session@filesSig) keys
- * @param {() => void} onLand - run after a SUCCESSFUL fetch lands
- * @returns {import('./types.js').WavFile[] | null}
- */
-export function loadSessionFiles(session, filesSig, pending, onLand) {
-  if (!session) return [];
-  if (!filesSig) {
-    // No files on disk yet, or every WAV was just deleted (files_sig == ""):
-    // this session's last-good IS now empty. Record that, so a later non-empty
-    // flip (a new tap records in) shows the empty state through the stale path
-    // rather than resurrecting the pre-deletion rows as ghosts.
-    _lastGoodFiles.hold(session, []);
-    return [];
-  }
-  const cached = sessionFiles.peek(session, filesSig);
-  if (cached !== undefined) {
-    _lastGoodFiles.hold(session, cached);
-    return cached;
-  }
-  const k = `${session}@${filesSig}`;
-  // `_failedFiles.delete(k)` is check-AND-consume: a key whose last fetch
-  // failed skips this one call, and the next call — the next poll tick —
-  // retries (see `_failedFiles`' doc for why the skip is load-bearing).
-  if (!pending.has(k) && !_failedFiles.delete(k)) {
-    pending.add(k);
-    sessionFiles.fetch(session, filesSig)
-      .then(onLand, () => {
-        // Transient failure: remember it (paces the retry to a later poll
-        // tick) and do NOT call onLand — nothing changed to re-render, and
-        // the failure's own re-render refiring the fetch was the retry storm.
-        _failedFiles.add(k);
-        _capCache(_failedFiles);
-      })
-      .finally(() => { pending.delete(k); });
-  }
-  // Stale-while-revalidate: hold this session's last-good listing during the
-  // refetch; `null` only on a cold load (a session that never resolved yet).
-  return _lastGoodFiles.get(session);
-}
 
 // ---- Waveform peaks fetch + client cache ---------------------------------
 //
@@ -341,11 +184,15 @@ export const WAVE_PEAK_BINS = 800;
 
 /**
  * Server-computed waveform peaks for one WAV, cached per (session, name,
- * source, sig) — sig is the WAV's byte size. Resolves the fixed-size
- * downsample; rejects (and evicts the key, so a later call retries) when the
- * WAV can't be read as peaks.
+ * source, sig) — sig is the WAV's byte size. Resolves the fixed-size downsample.
+ *
+ * `remember-error`, and NO hold: an unreadable WAV has no peaks, so re-asking
+ * every poll tick for as long as the operator sits on the stage answers nothing —
+ * the canvas shows the reason instead, until the byte size (a new key) changes.
+ * Peaks belong to one (WAV, size); an older version of them would be the wrong
+ * picture, not a stale one.
  */
-export const wavePeaks = _resource(
+export const wavePeaks = createResource(
   (
     /** @type {string} */ session,
     /** @type {string} */ name,
@@ -360,20 +207,26 @@ export const wavePeaks = _resource(
       fetch(url, { cache: "no-store" }).then(_unwrap)
     );
   },
+  { onFailure: "remember-error" },
 );
 
 /**
  * The committed strip-silence cut for one ORIGINAL wav, cached per (session,
  * name, sig) — callers pass the session's stripped_at stamp as sig so a
  * re-strip busts the key. Resolves null when the wav has no committed cut.
+ *
+ * `remember-error` for the same reason as the peaks beside it (the sidecar either
+ * parses or it doesn't), and no hold: a cut belongs to one `stripped_at`, so a
+ * previous strip's spans would overlay the wrong picture.
  */
-export const wavStripMeta = _resource(
+export const wavStripMeta = createResource(
   (/** @type {string} */ session, /** @type {string} */ name, /** @type {string} */ sig) =>
     `${session}/${name}@${sig}`,
   (session, name) =>
     /** @type {Promise<import('./types.js').WavStripMeta | null>} */ (
       getJson(`/api/wav/${encodeURIComponent(session)}/${encodeURIComponent(name)}/strip-meta`)
     ),
+  { onFailure: "remember-error" },
 );
 
 /**

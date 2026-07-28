@@ -2952,7 +2952,7 @@ async def test_next_files_sig_flip_does_not_blank_wav_list(running_recorder: Run
     flips the session's files_sig. The lazy files listing then refetches under
     the new sig — but the Recordings view must keep showing the LAST-GOOD listing
     while that refetch is in flight, not blank the whole WAV list to a "loading…"
-    placeholder. Pre-fix, loadSessionFiles returned null on every sig change, so
+    placeholder. Pre-fix, the listing resolved to null on every sig change, so
     each per-WAV completion during a batch transcribe wiped + rebuilt every row
     (and the header/waveform) — the "multi-track pages keep blinking while
     transcribing" report."""
@@ -3028,6 +3028,138 @@ async def test_next_files_sig_flip_does_not_blank_wav_list(running_recorder: Run
                 "blink on every per-WAV completion during a batch transcribe. Hold "
                 "the last-good listing while the refetch is in flight."
             )
+            await context.close()
+        finally:
+            await browser.close()
+
+
+async def test_next_failed_files_fetch_still_reconciles_after_a_stage_switch(
+    running_recorder: RunningRecorder,
+):
+    """Regression (#222 review): a REJECTED /files fetch must not leave a WAV list
+    pinned on rows that predate it.
+
+    The Recordings list and the Transcript picker watch the same lazy listing, and
+    each watcher keeps its OWN failure memory and paces its own retry. So the
+    watcher whose retry succeeds can be a different one from the watcher that put
+    the held rows on screen, and the latter never receives that land. Its
+    `renderList` sig contains the listing's stamp, which has NOT changed since it
+    rendered the held rows, so without a term distinguishing held rows from that
+    stamp's own rows the swap carries no signature change and is skipped: the list
+    keeps showing the pre-flip listing indefinitely.
+
+    Two things about the staging are load-bearing rather than padding:
+
+    * A rejected fetch retries on a later *render*, and an idle /api/state poll
+      304s WITHOUT re-rendering (ADR-0013) — so after the failure nothing
+      re-resolves on its own. Each session-label PUT is one render, which is one
+      step of the paced retry; the loop nudges until the retry actually fires.
+      A label is the smallest state change that touches no term in either WAV
+      list's signature, so the retry lands under the SAME stamp the held rows were
+      rendered under, which is the whole point of the case.
+    * The stage switch happens while the failed fetch is still in flight, so the
+      Transcript watcher JOINS that wait and records the failure too — which is why
+      it needs two renders (consume the skip, then fire), not one."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid = "2025-02-09T09-00-00Z"
+    session_dir, _names = _seed_multi_wav_session(rec, sid, n=2)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+
+            # Fail exactly ONE /files request, and only once armed — the cold load
+            # that paints the initial rows must succeed. Both Events are set INSIDE
+            # the handler so the waits gate on the requests actually happening rather
+            # than on a fixed budget: with the poll backing off to 2 s, a duration
+            # guess fails on a loaded runner in a way indistinguishable from a real
+            # regression.
+            state = {"armed": False, "failed": 0}
+            failed_once = asyncio.Event()
+            retried = asyncio.Event()
+
+            async def files_route(route):
+                if state["armed"] and state["failed"] == 0:
+                    state["failed"] += 1
+                    failed_once.set()
+                    await route.abort("failed")
+                    return
+                if state["failed"]:
+                    retried.set()
+                await route.continue_()
+
+            await page.route("**/api/sessions/*/files", files_route)
+            await page.goto(base + "/", wait_until="domcontentloaded")
+
+            await page.wait_for_function(
+                """(sid) => {
+                    const s = document.querySelector('[data-slot="sessionPick"]');
+                    return !!s && Array.from(s.options).some((o) => o.value === sid);
+                }""",
+                arg=sid,
+                timeout=10000,
+            )
+            await _focus_session_view(page, sid, "recordings")
+            await page.wait_for_function(
+                """() => document.querySelectorAll('#viewRoot .wavrow[data-wav]').length >= 2""",
+                timeout=15000,
+            )
+
+            # Arm the failure, then flip files_sig by adding a THIRD track, the way a
+            # new tap recording in does. Recordings holds its two rows and shows no
+            # error (a failure is silent under retry-next-poll).
+            state["armed"] = True
+            third = f"{sid}_spk9_id9_0000aa99.wav"
+            synth_speech_like_wav(session_dir / third, seconds=0.4, freq_hz=300.0)
+            await asyncio.wait_for(failed_once.wait(), timeout=15.0)
+
+            # Hand the listing to the OTHER watcher, then feed renders until its
+            # paced retry fires and lands.
+            await page.evaluate("() => window.gotoView('transcript')")
+            async with httpx.AsyncClient(base_url=base, timeout=10.0) as c:
+                for i in range(20):
+                    if retried.is_set():
+                        break
+                    r = await c.put(f"/api/session-meta/{sid}", json={"label": f"nudge{i}"})
+                    assert r.status_code == 200, r.text
+                    await page.wait_for_timeout(250)
+            assert retried.is_set(), "the paced retry never fired — nothing was staged"
+            # The retry must have LANDED, not merely been issued, before switching
+            # back — gated on the picker showing the third track.
+            await page.wait_for_function(
+                """(name) => !!document.querySelector(`#viewRoot [data-wav="${name}"]`)""",
+                arg=third,
+                timeout=15000,
+            )
+
+            # Back to Recordings, whose watcher missed that land. The third row must
+            # be there: the swap from held rows to the stamp's own rows has to cross
+            # the render gate on its own. `wait_until` rather than
+            # `wait_for_function` so a failure reports the rows actually on screen.
+            await page.evaluate("() => window.gotoView('recordings')")
+            got_third = await wait_until(
+                lambda: page.evaluate(
+                    """(name) => !!document.querySelector(`#viewRoot .wavrow[data-wav="${name}"]`)""",
+                    third,
+                ),
+                timeout=15.0,
+                interval=0.25,
+            )
+            rows = await page.evaluate(
+                """() => Array.from(document.querySelectorAll('#viewRoot .wavrow[data-wav]'))
+                        .map((r) => r.dataset.wav)"""
+            )
+            assert got_third, (
+                "the WAV list is stuck on rows that predate a failed /files fetch: "
+                f"{rows}. A watcher that missed the land needs the listing's "
+                "provisional-ness in its render-gate signature (session-files.js' "
+                "`sigTerm`), or held rows and the stamp's own rows are "
+                "indistinguishable to the gate."
+            )
+            assert len(rows) >= 3, f"expected all three tracks, got {rows}"
             await context.close()
         finally:
             await browser.close()

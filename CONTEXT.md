@@ -955,6 +955,68 @@ People names are owned by `people.js`, whose editor is the only one.
 Say "this needs a field saver" / "the catch-up sweep dropped it", and add
 a new editor by writing an owner, not another copy of the machine (#355).
 
+## Lazy resource · resolve · failure policy · last-good hold
+
+A **lazy resource** is one body the dashboard fetches on demand instead of
+carrying on the ~0.5 s `/api/state` poll, cached under a **signature key**
+that changes exactly when the body does: the merged transcript keyed on
+`(session, transcribed_at)`, the persisted summary on `(session,
+summarized_at)`, the per-session WAV listing on `(session, files_sig)`,
+waveform peaks on `(session, wav, source, byte size)`. A re-transcribe /
+re-strip / new WAV flips the signature and busts the key; an idle poll
+reuses the cached promise and fires no request. The mechanism is
+`web/js/lazy-resource.js`; `web/js/api.js` declares each resource's URL,
+key and policy.
+_Avoid_: "the transcript cache", "the files fetch" (they are the same
+thing with different payloads, and treating them as different is what
+produced five copies of the machinery — #222).
+
+A consumer that wants one **watches** it — `resource.watch(onLand)`, once,
+at build time — and then **resolves** through that watcher every render
+tick: `body.resolve([...key args])`. The resolve owns everything that used
+to be re-derived per call site: fetch the key ONCE (deduped across the
+ticks before it lands, and across *watchers* — two views waiting on the
+same key share the fetch and each get their own land), apply the failure
+policy, and answer with `{ value, loading, stale, error }`. `loading` is
+true only on a genuine **cold load**, which is the only state a caller may
+paint a placeholder for; **`stale`** says the value is the last-good body
+rather than this key's own, and a render gate keyed on the signature must
+carry it as a term (held rows and that signature's own rows are otherwise
+the same sig, so the swap between them would be skipped) — spelled once by
+whoever owns the resolve, never per view. `onLand` fires
+when there is something new to show and is where the view drops its render
+gates (`markRegionStale` / `markListStale`) and repaints — it is the prompt
+repaint, not the thing correctness rests on. One resource has many
+watchers; each keeps its OWN failure memory, so the watcher that pays for a
+skipped retry is the one that fires it, and a view REBUILD starts from
+nothing remembered (which is what lets a transient boot-time failure under
+`remember-error` be retried at all). A watcher
+belongs to one consumer for its whole life, which is what makes the
+identity-dedupe of waiting callbacks something the seam guarantees rather
+than something each call site has to remember.
+_Avoid_: "the pending set", "the rerender-pending map" — that bookkeeping
+is the resource's, not a view's. Don't say "pass a callback to resolve":
+the callback belongs to the watcher.
+
+A resource's **failure policy** is declared once, at the resource, and is
+a decision about the body rather than about the code around it:
+`retry-next-poll` (a rejection is silent and the key retries on a LATER
+tick — a rejection evicts the cache key, so the *pacing* is the point:
+without it the failure's own repaint re-resolves and refires the fetch at
+HTTP-response rate) or `remember-error` (report the rejection and stop
+asking until the signature changes — an unreadable WAV has no peaks, so
+re-asking every tick answers nothing and the operator wants the reason).
+
+The **last-good hold** (`holdKeyOf`) is stale-while-revalidate memory,
+keyed by what the body BELONGS to (the session) rather than which version
+it is. It is required when the signature is a session-level aggregate that
+flips when any one sibling changes — `files_sig` flips once per track
+during a batch transcribe — because otherwise every flip reports a cold
+load and the region blanks to "loading…" once per sibling (#266). Omit it
+when a stale body would be *wrong* rather than merely old.
+_Avoid_: "the stale cache" (it is not a cache — it holds exactly one value
+per session and exists only to keep a region from blanking).
+
 ## Player · seek target · open WAV · playhead
 
 The dashboard's audio playback. Playback belongs to the operator's
