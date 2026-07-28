@@ -31,17 +31,35 @@ request. `test_no_two_routes_are_match_ambiguous` pins that premise.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import itertools
 import pkgutil
 import re
+from pathlib import Path
 
 import pytest
 from fastapi.routing import _IncludedRouter, iter_route_contexts
 from starlette.routing import Mount, WebSocketRoute
 
+from tapscribe import app as tapscribe_app
 from tapscribe import routes as routes_pkg
 from tapscribe.app import app
+
+#: Decorators that register a route. `middleware` is deliberately absent: the
+#: security-header middleware IS app.py's business.
+_ROUTE_DECORATORS = {
+    "get",
+    "post",
+    "put",
+    "delete",
+    "patch",
+    "head",
+    "options",
+    "websocket",
+    "api_route",
+    "route",
+}
 
 # FastAPI's own docs endpoints, not part of TapScribe's surface.
 _FASTAPI_DOCS = {"openapi", "swagger_ui_html", "swagger_ui_redirect", "redoc_html"}
@@ -148,6 +166,70 @@ def _route_rows() -> list[tuple[str, str, str]]:
             continue
         rows.append((_kind(route), ctx.path or route.path, name))
     return rows
+
+
+def test_app_module_registers_no_routes_itself():
+    """`app.py` is assembly: app object, middleware, error registry, includes.
+
+    Enforced structurally rather than by convention, because a single
+    `@app.get(...)` in app.py is how the 2298-line module grew in the first
+    place. The route it registers would be invisible to the map test (which
+    walks the `routes` package), which is exactly the drift the maps exist to
+    prevent.
+    """
+    source = (Path(tapscribe_app.__file__)).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        for dec in node.decorator_list:
+            call = dec.func if isinstance(dec, ast.Call) else dec
+            if not isinstance(call, ast.Attribute) or not isinstance(call.value, ast.Name):
+                continue
+            if call.value.id == "app" and call.attr in _ROUTE_DECORATORS:
+                offenders.append(f"@app.{call.attr} on {node.name}")
+    assert offenders == [], (
+        f"app.py registers routes directly (move them into tapscribe/routes/): {offenders}"
+    )
+
+
+def test_no_router_imports_another_router():
+    """A router imports the shared seams, never a sibling router.
+
+    That is what makes each module readable on its own, and it is the property
+    that keeps the grouping decision honest: if two resource groups need the
+    same helper, the answer is either to group them together (what
+    `routes/strip.py` did) or to put the helper in a support module, never to
+    reach across.
+    """
+    package_dir = Path(routes_pkg.__path__[0])
+    violations = []
+    for path in sorted(package_dir.glob("*.py")):
+        module_name = path.stem
+        if module_name in _SUPPORT_MODULES or module_name == "__init__":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+                target = node.module.split(".")[0]
+                if target not in _SUPPORT_MODULES:
+                    violations.append(f"{module_name} imports {target}")
+    assert violations == [], f"router-to-router imports: {violations}"
+
+
+def test_routes_package_index_names_every_module():
+    """`routes/__init__.py`'s docstring is the index a reader lands on, so every
+    module in the package has to appear in it. An unlisted module is a resource
+    group nobody finds without grepping, which is the state #229 was filed
+    about."""
+    doc = routes_pkg.__doc__ or ""
+    missing = [
+        info.name
+        for info in pkgutil.iter_modules(routes_pkg.__path__)
+        if not re.search(rf"^  {re.escape(info.name)} ", doc, re.MULTILINE)
+    ]
+    assert missing == [], f"modules missing from the routes/ index docstring: {missing}"
 
 
 def test_routers_are_included_without_a_prefix():
