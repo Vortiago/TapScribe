@@ -2,6 +2,7 @@
 "where does X get served".
 
   assets           the page shells, top-level stylesheets, /web/* mounts
+  state            GET /api/state, the dashboard's poll (over state_view)
 
 Support modules (never a route between them, so a router imports only these):
 
@@ -25,8 +26,12 @@ from fastapi import APIRouter
 
 from .assets import mount_static
 from .assets import router as assets_router
+from .state import router as state_router
 
 #: Every router, in include order. Grows one entry per resource group.
-ALL_ROUTERS: tuple[APIRouter, ...] = (assets_router,)
+ALL_ROUTERS: tuple[APIRouter, ...] = (
+    state_router,
+    assets_router,
+)
 
 __all__ = ["ALL_ROUTERS", "mount_static"]

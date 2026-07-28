@@ -25,7 +25,6 @@ The big-picture route map:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import shutil
@@ -36,7 +35,6 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from functools import partial
-from itertools import islice
 from typing import Any
 from uuid import uuid4
 
@@ -48,7 +46,6 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
@@ -59,7 +56,6 @@ from fastapi.responses import (
 )
 
 from . import auth, bridges_catalog, config
-from . import hallucinations as hallucinations_mod
 from .audio import compute_peaks
 from .batch_pipeline import PipelineRequest, start_pipeline
 from .batch_strip import StripSessionRequest, strip_session
@@ -81,9 +77,9 @@ from .live_control import (
     apply_live,
     plan_live,
 )
-from .name_resolution import attach_people, attach_people_mutation, attach_people_view
+from .name_resolution import attach_people
 from .people import PeopleRegistry
-from .recorder import Recorder, SessionBusy
+from .recorder import Recorder, SessionBusy, open_wav_names
 from .routes import ALL_ROUTERS, mount_static
 from .routes.body import (
     json_body,
@@ -131,7 +127,6 @@ from .tap_fan_out import TapFanOut
 from .text import (
     CONFIG_KEYS,
     MAX_CONFIG_TEXT_LEN,
-    read_config,
     read_languages,
     read_summarizer_config,
     summarizer_default_public,
@@ -139,7 +134,7 @@ from .text import (
     write_languages,
     write_summarizer_config,
 )
-from .transcribers import current_idle_ttl_s, evict_idle_now, run_on_model_thread
+from .transcribers import evict_idle_now, run_on_model_thread
 from .transcribers.catalog import (
     REGISTRY,
     SPECIALIST_MODELS,
@@ -147,36 +142,6 @@ from .transcribers.catalog import (
     language_display_name,
 )
 from .wav_cache import set_primary_transcript
-
-
-def _compute_inputs_support() -> dict[str, bool]:
-    """Derive per-context support flags for the dashboard editors.
-
-    The dashboard hides each editor when no installed model in that
-    context declares the corresponding input. We compute this from the
-    registry (`ModelEntry.inputs`) so adding a future Voxtral prompt
-    field (or removing one) automatically updates the UI gating with
-    no manual flag-flipping.
-
-    `live_hotwords` is intentionally not exposed: WhisperLiveKit's CLI
-    has no --hotwords flag (see `build_live_cmd`), so even though
-    Whisper-family entries declare hotwords in `WHISPER_INPUTS`, the
-    live channel can't currently consume them.
-    """
-
-    def _any_installed_has(context: str, input_name: str) -> bool:
-        for entry in REGISTRY.for_context(context, only_installed=True):  # type: ignore[arg-type]
-            for inp in entry.inputs:
-                if inp.name == input_name:
-                    return True
-        return False
-
-    return {
-        "live_prompt": _any_installed_has("live", "initial_prompt"),
-        "batch_prompt": _any_installed_has("batch", "initial_prompt"),
-        "batch_hotwords": _any_installed_has("batch", "hotwords"),
-    }
-
 
 # Map of config key (URL segment) → writer. Keeps the PUT handler one
 # branch deep. The plain text-file keys ride text.CONFIG_KEYS/write_config;
@@ -440,25 +405,6 @@ async def list_sessions_simple(recorder: Recorder = Depends(get_recorder)):
     )
 
 
-def open_wav_names(active_streams, *, session: str | None = None) -> set[str]:
-    """The WAVs a tap is writing RIGHT NOW — `s.record and s.filename` is the
-    definition of "open", named once so the three callers can't drift.
-
-    `session=None` is the whole-recorder set the `files_sig` maskers want (a
-    growing WAV must not flip the digest ~2 Hz — `sessions._files_signature`);
-    an over-broad match there only costs an extra refetch. Pass `session` where
-    the answer is USER-VISIBLE — the lazy listing's `open` flag disables the
-    dashboard's play affordance (ADR-0017), and two sessions can legitimately
-    hold the same filename, so an unscoped match would mark an idle session's
-    WAV unplayable.
-    """
-    return {
-        s.filename
-        for s in active_streams
-        if s.record and s.filename and (session is None or s.session == session)
-    }
-
-
 def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
     """Rotate to a fresh session, THEN prune now-empty sessions. Order matters:
     rotating first makes the previous (now-abandoned, empty) session eligible
@@ -694,171 +640,6 @@ async def api_tap_pipeline_poll(session: str, recorder: Recorder = Depends(get_r
         # exists — that IS the done answer the polling Bridge is waiting for.
         return {"ok": True, "session": session, "state": "done", "summary": summary}
     return {"ok": True, "session": session, "state": "idle"}
-
-
-# ---------------------------------------------------------------------------
-# /api/state — the dashboard's once-per-second polling endpoint
-# ---------------------------------------------------------------------------
-
-# Round each open tap's raw bytes_received (bumped per 20 ms audio frame) to the
-# nearest bucket before it lands in /api/state, so a quiet-but-open tap's
-# sub-bucket byte drift stops busting the response ETag every poll (#217). One
-# constant so the round-to-nearest stays centred: half a bucket is _TAP_BYTES_BUCKET // 2.
-_TAP_BYTES_BUCKET = 64 * 1024
-
-
-def _build_state_blob(
-    current_session: str,
-    active: list[dict[str, Any]],
-    sessions_list: list[dict[str, Any]],
-    registry: PeopleRegistry,
-    occs: list[dict[str, Any]],
-    live_identities: set[str],
-    live_feed: list[dict[str, Any]],
-    live_info: dict[str, Any],
-    live_log: list[str],
-    live_supports_native_vad: bool,
-    recording_enabled: bool,
-    backend: str,
-    available_backends: list[str],
-) -> tuple[bytes, str]:
-    """Config reads, pure people joins, payload assembly, and ETag serialization.
-
-    `sessions_list` is pre-gathered; the registry is pre-synced (mutation ran on
-    the event loop). All recorder-owned inputs are snapshotted. Returns
-    (body_bytes, etag_string)."""
-    prompt = read_config("prompt")
-    live_prompt = read_config("live-prompt")
-    live_model_default = read_config("live-model")
-    batch_model_default = read_config("batch-model")
-    batch_model_effective = resolve_batch_model(warn=False)
-    languages_default = list(read_languages())
-    hotwords = read_config("hotwords")
-    summarizer_default = summarizer_default_public(read_summarizer_config())
-    halluc_rules = hallucinations_mod.parse_rules()
-    hallucinations_content = read_config("hallucinations")
-    inputs_support = _compute_inputs_support()
-
-    people = attach_people_view(sessions_list, registry, occs, live_identities)
-
-    override_counts: dict[str, int] = {"prompt": 0, "hotwords": 0, "summarizer": 0}
-    for s in sessions_list:
-        m = s.get("session_meta") or {}
-        if m.get("prompt"):
-            override_counts["prompt"] += 1
-        if m.get("hotwords"):
-            override_counts["hotwords"] += 1
-        if m.get("summary_source") or m.get("summary_prompt"):
-            override_counts["summarizer"] += 1
-
-    payload = {
-        "current_session": current_session,
-        "active": active,
-        "sessions": sessions_list,
-        "people": people,
-        "default_override_counts": override_counts,
-        "live_feed": live_feed,
-        "live_info": live_info,
-        "live_log": live_log,
-        "live_supports_native_vad": live_supports_native_vad,
-        "backend": backend,
-        "available_backends": available_backends,
-        "recording_enabled": recording_enabled,
-        "prompt": {
-            "path": str(config.PROMPT_FILE),
-            "content": prompt,
-            "length": len(prompt),
-        },
-        "live_prompt": {
-            "path": str(config.LIVE_PROMPT_FILE),
-            "content": live_prompt,
-            "length": len(live_prompt),
-        },
-        "hotwords": {
-            "path": str(config.HOTWORDS_FILE),
-            "content": hotwords,
-            "length": len(hotwords),
-        },
-        "inputs_support": inputs_support,
-        "live_model_default": live_model_default,
-        "batch_model_default": batch_model_default,
-        "batch_model_effective": batch_model_effective,
-        "languages": {
-            "path": str(config.LANGUAGES_FILE),
-            "default": languages_default,
-        },
-        "summarizer_default": summarizer_default,
-        # No "rules" list here: the config card renders the raw content
-        # textarea and reads only content + count — shipping every raw rule
-        # string per poll tick was dead payload weight (#303 follow-up).
-        "hallucinations": {
-            "path": str(config.HALLUCINATIONS_FILE),
-            "content": hallucinations_content,
-            "count": len(halluc_rules),
-        },
-        "idle_ttl_s": current_idle_ttl_s(),
-    }
-    body = json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode("utf-8")
-    etag = 'W/"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'
-    return body, etag
-
-
-@app.get("/api/state")
-async def api_state(req: Request, recorder: Recorder = Depends(get_recorder)):
-    active_streams = await recorder.streams.snapshot()
-    live_identities = {s.identity for s in active_streams}
-    jobs_snapshot = {k: asdict(v) for k, v in recorder.jobs.snapshot().items()}
-    open_wavs = open_wav_names(active_streams)
-
-    # Active rows with tap_settings overlay (on loop, unchanged)
-    active = []
-    for s in active_streams:
-        row = asdict(s)
-        pref = recorder.tap_settings.get(s.identity)
-        row["record"] = pref.record
-        row["live"] = pref.live
-        row["level"] = round(row["level"], 2)
-        row["bytes_received"] = (
-            (row["bytes_received"] + _TAP_BYTES_BUCKET // 2) // _TAP_BYTES_BUCKET * _TAP_BYTES_BUCKET
-        )
-        active.append(row)
-
-    # Thread hop 1: gather_sessions (disk walk, off the loop)
-    sessions_list = await asyncio.to_thread(
-        lambda: gather_sessions(
-            current_session=recorder.session_start,
-            jobs=jobs_snapshot,
-            open_wavs=open_wavs,
-        )
-    )
-
-    # Mutation: load → sync → save (on event loop, serialised with /api/people)
-    registry, occs = attach_people_mutation(sessions_list, live_identities=live_identities)
-
-    # Thread hop 2: config reads + people joins + payload build + serialize + ETag
-    body, etag = await asyncio.to_thread(
-        _build_state_blob,
-        recorder.session_start,
-        active,
-        sessions_list,
-        registry,
-        occs,
-        live_identities,
-        recorder.transcripts.snapshot(),
-        dict(recorder.live.info),
-        # Last 30 lines without copying the whole 200-entry deque on every
-        # poll tick — islice walks straight to the tail.
-        list(islice(recorder.live.log, max(0, len(recorder.live.log) - 30), None)),
-        bool(getattr(recorder.live, "supports_native_vad", False)),
-        recorder.recording_enabled,
-        recorder.backend,
-        sorted(available_backend_strs()),
-    )
-
-    headers = {"ETag": etag, "Cache-Control": "no-cache"}
-    if req.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers=headers)
-    return Response(content=body, media_type="application/json", headers=headers)
 
 
 # ---------------------------------------------------------------------------
