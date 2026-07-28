@@ -1114,6 +1114,29 @@ naturally invalidates every per-WAV transcript on its next
 - `cached_transcribe(wav, transcriber, ...)` is unchanged in signature;
   it just no longer evicts other entries.
 
+## Route module · State view
+
+A **route module** is one file under `tapscribe/routes/` holding the routes of
+one resource group, with a complete route map in its docstring. Modules are
+grouped by domain concern rather than URL prefix, so `strip` owns four routes
+spanning two prefixes and `tap` keeps each auth twin beside its sibling
+(ADR-0018). `routes/__init__.py` is the index: read it to find where something is
+served. `app.py` holds no routes; it is app construction, middleware, the
+domain-error registry and the includes.
+
+Four support modules are the only thing a route module may import from a sibling:
+`deps` (the shared `get_recorder` dependency), `body` (read a JSON body, parse one
+field of it), `errors` (domain error to HTTP status) and `guards` (the
+destructive-route preflight: refuse the current session, a busy session, a session
+with a live tap).
+
+The **State view** (`tapscribe/state_view.py`) is the read model behind
+`GET /api/state`: given snapshots of everything recorder-owned it produces the
+poll payload and its ETag. Distinct from the `sessions` read model below, which
+supplies the session listing the view joins in. FastAPI-free, so the projection,
+the per-session default-override counts and the open-tap byte bucketing are
+testable without a route.
+
 ## Session modules — paths · listing · maintenance
 
 Recording-session bookkeeping is split across three modules by concern, so the

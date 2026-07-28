@@ -5,6 +5,19 @@
 - `.claude/hooks/` — `session-start.sh` installs deps, `stop.sh` runs ruff.
   Convention changes go there or in `pyproject.toml`, not here.
 - `bridges/README.md` — Bridge → `/tap` wire contract.
+- `tapscribe/routes/` — the HTTP surface, one route module per resource
+  group; its `__init__.py` docstring is the index ("where does X get
+  served"). A new route goes in the module whose DOMAIN CONCERN it
+  belongs to (not its URL prefix — see `strip.py`, which owns four
+  routes across `/api/sessions/*` and `/api/wav/*` so the knob parser
+  stays single-owner) and gets a line in that module's docstring route
+  map. `tests/test_route_surface.py` fails if the map drifts, if
+  `app.py` registers a route itself, if a route module imports a
+  sibling route module (shared helpers live in `deps`/`body`/`errors`/
+  `guards`), or if the registered surface changes without its golden
+  table changing too. ADR-0018 has the why. Note `app.routes` no longer
+  enumerates routes (FastAPI keeps an included router as one lazy
+  entry): walk `fastapi.routing.iter_route_contexts` instead.
 - `frontend/` — TypeScript-via-JSDoc gate for `tapscribe/web/js/`. The
   `stop.sh` hook silently skips when `frontend/node_modules/.bin/tsc` is
   absent (fresh worktree before `session-start.sh` has finished), so if
