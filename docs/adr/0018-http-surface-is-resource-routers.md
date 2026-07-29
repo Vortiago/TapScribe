@@ -21,7 +21,7 @@ the largest module is the real cost (#229).
 
 Every route lives in a **route module** under `tapscribe/routes/`, grouped by
 **domain concern**. `app.py` owns app construction, middleware, the domain-error
-registry and the router includes, and nothing else.
+registry, the router includes and the two asset mounts, and nothing else.
 
 Four decisions inside that, each of which had a plausible alternative:
 
@@ -89,10 +89,16 @@ A route map that can decay is worth nothing, which is what #229 demonstrated.
 - the whole registered surface matches a golden `(kind, path, endpoint)` table,
   which is what made a 2300-line relocation reviewable.
 
-The dashboard's two StaticFiles mounts ride the assets router like any other
-route (an `APIRouter` holds a mount and `include_router` recomputes its path), so
-there is one registration path and the map test needs no exemption for a route
-kind.
+The dashboard's two StaticFiles mounts are the one thing that cannot ride a
+router: `Mount` is not a `Route` subclass, and `include_router` carries it across
+only from FastAPI 0.139, silently dropping it before that (verified on 0.115.14,
+which the declared floor permits, where the dashboard then serves its shell and
+404s every JS module). So `routes/assets.py` DECLARES them in `STATIC_MOUNTS` and
+attaches them to the app, and that declaration is what the route-map test and the
+ownership test both read. The ownership test deliberately does not exempt
+`starlette.*` endpoints wholesale, because a mount's app is defined in starlette
+wherever it was registered, and such an exemption would let `app.mount(...)` back
+into `app.py` unnoticed.
 
 Include order is left free, and a test pins the premise that makes that safe: no
 two registered routes are match-ambiguous (no literal-versus-parameter collision

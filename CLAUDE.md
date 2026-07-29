@@ -19,8 +19,12 @@
   enumerates routes (FastAPI keeps an included router as one lazy
   entry, and the effective path of a websocket or mount lives on the
   context's `starlette_route`): a test that sweeps the surface goes
-  through `tests/route_inventory.py`, which owns that traversal, rather
-  than re-deriving it.
+  through `tests/route_inventory.py`, which owns that traversal (and
+  handles both sides of 0.139) rather than re-deriving it. A StaticFiles
+  mount is the one thing that cannot ride a router: `include_router`
+  carries a `Mount` only from 0.139 and silently drops it before that,
+  so `routes/assets.py` declares mounts in `STATIC_MOUNTS` and attaches
+  them to the app.
 - `frontend/` — TypeScript-via-JSDoc gate for `tapscribe/web/js/`. The
   `stop.sh` hook silently skips when `frontend/node_modules/.bin/tsc` is
   absent (fresh worktree before `session-start.sh` has finished), so if

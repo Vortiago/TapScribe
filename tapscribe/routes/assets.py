@@ -13,16 +13,22 @@ The Stages dashboard ("/next" during its incubation; promoted to "/" once the
 classic dashboard was retired). The shell is next.html; it layers next.css on
 top of dashboard.css, and loads everything else through the /web/... mounts.
 
-The two mounts ride the router like every other route here: an `APIRouter`
-holds a mount fine, and `include_router` recomputes its path, so they need no
-second registration path in `app.py` and no exemption in the route-map test.
+The two mounts are declared in `STATIC_MOUNTS` and attached to the APP by
+`mount_static(app)`, not to the router. A router CAN hold a mount, but
+`include_router` only carries a `Mount` across from FastAPI 0.139: `Mount` is not
+a `Route` subclass, and the older isinstance ladder has no branch for it, so a
+router-held mount is DROPPED with no error. Verified on 0.115.14, which
+`fastapi>=0.110` permits, where the dashboard then serves its HTML shell and 404s
+every JS module and component template. Registering on the app works on every
+version in range, so the mounts keep their own attach step and
+`STATIC_MOUNTS` is what the route-map test reads.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -103,13 +109,24 @@ async def tones_css():
     return _css_response(TONES_CSS_PATH, "tones.css")
 
 
-# Dashboard JS modules and HTML component templates. StaticFiles handles
-# path-traversal protection and content-type detection. A missing directory is
-# skipped: a source checkout always has both, but a trimmed install should not
-# fail to boot over a missing asset dir.
-for _path, _dir, _name in (
+#: (mount path, directory, mount name) for each StaticFiles mount this module
+#: owns. Read by `mount_static` and by the route-map test, so a new mount is
+#: documented in the docstring above like any route.
+STATIC_MOUNTS: tuple[tuple[str, Path, str], ...] = (
     ("/web/js", DASHBOARD_JS_DIR, "web_js"),
     ("/web/components", DASHBOARD_COMPONENTS_DIR, "web_components"),
-):
-    if _dir.is_dir():
-        router.mount(_path, StaticFiles(directory=str(_dir)), name=_name)
+)
+
+
+def mount_static(app: FastAPI) -> None:
+    """Mount the dashboard JS modules and HTML component templates ON THE APP
+    (see the module docstring for why not on the router). StaticFiles handles
+    path-traversal protection and content-type detection.
+
+    A missing directory is skipped: a source checkout always has both, but a
+    trimmed install should not fail to boot over a missing asset dir. The tests
+    that pin the mount rows say so in their failure message, since a missing dir
+    and a lost mount otherwise look identical."""
+    for path, directory, name in STATIC_MOUNTS:
+        if directory.is_dir():
+            app.mount(path, StaticFiles(directory=str(directory)), name=name)

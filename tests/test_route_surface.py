@@ -162,14 +162,22 @@ def test_every_route_is_served_from_the_routes_package():
     which is the drift the maps exist to prevent. Every endpoint's defining
     module answers the question directly.
     """
+    declared_mounts = {(path, name) for _m, path, name in _declared_mounts()}
     strays = []
     for row in registered_routes(app):
         endpoint = getattr(row.route, "endpoint", None)
-        if endpoint is None:  # a mount: its app is the endpoint
-            module = type(getattr(row.route, "app", None)).__module__
-        else:
-            module = getattr(endpoint, "__module__", "")
-        if not module.startswith(f"{routes_pkg.__name__}.") and not module.startswith("starlette."):
+        if endpoint is None:
+            # A mount has no endpoint function, and its app (StaticFiles) is
+            # defined in starlette wherever it was registered, so provenance
+            # can't come from the object. A route module DECLARING it is what
+            # makes it owned: exempting `starlette.*` wholesale would let
+            # `app.mount(...)` back into app.py, which is the one route kind
+            # app.py used to own and the one with no map line to prompt review.
+            if (row.path, row.name) not in declared_mounts:
+                strays.append(f"{row.kind} {row.path} declared by no route module")
+            continue
+        module = getattr(endpoint, "__module__", "")
+        if not module.startswith(f"{routes_pkg.__name__}."):
             strays.append(f"{row.kind} {row.path} from {module}")
     assert strays == [], (
         f"routes not owned by a router module (move them into {routes_pkg.__name__}/): {strays}"
@@ -254,6 +262,15 @@ def test_routers_are_included_without_a_prefix():
     assert moved == [], f"a router is included under a prefix, so these paths are not what it says: {moved}"
 
 
+def _mount_dirs() -> list[Path]:
+    """Every directory a declared mount serves from."""
+    return [
+        directory
+        for module in _router_modules()
+        for _path, directory, _name in getattr(module, "STATIC_MOUNTS", ())
+    ]
+
+
 def _router_modules():
     """Every router module in `tapscribe.routes` (support modules excluded)."""
     mods = []
@@ -268,10 +285,25 @@ def _documented(module) -> set[tuple[str, str]]:
     return {m.groups() for m in _MAP_LINE.finditer(module.__doc__ or "")}
 
 
+def _declared_mounts() -> list[tuple[object, str, str]]:
+    """(module, path, name) for every StaticFiles mount a route module declares.
+
+    A mount cannot ride the router (`include_router` only carries a `Mount`
+    across from FastAPI 0.139, and the floor is lower), so a module owns one by
+    declaring it in `STATIC_MOUNTS` and attaching it to the app. That declaration
+    is what both the route-map test and the owner test read."""
+    return [
+        (module, path, name)
+        for module in _router_modules()
+        for path, _dir, name in getattr(module, "STATIC_MOUNTS", ())
+    ]
+
+
 def _registered(module) -> set[tuple[str, str]]:
-    """What the module serves, mounts included: an `APIRouter` holds a mount, so
-    there is one list to read and no exemption for a route kind."""
-    return {(route_kind(r), r.path) for r in module.router.routes}
+    """What the module serves: its router's routes plus the mounts it declares."""
+    rows = {(route_kind(r), r.path) for r in module.router.routes}
+    rows |= {("MOUNT", path) for _m, path, _name in _declared_mounts() if _m is module}
+    return rows
 
 
 @pytest.mark.parametrize("module", _router_modules(), ids=lambda m: m.__name__.rsplit(".", 1)[-1])
@@ -330,6 +362,11 @@ def test_route_table_is_unchanged():
     without updating this table (deliberate additions update `_GOLDEN` in the
     same commit, which is the review prompt this test exists to force).
     """
+    missing_dirs = [str(d) for _m, _p, _n in _declared_mounts() for d in _mount_dirs() if not d.is_dir()]
+    assert missing_dirs == [], (
+        "asset directories are missing, so the mount rows below cannot register: "
+        f"{sorted(set(missing_dirs))}. This is an environment problem, not a route regression."
+    )
     rows = _route_rows()
     actual = frozenset(rows)
     assert len(rows) == len(actual), f"a route is registered twice: {sorted(rows)}"
@@ -357,10 +394,23 @@ def test_no_two_routes_are_match_ambiguous():
             return False
         return all(x.startswith("{") or x == y for x, y in zip(a, b, strict=True))
 
-    http = [(k, p) for k, p, _ in _route_rows() if k not in ("WS", "MOUNT")]
+    rows = [(k, p) for k, p, _ in _route_rows()]
+    http = [(k, p) for k, p in rows if k not in ("WS", "MOUNT")]
     ambiguous = [
         (k1, p1, p2)
         for (k1, p1), (k2, p2) in itertools.permutations(http, 2)
         if p1 != p2 and set(k1.split(",")) & set(k2.split(",")) and generalises(p1, p2)
     ]
+    # A Mount matches by PREFIX at any depth, which `generalises` (equal segment
+    # count) cannot model, so mounts get their own comparison instead of being
+    # filtered out: a route under a mount's prefix is answered by whichever was
+    # registered first, i.e. exactly the order dependence this test denies.
+    shadowed = [
+        (f"MOUNT {mount}", f"{kind} {path}")
+        for _k, mount in rows
+        if _k == "MOUNT"
+        for kind, path in rows
+        if path != mount and path.startswith(mount.rstrip("/") + "/")
+    ]
     assert ambiguous == [], f"ambiguous route pairs (order becomes load-bearing): {ambiguous}"
+    assert shadowed == [], f"route under a mount's prefix (order decides which answers): {shadowed}"

@@ -16,8 +16,11 @@ bucketing).
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime
+
+import pytest
 
 from tapscribe.people import PeopleRegistry
 from tapscribe.recorder import ActiveStream, TapSetting
@@ -74,12 +77,63 @@ def test_state_blob_is_json_with_an_etag_over_its_own_bytes(tmp_config_dir):
     assert _blob()[1] == etag
 
 
-def test_state_blob_etag_changes_when_any_input_changes(tmp_config_dir):
-    _, baseline = _blob()
-    assert _blob(recording_enabled=False)[1] != baseline
-    assert _blob(current_session="20260101T010000Z")[1] != baseline
-    assert _blob(live_info={"state": "running"})[1] != baseline
-    assert _blob(backend="cuda")[1] != baseline
+#: A one-session, one-person baseline. The three People-join inputs
+#: (`sessions_list`, `occs`, `live_identities`) are structurally coupled: `occs`
+#: is one roster PER session, and neither a roster nor a live identity reaches
+#: the payload unless there is a session to attach it to and a registry that
+#: knows the identity. So the sweep below varies each input on top of this,
+#: rather than pretending they are independent.
+def _peopled(**overrides):
+    kwargs = {
+        "sessions_list": [{"session": "a", "session_meta": {}}],
+        "occs": [{"alice": {"slug": "Alice", "name": "Alice"}}],
+        "registry": PeopleRegistry([{"id": "p_a", "name": "Alice", "identities": ["alice"]}]),
+    }
+    kwargs.update(overrides)
+    return _blob(**kwargs)
+
+
+#: One CHANGED value per parameter of `build_state_blob`, each different from what
+#: `_peopled()` passes. Every parameter appears exactly once, so a payload that
+#: stops carrying one of them (a dropped key, a rename) is caught rather than
+#: leaving the ETag stable for something the operator can actually change.
+_CHANGED_INPUT = {
+    "current_session": "20260101T010000Z",
+    "active": [{"identity": "alice", "record": True, "live": True}],
+    "sessions_list": [{"session": "a", "session_meta": {"prompt": "an override"}}],
+    "registry": PeopleRegistry([{"id": "p_a", "name": "Renamed", "identities": ["alice"]}]),
+    "occs": [{"bob": {"slug": "Bob", "name": "Bob"}}],
+    "live_identities": {"alice"},
+    "live_feed": [{"text": "hello"}],
+    "live_info": {"state": "running"},
+    "live_log": ["a log line"],
+    "live_supports_native_vad": True,
+    "recording_enabled": False,
+    "backend": "cuda",
+    "available_backends": ["cpu", "cuda"],
+}
+
+
+def test_every_build_state_blob_input_is_covered_by_the_etag_cases():
+    """The table above must name every parameter, or the sweep below silently
+    stops covering one. A new input to the payload arrives with a changed value
+    here, in the same commit."""
+    params = set(inspect.signature(build_state_blob).parameters)
+    assert set(_CHANGED_INPUT) == params, (
+        f"missing from _CHANGED_INPUT: {sorted(params - set(_CHANGED_INPUT))}; "
+        f"unknown: {sorted(set(_CHANGED_INPUT) - params)}"
+    )
+
+
+@pytest.mark.parametrize("field", sorted(_CHANGED_INPUT))
+def test_state_blob_etag_changes_when_any_input_changes(tmp_config_dir, field):
+    """ANY changed input yields a different tag, because the tag is a digest of
+    the body. The dashboard's 304 path is only correct while that holds: an input
+    that stops reaching the payload makes the poll answer 304 forever to a change
+    the operator just made."""
+    _, baseline = _peopled()
+    _, changed = _peopled(**{field: _CHANGED_INPUT[field]})
+    assert changed != baseline, f"changing {field} left the ETag unchanged"
 
 
 def test_state_blob_counts_per_session_default_overrides(tmp_config_dir):

@@ -65,11 +65,7 @@ async def api_wav_transcript(session: str, name: str, source: str = "original"):
 # into this band rather than 422-ing — a fixed payload size is the whole point,
 # and the dashboard never needs more than a few thousand bars on screen.
 _PEAKS_BINS_DEFAULT = 800
-
-
 _PEAKS_BINS_MIN = 16
-
-
 _PEAKS_BINS_MAX = 2000
 
 

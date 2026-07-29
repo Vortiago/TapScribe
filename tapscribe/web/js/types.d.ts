@@ -3,7 +3,8 @@
 //   /** @type {import('./types.js').AppState} */
 //
 // Source ground-truth:
-//   tapscribe/app.py           — /api/state + mutation routes
+//   tapscribe/routes/state.py  — /api/state (payload: tapscribe/state_view.py)
+//   tapscribe/routes/*.py      — the mutation routes, one module per resource group
 //   tapscribe/recorder.py      — ActiveStream, JobState dataclasses
 //   tapscribe/session_merge.py — MergedTranscript, Segment shapes
 //   tapscribe/sessions.py      — gather_sessions() per-session shape
@@ -87,7 +88,7 @@ export interface SummarizerDefault {
 
 // Active /tap WebSocket (one per recording utterance). `record` and `live`
 // are overwritten at serialisation time with the per-identity TapSetting
-// preference (tapscribe/app.py:329-330), not the WS-open snapshot.
+// preference (tapscribe/state_view.py's `active_rows`), not the WS-open snapshot.
 export interface ActiveStream {
   conn_id: string;
   identity: string;
