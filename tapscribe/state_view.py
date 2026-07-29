@@ -39,10 +39,6 @@ from fastapi.encoders import jsonable_encoder
 from . import config
 from . import hallucinations as hallucinations_mod
 from .batch_transcribe import resolve_batch_model
-
-# A REAL import, not a `TYPE_CHECKING` one: `tests/test_state_view.py` resolves
-# `StateInputs`' annotations with `get_type_hints` to walk its leaf inputs, and
-# that walk needs `LiveSnapshot` present in this module's globals.
 from .live import LiveSnapshot
 from .name_resolution import attach_people_view
 from .people import PeopleRegistry
@@ -156,9 +152,17 @@ class StateInputs:
     call.
 
     Frozen for the declaration, not for deep immutability: the list and dict
-    fields stay mutable (and `attach_people_view` deliberately writes into
-    `sessions_list`), and `frozen=True`'s synthesised `__hash__` raises on them —
-    this is a record of one instant, not a cache key.
+    fields stay mutable, and `frozen=True`'s synthesised `__hash__` raises on
+    them — this is a record of one instant, not a cache key.
+
+    One consequence worth knowing before reusing an instance: `build_state_blob`
+    is NOT replayable over the same object. `attach_people_view` writes `names`
+    into each entry of `sessions_list` and pops its `roster` back off, so a
+    second projection sees sessions stripped of the roster the People join reads.
+    Each poll builds a fresh listing, so this never bites in the route — but
+    `dataclasses.replace` SHARES the list with the original, so a test sweeping
+    variants off one baseline must rebuild it per case rather than replacing into
+    it (`_peopled_inputs` in the unit tests does exactly that).
     """
 
     current_session: str

@@ -108,9 +108,11 @@ def test_capture_defaults_supports_native_vad_to_false_when_undeclared():
 
 
 def test_capture_coerces_supports_native_vad_to_a_real_bool():
-    """The flag is serialised straight into the payload, and the dashboard tests
-    it with `=== true`. A channel declaring a truthy non-bool would ship `1`,
-    which is JSON the frontend reads as false."""
+    """The flag is serialised straight into the payload, which `types.d.ts`
+    declares as a `boolean`. A channel declaring a truthy non-bool would put a
+    `1` on the wire — the live-channel card reads `!== false`, so it would still
+    render as supported, but the payload would no longer match its own declared
+    type and the ETag would churn on a value the operator never changed."""
     snapshot = LiveSnapshot.capture(_Channel(supports_native_vad=1))
 
     assert snapshot.supports_native_vad is True

@@ -18,9 +18,8 @@ the override counts, and the active-row overlay with its byte bucketing).
 from __future__ import annotations
 
 import json
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime
-from typing import get_type_hints
 
 import pytest
 
@@ -179,27 +178,28 @@ _CHANGED_INPUT = {
 }
 
 
-def _leaf_inputs(cls, prefix: str = "") -> set[str]:
-    """Every LEAF input of `cls`, dotted through nested value objects.
+def _leaf_inputs() -> set[str]:
+    """Every LEAF input of `StateInputs`, dotted through its one nested value
+    object.
 
-    `StateInputs.live` is ONE field but THREE payload inputs, so a guard that
-    counted fields would let `live_log` stop reaching the payload with the table
-    still "complete". Annotations are resolved with `get_type_hints` because
-    `from __future__ import annotations` makes `Field.type` a string.
+    `live` is ONE field but THREE payload inputs, so a guard that counted fields
+    would let `live_log` stop reaching the payload with the table still
+    "complete". Spelled out rather than walked reflectively: with one nesting the
+    walk was the longer way round, and descending on `is_dataclass` would demand
+    the table enumerate the internals of any input that later becomes a dataclass
+    (`PeopleRegistry` is a plain class today) even though those are not
+    independently-varying inputs.
+
+    Every drift mode still fails, and loudly: a new field on either object shows
+    up unmatched, and flattening `LiveSnapshot` back to a bare dict makes
+    `fields()` raise rather than silently shrink the sweep.
 
     Derived properties (`live_identities`) are deliberately absent: they are not
     inputs, they are consequences of one, and the sweep covers them through the
     field they derive from.
     """
-    hints = get_type_hints(cls)
-    names: set[str] = set()
-    for field in fields(cls):
-        annotation = hints[field.name]
-        if is_dataclass(annotation):
-            names |= _leaf_inputs(annotation, prefix=f"{prefix}{field.name}.")
-        else:
-            names.add(f"{prefix}{field.name}")
-    return names
+    outer = {f.name for f in fields(StateInputs)} - {"live"}
+    return outer | {f"live.{f.name}" for f in fields(LiveSnapshot)}
 
 
 def _with_input(inputs: StateInputs, dotted: str, value) -> StateInputs:
@@ -214,22 +214,11 @@ def _with_input(inputs: StateInputs, dotted: str, value) -> StateInputs:
     return replace(inputs, **{group: replace(getattr(inputs, group), **{leaf: value})})
 
 
-def test_the_input_walk_descends_into_nested_value_objects():
-    """The coverage guard below is only meaningful at LEAF granularity, and this
-    walk is what makes it so — pinned separately because it fails OPEN. Turn
-    `LiveSnapshot` back into a bare dict and the walk yields a single `live`
-    entry, `_CHANGED_INPUT` matches it, and three payload inputs quietly stop
-    being swept with every test still green."""
-    leaves = _leaf_inputs(StateInputs)
-    assert {"live.info", "live.log", "live.supports_native_vad"} <= leaves
-    assert "live" not in leaves, "the walk stopped AT the value object instead of descending into it"
-
-
 def test_every_state_input_is_covered_by_the_etag_cases():
     """The table above must name every LEAF input, or the sweep below silently
     stops covering one. A new input to the payload arrives with a changed value
     here, in the same commit."""
-    leaves = _leaf_inputs(StateInputs)
+    leaves = _leaf_inputs()
     assert set(_CHANGED_INPUT) == leaves, (
         f"missing from _CHANGED_INPUT: {sorted(leaves - set(_CHANGED_INPUT))}; "
         f"unknown: {sorted(set(_CHANGED_INPUT) - leaves)}"

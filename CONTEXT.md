@@ -197,11 +197,14 @@ that have no native VAD to defer to. `WhisperLiveKitChannel` is
 True; the planned `ParakeetLiveChannel` will be False.
 
 One tick's read of a channel for `/api/state` is a **`LiveSnapshot`**
-(`live.py`): `info` copied, the log tailed to `LOG_PREVIEW_LINES`, and
-`supports_native_vad` read with the same safe-in-absence `False` that
-`speech_gate.effective_gate_config` uses. Deliberately duck-typed and *not* a
-`LiveChannel` Protocol method — the Protocol is the engine lifecycle seam, and a
-dashboard projection there would tax every engine and every test double.
+(`live.py`): `info` copied, the log tailed to `LOG_PREVIEW_LINES` (a preview of
+`LOG_TAIL_LINES`, the bound both channels give their `TailLog` and
+`/api/live/log` serves in full), and `supports_native_vad` read with the same
+safe-in-absence `False` that `speech_gate.effective_gate_config` uses — tolerant
+because the flag is a required per-subclass declaration the base deliberately
+omits, and a non-declaring channel must not 500 the ~2 Hz poll.
+`live_control.plan_live` reads it strictly instead, because it genuinely
+requires a conforming channel.
 
 `info["device"]` is an **observation, not an assertion**: WlK exposes
 no `--device` flag (its faster-whisper backend hands `device="auto"`

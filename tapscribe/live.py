@@ -77,9 +77,9 @@ class TailLog(deque):
     one internal lock — the `log` attribute type both live channels use.
 
     Why: the channel's pump thread appends log lines from a plain
-    `threading.Thread` while `/api/state` (`islice(log, …)`) and
-    `/api/live/log` (`list(log)`) iterate the same deque on the event
-    loop. A CPython deque iterator raises
+    `threading.Thread` while `/api/state` (`LiveSnapshot.capture`, which
+    tails one snapshot) and `/api/live/log` (`list(log)`) iterate the same
+    deque on the event loop. A CPython deque iterator raises
     `RuntimeError("deque mutated during iteration")` when an append lands
     between iterator creation and consumption, 500ing the poll.
 
@@ -91,7 +91,7 @@ class TailLog(deque):
     guarantee structural: `__iter__` snapshots under the lock, so EVERY
     reader that iterates (`list()`, `islice()`, a `for` loop — including
     tests appending from foreign threads) is safe with no bespoke copies
-    or locking at any call site. Readers pay one O(maxlen≤200) copy.
+    or locking at any call site. Readers pay one O(`LOG_TAIL_LINES`) copy.
 
     Only the operations the channels use are overridden (`append`,
     `clear`, `__iter__`); give any other mutator the same lock treatment
@@ -116,13 +116,17 @@ class TailLog(deque):
         return iter(snapshot)
 
 
+#: How many lines a channel's `TailLog` keeps — the bound `/api/live/log` serves
+#: in full. Named rather than repeated as a literal in each channel's `__init__`,
+#: so it is one thing the preview below can be a preview OF.
+LOG_TAIL_LINES = 200
+
 #: How many log lines `/api/state` ships per poll tick. The dashboard's log
-#: dialog fetches the WHOLE tail on demand via `/api/live/log` (up to the
-#: `TailLog(maxlen=200)` above), so the poll needs only the live-channel card's
-#: inline preview. Declared beside the bound it is a preview OF, so the two
-#: cannot drift into "preview larger than the log". Must stay > 0: a slice of
-#: `[-0:]` is the WHOLE list, so a "0 means off" reading would ship 200 lines a
-#: tick rather than none.
+#: dialog fetches the whole `LOG_TAIL_LINES` on demand via `/api/live/log`, so
+#: the poll needs only the live-channel card's inline preview. Declared beside
+#: the bound so the two cannot drift into "preview larger than the log". Must
+#: stay > 0: a slice of `[-0:]` is the WHOLE list, so a "0 means off" reading
+#: would ship every retained line per tick rather than none.
 LOG_PREVIEW_LINES = 30
 
 
@@ -168,11 +172,15 @@ class LiveSnapshot:
         `RuntimeError: deque mutated during iteration` here exactly as it was
         before.)
 
-        Duck-typed (`getattr`) rather than a `LiveChannel` Protocol method: the
-        Protocol is the engine LIFECYCLE seam, and requiring every present and
-        future engine — plus every test double — to implement a dashboard
-        projection is the wrong direction for it to grow. Same duck typing, and
-        the same safe-in-absence `False`, as `speech_gate.effective_gate_config`.
+        `supports_native_vad` is read with `getattr`, not as the plain attribute
+        the `LiveChannel` Protocol declares, for the same reason
+        `speech_gate.effective_gate_config` does: this runs on the ~2 Hz poll, and
+        a channel that never declared the flag must degrade to "no native VAD"
+        rather than 500 the dashboard. `LiveChannelBase` deliberately leaves the
+        declaration to each subclass (its safe default is the opposite of
+        Whisper's), so a non-declaring channel is a shape the codebase permits.
+        `live_control.plan_live` reads it strictly instead — it genuinely requires
+        a conforming channel.
         """
         return cls(
             info=dict(channel.info),
@@ -884,7 +892,7 @@ class WhisperLiveKitChannel(LiveChannelBase):
         self.info: dict[str, str] = _initial_info()
         # TailLog, not a bare deque: the pump thread appends while the
         # /api/state and /api/live/log routes iterate on the event loop.
-        self.log: deque[str] = TailLog(maxlen=200)
+        self.log: deque[str] = TailLog(maxlen=LOG_TAIL_LINES)
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         # Seed info with the boot-time config so the dashboard renders

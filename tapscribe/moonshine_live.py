@@ -54,6 +54,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from .live import (
+    LOG_TAIL_LINES,
     LiveChannel,
     LiveChannelBase,
     LiveConfig,
@@ -419,7 +420,7 @@ class MoonshineLiveChannel(LiveChannelBase):
         # TailLog for parity with WhisperLiveKitChannel: /api/state and
         # /api/live/log iterate `log` on the event loop; any future
         # thread-side appender is safe by construction.
-        self.log: deque[str] = TailLog(maxlen=200)
+        self.log: deque[str] = TailLog(maxlen=LOG_TAIL_LINES)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
