@@ -90,10 +90,27 @@ CS_INT = Spelling(parse=lambda s: int(s.replace("_", "")), render=lambda v: f"{v
 #: against `content.js`'s bare `DRAIN_MAX_MS = 8000`. Read-only: tier 2.
 CS_TIMESPAN_MS = Spelling(parse=_timespan_ms)
 
+
+def _to_thousands(value: int) -> str:
+    """2000 -> "2". Refuses a value that isn't a whole number of thousands.
+
+    Without the guard this floor-divides: a 44 100 Hz wire would be written
+    into four docs as "44 kHz", silently wrong — a stamper that quietly
+    corrupts prose is worse than the drift it exists to prevent. Same class of
+    bug as the sample-width spelling, which the anti-vacuity sweep caught.
+    """
+    if value % 1000:
+        raise ValueError(
+            f"{value} is not a whole number of thousands, so it cannot be spelled "
+            f"in k-units; this site's prose needs a different anchor."
+        )
+    return str(value // 1000)
+
+
 #: Prose that states the value in thousands of the canonical unit — "16 kHz
 #: mono" (Hz), "`DRAIN_MAX_MS` (8 s)" (ms). ONE spelling: the arithmetic is
 #: identical either way, and the unit is already named by each site's anchor.
-THOUSANDS = Spelling(parse=lambda s: int(s) * 1000, render=lambda v: str(v // 1000))
+THOUSANDS = Spelling(parse=lambda s: int(s) * 1000, render=_to_thousands)
 
 #: Prose that spaces its thousands — "**96 000 bytes**". Gate-only, so the
 #: render it never reaches is simply absent.
@@ -363,6 +380,22 @@ def restamped(text: str, site: Site, value: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _frame_ms(frame_samples: int, sample_rate: int) -> int:
+    """Frame duration in whole milliseconds, or raise.
+
+    Derived, and stamped only into PROSE (code computes it where it needs it).
+    Integer division would silently call a 321-sample frame "20 ms" and write
+    that into four docs, so a frame that isn't a whole number of milliseconds
+    is an error rather than a rounding.
+    """
+    if (frame_samples * 1000) % sample_rate:
+        raise ValueError(
+            f"{frame_samples} samples at {sample_rate} Hz is not a whole number of "
+            f"milliseconds, so the docs' 'N ms' phrasing can no longer be stamped."
+        )
+    return frame_samples * 1000 // sample_rate
+
+
 def recorder_contract() -> dict[str, Any]:
     """The wire contract, read from the Recorder's own constants.
 
@@ -396,7 +429,7 @@ def recorder_contract() -> dict[str, Any]:
         # the frame duration where it needs it; PROSE states "20 ms"
         # outright, five times across four docs. A frame-size change would
         # leave every one of them quietly wrong.
-        "frame_ms": speech_gate.FRAME_SAMPLES * 1000 // RECORDER_SAMPLE_RATE,
+        "frame_ms": _frame_ms(speech_gate.FRAME_SAMPLES, RECORDER_SAMPLE_RATE),
     }
 
 

@@ -667,3 +667,45 @@ def test_each_bridge_still_spells_the_paths_the_table_claims(where: str) -> None
         # prefix and suffix around the `{session}` placeholder.
         for fragment in path.split("{session}"):
             assert fragment in text, f"{where} no longer spells {fragment!r} (from {path})"
+
+
+#: Every NUMERIC spelling that can write. These have arithmetic in the render,
+#: so these are the ones that can lose precision. (TEXT/RAW are string
+#: spellings; a number never reaches them.)
+_WRITABLE_NUMERIC = {
+    "INT": stamper.INT,
+    "CS_INT": stamper.CS_INT,
+    "THOUSANDS": stamper.THOUSANDS,
+    "BITS": stamper.BITS,
+}
+
+
+@pytest.mark.parametrize("value", [16000, 8000, 44100, 22050, 48000, 1, 2, 320, 640], ids=str)
+@pytest.mark.parametrize("name", sorted(_WRITABLE_NUMERIC), ids=str)
+def test_a_numeric_spelling_round_trips_exactly_or_refuses(name: str, value: int) -> None:
+    """The invariant that matters for a tool that WRITES prose: it may never
+    emit text that reads back as a DIFFERENT number.
+
+    `THOUSANDS.render` used to floor-divide, so a 44 100 Hz wire would have
+    been written into four docs as "44 kHz" and read back as 44 000 — the gate
+    would then have gone green on a lie the stamper itself introduced. Same
+    class as the sample-width spelling the anti-vacuity sweep caught, which is
+    why this is a property over every writable numeric spelling rather than
+    one case per bug.
+    """
+    spelling = _WRITABLE_NUMERIC[name]
+    assert spelling.render is not None
+    try:
+        rendered = spelling.render(value)
+    except ValueError:
+        return  # refusing a value it cannot state exactly is the correct answer
+    assert spelling.parse(rendered) == value, (
+        f"{name}.render({value}) -> {rendered!r}, which reads back as "
+        f"{spelling.parse(rendered)!r}. A spelling must refuse rather than "
+        f"emit a value it cannot state exactly."
+    )
+
+
+def test_thousands_refuses_a_value_it_cannot_spell() -> None:
+    with pytest.raises(ValueError, match="whole number of thousands"):
+        stamper.THOUSANDS.render(44100)
