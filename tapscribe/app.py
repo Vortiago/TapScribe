@@ -1588,8 +1588,8 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
     # between the check and the thread hop and race the unlink walk), so the
     # delete claims the SAME slot the batch jobs use — a job arriving
     # mid-delete gets the standard SessionBusy 409, and vice versa. run()
-    # releases on every exit path, so unlike whole-session delete the
-    # surviving session's slot is always freed again.
+    # releases on every exit path, so the surviving session's slot is always
+    # freed again.
     async with recorder.jobs.run(session, kind="delete", total=1):
         # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
         # ~1 Hz /api/state poll stays responsive — same as strip-silence.
@@ -1705,14 +1705,10 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     the sibling /audio and /absorb endpoints enforce)."""
     await _refuse_current_or_busy(recorder, session, current=session, action="delete")
     session_dir = resolve_session_dir(session)
-    # Same bracket as the sibling /audio delete, for the same two reasons:
-    # the pre-flight above is check-then-act (a transcribe/strip could claim
-    # the freed slot and start reading WAVs while this rmtrees them), and the
-    # recursive unlink walk over a whole session (thousands of WAVs plus
-    # their `.transcripts/` dirs) must leave the event loop so the ~1 Hz
-    # /api/state poll and any open tap WS stay responsive. `jobs.run`
-    # releases on EVERY exit path, so it also subsumes the hand-rolled
-    # `jobs.release` this route used to do on the success path only.
+    # Same hold-for-the-walk bracket as the sibling /audio delete, for the two
+    # reasons spelled out there. Route-specific: `jobs.run` releases on EVERY
+    # exit path, so it also subsumes the hand-rolled `jobs.release` this route
+    # used to do on the success path only.
     async with recorder.jobs.run(session, kind="delete", total=1):
         try:
             await asyncio.to_thread(shutil.rmtree, session_dir)
@@ -2002,10 +1998,10 @@ async def api_wav_delete(
     component (only compared against the two literals)."""
     await _refuse_current_or_busy(recorder, session, current=session, action="delete WAVs from")
     resolve_session_dir(session)
-    # Hold the slot for the unlink, exactly as the sibling /audio delete does:
-    # the pre-flight is check-then-act, and a transcribe that passed its own
-    # pre-claim WAV scan could otherwise claim the slot and then read the file
-    # (and the `.transcripts/` sidecar dir) this walk is removing.
+    # Same hold-for-the-walk bracket as the sibling /audio delete, for the two
+    # reasons spelled out there. Route-specific: a transcribe that already
+    # passed its own pre-claim WAV scan would otherwise read the file — and
+    # the `.transcripts/` sidecar dir — this unlink is removing.
     async with recorder.jobs.run(session, kind="delete", total=1):
         summary = await asyncio.to_thread(delete_session_wav, session, name, source)
     _ops_log(f"deleted wav {name} ({source}) from session {session}: {summary['bytes_freed']} bytes freed")

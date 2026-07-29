@@ -45,7 +45,7 @@ from fastapi.testclient import TestClient
 from wav_builders import seed_session  # type: ignore[import-not-found]
 
 from tapscribe.app import _ops_log, app, get_recorder
-from tapscribe.recorder import Recorder
+from tapscribe.recorder import JobState, Recorder
 
 DESTRUCTIVE_ROUTES = (
     "api_session_audio_delete",
@@ -187,18 +187,24 @@ def test_session_delete_holds_the_job_slot_for_the_walk_and_frees_it_after(
     the id would 409 forever."""
     seed_session(recorder_under_test.recordings_dir, "doomed", ["20260101T000000Z__alice__abc.wav"])
     real_rmtree = shutil.rmtree
-    held: list[object] = []
+    held: list[JobState | None] = []
 
     def _observe(path: object, *a: object, **k: object) -> None:
         # `JobTracker.get` is a bare dict read, so it is safe from the worker
-        # thread `asyncio.to_thread` runs this on.
+        # thread `asyncio.to_thread` runs this on. (`jobs.claim` is not — it
+        # awaits a lock bound to the app's loop — so the during-state is
+        # asserted on lock-free state, per #271.)
         held.append(recorder_under_test.jobs.get("doomed"))
         real_rmtree(path, *a, **k)  # type: ignore[arg-type]
 
     monkeypatch.setattr(shutil, "rmtree", _observe)
     assert client.delete("/api/sessions/doomed").status_code == 200
     assert held, "the teardown never ran"
+    # Not merely "the slot is populated" — it must be THIS route's bracket
+    # holding it, so stray bookkeeping that fills the slot can't stand in for
+    # the hold.
     assert held[0] is not None, "the session's job slot was not held for the teardown walk"
+    assert held[0].kind == "delete", f"the slot was held by a {held[0].kind} job, not the delete bracket"
     assert recorder_under_test.jobs.get("doomed") is None
 
 
@@ -321,29 +327,31 @@ def test_the_seam_owns_the_prefix_and_the_flush(monkeypatch: pytest.MonkeyPatch)
     assert kwargs.get("flush") is True
 
 
-def test_session_delete_still_says_what_it_deleted(
-    client: TestClient, recorder_under_test: Recorder, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("/api/sessions/s", "[tapscribe] deleted session: "),
+        ("/api/sessions/s/audio", "[tapscribe] deleted audio from session s: 1 wavs, "),
+        (
+            "/api/wav/s/20260101T000000Z__alice__abc.wav",
+            "[tapscribe] deleted wav 20260101T000000Z__alice__abc.wav (original) from session s: ",
+        ),
+    ],
+    ids=["session", "audio", "wav"],
+)
+def test_single_session_delete_still_says_what_it_freed(
+    client: TestClient,
+    recorder_under_test: Recorder,
+    capsys: pytest.CaptureFixture[str],
+    url: str,
+    expected: str,
 ) -> None:
-    seed_session(recorder_under_test.recordings_dir, "doomed", ["20260101T000000Z__alice__abc.wav"])
-    assert client.delete("/api/sessions/doomed").status_code == 200
-    assert "[tapscribe] deleted session: " in capsys.readouterr().out
-
-
-def test_audio_delete_still_says_what_it_freed(
-    client: TestClient, recorder_under_test: Recorder, capsys: pytest.CaptureFixture[str]
-) -> None:
+    """One seeded session, one DELETE, one line — the three routes differ only
+    in the URL and the prefix they owe the operator. (`absorb` needs a second
+    session, so it stays its own test below.)"""
     seed_session(recorder_under_test.recordings_dir, "s", ["20260101T000000Z__alice__abc.wav"])
-    assert client.delete("/api/sessions/s/audio").status_code == 200
-    assert "[tapscribe] deleted audio from session s: 1 wavs, " in capsys.readouterr().out
-
-
-def test_wav_delete_still_says_what_it_freed(
-    client: TestClient, recorder_under_test: Recorder, capsys: pytest.CaptureFixture[str]
-) -> None:
-    seed_session(recorder_under_test.recordings_dir, "s", ["20260101T000000Z__alice__abc.wav"])
-    assert client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav").status_code == 200
-    out = capsys.readouterr().out
-    assert "[tapscribe] deleted wav 20260101T000000Z__alice__abc.wav (original) from session s: " in out
+    assert client.delete(url).status_code == 200
+    assert expected in capsys.readouterr().out
 
 
 def test_absorb_still_says_what_it_moved(
