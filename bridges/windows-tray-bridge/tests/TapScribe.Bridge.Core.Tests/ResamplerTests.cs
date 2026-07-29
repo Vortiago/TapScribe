@@ -190,4 +190,38 @@ public class ResamplerTests
             samples[i] = BinaryPrimitives.ReadInt16LittleEndian(pcm.AsSpan(i * 2, 2));
         return samples;
     }
+
+    [Fact]
+    public void FormatMatchedInt16Audio_SurvivesTheResamplerBitExactly()
+    {
+        // The identity path: the device already delivers 16 kHz mono int16, so
+        // the Resampler decodes to float and re-encodes with no rate or layout
+        // change. Nothing should be lost — but encode used to scale by 32767
+        // while decode divides by 32768, so every sample with |x| >= 0.5 came
+        // back 1 LSB light. Silent, permanent, and on EVERY frame the tray
+        // bridge sends. This pins the roundtrip instead of the arithmetic, so
+        // it still holds if the scaling is expressed some other way.
+        var format = new AudioFormat(TapWire.SampleRate, 1, SampleKind.Int16);
+        var resampler = new Resampler(format);
+
+        // Full-scale extremes plus the boundaries where the old 32767 scaling
+        // first loses a count.
+        short[] original =
+        [
+            short.MinValue, -32767, -24576, -16384, -8192, -1, 0, 1,
+            8192, 16384, 24576, 32766, short.MaxValue,
+        ];
+        var pcm = new byte[original.Length * 2];
+        for (int i = 0; i < original.Length; i++)
+            BinaryPrimitives.WriteInt16LittleEndian(pcm.AsSpan(i * 2, 2), original[i]);
+
+        // The interpolator always lags one sample — it needs the right-hand
+        // neighbour before it can emit — so feed a trailing sample to flush the
+        // last real one out, and compare the stream prefix.
+        var flush = new byte[2];
+        BinaryPrimitives.WriteInt16LittleEndian(flush, 0);
+        short[] roundTripped = [.. Samples(resampler.Process(pcm)), .. Samples(resampler.Process(flush))];
+
+        Assert.Equal(original, roundTripped.Take(original.Length).ToArray());
+    }
 }
