@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from wav_builders import seed_wav  # type: ignore[import-not-found]
 
+from tapscribe.audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
 from tapscribe.transcribers.base import TranscriptionResult, TranscriptionSegment
 from tapscribe.wav_cache import (
     _PRIMARY_POINTER,
@@ -25,8 +26,6 @@ from tapscribe.wav_cache import (
     set_primary_transcript,
     transcripts_dir,
 )
-
-SAMPLE_RATE = 16000
 
 
 class _StubTranscriber:

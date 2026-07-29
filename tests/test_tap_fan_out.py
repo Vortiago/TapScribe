@@ -29,6 +29,7 @@ from conftest import (  # type: ignore[import-not-found]  # noqa: E402  # pytest
 )
 
 from tapscribe import roster
+from tapscribe.audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
 from tapscribe.recorder import Recorder
 from tapscribe.tap_fan_out import STREAM_FLUSH_EVERY_FRAMES, TapFanOut
 
@@ -394,7 +395,6 @@ async def test_write_frame_level_against_synthesised_half_scale_tone(recorder: R
     average instead of peak-detect, or where normalisation drifts."""
     import numpy as np
 
-    SAMPLE_RATE = 16000
     seconds = 0.4
     t = np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
     samples = (0.5 * 32767 * np.sin(2 * np.pi * 440.0 * t)).astype(np.int16)

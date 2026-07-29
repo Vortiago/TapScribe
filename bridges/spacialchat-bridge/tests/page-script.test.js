@@ -126,6 +126,7 @@ function loadPageScript({
   for (const p of remoteParticipants) room.remoteParticipants.set(p.identity, p);
   if (localParticipant) room.localParticipant = localParticipant;
   const posted = [];
+  const blobParts = [];
   const eventListeners = {};
 
   // Document mock: querySelectorAll returns sidebar elements when the
@@ -192,7 +193,11 @@ function loadPageScript({
     AudioWorkletNode: audio.AudioWorkletNode,
     MediaStream: audio.MediaStream,
     URL: { createObjectURL: () => "blob:fake", revokeObjectURL: () => {} },
-    Blob: function Blob() { return {}; },
+    // Capture the parts rather than discarding them: the AudioWorklet source
+    // is built as a template string and handed to `new Blob([src], …)`, so
+    // this is the ONLY place a test can observe what the worklet will
+    // actually run — see "the worklet emits …-sample frames" below.
+    Blob: function Blob(parts) { blobParts.push(parts); return {}; },
     crypto: { randomUUID: () => "u-" + Math.random().toString(36).slice(2) },
     console: { log: () => {}, warn: () => {}, error: () => {} },
     // Capture the 250ms room-poll callback (don't auto-run it) so a test
@@ -219,6 +224,7 @@ function loadPageScript({
     eventListeners,
     sandbox,
     sidebarEls,
+    workletSource: () => blobParts.map((parts) => (parts || []).join("")).join(""),
     setNow: (ms) => { nowMs = ms; },
     sidebarScans: () => sidebarScanCount,
   };
@@ -1003,4 +1009,56 @@ test("a gesture whose resume() REJECTS leaves the retry armed", async () => {
       "a SUCCESSFUL resume disarms every one-shot listener (" + ev + ")",
     );
   }
+});
+
+test("the worklet emits FRAME_SAMPLES-sample frames, interpolated not hard-coded", async () => {
+  // The MAIN world can't import control-client.js, so page-script.js declares
+  // the frame size itself and interpolates it into the worklet source. That
+  // makes it a /tap wire declaration site, stamped from the Recorder by
+  // tools/stamp_tap_wire.py and gated by tests/test_tap_wire_contract.py.
+  //
+  // Interpolation inside a String.raw template is the one thing that could
+  // silently break here — String.raw leaves BACKSLASH escapes raw, and a
+  // reader who assumes it leaves `${...}` raw too would ship a worklet that
+  // allocates `Int16Array(NaN)` and emits nothing. Every other test in this
+  // file hand-feeds frames through port.onmessage and would stay green.
+  // The worklet Blob is built lazily by ensureAudioGraph(), so a tap has to
+  // happen before there is anything to inspect.
+  const env = loadPageScript();
+  const track = makeTrack();
+  env.room.fire(
+    "trackSubscribed",
+    track,
+    makeAudioPublication({ track }),
+    { identity: "alice-id", name: "Alice", audioTrackPublications: new Map() },
+  );
+  await flush();
+
+  const src = env.workletSource();
+  assert.ok(src.includes("class TapscribeResampler"), "the worklet source was captured");
+  assert.ok(
+    !src.includes("${"),
+    "no un-substituted template placeholder survived into the worklet source",
+  );
+
+  // Compare the worklet against the DECLARED const rather than a literal 320.
+  // Hard-coding 320 here would pass just as happily if the const were stamped
+  // to a new frame size and the worklet body left stale — which is the only
+  // way this can actually break.
+  const declared = /const FRAME_SAMPLES = (\d+);/.exec(
+    fs.readFileSync(PAGE_SCRIPT, "utf8"),
+  );
+  assert.ok(declared, "page-script.js declares FRAME_SAMPLES");
+  const n = declared[1];
+
+  assert.match(
+    src,
+    new RegExp(`new Int16Array\\(${n}\\)`),
+    `the output buffer is FRAME_SAMPLES (${n}) samples`,
+  );
+  assert.match(
+    src,
+    new RegExp(`this\\.outPos === ${n}`),
+    `the flush threshold is the same ${n} samples`,
+  );
 });

@@ -468,6 +468,13 @@ disk. Bridges don't talk to WhisperLiveKit themselves and don't POST
 settled lines back; the verb the Bridge performs is "tap," and the
 endpoint name reflects that.
 
+The wire contract is held **structurally**, not by review discipline, the
+same way the tap-auth sweep above holds the auth gate: the Recorder's own
+constants are the source, `tools/stamp_tap_wire.py` writes them into every
+Bridge and every doc that restates them, and `tests/test_tap_wire_contract.py`
+fails when any declaration drifts — including one nobody remembered to list.
+See ADR-0019.
+
 Besides the audio `tap`, a Bridge may issue a small **control** plane over
 HTTP, all authenticated by the tap token as an `Authorization: Bearer`
 header (never the cleartext-vulnerable subprotocol slot the `/tap` WS must
@@ -805,6 +812,28 @@ so the WAV finalizes with that trailing audio intact. The timeout exists
 so an unreachable Recorder can't wedge the utterance forever. Implemented
 in the Bridge's `startDrainTimer()` / `endUtterance()` and on the Recorder
 side in `live_relay.close()` / `_flush_tail()`.
+
+## Blip-resilience recipe
+
+The concrete numbers a Bridge uses to survive a transient `/tap` failure
+without losing audio: the reconnect **backoff ladder** (with jitter), the
+**gap-buffer** cap on PCM held while disconnected, and the [Drain](#drain)
+budget. Named as one thing because the three only make sense together — a
+ladder without a buffer reconnects to nothing, a buffer without a bounded
+drain wedges the Utterance.
+
+Unlike the [Wire contract](#bridge), these are **recommended, not
+enforced**: the Recorder has no opinion on them, and a third-party Bridge
+may deviate deliberately. What is not allowed is the two bundled Bridges
+and the docs drifting from *each other*. (Prefer this term over the older
+"recommended defaults" / "reference recipe" wordings, and don't say
+"reference recipe" at all — "reference implementation" already means the
+local-test Bridge.)
+
+The **first-connect-failure semantics** are pointedly NOT part of the
+recipe: whether a failure on an Utterance's very first connect is terminal
+or retried is an open per-Bridge choice, and the two bundled Bridges answer
+it differently on purpose. See `bridges/README.md`.
 
 ## Tail flush
 

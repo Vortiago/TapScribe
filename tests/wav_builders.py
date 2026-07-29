@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-SAMPLE_RATE = 16000
+from tapscribe.audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
 
 
 def seed_wav(path: Path, *, amplitude: int = 8000, seconds: float = 1.0) -> Path:

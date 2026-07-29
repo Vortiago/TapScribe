@@ -4,7 +4,18 @@
   Use those names; don't introduce shadow vocabulary.
 - `.claude/hooks/` — `session-start.sh` installs deps, `stop.sh` runs ruff.
   Convention changes go there or in `pyproject.toml`, not here.
-- `bridges/README.md` — Bridge → `/tap` wire contract.
+- `bridges/README.md` — Bridge → `/tap` wire contract. The constants in it
+  are declared in JS, C#, Python and prose, and are held in lock-step
+  mechanically: `tapscribe/` is the SOURCE (edit `auth.py` /
+  `speech_gate.py` / `audio.py` by hand), `python3 tools/stamp_tap_wire.py`
+  writes every bridge and every doc that restates them, and
+  `tests/test_tap_wire_contract.py` fails on drift — including a
+  declaration site nobody listed. Adding a bridge in a new language is one
+  new `Site` row; Python on the Recorder's side of the wire just imports.
+  Never hand-edit a wire constant in `bridges/` — run the stamper. The
+  Blip-resilience recipe (backoff / gap buffer / drain) is GATED but never
+  stamped: the Recorder has no opinion on it. ADR-0019, incl. why this is a
+  stamper and not codegen.
 - `tapscribe/routes/` — the HTTP surface, one route module per resource
   group; its `__init__.py` docstring is the index ("where does X get
   served"). A new route goes in the module whose DOMAIN CONCERN it

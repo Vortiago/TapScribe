@@ -133,9 +133,12 @@ from a transient WS failure (network blip, recorder restart) should:
 
 The two bundled production bridges (`spacialchat-bridge/content.js` and
 `windows-tray-bridge`'s `TapStream.cs` / `TapStreamOptions.cs`) have
-converged on the same concrete numbers below; treat them as the
-**recommended defaults** for a new bridge rather than re-deriving your own
-loss budget from scratch.
+converged on the same concrete numbers below — the **Blip-resilience
+recipe** (see CONTEXT.md). Treat it as the recommended starting point for a
+new bridge rather than re-deriving your own loss budget from scratch. Unlike
+the wire contract above, the Recorder has no opinion on these: a bridge with
+a good reason may deviate. The bundled two may not drift from each other,
+and `tests/test_tap_wire_contract.py` holds them to it.
 
 - **Backoff ladder:** jittered exponential — `200, 400, 800, 1600, 3200 ms`,
   capped at `5000 ms`, with **±25 % jitter** on each delay so a roomful of
@@ -346,6 +349,27 @@ The bundled `spacialchat-bridge` and `windows-tray-bridge` both call this
 pair from their **End meeting** flow; see `control-client.js`
 (`TapscribeControlClient`) in `spacialchat-bridge/` or `ControlClient.cs` in
 `windows-tray-bridge/` for reference implementations.
+
+## Keeping the languages honest
+
+The wire constants above are declared in JS, C#, Python and this prose, and
+they used to drift with nothing to catch it. They no longer can:
+
+- **`tapscribe/` is the source.** The Recorder serves `/tap`, so its own
+  constants *are* the contract. A wire change is a hand edit there — for the
+  subprotocol, `tapscribe/auth.py` — with its own tests.
+- **`python3 tools/stamp_tap_wire.py`** then rewrites the matching literal in
+  every bridge and every doc, this file included. Run it after any such edit;
+  it's idempotent, so running it when nothing changed prints
+  `already consistent`.
+- **`tests/test_tap_wire_contract.py`** fails when a declaration drifts —
+  including a hand edit that skipped the tool, and including a declaration
+  site nobody remembered to list.
+
+**Adding a bridge in a new language is one new `Site` row** in the stamper's
+table. Python on the Recorder's own side of the wire needs no row at all: it
+imports the constants. ADR-0019 has the reasoning, including why this is a
+stamper rather than codegen.
 
 ## Adding a new bridge
 

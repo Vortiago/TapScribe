@@ -13,18 +13,27 @@
   }
   window.__tapscribeBridgePageInstalled = true;
 
+  // The /tap wire frame: 20 ms of 16 kHz mono int16 = 320 samples. This is
+  // the MAIN world, which cannot import control-client.js (the content script
+  // lives in an isolated world), so this is JS's second declaration site for
+  // the frame size — and it is stamped from the Recorder rather than typed by
+  // hand. Interpolated into WORKLET_SRC below: `String.raw` leaves BACKSLASH
+  // escapes raw but still substitutes `${...}` normally.
+  // See tools/stamp_tap_wire.py and ADR-0019.
+  const FRAME_SAMPLES = 320;
+
   // ---- Inline AudioWorklet source -------------------------------------------
   // 48 kHz mono float32 in -> 16 kHz mono int16 out. 3:1 decimation with
   // a 3-tap boxcar lowpass (cheap and good enough for speech). 20 ms
-  // output chunks (320 samples) posted as transferable Int16Array
-  // buffers — matches the Recorder's /tap frame size exactly.
+  // output chunks posted as transferable Int16Array buffers — matches the
+  // Recorder's /tap frame size exactly.
   const WORKLET_SRC = String.raw`
     class TapscribeResampler extends AudioWorkletProcessor {
       constructor() {
         super();
         this.phase = 0;
         this.s0 = 0; this.s1 = 0; this.s2 = 0;
-        this.outBuf = new Int16Array(320);
+        this.outBuf = new Int16Array(${FRAME_SAMPLES});
         this.outPos = 0;
       }
       process(inputs) {
@@ -38,7 +47,7 @@
             const y = (this.s0 + this.s1 + this.s2) / 3;
             const c = y < -1 ? -1 : y > 1 ? 1 : y;
             this.outBuf[this.outPos++] = Math.round(c * 32767);
-            if (this.outPos === 320) {
+            if (this.outPos === ${FRAME_SAMPLES}) {
               const out = new Int16Array(this.outBuf);
               this.port.postMessage(out, [out.buffer]);
               this.outPos = 0;
