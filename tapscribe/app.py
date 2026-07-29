@@ -542,11 +542,15 @@ async def _refuse_current_or_busy(
 
 
 def _ops_log(message: str) -> None:
-    """Emit an operational completion line.
+    """Emit a destructive route's completion line.
 
-    Owns the `[tapscribe]` prefix and `flush=True` in one place so a
-    future change to the log format or transport touches all callers.
-    The route builds its own message; this seam only emits it.
+    Owns the `[tapscribe]` prefix and `flush=True` for ITS callers — the
+    four destructive session/WAV routes — so a change to their format or
+    transport lands in one place. Deliberately NOT a module-wide seam:
+    `app.py`'s other `[tapscribe] ` prints (and the leaf modules', which
+    `app.py` imports and so can never import this back) still hand-roll
+    the prefix. Widening the claim means sweeping them, not rewording
+    this.
     """
     print(f"[tapscribe] {message}", flush=True)
 
@@ -1592,7 +1596,7 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
         summary = await asyncio.to_thread(delete_session_audio, session)
     _ops_log(
         f"deleted audio from session {session}: "
-        f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed",
+        f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed"
     )
     return {"ok": True, **summary}
 
@@ -1687,7 +1691,7 @@ async def api_session_absorb(
     _ops_log(
         f"absorbed {source} into {target}: "
         f"{summary['wavs_moved']} wavs, {summary['stripped_moved']} stripped, "
-        f"+{len(summary['aliases_added'])} aliases",
+        f"+{len(summary['aliases_added'])} aliases"
     )
     return {"ok": True, **summary}
 
@@ -1701,11 +1705,19 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     the sibling /audio and /absorb endpoints enforce)."""
     await _refuse_current_or_busy(recorder, session, current=session, action="delete")
     session_dir = resolve_session_dir(session)
-    try:
-        shutil.rmtree(session_dir)
-    except OSError as e:
-        raise SessionDeleteError(f"delete failed: {e}") from None
-    await recorder.jobs.release(session)
+    # Same bracket as the sibling /audio delete, for the same two reasons:
+    # the pre-flight above is check-then-act (a transcribe/strip could claim
+    # the freed slot and start reading WAVs while this rmtrees them), and the
+    # recursive unlink walk over a whole session (thousands of WAVs plus
+    # their `.transcripts/` dirs) must leave the event loop so the ~1 Hz
+    # /api/state poll and any open tap WS stay responsive. `jobs.run`
+    # releases on EVERY exit path, so it also subsumes the hand-rolled
+    # `jobs.release` this route used to do on the success path only.
+    async with recorder.jobs.run(session, kind="delete", total=1):
+        try:
+            await asyncio.to_thread(shutil.rmtree, session_dir)
+        except OSError as e:
+            raise SessionDeleteError(f"delete failed: {e}") from None
     _ops_log(f"deleted session: {session_dir}")
     return {"ok": True, "deleted": session}
 
@@ -1990,10 +2002,13 @@ async def api_wav_delete(
     component (only compared against the two literals)."""
     await _refuse_current_or_busy(recorder, session, current=session, action="delete WAVs from")
     resolve_session_dir(session)
-    summary = await asyncio.to_thread(delete_session_wav, session, name, source)
-    _ops_log(
-        f"deleted wav {name} ({source}) from session {session}: {summary['bytes_freed']} bytes freed",
-    )
+    # Hold the slot for the unlink, exactly as the sibling /audio delete does:
+    # the pre-flight is check-then-act, and a transcribe that passed its own
+    # pre-claim WAV scan could otherwise claim the slot and then read the file
+    # (and the `.transcripts/` sidecar dir) this walk is removing.
+    async with recorder.jobs.run(session, kind="delete", total=1):
+        summary = await asyncio.to_thread(delete_session_wav, session, name, source)
+    _ops_log(f"deleted wav {name} ({source}) from session {session}: {summary['bytes_freed']} bytes freed")
     return {"ok": True, **summary}
 
 

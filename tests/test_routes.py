@@ -3731,7 +3731,9 @@ def test_api_people_mutation_errors(client):
 # The migrated session domain exceptions carry NO status_code attribute; the
 # handler dispatches solely on app._DOMAIN_ERROR_STATUS by exact type. Pin each
 # newly-migrated type here so a de-registration or wrong status is caught
-# directly at the map (SessionDeleteError's 500 has no easy route to exercise).
+# directly at the map. (SessionDeleteError's 500 is driven end to end as well,
+# by test_destructive_route_tail.py::test_session_delete_failure_is_a_500_that_
+# says_what_failed; this map-level pin still stands on its own.)
 @pytest.mark.parametrize(
     ("exc_type", "status"),
     [

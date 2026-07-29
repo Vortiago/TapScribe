@@ -22,9 +22,9 @@ pin — and what a uniform helper would silently break — is pinned here:
     ONE route that does not spread a summary. A `{"ok": True, **summary}` helper
     is the natural collapse and would change the API behind a green gate. This
     is the same un-gated-response-key trap the People step hit with `detached`.
-  * it releases the session's job slot after deleting, which nothing asserts.
+  * it frees the session's job slot after deleting, which nothing asserted.
   * its failure path answers 500 with a `delete failed:` detail, which nothing
-    exercises.
+    exercised.
 
 Deliberately NOT pinned — the implementer's call: whether the tail becomes one
 helper or several, whether it is a function / decorator / context manager, what
@@ -35,6 +35,7 @@ a thread) starts doing so.
 from __future__ import annotations
 
 import ast
+import builtins
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -43,7 +44,7 @@ import pytest
 from fastapi.testclient import TestClient
 from wav_builders import seed_session  # type: ignore[import-not-found]
 
-from tapscribe.app import app, get_recorder
+from tapscribe.app import _ops_log, app, get_recorder
 from tapscribe.recorder import Recorder
 
 DESTRUCTIVE_ROUTES = (
@@ -63,15 +64,30 @@ def client(recorder_under_test: Recorder) -> Iterator[TestClient]:
     app.dependency_overrides.clear()
 
 
-def _route_defs() -> dict[str, ast.AST]:
+def _func_defs() -> dict[str, ast.AST]:
     from tapscribe import app as app_module
 
     tree = ast.parse(Path(app_module.__file__).read_text(encoding="utf-8"))
     return {
         node.name: node
         for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in DESTRUCTIVE_ROUTES
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+
+
+def _route_defs() -> dict[str, ast.AST]:
+    return {name: node for name, node in _func_defs().items() if name in DESTRUCTIVE_ROUTES}
+
+
+def _httpexception_raises(node: ast.AST) -> list[ast.Raise]:
+    return [
+        r
+        for r in ast.walk(node)
+        if isinstance(r, ast.Raise)
+        and isinstance(r.exc, ast.Call)
+        and isinstance(r.exc.func, ast.Name)
+        and r.exc.func.id == "HTTPException"
+    ]
 
 
 def _calls_named(node: ast.AST, name: str) -> list[ast.Call]:
@@ -109,15 +125,32 @@ def test_session_delete_uses_the_domain_error_seam() -> None:
     stay with the routes). `SessionDeleteError` is already registered at 500 in
     `_DOMAIN_ERROR_STATUS`; the route should use it rather than translating by
     hand — that is the whole point of the map #228 introduced."""
-    raises = [
-        r
-        for r in ast.walk(_route_defs()["api_session_delete"])
-        if isinstance(r, ast.Raise)
-        and isinstance(r.exc, ast.Call)
-        and isinstance(r.exc.func, ast.Name)
-        and r.exc.func.id == "HTTPException"
-    ]
-    assert not raises, "api_session_delete still translates its failure to HTTPException by hand"
+    assert not _httpexception_raises(_route_defs()["api_session_delete"]), (
+        "api_session_delete still translates its failure to HTTPException by hand"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The scoped-OUT sibling, pinned POSITIVELY.
+# ---------------------------------------------------------------------------
+
+
+def test_stripped_delete_is_deliberately_left_alone() -> None:
+    """`api_session_stripped_delete` sits inside the blast radius but OUTSIDE
+    the scope: it is not one of `DESTRUCTIVE_ROUTES`, #368 never names it, and
+    it carries the same `raise HTTPException(500, f"delete failed: {e}")`
+    literal `api_session_delete` is losing — so an unanchored replace_all on
+    that literal silently rewrites it too. Every assertion above is about the
+    ABSENCE of something; nothing notices a scoped-out sibling being swept
+    along unless the sibling is pinned positively, so pin it here. Deliberate
+    sweeping is fine — it just has to update this test and say so."""
+    stripped = _func_defs()["api_session_stripped_delete"]
+    assert _calls_named(stripped, "print"), (
+        "api_session_stripped_delete's inline completion log was swept — out of #368's scope"
+    )
+    assert _httpexception_raises(stripped), (
+        "api_session_stripped_delete's hand-rolled HTTPException(500) was swept — out of #368's scope"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +171,34 @@ def test_session_delete_response_shape_is_not_a_summary_spread(
     assert not (recorder_under_test.recordings_dir / "doomed").exists()
 
 
-def test_session_delete_releases_the_job_slot(client: TestClient, recorder_under_test: Recorder) -> None:
-    """`recorder.jobs.release(session)` runs after the tree is gone — the slot
-    would otherwise leak for a session id that no longer exists, and a later
-    session reusing the id would 409 forever. Unasserted until now."""
+def test_session_delete_holds_the_job_slot_for_the_walk_and_frees_it_after(
+    client: TestClient, recorder_under_test: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route brackets its teardown with the SAME slot the batch jobs use.
+
+    Asserting only the after-state is vacuous: `_refuse_current_or_busy`
+    already guarantees the slot is empty at request time, so `jobs.get(...)
+    is None` afterwards passes even with the bracket deleted outright. The
+    load-bearing half is the DURING-state — the slot is held while the tree
+    is being unlinked, so a transcribe/strip that races the check-then-act
+    pre-flight window gets a 409 instead of reading WAVs out of a folder
+    being rmtree'd. The after-state then pins the release: the slot must not
+    leak for a session id that no longer exists, or a later session reusing
+    the id would 409 forever."""
     seed_session(recorder_under_test.recordings_dir, "doomed", ["20260101T000000Z__alice__abc.wav"])
+    real_rmtree = shutil.rmtree
+    held: list[object] = []
+
+    def _observe(path: object, *a: object, **k: object) -> None:
+        # `JobTracker.get` is a bare dict read, so it is safe from the worker
+        # thread `asyncio.to_thread` runs this on.
+        held.append(recorder_under_test.jobs.get("doomed"))
+        real_rmtree(path, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(shutil, "rmtree", _observe)
     assert client.delete("/api/sessions/doomed").status_code == 200
+    assert held, "the teardown never ran"
+    assert held[0] is not None, "the session's job slot was not held for the teardown walk"
     assert recorder_under_test.jobs.get("doomed") is None
 
 
@@ -162,7 +217,11 @@ def test_session_delete_failure_is_a_500_that_says_what_failed(
     r = client.delete("/api/sessions/locked")
     assert r.status_code == 500, r.text
     assert "delete failed" in r.json()["detail"]
-    # The folder survives a failed delete — no partial teardown.
+    # The folder survives a delete that never started. `rmtree` is replaced
+    # wholesale here, so this pins THAT and not "a mid-walk failure leaves
+    # nothing behind" — `shutil.rmtree` is not atomic, and a real EBUSY part
+    # way through leaves a truncated folder (the same exposure
+    # `delete_session_audio` has had since #207).
     assert (recorder_under_test.recordings_dir / "locked").exists()
 
 
@@ -237,3 +296,61 @@ def test_wav_delete_rejects_an_unknown_source_with_400(
     seed_session(recorder_under_test.recordings_dir, "s", ["20260101T000000Z__alice__abc.wav"])
     r = client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav?source=bogus")
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# The emitted line — the harm layer. Every scan above asserts the ABSENCE of an
+# inline `print`, which a bare `def _ops_log(m): print(m)` satisfies while
+# dropping both the `[tapscribe] ` prefix an operator greps for and the
+# `flush=True` that keeps the line visible behind a pipe. The operator log IS
+# the deliverable of the `log` limb, so pin what reaches stdout, per route.
+# ---------------------------------------------------------------------------
+
+
+def test_the_seam_owns_the_prefix_and_the_flush(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`capsys` replaces stdout with a plain buffer, so flushing is not
+    observable through it — assert on the call the seam makes instead."""
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: calls.append((a, k)))
+    _ops_log("something happened")
+    ((args, kwargs),) = calls
+    assert args == ("[tapscribe] something happened",)
+    # `flush` only — NOT an exact-kwargs match, so the transport change this
+    # seam exists to make cheap (a `file=`, an `end=`) does not redden a test
+    # about the prefix.
+    assert kwargs.get("flush") is True
+
+
+def test_session_delete_still_says_what_it_deleted(
+    client: TestClient, recorder_under_test: Recorder, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_session(recorder_under_test.recordings_dir, "doomed", ["20260101T000000Z__alice__abc.wav"])
+    assert client.delete("/api/sessions/doomed").status_code == 200
+    assert "[tapscribe] deleted session: " in capsys.readouterr().out
+
+
+def test_audio_delete_still_says_what_it_freed(
+    client: TestClient, recorder_under_test: Recorder, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_session(recorder_under_test.recordings_dir, "s", ["20260101T000000Z__alice__abc.wav"])
+    assert client.delete("/api/sessions/s/audio").status_code == 200
+    assert "[tapscribe] deleted audio from session s: 1 wavs, " in capsys.readouterr().out
+
+
+def test_wav_delete_still_says_what_it_freed(
+    client: TestClient, recorder_under_test: Recorder, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_session(recorder_under_test.recordings_dir, "s", ["20260101T000000Z__alice__abc.wav"])
+    assert client.delete("/api/wav/s/20260101T000000Z__alice__abc.wav").status_code == 200
+    out = capsys.readouterr().out
+    assert "[tapscribe] deleted wav 20260101T000000Z__alice__abc.wav (original) from session s: " in out
+
+
+def test_absorb_still_says_what_it_moved(
+    client: TestClient, recorder_under_test: Recorder, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = recorder_under_test.recordings_dir
+    seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
+    seed_session(root, "src", ["20260101T010000Z__bob__def.wav"])
+    assert client.post("/api/sessions/tgt/absorb", json={"source": "src"}).status_code == 200
+    assert "[tapscribe] absorbed src into tgt: 1 wavs, " in capsys.readouterr().out
