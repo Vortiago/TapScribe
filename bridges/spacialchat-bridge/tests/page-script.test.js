@@ -197,7 +197,7 @@ function loadPageScript({
     // is built as a template string and handed to `new Blob([src], …)`, so
     // this is the ONLY place a test can observe what the worklet will
     // actually run — see "the worklet emits …-sample frames" below.
-    Blob: function Blob(parts) { blobParts.push(parts); return {}; },
+    Blob: function Blob(parts = []) { blobParts.push(parts.join("")); return {}; },
     crypto: { randomUUID: () => "u-" + Math.random().toString(36).slice(2) },
     console: { log: () => {}, warn: () => {}, error: () => {} },
     // Capture the 250ms room-poll callback (don't auto-run it) so a test
@@ -224,7 +224,7 @@ function loadPageScript({
     eventListeners,
     sandbox,
     sidebarEls,
-    workletSource: () => blobParts.map((parts) => (parts || []).join("")).join(""),
+    workletSource: () => blobParts.join(""),
     setNow: (ms) => { nowMs = ms; },
     sidebarScans: () => sidebarScanCount,
   };

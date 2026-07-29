@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -90,14 +90,28 @@ CS_INT = Spelling(parse=lambda s: int(s.replace("_", "")), render=lambda v: f"{v
 #: against `content.js`'s bare `DRAIN_MAX_MS = 8000`. Read-only: tier 2.
 CS_TIMESPAN_MS = Spelling(parse=_timespan_ms)
 
-#: Prose that states the rate in kilohertz — "16 kHz mono".
-KHZ = Spelling(parse=lambda s: int(s) * 1000, render=lambda v: str(v // 1000))
+#: Prose that states the value in thousands of the canonical unit — "16 kHz
+#: mono" (Hz), "`DRAIN_MAX_MS` (8 s)" (ms). ONE spelling: the arithmetic is
+#: identical either way, and the unit is already named by each site's anchor.
+THOUSANDS = Spelling(parse=lambda s: int(s) * 1000, render=lambda v: str(v // 1000))
 
-#: Prose that states a duration in whole seconds — "(8 s)".
-SECONDS_MS = Spelling(parse=lambda s: int(s) * 1000, render=lambda v: str(v // 1000))
+#: Prose that spaces its thousands — "**96 000 bytes**". Gate-only, so the
+#: render it never reaches is simply absent.
+SPACED_INT = Spelling(parse=lambda s: int(s.replace(" ", "")))
 
-#: Prose that spaces its thousands — "**96 000 bytes**".
-SPACED_INT = Spelling(parse=lambda s: int(s.replace(" ", "")), render=lambda v: f"{v:,}".replace(",", " "))
+
+def _bits_to_bytes(declared: str) -> int:
+    """ "16" -> 2. Rejects a width that isn't whole bytes: without that, the
+    anti-vacuity sweep showed "signed 17-bit" floor-dividing to the same 2 and
+    the site proving nothing."""
+    bits = int(declared)
+    if bits % 8:
+        raise ValueError(f"sample width must be a whole number of bytes, got {bits} bits")
+    return bits // 8
+
+
+#: Prose that states the sample width in bits — "PCM signed 16-bit".
+BITS = Spelling(parse=_bits_to_bytes, render=lambda v: str(v * 8))
 
 #: Prose that states a fraction as a percentage — "**±25 % jitter**".
 PERCENT = Spelling(parse=lambda s: float(s) / 100)
@@ -113,15 +127,18 @@ FLOAT = Spelling(parse=float)
 RAW = Spelling(parse=str.strip, render=str)
 
 
-def readonly(spelling: Spelling) -> Spelling:
-    """The same spelling with no `render` — a gate-only site.
+def _gate_only(*sites: Site) -> tuple[Site, ...]:
+    """Strip every render from a whole tier: gated, never stamped.
 
-    Tier-2 sites are read by the gate and never written by the stamper, and
-    the two tables below enforce that structurally (the stamper only iterates
-    `STAMPS`). This is the second lock: even a row moved into the wrong table
-    by hand cannot be written.
+    `stamp()` iterates `STAMPS` alone, so the table split is already the
+    structural guarantee. This is the second lock, and it is applied to the
+    TIER rather than to each row — a row added to `RECIPE` later inherits it
+    instead of depending on the author remembering a per-row wrapper. (It was
+    per-row once: 8 of 16 rows carried it, three of those were no-ops, and a
+    reader could not tell which rows were locked by policy and which merely
+    by a spelling that happened to lack a render.)
     """
-    return Spelling(parse=spelling.parse)
+    return tuple(replace(s, spelling=Spelling(parse=s.spelling.parse)) for s in sites)
 
 
 #: A C# collection expression of TimeSpan factory calls, canonicalised to a
@@ -160,49 +177,87 @@ class AnchorNotFound(LookupError):
 
 
 @dataclass(frozen=True)
+class Anchor:
+    """A matcher plus what the thing it matches is CALLED in that file.
+
+    The two travel together because a `Site` used to name its symbol twice —
+    once as text and once inside the builder call — which no test could catch
+    when they disagreed, and which made every row multi-line.
+
+    ``name`` is set only for a real identifier (`py_assign` & friends), and is
+    what the completeness sweep derives its watch-list from; prose anchors have
+    no identifier, so they carry ``None`` and a human-readable ``label``.
+    """
+
+    label: str
+    pattern: re.Pattern[str]
+    name: str | None = None
+
+
+@dataclass(frozen=True)
 class Site:
     """One place that declares one contract value.
 
-    ``pattern`` must capture the value in a group named ``v``, anchored on the
-    symbol or markup around it so it can't match a coincidental number.
-    ``symbol`` is what the anchor is named in that file, for the error message.
+    The anchor's pattern must capture the value in a group named ``v``,
+    anchored on the symbol or markup around it so it can't match a
+    coincidental number.
     """
 
     path: Path
     key: str
-    symbol: str
-    pattern: re.Pattern[str]
-    spelling: Spelling = field(default=TEXT)
+    anchor: Anchor
+    spelling: Spelling = TEXT
+
+    @property
+    def symbol(self) -> str:
+        """What to call this declaration in an error message."""
+        return self.anchor.label
+
+    @property
+    def pattern(self) -> re.Pattern[str]:
+        return self.anchor.pattern
 
 
-def py_assign(symbol: str) -> re.Pattern[str]:
+def py_assign(symbol: str) -> Anchor:
     """A module-level Python assignment — `SAMPLE_RATE = 16000`.
 
     Every pattern here captures the RAW right-hand side; unquoting and unit
     conversion belong to the `Spelling`, so one pattern serves a string and a
     number alike and each language's syntax has exactly one owner.
     """
-    return re.compile(
-        rf"^{re.escape(symbol)}(?:\s*:\s*\w+)?\s*=\s*(?P<v>\"[^\"]*\"|[^\n#]+?)\s*$",
-        re.MULTILINE,
+    return Anchor(
+        symbol,
+        re.compile(
+            rf"^{re.escape(symbol)}(?:\s*:\s*\w+)?\s*=\s*(?P<v>\"[^\"]*\"|[^\n#]+?)\s*$",
+            re.MULTILINE,
+        ),
+        name=symbol,
     )
 
 
-def cs_const(symbol: str) -> re.Pattern[str]:
+def cs_const(symbol: str) -> Anchor:
     """A C# `const` field initialiser — `public const int SampleRate = 16_000;`."""
-    return re.compile(rf"\bconst\s+\w+\s+{re.escape(symbol)}\s*=\s*(?P<v>[^;]+?)\s*;")
+    return Anchor(
+        symbol,
+        re.compile(rf"\bconst\s+\w+\s+{re.escape(symbol)}\s*=\s*(?P<v>[^;]+?)\s*;"),
+        name=symbol,
+    )
 
 
-def cs_property(symbol: str) -> re.Pattern[str]:
+def cs_property(symbol: str) -> Anchor:
     """A C# auto-property default — `public TimeSpan DrainBudget { get; init; } = X;`.
 
     DOTALL because the backoff ladder's collection expression spans six lines;
     a collection expression contains no `;` of its own, so the lazy run to the
     terminating `;` still stops at the right place.
     """
-    return re.compile(
-        rf"\b{re.escape(symbol)}\s*\{{\s*get;\s*init;\s*\}}\s*=\s*(?P<v>[^;]+?)\s*;",
-        re.DOTALL,
+    return Anchor(
+        symbol,
+        re.compile(
+            rf"\b{re.escape(symbol)}\s*\{{\s*get;\s*init;\s*\}}\s*=\s*(?P<v>[^;]+?)\s*;",
+            re.DOTALL,
+        ),
+        name=symbol,
     )
 
 
@@ -214,7 +269,7 @@ _ESCAPE = re.compile(r"\\.")
 _NOT_AN_ANCHOR = re.compile(r"[^A-Za-z]")
 
 
-def anchored(regex: str) -> re.Pattern[str]:
+def anchored(regex: str, *, called: str) -> Anchor:
     """A hand-anchored matcher for one value that has no symbol to hang on.
 
     Prose has no symbols to anchor on, and 320 / 640 / 8 appear as ordinary
@@ -231,19 +286,27 @@ def anchored(regex: str) -> re.Pattern[str]:
     outside = _ESCAPE.sub("", regex.replace("(?P<v>", ""))
     if not _NOT_AN_ANCHOR.sub("", outside):
         raise ValueError(f"prose matcher has no word anchor, so it would match any number: {regex!r}")
-    return re.compile(regex)
+    # `name` stays None: prose declares no identifier, so there is nothing for
+    # the completeness sweep's watch-list to derive from here — a restatement
+    # in prose is sweep B's job, not sweep A's.
+    return Anchor(called, re.compile(regex))
 
 
-def js_const(symbol: str) -> re.Pattern[str]:
+def js_const(symbol: str) -> Anchor:
     """A JS `const` declaration — string, number or array literal."""
-    return re.compile(rf"\bconst\s+{re.escape(symbol)}\s*=\s*(?P<v>\[[^\]]*\]|[^;\n]+?)\s*;")
+    return Anchor(
+        symbol,
+        re.compile(rf"\bconst\s+{re.escape(symbol)}\s*=\s*(?P<v>\[[^\]]*\]|[^;\n]+?)\s*;"),
+        name=symbol,
+    )
 
 
-def declared_value(text: str, site: Site) -> Any:
-    """The value ``site`` currently declares in ``text``.
+def _matches(text: str, site: Site) -> list[re.Match[str]]:
+    """Every occurrence `site` declares in `text`, or raise.
 
-    Raises `AnchorNotFound` when the pattern matches nothing — see that class
-    for why this is never a soft failure.
+    Raising rather than returning an empty list is the fail-CLOSED half of the
+    gate: `None`/empty would compare equal across two un-anchored sites and
+    turn the whole thing green while checking nothing.
     """
     matches = list(site.pattern.finditer(text))
     if not matches:
@@ -252,6 +315,16 @@ def declared_value(text: str, site: Site) -> Any:
             f"(contract key {site.key!r}). It was renamed, reformatted or "
             f"removed — update this site's pattern in tools/stamp_tap_wire.py."
         )
+    return matches
+
+
+def declared_value(text: str, site: Site) -> Any:
+    """The value ``site`` currently declares in ``text``.
+
+    Raises `AnchorNotFound` when the pattern matches nothing — see that class
+    for why this is never a soft failure.
+    """
+    matches = _matches(text, site)
     values = [site.spelling.parse(m.group("v")) for m in matches]
     distinct = [v for i, v in enumerate(values) if v not in values[:i]]
     if len(distinct) > 1:
@@ -275,12 +348,7 @@ def restamped(text: str, site: Site, value: Any) -> str:
             f"is pinned by the golden table in tests/test_tap_wire_contract.py, "
             f"not written from the Recorder — see ADR-0019."
         )
-    matches = list(site.pattern.finditer(text))
-    if not matches:
-        raise AnchorNotFound(
-            f"{site.path}: no declaration of {site.symbol!r} matched "
-            f"(contract key {site.key!r}) — nothing to stamp."
-        )
+    matches = _matches(text, site)
     rendered = site.spelling.render(value)
     # Right to left, so an earlier replacement can't shift a later span.
     out = text
@@ -313,7 +381,7 @@ def recorder_contract() -> dict[str, Any]:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
-    from tapscribe import auth, config, speech_gate, tap_fan_out
+    from tapscribe import auth, speech_gate, tap_fan_out
     from tapscribe.audio import RECORDER_CHANNELS, RECORDER_SAMPLE_RATE, RECORDER_SAMPLE_WIDTH
 
     return {
@@ -324,7 +392,6 @@ def recorder_contract() -> dict[str, Any]:
         "frame_samples": speech_gate.FRAME_SAMPLES,
         "frame_bytes": speech_gate.FRAME_BYTES,
         "probe_identity": tap_fan_out.PROBE_IDENTITY,
-        "tap_prefix": config.TAP_PREFIX,
         # Derived, and that is exactly why it needs stamping. CODE derives
         # the frame duration where it needs it; PROSE states "20 ms"
         # outright, five times across four docs. A frame-size change would
@@ -339,196 +406,109 @@ def recorder_contract() -> dict[str, Any]:
 
 _SC = Path("bridges/spacialchat-bridge")
 _TRAY = Path("bridges/windows-tray-bridge/src/TapScribe.Bridge.Core")
+_LTB = Path("bridges/local-test-bridge/local_test_bridge.py")
+_BRIDGES_README = Path("bridges/README.md")
+_TRAY_README = Path("bridges/windows-tray-bridge/README.md")
+_SC_README = _SC / "README.md"
+_CONTEXT = Path("CONTEXT.md")
+
+#: Prose restatements that appear verbatim in more than one doc. Each path is
+#: still listed literally and still gets its own row (and its own failure id);
+#: this only stops the same anchor being retyped once per file.
+_KHZ = anchored(r"(?P<v>\d+) kHz mono", called="16 kHz mono")
+_NBYTE = anchored(r"(?P<v>\d+)-byte", called="N-byte")
+_SUBPROTO_DOC = anchored(r"`(?P<v>tapscribe\.v\d+\.tap\.)<token>`", called="`tapscribe.vN.tap.<token>`")
+
+
+def _in_each(paths: tuple[Path, ...], key: str, anchor: Anchor, spelling: Spelling) -> tuple[Site, ...]:
+    """One restatement of `key`, appearing in several files."""
+    return tuple(Site(p, key, anchor, spelling) for p in paths)
+
 
 STAMPS: tuple[Site, ...] = (
-    # --- C#: the tray bridge's wire constants ------------------------------
-    Site(_TRAY / "TapWire.cs", "sample_rate", "SampleRate", cs_const("SampleRate"), CS_INT),
-    Site(_TRAY / "TapWire.cs", "channels", "Channels", cs_const("Channels"), CS_INT),
-    Site(_TRAY / "TapWire.cs", "frame_samples", "FrameSamples", cs_const("FrameSamples"), CS_INT),
-    Site(
-        _TRAY / "TapWire.cs",
-        "subprotocol_prefix",
-        "SubprotocolPrefix",
-        cs_const("SubprotocolPrefix"),
-        TEXT,
-    ),
+    # --- C#: the tray bridge -----------------------------------------------
+    Site(_TRAY / "TapWire.cs", "sample_rate", cs_const("SampleRate"), CS_INT),
+    Site(_TRAY / "TapWire.cs", "channels", cs_const("Channels"), CS_INT),
+    Site(_TRAY / "TapWire.cs", "frame_samples", cs_const("FrameSamples"), CS_INT),
+    Site(_TRAY / "TapWire.cs", "subprotocol_prefix", cs_const("SubprotocolPrefix"), TEXT),
     # `FrameBytes = FrameSamples * 2` is DERIVED — never stamped.
-    # The XML doc comment spells the offered subprotocol out for IntelliSense;
-    # found by the completeness tripwire, which is exactly its job.
     Site(
         _TRAY / "TapClient.cs",
         "subprotocol_prefix",
-        "`tapscribe.vN.tap.&lt;token&gt;` in the XML doc",
-        anchored(r"`(?P<v>tapscribe\.v\d+\.tap\.)&lt;token&gt;`"),
+        anchored(
+            r"`(?P<v>tapscribe\.v\d+\.tap\.)&lt;token&gt;`",
+            called="`tapscribe.vN.tap.<token>` in the XML doc",
+        ),
         RAW,
     ),
     Site(
         _TRAY / "ConnectionTester.cs",
         "probe_identity",
-        "Identity",
-        anchored(r"Identity = (?P<v>\"[^\"]*\")"),
+        anchored(r"Identity = (?P<v>\"[^\"]*\")", called="Identity"),
         TEXT,
     ),
     # --- JS: the SpatialChat bridge, both worlds ---------------------------
-    Site(
-        _SC / "control-client.js",
-        "subprotocol_prefix",
-        "TAP_SUBPROTOCOL_PREFIX",
-        js_const("TAP_SUBPROTOCOL_PREFIX"),
-        TEXT,
-    ),
+    Site(_SC / "control-client.js", "subprotocol_prefix", js_const("TAP_SUBPROTOCOL_PREFIX"), TEXT),
     Site(
         _SC / "control-client.js",
         "probe_identity",
-        "identity= in the probe URL",
-        anchored(r"/tap\?identity=(?P<v>[^&\"]+)&name=probe"),
+        anchored(r"/tap\?identity=(?P<v>[^&\"]+)&name=probe", called="identity= in the probe URL"),
         RAW,
     ),
+    Site(_SC / "page-script.js", "frame_samples", js_const("FRAME_SAMPLES"), INT),
+    # content.js restates the whole wire contract in its header block. It is
+    # shipped bridge code under a "Wire contract" heading, not incidental
+    # prose, so it is stamped like any other declaration (found by the
+    # completeness review, not by the first cut of the table).
+    Site(_SC / "content.js", "sample_rate", _KHZ, THOUSANDS),
+    Site(_SC / "content.js", "frame_ms", anchored(r"(?P<v>\d+) ms each", called="N ms each"), INT),
     Site(
-        _SC / "page-script.js",
+        _SC / "content.js",
         "frame_samples",
-        "FRAME_SAMPLES",
-        js_const("FRAME_SAMPLES"),
+        anchored(r"each \((?P<v>\d+) samples", called="(N samples ...)"),
+        INT,
+    ),
+    Site(
+        _SC / "content.js",
+        "frame_bytes",
+        anchored(r"samples = (?P<v>\d+) bytes\)", called="(... = N bytes)"),
         INT,
     ),
     # --- Python: the local-test bridge -------------------------------------
-    Site(
-        Path("bridges/local-test-bridge/local_test_bridge.py"),
-        "sample_rate",
-        "SAMPLE_RATE",
-        py_assign("SAMPLE_RATE"),
-        INT,
-    ),
-    Site(
-        Path("bridges/local-test-bridge/local_test_bridge.py"),
-        "frame_samples",
-        "FRAME_SAMPLES",
-        py_assign("FRAME_SAMPLES"),
-        INT,
-    ),
-    Site(
-        Path("bridges/local-test-bridge/local_test_bridge.py"),
-        "subprotocol_prefix",
-        "TAP_SUBPROTOCOL_PREFIX",
-        py_assign("TAP_SUBPROTOCOL_PREFIX"),
-        TEXT,
-    ),
+    Site(_LTB, "sample_rate", py_assign("SAMPLE_RATE"), INT),
+    Site(_LTB, "frame_samples", py_assign("FRAME_SAMPLES"), INT),
+    Site(_LTB, "subprotocol_prefix", py_assign("TAP_SUBPROTOCOL_PREFIX"), TEXT),
     # --- Prose. Each pattern rewrites EVERY occurrence in its file. --------
+    *_in_each((_BRIDGES_README, _TRAY_README, _SC_README, _CONTEXT), "sample_rate", _KHZ, THOUSANDS),
+    *_in_each((_TRAY_README, _SC_README), "frame_bytes", _NBYTE, INT),
+    *_in_each((_BRIDGES_README, _TRAY_README), "subprotocol_prefix", _SUBPROTO_DOC, RAW),
+    Site(_BRIDGES_README, "sample_width", anchored(r"signed (?P<v>\d+)-bit", called="signed N-bit"), BITS),
+    Site(_BRIDGES_README, "frame_ms", anchored(r"(?P<v>\d+) ms \(", called="N ms ("), INT),
+    Site(_BRIDGES_README, "frame_samples", anchored(r"\((?P<v>\d+) samples =", called="(N samples ="), INT),
     Site(
-        Path("bridges/README.md"),
-        "sample_rate",
-        "16 kHz mono",
-        anchored(r"(?P<v>\d+) kHz mono"),
-        KHZ,
-    ),
-    Site(
-        Path("bridges/README.md"),
-        "frame_ms",
-        "N ms",
-        anchored(r"(?P<v>\d+) ms \("),
-        INT,
-    ),
-    Site(
-        Path("bridges/spacialchat-bridge/README.md"),
-        "frame_ms",
-        "N ms",
-        anchored(r"in (?P<v>\d+) ms \("),
-        INT,
-    ),
-    Site(
-        Path("bridges/windows-tray-bridge/README.md"),
-        "frame_ms",
-        "N ms",
-        # Both mentions in this file are the frame duration, so a plain "N ms"
-        # anchor is safe here — unlike bridges/README.md, where `5000 ms` and
-        # `8000 ms` (the Blip-resilience recipe) would also match.
-        anchored(r"(?P<v>\d+) ms"),
-        INT,
-    ),
-    Site(
-        Path("CONTEXT.md"),
-        "frame_ms",
-        "N ms / N bytes per frame",
-        anchored(r"\((?P<v>\d+) ms / \d+ bytes per frame\)"),
-        INT,
-    ),
-    Site(
-        Path("bridges/README.md"),
-        "frame_samples",
-        "(N samples = ...)",
-        anchored(r"\((?P<v>\d+) samples ="),
-        INT,
-    ),
-    Site(
-        Path("bridges/README.md"),
+        _BRIDGES_README,
         "frame_bytes",
-        "(... = N bytes)",
-        anchored(r"samples = (?P<v>\d+) bytes\)"),
+        anchored(r"samples = (?P<v>\d+) bytes\)", called="(... = N bytes)"),
         INT,
     ),
     Site(
-        Path("bridges/README.md"),
-        "subprotocol_prefix",
-        "`tapscribe.vN.tap.<token>`",
-        anchored(r"`(?P<v>tapscribe\.v\d+\.tap\.)<token>`"),
-        RAW,
-    ),
-    Site(
-        Path("bridges/README.md"),
+        _BRIDGES_README,
         "probe_identity",
-        "`__probe__` is RESERVED",
-        anchored(r"\*\*`(?P<v>__probe__)` is RESERVED\*\*"),
+        anchored(r"\*\*`(?P<v>__probe__)` is RESERVED\*\*", called="`__probe__` is RESERVED"),
         RAW,
     ),
+    # Both "N ms" mentions in the tray README are the frame duration, so a
+    # plain anchor is safe there — unlike bridges/README.md, where the
+    # Blip-resilience recipe's `5000 ms` / `8000 ms` would also match.
+    Site(_TRAY_README, "frame_ms", anchored(r"(?P<v>\d+) ms", called="N ms"), INT),
+    Site(_SC_README, "frame_ms", anchored(r"in (?P<v>\d+) ms \(", called="in N ms ("), INT),
     Site(
-        Path("bridges/windows-tray-bridge/README.md"),
-        "sample_rate",
-        "16 kHz mono",
-        anchored(r"(?P<v>\d+) kHz mono"),
-        KHZ,
-    ),
-    Site(
-        Path("bridges/windows-tray-bridge/README.md"),
-        "frame_bytes",
-        "N-byte",
-        anchored(r"(?P<v>\d+)-byte"),
+        _CONTEXT,
+        "frame_ms",
+        anchored(r"\((?P<v>\d+) ms / \d+ bytes per frame\)", called="(N ms / N bytes per frame)"),
         INT,
     ),
-    Site(
-        Path("bridges/windows-tray-bridge/README.md"),
-        "subprotocol_prefix",
-        "`tapscribe.vN.tap.<token>`",
-        anchored(r"`(?P<v>tapscribe\.v\d+\.tap\.)<token>`"),
-        RAW,
-    ),
-    Site(
-        _SC / "README.md",
-        "sample_rate",
-        "16 kHz mono",
-        anchored(r"(?P<v>\d+) kHz mono"),
-        KHZ,
-    ),
-    Site(
-        _SC / "README.md",
-        "frame_bytes",
-        "N-byte",
-        anchored(r"(?P<v>\d+)-byte"),
-        INT,
-    ),
-    Site(
-        Path("CONTEXT.md"),
-        "sample_rate",
-        "16 kHz mono",
-        anchored(r"(?P<v>\d+) kHz mono"),
-        KHZ,
-    ),
-    Site(
-        Path("CONTEXT.md"),
-        "frame_bytes",
-        "N bytes per frame",
-        anchored(r"(?P<v>\d+) bytes per frame"),
-        INT,
-    ),
+    Site(_CONTEXT, "frame_bytes", anchored(r"(?P<v>\d+) bytes per frame", called="N bytes per frame"), INT),
 )
 
 
@@ -542,121 +522,60 @@ STAMPS: tuple[Site, ...] = (
 # other, which is what the gate's golden table pins. `local-test-bridge` has
 # no reconnect ladder at all and is exempt by construction.
 
-RECIPE: tuple[Site, ...] = (
-    Site(
-        _SC / "content.js",
-        "backoff_ms",
-        "BACKOFF_MS",
-        js_const("BACKOFF_MS"),
-        readonly(INT_LIST),
-    ),
-    Site(
-        _SC / "content.js",
-        "backoff_cap_ms",
-        "BACKOFF_CAP_MS",
-        js_const("BACKOFF_CAP_MS"),
-        readonly(INT),
-    ),
-    Site(
-        _SC / "content.js",
-        "max_buffer_bytes",
-        "MAX_BUFFER_BYTES",
-        js_const("MAX_BUFFER_BYTES"),
-        readonly(INT),
-    ),
-    Site(
-        _SC / "content.js",
-        "drain_budget_ms",
-        "DRAIN_MAX_MS",
-        js_const("DRAIN_MAX_MS"),
-        readonly(INT),
-    ),
+RECIPE: tuple[Site, ...] = _gate_only(
+    Site(_SC / "content.js", "backoff_ms", js_const("BACKOFF_MS"), INT_LIST),
+    Site(_SC / "content.js", "backoff_cap_ms", js_const("BACKOFF_CAP_MS"), INT),
+    Site(_SC / "content.js", "max_buffer_bytes", js_const("MAX_BUFFER_BYTES"), INT),
+    Site(_SC / "content.js", "drain_budget_ms", js_const("DRAIN_MAX_MS"), INT),
     # content.js spells the jitter as the WIDTH of a symmetric span
     # (`(Math.random() - 0.5) * 0.5`), C# as the fraction either side (0.25).
     # Same fact, half the number — hence the /2 in the spelling.
     Site(
         _SC / "content.js",
         "backoff_jitter",
-        "(Math.random() - 0.5) * N",
-        anchored(r"\(Math\.random\(\) - 0\.5\) \* (?P<v>[\d.]+)"),
+        anchored(r"\(Math\.random\(\) - 0\.5\) \* (?P<v>[\d.]+)", called="(Math.random() - 0.5) * N"),
         Spelling(parse=lambda s: float(s) / 2),
     ),
+    Site(_TRAY / "TapStreamOptions.cs", "backoff_ms", cs_property("Backoff"), CS_TIMESPAN_LIST_MS),
+    Site(_TRAY / "TapStreamOptions.cs", "backoff_cap_ms", cs_property("BackoffCap"), CS_TIMESPAN_MS),
+    Site(_TRAY / "TapStreamOptions.cs", "backoff_jitter", cs_property("BackoffJitter"), FLOAT),
+    Site(_TRAY / "TapStreamOptions.cs", "max_buffer_bytes", cs_property("MaxBufferBytes"), CS_INT),
+    Site(_TRAY / "TapStreamOptions.cs", "drain_budget_ms", cs_property("DrainBudget"), CS_TIMESPAN_MS),
     Site(
-        _TRAY / "TapStreamOptions.cs",
+        _BRIDGES_README,
         "backoff_ms",
-        "Backoff",
-        cs_property("Backoff"),
-        CS_TIMESPAN_LIST_MS,
+        anchored(r"jittered exponential — `(?P<v>[\d, ]+) ms`", called="jittered exponential — `... ms`"),
+        INT_LIST,
     ),
     Site(
-        _TRAY / "TapStreamOptions.cs",
+        _BRIDGES_README,
         "backoff_cap_ms",
-        "BackoffCap",
-        cs_property("BackoffCap"),
-        CS_TIMESPAN_MS,
+        anchored(r"capped at `(?P<v>\d+) ms`", called="capped at `N ms`"),
+        INT,
     ),
     Site(
-        _TRAY / "TapStreamOptions.cs",
+        _BRIDGES_README,
         "backoff_jitter",
-        "BackoffJitter",
-        cs_property("BackoffJitter"),
-        readonly(FLOAT),
-    ),
-    Site(
-        _TRAY / "TapStreamOptions.cs",
-        "max_buffer_bytes",
-        "MaxBufferBytes",
-        cs_property("MaxBufferBytes"),
-        readonly(CS_INT),
-    ),
-    Site(
-        _TRAY / "TapStreamOptions.cs",
-        "drain_budget_ms",
-        "DrainBudget",
-        cs_property("DrainBudget"),
-        CS_TIMESPAN_MS,
-    ),
-    Site(
-        Path("bridges/README.md"),
-        "backoff_ms",
-        "jittered exponential — `... ms`",
-        anchored(r"jittered exponential — `(?P<v>[\d, ]+) ms`"),
-        readonly(INT_LIST),
-    ),
-    Site(
-        Path("bridges/README.md"),
-        "backoff_cap_ms",
-        "capped at `N ms`",
-        anchored(r"capped at `(?P<v>\d+) ms`"),
-        readonly(INT),
-    ),
-    Site(
-        Path("bridges/README.md"),
-        "backoff_jitter",
-        "**±N % jitter**",
-        anchored(r"\*\*±(?P<v>[\d.]+) % jitter\*\*"),
+        anchored(r"\*\*±(?P<v>[\d.]+) % jitter\*\*", called="**±N % jitter**"),
         PERCENT,
     ),
     Site(
-        Path("bridges/README.md"),
+        _BRIDGES_README,
         "max_buffer_bytes",
-        "**N bytes**",
-        anchored(r"\*\*(?P<v>[\d ]+) bytes\*\*"),
-        readonly(SPACED_INT),
+        anchored(r"\*\*(?P<v>[\d ]+) bytes\*\*", called="**N bytes**"),
+        SPACED_INT,
     ),
     Site(
-        Path("bridges/README.md"),
+        _BRIDGES_README,
         "drain_budget_ms",
-        "recommended **N ms**",
-        anchored(r"recommended \*\*(?P<v>\d+) ms\*\*"),
-        readonly(INT),
+        anchored(r"recommended \*\*(?P<v>\d+) ms\*\*", called="recommended **N ms**"),
+        INT,
     ),
     Site(
-        Path("CONTEXT.md"),
+        _CONTEXT,
         "drain_budget_ms",
-        "`DRAIN_MAX_MS` (N s)",
-        anchored(r"`DRAIN_MAX_MS` \((?P<v>\d+) s\)"),
-        readonly(SECONDS_MS),
+        anchored(r"`DRAIN_MAX_MS` \((?P<v>\d+) s\)", called="`DRAIN_MAX_MS` (N s)"),
+        THOUSANDS,
     ),
 )
 
@@ -666,59 +585,39 @@ RECIPE: tuple[Site, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def stamp(root: Path | None = None) -> list[Path]:
+def stamp(root: Path = REPO_ROOT) -> list[Path]:
     """Bring every stamped site into line with the Recorder.
 
     Returns the paths actually rewritten — empty when the tree is already
     consistent, which is the normal case and the reason re-running is free.
     `root` lets the tests drive a throwaway copy instead of the worktree.
     """
-    base = REPO_ROOT if root is None else root
     contract = recorder_contract()
 
-    edits: dict[Path, str] = {}
+    original: dict[Path, str] = {}
+    edited: dict[Path, str] = {}
     for site in STAMPS:
-        text = edits.get(site.path)
-        if text is None:
-            text = (base / site.path).read_text(encoding="utf-8")
-        edits[site.path] = restamped(text, site, contract[site.key])
+        if site.path not in original:
+            original[site.path] = (root / site.path).read_text(encoding="utf-8")
+            edited[site.path] = original[site.path]
+        edited[site.path] = restamped(edited[site.path], site, contract[site.key])
 
     changed: list[Path] = []
-    for path, text in edits.items():
-        target = base / path
-        if target.read_text(encoding="utf-8") != text:
-            target.write_text(text, encoding="utf-8")
+    for path, text in edited.items():
+        if text != original[path]:
+            (root / path).write_text(text, encoding="utf-8")
             changed.append(path)
     return changed
 
 
-def main(argv: list[str] | None = None) -> int:
-    import argparse
+def main() -> int:
+    """Stamp, and report what moved.
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "Stamp the /tap wire constants from the Recorder into every Bridge. "
-            "Edit tapscribe/ first, then run this."
-        )
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="report drift and exit 1 without writing (what CI's gate does).",
-    )
-    args = parser.parse_args(argv)
-
-    if args.check:
-        stale = [
-            site
-            for site in STAMPS
-            if declared_value((REPO_ROOT / site.path).read_text(encoding="utf-8"), site)
-            != recorder_contract()[site.key]
-        ]
-        for site in stale:
-            print(f"drifted: {site.path} ({site.symbol})")
-        return 1 if stale else 0
-
+    There is deliberately no `--check` mode: the gate is
+    `tests/test_tap_wire_contract.py`, and a second copy of that predicate here
+    could only drift from it. To check by hand, run this (it is idempotent)
+    and look at `git diff` — same as `tools/bump_version.py`.
+    """
     changed = stamp()
     for path in changed:
         print(f"stamped: {path}")

@@ -10,9 +10,11 @@ stamper.
 Three tiers, with different authority:
 
   1. **Wire contract** — enforced. Subprotocol prefix, sample rate, channels,
-     sample width, frame samples/bytes, `__probe__`. Compared against the
-     Recorder's IMPORTED constants, never a copy, so the gate and the server
-     cannot diverge.
+     sample width, frame samples / bytes / duration, `__probe__`. Compared
+     against the Recorder's IMPORTED constants, never a copy, so the gate and
+     the server cannot diverge. The control PATHS are checked differently —
+     against the registered route surface, not stamped — because the Recorder
+     declares them as decorator literals with no constant to read.
   2. **Blip-resilience recipe** — recommended, not enforced (CONTEXT.md). The
      Recorder has no opinion on the backoff ladder / gap buffer / drain
      budget; a third-party Bridge may deviate. What is pinned is that the
@@ -33,34 +35,41 @@ deliberate per-Bridge choice. See ADR-0019.
 
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+import stamp_tap_wire as stamper
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# tools/ isn't a package — same path insert tests/test_package_bridge.py uses.
-TOOLS = REPO_ROOT / "tools"
-if str(TOOLS) not in sys.path:
-    sys.path.insert(0, str(TOOLS))
-
-import stamp_tap_wire as stamper  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # The extractor — a pure function over file text
 # ---------------------------------------------------------------------------
 
 
+def _site(
+    anchor: stamper.Anchor,
+    spelling: stamper.Spelling = stamper.TEXT,
+    *,
+    path: str = "x.txt",
+    key: str = "sample_rate",
+) -> stamper.Site:
+    """A Site for exercising the extractor.
+
+    Only `anchor` and `spelling` participate in reading a value; `path` and
+    `key` exist for error messages. Defaulting them keeps each case about the
+    one spelling it is testing — the tests that DO care about the message pass
+    them explicitly.
+    """
+    return stamper.Site(Path(path), key, anchor, spelling)
+
+
 def test_reads_a_python_assignment() -> None:
     """The simplest shape, and the one the Recorder itself uses."""
-    site = stamper.Site(
-        path=Path("local_test_bridge.py"),
-        key="subprotocol_prefix",
-        symbol="TAP_SUBPROTOCOL_PREFIX",
-        pattern=stamper.py_assign("TAP_SUBPROTOCOL_PREFIX"),
-    )
+    site = _site(stamper.py_assign("TAP_SUBPROTOCOL_PREFIX"))
     text = 'FRAME_BYTES = 640\nTAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap."\n'
     assert stamper.declared_value(text, site) == "tapscribe.v1.tap."
 
@@ -73,12 +82,7 @@ def test_a_renamed_symbol_raises_instead_of_reading_nothing() -> None:
     the suite would go green while checking nothing. It must raise, and the
     message must name the file and the symbol so the fix is obvious.
     """
-    site = stamper.Site(
-        path=Path("local_test_bridge.py"),
-        key="subprotocol_prefix",
-        symbol="TAP_SUBPROTOCOL_PREFIX",
-        pattern=stamper.py_assign("TAP_SUBPROTOCOL_PREFIX"),
-    )
+    site = _site(stamper.py_assign("TAP_SUBPROTOCOL_PREFIX"), path="local_test_bridge.py")
     with pytest.raises(stamper.AnchorNotFound) as excinfo:
         stamper.declared_value('RENAMED_PREFIX = "tapscribe.v1.tap."\n', site)
 
@@ -94,13 +98,7 @@ def test_reads_a_csharp_int_through_its_digit_separator() -> None:
     the comparison is over facts, not over formatting — otherwise every site
     would need the Recorder's exact punctuation, which C# style forbids.
     """
-    site = stamper.Site(
-        path=Path("TapWire.cs"),
-        key="sample_rate",
-        symbol="SampleRate",
-        pattern=stamper.cs_const("SampleRate"),
-        spelling=stamper.CS_INT,
-    )
+    site = _site(stamper.cs_const("SampleRate"), stamper.CS_INT)
     text = "    public const int SampleRate = 16_000;\n"
     assert stamper.declared_value(text, site) == 16000
 
@@ -118,13 +116,7 @@ def test_reads_a_csharp_timespan_as_milliseconds(declared: str, expected_ms: int
     """`TapStreamOptions.cs` spells the recipe in TimeSpans, `content.js` in
     bare milliseconds. Canonical is milliseconds, so `FromSeconds(8)` and
     `DRAIN_MAX_MS = 8000` are recognisably the same budget."""
-    site = stamper.Site(
-        path=Path("TapStreamOptions.cs"),
-        key="drain_budget_ms",
-        symbol="DrainBudget",
-        pattern=stamper.cs_property("DrainBudget"),
-        spelling=stamper.CS_TIMESPAN_MS,
-    )
+    site = _site(stamper.cs_property("DrainBudget"), stamper.CS_TIMESPAN_MS, path="TapStreamOptions.cs")
     text = f"    public TimeSpan DrainBudget {{ get; init; }} = {declared};\n"
     assert stamper.declared_value(text, site) == expected_ms
 
@@ -135,36 +127,19 @@ def test_a_gate_only_site_refuses_to_be_stamped() -> None:
     read-only Spelling has no `render`, which makes that unwritable rather
     than merely documented."""
     assert stamper.CS_TIMESPAN_MS.render is None
-    site = stamper.Site(
-        path=Path("TapStreamOptions.cs"),
-        key="drain_budget_ms",
-        symbol="DrainBudget",
-        pattern=stamper.cs_property("DrainBudget"),
-        spelling=stamper.CS_TIMESPAN_MS,
-    )
+    site = _site(stamper.cs_property("DrainBudget"), stamper.CS_TIMESPAN_MS, path="TapStreamOptions.cs")
     with pytest.raises(stamper.NotStampable):
         stamper.restamped("    public TimeSpan DrainBudget { get; init; } = x;\n", site, 9000)
 
 
 def test_reads_a_js_const_string() -> None:
-    site = stamper.Site(
-        path=Path("control-client.js"),
-        key="subprotocol_prefix",
-        symbol="TAP_SUBPROTOCOL_PREFIX",
-        pattern=stamper.js_const("TAP_SUBPROTOCOL_PREFIX"),
-    )
+    site = _site(stamper.js_const("TAP_SUBPROTOCOL_PREFIX"), path="control-client.js")
     text = '  const TAP_SUBPROTOCOL_PREFIX = "tapscribe.v1.tap.";\n'
     assert stamper.declared_value(text, site) == "tapscribe.v1.tap."
 
 
 def test_reads_a_js_const_int() -> None:
-    site = stamper.Site(
-        path=Path("content.js"),
-        key="max_buffer_bytes",
-        symbol="MAX_BUFFER_BYTES",
-        pattern=stamper.js_const("MAX_BUFFER_BYTES"),
-        spelling=stamper.INT,
-    )
+    site = _site(stamper.js_const("MAX_BUFFER_BYTES"), stamper.INT, path="content.js")
     assert stamper.declared_value("  const MAX_BUFFER_BYTES = 96000;\n", site) == 96000
 
 
@@ -173,13 +148,7 @@ def test_reads_the_backoff_ladder_from_both_languages_as_one_list() -> None:
     `TapStreamOptions.cs` writes a collection expression of TimeSpan factory
     calls across six lines. Canonical is `[200, 400, 800, 1600, 3200]` for
     both, or the two could never be compared."""
-    js = stamper.Site(
-        path=Path("content.js"),
-        key="backoff_ms",
-        symbol="BACKOFF_MS",
-        pattern=stamper.js_const("BACKOFF_MS"),
-        spelling=stamper.INT_LIST,
-    )
+    js = _site(stamper.js_const("BACKOFF_MS"), stamper.INT_LIST, path="content.js")
     assert stamper.declared_value("  const BACKOFF_MS = [200, 400, 800, 1600, 3200];\n", js) == [
         200,
         400,
@@ -188,13 +157,7 @@ def test_reads_the_backoff_ladder_from_both_languages_as_one_list() -> None:
         3200,
     ]
 
-    cs = stamper.Site(
-        path=Path("TapStreamOptions.cs"),
-        key="backoff_ms",
-        symbol="Backoff",
-        pattern=stamper.cs_property("Backoff"),
-        spelling=stamper.CS_TIMESPAN_LIST_MS,
-    )
+    cs = _site(stamper.cs_property("Backoff"), stamper.CS_TIMESPAN_LIST_MS, path="TapStreamOptions.cs")
     text = (
         "    public IReadOnlyList<TimeSpan> Backoff { get; init; } =\n"
         "    [\n"
@@ -214,25 +177,21 @@ def test_prose_matchers_must_be_anchored_on_words_not_just_digits() -> None:
     hit first, so `prose()` refuses to build one — the plan's "never a bare
     numeric scan" rule, made unwritable instead of merely documented."""
     with pytest.raises(ValueError, match="anchor"):
-        stamper.anchored(r"\((?P<v>\d+)\)")
+        stamper.anchored(r"\((?P<v>\d+)\)", called="(N)")
 
     with pytest.raises(ValueError, match="'v'"):
-        stamper.anchored(r"(\d+) samples")
+        stamper.anchored(r"(\d+) samples", called="N samples")
 
     # Anchored on the surrounding words: fine.
-    pattern = stamper.anchored(r"samples = (?P<v>\d+) bytes")
-    assert pattern.search("(320 samples = 640 bytes)").group("v") == "640"
+    pattern = stamper.anchored(r"samples = (?P<v>\d+) bytes", called="N bytes")
+    assert pattern.pattern.search("(320 samples = 640 bytes)").group("v") == "640"
 
 
 def test_reads_prose_that_states_the_rate_in_kilohertz() -> None:
     """`bridges/README.md` says "16 kHz mono", not "16000". Same fact, reader's
     units — so a rate change has to rewrite the prose as `48 kHz`."""
-    site = stamper.Site(
-        path=Path("README.md"),
-        key="sample_rate",
-        symbol="16 kHz mono",
-        pattern=stamper.anchored(r"(?P<v>\d+) kHz mono"),
-        spelling=stamper.KHZ,
+    site = _site(
+        stamper.anchored(r"(?P<v>\d+) kHz mono", called="N kHz mono"), stamper.THOUSANDS, path="README.md"
     )
     text = "**Audio format:** PCM signed 16-bit little-endian, 16 kHz mono, raw\n"
     assert stamper.declared_value(text, site) == 16000
@@ -244,12 +203,8 @@ def test_a_repeated_declaration_is_read_once_and_stamped_everywhere() -> None:
     `bridges/README.md`. A doc that states the fact five times must state the
     NEW fact five times — stamping only the first occurrence is precisely the
     stale-prose drift this gate exists to stop."""
-    site = stamper.Site(
-        path=Path("README.md"),
-        key="sample_rate",
-        symbol="16 kHz mono",
-        pattern=stamper.anchored(r"(?P<v>\d+) kHz mono"),
-        spelling=stamper.KHZ,
+    site = _site(
+        stamper.anchored(r"(?P<v>\d+) kHz mono", called="N kHz mono"), stamper.THOUSANDS, path="README.md"
     )
     text = "a resampler to 16 kHz mono int16\n...\nraw PCM, 16 kHz mono int16, 20 ms\n"
 
@@ -261,12 +216,8 @@ def test_a_file_that_disagrees_with_itself_is_an_error() -> None:
     """Two occurrences, two values — the file has already drifted internally.
     Returning either one would let the gate pick the convenient answer, so
     this raises instead."""
-    site = stamper.Site(
-        path=Path("README.md"),
-        key="sample_rate",
-        symbol="16 kHz mono",
-        pattern=stamper.anchored(r"(?P<v>\d+) kHz mono"),
-        spelling=stamper.KHZ,
+    site = _site(
+        stamper.anchored(r"(?P<v>\d+) kHz mono", called="N kHz mono"), stamper.THOUSANDS, path="README.md"
     )
     with pytest.raises(stamper.SiteDisagreesWithItself, match="16000.*48000|48000.*16000"):
         stamper.declared_value("16 kHz mono here, 48 kHz mono there\n", site)
@@ -325,6 +276,20 @@ def test_the_blip_resilience_recipe_is_the_same_everywhere(site: stamper.Site) -
     )
 
 
+def test_the_contract_has_no_key_that_no_site_declares() -> None:
+    """The tier-1 twin of the recipe check below. `sample_width` and
+    `tap_prefix` were both produced by `recorder_contract()` and read by
+    nothing, while this module's docstring advertised sample width as
+    enforced — the exact class of false prose this gate exists to kill."""
+    declared = {site.key for site in stamper.STAMPS}
+    orphans = sorted(set(stamper.recorder_contract()) - declared)
+    assert not orphans, (
+        f"recorder_contract() produces {orphans} that no Site consumes — either "
+        f"add the rows, or drop the keys. A key nothing reads looks covered "
+        f"and isn't."
+    )
+
+
 def test_the_recipe_table_names_exactly_what_the_sites_declare() -> None:
     """No orphan row on either side: a golden value nothing reads is dead
     weight, and a site whose key isn't in the table is unchecked."""
@@ -365,7 +330,7 @@ def _conforms(text: str, site: stamper.Site, expected: object) -> bool:
     as a rejection — a renamed anchor and a wrong value are both drift."""
     try:
         return stamper.declared_value(text, site) == expected
-    except (stamper.AnchorNotFound, stamper.SiteDisagreesWithItself, ValueError):
+    except (stamper.AnchorNotFound, ValueError):  # SiteDisagreesWithItself IS a ValueError
         return False
 
 
@@ -421,6 +386,14 @@ def test_perturbing_a_site_makes_the_gate_reject_it(site: stamper.Site, tier: st
 
 #: The Recorder's own modules. Not "sites" — the gate READS these by import,
 #: so they can't drift from themselves.
+_MECHANISM_FILES = {
+    # The stamper's docstrings and the gate's fixtures quote declarations
+    # (`public const int SampleRate = 16_000;`) as EXAMPLES of what they match.
+    # Sweeping the mechanism for the shapes it exists to describe is circular.
+    "tools/stamp_tap_wire.py",
+    "tests/test_tap_wire_contract.py",
+}
+
 _SOURCE_MODULES = {
     "tapscribe/auth.py",
     "tapscribe/audio.py",
@@ -429,51 +402,53 @@ _SOURCE_MODULES = {
     "tapscribe/tap_fan_out.py",
 }
 
-#: Names that would make a private copy of a wire constant.
-_CONTRACT_SYMBOLS = (
-    "SAMPLE_RATE",
-    "FRAME_SAMPLES",
-    "FRAME_BYTES",
-    "TAP_SUBPROTOCOL_PREFIX",
-    "BACKOFF_MS",
-    "BACKOFF_CAP_MS",
-    "MAX_BUFFER_BYTES",
-    "DRAIN_MAX_MS",
-    "SubprotocolPrefix",
-    "SampleRate",
-    "FrameSamples",
-    "FrameBytes",
-    "MaxBufferBytes",
-    "DrainBudget",
-    "BackoffCap",
-    "BackoffJitter",
+#: Names that would make a private copy of a wire constant — DERIVED from the
+#: tables, not hand-listed. The hand-written version had already drifted before
+#: this shipped: `Channels` was a Site symbol and was missing here, so a new
+#: bridge declaring `const Channels = 2;` in an undeclared file would have
+#: walked straight past the sweep built to catch exactly that.
+_DERIVED_ONLY = frozenset(
+    {
+        # FRAME_BYTES / FrameBytes are computed from FRAME_SAMPLES everywhere
+        # and are deliberately never a Site, so no table row can supply them.
+        "FRAME_BYTES",
+        "FrameBytes",
+    }
+)
+_CONTRACT_SYMBOLS = sorted(
+    {s.anchor.name for s in (*stamper.STAMPS, *stamper.RECIPE) if s.anchor.name} | _DERIVED_ONLY
 )
 
-_PY_CS_DECL = re.compile(
-    r"^(?:\s*(?:public\s+)?(?:const\s+\w+\s+|\w+\s+)?)?("
-    + "|".join(_CONTRACT_SYMBOLS)
-    + r")\s*(?::\s*\w+\s*)?=(?!=)",
-    re.MULTILINE,
+#: A real DECLARATION: a Python module-level binding at column 0, or a C#
+#: field/property with an explicit type. Deliberately NOT an assignment —
+#: `DrainBudget = TimeSpan.FromSeconds(1)` inside an object initialiser is a
+#: test fixture configuring a record, not a second source of truth.
+_PY_DECL = re.compile(r"^(" + "|".join(_CONTRACT_SYMBOLS) + r")\s*(?::\s*\w+\s*)?=(?!=)", re.MULTILINE)
+_CS_DECL = re.compile(
+    r"\b(?:const|static\s+readonly|readonly)\s+\w+\s+(" + "|".join(_CONTRACT_SYMBOLS) + r")\s*=(?!=)"
 )
 _JS_DECL = re.compile(r"^\s*const\s+(" + "|".join(_CONTRACT_SYMBOLS) + r")\s*=(?!=)", re.MULTILINE)
+
+#: Cheap prefilter — skips ~85% of tracked files before the real matchers
+#: run, which is 3x off the slowest test in this module.
+_ANY_CONTRACT_SYMBOL = re.compile("|".join(_CONTRACT_SYMBOLS))
 _SUBPROTOCOL_LITERAL = re.compile(r"tapscribe\.v\d+\.tap\.")
 
 #: Declarations that are NOT the wire contract, each with the reason. A new
 #: entry here is a claim that has to survive review — that is the point.
 _EXEMPT_DECLARATIONS: dict[str, str] = {
-    "bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/DrainBarrierTests.cs": "TapStreamOptions overrides with deliberately tight values so the "
-    "resilience paths run in milliseconds — a test fixture, not a declaration.",
-    "bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TapStreamTests.cs": "Same: per-test TapStreamOptions overrides.",
-    "bridges/windows-tray-bridge/tests/TapScribe.Bridge.Core.Tests/TestDoubles.cs": "Same: shared test-double TapStreamOptions.",
-    "tests/test_vad_silero_port.py": "Silero VAD requires 16 kHz for its OWN reasons, independent of /tap. "
-    "Same number, different fact — coupling it to the wire contract would "
-    "be wrong, since a /tap rate change must not silently retune the VAD.",
+    "tests/test_vad_silero_port.py": (
+        "Silero VAD requires 16 kHz for its OWN reasons, independent of /tap. "
+        "Same number, different fact — coupling it to the wire contract would "
+        "be wrong, since a /tap rate change must not silently retune the VAD."
+    ),
 }
 
 
-def _tracked_files(suffixes: frozenset[str]) -> list[Path]:
+@functools.cache
+def _tracked_files(suffixes: frozenset[str]) -> tuple[Path, ...]:
     out = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
-    return [Path(p) for p in out.stdout.split() if Path(p).suffix in suffixes]
+    return tuple(Path(p) for p in out.stdout.split() if Path(p).suffix in suffixes)
 
 
 def test_no_undeclared_copy_of_a_wire_constant() -> None:
@@ -484,10 +459,15 @@ def test_no_undeclared_copy_of_a_wire_constant() -> None:
     offenders: dict[str, list[str]] = {}
     for path in _tracked_files(frozenset({".py", ".js", ".cs"})):
         key = path.as_posix()
-        if key in declared or key in _SOURCE_MODULES or key in _EXEMPT_DECLARATIONS:
+        if key in declared or key in _SOURCE_MODULES or key in _MECHANISM_FILES:
+            continue
+        if key in _EXEMPT_DECLARATIONS:
             continue
         text = (REPO_ROOT / path).read_text(encoding="utf-8", errors="replace")
-        names = {m.group(1) for m in _PY_CS_DECL.finditer(text)}
+        if not _ANY_CONTRACT_SYMBOL.search(text):
+            continue
+        names = {m.group(1) for m in _PY_DECL.finditer(text)}
+        names |= {m.group(1) for m in _CS_DECL.finditer(text)}
         names |= {m.group(1) for m in _JS_DECL.finditer(text)}
         if names:
             offenders[key] = sorted(names)
@@ -514,7 +494,9 @@ def test_no_unstamped_copy_of_the_subprotocol_literal() -> None:
     for path in _tracked_files(frozenset({".py", ".js", ".cs", ".md"})):
         key = path.as_posix()
         # Tests are CONSUMERS: a stale literal there fails that test loudly.
-        if key in _SOURCE_MODULES or key.startswith("tests/") or "/tests/" in key:
+        if key in _SOURCE_MODULES or key in _MECHANISM_FILES:
+            continue
+        if key.startswith("tests/") or "/tests/" in key:
             continue
         text = (REPO_ROOT / path).read_text(encoding="utf-8", errors="replace")
         spans = covered.get(key, [])
@@ -562,7 +544,7 @@ def test_every_exemption_still_applies() -> None:
         path = REPO_ROOT / key
         assert path.exists(), f"exempt file no longer exists: {key}"
         text = path.read_text(encoding="utf-8", errors="replace")
-        assert _PY_CS_DECL.search(text) or _JS_DECL.search(text), (
+        assert _PY_DECL.search(text) or _CS_DECL.search(text) or _JS_DECL.search(text), (
             f"{key} no longer declares a wire-constant name, so its exemption "
             f"is dead — drop it. (Reason on file: {reason})"
         )
@@ -623,9 +605,65 @@ def test_derived_values_are_never_stamped() -> None:
     """`FRAME_BYTES = FRAME_SAMPLES * 2` is a derivation in three languages.
     Stamping it would replace the derivation with a literal that then has to
     be maintained."""
-    derived = [s for s in stamper.STAMPS if s.key == "frame_bytes" and s.path.suffix != ".md"]
-    assert derived == [], (
-        "frame_bytes is stamped into CODE at "
-        f"{[str(s.path) for s in derived]} — code derives it from frame_samples; "
-        "only prose spells it out."
+    named = [s for s in stamper.STAMPS if s.key == "frame_bytes" and s.anchor.name]
+    assert named == [], (
+        "frame_bytes is stamped into a NAMED constant at "
+        f"{[str(s.path) for s in named]} — every language derives it from "
+        "frame_samples, so a literal there would replace the derivation. "
+        "(Prose and comments may spell it out; those are anchored, not named.)"
     )
+
+
+# ---------------------------------------------------------------------------
+# The control paths — gated against the served surface, not stamped
+# ---------------------------------------------------------------------------
+
+
+#: Every `/tap`-family path a bundled Bridge builds a request or a WS URL from,
+#: and the file it is spelled in. These are NOT stamped: the Recorder declares
+#: them as decorator literals (`@router.post("/api/tap/new-session")`) with no
+#: constant to read, so hardcoding them in the stamper would quietly make the
+#: STAMPER the source of truth — the one thing the whole design avoids.
+_BRIDGE_PATHS: dict[str, tuple[str, ...]] = {
+    "bridges/spacialchat-bridge/control-client.js": (
+        "/api/tap/new-session",
+        "/api/tap/sessions/{session}/pipeline",
+    ),
+    "bridges/windows-tray-bridge/src/TapScribe.Bridge.Core/ControlClient.cs": (
+        "/api/tap/new-session",
+        "/api/tap/sessions/{session}/pipeline",
+    ),
+}
+
+
+def test_every_path_a_bridge_calls_is_a_route_the_recorder_serves() -> None:
+    """A bridge calling a path the Recorder doesn't serve gets a 404 at runtime
+    and nothing catches it until someone runs that bridge. Read through
+    `tests/route_inventory.py`, which CLAUDE.md names as the single owner of
+    the route-surface traversal — this must not re-derive it.
+    """
+    from route_inventory import registered_routes  # noqa: PLC0415
+
+    from tapscribe.app import app
+
+    served = {row.path for row in registered_routes(app)}
+    missing = {
+        f"{path} ({where})" for where, paths in _BRIDGE_PATHS.items() for path in paths if path not in served
+    }
+    assert not missing, (
+        f"these bridges call paths the Recorder does not serve: {sorted(missing)}. "
+        f"Either the route moved (update the bridge) or the bridge is wrong."
+    )
+
+
+@pytest.mark.parametrize("where", sorted(_BRIDGE_PATHS))
+def test_each_bridge_still_spells_the_paths_the_table_claims(where: str) -> None:
+    """The other direction: the table above is only meaningful while the bridge
+    really does contain those literals. Without this, deleting a call site
+    would leave a row here vouching for code that no longer exists."""
+    text = (REPO_ROOT / where).read_text(encoding="utf-8")
+    for path in _BRIDGE_PATHS[where]:
+        # Both languages interpolate the session id, so compare the literal
+        # prefix and suffix around the `{session}` placeholder.
+        for fragment in path.split("{session}"):
+            assert fragment in text, f"{where} no longer spells {fragment!r} (from {path})"

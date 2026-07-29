@@ -332,6 +332,10 @@ tapscribe = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tools/ is not a package, so the modules there (bump_version, package_bridge,
+# stamp_tap_wire, strip_silence_cli) were each imported via a hand-rolled
+# sys.path insert in their test. One line here instead.
+pythonpath = ["tools"]
 addopts = "-q --strict-markers"
 asyncio_mode = "auto"
 # Treat warnings as errors. Anything new that surfaces is a real signal —
