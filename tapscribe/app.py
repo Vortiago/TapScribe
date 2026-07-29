@@ -541,6 +541,16 @@ async def _refuse_current_or_busy(
         raise SessionBusy("a live tap is writing to this session")
 
 
+def _ops_log(message: str) -> None:
+    """Emit an operational completion line.
+
+    Owns the `[tapscribe]` prefix and `flush=True` in one place so a
+    future change to the log format or transport touches all callers.
+    The route builds its own message; this seam only emits it.
+    """
+    print(f"[tapscribe] {message}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Health + simple listings
 # ---------------------------------------------------------------------------
@@ -1580,10 +1590,9 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
         # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
         # ~1 Hz /api/state poll stays responsive — same as strip-silence.
         summary = await asyncio.to_thread(delete_session_audio, session)
-    print(
-        f"[tapscribe] deleted audio from session {session}: "
+    _ops_log(
+        f"deleted audio from session {session}: "
         f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed",
-        flush=True,
     )
     return {"ok": True, **summary}
 
@@ -1675,11 +1684,10 @@ async def api_session_absorb(
     resolve_session_dir(source)
 
     summary = absorb_session(target, source)
-    print(
-        f"[tapscribe] absorbed {source} into {target}: "
+    _ops_log(
+        f"absorbed {source} into {target}: "
         f"{summary['wavs_moved']} wavs, {summary['stripped_moved']} stripped, "
         f"+{len(summary['aliases_added'])} aliases",
-        flush=True,
     )
     return {"ok": True, **summary}
 
@@ -1696,9 +1704,9 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     try:
         shutil.rmtree(session_dir)
     except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from None
+        raise SessionDeleteError(f"delete failed: {e}") from None
     await recorder.jobs.release(session)
-    print(f"[tapscribe] deleted session: {session_dir}", flush=True)
+    _ops_log(f"deleted session: {session_dir}")
     return {"ok": True, "deleted": session}
 
 
@@ -1983,10 +1991,8 @@ async def api_wav_delete(
     await _refuse_current_or_busy(recorder, session, current=session, action="delete WAVs from")
     resolve_session_dir(session)
     summary = await asyncio.to_thread(delete_session_wav, session, name, source)
-    print(
-        f"[tapscribe] deleted wav {name} ({source}) from session {session}: "
-        f"{summary['bytes_freed']} bytes freed",
-        flush=True,
+    _ops_log(
+        f"deleted wav {name} ({source}) from session {session}: {summary['bytes_freed']} bytes freed",
     )
     return {"ok": True, **summary}
 
