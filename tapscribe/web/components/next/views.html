@@ -116,13 +116,25 @@
          a comfortable measure (next.css `.txbody`) so they don't run the full
          panel width like a log dump. -->
     <div class="panel panel--primary panel--fill txpanel">
-      <!-- Copy applies speaker-name aliases (raw identity keys → display names),
-           one "[hh:mm:ss] Name: text" line per non-suppressed segment, then
-           navigator.clipboard.writeText. txCopyStatus flashes copied/failed.
-           Disabled until the merged body is loaded — toggled inside the
-           lastTxSig gate, never per-tick. NB: NOT inside a .transcript pre-wrap
-           container, so the single-line constraint does not apply here. -->
-      <div class="panel__head"><div class="panel__title"><span class="ic">📝</span>Merged transcript</div><span class="dim mono" data-slot="txCopyStatus"></span><button class="act act--sm" type="button" data-slot="txCopyBtn" disabled>copy</button><button class="act act--sm" type="button" data-slot="txDownloadTxt" disabled>txt</button><button class="act act--sm" type="button" data-slot="txDownloadSrt" disabled>srt</button><button class="act act--sm" type="button" data-slot="txDownloadVtt" disabled>vtt</button><div class="panel__hint mono" data-slot="txHint"></div></div>
+      <!-- The EXPORT family, all built from the same alias-applied lines the
+           operator sees (raw identity keys → display names, one
+           "[hh:mm:ss] Name: text" line per non-suppressed segment):
+             copy    → navigator.clipboard.writeText; txCopyStatus flashes
+                       copied / failed / "nothing to copy" / "nothing to export".
+             txt     → that same copy text as a FILE (Blob download, never the
+                       clipboard — a plain-HTTP LAN dashboard is not a secure
+                       context, so the clipboard API is absent there).
+             srt/vtt → the same segments re-based onto a RELATIVE cue clock
+                       (buildExportSegments); only the .txt keeps absolute stamps.
+           All four ride ONE enable gate and stay disabled until the merged body
+           is loaded — toggled inside the lastTxSig gate, never per-tick. The
+           three-letter labels carry title/aria-label because the text alone does
+           not name the control. Grouped in a .panel__ctl so the head's flex
+           `space-between` keeps them together instead of scattering them across
+           the bar, with the hint right-most as in every other head. NB: NOT
+           inside a .transcript pre-wrap container, so the single-line constraint
+           does not apply here. -->
+      <div class="panel__head"><div class="panel__title"><span class="ic">📝</span>Merged transcript</div><div class="panel__ctl"><span class="dim mono" data-slot="txCopyStatus"></span><button class="act act--sm" type="button" data-slot="txCopyBtn" title="copy the merged transcript to the clipboard" aria-label="copy merged transcript" disabled>copy</button><button class="act act--sm" type="button" data-slot="txDownloadTxt" title="download the merged transcript as a .txt file" aria-label="download merged transcript as txt" disabled>txt</button><button class="act act--sm" type="button" data-slot="txDownloadSrt" title="download SubRip subtitles (.srt)" aria-label="download subtitles as srt" disabled>srt</button><button class="act act--sm" type="button" data-slot="txDownloadVtt" title="download WebVTT subtitles (.vtt)" aria-label="download subtitles as vtt" disabled>vtt</button></div><div class="panel__hint mono" data-slot="txHint"></div></div>
       <div class="panel__body flush txbody"><div data-slot="mergedHost"></div></div>
     </div>
 

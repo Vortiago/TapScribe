@@ -1,7 +1,9 @@
 // @ts-check
 // Pure client-side subtitle exporters. toSRT / toVTT take an array of timed
-// segments and return a SubRip / WebVTT document string. No DOM, no backend —
-// wiring a download button into the Transcript view is a separate follow-on (#208).
+// segments and return a SubRip / WebVTT document string. No DOM, no backend.
+// The Transcript view's srt/vtt download buttons are the consumers
+// (js/next/views/transcript.js — buildExportSegments converts the merged
+// schema's absolute ISO stamps to this module's relative seconds).
 
 /** @typedef {{ start: number, end: number, text: string, speaker?: string }} Seg */
 
@@ -25,8 +27,20 @@ function fmtTime(seconds, sep) {
   return `${pad(h)}:${pad(m)}:${pad(s)}${sep}${pad(ms, 3)}`;
 }
 
+/** Escape what a cue payload may not carry literally. WebVTT forbids a bare
+ * `&` or `<` in a payload (character references are required), and an unknown
+ * pseudo-tag is DROPPED by the parser — so a speaker rendered `<anon>` (the
+ * merge layer's default key) or an operator alias like `R&D <lead>` silently
+ * loses its attribution. Escaping `>` as well neutralises a literal `-->` in
+ * transcript text, which would otherwise read as a cue timing line. SubRip has
+ * no spec but its HTML-ish renderers (ffmpeg's srtdec, VLC) decode the same
+ * three entities, so one escape serves both formats. `&` goes first or the
+ * later replacements double-escape (`<` -> `&lt;` -> `&amp;lt;`).
+ * @param {string} s */
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 /** @param {Seg} seg */
-const line = (seg) => (seg.speaker ? `${seg.speaker}: ${seg.text}` : seg.text);
+const line = (seg) => (seg.speaker ? `${esc(seg.speaker)}: ${esc(seg.text)}` : esc(seg.text));
 
 /**
  * Render segments as a SubRip (.srt) document. Empty input -> "".

@@ -37,7 +37,7 @@ import { postJson, putJson, sessionSummary, errText } from "../../api.js";
 import { wireSave } from "../../save-status.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar, sessionLabel } from "../shell.js";
-import { makeStatusFlasher, copyToClipboard, downloadFile } from "../ui.js";
+import { makeStatusFlasher, copyToClipboard, downloadFile, showTextForManualCopy } from "../ui.js";
 
 /**
  * @param {{
@@ -278,19 +278,29 @@ export function build(ctx) {
   });
 
   sumCopyBtn.addEventListener("click", async () => {
-    if (!copySummaryText) return;
-    await copyToClipboard(copySummaryText, {
+    // SNAPSHOT before the await: a poll tick can re-render the pane (a spine
+    // click, or a superseded summary) and clear copySummaryText while the
+    // clipboard write is in flight. A fallback that re-read the mutable would
+    // then prompt with the literal "null" — hence a local, which also keeps
+    // tsc's null-check on this path instead of a cast that hides it.
+    const text = copySummaryText;
+    if (!text) return;
+    await copyToClipboard(text, {
       onOk: () => flashSumCopyStatus("✓ copied"),
       onFallback: () => {
-        window.prompt("Copy the summary (Ctrl/Cmd-C, Enter, Esc):", /** @type {string} */ (copySummaryText));
-        flashSumCopyStatus("↗ shown in prompt");
+        // A markdown summary is a multi-line DOCUMENT, so it gets the shared
+        // new-tab treatment (a prompt() default is a single-line input that
+        // flattens it); the prompt is only the popup-blocked degradation.
+        const how = showTextForManualCopy(text, "Copy the summary (Ctrl/Cmd-C, Enter, Esc):");
+        flashSumCopyStatus(how === "tab" ? "↗ opened in new tab" : "↗ shown in prompt");
       },
     });
   });
 
   sumDownloadMd.addEventListener("click", () => {
-    if (!copySummaryText || !copySummarySid) return;
-    downloadFile(copySummaryText, "summary_" + copySummarySid + ".md");
+    const text = copySummaryText;
+    if (!text || !copySummarySid) { flashSumCopyStatus("nothing to export"); return; }
+    downloadFile(text, "summary_" + copySummarySid + ".md", "text/markdown;charset=utf-8");
   });
 
   // ---- Summarizer controls (shared component) ---------------------------------
@@ -494,18 +504,15 @@ export function build(ctx) {
       stale ? 1 : 0,
     ].join("§");
     const renderSummaryOut = () => {
-      if (shown) {
-        copySummaryText = shown.summary || "";
-        copySummarySid = sid;
-        sumCopyBtn.disabled = false;
-        sumDownloadMd.disabled = false;
-        return renderSummary(shown, stale);
-      }
-      copySummaryText = null;
-      copySummarySid = "";
-      sumCopyBtn.disabled = true;
-      sumDownloadMd.disabled = true;
-      return renderPlaceholder(sess);
+      // ONE predicate behind both controls and both handlers: what's ENABLED is
+      // exactly what's exportable. A persisted-but-empty `summary` would
+      // otherwise light up two buttons whose clicks do nothing.
+      const text = shown?.summary || "";
+      copySummaryText = text || null;
+      copySummarySid = text ? sid : "";
+      sumCopyBtn.disabled = !text;
+      sumDownloadMd.disabled = !text;
+      return shown ? renderSummary(shown, stale) : renderPlaceholder(sess);
     };
     renderRegion(sumOut, renderSummaryOut, {
       sig: outSig,

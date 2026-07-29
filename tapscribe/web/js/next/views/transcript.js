@@ -33,7 +33,7 @@ import { wireSave } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
-import { makeStatusFlasher, copyToClipboard, downloadFile } from "../ui.js";
+import { makeStatusFlasher, copyToClipboard, downloadFile, showTextForManualCopy } from "../ui.js";
 import { toSRT, toVTT } from "../subtitles.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
@@ -77,6 +77,57 @@ export function recordingVariants(rec) {
     for (const v of r.transcripts || []) out.push({ ...v, file: r.name });
   }
   return out;
+}
+
+/**
+ * The merged schema's segments as SUBTITLE segments: alias-applied speakers and
+ * a RELATIVE clock in seconds — the shape subtitles.js's toSRT/toVTT take. The
+ * merged bodies carry `abs_start`/`abs_end` as absolute ISO strings, and handing
+ * those over unconverted is what produces `NaN:NaN:NaN,NaN` cues.
+ *
+ * Two choices here are load-bearing:
+ *
+ *  · t=0 is the first EMITTED segment, so the skip-then-anchor ORDER matters —
+ *    the empty-text `continue` runs before `tZero` is set, and reordering it
+ *    would shift every cue in the file. (The .txt export deliberately keeps
+ *    ABSOLUTE wall-clock stamps instead: a subtitle file is played against the
+ *    recording, a transcript is read against the meeting.)
+ *
+ *  · A segment whose `abs_start` will not parse is DROPPED rather than emitted
+ *    with a NaN stamp. NaN would latch into `tZero` (NaN !== null), poisoning
+ *    every later `absStart - tZero`, so ONE corrupt value in a hand-edited or
+ *    truncated sidecar would garble the whole document — the same invariant
+ *    fmtClock states for the copy path ("a single corrupt sidecar value must
+ *    garble one cell, never abort the entire render"). A parseable start with a
+ *    corrupt end keeps its line, as a zero-length cue.
+ *
+ * Pure — module-scope (not a build() closure local) so the unit tests can reach
+ * this slice's own trap without driving a browser.
+ * @param {import('../../types.js').MergedTranscript} full
+ * @param {import('../../types.js').EffectiveMeta} meta
+ * @returns {import('../subtitles.js').Seg[]}
+ */
+export function buildExportSegments(full, meta) {
+  const aliases = meta.aliases || {};
+  /** @type {import('../subtitles.js').Seg[]} */
+  const segments = [];
+  let tZero = null;
+  for (const seg of full.segments || []) {
+    const text = seg.text || "";
+    if (!text) continue;
+    const absStart = new Date(seg.abs_start).getTime() / 1000;
+    if (!Number.isFinite(absStart)) continue;
+    const absEnd = new Date(seg.abs_end).getTime() / 1000;
+    const speaker = aliasOf(seg.speaker || "", aliases);
+    if (tZero === null) tZero = absStart;
+    segments.push({
+      start: absStart - tZero,
+      end: (Number.isFinite(absEnd) ? absEnd : absStart) - tZero,
+      text,
+      speaker: speaker || undefined,
+    });
+  }
+  return segments;
 }
 
 /**
@@ -455,49 +506,11 @@ export function build(ctx) {
 
   const flashCopyStatus = makeStatusFlasher(txCopyStatus);
 
-  /** @typedef {{ start: number, end: number, text: string, speaker?: string }} ExportSeg */
-
-  /**
-   * Convert merged segments to relative-clock, alias-applied segments for subtitle export.
-   * @param {import('../../types.js').MergedTranscript} full
-   * @param {import('../../types.js').EffectiveMeta} meta
-   * @returns {ExportSeg[]}
-   */
-  const buildExportSegments = (full, meta) => {
-    const aliases = meta.aliases || {};
-    /** @type {ExportSeg[]} */
-    const segments = [];
-    let tZero = null;
-    for (const seg of full.segments || []) {
-      const text = seg.text || "";
-      if (!text) continue;
-      const speaker = aliasOf(seg.speaker || "", aliases);
-      const absStart = new Date(seg.abs_start).getTime() / 1000;
-      const absEnd = new Date(seg.abs_end).getTime() / 1000;
-      if (tZero === null) tZero = absStart;
-      segments.push({
-        start: absStart - tZero,
-        end: absEnd - tZero,
-        text,
-        speaker: speaker || undefined,
-      });
-    }
-    return segments;
-  };
-
-  /** Render the transcript text into a blank tab for manual select-copy.
-   * @param {Window} w @param {string} text */
-  const populateTranscriptTab = (w, text) => {
-    w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
-    w.document.body.style.whiteSpace = "pre-wrap";
-    w.document.body.textContent = text;
-  };
-
   // Bound ONCE at build time; reads the captured copyTxFull/copyMeta (the body
   // currently in the pane), not per-tick DOM. Disabled until a body has loaded.
-  // The copy flow is the shared copyToClipboard (ui.js); this view's fallback
-  // is the styled new-tab variant — window.open succeeds when the fallback
-  // runs synchronously in the gesture (non-secure context), and degrades to a
+  // The copy flow is the shared copyToClipboard (ui.js); the fallback is the
+  // shared showTextForManualCopy — window.open succeeds when the fallback runs
+  // synchronously in the gesture (non-secure context), and degrades to a
   // prompt() when blocked (post-await clipboard rejection) — same design as
   // the classic dashboard's copy.
   txCopyBtn.addEventListener("click", async () => {
@@ -507,40 +520,43 @@ export function build(ctx) {
     await copyToClipboard(out, {
       onOk: () => flashCopyStatus("✓ copied"),
       onFallback: () => {
-        const w = window.open("", "_blank");
-        if (w) {
-          populateTranscriptTab(w, out);
-          flashCopyStatus("↗ opened in new tab");
-        } else {
-          window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", out);
-        }
+        const how = showTextForManualCopy(out, "Copy the merged transcript (Ctrl/Cmd-C, Enter):");
+        if (how === "tab") flashCopyStatus("↗ opened in new tab");
       },
     });
   });
 
-  // .txt download — reuses buildCopyText so the bytes are identical to the
-  // clipboard copy (not the backend's plain_text which carries raw keys).
-  txDownloadTxt.addEventListener("click", () => {
-    if (!copyTxFull || !copyMeta || !exportSid) return;
-    const out = buildCopyText(copyTxFull, copyMeta);
-    if (!out) return;
-    downloadFile(out, exportSid + ".txt");
-  });
+  /** Wire one export button: the shared captured state, ONE filename scheme,
+   * and — like the copy button beside it — a STATUS on an empty export, since a
+   * dead click on an enabled control is indistinguishable from a broken page.
+   * `render` returns the file's bytes, or "" when there is nothing to export.
+   * @param {HTMLButtonElement} btn
+   * @param {string} ext
+   * @param {string} mime
+   * @param {(full: import('../../types.js').MergedTranscript, meta: import('../../types.js').EffectiveMeta) => string} render
+   */
+  const wireExport = (btn, ext, mime, render) => {
+    btn.addEventListener("click", () => {
+      if (!copyTxFull || !copyMeta || !exportSid) return;
+      const out = render(copyTxFull, copyMeta);
+      if (!out) { flashCopyStatus("nothing to export"); return; }
+      downloadFile(out, exportSid + ext, mime);
+    });
+  };
 
-  // .srt download — relative-clock segments, alias-applied.
-  txDownloadSrt.addEventListener("click", () => {
-    if (!copyTxFull || !copyMeta || !exportSid) return;
-    const segments = buildExportSegments(copyTxFull, copyMeta);
-    if (!segments.length) return;
-    downloadFile(toSRT(segments), exportSid + ".srt");
+  // .txt reuses buildCopyText, so the bytes are identical to the clipboard copy
+  // (not the backend's plain_text, which carries raw speaker keys). .srt/.vtt
+  // go through the relative-clock conversion; an empty cue list renders as ""
+  // rather than toVTT([])'s truthy header-only document, which is not a file
+  // worth handing the operator.
+  wireExport(txDownloadTxt, ".txt", "text/plain;charset=utf-8", buildCopyText);
+  wireExport(txDownloadSrt, ".srt", "application/x-subrip", (full, meta) => {
+    const segments = buildExportSegments(full, meta);
+    return segments.length ? toSRT(segments) : "";
   });
-
-  // .vtt download — relative-clock segments, alias-applied.
-  txDownloadVtt.addEventListener("click", () => {
-    if (!copyTxFull || !copyMeta || !exportSid) return;
-    const segments = buildExportSegments(copyTxFull, copyMeta);
-    if (!segments.length) return;
-    downloadFile(toVTT(segments), exportSid + ".vtt");
+  wireExport(txDownloadVtt, ".vtt", "text/vtt", (full, meta) => {
+    const segments = buildExportSegments(full, meta);
+    return segments.length ? toVTT(segments) : "";
   });
 
   // ---- Set primary (REAL — moved from recordings.js) ------------------------

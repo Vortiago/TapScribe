@@ -14,9 +14,16 @@
     <!-- LEFT: the generated summary OUTPUT. Fills the column height and scrolls
          its own body (consistent with the other stages). -->
     <div class="panel panel--primary panel--fill">
+      <!-- The summary's export pair, the same shape as the Transcript head's
+           family: copy (clipboard, falling back to a populated tab when there
+           is no secure context) and md (the markdown SOURCE as a file, no
+           clipboard involved). Both ride ONE predicate — enabled exactly when
+           there is a non-empty summary to export — and are grouped in a
+           .panel__ctl, with the hint right-most as in every other head. -->
       <div class="panel__head">
         <div class="panel__title"><span class="ic">📄</span>Summary</div>
-        <span class="panel__hint mono" data-slot="sumOutHint"></span><span class="dim mono" data-slot="sumCopyStatus"></span><button class="act act--sm" type="button" data-slot="sumCopyBtn" disabled>copy</button><button class="act act--sm" type="button" data-slot="sumDownloadMd" disabled>md</button>
+        <div class="panel__ctl"><span class="dim mono" data-slot="sumCopyStatus"></span><button class="act act--sm" type="button" data-slot="sumCopyBtn" title="copy the summary to the clipboard" aria-label="copy summary" disabled>copy</button><button class="act act--sm" type="button" data-slot="sumDownloadMd" title="download the summary as a markdown (.md) file" aria-label="download summary as markdown" disabled>md</button></div>
+        <span class="panel__hint mono" data-slot="sumOutHint"></span>
       </div>
       <div class="panel__body"><div data-slot="sumOut"></div></div>
     </div>

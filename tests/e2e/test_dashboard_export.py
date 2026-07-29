@@ -174,6 +174,19 @@ async def _download_text(page, slot: str) -> tuple[str, str]:
     return dl.suggested_filename, Path(path).read_text(encoding="utf-8")
 
 
+async def _assert_named_controls(page, names: tuple[str, ...]) -> None:
+    """Every export control must be reachable by its ACCESSIBLE NAME, not only
+    by `data-slot`. The labels are three letters (`txt`/`srt`/`vtt`/`md`), which
+    name nothing to a screen reader, so the name has to come from an
+    aria-label/title — and CLAUDE.md prefers role/label selectors for controls,
+    reserving data-slot for structural seams. Pinned for the whole FAMILY,
+    including the pre-existing copy button, so the head cannot end up
+    half-labelled."""
+    for name in names:
+        found = await page.locator("#viewRoot").get_by_role("button", name=name).count()
+        assert found == 1, f"no control named {name!r} in the panel head (found {found})"
+
+
 async def _open_transcript_view(page, base_url: str, session: str) -> None:
     await page.goto(base_url, wait_until="domcontentloaded")
     await page.wait_for_function(
@@ -246,6 +259,15 @@ async def test_transcript_downloads_as_srt_with_real_cue_timings(running_recorde
             context = await browser.new_context(viewport={"width": 1400, "height": 900})
             page = await context.new_page()
             await _open_transcript_view(page, running_recorder.base_url, rec.session_start)
+            await _assert_named_controls(
+                page,
+                (
+                    "copy merged transcript",
+                    "download merged transcript as txt",
+                    "download subtitles as srt",
+                    "download subtitles as vtt",
+                ),
+            )
 
             name, body = await _download_text(page, "txDownloadSrt")
             assert name.endswith(".srt"), f"subtitle export must be a .srt: {name!r}"
@@ -384,6 +406,8 @@ async def test_summary_copies_and_downloads_as_markdown(running_recorder: Runnin
                          .includes('ninety days')""",
                 timeout=15000,
             )
+
+            await _assert_named_controls(page, ("copy summary", "download summary as markdown"))
 
             name, body = await _download_text(page, "sumDownloadMd")
             assert name.endswith(".md"), f"the summary export must be markdown: {name!r}"

@@ -73,12 +73,42 @@ export async function copyToClipboard(text, { onOk, onFallback }) {
 }
 
 /**
- * Trigger a client-side file download from a string.
+ * Surface `text` for MANUAL copy when the clipboard is out of reach (the
+ * non-secure-context LAN dashboard, or a rejected write). A populated blank
+ * tab, because every caller here hands over a MULTI-LINE document (a merged
+ * transcript, a markdown summary) and a `prompt()` default is a single-line
+ * input that flattens it. window.open only survives when the fallback runs
+ * inside the user gesture (the unavailable-API path), so a blocked popup
+ * degrades to the prompt rather than losing the text. The caller flashes its
+ * own status off the returned route — that part of the UX stays per-view.
+ * @param {string} text
+ * @param {string} promptLabel shown when the popup is blocked
+ * @returns {"tab" | "prompt"} which route actually surfaced the text
+ */
+export function showTextForManualCopy(text, promptLabel) {
+  const w = window.open("", "_blank");
+  if (!w) {
+    window.prompt(promptLabel, text);
+    return "prompt";
+  }
+  w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
+  w.document.body.style.whiteSpace = "pre-wrap";
+  w.document.body.textContent = text;
+  return "tab";
+}
+
+/**
+ * Trigger a client-side file download from a string. `mime` is the Blob's
+ * media type: the extension in `filename` drives the OS association, but a
+ * consumer that reads the download's recorded type (a subtitle player's file
+ * picker, a strict validator) sees this — so an .srt/.vtt/.md export passes
+ * its own type rather than defaulting to plain text.
  * @param {string} content
  * @param {string} filename
+ * @param {string} [mime]
  */
-export function downloadFile(content, filename) {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+export function downloadFile(content, filename, mime = "text/plain;charset=utf-8") {
+  const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

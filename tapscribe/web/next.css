@@ -424,6 +424,13 @@ body::before { display: none; }
 .panel__title { font-size: 10px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-1); display: flex; align-items: center; gap: 6px; }
 .panel__title .ic { font-size: 11px; opacity: .85; }
 .panel__hint { font-size: 9.5px; color: var(--fg-3); font-family: var(--mono); display: inline-flex; align-items: center; gap: 8px; }
+/* A head's control CLUSTER (status + action buttons). The head is
+   `space-between`, which would spread a family of loose buttons across the
+   whole bar — and would then strand this one child as an island mid-bar. The
+   `margin-left: auto` absorbs the free space BEFORE justify-content sees it,
+   so the title stays left and the cluster packs against the hint on the right,
+   the same title-left / meta-right reading every other panel head has. */
+.panel__ctl { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
 .panel__body { padding: 11px; }
 .panel__body.flush { padding: 0; }
 .panel--primary { border-color: var(--rule); }
