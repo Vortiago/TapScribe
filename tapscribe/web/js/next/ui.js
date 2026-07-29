@@ -73,6 +73,26 @@ export async function copyToClipboard(text, { onOk, onFallback }) {
 }
 
 /**
+ * Trigger a client-side file download from a string.
+ * @param {string} content
+ * @param {string} filename
+ */
+export function downloadFile(content, filename) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Defer revoke — Chromium needs time to commit the Blob to disk after click().
+  // A synchronous revoke races the download pipeline and produces an empty file
+  // or a hang on expect_download.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
  * Set a stat/health tile's text, dimming empty/em-dash placeholders so a
  * missing metric recedes (the `.is-empty` styling in next.css) while real
  * values stay bright. Shared by the Capture health tiles and the Recordings

@@ -33,7 +33,8 @@ import { wireSave } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
-import { makeStatusFlasher, copyToClipboard } from "../ui.js";
+import { makeStatusFlasher, copyToClipboard, downloadFile } from "../ui.js";
+import { toSRT, toVTT } from "../subtitles.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 
@@ -95,6 +96,9 @@ export function build(ctx) {
   const txHint = pick(frag, "txHint");
   const txCopyBtn = /** @type {HTMLButtonElement} */ (pick(frag, "txCopyBtn"));
   const txCopyStatus = pick(frag, "txCopyStatus");
+  const txDownloadTxt = /** @type {HTMLButtonElement} */ (pick(frag, "txDownloadTxt"));
+  const txDownloadSrt = /** @type {HTMLButtonElement} */ (pick(frag, "txDownloadSrt"));
+  const txDownloadVtt = /** @type {HTMLButtonElement} */ (pick(frag, "txDownloadVtt"));
   const mergedHost = pick(frag, "mergedHost");
   // ONE delegated seek listener for the whole merged pane, attached to the
   // stable host rather than to lines. The host outlives every render (the
@@ -196,6 +200,8 @@ export function build(ctx) {
   let copyTxFull = null;
   /** @type {import('../../types.js').EffectiveMeta | null} */
   let copyMeta = null;
+  /** Session id for export filenames — captured alongside copyTxFull. */
+  let exportSid = "";
   /** Selected WAV/clip name, per session id (drives re-transcribe + cache). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
@@ -449,6 +455,36 @@ export function build(ctx) {
 
   const flashCopyStatus = makeStatusFlasher(txCopyStatus);
 
+  /** @typedef {{ start: number, end: number, text: string, speaker?: string }} ExportSeg */
+
+  /**
+   * Convert merged segments to relative-clock, alias-applied segments for subtitle export.
+   * @param {import('../../types.js').MergedTranscript} full
+   * @param {import('../../types.js').EffectiveMeta} meta
+   * @returns {ExportSeg[]}
+   */
+  const buildExportSegments = (full, meta) => {
+    const aliases = meta.aliases || {};
+    /** @type {ExportSeg[]} */
+    const segments = [];
+    let tZero = null;
+    for (const seg of full.segments || []) {
+      const text = seg.text || "";
+      if (!text) continue;
+      const speaker = aliasOf(seg.speaker || "", aliases);
+      const absStart = new Date(seg.abs_start).getTime() / 1000;
+      const absEnd = new Date(seg.abs_end).getTime() / 1000;
+      if (tZero === null) tZero = absStart;
+      segments.push({
+        start: absStart - tZero,
+        end: absEnd - tZero,
+        text,
+        speaker: speaker || undefined,
+      });
+    }
+    return segments;
+  };
+
   /** Render the transcript text into a blank tab for manual select-copy.
    * @param {Window} w @param {string} text */
   const populateTranscriptTab = (w, text) => {
@@ -480,6 +516,31 @@ export function build(ctx) {
         }
       },
     });
+  });
+
+  // .txt download — reuses buildCopyText so the bytes are identical to the
+  // clipboard copy (not the backend's plain_text which carries raw keys).
+  txDownloadTxt.addEventListener("click", () => {
+    if (!copyTxFull || !copyMeta || !exportSid) return;
+    const out = buildCopyText(copyTxFull, copyMeta);
+    if (!out) return;
+    downloadFile(out, exportSid + ".txt");
+  });
+
+  // .srt download — relative-clock segments, alias-applied.
+  txDownloadSrt.addEventListener("click", () => {
+    if (!copyTxFull || !copyMeta || !exportSid) return;
+    const segments = buildExportSegments(copyTxFull, copyMeta);
+    if (!segments.length) return;
+    downloadFile(toSRT(segments), exportSid + ".srt");
+  });
+
+  // .vtt download — relative-clock segments, alias-applied.
+  txDownloadVtt.addEventListener("click", () => {
+    if (!copyTxFull || !copyMeta || !exportSid) return;
+    const segments = buildExportSegments(copyTxFull, copyMeta);
+    if (!segments.length) return;
+    downloadFile(toVTT(segments), exportSid + ".vtt");
   });
 
   // ---- Set primary (REAL — moved from recordings.js) ------------------------
@@ -657,11 +718,19 @@ export function build(ctx) {
         if (sess && txFull && meta) {
           copyTxFull = txFull;
           copyMeta = meta;
+          exportSid = sid;
           txCopyBtn.disabled = false;
+          txDownloadTxt.disabled = false;
+          txDownloadSrt.disabled = false;
+          txDownloadVtt.disabled = false;
         } else {
           copyTxFull = null;
           copyMeta = null;
+          exportSid = "";
           txCopyBtn.disabled = true;
+          txDownloadTxt.disabled = true;
+          txDownloadSrt.disabled = true;
+          txDownloadVtt.disabled = true;
         }
 
         // Merged transcript (main/left). `tx` is the slim marker; the body comes

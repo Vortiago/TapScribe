@@ -37,6 +37,7 @@ import { postJson, putJson, sessionSummary, errText } from "../../api.js";
 import { wireSave } from "../../save-status.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar, sessionLabel } from "../shell.js";
+import { makeStatusFlasher, copyToClipboard, downloadFile } from "../ui.js";
 
 /**
  * @param {{
@@ -67,6 +68,9 @@ export function build(ctx) {
   const jobCount = pick(frag, "jobCount");
   const jobProgress = /** @type {HTMLElement} */ (pick(frag, "jobProgress"));
   const jobWav = pick(frag, "jobWav");
+  const sumCopyStatus = pick(frag, "sumCopyStatus");
+  const sumCopyBtn = /** @type {HTMLButtonElement} */ (pick(frag, "sumCopyBtn"));
+  const sumDownloadMd = /** @type {HTMLButtonElement} */ (pick(frag, "sumDownloadMd"));
 
   // Source selector + per-source detail panes + the local model picker —
   // all built ONCE from the template and handed to the shared
@@ -117,6 +121,9 @@ export function build(ctx) {
    * synchronous re-render still carries the stale (pre-clear) session-meta. */
   /** @type {import('../../types.js').SummarizerDefault | null} */
   let lastDefault = null;
+  /** Captured summary text and session id for copy/download handlers. */
+  let copySummaryText = /** @type {string | null} */ (null);
+  let copySummarySid = "";
 
   // The controls' render gate. The other two regions own theirs: the output pane
   // renders through `renderRegion(sumOut, …, {sig})`, and the header through
@@ -168,6 +175,8 @@ export function build(ctx) {
           ? "transcribe this session first — Generate needs a merged transcript"
           : "";
   };
+
+  const flashSumCopyStatus = makeStatusFlasher(sumCopyStatus);
 
   /**
    * @param {import('../../types.js').PersistedSummary} res
@@ -266,6 +275,22 @@ export function build(ctx) {
       // the copy-selection guard a direct render here would bypass.
       afterMutate();
     }
+  });
+
+  sumCopyBtn.addEventListener("click", async () => {
+    if (!copySummaryText) return;
+    await copyToClipboard(copySummaryText, {
+      onOk: () => flashSumCopyStatus("✓ copied"),
+      onFallback: () => {
+        window.prompt("Copy the summary (Ctrl/Cmd-C, Enter, Esc):", /** @type {string} */ (copySummaryText));
+        flashSumCopyStatus("↗ shown in prompt");
+      },
+    });
+  });
+
+  sumDownloadMd.addEventListener("click", () => {
+    if (!copySummaryText || !copySummarySid) return;
+    downloadFile(copySummaryText, "summary_" + copySummarySid + ".md");
   });
 
   // ---- Summarizer controls (shared component) ---------------------------------
@@ -468,7 +493,21 @@ export function build(ctx) {
       hasTranscript() ? 1 : 0,
       stale ? 1 : 0,
     ].join("§");
-    renderRegion(sumOut, () => (shown ? renderSummary(shown, stale) : renderPlaceholder(sess)), {
+    const renderSummaryOut = () => {
+      if (shown) {
+        copySummaryText = shown.summary || "";
+        copySummarySid = sid;
+        sumCopyBtn.disabled = false;
+        sumDownloadMd.disabled = false;
+        return renderSummary(shown, stale);
+      }
+      copySummaryText = null;
+      copySummarySid = "";
+      sumCopyBtn.disabled = true;
+      sumDownloadMd.disabled = true;
+      return renderPlaceholder(sess);
+    };
+    renderRegion(sumOut, renderSummaryOut, {
       sig: outSig,
     });
 
