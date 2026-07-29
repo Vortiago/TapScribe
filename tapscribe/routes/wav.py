@@ -36,7 +36,7 @@ from ..sessions import read_wav_transcript
 from ..wav_cache import set_primary_transcript
 from .body import json_body
 from .deps import get_recorder
-from .guards import refuse_current_or_busy
+from .guards import ops_log, refuse_current_or_busy
 
 router = APIRouter()
 
@@ -112,12 +112,13 @@ async def api_wav_delete(
     component (only compared against the two literals)."""
     await refuse_current_or_busy(recorder, session, current=session, action="delete WAVs from")
     resolve_session_dir(session)
-    summary = await asyncio.to_thread(delete_session_wav, session, name, source)
-    print(
-        f"[tapscribe] deleted wav {name} ({source}) from session {session}: "
-        f"{summary['bytes_freed']} bytes freed",
-        flush=True,
-    )
+    # Same hold-for-the-walk bracket as the sibling /audio delete, for the two
+    # reasons spelled out there. Route-specific: a transcribe that already
+    # passed its own pre-claim WAV scan would otherwise read the file — and
+    # the `.transcripts/` sidecar dir — this unlink is removing.
+    async with recorder.jobs.run(session, kind="delete", total=1):
+        summary = await asyncio.to_thread(delete_session_wav, session, name, source)
+    ops_log(f"deleted wav {name} ({source}) from session {session}: {summary['bytes_freed']} bytes freed")
     return {"ok": True, **summary}
 
 

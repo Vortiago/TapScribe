@@ -29,7 +29,7 @@ from ..name_resolution import attach_people
 from ..people import PeopleRegistry
 from ..recorder import Recorder
 from ..sessions import gather_sessions
-from .body import json_body
+from .body import json_body, require_json_object_body, require_str
 from .deps import get_recorder
 
 router = APIRouter()
@@ -51,15 +51,14 @@ async def api_people_get(recorder: Recorder = Depends(get_recorder)):
 
 @router.put("/api/people/{person_id}")
 async def api_people_rename(person_id: str, req: Request, recorder: Recorder = Depends(get_recorder)):
-    body = await json_body(req)
-    name = body.get("name", "")
-    if not isinstance(name, str):
-        raise HTTPException(400, "name must be a string")
+    # Strict parse + a REQUIRED `name`: a blank stored name is how the registry
+    # says "fall back to the roster default", so a body that never parsed — or
+    # one without the key — must not read as a deliberate rename-to-blank and
+    # DESTROY the operator's chosen name. Only an explicit `{"name": ""}` clears.
+    body = await require_json_object_body(req, allow_empty=False)
+    name = require_str(body.get("name"), "name")
     registry = PeopleRegistry.load()
-    try:
-        registry.rename(person_id, name.strip())
-    except KeyError:
-        raise HTTPException(404, "person not found") from None
+    registry.rename(person_id, name.strip())
     registry.save()
     return {"ok": True, "people": await _people_view(recorder)}
 
@@ -72,12 +71,7 @@ async def api_people_merge(req: Request, recorder: Recorder = Depends(get_record
     if not isinstance(survivor, str) or not isinstance(absorbed, str) or not survivor or not absorbed:
         raise HTTPException(400, "survivor and absorbed person ids are required")
     registry = PeopleRegistry.load()
-    try:
-        registry.merge(survivor, absorbed)
-    except KeyError:
-        raise HTTPException(404, "person not found") from None
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+    registry.merge(survivor, absorbed)
     registry.save()
     return {"ok": True, "people": await _people_view(recorder)}
 
@@ -89,11 +83,6 @@ async def api_people_detach(person_id: str, req: Request, recorder: Recorder = D
     if not isinstance(identity, str) or not identity:
         raise HTTPException(400, "identity is required")
     registry = PeopleRegistry.load()
-    try:
-        new_person = registry.detach(person_id, identity)
-    except KeyError:
-        raise HTTPException(404, "person not found") from None
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+    new_person = registry.detach(person_id, identity)
     registry.save()
     return {"ok": True, "detached": new_person["id"], "people": await _people_view(recorder)}

@@ -52,7 +52,12 @@ class InvalidAbsorbRequest(Exception):
 
 
 class SessionDeleteError(Exception):
-    """IO failure during session audio deletion (rmtree OSError)."""
+    """IO failure while deleting a session's files (rmtree OSError).
+
+    Covers BOTH scopes an operator can ask for: `delete_session_audio`'s
+    `stripped/` teardown here, and `api_session_delete`'s teardown of the
+    whole session folder. Sizing the blast radius of the 500 it maps to
+    means reading the raise site, not this class."""
 
 
 def session_is_empty(session_dir: Path) -> bool:

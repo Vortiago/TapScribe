@@ -97,6 +97,18 @@ def parse_bounded_int(raw, field: str, *, lo: int, hi: int) -> int | None:
     return value
 
 
+def require_str(raw, field: str) -> str:
+    """`require_opt_str`'s REQUIRED sibling, for body fields where an absent
+    key is NOT a valid request. The optional form reads a missing key as None
+    and lets it through; here None fails the same 400 a non-string does, so
+    the `body.get(field, "")` idiom — which turns a malformed body into a
+    silent write of the default — has no way back in. Returns the string
+    VERBATIM; strip/blank policy stays with the caller."""
+    if not isinstance(raw, str):
+        raise HTTPException(400, f"{field} must be a string")
+    return raw
+
+
 def require_opt_str(raw, field: str) -> str | None:
     """The type boundary for optional string body fields — the ONE owner of
     the non-string 400 (a non-string JSON value 400s like every other
