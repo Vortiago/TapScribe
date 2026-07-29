@@ -271,7 +271,7 @@ class RecorderServer:
 # contract is the drift #356 is about; a Bridge in another language has to be
 # stamped, but a Python test helper just imports.)
 from tapscribe.audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE  # noqa: E402
-from tapscribe.speech_gate import FRAME_BYTES, FRAME_SAMPLES  # noqa: E402,F401
+from tapscribe.speech_gate import FRAME_BYTES  # noqa: E402
 
 
 def synth_speech_like_wav(out: Path, *, seconds: float, freq_hz: float, amplitude: float = 0.25) -> Path:

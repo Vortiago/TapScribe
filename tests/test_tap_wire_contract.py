@@ -709,3 +709,15 @@ def test_a_numeric_spelling_round_trips_exactly_or_refuses(name: str, value: int
 def test_thousands_refuses_a_value_it_cannot_spell() -> None:
     with pytest.raises(ValueError, match="whole number of thousands"):
         stamper.THOUSANDS.render(44100)
+
+
+def test_the_stampers_declared_exports_all_exist() -> None:
+    """`__all__` is what tells CodeQL (and a reader) that the tables are the
+    module's product rather than dead globals. A typo there would silently
+    re-open that alert, so pin it."""
+    missing = [name for name in stamper.__all__ if not hasattr(stamper, name)]
+    assert not missing, f"tools/stamp_tap_wire.py __all__ names nothing: {missing}"
+
+    # Everything the gate actually reaches for must be declared.
+    for name in ("STAMPS", "RECIPE", "Site", "Spelling", "Anchor", "declared_value"):
+        assert name in stamper.__all__, f"{name} is used by this gate but not exported"

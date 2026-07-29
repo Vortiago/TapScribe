@@ -36,6 +36,31 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+#: The module's public surface. `tests/test_tap_wire_contract.py` is the only
+#: consumer, and it reaches these through `stamper.<name>` — an access CodeQL
+#: cannot resolve, since `tools/` is not an importable package from its point
+#: of view, so without this the tables read as dead globals. Stating the
+#: exports is what a reader wants anyway.
+__all__ = [
+    "RECIPE",
+    "STAMPS",
+    "Anchor",
+    "AnchorNotFound",
+    "NotStampable",
+    "Site",
+    "SiteDisagreesWithItself",
+    "Spelling",
+    "anchored",
+    "cs_const",
+    "cs_property",
+    "declared_value",
+    "js_const",
+    "py_assign",
+    "recorder_contract",
+    "restamped",
+    "stamp",
+]
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
