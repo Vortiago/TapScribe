@@ -269,7 +269,7 @@ async def test_recording_toggle_during_reconnect_uses_snapshot_at_open(
     the bridge then drops + reconnects, the second WS sees the post-
     toggle state.
 
-    Reading `tapscribe/app.py` /tap handler closely:
+    Reading the `tapscribe/routes/tap.py` /tap handler closely:
       - When recording_enabled is False, the WS is accepted then closed
         with code 1000 BEFORE TapFanOut is built. No fan-out, no resume
         attempt, no WAV append.

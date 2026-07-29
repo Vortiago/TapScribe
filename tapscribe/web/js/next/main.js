@@ -197,7 +197,7 @@ function adoptSavedBatchModel(j) {
 
 /**
  * Per-(selected default model) input support — mirrors the server's
- * _compute_inputs_support, but for the ONE model chosen in Settings' "Default
+ * state_view.compute_inputs_support, but for the ONE model chosen in Settings' "Default
  * engine" selector, so the prompt/hotwords editors gate on the picked model
  * (Whisper declares both `initial_prompt` + `hotwords`; Parakeet/Voxtral
  * declare neither). Returns null when the model isn't in the catalog yet, so

@@ -5,6 +5,26 @@
 - `.claude/hooks/` — `session-start.sh` installs deps, `stop.sh` runs ruff.
   Convention changes go there or in `pyproject.toml`, not here.
 - `bridges/README.md` — Bridge → `/tap` wire contract.
+- `tapscribe/routes/` — the HTTP surface, one route module per resource
+  group; its `__init__.py` docstring is the index ("where does X get
+  served"). A new route goes in the module whose DOMAIN CONCERN it
+  belongs to (not its URL prefix — see `strip.py`, which owns four
+  routes across `/api/sessions/*` and `/api/wav/*` so the knob parser
+  stays single-owner) and gets a line in that module's docstring route
+  map. `tests/test_route_surface.py` fails if the map drifts, if
+  `app.py` registers a route itself, if a route module imports a
+  sibling route module (shared helpers live in `deps`/`body`/`errors`/
+  `guards`), or if the registered surface changes without its golden
+  table changing too. ADR-0018 has the why. Note `app.routes` no longer
+  enumerates routes (FastAPI keeps an included router as one lazy
+  entry, and the effective path of a websocket or mount lives on the
+  context's `starlette_route`): a test that sweeps the surface goes
+  through `tests/route_inventory.py`, which owns that traversal (and
+  handles both sides of 0.139) rather than re-deriving it. A StaticFiles
+  mount is the one thing that cannot ride a router: `include_router`
+  carries a `Mount` only from 0.139 and silently drops it before that,
+  so `routes/assets.py` declares mounts in `STATIC_MOUNTS` and attaches
+  them to the app.
 - `frontend/` — TypeScript-via-JSDoc gate for `tapscribe/web/js/`. The
   `stop.sh` hook silently skips when `frontend/node_modules/.bin/tsc` is
   absent (fresh worktree before `session-start.sh` has finished), so if

@@ -45,20 +45,24 @@ jobs:
       - name: Install runtime + test dependencies
         run: |
           python -m pip install --upgrade pip
-          # We only install the lightweight dependencies needed to run the
-          # unit tests — no torch / faster-whisper / mlx-whisper. The tests
-          # are scoped to pure helpers that don't need a real model loaded.
-          # `cryptography` is needed so test_tls runs (the test itself uses
-          # pytest.importorskip, so omitting it just silently skips
-          # coverage of the --tls boot path).
+          # `pip install -e .` rather than a hand-maintained list: the CORE
+          # dependencies are already the lightweight ones (fastapi, uvicorn,
+          # python-multipart, numpy, websockets, cryptography, onnxruntime) and
+          # every heavy backend — torch, faster-whisper, mlx-whisper — is an
+          # optional extra, so this stays as light as the old list while being
+          # unable to drift from it.
           #
-          # This list is hand-maintained rather than `pip install -e .`, so it
-          # can DRIFT from pyproject's core dependencies — `onnxruntime` was
+          # It used to be hand-maintained, and it DID drift: `onnxruntime` was
           # missing for a while after #374 made it core, which silently skipped
-          # every test that exercises the VAD (the gate tests and the
-          # strip-silence detector) on all nine legs. When you add a core
-          # dependency, add it here too.
-          pip install fastapi uvicorn python-multipart numpy websockets onnxruntime pytest pytest-asyncio pytest-cov httpx hypothesis ruff cryptography
+          # every test exercising the VAD (the gate tests, the strip-silence
+          # detector) on all nine legs. Resolving pyproject also means the
+          # version bounds declared there — notably the `fastapi<0.140` cap that
+          # the route-surface sweeps depend on (see tests/route_inventory.py) —
+          # actually bind in the job that runs those tests.
+          #
+          # `cryptography` arrives as a core dep, so test_tls runs rather than
+          # silently importorskip-ing past the --tls boot path.
+          pip install -e . pytest pytest-asyncio pytest-cov httpx hypothesis ruff
 
       - name: Lint (ruff)
         run: ruff check tapscribe tools tests benchmarks bridges/local-test-bridge
@@ -539,9 +543,14 @@ jobs:
       - name: Install runtime + Playwright
         run: |
           python -m pip install --upgrade pip
-          # Same lightweight set as the `test` job, plus playwright. No
-          # faster-whisper — `FakeTranscriber` covers the synthetic path.
-          pip install fastapi uvicorn python-multipart numpy websockets pytest pytest-asyncio pytest-cov httpx hypothesis ruff cryptography playwright
+          # Same install as the `test` job, plus playwright. No faster-whisper —
+          # `FakeTranscriber` covers the synthetic path.
+          #
+          # This list previously omitted `onnxruntime`, which is core since #374:
+          # the per-tap TapScribe gate could not construct, so it fell back to
+          # passthrough and the browser legs exercised a no-op VAD without saying
+          # so. `pip install -e .` makes that class of omission unwritable.
+          pip install -e . pytest pytest-asyncio pytest-cov httpx hypothesis ruff playwright
 
       - name: Install Chromium for Playwright
         run: python -m playwright install --with-deps chromium

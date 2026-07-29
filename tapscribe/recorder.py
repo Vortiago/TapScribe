@@ -75,6 +75,25 @@ class ActiveStream:
 _ACTIVE_STREAM_FIELDS = frozenset(f.name for f in fields(ActiveStream))
 
 
+def open_wav_names(active_streams, *, session: str | None = None) -> set[str]:
+    """The WAVs a tap is writing RIGHT NOW — `s.record and s.filename` is the
+    definition of "open", named once so the three callers can't drift.
+
+    `session=None` is the whole-recorder set the `files_sig` maskers want (a
+    growing WAV must not flip the digest ~2 Hz — `sessions._files_signature`);
+    an over-broad match there only costs an extra refetch. Pass `session` where
+    the answer is USER-VISIBLE — the lazy listing's `open` flag disables the
+    dashboard's play affordance (ADR-0017), and two sessions can legitimately
+    hold the same filename, so an unscoped match would mark an idle session's
+    WAV unplayable.
+    """
+    return {
+        s.filename
+        for s in active_streams
+        if s.record and s.filename and (session is None or s.session == session)
+    }
+
+
 def _apply_fields(target: Any, updates: dict[str, Any], allowed: frozenset[str], what: str) -> None:
     """Allowlist-check `updates`, then set them on `target` (None = the entry
     is gone: nothing to set). ONE copy of the rule for the two in-place

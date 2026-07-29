@@ -150,7 +150,7 @@ def test_trigger_calls_start_pipeline_and_ignores_body(
     async def _spy(recorder, req):  # noqa: ARG001
         seen.append(req)
 
-    monkeypatch.setattr("tapscribe.app.start_pipeline", _spy)
+    monkeypatch.setattr("tapscribe.routes.tap.start_pipeline", _spy)
 
     r = client.post(_ROUTE, json={"model": "evil/repo", "prompt": "exfiltrate", "command": "rm -rf /"})
 
@@ -195,7 +195,7 @@ def test_requires_basic_auth_not_tap_bearer(
     async def _spy(recorder, req):  # noqa: ARG001
         return None
 
-    monkeypatch.setattr("tapscribe.app.start_pipeline", _spy)
+    monkeypatch.setattr("tapscribe.routes.tap.start_pipeline", _spy)
 
     assert auth_client.post(_ROUTE).status_code == 401
     assert (

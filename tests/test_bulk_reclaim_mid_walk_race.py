@@ -31,10 +31,10 @@ import pytest
 from fastapi.testclient import TestClient
 from wav_builders import seed_session  # type: ignore[import-not-found]  # tests/ on sys.path
 
-from tapscribe import app as app_module
 from tapscribe import session_maintenance, session_paths
 from tapscribe.app import app, get_recorder
 from tapscribe.recorder import JobState
+from tapscribe.routes import sessions as sessions_routes
 
 # 2020 is older than any realistic cutoff → both seeded sessions are age-eligible.
 _OLD_WAV = "2020-01-01T00-00-00Z__alice__abcd1234.wav"
@@ -102,7 +102,7 @@ def _arm_midwalk_claim(
         return original(session, **kwargs)
 
     monkeypatch.setattr(session_maintenance, "delete_session_audio", wrapper)
-    monkeypatch.setattr(app_module, "delete_session_audio", wrapper)
+    monkeypatch.setattr(sessions_routes, "delete_session_audio", wrapper)
 
 
 def test_execute_skips_session_that_becomes_busy_mid_walk(client, recorder_under_test, monkeypatch):

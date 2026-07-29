@@ -10,7 +10,7 @@ edges the happy-path fixtures never seed:
   * ``older_than_days <= 0`` (or missing) is rejected with 400
   * a non-current session with a transcribe/strip job in flight, or a live tap
     writing to it, is EXCLUDED — its WAVs survive an execute (the busy-guard the
-    single-item DELETE /audio route enforces via ``_refuse_current_or_busy``)
+    single-item DELETE /audio route enforces via ``refuse_current_or_busy``)
   * a delete-failing session lands in ``failed[]`` and the walk continues
   * a session mixing old + recent WAVs takes its age from the LATEST (max) WAV
 """

@@ -21,7 +21,31 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastapi>=0.110",
+    # Upper bound because the TEST suite reads FastAPI's routing internals: from
+    # 0.139 an included router stays one lazily-resolved entry in `app.routes`, so
+    # the surface sweeps (tests/route_inventory.py, used by test_route_surface.py
+    # and test_tap_endpoint.py's tap-bearer sweep) walk
+    # `fastapi.routing.iter_route_contexts` and read the effective path off each
+    # route context. Neither is covered by a stability promise, and a sweep that
+    # goes blind fails OPEN (it stops finding routes), so
+    # `test_iter_route_contexts_reports_effective_paths` pins the contract and the
+    # cap keeps a resolve from silently crossing it. Bump both together after
+    # auditing the changelog.
+    #
+    # The FLOOR stays where it is, and production code has to keep earning that:
+    # everything below the route layer uses only APIRouter / include_router /
+    # Depends. One thing that does NOT work across the range is a mount held by a
+    # router (`include_router` carries a `Mount` only from 0.139), which is why
+    # `routes/assets.py` attaches its two StaticFiles mounts to the APP. The
+    # sweeps handle both sides of 0.139 rather than hard-importing the newer
+    # symbol, so an older in-range install runs the suite instead of failing to
+    # collect it.
+    #
+    # Caveat worth knowing: ci.yml's `tests` and browser-E2E jobs hand-install
+    # dependencies rather than `pip install -e .`, so THIS cap does not bind
+    # there. That drift is pre-existing (the same comment appears for the core
+    # deps) and is not something this pin can fix.
+    "fastapi>=0.110,<0.140",
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
     "numpy>=1.24",

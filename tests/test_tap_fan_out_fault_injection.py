@@ -159,7 +159,7 @@ async def test_finalize_close_oserror_still_leaves_no_leaked_tasks(
 async def _run_tap_until_write_failure(recorder: Recorder, fake_wf: _FakeWaveWriter, *, utterance_id: str):
     """Mirror the `/tap` route's own shape: `write_frame` has no try/except
     of its own, so a mid-stream OSError propagates straight out of it. The
-    real route (`app.py`) catches it with a broad `except Exception`, logs,
+    real route (`routes/tap.py`) catches it with a broad `except Exception`, logs,
     and lets the `async with` body finish normally, so cleanup then runs via
     a CLEAN `__aexit__` (no exc info), not one carrying the OSError. Reproduce
     that exact shape here rather than asserting on `pytest.raises` at the

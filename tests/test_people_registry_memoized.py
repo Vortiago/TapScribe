@@ -30,7 +30,7 @@ cache — snapshot-keyed-on-stat, copy-on-load, etc.):
 OUT OF THIS GATE (named in the plan-spec, verified by code-review): moving the
 pure joins (session_occurrences / resolve_session_names / build_people_view) and
 the jsonable_encoder + json.dumps + blake2b ETag hash off the event loop into
-the existing _build_state_blob worker thread. That is a loop-residency (perf)
+the existing state_view.build_state_blob worker thread. That is a loop-residency (perf)
 change with no in-process behavioural assertion; the memoisation above is the
 correctness-bearing half the gate can see.
 """

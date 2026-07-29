@@ -36,7 +36,7 @@ from . import config
 class SessionPathError(Exception):
     """Base for session path-layer domain errors. Catch sites (sessions.known_names_for_session,
     session_merge.select_session_wavs) catch this base to degrade gracefully. The HTTP status
-    for each subclass lives ONCE in app._DOMAIN_ERROR_STATUS (the handler's only source)."""
+    for each subclass lives ONCE in routes.errors.DOMAIN_ERROR_STATUS (the handler's only source)."""
 
 
 class SessionNotFound(SessionPathError):
@@ -69,7 +69,7 @@ _UNSAFE_PART_RE = re.compile(r"[\\/\x00]|^\.\.?$|^$")
 # both sanitiser layers and only fails deep inside the filesystem call —
 # `create_session_dir("a" * 300)`'s `os.makedirs` raises a bare
 # `OSError: [Errno 36] File name too long`, which is not a `SessionPathError`
-# and so is absent from `app._DOMAIN_ERROR_STATUS`: `PUT /api/sessions/<300
+# and so is absent from `routes.errors.DOMAIN_ERROR_STATUS`: `PUT /api/sessions/<300
 # chars>/meta` answered 500 while `resolve_session_dir` on the same id answered
 # 404. Length is just one more unsafe-input class, so it is refused here at
 # layer 1 with every other one.

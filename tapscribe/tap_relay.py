@@ -74,7 +74,7 @@ if TYPE_CHECKING:
 # channel that built them). A process that never opens a live tap with
 # gate_kind="tapscribe" never pays for it. Safe without a lock: `_vad_executor()` only ever runs on
 # the app's single event loop thread (called from `TapRelay.feed`, itself
-# only reachable from the `/tap` WS handler in `app.py`), and the
+# only reachable from the `/tap` WS handler in `routes/tap.py`), and the
 # check-then-create has no `await` in between, so two `/tap`s racing to
 # create it is not possible — cooperative scheduling only switches tasks
 # at an `await`.
@@ -270,7 +270,7 @@ class TapRelay:
         actually fed to, not whatever `self._gate` has become by the time
         the await resolves. `TapFanOut.write_frame` awaits this call to
         completion before reading the next WS frame for this tap (see
-        `app.py`'s `/tap` receive loop), so one tap's frames only ever
+        `routes/tap.py`'s `/tap` receive loop), so one tap's frames only ever
         reach its own gate one at a time — required, since Silero's
         streaming RNN state lives on the gate's model instance and two
         concurrent `feed`s on the same gate would corrupt it. Different

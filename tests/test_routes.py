@@ -24,9 +24,10 @@ from fastapi.testclient import TestClient
 from wav_builders import seed_session, seed_wav  # type: ignore[import-not-found]
 
 from tapscribe import config as _config
-from tapscribe.app import _DOMAIN_ERROR_STATUS, app, get_recorder
+from tapscribe.app import app, get_recorder
 from tapscribe.live import LiveConfig
 from tapscribe.recorder import ActiveStream, Recorder
+from tapscribe.routes.errors import DOMAIN_ERROR_STATUS
 from tapscribe.session_maintenance import (
     AbsorbCollision,
     InvalidAbsorbRequest,
@@ -501,7 +502,7 @@ def test_recording_toggle_rejects_a_non_bool_enabled(client, recorder_under_test
     `String(bool)`, a URL param) returned `{"ok": true, "enabled": true}` and
     kept recording every participant after the operator asked to pause. That is
     a wrong-DIRECTION privacy bug, not merely a rejected request —
-    `_parse_opt_bool`'s own docstring names the trap ("bool('false') is True").
+    `parse_opt_bool`'s own docstring names the trap ("bool('false') is True").
     """
     recorder_under_test.recording_enabled = True
     r = client.post("/api/recording/toggle", json={"enabled": raw})
@@ -653,7 +654,7 @@ def test_api_state_runs_gather_sessions_off_event_loop(client, recorder_under_te
     gather_sessions must run on a *different* thread."""
     import threading
 
-    from tapscribe.app import gather_sessions as _real_gather
+    from tapscribe.routes.state import gather_sessions as _real_gather
 
     seen: dict[str, int] = {}
 
@@ -669,7 +670,7 @@ def test_api_state_runs_gather_sessions_off_event_loop(client, recorder_under_te
         seen["gather"] = threading.get_ident()
         return _real_gather(**kw)
 
-    monkeypatch.setattr("tapscribe.app.gather_sessions", gather_spy)
+    monkeypatch.setattr("tapscribe.routes.state.gather_sessions", gather_spy)
 
     assert client.get("/api/state").status_code == 200
     assert seen["gather"] != seen["loop"], (
@@ -1484,8 +1485,8 @@ def test_delete_session_audio_holds_job_slot_during_walk(client, recorder_under_
     the session's job slot is CLAIMED (kind="delete"), so a transcribe/strip
     arriving mid-delete gets the standard SessionBusy 409 instead of racing
     the unlink walk (the old pre-flight was check-then-act)."""
-    from tapscribe import app as app_module
     from tapscribe.recorder import JobState
+    from tapscribe.routes import sessions as sessions_routes
 
     root = recorder_under_test.recordings_dir
     seed_session(root, "s", ["20260101T000000Z__alice__abc.wav"])
@@ -1511,7 +1512,7 @@ def test_delete_session_audio_holds_job_slot_during_walk(client, recorder_under_
             )
         return {"wavs_deleted": 0, "bytes_freed": 0, "sidecars_deleted": 0}
 
-    monkeypatch.setattr(app_module, "delete_session_audio", probing_delete)
+    monkeypatch.setattr(sessions_routes, "delete_session_audio", probing_delete)
     r = client.delete("/api/sessions/s/audio")
     assert r.status_code == 200
     assert observed["claim_refused"] is True
@@ -1625,7 +1626,7 @@ def test_delete_stripped_holds_job_slot_during_rmtree(client, recorder_under_tes
 
 
 def test_delete_stripped_allows_the_current_session(client, recorder_under_test):
-    """Deliberately NOT `_refuse_current_or_busy`: stripped/ is a derived
+    """Deliberately NOT `refuse_current_or_busy`: stripped/ is a derived
     artefact, so clearing the live session's regions to re-cut them is a
     normal operator move. Guards against someone 'aligning' this route with
     its siblings' current-session refusal."""
@@ -1750,7 +1751,7 @@ def test_current_session_refused_before_dir_materialised(client, recorder_under_
 
 
 # ---------------------------------------------------------------------------
-# _refuse_current_or_busy — the shared pre-flight guard the 4 destructive
+# refuse_current_or_busy — the shared pre-flight guard the 4 destructive
 # session/WAV routes above delegate to (issue #256). Driven directly against
 # a real Recorder (no HTTP) so each guard combination is pinned independent
 # of any one route's wiring.
@@ -1758,19 +1759,19 @@ def test_current_session_refused_before_dir_materialised(client, recorder_under_
 
 
 async def test_refuse_current_or_busy_allows_when_neither_current_nor_busy(recorder_under_test):
-    from tapscribe.app import _refuse_current_or_busy
+    from tapscribe.routes.guards import refuse_current_or_busy
 
-    await _refuse_current_or_busy(recorder_under_test, "s", current="s", action="delete")  # must not raise
+    await refuse_current_or_busy(recorder_under_test, "s", current="s", action="delete")  # must not raise
 
 
 async def test_refuse_current_or_busy_refuses_current_session(recorder_under_test):
     from fastapi import HTTPException
 
-    from tapscribe.app import _refuse_current_or_busy
+    from tapscribe.routes.guards import refuse_current_or_busy
 
     cur = recorder_under_test.session_start
     with pytest.raises(HTTPException) as exc_info:
-        await _refuse_current_or_busy(recorder_under_test, cur, current=cur, action="delete")
+        await refuse_current_or_busy(recorder_under_test, cur, current=cur, action="delete")
     assert exc_info.value.status_code == 409
     assert "cannot delete the current session" in exc_info.value.detail
 
@@ -1778,11 +1779,11 @@ async def test_refuse_current_or_busy_refuses_current_session(recorder_under_tes
 async def test_refuse_current_or_busy_appends_hint_after_current_session_message(recorder_under_test):
     from fastapi import HTTPException
 
-    from tapscribe.app import _refuse_current_or_busy
+    from tapscribe.routes.guards import refuse_current_or_busy
 
     cur = recorder_under_test.session_start
     with pytest.raises(HTTPException) as exc_info:
-        await _refuse_current_or_busy(
+        await refuse_current_or_busy(
             recorder_under_test, "tgt", cur, current=cur, action="absorb", hint="do the other thing instead"
         )
     assert exc_info.value.status_code == 409
@@ -1792,20 +1793,20 @@ async def test_refuse_current_or_busy_appends_hint_after_current_session_message
 
 
 async def test_refuse_current_or_busy_refuses_single_session_job_in_flight(recorder_under_test):
-    from tapscribe.app import _refuse_current_or_busy
     from tapscribe.recorder import JobState, SessionBusy
+    from tapscribe.routes.guards import refuse_current_or_busy
 
     await recorder_under_test.jobs.claim(
         JobState(session="s", kind="strip", current=0, total=1, started_at=datetime.now(UTC))
     )
     with pytest.raises(SessionBusy) as exc_info:
-        await _refuse_current_or_busy(recorder_under_test, "s", current="s", action="delete")
+        await refuse_current_or_busy(recorder_under_test, "s", current="s", action="delete")
     assert str(exc_info.value) == "a transcribe or strip job is in flight on this session"
 
 
 async def test_refuse_current_or_busy_ors_job_check_across_multiple_sessions(recorder_under_test):
-    from tapscribe.app import _refuse_current_or_busy
     from tapscribe.recorder import JobState, SessionBusy
+    from tapscribe.routes.guards import refuse_current_or_busy
 
     # Only "src" is busy; "tgt" is clean. Neither is the current session.
     # The busy check must still refuse because it applies to EITHER session.
@@ -1813,7 +1814,7 @@ async def test_refuse_current_or_busy_ors_job_check_across_multiple_sessions(rec
         JobState(session="src", kind="transcribe", current=0, total=1, started_at=datetime.now(UTC))
     )
     with pytest.raises(SessionBusy) as exc_info:
-        await _refuse_current_or_busy(recorder_under_test, "tgt", "src", current="src", action="absorb")
+        await refuse_current_or_busy(recorder_under_test, "tgt", "src", current="src", action="absorb")
     assert str(exc_info.value) == "a transcribe or strip job is in flight on one of these sessions"
 
 
@@ -1821,11 +1822,11 @@ async def test_refuse_current_or_busy_target_may_be_current_source_may_not(recor
     """The absorb asymmetry: passing `current=source` means the TARGET being
     the live session is fine — only the explicitly-named `current` session
     is refused."""
-    from tapscribe.app import _refuse_current_or_busy
+    from tapscribe.routes.guards import refuse_current_or_busy
 
     cur = recorder_under_test.session_start
     # target == current, source != current, neither busy → must not raise.
-    await _refuse_current_or_busy(recorder_under_test, cur, "src", current="src", action="absorb")
+    await refuse_current_or_busy(recorder_under_test, cur, "src", current="src", action="absorb")
 
 
 async def test_refuse_current_or_busy_requires_explicit_current(recorder_under_test):
@@ -1833,10 +1834,10 @@ async def test_refuse_current_or_busy_requires_explicit_current(recorder_under_t
     default) — a caller can't silently skip the current-session guard by
     forgetting it, single-session or multi. Python's own TypeError enforces
     this; this test just pins that it's still required after any refactor."""
-    from tapscribe.app import _refuse_current_or_busy
+    from tapscribe.routes.guards import refuse_current_or_busy
 
     with pytest.raises(TypeError):
-        await _refuse_current_or_busy(recorder_under_test, "s", action="delete")
+        await refuse_current_or_busy(recorder_under_test, "s", action="delete")
 
 
 def test_delete_wav_stripped_region_only(client, recorder_under_test):
@@ -2930,7 +2931,7 @@ def test_absorb_refuses_when_job_in_flight(client, recorder_under_test):
 
 
 def test_absorb_refuses_busy_source_even_when_target_missing(client, recorder_under_test):
-    """`_refuse_current_or_busy` checks both sessions' jobs before either
+    """`refuse_current_or_busy` checks both sessions' jobs before either
     `resolve_session_dir` call, so a busy source now wins 409 over a missing
     target's 404 — a deliberate, benign flip from the pre-refactor ordering
     (both outcomes refuse the request; only the status code differs) for
@@ -3415,7 +3416,7 @@ def test_summarizer_config_put_empty_object_clears(client):
 
 
 def test_summarizer_config_put_rejects_a_bodyless_or_malformed_write(client):
-    """Full-object semantics + `_json_body`'s "any parse failure → {}" used to
+    """Full-object semantics + `json_body`'s "any parse failure → {}" used to
     mean a client that dropped or truncated the body WIPED the operator's
     saved default — taking the end-of-meeting pipeline's summarize stage with
     it — and was told the save worked. Only a deliberate `{}` may clear."""
@@ -3729,7 +3730,7 @@ def test_api_people_mutation_errors(client):
 
 # --- #228: the domain-error → HTTP status map is the ONE source of truth ------
 # The migrated session domain exceptions carry NO status_code attribute; the
-# handler dispatches solely on app._DOMAIN_ERROR_STATUS by exact type. Pin each
+# handler dispatches solely on routes.errors.DOMAIN_ERROR_STATUS by exact type. Pin each
 # newly-migrated type here so a de-registration or wrong status is caught
 # directly at the map (SessionDeleteError's 500 has no easy route to exercise).
 @pytest.mark.parametrize(
@@ -3747,4 +3748,4 @@ def test_api_people_mutation_errors(client):
     ids=lambda v: getattr(v, "__name__", v),
 )
 def test_migrated_domain_error_status_is_registered(exc_type, status):
-    assert _DOMAIN_ERROR_STATUS[exc_type] == status
+    assert DOMAIN_ERROR_STATUS[exc_type] == status

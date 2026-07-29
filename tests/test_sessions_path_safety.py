@@ -101,7 +101,7 @@ def test_resolve_wav_rejects_bad_name(bad_name, recordings_dir):
 def test_over_long_session_id_is_rejected_as_not_found(build, recordings_dir):  # noqa: ARG001
     """A 300-char session id passed both sanitiser layers, so `os.makedirs`
     raised `OSError: [Errno 36] File name too long` — not a `SessionPathError`,
-    so not in `app._DOMAIN_ERROR_STATUS`, so `PUT /api/sessions/<300 chars>/meta`
+    so not in `routes.errors.DOMAIN_ERROR_STATUS`, so `PUT /api/sessions/<300 chars>/meta`
     answered 500 while `resolve_session_dir` on the SAME id correctly raised
     SessionNotFound. Windows' 260-char MAX_PATH puts the threshold lower still."""
     with pytest.raises(SessionNotFound):
