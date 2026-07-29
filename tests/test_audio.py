@@ -10,8 +10,7 @@ import numpy as np
 import pytest
 
 from tapscribe import audio
-
-SAMPLE_RATE = 16000
+from tapscribe.audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
 
 
 def _write_pcm_wav(
@@ -174,7 +173,9 @@ def test_int16_peak_norm_does_not_mutate_input():
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "audio"
-FRAME_BYTES = 640  # 20 ms @ 16 kHz mono int16 — bridge wire format
+# The /tap wire frame, imported rather than restated (#356): this is the
+# Recorder's own side of the wire, so it uses the Recorder's constant.
+from tapscribe.speech_gate import FRAME_BYTES  # noqa: E402
 
 
 def _wav_to_frames(path: Path, frame_bytes: int = FRAME_BYTES) -> list[bytes]:
@@ -238,7 +239,6 @@ def test_int16_peak_norm_synthesised_half_scale_tone_reads_half(tmp_path):
     sine. Pins the exact numeric value end-to-end through the same WAV
     I/O path the recorder uses, with a signal that any audio engineer
     can reproduce."""
-    SAMPLE_RATE = 16000
     seconds = 0.5
     t = np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
     samples = (0.5 * 32767 * np.sin(2 * np.pi * 440.0 * t)).astype(np.int16)

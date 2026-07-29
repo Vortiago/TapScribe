@@ -263,13 +263,15 @@ class RecorderServer:
             self._thread.join(timeout=timeout)
 
 
-# Recorder wire format: 16 kHz mono int16 PCM, 20 ms frames. Mirrors the
-# constants in bridges/local-test-bridge/local_test_bridge.py — these
-# values appear in production too (tap_fan_out hard-codes 16000) but
-# there's no shared module yet.
-SAMPLE_RATE = 16000
-FRAME_SAMPLES = 320
-FRAME_BYTES = FRAME_SAMPLES * 2
+# Recorder wire format: 16 kHz mono int16 PCM, 20 ms frames. Imported, not
+# restated — this is Python on the Recorder's own side of the wire, so it can
+# simply use the Recorder's constants. (It used to declare its own copies
+# under a comment claiming "tap_fan_out hard-codes 16000", which was already
+# false: that module contains no such literal. Stale prose about the wire
+# contract is the drift #356 is about; a Bridge in another language has to be
+# stamped, but a Python test helper just imports.)
+from tapscribe.audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE  # noqa: E402
+from tapscribe.speech_gate import FRAME_BYTES  # noqa: E402
 
 
 def synth_speech_like_wav(out: Path, *, seconds: float, freq_hz: float, amplitude: float = 0.25) -> Path:

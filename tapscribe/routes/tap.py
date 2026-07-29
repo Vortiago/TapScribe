@@ -334,8 +334,11 @@ async def tap(ws: WebSocket):
         await ws.close(code=1011, reason="recorder not ready")
         return
 
-    # Auth gate: when AUTH_ENABLED, the bridge must offer a subprotocol of
-    # the form "tapscribe.v1.tap.<token>" whose token matches recorder.tap.value.
+    # Auth gate: when AUTH_ENABLED, the bridge must offer a subprotocol of the
+    # form `auth.TAP_SUBPROTOCOL_PREFIX + <token>` whose token matches
+    # recorder.tap.value. Named rather than spelled out: this module is INSIDE
+    # the wire contract's source, so a literal here would be a fifth copy that
+    # tools/stamp_tap_wire.py deliberately never writes (#356, ADR-0019).
     # We accept-with-subprotocol on match (browsers require the server to
     # echo one of the offered values), and refuse the upgrade on mismatch.
     accept_subprotocol: str | None = None

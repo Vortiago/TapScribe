@@ -9,16 +9,10 @@ cross-PR asset contract: the zip extracts to a single
 
 from __future__ import annotations
 
-import sys
 import zipfile
 from pathlib import Path
 
-# tools/ isn't a package — make package_bridge importable by name.
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-import package_bridge  # noqa: E402
+import package_bridge
 
 
 def _names(out_dir: Path) -> list[str]:

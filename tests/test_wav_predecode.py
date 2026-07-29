@@ -17,8 +17,7 @@ import numpy as np
 import pytest
 
 from tapscribe import wav_predecode
-
-SAMPLE_RATE = 16000
+from tapscribe.audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
 
 
 def _write_pcm_wav(

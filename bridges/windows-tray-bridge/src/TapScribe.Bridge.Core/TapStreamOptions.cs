@@ -1,11 +1,13 @@
 namespace TapScribe.Bridge.Core;
 
 /// <summary>
-/// Blip-resilience tuning for one <see cref="TapStream"/>: the reconnect ladder,
-/// the during-gap buffer bound, and the drain budget. Defaults mirror the
-/// SpatialChat bridge's reference recipe (see bridges/README.md and
-/// bridges/spacialchat-bridge/content.js). Tests inject tight values so the
-/// resilience paths run in milliseconds.
+/// The Blip-resilience recipe for one <see cref="TapStream"/>: the reconnect
+/// ladder, the during-gap buffer bound, and the drain budget. Recommended, not
+/// enforced — the Recorder has no opinion on these (CONTEXT.md) — but the
+/// bundled bridges must not drift from each other, so these defaults are pinned
+/// against bridges/spacialchat-bridge/content.js and bridges/README.md by
+/// tests/test_tap_wire_contract.py. Tests inject tight values so the resilience
+/// paths run in milliseconds.
 /// </summary>
 public sealed record TapStreamOptions
 {

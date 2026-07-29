@@ -34,10 +34,13 @@ from collections.abc import Callable
 from dataclasses import replace
 
 # PCM frame contract — matches the Bridge → /tap wire format. 20 ms of
-# 16 kHz mono int16 = 320 samples = 640 bytes per frame. Don't reuse
-# constants from bridges/ — those are JS — but they MUST agree. The
-# sample rate is the recorder's canonical one (tapscribe.audio), same
-# aliasing as strip_silence / wav_predecode.
+# 16 kHz mono int16 = 320 samples = 640 bytes per frame. This module is on the
+# SOURCE side of that contract: the bridges (JS, C#, and the local-test bridge)
+# can't import from here, so `tools/stamp_tap_wire.py` writes these values into
+# them and `tests/test_tap_wire_contract.py` fails if any of them drifts.
+# Change FRAME_SAMPLES here, then run the stamper — see ADR-0019. The sample
+# rate is the recorder's canonical one (tapscribe.audio), same aliasing as
+# strip_silence / wav_predecode.
 from .audio import RECORDER_SAMPLE_RATE as SAMPLE_RATE
 
 FRAME_SAMPLES = 320

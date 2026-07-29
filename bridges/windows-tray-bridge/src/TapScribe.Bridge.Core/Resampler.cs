@@ -122,12 +122,22 @@ public sealed class Resampler
         return mono;
     }
 
+    /// <summary>
+    /// float -&gt; int16, scaling by 32768 so it is the exact inverse of the
+    /// decode above (which divides by 32768). It used to multiply by 32767,
+    /// which cost 1 LSB on every sample with |x| &gt;= 0.5 — even on the
+    /// format-matched identity path, where the bytes should pass through
+    /// untouched. 32768 is also the convention the Recorder documents and
+    /// uses (tapscribe/audio.py), so the two sides of the /tap wire now agree
+    /// on what full scale means: -1.0 maps to short.MinValue exactly, and the
+    /// clamp below absorbs +1.0, the only value that would overflow.
+    /// </summary>
     private static byte[] EncodeInt16(List<float> samples)
     {
         var bytes = new byte[samples.Count * 2];
         for (int n = 0; n < samples.Count; n++)
         {
-            int v = (int)Math.Round(samples[n] * 32767f);
+            int v = (int)Math.Round(samples[n] * 32768f);
             v = Math.Clamp(v, short.MinValue, short.MaxValue);
             BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(n * 2, 2), (short)v);
         }

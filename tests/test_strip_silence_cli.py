@@ -13,20 +13,12 @@ fires, and these tests run modelless).
 
 from __future__ import annotations
 
-import sys
 import wave
 from pathlib import Path
 
 import numpy as np
 import pytest
-
-# tools/ isn't a package — make the CLI importable by name (same pattern
-# as test_install_picker.py).
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-import strip_silence_cli as cli  # noqa: E402
+import strip_silence_cli as cli
 
 from tapscribe import strip_silence as ss  # noqa: E402
 
