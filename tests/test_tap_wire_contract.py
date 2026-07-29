@@ -480,10 +480,10 @@ def test_no_undeclared_copy_of_a_wire_constant() -> None:
     """Sweep A: a module-level constant named like a wire constant, outside
     any declared site. This is the `harness.py` shape — a private copy that
     tiers 1 and 2 would never look at."""
-    declared = {str(site.path) for site in (*stamper.STAMPS, *stamper.RECIPE)}
+    declared = {site.path.as_posix() for site in (*stamper.STAMPS, *stamper.RECIPE)}
     offenders: dict[str, list[str]] = {}
     for path in _tracked_files(frozenset({".py", ".js", ".cs"})):
-        key = str(path)
+        key = path.as_posix()
         if key in declared or key in _SOURCE_MODULES or key in _EXEMPT_DECLARATIONS:
             continue
         text = (REPO_ROOT / path).read_text(encoding="utf-8", errors="replace")
@@ -508,13 +508,13 @@ def test_no_unstamped_copy_of_the_subprotocol_literal() -> None:
     covered: dict[str, list[tuple[int, int]]] = {}
     for site in (*stamper.STAMPS, *stamper.RECIPE):
         text = (REPO_ROOT / site.path).read_text(encoding="utf-8")
-        covered.setdefault(str(site.path), []).extend(m.span() for m in site.pattern.finditer(text))
+        covered.setdefault(site.path.as_posix(), []).extend(m.span() for m in site.pattern.finditer(text))
 
     offenders: list[str] = []
     for path in _tracked_files(frozenset({".py", ".js", ".cs", ".md"})):
-        key = str(path)
+        key = path.as_posix()
         # Tests are CONSUMERS: a stale literal there fails that test loudly.
-        if key in _SOURCE_MODULES or "tests/" in key or key.startswith("tests/"):
+        if key in _SOURCE_MODULES or key.startswith("tests/") or "/tests/" in key:
             continue
         text = (REPO_ROOT / path).read_text(encoding="utf-8", errors="replace")
         spans = covered.get(key, [])
@@ -529,6 +529,30 @@ def test_no_unstamped_copy_of_the_subprotocol_literal() -> None:
         + "\nAdd a Site row in tools/stamp_tap_wire.py, or name the constant "
         "instead of restating the literal."
     )
+
+
+def test_site_keys_are_platform_independent() -> None:
+    """Every table here is keyed by a repo-relative POSIX path, and the sweeps
+    derive their keys with `.as_posix()` so they match on Windows too.
+
+    This is a real regression: the first cut compared `str(Path(...))`, which
+    is backslash-separated on Windows, against these forward-slash keys. Every
+    comparison missed, so the tripwire reported the entire repository as
+    undeclared and all three Windows jobs went red while every POSIX job
+    passed. Nothing in a Linux run can notice that, hence this guard.
+    """
+    keys = (
+        {site.path.as_posix() for site in (*stamper.STAMPS, *stamper.RECIPE)}
+        | set(_SOURCE_MODULES)
+        | set(_EXEMPT_DECLARATIONS)
+    )
+    assert not [k for k in keys if "\\" in k], "table keys must use /, not \\"
+
+    # And the Site paths must be built from POSIX literals, so `.as_posix()`
+    # is a no-op round trip rather than a lossy guess.
+    for site in (*stamper.STAMPS, *stamper.RECIPE):
+        assert Path(site.path.as_posix()) == site.path
+        assert not site.path.is_absolute(), f"{site.path} must be repo-relative"
 
 
 def test_every_exemption_still_applies() -> None:
@@ -592,7 +616,7 @@ def test_stamping_repairs_a_drifted_site_and_only_that_site(tmp_path: Path) -> N
 def test_the_stamper_never_writes_the_recorder() -> None:
     """`tapscribe/` is the SOURCE. If the tool could rewrite it, a typo in a
     Bridge could propagate INTO the contract instead of being caught by it."""
-    assert not any(str(site.path).startswith("tapscribe/") for site in stamper.STAMPS)
+    assert not any(site.path.as_posix().startswith("tapscribe/") for site in stamper.STAMPS)
 
 
 def test_derived_values_are_never_stamped() -> None:
