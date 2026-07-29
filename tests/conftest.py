@@ -29,6 +29,55 @@ if str(REPO_ROOT) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
+# Close huggingface_hub's pooled HTTPS client after any test that opened one
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _close_hf_http_client() -> Iterator[None]:
+    """Shut huggingface_hub's shared `httpx.Client` after a test that used it.
+
+    `huggingface_hub` 1.x keeps ONE process-wide `httpx.Client` (`get_session`)
+    and never closes it, so a keep-alive TLS connection to the CDN outlives the
+    test that triggered it — a real-model test like
+    `test_tap_live_gate_real_audio.py` (`WhisperModel("tiny.en", ...)`) resolves
+    its weights over HTTPS and leaves the pooled socket open.
+
+    That socket is eventually finalized by the GARBAGE COLLECTOR, which emits
+    `ResourceWarning: unclosed socket`. Under `filterwarnings = ["error"]`
+    pytest turns that into an error and blames whichever test happened to be
+    running when the GC fired, so it surfaced as an intermittent failure in an
+    unrelated file (`test_tap_endpoint.py`) that went green on re-run and under
+    `-k` isolation. Same failure shape — and the same fix in spirit — as
+    `FakeWlkThread`'s task drain below: make teardown deterministic so the
+    warning is impossible rather than rare.
+
+    Autouse and cheap: it only touches `huggingface_hub` when that module is
+    ALREADY imported and has actually built a client, so the ~1200 tests that
+    never reach the Hub pay one dict lookup. `close_session()` is the library's
+    own supported call and the client is lazily rebuilt on next use, so closing
+    between tests is safe.
+    """
+    yield
+    close_hf_http_client_if_open()
+
+
+def close_hf_http_client_if_open() -> bool:
+    """Close huggingface_hub's shared `httpx.Client` if one has been built.
+
+    Returns True when it closed one. Split out of the autouse fixture above so
+    the behaviour is directly testable (`test_hf_session_cleanup.py`) — a
+    fixture's teardown cannot assert on its own effect.
+    """
+    http = sys.modules.get("huggingface_hub.utils._http")
+    if http is None or getattr(http, "_GLOBAL_CLIENT", None) is None:
+        return False
+    with contextlib.suppress(Exception):
+        http.close_session()
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Shared #224 gate-knob test values
 # ---------------------------------------------------------------------------
 #
