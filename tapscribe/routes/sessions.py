@@ -40,6 +40,7 @@ from fastapi import (
 
 from ..recorder import Recorder, open_wav_names
 from ..session_maintenance import (
+    SessionDeleteError,
     absorb_session,
     delete_session_audio,
     prune_empty_sessions,
@@ -57,7 +58,7 @@ from ..sessions import (
 )
 from .body import json_body
 from .deps import get_recorder
-from .guards import refuse_current_or_busy
+from .guards import ops_log, refuse_current_or_busy
 
 router = APIRouter()
 
@@ -98,16 +99,15 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
     # between the check and the thread hop and race the unlink walk), so the
     # delete claims the SAME slot the batch jobs use — a job arriving
     # mid-delete gets the standard SessionBusy 409, and vice versa. run()
-    # releases on every exit path, so unlike whole-session delete the
-    # surviving session's slot is always freed again.
+    # releases on every exit path, so the surviving session's slot is always
+    # freed again.
     async with recorder.jobs.run(session, kind="delete", total=1):
         # Offload the filesystem walk (many WAVs + .transcripts/ dirs) so the
         # ~1 Hz /api/state poll stays responsive — same as strip-silence.
         summary = await asyncio.to_thread(delete_session_audio, session)
-    print(
-        f"[tapscribe] deleted audio from session {session}: "
-        f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed",
-        flush=True,
+    ops_log(
+        f"deleted audio from session {session}: "
+        f"{summary['wavs_deleted']} wavs, {summary['bytes_freed']} bytes freed"
     )
     return {"ok": True, **summary}
 
@@ -199,11 +199,10 @@ async def api_session_absorb(
     resolve_session_dir(source)
 
     summary = absorb_session(target, source)
-    print(
-        f"[tapscribe] absorbed {source} into {target}: "
+    ops_log(
+        f"absorbed {source} into {target}: "
         f"{summary['wavs_moved']} wavs, {summary['stripped_moved']} stripped, "
-        f"+{len(summary['aliases_added'])} aliases",
-        flush=True,
+        f"+{len(summary['aliases_added'])} aliases"
     )
     return {"ok": True, **summary}
 
@@ -217,12 +216,16 @@ async def api_session_delete(session: str, recorder: Recorder = Depends(get_reco
     the sibling /audio and /absorb endpoints enforce)."""
     await refuse_current_or_busy(recorder, session, current=session, action="delete")
     session_dir = resolve_session_dir(session)
-    try:
-        shutil.rmtree(session_dir)
-    except OSError as e:
-        raise HTTPException(500, f"delete failed: {e}") from None
-    await recorder.jobs.release(session)
-    print(f"[tapscribe] deleted session: {session_dir}", flush=True)
+    # Same hold-for-the-walk bracket as the sibling /audio delete, for the two
+    # reasons spelled out there. Route-specific: `jobs.run` releases on EVERY
+    # exit path, so it also subsumes the hand-rolled `jobs.release` this route
+    # used to do on the success path only.
+    async with recorder.jobs.run(session, kind="delete", total=1):
+        try:
+            await asyncio.to_thread(shutil.rmtree, session_dir)
+        except OSError as e:
+            raise SessionDeleteError(f"delete failed: {e}") from None
+    ops_log(f"deleted session: {session_dir}")
     return {"ok": True, "deleted": session}
 
 

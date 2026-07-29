@@ -15,7 +15,13 @@ from pathlib import Path
 import pytest
 
 from tapscribe import config
-from tapscribe.people import PEOPLE_JSON, PeopleRegistry
+from tapscribe.people import (
+    PEOPLE_JSON,
+    IdentityNotAMember,
+    InvalidMergeRequest,
+    PeopleRegistry,
+    PersonNotFound,
+)
 
 
 @pytest.fixture
@@ -56,7 +62,7 @@ def test_rename_sets_the_chosen_name(recordings_dir: Path) -> None:
 
 def test_rename_unknown_id_raises(recordings_dir: Path) -> None:
     reg = PeopleRegistry.load()
-    with pytest.raises(KeyError):
+    with pytest.raises(PersonNotFound):
         reg.rename("p_nope", "X")
 
 
@@ -83,9 +89,9 @@ def test_merge_rejects_same_and_unknown(recordings_dir: Path) -> None:
     reg = PeopleRegistry.load()
     reg.sync(["a"])
     pid = reg.person_for_identity("a")["id"]
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidMergeRequest):
         reg.merge(pid, pid)
-    with pytest.raises(KeyError):
+    with pytest.raises(PersonNotFound):
         reg.merge(pid, "p_nope")
 
 
@@ -113,7 +119,7 @@ def test_detach_identity_not_in_person_raises(recordings_dir: Path) -> None:
     reg = PeopleRegistry.load()
     reg.sync(["x", "y"])
     pid = reg.person_for_identity("x")["id"]
-    with pytest.raises(ValueError):
+    with pytest.raises(IdentityNotAMember):
         reg.detach(pid, "y")  # y belongs to a different person
 
 

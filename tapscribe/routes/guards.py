@@ -50,3 +50,16 @@ async def refuse_current_or_busy(
         raise SessionBusy(f"a transcribe or strip job is in flight on {noun}")
     if any(s.session == current for s in await recorder.streams.snapshot()):
         raise SessionBusy("a live tap is writing to this session")
+
+
+def ops_log(message: str) -> None:
+    """Emit a destructive route's completion line.
+
+    Owns the `[tapscribe] ` prefix and `flush=True` for ITS callers — the four
+    destructive session/WAV routes whose preflight is `refuse_current_or_busy`
+    above — so a change to their format or transport lands in one place.
+    Deliberately NOT a module-wide seam: the other `[tapscribe] ` prints in the
+    route modules and the leaf modules still hand-roll the prefix. Widening the
+    claim means sweeping them, not rewording this.
+    """
+    print(f"[tapscribe] {message}", flush=True)

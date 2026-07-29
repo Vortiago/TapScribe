@@ -19,6 +19,7 @@ from ..batch_strip import StrippedDirUnclearable
 from ..batch_summarize import NoMergedTranscript
 from ..batch_transcribe import WavTooQuiet, WavUnreadable
 from ..live_control import GateKindUnsupported, LiveModelUnknown, LiveStartFailed
+from ..people import IdentityNotAMember, InvalidMergeRequest, PersonNotFound
 from ..recorder import SessionBusy
 from ..session_maintenance import AbsorbCollision, InvalidAbsorbRequest, SessionDeleteError
 from ..session_merge import InvalidRange, NoUsableWavs
@@ -50,6 +51,10 @@ DOMAIN_ERROR_STATUS: dict[type[Exception], int] = {
     LiveModelUnknown: 400,
     GateKindUnsupported: 400,
     LiveStartFailed: 500,
+    # People registry (#368)
+    PersonNotFound: 404,
+    InvalidMergeRequest: 400,
+    IdentityNotAMember: 400,
 }
 
 

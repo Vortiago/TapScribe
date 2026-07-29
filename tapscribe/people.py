@@ -33,6 +33,26 @@ from .text import atomic_write_text, file_stat_sig
 
 PEOPLE_JSON = "people.json"
 
+
+# --- Domain errors — FastAPI-free, translated by routes/errors.py ------------
+
+
+class PersonNotFound(Exception):
+    """No Person with that id (→ 404)."""
+
+    def __init__(self, person_id: str) -> None:
+        super().__init__("person not found")
+        self.person_id = person_id
+
+
+class InvalidMergeRequest(Exception):
+    """The merge is malformed — e.g. a Person into itself (→ 400)."""
+
+
+class IdentityNotAMember(Exception):
+    """The Identity does not belong to the Person named (→ 400)."""
+
+
 # Single-slot memoisation cache for `load()`. Stores `(sig, raw_data)` where
 # `raw_data` is the raw dict from `json.loads`. On a hit, `_coerce_people`
 # builds a fresh PeopleRegistry from the cached snapshot — independence is
@@ -152,19 +172,19 @@ class PeopleRegistry:
     def rename(self, person_id: str, name: str) -> dict[str, Any]:
         person = self.get(person_id)
         if person is None:
-            raise KeyError(person_id)
+            raise PersonNotFound(person_id)
         person["name"] = name
         return person
 
     def merge(self, survivor_id: str, absorbed_id: str) -> dict[str, Any]:
         if survivor_id == absorbed_id:
-            raise ValueError("cannot merge a Person into itself")
+            raise InvalidMergeRequest("cannot merge a Person into itself")
         survivor = self.get(survivor_id)
         absorbed = self.get(absorbed_id)
         if survivor is None:
-            raise KeyError(survivor_id)
+            raise PersonNotFound(survivor_id)
         if absorbed is None:
-            raise KeyError(absorbed_id)
+            raise PersonNotFound(absorbed_id)
         for identity in absorbed["identities"]:
             if identity not in survivor["identities"]:
                 survivor["identities"].append(identity)
@@ -188,9 +208,9 @@ class PeopleRegistry:
         """
         person = self.get(person_id)
         if person is None:
-            raise KeyError(person_id)
+            raise PersonNotFound(person_id)
         if identity not in person["identities"]:
-            raise ValueError(f"{identity!r} is not a member of {person_id!r}")
+            raise IdentityNotAMember(f"{identity!r} is not a member of {person_id!r}")
         if person["identities"] == [identity]:
             return person
         person["identities"].remove(identity)
