@@ -212,7 +212,8 @@ def test_session_delete_holds_the_job_slot_for_the_walk_and_frees_it_after(
         real_rmtree(path, *a, **k)  # type: ignore[arg-type]
 
     monkeypatch.setattr(shutil, "rmtree", _observe)
-    assert client.delete("/api/sessions/doomed").status_code == 200
+    r = client.delete("/api/sessions/doomed")
+    assert r.status_code == 200
     assert held, "the teardown never ran"
     # Not merely "the slot is populated" — it must be THIS route's bracket
     # holding it, so stray bookkeeping that fills the slot can't stand in for
@@ -297,7 +298,8 @@ def test_absorb_rejects_a_bad_source_with_400(
     client: TestClient, recorder_under_test: Recorder, body: dict
 ) -> None:
     seed_session(recorder_under_test.recordings_dir, "tgt", ["20260101T000000Z__alice__abc.wav"])
-    assert client.post("/api/sessions/tgt/absorb", json=body).status_code == 400
+    r = client.post("/api/sessions/tgt/absorb", json=body)
+    assert r.status_code == 400
 
 
 def test_absorb_rejects_absorbing_a_session_into_itself(
@@ -364,8 +366,10 @@ def test_single_session_delete_still_says_what_it_freed(
     in the URL and the prefix they owe the operator. (`absorb` needs a second
     session, so it stays its own test below.)"""
     seed_session(recorder_under_test.recordings_dir, "s", ["20260101T000000Z__alice__abc.wav"])
-    assert client.delete(url).status_code == 200
-    assert expected in capsys.readouterr().out
+    r = client.delete(url)
+    assert r.status_code == 200
+    out = capsys.readouterr().out
+    assert expected in out
 
 
 def test_absorb_still_says_what_it_moved(
@@ -374,5 +378,7 @@ def test_absorb_still_says_what_it_moved(
     root = recorder_under_test.recordings_dir
     seed_session(root, "tgt", ["20260101T000000Z__alice__abc.wav"])
     seed_session(root, "src", ["20260101T010000Z__bob__def.wav"])
-    assert client.post("/api/sessions/tgt/absorb", json={"source": "src"}).status_code == 200
-    assert "[tapscribe] absorbed src into tgt: 1 wavs, " in capsys.readouterr().out
+    r = client.post("/api/sessions/tgt/absorb", json={"source": "src"})
+    assert r.status_code == 200
+    out = capsys.readouterr().out
+    assert "[tapscribe] absorbed src into tgt: 1 wavs, " in out

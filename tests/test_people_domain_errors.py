@@ -338,7 +338,8 @@ def test_rename_to_an_explicit_blank_still_clears_the_name(client: TestClient) -
     reg.rename(alice, "Operator Chosen Name")
     reg.save()
 
-    assert client.put(f"/api/people/{alice}", json={"name": ""}).status_code == 200
+    r = client.put(f"/api/people/{alice}", json={"name": ""})
+    assert r.status_code == 200
 
     stored = json.loads((config.RECORDINGS_DIR / PEOPLE_JSON).read_text(encoding="utf-8"))
     assert next(p for p in stored["people"] if p["id"] == alice)["name"] == ""
@@ -421,9 +422,12 @@ def test_failed_mutation_persists_nothing(client: TestClient, tmp_path: Path) ->
     alice, _ = _seed_two_people()
     before = json.loads((config.RECORDINGS_DIR / PEOPLE_JSON).read_text(encoding="utf-8"))
 
-    assert client.post("/api/people/merge", json={"survivor": alice, "absorbed": "p_nope"}).status_code == 404
-    assert client.post(f"/api/people/{alice}/detach", json={"identity": "bob"}).status_code == 400
-    assert client.put("/api/people/p_nope", json={"name": "X"}).status_code == 404
+    merged = client.post("/api/people/merge", json={"survivor": alice, "absorbed": "p_nope"})
+    assert merged.status_code == 404
+    detached = client.post(f"/api/people/{alice}/detach", json={"identity": "bob"})
+    assert detached.status_code == 400
+    renamed = client.put("/api/people/p_nope", json={"name": "X"})
+    assert renamed.status_code == 404
 
     after = json.loads((config.RECORDINGS_DIR / PEOPLE_JSON).read_text(encoding="utf-8"))
     assert after == before
