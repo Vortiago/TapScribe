@@ -121,9 +121,12 @@ export function build(ctx) {
    * synchronous re-render still carries the stale (pre-clear) session-meta. */
   /** @type {import('../../types.js').SummarizerDefault | null} */
   let lastDefault = null;
-  /** Captured summary text and session id for copy/download handlers. */
-  let copySummaryText = /** @type {string | null} */ (null);
-  let copySummarySid = "";
+  /** The summary the copy/download handlers act on — its text and the session it
+   * belongs to, captured TOGETHER so the two can't drift apart. null (never an
+   * empty text) whenever there is nothing to export, which is also exactly when
+   * both buttons are disabled: one guard, one invariant. */
+  /** @type {{ text: string, sid: string } | null} */
+  let copySummary = null;
 
   // The controls' render gate. The other two regions own theirs: the output pane
   // renders through `renderRegion(sumOut, …, {sig})`, and the header through
@@ -279,28 +282,28 @@ export function build(ctx) {
 
   sumCopyBtn.addEventListener("click", async () => {
     // SNAPSHOT before the await: a poll tick can re-render the pane (a spine
-    // click, or a superseded summary) and clear copySummaryText while the
-    // clipboard write is in flight. A fallback that re-read the mutable would
-    // then prompt with the literal "null" — hence a local, which also keeps
-    // tsc's null-check on this path instead of a cast that hides it.
-    const text = copySummaryText;
-    if (!text) return;
-    await copyToClipboard(text, {
+    // click, or a superseded summary) and clear copySummary while the clipboard
+    // write is in flight. A fallback that re-read the mutable would then prompt
+    // with the literal "null" — hence a local, which also keeps tsc's null-check
+    // on this path instead of a cast that hides it.
+    const snap = copySummary;
+    if (!snap) return;
+    await copyToClipboard(snap.text, {
       onOk: () => flashSumCopyStatus("✓ copied"),
       onFallback: () => {
         // A markdown summary is a multi-line DOCUMENT, so it gets the shared
         // new-tab treatment (a prompt() default is a single-line input that
         // flattens it); the prompt is only the popup-blocked degradation.
-        const how = showTextForManualCopy(text, "Copy the summary (Ctrl/Cmd-C, Enter, Esc):");
+        const how = showTextForManualCopy(snap.text, "Copy the summary (Ctrl/Cmd-C, Enter, Esc):");
         flashSumCopyStatus(how === "tab" ? "↗ opened in new tab" : "↗ shown in prompt");
       },
     });
   });
 
   sumDownloadMd.addEventListener("click", () => {
-    const text = copySummaryText;
-    if (!text || !copySummarySid) { flashSumCopyStatus("nothing to export"); return; }
-    downloadFile(text, "summary_" + copySummarySid + ".md", "text/markdown;charset=utf-8");
+    const snap = copySummary;
+    if (!snap) { flashSumCopyStatus("nothing to export"); return; }
+    downloadFile(snap.text, "summary_" + snap.sid + ".md", "text/markdown;charset=utf-8");
   });
 
   // ---- Summarizer controls (shared component) ---------------------------------
@@ -508,8 +511,7 @@ export function build(ctx) {
       // exactly what's exportable. A persisted-but-empty `summary` would
       // otherwise light up two buttons whose clicks do nothing.
       const text = shown?.summary || "";
-      copySummaryText = text || null;
-      copySummarySid = text ? sid : "";
+      copySummary = text ? { text, sid } : null;
       sumCopyBtn.disabled = !text;
       sumDownloadMd.disabled = !text;
       return shown ? renderSummary(shown, stale) : renderPlaceholder(sess);

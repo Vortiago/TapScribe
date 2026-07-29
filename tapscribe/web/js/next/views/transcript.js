@@ -80,6 +80,38 @@ export function recordingVariants(rec) {
 }
 
 /**
+ * The merged body's EXPORTABLE segments, in order, each paired with its text and
+ * the operator's display name. ONE walk behind every export (the clipboard/.txt
+ * copy and the .srt/.vtt cues), so they can never disagree about their line set:
+ * change the skip or the alias rule here and every export moves together.
+ *
+ * Two rules live here rather than in each consumer:
+ *
+ *  · an empty-text segment is SKIPPED, and the skip happens HERE — before any
+ *    consumer sees it. That order is load-bearing for the subtitle clock, whose
+ *    t=0 anchors on the first EMITTED segment (see buildExportSegments).
+ *
+ *  · the speaker is the operator's ALIAS (`meta.aliases`), never the backend's
+ *    raw key — exports must read like the pane the user is looking at.
+ *
+ * Suppressed segments need no rule here: session_merge keeps them OUT of
+ * `segments` entirely (they land in the body's separate `suppressed` list), so
+ * nothing this walk yields was ever suppressed.
+ *
+ * @param {import('../../types.js').MergedTranscript} full
+ * @param {import('../../types.js').EffectiveMeta} meta
+ * @returns {Generator<{ seg: import('../../types.js').Segment, text: string, speaker: string }>}
+ */
+function* aliasedSegments(full, meta) {
+  const aliases = meta.aliases || {};
+  for (const seg of full.segments || []) {
+    const text = seg.text || "";
+    if (!text) continue;
+    yield { seg, text, speaker: aliasOf(seg.speaker || "", aliases) };
+  }
+}
+
+/**
  * The merged schema's segments as SUBTITLE segments: alias-applied speakers and
  * a RELATIVE clock in seconds — the shape subtitles.js's toSRT/toVTT take. The
  * merged bodies carry `abs_start`/`abs_end` as absolute ISO strings, and handing
@@ -88,10 +120,11 @@ export function recordingVariants(rec) {
  * Two choices here are load-bearing:
  *
  *  · t=0 is the first EMITTED segment, so the skip-then-anchor ORDER matters —
- *    the empty-text `continue` runs before `tZero` is set, and reordering it
- *    would shift every cue in the file. (The .txt export deliberately keeps
- *    ABSOLUTE wall-clock stamps instead: a subtitle file is played against the
- *    recording, a transcript is read against the meeting.)
+ *    BOTH skips (aliasedSegments' empty-text one, and the unparseable-start
+ *    `continue` below) run before `tZero` is set, and moving either past the
+ *    anchor would shift every cue in the file. (The .txt export deliberately
+ *    keeps ABSOLUTE wall-clock stamps instead: a subtitle file is played against
+ *    the recording, a transcript is read against the meeting.)
  *
  *  · A segment whose `abs_start` will not parse is DROPPED rather than emitted
  *    with a NaN stamp. NaN would latch into `tZero` (NaN !== null), poisoning
@@ -108,17 +141,13 @@ export function recordingVariants(rec) {
  * @returns {import('../subtitles.js').Seg[]}
  */
 export function buildExportSegments(full, meta) {
-  const aliases = meta.aliases || {};
   /** @type {import('../subtitles.js').Seg[]} */
   const segments = [];
   let tZero = null;
-  for (const seg of full.segments || []) {
-    const text = seg.text || "";
-    if (!text) continue;
+  for (const { seg, text, speaker } of aliasedSegments(full, meta)) {
     const absStart = new Date(seg.abs_start).getTime() / 1000;
     if (!Number.isFinite(absStart)) continue;
     const absEnd = new Date(seg.abs_end).getTime() / 1000;
-    const speaker = aliasOf(seg.speaker || "", aliases);
     if (tZero === null) tZero = absStart;
     segments.push({
       start: absStart - tZero,
@@ -481,22 +510,20 @@ export function build(ctx) {
   // ---- Copy merged transcript (ported from classic main.js onCopyMerged) ----
 
   // Rebuild the export text from segments so display-name aliases match what
-  // the user sees — the backend's `plain_text` uses raw speaker keys. One line
-  // per non-suppressed segment ("[hh:mm:ss] Alias: text", "[uncertain]" suffix
-  // on low-confidence lines); suppressed segments (full.suppressed) are never
-  // included. Falls back to plain_text when no segments produced a line.
+  // the user sees — the backend's `plain_text` uses raw speaker keys. Which
+  // segments qualify and what a speaker is called is the shared aliasedSegments
+  // walk (the same line set the .srt/.vtt exports get); this function owns only
+  // the LINE format: "[hh:mm:ss] Alias: text", "[uncertain]" suffix on
+  // low-confidence lines, an ABSOLUTE wall clock. Falls back to plain_text when
+  // no segments produced a line.
   /**
    * @param {import('../../types.js').MergedTranscript} full
    * @param {import('../../types.js').EffectiveMeta} meta
    * @returns {string}
    */
   const buildCopyText = (full, meta) => {
-    const aliases = meta.aliases || {};
     const lines = [];
-    for (const seg of full.segments || []) {
-      const text = seg.text || "";
-      if (!text) continue;
-      const speaker = aliasOf(seg.speaker || "", aliases);
+    for (const { seg, text, speaker } of aliasedSegments(full, meta)) {
       let line = `[${fmtClock(seg.abs_start)}] ${speaker}: ${text}`;
       if (seg.low_confidence) line += " [uncertain]";
       lines.push(line);
@@ -728,26 +755,19 @@ export function build(ctx) {
             : (sess ? "not transcribed yet — declare languages and transcribe below" : "no session selected — pick one from the spine"),
         });
 
-        // Copy button: enabled only once the FULL merged body has loaded (the
-        // slim marker alone can't produce alias-applied lines). Captured here,
-        // inside the build, so the click handler copies exactly what's shown.
-        if (sess && txFull && meta) {
-          copyTxFull = txFull;
-          copyMeta = meta;
-          exportSid = sid;
-          txCopyBtn.disabled = false;
-          txDownloadTxt.disabled = false;
-          txDownloadSrt.disabled = false;
-          txDownloadVtt.disabled = false;
-        } else {
-          copyTxFull = null;
-          copyMeta = null;
-          exportSid = "";
-          txCopyBtn.disabled = true;
-          txDownloadTxt.disabled = true;
-          txDownloadSrt.disabled = true;
-          txDownloadVtt.disabled = true;
-        }
+        // Copy + download buttons: enabled only once the FULL merged body has
+        // loaded (the slim marker alone can't produce alias-applied lines).
+        // ONE predicate drives the capture AND every control, so a button can
+        // never sit enabled over cleared state. Captured here, inside the build,
+        // so the click handlers export exactly what's shown.
+        const ready = !!(sess && txFull && meta);
+        copyTxFull = ready ? txFull : null;
+        copyMeta = ready ? meta : null;
+        exportSid = ready ? sid : "";
+        txCopyBtn.disabled = !ready;
+        txDownloadTxt.disabled = !ready;
+        txDownloadSrt.disabled = !ready;
+        txDownloadVtt.disabled = !ready;
 
         // Merged transcript (main/left). `tx` is the slim marker; the body comes
         // from the lazy cache. While it loads, the marker still drives the "has a
