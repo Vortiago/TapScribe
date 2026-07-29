@@ -765,6 +765,22 @@ def test_api_state_exposes_live_supports_native_vad(client):
     assert body.get("live_supports_native_vad") is True
 
 
+def test_api_state_ships_a_log_preview_not_the_whole_tail(client, recorder_under_test):
+    """The ~2 Hz poll carries a PREVIEW of the live channel's log; the log dialog
+    fetches the whole 200-line tail on demand via /api/live/log. How much a tick
+    ships belongs to `live.LiveSnapshot` (LOG_PREVIEW_LINES), not to this route —
+    what is pinned here is that the route actually goes through it, and that the
+    preview is the NEWEST lines rather than the oldest."""
+    from tapscribe.live import LOG_PREVIEW_LINES
+
+    for i in range(200):
+        recorder_under_test.live.log.append(f"line {i}")
+
+    log = client.get("/api/state").json()["live_log"]
+    assert len(log) == LOG_PREVIEW_LINES
+    assert log[-1] == "line 199", "the preview must be the tail, not the head"
+
+
 class _FakeMoonshineEngine:
     """Shared stub for the moonshine route tests — no real weights load."""
 

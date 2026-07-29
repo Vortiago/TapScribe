@@ -66,7 +66,11 @@ snapshots, so the projection, the override counts and the byte bucketing are
 unit-testable without a route or a Recorder, matching what the batch
 orchestrators already do. (Not literally fastapi-free: `jsonable_encoder` is
 what gives the payload its datetime-aware encoding, and that is the wire
-format.)
+format.) The route hands it one `StateInputs`: the thirteen hand-marshalled
+arguments became a frozen value object, which is what makes "nothing the worker
+thread touches is still being mutated" structural rather than careful, and what
+lets `live_identities` be derived from the rows it must match instead of passed
+beside them (#365).
 
 ## The map is enforced, not encouraged
 

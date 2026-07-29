@@ -5,13 +5,17 @@ transport is poll, not push) and the response is a projection over many owners:
 the session listing, the People registry, the live channel's info and log tail,
 the operator's text config, the registry-derived editor support flags, and the
 open taps. Assembling it is pure given snapshots, so it lives here rather than
-in the route: `routes/state.py` snapshots the Recorder, hops to a thread, and
-owns the 304 branch, and nothing else needs a Recorder or a Request to test.
+in the route: `routes/state.py` snapshots the Recorder into one `StateInputs`,
+hops to a thread, and owns the 304 branch, and nothing else needs a Recorder or
+a Request to test.
 
-Two derivations have no other owner:
+Three derivations have no other owner:
 
 - `active_rows` overlays each open tap's row with the CURRENT per-identity
   record/live preference and buckets its byte counter.
+- `live_identities_of`, the set of identities with an open tap — read off the
+  same rows the payload ships, by both the route (for the People mutation) and
+  `StateInputs` (for the join).
 - the `default_override_counts` loop, which tells the config card how many
   sessions override each global default.
 
@@ -27,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
@@ -35,6 +39,11 @@ from fastapi.encoders import jsonable_encoder
 from . import config
 from . import hallucinations as hallucinations_mod
 from .batch_transcribe import resolve_batch_model
+
+# A REAL import, not a `TYPE_CHECKING` one: `tests/test_state_view.py` resolves
+# `StateInputs`' annotations with `get_type_hints` to walk its leaf inputs, and
+# that walk needs `LiveSnapshot` present in this module's globals.
+from .live import LiveSnapshot
 from .name_resolution import attach_people_view
 from .people import PeopleRegistry
 from .recorder import ActiveStream, TapSetting
@@ -110,37 +119,70 @@ def active_rows(
     return rows
 
 
-def build_state_blob(
-    *,
-    current_session: str,
-    active: list[dict[str, Any]],
-    sessions_list: list[dict[str, Any]],
-    registry: PeopleRegistry,
-    occs: list[dict[str, Any]],
-    live_identities: set[str],
-    live_feed: list[dict[str, Any]],
-    live_info: dict[str, Any],
-    live_log: list[str],
-    live_supports_native_vad: bool,
-    recording_enabled: bool,
-    backend: str,
-    available_backends: list[str],
-) -> tuple[bytes, str]:
+def live_identities_of(active: list[dict[str, Any]]) -> set[str]:
+    """The identities with an open tap, read off the same rows `/api/state` ships.
+
+    The People join treats a live identity as present-in-the-meeting (ADR-0009),
+    and the route needs this set BEFORE the projection runs — the registry sync
+    is a mutation and must stay on the event loop. One function called from both
+    places, over one `active_rows` output, is what makes "the set matches the
+    rows" true rather than merely documented.
+    """
+    return {row["identity"] for row in active}
+
+
+@dataclass(frozen=True, kw_only=True)
+class StateInputs:
+    """Everything one /api/state tick projects from, snapshotted.
+
+    One value object rather than thirteen keyword arguments: the route reads a
+    Recorder at ONE instant and hands the projection a frozen record of that
+    instant. That is what makes the thread hop safe to reason about — nothing the
+    worker touches is still being mutated — and what lets a CLI, a queue worker
+    or a test build a tick by hand. It is also why a transposition is no longer
+    a hazard worth a keyword-only signature: every input is a named field, so
+    swapping two same-typed ones is unwritable rather than merely lint-clean.
+
+    `live_identities` is a PROPERTY, not a field. It must be the identity set of
+    the open taps; while it was a thirteenth parameter that was a docstring
+    promise the type could not keep, and a caller handing the join a set from a
+    previous tick would render a Person "live" with no tap open. Derived, the two
+    cannot disagree.
+
+    The live channel arrives as a `LiveSnapshot` (`live.py`), which owns how a
+    channel is read and how much log a poll ships. `live_feed` stays its own
+    field: those settled lines come from the Recorder's `LiveTranscripts`, a
+    different owner, so a snapshot carrying both could not be captured in one
+    call.
+
+    Frozen for the declaration, not for deep immutability: the list and dict
+    fields stay mutable (and `attach_people_view` deliberately writes into
+    `sessions_list`), and `frozen=True`'s synthesised `__hash__` raises on them —
+    this is a record of one instant, not a cache key.
+    """
+
+    current_session: str
+    active: list[dict[str, Any]]
+    sessions_list: list[dict[str, Any]]
+    registry: PeopleRegistry
+    occs: list[dict[str, Any]]
+    live_feed: list[dict[str, Any]]
+    live: LiveSnapshot
+    recording_enabled: bool
+    backend: str
+    available_backends: list[str]
+
+    @property
+    def live_identities(self) -> set[str]:
+        return live_identities_of(self.active)
+
+
+def build_state_blob(inputs: StateInputs) -> tuple[bytes, str]:
     """Config reads, pure people joins, payload assembly, and ETag serialization.
 
-    `sessions_list` is pre-gathered; the registry is pre-synced (mutation ran on
-    the event loop). All recorder-owned inputs are snapshotted. Returns
-    (body_bytes, etag_string).
-
-    Keyword-only, deliberately: thirteen parameters with two adjacent same-typed
-    pairs (`active`/`sessions_list`, `live_supports_native_vad`/
-    `recording_enabled`) means a transposition at the call site would type-check,
-    lint clean and ship a wrong payload, and no test of the serialized bytes
-    could see it.
-
-    `live_identities` MUST be the identity set of `active` (the route derives
-    both from one `streams.snapshot()`); it is passed rather than derived here
-    because the route needs it for the People mutation anyway."""
+    Takes the tick as one `StateInputs`: `sessions_list` is pre-gathered, the
+    registry is pre-synced (that mutation ran on the event loop), and every
+    recorder-owned input is a snapshot. Returns (body_bytes, etag_string)."""
     prompt = read_config("prompt")
     live_prompt = read_config("live-prompt")
     live_model_default = read_config("live-model")
@@ -153,7 +195,8 @@ def build_state_blob(
     hallucinations_content = read_config("hallucinations")
     inputs_support = compute_inputs_support()
 
-    people = attach_people_view(sessions_list, registry, occs, live_identities)
+    sessions_list = inputs.sessions_list
+    people = attach_people_view(sessions_list, inputs.registry, inputs.occs, inputs.live_identities)
 
     override_counts: dict[str, int] = {"prompt": 0, "hotwords": 0, "summarizer": 0}
     for s in sessions_list:
@@ -166,18 +209,18 @@ def build_state_blob(
             override_counts["summarizer"] += 1
 
     payload = {
-        "current_session": current_session,
-        "active": active,
+        "current_session": inputs.current_session,
+        "active": inputs.active,
         "sessions": sessions_list,
         "people": people,
         "default_override_counts": override_counts,
-        "live_feed": live_feed,
-        "live_info": live_info,
-        "live_log": live_log,
-        "live_supports_native_vad": live_supports_native_vad,
-        "backend": backend,
-        "available_backends": available_backends,
-        "recording_enabled": recording_enabled,
+        "live_feed": inputs.live_feed,
+        "live_info": inputs.live.info,
+        "live_log": inputs.live.log,
+        "live_supports_native_vad": inputs.live.supports_native_vad,
+        "backend": inputs.backend,
+        "available_backends": inputs.available_backends,
+        "recording_enabled": inputs.recording_enabled,
         "prompt": {
             "path": str(config.PROMPT_FILE),
             "content": prompt,
