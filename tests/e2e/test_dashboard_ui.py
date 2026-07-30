@@ -3033,6 +3033,91 @@ async def test_next_files_sig_flip_does_not_blank_wav_list(running_recorder: Run
             await browser.close()
 
 
+async def test_next_sessions_list_survives_a_sibling_sessions_per_tick_change(
+    running_recorder: RunningRecorder,
+):
+    """#312: the Sessions list used to fold per-tick values — a session's
+    unmasked `total_bytes`, a sibling's `segment_count` — into ONE whole-list
+    `listSig` and rebuild every row through `body.replaceChildren(list)` when
+    any of them moved. O(sessions) node + row-listener churn on every tick, and
+    any row state (a focused rename input) torn out with it.
+
+    It is a keyed reconcile with a per-row `itemSig` now, so this pins it the
+    way the WAV lists are pinned: stamp an UNRELATED session's row, move a
+    SIBLING session's per-tick numbers, and assert the stamped node is still
+    the same node once the sibling's row has visibly caught up.
+
+    Growing the sibling's WAV count deliberately leaves the reconcile KEY alone
+    (it carries only has-WAVs, not the count), so a rebuild here would be the
+    whole-list swap coming back, not a legitimate re-key."""
+    rec = running_recorder.recorder
+    base = running_recorder.base_url
+    sid_untouched = "2025-03-01T09-00-00Z"
+    sid_moving = "2025-03-02T09-00-00Z"
+    _seed_multi_wav_session(rec, sid_untouched, n=1)
+    dir_moving, _ = _seed_multi_wav_session(rec, sid_moving, n=1)
+
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await page.goto(base + "/#sessions", wait_until="domcontentloaded")
+
+            for sid in (sid_untouched, sid_moving):
+                await page.wait_for_selector(f'#viewRoot [data-sid="{sid}"]', timeout=15000)
+
+            stamped = await page.evaluate(
+                """(sid) => {
+                    const row = document.querySelector(`#viewRoot [data-sid="${sid}"]`);
+                    if (!row) return false;
+                    row.__guardMark = 1;
+                    return true;
+                }""",
+                sid_untouched,
+            )
+            assert stamped, "could not find the unrelated session row to stamp"
+
+            # The sibling gains a WAV: its wav_count and total_bytes both move on
+            # the next /api/state poll — the per-tick values the old listSig folded
+            # into a whole-list rebuild.
+            synth_speech_like_wav(
+                dir_moving / f"{sid_moving}_spk1_id1_0000bb01.wav", seconds=0.4, freq_hz=260.0
+            )
+
+            # Wait for the sibling's row to show the new count — proves a full
+            # render cycle under the changed values actually ran.
+            await page.wait_for_function(
+                """(sid) => {
+                    const cell = document.querySelector(`#viewRoot [data-sid="${sid}"] [data-slot="wavs"]`);
+                    return !!cell && cell.textContent.trim() === '2';
+                }""",
+                arg=sid_moving,
+                timeout=15000,
+            )
+
+            survived = await page.evaluate(
+                """(sid) => {
+                    const row = document.querySelector(`#viewRoot [data-sid="${sid}"]`);
+                    return !!(row && row.__guardMark === 1);
+                }""",
+                sid_untouched,
+            )
+            assert survived, (
+                "a sibling session's per-tick change rebuilt the WHOLE session list — "
+                "the unrelated row is a different node. Keep the keyed reconcile's "
+                "per-row itemSig gate; a whole-list replaceChildren churns every row's "
+                "listeners and tears out a focused rename mid-edit (#312)."
+            )
+            # Same node, and its own content stayed put — a sibling's tick is
+            # not this row's business.
+            cell = await page.text_content(f'#viewRoot [data-sid="{sid_untouched}"] [data-slot="wavs"]')
+            assert (cell or "").strip() == "1", "the unrelated row's own content moved when a sibling ticked"
+            await context.close()
+        finally:
+            await browser.close()
+
+
 async def test_next_failed_files_fetch_still_reconciles_after_a_stage_switch(
     running_recorder: RunningRecorder,
 ):
