@@ -196,6 +196,16 @@ boundary check) can refuse `gate_kind="backend"` against channels
 that have no native VAD to defer to. `WhisperLiveKitChannel` is
 True; the planned `ParakeetLiveChannel` will be False.
 
+One tick's read of a channel for `/api/state` is a **`LiveSnapshot`**
+(`live.py`): `info` copied, the log tailed to `LOG_PREVIEW_LINES` (a preview of
+`LOG_TAIL_LINES`, the bound both channels give their `TailLog` and
+`/api/live/log` serves in full), and `supports_native_vad` read with the same
+safe-in-absence `False` that `speech_gate.effective_gate_config` uses — tolerant
+because the flag is a required per-subclass declaration the base deliberately
+omits, and a non-declaring channel must not 500 the ~2 Hz poll.
+`live_control.plan_live` reads it strictly instead, because it genuinely
+requires a conforming channel.
+
 `info["device"]` is an **observation, not an assertion**: WlK exposes
 no `--device` flag (its faster-whisper backend hands `device="auto"`
 to CTranslate2 inside the child), so the parent can't pin or know the
@@ -1160,11 +1170,26 @@ destructive-route preflight: refuse the current session, a busy session, a sessi
 with a live tap).
 
 The **State view** (`tapscribe/state_view.py`) is the read model behind
-`GET /api/state`: given snapshots of everything recorder-owned it produces the
-poll payload and its ETag. Distinct from the `sessions` read model below, which
-supplies the session listing the view joins in. Request-free and Recorder-free,
-so the projection, the per-session default-override counts and the open-tap byte
-bucketing are testable without a route.
+`GET /api/state`: given one **`StateInputs`** — a frozen record of everything
+recorder-owned at one instant — it produces the poll payload and its ETag.
+Distinct from the `sessions` read model below, which supplies the session listing
+the view joins in. Request-free and Recorder-free, so the projection, the
+per-session default-override counts and the open-tap byte bucketing are testable
+without a route.
+
+`StateInputs` is the whole interface — one value object, not the thirteen
+keyword arguments the route used to marshal — so a tick can be built by hand and
+nothing the worker thread touches is still being mutated. Two of its fields carry
+the seam's remaining rules. `live_identities` is a derived PROPERTY over
+`active`, not a field: the People join must see exactly the identities with an
+open tap, and passing both left "these agree" as a docstring promise; the route
+derives its own copy through the same `live_identities_of` before the registry
+mutation runs. The live channel arrives as a **`LiveSnapshot`** (`live.py`,
+beside `TailLog`), which owns the `info` copy, the `LOG_PREVIEW_LINES` log tail
+and `supports_native_vad`'s safe-in-absence `False`, so the route no longer knows
+how much log a poll ships. `live_feed` stays its own field: those settled lines
+come from the Recorder's `LiveTranscripts`, a different owner, and a snapshot
+with two owners could not be captured in one call.
 
 ## Session modules — paths · listing · maintenance
 

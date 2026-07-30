@@ -20,6 +20,11 @@ in `live_control.plan_live` / `apply_live`, not in the channels.
 `build_live_cmd` is the pure argv builder for WhisperLiveKit (testable
 as data); the class wires the surrounding orchestration (find the exe,
 download NB-Whisper weights, spawn, drain stdout, update INFO).
+
+`LiveSnapshot` is one tick's read of a channel for `/api/state` — here
+rather than in `state_view` because reading a channel safely is this
+module's business: the `info` copy, the `TailLog` tail bounded by
+`LOG_PREVIEW_LINES`, and `supports_native_vad`'s safe-in-absence default.
 """
 
 from __future__ import annotations
@@ -72,9 +77,9 @@ class TailLog(deque):
     one internal lock — the `log` attribute type both live channels use.
 
     Why: the channel's pump thread appends log lines from a plain
-    `threading.Thread` while `/api/state` (`islice(log, …)`) and
-    `/api/live/log` (`list(log)`) iterate the same deque on the event
-    loop. A CPython deque iterator raises
+    `threading.Thread` while `/api/state` (`LiveSnapshot.capture`, which
+    tails one snapshot) and `/api/live/log` (`list(log)`) iterate the same
+    deque on the event loop. A CPython deque iterator raises
     `RuntimeError("deque mutated during iteration")` when an append lands
     between iterator creation and consumption, 500ing the poll.
 
@@ -86,7 +91,7 @@ class TailLog(deque):
     guarantee structural: `__iter__` snapshots under the lock, so EVERY
     reader that iterates (`list()`, `islice()`, a `for` loop — including
     tests appending from foreign threads) is safe with no bespoke copies
-    or locking at any call site. Readers pay one O(maxlen≤200) copy.
+    or locking at any call site. Readers pay one O(`LOG_TAIL_LINES`) copy.
 
     Only the operations the channels use are overridden (`append`,
     `clear`, `__iter__`); give any other mutator the same lock treatment
@@ -109,6 +114,79 @@ class TailLog(deque):
         with self._lock:
             snapshot = list(super().__iter__())
         return iter(snapshot)
+
+
+#: How many lines a channel's `TailLog` keeps — the bound `/api/live/log` serves
+#: in full. Named rather than repeated as a literal in each channel's `__init__`,
+#: so it is one thing the preview below can be a preview OF.
+LOG_TAIL_LINES = 200
+
+#: How many log lines `/api/state` ships per poll tick. The dashboard's log
+#: dialog fetches the whole `LOG_TAIL_LINES` on demand via `/api/live/log`, so
+#: the poll needs only the live-channel card's inline preview. Declared beside
+#: the bound so the two cannot drift into "preview larger than the log". Must
+#: stay > 0: a slice of `[-0:]` is the WHOLE list, so a "0 means off" reading
+#: would ship every retained line per tick rather than none.
+LOG_PREVIEW_LINES = 30
+
+
+@dataclass(frozen=True)
+class LiveSnapshot:
+    """One tick's read of a `LiveChannel`, as plain data.
+
+    `/api/state` renders the live-channel card from three attributes the channel
+    mutates from its own pump thread, and the payload is assembled on a worker
+    thread (`state_view.build_state_blob`). Handing that worker the CHANNEL would
+    mean serialising a dict and a deque a `threading.Thread` is appending to;
+    handing it this means every read already happened, once, on the event loop.
+
+    It lives here rather than in `state_view` because reading a channel safely is
+    this module's business — the `info` copy, the `TailLog` tail, and
+    `supports_native_vad`'s safe-in-absence default. The route's previous
+    hand-marshalling proved the point by going stale: its "islice walks straight
+    to the tail without copying the deque" comment was written against a bare
+    deque, and `TailLog.__iter__` copies the whole thing under its lock.
+
+    `live_feed` is deliberately NOT here: those settled lines come from the
+    Recorder's `LiveTranscripts`, not from the channel, so a snapshot carrying
+    them would have two owners and could not be captured in one call.
+
+    Frozen for the declaration, not for deep immutability: `info` and `log` are
+    ordinary mutable containers (and `frozen=True` synthesises an `__hash__` that
+    raises on them), so this is a record of one instant, not a cache key.
+    """
+
+    info: dict[str, str]
+    log: list[str]
+    supports_native_vad: bool
+
+    @classmethod
+    def capture(cls, channel: Any) -> LiveSnapshot:
+        """Read `channel` once, for one poll tick.
+
+        The tail comes off ONE snapshot and is capped by a slice, not by an index
+        computed from a separately-read `len()`: `TailLog` serialises each read
+        individually, so a pair of them could disagree while the pump thread
+        appends. (Atomicity is the log type's to give — a channel whose `log` is a
+        bare `deque` rather than a `TailLog` is exposed to
+        `RuntimeError: deque mutated during iteration` here exactly as it was
+        before.)
+
+        `supports_native_vad` is read with `getattr`, not as the plain attribute
+        the `LiveChannel` Protocol declares, for the same reason
+        `speech_gate.effective_gate_config` does: this runs on the ~2 Hz poll, and
+        a channel that never declared the flag must degrade to "no native VAD"
+        rather than 500 the dashboard. `LiveChannelBase` deliberately leaves the
+        declaration to each subclass (its safe default is the opposite of
+        Whisper's), so a non-declaring channel is a shape the codebase permits.
+        `live_control.plan_live` reads it strictly instead — it genuinely requires
+        a conforming channel.
+        """
+        return cls(
+            info=dict(channel.info),
+            log=list(channel.log)[-LOG_PREVIEW_LINES:],
+            supports_native_vad=bool(getattr(channel, "supports_native_vad", False)),
+        )
 
 
 def resolve_live_init_prompt() -> str | None:
@@ -795,8 +873,8 @@ class WhisperLiveKitChannel(LiveChannelBase):
     `whisperlivekit-server` integration.
 
     `info` is a dict mirrored into `/api/state` so the dashboard can
-    render the live-channel panel. `log` is a 200-entry deque of the
-    child's stdout tail. `config` holds the current LiveConfig; replaced
+    render the live-channel panel. `log` is a `LOG_TAIL_LINES`-entry deque
+    of the child's stdout tail. `config` holds the current LiveConfig; replaced
     wholesale via `start(model=..., language=...)`.
     """
 
@@ -814,7 +892,7 @@ class WhisperLiveKitChannel(LiveChannelBase):
         self.info: dict[str, str] = _initial_info()
         # TailLog, not a bare deque: the pump thread appends while the
         # /api/state and /api/live/log routes iterate on the event loop.
-        self.log: deque[str] = TailLog(maxlen=200)
+        self.log: deque[str] = TailLog(maxlen=LOG_TAIL_LINES)
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         # Seed info with the boot-time config so the dashboard renders
@@ -1069,7 +1147,7 @@ class WhisperLiveKitChannel(LiveChannelBase):
         second per stream, has no timestamp, and drowns the console.
 
         Only WARNING/ERROR/Traceback lines are forwarded to the recorder's
-        stdout; everything else stays in the 200-line deque, exposed via
+        stdout; everything else stays in the `LOG_TAIL_LINES` deque, exposed via
         GET /api/live/log and the dashboard's log dialog. Spawn/stop
         breadcrumbs that the operator actually needs in the console are
         printed by `start()`/`stop()` directly.

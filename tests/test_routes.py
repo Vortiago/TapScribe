@@ -765,6 +765,21 @@ def test_api_state_exposes_live_supports_native_vad(client):
     assert body.get("live_supports_native_vad") is True
 
 
+def test_api_state_ships_the_live_snapshots_log_preview(client, recorder_under_test):
+    """How much log a tick ships is `live.LiveSnapshot`'s rule (pinned in
+    test_live_snapshot.py); what is pinned HERE is only that the route goes
+    through it rather than serving the log some other way. One line past the cap
+    is enough to tell the two apart."""
+    from tapscribe.live import LOG_PREVIEW_LINES, LiveSnapshot
+
+    for i in range(LOG_PREVIEW_LINES + 1):
+        recorder_under_test.live.log.append(f"line {i}")
+
+    log = client.get("/api/state").json()["live_log"]
+    assert log == LiveSnapshot.capture(recorder_under_test.live).log
+    assert len(log) == LOG_PREVIEW_LINES
+
+
 class _FakeMoonshineEngine:
     """Shared stub for the moonshine route tests — no real weights load."""
 
