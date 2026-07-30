@@ -2,7 +2,9 @@
 // Stages-only shared helpers. New file under js/next/ so the existing shared
 // modules stay untouched — see the Phase-1 brief. Mostly pure DOM + template
 // glue, plus a couple of shared click-to-mutate wirings (wireRecPill) that
-// don't warrant their own module.
+// don't warrant their own module — AND THE owner of "which audio of a session
+// the dashboard acts on", the source pick both stages read and write (#354; see
+// CONTEXT.md "Source pick · original / stripped · effective source").
 
 import { tpl, pick } from "../templates.js";
 import { postJson, mutateButton } from "../api.js";

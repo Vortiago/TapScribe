@@ -298,6 +298,9 @@ export function build(ctx) {
   // own sig (txSig) is held by `renderRegion(mergedHost, …)`; only the control
   // column keeps a closure sig here.
   let lastCtlSig = " "; // control column chrome: toggle/range/note/selected/cache
+  /** The source that chrome was last painted for — the one term the mid-edit
+   * freeze below must NOT hold back (the pick store is shared, #354). */
+  let lastCtlSrc = "";
   /** This view's watcher on the merged body: when one lands, force the pane past
    * its sig gate and render now, so "loading… → loaded" re-crosses the gate
    * without a marker change. */
@@ -350,7 +353,7 @@ export function build(ctx) {
    * no longer ships). */
   /** @returns {(import('../../types.js').WavFile | import('../../types.js').WavRegion)[]} */
   const sourceFiles = () =>
-     effectiveSource(session) === "stripped" ? currentFiles.flatMap((f) => f.regions || []) : currentFiles;
+    effectiveSource(session) === "stripped" ? currentFiles.flatMap((f) => f.regions || []) : currentFiles;
 
   /** In-flight key for a (name, source) — matches transcribeWav's key shape so
    * the row "⟳ tx" busy state lines up with the optimistic set. */
@@ -814,8 +817,15 @@ export function build(ctx) {
     ].join("§");
     const focused = /** @type {HTMLElement | null} */ (document.activeElement);
     const editing = !!focused && (focused === rangeFrom || focused === rangeTo);
-    if (!(ctlSig === lastCtlSig || editing)) {
+    // The mid-edit freeze must not cover the SOURCE. The picker list and both
+    // transcribe buttons read `src` UNGATED, and the pick is now shared (#354) —
+    // Recordings' ✂ strip all writes it when its POST resolves — so a flip that
+    // lands while an ISO box has focus would leave the toggle lit "original"
+    // over a transcribe that posts "stripped". Safe to let through: this block
+    // writes no range-box VALUE, only a placeholder, and only while empty.
+    if (!(ctlSig === lastCtlSig || (editing && src === lastCtlSrc))) {
       lastCtlSig = ctlSig;
+      lastCtlSrc = src;
 
       // Source toggle (original / stripped) — drives the range transcribe AND
       // the per-WAV picker below.
