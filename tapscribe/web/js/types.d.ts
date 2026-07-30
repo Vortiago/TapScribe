@@ -52,6 +52,16 @@ export interface AppState {
   // the small current value the picker pre-selects.
   languages: { path: string; default: string[] };
   hallucinations: HallucinationsConfig;
+  // Model idle-TTL in seconds (-1 = never evict); surfaced via /api/state.
+  idle_ttl_s: number;
+  // Parakeet chunk/overlap tuning — dashboard-writable config knobs.
+  parakeet_chunk_s: number;
+  parakeet_overlap_s: number;
+  // Summarizer tuning — dashboard-writable config knobs.
+  summarize_timeout_s: number;
+  summarize_gguf_ctx: number;
+  // Specialist language→model map (read-only, launch-time) — surfaced on /api/state.
+  specialists: Record<string, string>;
   // The cross-session People Registry view (ADR-0009): one row per canonical
   // Person, aggregated server-side from every session's roster + the live
   // identities. The People view renders these directly; rename/merge/detach

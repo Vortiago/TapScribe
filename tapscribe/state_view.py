@@ -43,6 +43,8 @@ from .live import LiveSnapshot
 from .name_resolution import attach_people_view
 from .people import PeopleRegistry
 from .recorder import ActiveStream, TapSetting
+from .summarizers.catalog import current_summarize_gguf_ctx
+from .summarizers.command import current_summarize_timeout_s
 from .text import (
     read_config,
     read_languages,
@@ -50,7 +52,8 @@ from .text import (
     summarizer_default_public,
 )
 from .transcribers import current_idle_ttl_s
-from .transcribers.catalog import REGISTRY
+from .transcribers._chunked import current_parakeet_chunk_s, current_parakeet_overlap_s
+from .transcribers.catalog import REGISTRY, SPECIALIST_MODELS
 
 # Round each open tap's raw bytes_received (bumped per 20 ms audio frame) to the
 # nearest bucket before it lands in /api/state, so a quiet-but-open tap's
@@ -261,6 +264,11 @@ def build_state_blob(inputs: StateInputs) -> tuple[bytes, str]:
             "count": len(halluc_rules),
         },
         "idle_ttl_s": current_idle_ttl_s(),
+        "parakeet_chunk_s": current_parakeet_chunk_s(),
+        "parakeet_overlap_s": current_parakeet_overlap_s(),
+        "summarize_timeout_s": current_summarize_timeout_s(),
+        "summarize_gguf_ctx": current_summarize_gguf_ctx(),
+        "specialists": {lang: m for lang, m in SPECIALIST_MODELS.items() if REGISTRY.get(m) is not None},
     }
     body = json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode("utf-8")
     etag = 'W/"' + hashlib.blake2b(body, digest_size=12).hexdigest() + '"'

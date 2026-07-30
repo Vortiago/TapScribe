@@ -202,6 +202,25 @@ export function build(ctx) {
   // first poll carrying `summarizer_default`; the per-tick update only writes
   // the override-count hint in place. One Save persists the whole structured
   // object via PUT /api/summarize/config.
+
+  // Advanced card controls
+  const idleTtlInput = /** @type {HTMLInputElement} */ (pick(frag, "setIdleTtlS"));
+  const idleTtlSave = /** @type {HTMLButtonElement} */ (pick(frag, "setIdleTtlSSave"));
+  const idleTtlStatus = pick(frag, "setIdleTtlSStatus");
+  const chunkSInput = /** @type {HTMLInputElement} */ (pick(frag, "setChunkS"));
+  const chunkSSave = /** @type {HTMLButtonElement} */ (pick(frag, "setChunkSSave"));
+  const chunkSStatus = pick(frag, "setChunkSStatus");
+  const overlapSInput = /** @type {HTMLInputElement} */ (pick(frag, "setOverlapS"));
+  const overlapSSave = /** @type {HTMLButtonElement} */ (pick(frag, "setOverlapSSave"));
+  const overlapSStatus = pick(frag, "setOverlapSStatus");
+  const timeoutInput = /** @type {HTMLInputElement} */ (pick(frag, "setSummarizeTimeoutS"));
+  const timeoutSave = /** @type {HTMLButtonElement} */ (pick(frag, "setSummarizeTimeoutSSave"));
+  const timeoutStatus = pick(frag, "setSummarizeTimeoutSStatus");
+  const ggufCtxInput = /** @type {HTMLInputElement} */ (pick(frag, "setGgufCtx"));
+  const ggufCtxSave = /** @type {HTMLButtonElement} */ (pick(frag, "setGgufCtxSave"));
+  const ggufCtxStatus = pick(frag, "setGgufCtxStatus");
+  const specialistsEl = pick(frag, "setSpecialists");
+
   const sdSourceWrap = pick(frag, "sdSource");
   const sdButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
     sdSourceWrap.querySelectorAll("[data-sd-src]")
@@ -223,8 +242,14 @@ export function build(ctx) {
   const sdOverrides = pick(frag, "sdOverrides");
 
   /** One-shot: seed the controls from the first poll carrying the saved
-   * default, then never touch them again (interaction hold). */
+    * default, then never touch them again (interaction hold). */
   let sdSeeded = false;
+  let idleTtlSeeded = false;
+  let chunkSeeded = false;
+  let overlapSeeded = false;
+  let timeoutSeeded = false;
+  let ggufSeeded = false;
+  let specialistsSeeded = false;
 
   // Source segctl + model/preset/max-tokens wiring is the shared
   // summarizer-controls component (the Summary view uses the same one).
@@ -263,6 +288,13 @@ export function build(ctx) {
     put: () => putJson("/api/summarize/config", { ...ctl.values(), prompt: sdPrompt.value }),
     onSuccess: () => afterMutate(),
   });
+
+  // Advanced card save wiring
+  wireConfigSave({ key: "model-idle-ttl", btn: idleTtlSave, textarea: idleTtlInput, status: idleTtlStatus, onSuccess: () => afterMutate() });
+  wireConfigSave({ key: "parakeet-chunk-s", btn: chunkSSave, textarea: chunkSInput, status: chunkSStatus, onSuccess: () => afterMutate() });
+  wireConfigSave({ key: "parakeet-overlap-s", btn: overlapSSave, textarea: overlapSInput, status: overlapSStatus, onSuccess: () => afterMutate() });
+  wireConfigSave({ key: "summarize-timeout-s", btn: timeoutSave, textarea: timeoutInput, status: timeoutStatus, onSuccess: () => afterMutate() });
+  wireConfigSave({ key: "summarize-gguf-ctx", btn: ggufCtxSave, textarea: ggufCtxInput, status: ggufCtxStatus, onSuccess: () => afterMutate() });
 
   /** Does this live model declare an initial_prompt input? Falls back to the
    * registry-wide flag when the model isn't in the live catalog. */
@@ -397,6 +429,20 @@ export function build(ctx) {
     }
     const n = j.default_override_counts?.summarizer || 0;
     sdOverrides.textContent = n ? `· ${n} session${n === 1 ? "" : "s"} override this` : "";
+
+    // Seed the Advanced card controls ONCE from the first poll
+    if (!idleTtlSeeded && j.idle_ttl_s !== undefined) { idleTtlSeeded = true; idleTtlInput.value = String(j.idle_ttl_s); }
+    if (!chunkSeeded && j.parakeet_chunk_s !== undefined) { chunkSeeded = true; chunkSInput.value = String(j.parakeet_chunk_s); }
+    if (!overlapSeeded && j.parakeet_overlap_s !== undefined) { overlapSeeded = true; overlapSInput.value = String(j.parakeet_overlap_s); }
+    if (!timeoutSeeded && j.summarize_timeout_s !== undefined) { timeoutSeeded = true; timeoutInput.value = String(j.summarize_timeout_s); }
+    if (!ggufSeeded && j.summarize_gguf_ctx !== undefined) { ggufSeeded = true; ggufCtxInput.value = String(j.summarize_gguf_ctx); }
+    if (!specialistsSeeded && j.specialists) {
+      specialistsSeeded = true;
+      const entries = Object.entries(j.specialists);
+      specialistsEl.textContent = entries.length
+        ? entries.map(([lang, model]) => `${lang}: ${model}`).join(", ")
+        : "(none)";
+    }
   };
 
   return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };

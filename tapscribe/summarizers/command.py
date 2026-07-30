@@ -24,6 +24,7 @@ the transcript to a file.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import tempfile
@@ -31,6 +32,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from .. import config
+from .. import config_store as _config_store
 from .base import SummarizerFailed, SummarizerUnavailable, SummaryResult, fold_hint
 
 # Operator knob for the per-summarize subprocess timeout, hoisted to a module
@@ -38,21 +40,26 @@ from .base import SummarizerFailed, SummarizerUnavailable, SummaryResult, fold_h
 # convention as the MLX chunk-size knobs on the transcriber adapters.
 ENV_TIMEOUT_S = "TAPSCRIBE_SUMMARIZE_TIMEOUT_S"
 _DEFAULT_TIMEOUT_S = 120.0
-# A summarize is one short subprocess call; bound the timeout between 1 s and an
-# hour so a typo can't wedge a job forever or fail a slow local model instantly.
-_TIMEOUT_BOUNDS = (1.0, 3600.0)
 
 
-def _default_timeout_s() -> float:
-    """Current per-summarize subprocess timeout (seconds), re-read per call so
-    an operator can retune `TAPSCRIBE_SUMMARIZE_TIMEOUT_S` without a restart —
-    same as how the transcriber idle-TTL knob is read per call."""
-    return config.env_float(
-        ENV_TIMEOUT_S,
-        _DEFAULT_TIMEOUT_S,
-        min_value=_TIMEOUT_BOUNDS[0],
-        max_value=_TIMEOUT_BOUNDS[1],
-    )
+def _resolve_timeout_s() -> float:
+    """Current per-summarize subprocess timeout (seconds), resolved env > file > default."""
+    raw_env = os.environ.get(ENV_TIMEOUT_S)
+    if raw_env:
+        v = config._parse_summarize_timeout(raw_env)
+        if v is not None:
+            return v
+    v = config._parse_summarize_timeout(_config_store.read_text_file(config.SUMMARIZE_TIMEOUT_S_FILE))
+    return v if v is not None else _DEFAULT_TIMEOUT_S
+
+
+def current_summarize_timeout_s() -> float:
+    """Public accessor for the resolved summarize timeout (env > file > default)."""
+    return _resolve_timeout_s()
+
+
+# Alias kept for test imports (test_operator_knobs_config.py)
+_default_timeout_s = current_summarize_timeout_s
 
 
 def build_command_argv(command: str, prompt: str) -> list[str]:

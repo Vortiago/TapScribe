@@ -17,13 +17,15 @@ is implementation sharing *behind* that seam.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .. import config
+from .. import config_store as _config_store
 from ..audio import RECORDER_SAMPLE_RATE
 from ..chunking import Window, chunk_windows
-from ..config import env_float
 from ..wav_predecode import load_recorder_wav_as_pcm
 from .base import TranscriptionResult, TranscriptionSegment, build_transcription_result
 
@@ -31,7 +33,7 @@ from .base import TranscriptionResult, TranscriptionSegment, build_transcription
 # parakeet-mlx authors' own `transcribe()` tuning, fits comfortably under a
 # base M1 mini's ~14 GB max-buffer Metal cap, and keeps a multi-hour
 # recording from building one giant activation tensor on CPU/CUDA.
-# Operator-tunable via env — ONE env pair shared by both adapters,
+# Operator-tunable via env + config file — ONE env pair shared by both adapters,
 # deliberately, so the dashboard wiring (when it lands) has one source of
 # truth. Out-of-range env values are rejected by `env_float` (logged +
 # default used).
@@ -41,9 +43,6 @@ _DEFAULT_OVERLAP_DURATION_S = 15.0
 ENV_CHUNK_S = "TAPSCRIBE_PARAKEET_CHUNK_S"
 ENV_OVERLAP_S = "TAPSCRIBE_PARAKEET_OVERLAP_S"
 
-_CHUNK_S_BOUNDS = (1.0, 600.0)
-_OVERLAP_S_BOUNDS = (0.0, 60.0)
-
 # Mirrors the ratio hard-coded in `chunking.chunk_windows`:
 # `chunk_windows` requires `overlap_s <= chunk_s * MAX_OVERLAP_FRACTION`
 # (otherwise a window advances by ≤0 and the walk can't terminate). The two
@@ -52,6 +51,38 @@ _OVERLAP_S_BOUNDS = (0.0, 60.0)
 # 15 s overlap — passes both bound checks and only blows up inside
 # `chunk_windows`, i.e. per-WAV at request time. See `_clamp_overlap`.
 MAX_OVERLAP_FRACTION = 0.9
+
+
+def _resolve_chunk_s():
+    """Current parakeet chunk duration (seconds), resolved env > config file > default."""
+    raw_env = os.environ.get(ENV_CHUNK_S)
+    if raw_env:
+        v = config._parse_parakeet_chunk(raw_env)
+        if v is not None:
+            return v
+    v = config._parse_parakeet_chunk(_config_store.read_text_file(config.PARAKEET_CHUNK_S_FILE))
+    return v if v is not None else _DEFAULT_CHUNK_DURATION_S
+
+
+def _resolve_overlap_s():
+    """Current parakeet overlap duration (seconds), resolved env > config file > default."""
+    raw_env = os.environ.get(ENV_OVERLAP_S)
+    if raw_env:
+        v = config._parse_parakeet_overlap(raw_env)
+        if v is not None:
+            return v
+    v = config._parse_parakeet_overlap(_config_store.read_text_file(config.PARAKEET_OVERLAP_S_FILE))
+    return v if v is not None else _DEFAULT_OVERLAP_DURATION_S
+
+
+def current_parakeet_chunk_s():
+    """Public accessor for the resolved parakeet chunk duration (env > file > default)."""
+    return _resolve_chunk_s()
+
+
+def current_parakeet_overlap_s():
+    """Public accessor for the resolved parakeet overlap duration (env > file > default)."""
+    return _resolve_overlap_s()
 
 
 def clamp_overlap(chunk_s: float, overlap_s: float) -> float:
@@ -138,26 +169,8 @@ class ChunkedTranscriber:
         overlap_duration_s: float | None = None,
     ):
         self.model_name = model_name
-        self.chunk_duration_s = (
-            chunk_duration_s
-            if chunk_duration_s is not None
-            else env_float(
-                ENV_CHUNK_S,
-                _DEFAULT_CHUNK_DURATION_S,
-                min_value=_CHUNK_S_BOUNDS[0],
-                max_value=_CHUNK_S_BOUNDS[1],
-            )
-        )
-        overlap = (
-            overlap_duration_s
-            if overlap_duration_s is not None
-            else env_float(
-                ENV_OVERLAP_S,
-                _DEFAULT_OVERLAP_DURATION_S,
-                min_value=_OVERLAP_S_BOUNDS[0],
-                max_value=_OVERLAP_S_BOUNDS[1],
-            )
-        )
+        self.chunk_duration_s = chunk_duration_s if chunk_duration_s is not None else _resolve_chunk_s()
+        overlap = overlap_duration_s if overlap_duration_s is not None else _resolve_overlap_s()
         # Joint constraint — see `clamp_overlap`. Resolved HERE, at
         # construction, so a bad pair degrades once and loudly instead of
         # raising inside `chunk_windows` on every WAV.

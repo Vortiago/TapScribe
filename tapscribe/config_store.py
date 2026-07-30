@@ -179,6 +179,38 @@ def _check_idle_ttl(content: str) -> None:
         raise ValueError(f"idle TTL must be a finite number between {lo} and {hi}, got {content!r}")
 
 
+def _check_parakeet_chunk(content: str) -> None:
+    if not content:
+        return
+    if config._parse_parakeet_chunk(content) is None:
+        lo, hi = config._PARAKEET_CHUNK_S_BOUNDS
+        raise ValueError(f"parakeet chunk must be a finite number between {lo} and {hi}, got {content!r}")
+
+
+def _check_parakeet_overlap(content: str) -> None:
+    if not content:
+        return
+    if config._parse_parakeet_overlap(content) is None:
+        lo, hi = config._PARAKEET_OVERLAP_S_BOUNDS
+        raise ValueError(f"parakeet overlap must be a finite number between {lo} and {hi}, got {content!r}")
+
+
+def _check_summarize_timeout(content: str) -> None:
+    if not content:
+        return
+    if config._parse_summarize_timeout(content) is None:
+        lo, hi = config._SUMMARIZE_TIMEOUT_S_BOUNDS
+        raise ValueError(f"summarize timeout must be a finite number between {lo} and {hi}, got {content!r}")
+
+
+def _check_summarize_gguf_ctx(content: str) -> None:
+    if not content:
+        return
+    if config._parse_summarize_gguf_ctx(content) is None:
+        lo, hi = config._SUMMARIZE_GGUF_CTX_BOUNDS
+        raise ValueError(f"summarize gguf ctx must be an integer between {lo} and {hi}, got {content!r}")
+
+
 # The editable config files behind read_config / write_config, keyed by the
 # same key the dashboard PUTs to /api/config/{key}. The richer shapes
 # (languages.txt's catalog-validated set, summarizer.json) keep their own
@@ -212,6 +244,16 @@ CONFIG_KEYS: dict[str, _ConfigSpec] = {
     # eviction. Dashboard writes via config-store; _idle_ttl_s() reads at
     # use-time when env var is unset.
     "model-idle-ttl": _ConfigSpec("MODEL_IDLE_TTL_FILE", strip=True, check=_check_idle_ttl),
+    # Parakeet chunk duration (parakeet-chunk-s.txt): window length in seconds.
+    "parakeet-chunk-s": _ConfigSpec("PARAKEET_CHUNK_S_FILE", strip=True, check=_check_parakeet_chunk),
+    # Parakeet overlap duration (parakeet-overlap-s.txt): overlap between windows.
+    "parakeet-overlap-s": _ConfigSpec("PARAKEET_OVERLAP_S_FILE", strip=True, check=_check_parakeet_overlap),
+    # Summarize timeout (summarize-timeout-s.txt): per-summarize subprocess timeout.
+    "summarize-timeout-s": _ConfigSpec(
+        "SUMMARIZE_TIMEOUT_S_FILE", strip=True, check=_check_summarize_timeout
+    ),
+    # Summarize GGUF context window (summarize-gguf-ctx.txt): integer n_ctx.
+    "summarize-gguf-ctx": _ConfigSpec("SUMMARIZE_GGUF_CTX_FILE", strip=True, check=_check_summarize_gguf_ctx),
 }
 
 # A candidate-language set is a small comma/space-separated bag of ISO codes.

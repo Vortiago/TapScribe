@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import config
+from .. import config_store as _config_store
 from .base import SummarizerUnavailable
 
 # ---------------------------------------------------------------------------
@@ -290,7 +291,22 @@ MAX_TOKENS_BOUNDS = (16, 8192)
 # typical session, env-tunable for very long ones (bounded by host RAM).
 ENV_GGUF_CTX = "TAPSCRIBE_SUMMARIZE_GGUF_CTX"
 _DEFAULT_GGUF_CTX = 8192
-_GGUF_CTX_BOUNDS = (512, 131_072)
+
+
+def _resolve_gguf_ctx() -> int:
+    """Current GGUF context window, resolved env > file > default."""
+    raw_env = os.environ.get(ENV_GGUF_CTX)
+    if raw_env:
+        v = config._parse_summarize_gguf_ctx(raw_env)
+        if v is not None:
+            return v
+    v = config._parse_summarize_gguf_ctx(_config_store.read_text_file(config.SUMMARIZE_GGUF_CTX_FILE))
+    return v if v is not None else _DEFAULT_GGUF_CTX
+
+
+def current_summarize_gguf_ctx() -> int:
+    """Public accessor for the resolved GGUF context window (env > file > default)."""
+    return _resolve_gguf_ctx()
 
 
 # One declarative record per hardware-routed backend (mirrors the catalog's
@@ -330,10 +346,8 @@ def clamp_max_tokens(value: int) -> int:
 
 
 def default_gguf_ctx() -> int:
-    """Current GGUF context window, re-read per call (see `default_max_tokens`)."""
-    return config.env_int(
-        ENV_GGUF_CTX, _DEFAULT_GGUF_CTX, min_value=_GGUF_CTX_BOUNDS[0], max_value=_GGUF_CTX_BOUNDS[1]
-    )
+    """Current GGUF context window, resolved env > file > default (see `default_max_tokens`)."""
+    return _resolve_gguf_ctx()
 
 
 def effective_context_tokens(backend: str, native_tokens: int) -> int:

@@ -70,11 +70,23 @@ LANGUAGES_FILE: Path = CONFIG_DIR / "languages.txt"
 # `_idle_ttl_s()` reads it at use-time when the env var is unset.
 MODEL_IDLE_TTL_FILE: Path = CONFIG_DIR / "model-idle-ttl.txt"
 
-# Top-level dirs are created lazily on first use rather than at import
-# time, so unit tests and offline tooling don't litter the worktree
-# with empty `recordings/` / `config/` folders. The /record WebSocket
-# handler mkdirs session_dir with parents=True, which creates
-# RECORDINGS_DIR if missing.
+# ---------------------------------------------------------------------------
+# Bounds tuples for operator-tunable numeric knobs
+# ---------------------------------------------------------------------------
+
+_PARAKEET_CHUNK_S_BOUNDS = (1.0, 600.0)
+_PARAKEET_OVERLAP_S_BOUNDS = (0.0, 60.0)
+_SUMMARIZE_TIMEOUT_S_BOUNDS = (1.0, 3600.0)
+_SUMMARIZE_GGUF_CTX_BOUNDS = (512, 131_072)
+
+# ---------------------------------------------------------------------------
+# File constants — config files under CONFIG_DIR for operator-tunable knobs
+# ---------------------------------------------------------------------------
+
+PARAKEET_CHUNK_S_FILE: Path = CONFIG_DIR / "parakeet-chunk-s.txt"
+PARAKEET_OVERLAP_S_FILE: Path = CONFIG_DIR / "parakeet-overlap-s.txt"
+SUMMARIZE_TIMEOUT_S_FILE: Path = CONFIG_DIR / "summarize-timeout-s.txt"
+SUMMARIZE_GGUF_CTX_FILE: Path = CONFIG_DIR / "summarize-gguf-ctx.txt"
 
 # ---------------------------------------------------------------------------
 # Security thresholds + flags (boot-time)
@@ -214,7 +226,7 @@ def _parse_bounded_ttl(raw: str) -> float | None:
     or None when it is empty, unparseable, non-finite (NaN/inf), or out of
     range. The single source of truth shared by the config-file branch of
     `transcribers._idle_ttl_s()` (read-time) and `config_store._check_idle_ttl`
-    (write-time) so the two can never diverge on the same input. Lives here
+    (write-time) so the two can't diverge on the same input. Lives here
     beside the sibling numeric-knob parsers (`env_float`/`env_int`) and the
     knob's file path (`MODEL_IDLE_TTL_FILE`) so both callers import it plainly
     instead of reaching into the heavy transcribers package. The explicit
@@ -263,3 +275,41 @@ def env_int(
         )
         return default
     return v
+
+
+# ---------------------------------------------------------------------------
+# Shared bounded-knob parser — one implementation, four callers
+# ---------------------------------------------------------------------------
+
+
+def _parse_bounded_knob(raw, lo, hi, *, cast=float):
+    """Parse `raw` to `cast`, return None when empty, unparseable, non-finite
+    (NaN/inf for float), or out of `[lo, hi]`. The single source of truth
+    shared by config-store validators and use-time resolvers so the two can
+    never diverge on the same input."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        v = cast(raw)
+    except ValueError:
+        return None
+    if cast is float and not math.isfinite(v):
+        return None
+    return v if lo <= v <= hi else None
+
+
+def _parse_parakeet_chunk(raw):
+    return _parse_bounded_knob(raw, *_PARAKEET_CHUNK_S_BOUNDS)
+
+
+def _parse_parakeet_overlap(raw):
+    return _parse_bounded_knob(raw, *_PARAKEET_OVERLAP_S_BOUNDS)
+
+
+def _parse_summarize_timeout(raw):
+    return _parse_bounded_knob(raw, *_SUMMARIZE_TIMEOUT_S_BOUNDS)
+
+
+def _parse_summarize_gguf_ctx(raw):
+    return _parse_bounded_knob(raw, *_SUMMARIZE_GGUF_CTX_BOUNDS, cast=int)

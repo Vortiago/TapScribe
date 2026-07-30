@@ -111,6 +111,11 @@ _PAYLOAD_KEYS = [
     "summarizer_default",
     "hallucinations",
     "idle_ttl_s",
+    "parakeet_chunk_s",
+    "parakeet_overlap_s",
+    "summarize_timeout_s",
+    "summarize_gguf_ctx",
+    "specialists",
 ]
 
 
