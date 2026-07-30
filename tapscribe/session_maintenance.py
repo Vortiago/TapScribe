@@ -38,6 +38,46 @@ from .sessions import read_session_meta, write_session_meta
 from .text import atomic_write_text, parse_wav_start
 from .wav_cache import sidecar_paths
 
+# Sessions with a tap in the mkdir→WAV-open window. Reference-counted so
+# multiple concurrent taps into the same session are tracked independently.
+# Access via tap_open_guard() — never read or write this dict directly.
+_tap_open_sessions: dict[str, int] = {}
+
+
+class tap_open_guard:
+    """Context manager: mark a session in-flight to prevent prune from
+    deleting its directory while a tap materialises the first WAV.
+
+    Enter is taken before mkdir, exit is released in _close's sync-first
+    block (before anything that can raise or await). Reference-counted
+    so concurrent taps into the same session are independent.
+
+    Only the fresh-open path takes this guard — the resume path's WAV
+    already exists, and record-off / probe skip mkdir entirely.
+    `reclaim_audio_older_than` needs no separate mark: it walks
+    `_iter_candidate_session_dirs` (the same iterator) and only deletes
+    from sessions with a merged transcript and existing WAVs, which
+    cannot be empty by definition.
+    """
+
+    def __init__(self, session_name: str) -> None:
+        self._session = session_name
+        self._taken = False
+
+    def __enter__(self) -> None:
+        _tap_open_sessions[self._session] = _tap_open_sessions.get(self._session, 0) + 1
+        self._taken = True
+
+    def __exit__(self, *args) -> None:
+        if self._taken:
+            count = _tap_open_sessions.get(self._session, 0) - 1
+            if count <= 0:
+                _tap_open_sessions.pop(self._session, None)
+            else:
+                _tap_open_sessions[self._session] = count
+            self._taken = False
+
+
 # ---------------------------------------------------------------------------
 # Domain errors — FastAPI-free maintenance exceptions.
 # ---------------------------------------------------------------------------
@@ -106,7 +146,8 @@ def _iter_candidate_session_dirs(current_session: str) -> Iterator[Path]:
 def prune_empty_sessions(current_session: str) -> dict[str, Any]:
     """Delete every session folder under RECORDINGS_DIR that `session_is_empty`
     (no WAVs, no merged transcript, no operator label). Never deletes
-    `current_session`. Returns ``{"pruned": [...], "count": N, "failed": [...]}``.
+    `current_session` or sessions with an in-flight tap (guarded by
+    `tap_open_guard`). Returns ``{"pruned": [...], "count": N, "failed": [...]}``.
 
     Shared by the manual `/api/sessions/prune-empty` endpoint and the
     rotate-then-prune flow behind every new-session trigger.
@@ -114,6 +155,8 @@ def prune_empty_sessions(current_session: str) -> dict[str, Any]:
     pruned: list[str] = []
     failed: list[dict[str, str]] = []
     for sd in _iter_candidate_session_dirs(current_session):
+        if sd.name in _tap_open_sessions:
+            continue
         if not session_is_empty(sd):
             continue
         try:

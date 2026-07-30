@@ -67,12 +67,12 @@ def _rotate_and_prune(recorder: Recorder) -> dict[str, Any]:
     deliberately does NOT prune (deleting folders stays an operator action; see
     `api_tap_new_session`).
 
-    Prune runs synchronously (not offloaded to a thread): single-threaded
-    asyncio then guarantees no `/tap` upload can interleave and have its
-    just-created session folder deleted mid-walk. Keep it synchronous — and
-    `TapFanOut._open` await-free between mkdir and wave-open — or that race
-    reopens. (With `--workers > 1` each worker has its own Recorder and the
-    guarantee weakens; TapScribe runs single-worker by design.)
+    The prune-vs-tap invariant is structural: `TapFanOut._open` takes a
+    `tap_open_guard` before the session mkdir, and `prune_empty_sessions`
+    skips sessions with an in-flight guard. Inserting an await in `_open`
+    no longer reopens the race. (With `--workers > 1` each worker has its
+    own Recorder and the guarantee weakens; TapScribe runs single-worker
+    by design.)
     """
     prev, current = recorder.rotate_session()
     prune = prune_empty_sessions(current)
