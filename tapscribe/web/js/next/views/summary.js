@@ -37,6 +37,7 @@ import { postJson, putJson, sessionSummary, errText } from "../../api.js";
 import { wireSave } from "../../save-status.js";
 import { wireSummarizerControls } from "../components/summarizer-controls.js";
 import { header, strong, inline, renderJobBar, sessionLabel } from "../shell.js";
+import { makeStatusFlasher, copyToClipboard, downloadFile, showTextForManualCopy } from "../ui.js";
 
 /**
  * @param {{
@@ -67,6 +68,9 @@ export function build(ctx) {
   const jobCount = pick(frag, "jobCount");
   const jobProgress = /** @type {HTMLElement} */ (pick(frag, "jobProgress"));
   const jobWav = pick(frag, "jobWav");
+  const sumCopyStatus = pick(frag, "sumCopyStatus");
+  const sumCopyBtn = /** @type {HTMLButtonElement} */ (pick(frag, "sumCopyBtn"));
+  const sumDownloadMd = /** @type {HTMLButtonElement} */ (pick(frag, "sumDownloadMd"));
 
   // Source selector + per-source detail panes + the local model picker —
   // all built ONCE from the template and handed to the shared
@@ -117,6 +121,12 @@ export function build(ctx) {
    * synchronous re-render still carries the stale (pre-clear) session-meta. */
   /** @type {import('../../types.js').SummarizerDefault | null} */
   let lastDefault = null;
+  /** The summary the copy/download handlers act on — its text and the session it
+   * belongs to, captured TOGETHER so the two can't drift apart. null (never an
+   * empty text) whenever there is nothing to export, which is also exactly when
+   * both buttons are disabled: one guard, one invariant. */
+  /** @type {{ text: string, sid: string } | null} */
+  let copySummary = null;
 
   // The controls' render gate. The other two regions own theirs: the output pane
   // renders through `renderRegion(sumOut, …, {sig})`, and the header through
@@ -168,6 +178,8 @@ export function build(ctx) {
           ? "transcribe this session first — Generate needs a merged transcript"
           : "";
   };
+
+  const flashSumCopyStatus = makeStatusFlasher(sumCopyStatus);
 
   /**
    * @param {import('../../types.js').PersistedSummary} res
@@ -266,6 +278,32 @@ export function build(ctx) {
       // the copy-selection guard a direct render here would bypass.
       afterMutate();
     }
+  });
+
+  sumCopyBtn.addEventListener("click", async () => {
+    // SNAPSHOT before the await: a poll tick can re-render the pane (a spine
+    // click, or a superseded summary) and clear copySummary while the clipboard
+    // write is in flight. A fallback that re-read the mutable would then prompt
+    // with the literal "null" — hence a local, which also keeps tsc's null-check
+    // on this path instead of a cast that hides it.
+    const snap = copySummary;
+    if (!snap) return;
+    await copyToClipboard(snap.text, {
+      onOk: () => flashSumCopyStatus("✓ copied"),
+      onFallback: () => {
+        // A markdown summary is a multi-line DOCUMENT, so it gets the shared
+        // new-tab treatment (a prompt() default is a single-line input that
+        // flattens it); the prompt is only the popup-blocked degradation.
+        const how = showTextForManualCopy(snap.text, "Copy the summary (Ctrl/Cmd-C, Enter, Esc):");
+        flashSumCopyStatus(how === "tab" ? "↗ opened in new tab" : "↗ shown in prompt");
+      },
+    });
+  });
+
+  sumDownloadMd.addEventListener("click", () => {
+    const snap = copySummary;
+    if (!snap) { flashSumCopyStatus("nothing to export"); return; }
+    downloadFile(snap.text, "summary_" + snap.sid + ".md", "text/markdown;charset=utf-8");
   });
 
   // ---- Summarizer controls (shared component) ---------------------------------
@@ -468,7 +506,17 @@ export function build(ctx) {
       hasTranscript() ? 1 : 0,
       stale ? 1 : 0,
     ].join("§");
-    renderRegion(sumOut, () => (shown ? renderSummary(shown, stale) : renderPlaceholder(sess)), {
+    const renderSummaryOut = () => {
+      // ONE predicate behind both controls and both handlers: what's ENABLED is
+      // exactly what's exportable. A persisted-but-empty `summary` would
+      // otherwise light up two buttons whose clicks do nothing.
+      const text = shown?.summary || "";
+      copySummary = text ? { text, sid } : null;
+      sumCopyBtn.disabled = !text;
+      sumDownloadMd.disabled = !text;
+      return shown ? renderSummary(shown, stale) : renderPlaceholder(sess);
+    };
+    renderRegion(sumOut, renderSummaryOut, {
       sig: outSig,
     });
 

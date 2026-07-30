@@ -33,7 +33,8 @@ import { wireSave } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
 import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
-import { makeStatusFlasher, copyToClipboard } from "../ui.js";
+import { makeStatusFlasher, copyToClipboard, downloadFile, showTextForManualCopy } from "../ui.js";
+import { toSRT, toVTT } from "../subtitles.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
 import { fillLanguageOptions, setSelectedLanguages, selectedLanguages } from "../components/language-picker.js";
 
@@ -79,6 +80,86 @@ export function recordingVariants(rec) {
 }
 
 /**
+ * The merged body's EXPORTABLE segments, in order, each paired with its text and
+ * the operator's display name. ONE walk behind every export (the clipboard/.txt
+ * copy and the .srt/.vtt cues), so they can never disagree about their line set:
+ * change the skip or the alias rule here and every export moves together.
+ *
+ * Two rules live here rather than in each consumer:
+ *
+ *  · an empty-text segment is SKIPPED, and the skip happens HERE — before any
+ *    consumer sees it. That order is load-bearing for the subtitle clock, whose
+ *    t=0 anchors on the first EMITTED segment (see buildExportSegments).
+ *
+ *  · the speaker is the operator's ALIAS (`meta.aliases`), never the backend's
+ *    raw key — exports must read like the pane the user is looking at.
+ *
+ * Suppressed segments need no rule here: session_merge keeps them OUT of
+ * `segments` entirely (they land in the body's separate `suppressed` list), so
+ * nothing this walk yields was ever suppressed.
+ *
+ * @param {import('../../types.js').MergedTranscript} full
+ * @param {import('../../types.js').EffectiveMeta} meta
+ * @returns {Generator<{ seg: import('../../types.js').Segment, text: string, speaker: string }>}
+ */
+function* aliasedSegments(full, meta) {
+  const aliases = meta.aliases || {};
+  for (const seg of full.segments || []) {
+    const text = seg.text || "";
+    if (!text) continue;
+    yield { seg, text, speaker: aliasOf(seg.speaker || "", aliases) };
+  }
+}
+
+/**
+ * The merged schema's segments as SUBTITLE segments: alias-applied speakers and
+ * a RELATIVE clock in seconds — the shape subtitles.js's toSRT/toVTT take. The
+ * merged bodies carry `abs_start`/`abs_end` as absolute ISO strings, and handing
+ * those over unconverted is what produces `NaN:NaN:NaN,NaN` cues.
+ *
+ * Two choices here are load-bearing:
+ *
+ *  · t=0 is the first EMITTED segment, so the skip-then-anchor ORDER matters —
+ *    BOTH skips (aliasedSegments' empty-text one, and the unparseable-start
+ *    `continue` below) run before `tZero` is set, and moving either past the
+ *    anchor would shift every cue in the file. (The .txt export deliberately
+ *    keeps ABSOLUTE wall-clock stamps instead: a subtitle file is played against
+ *    the recording, a transcript is read against the meeting.)
+ *
+ *  · A segment whose `abs_start` will not parse is DROPPED rather than emitted
+ *    with a NaN stamp. NaN would latch into `tZero` (NaN !== null), poisoning
+ *    every later `absStart - tZero`, so ONE corrupt value in a hand-edited or
+ *    truncated sidecar would garble the whole document — the same invariant
+ *    fmtClock states for the copy path ("a single corrupt sidecar value must
+ *    garble one cell, never abort the entire render"). A parseable start with a
+ *    corrupt end keeps its line, as a zero-length cue.
+ *
+ * Pure — module-scope (not a build() closure local) so the unit tests can reach
+ * this slice's own trap without driving a browser.
+ * @param {import('../../types.js').MergedTranscript} full
+ * @param {import('../../types.js').EffectiveMeta} meta
+ * @returns {import('../subtitles.js').Seg[]}
+ */
+export function buildExportSegments(full, meta) {
+  /** @type {import('../subtitles.js').Seg[]} */
+  const segments = [];
+  let tZero = null;
+  for (const { seg, text, speaker } of aliasedSegments(full, meta)) {
+    const absStart = new Date(seg.abs_start).getTime() / 1000;
+    if (!Number.isFinite(absStart)) continue;
+    const absEnd = new Date(seg.abs_end).getTime() / 1000;
+    if (tZero === null) tZero = absStart;
+    segments.push({
+      start: absStart - tZero,
+      end: (Number.isFinite(absEnd) ? absEnd : absStart) - tZero,
+      text,
+      speaker: speaker || undefined,
+    });
+  }
+  return segments;
+}
+
+/**
  * @param {{
  *   metaFor: (s: import('../../types.js').Session) => import('../../types.js').EffectiveMeta,
  *   languageCatalog: import('../../types.js').LanguageCatalog,
@@ -95,6 +176,9 @@ export function build(ctx) {
   const txHint = pick(frag, "txHint");
   const txCopyBtn = /** @type {HTMLButtonElement} */ (pick(frag, "txCopyBtn"));
   const txCopyStatus = pick(frag, "txCopyStatus");
+  const txDownloadTxt = /** @type {HTMLButtonElement} */ (pick(frag, "txDownloadTxt"));
+  const txDownloadSrt = /** @type {HTMLButtonElement} */ (pick(frag, "txDownloadSrt"));
+  const txDownloadVtt = /** @type {HTMLButtonElement} */ (pick(frag, "txDownloadVtt"));
   const mergedHost = pick(frag, "mergedHost");
   // ONE delegated seek listener for the whole merged pane, attached to the
   // stable host rather than to lines. The host outlives every render (the
@@ -196,6 +280,8 @@ export function build(ctx) {
   let copyTxFull = null;
   /** @type {import('../../types.js').EffectiveMeta | null} */
   let copyMeta = null;
+  /** Session id for export filenames — captured alongside copyTxFull. */
+  let exportSid = "";
   /** Selected WAV/clip name, per session id (drives re-transcribe + cache). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
@@ -424,22 +510,20 @@ export function build(ctx) {
   // ---- Copy merged transcript (ported from classic main.js onCopyMerged) ----
 
   // Rebuild the export text from segments so display-name aliases match what
-  // the user sees — the backend's `plain_text` uses raw speaker keys. One line
-  // per non-suppressed segment ("[hh:mm:ss] Alias: text", "[uncertain]" suffix
-  // on low-confidence lines); suppressed segments (full.suppressed) are never
-  // included. Falls back to plain_text when no segments produced a line.
+  // the user sees — the backend's `plain_text` uses raw speaker keys. Which
+  // segments qualify and what a speaker is called is the shared aliasedSegments
+  // walk (the same line set the .srt/.vtt exports get); this function owns only
+  // the LINE format: "[hh:mm:ss] Alias: text", "[uncertain]" suffix on
+  // low-confidence lines, an ABSOLUTE wall clock. Falls back to plain_text when
+  // no segments produced a line.
   /**
    * @param {import('../../types.js').MergedTranscript} full
    * @param {import('../../types.js').EffectiveMeta} meta
    * @returns {string}
    */
   const buildCopyText = (full, meta) => {
-    const aliases = meta.aliases || {};
     const lines = [];
-    for (const seg of full.segments || []) {
-      const text = seg.text || "";
-      if (!text) continue;
-      const speaker = aliasOf(seg.speaker || "", aliases);
+    for (const { seg, text, speaker } of aliasedSegments(full, meta)) {
       let line = `[${fmtClock(seg.abs_start)}] ${speaker}: ${text}`;
       if (seg.low_confidence) line += " [uncertain]";
       lines.push(line);
@@ -449,19 +533,11 @@ export function build(ctx) {
 
   const flashCopyStatus = makeStatusFlasher(txCopyStatus);
 
-  /** Render the transcript text into a blank tab for manual select-copy.
-   * @param {Window} w @param {string} text */
-  const populateTranscriptTab = (w, text) => {
-    w.document.body.style.font = "12px ui-monospace, Menlo, Consolas, monospace";
-    w.document.body.style.whiteSpace = "pre-wrap";
-    w.document.body.textContent = text;
-  };
-
   // Bound ONCE at build time; reads the captured copyTxFull/copyMeta (the body
   // currently in the pane), not per-tick DOM. Disabled until a body has loaded.
-  // The copy flow is the shared copyToClipboard (ui.js); this view's fallback
-  // is the styled new-tab variant — window.open succeeds when the fallback
-  // runs synchronously in the gesture (non-secure context), and degrades to a
+  // The copy flow is the shared copyToClipboard (ui.js); the fallback is the
+  // shared showTextForManualCopy — window.open succeeds when the fallback runs
+  // synchronously in the gesture (non-secure context), and degrades to a
   // prompt() when blocked (post-await clipboard rejection) — same design as
   // the classic dashboard's copy.
   txCopyBtn.addEventListener("click", async () => {
@@ -471,15 +547,43 @@ export function build(ctx) {
     await copyToClipboard(out, {
       onOk: () => flashCopyStatus("✓ copied"),
       onFallback: () => {
-        const w = window.open("", "_blank");
-        if (w) {
-          populateTranscriptTab(w, out);
-          flashCopyStatus("↗ opened in new tab");
-        } else {
-          window.prompt("Copy the merged transcript (Ctrl/Cmd-C, Enter):", out);
-        }
+        const how = showTextForManualCopy(out, "Copy the merged transcript (Ctrl/Cmd-C, Enter):");
+        if (how === "tab") flashCopyStatus("↗ opened in new tab");
       },
     });
+  });
+
+  /** Wire one export button: the shared captured state, ONE filename scheme,
+   * and — like the copy button beside it — a STATUS on an empty export, since a
+   * dead click on an enabled control is indistinguishable from a broken page.
+   * `render` returns the file's bytes, or "" when there is nothing to export.
+   * @param {HTMLButtonElement} btn
+   * @param {string} ext
+   * @param {string} mime
+   * @param {(full: import('../../types.js').MergedTranscript, meta: import('../../types.js').EffectiveMeta) => string} render
+   */
+  const wireExport = (btn, ext, mime, render) => {
+    btn.addEventListener("click", () => {
+      if (!copyTxFull || !copyMeta || !exportSid) return;
+      const out = render(copyTxFull, copyMeta);
+      if (!out) { flashCopyStatus("nothing to export"); return; }
+      downloadFile(out, exportSid + ext, mime);
+    });
+  };
+
+  // .txt reuses buildCopyText, so the bytes are identical to the clipboard copy
+  // (not the backend's plain_text, which carries raw speaker keys). .srt/.vtt
+  // go through the relative-clock conversion; an empty cue list renders as ""
+  // rather than toVTT([])'s truthy header-only document, which is not a file
+  // worth handing the operator.
+  wireExport(txDownloadTxt, ".txt", "text/plain;charset=utf-8", buildCopyText);
+  wireExport(txDownloadSrt, ".srt", "application/x-subrip", (full, meta) => {
+    const segments = buildExportSegments(full, meta);
+    return segments.length ? toSRT(segments) : "";
+  });
+  wireExport(txDownloadVtt, ".vtt", "text/vtt", (full, meta) => {
+    const segments = buildExportSegments(full, meta);
+    return segments.length ? toVTT(segments) : "";
   });
 
   // ---- Set primary (REAL — moved from recordings.js) ------------------------
@@ -651,18 +755,19 @@ export function build(ctx) {
             : (sess ? "not transcribed yet — declare languages and transcribe below" : "no session selected — pick one from the spine"),
         });
 
-        // Copy button: enabled only once the FULL merged body has loaded (the
-        // slim marker alone can't produce alias-applied lines). Captured here,
-        // inside the build, so the click handler copies exactly what's shown.
-        if (sess && txFull && meta) {
-          copyTxFull = txFull;
-          copyMeta = meta;
-          txCopyBtn.disabled = false;
-        } else {
-          copyTxFull = null;
-          copyMeta = null;
-          txCopyBtn.disabled = true;
-        }
+        // Copy + download buttons: enabled only once the FULL merged body has
+        // loaded (the slim marker alone can't produce alias-applied lines).
+        // ONE predicate drives the capture AND every control, so a button can
+        // never sit enabled over cleared state. Captured here, inside the build,
+        // so the click handlers export exactly what's shown.
+        const ready = !!(sess && txFull && meta);
+        copyTxFull = ready ? txFull : null;
+        copyMeta = ready ? meta : null;
+        exportSid = ready ? sid : "";
+        txCopyBtn.disabled = !ready;
+        txDownloadTxt.disabled = !ready;
+        txDownloadSrt.disabled = !ready;
+        txDownloadVtt.disabled = !ready;
 
         // Merged transcript (main/left). `tx` is the slim marker; the body comes
         // from the lazy cache. While it loads, the marker still drives the "has a

@@ -47,6 +47,22 @@ test("empty input: SRT is empty, VTT is just the header line", () => {
   assert.equal(toVTT([]), "WEBVTT\n");
 });
 
+test("a cue payload escapes &, < and > in both the speaker and the text", () => {
+  // `<anon>` is the merge layer's default speaker key and an operator alias is
+  // free text: unescaped, a WebVTT parser reads `<lead>` as an unknown cue tag
+  // and DROPS it, taking the speaker attribution with it. Escaping `>` also
+  // means a literal `-->` in transcript text can never read as a timing line.
+  const seg = [{ start: 0, end: 1, speaker: "R&D <lead>", text: "a --> b & <c>" }];
+  assert.equal(
+    toSRT(seg),
+    "1\n00:00:00,000 --> 00:00:01,000\nR&amp;D &lt;lead&gt;: a --&gt; b &amp; &lt;c&gt;",
+  );
+  assert.equal(
+    toVTT(seg),
+    "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nR&amp;D &lt;lead&gt;: a --&gt; b &amp; &lt;c&gt;",
+  );
+});
+
 test("millisecond rounding carries into the seconds field (no 4-digit ms)", () => {
   // 0.9999s = 999.9ms -> 1000ms must carry: 00:00:01,000, not 00:00:00,1000
   assert.equal(toSRT([{ start: 0.9999, end: 1, text: "x" }]), "1\n00:00:01,000 --> 00:00:01,000\nx");
