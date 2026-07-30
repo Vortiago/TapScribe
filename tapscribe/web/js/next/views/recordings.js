@@ -36,7 +36,7 @@ import { tpl, mount, pick, renderList, markListStale } from "../../templates.js"
 import { postJson, del, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, wavUrl, errText } from "../../api.js";
 import { createFilesSource, listState } from "../session-files.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
-import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
+import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, setSourcePick, clearSourcePick, sessionLabel } from "../shell.js";
 import { setDimmable } from "../ui.js";
 import { createWaveform } from "../components/waveform.js";
 
@@ -148,9 +148,6 @@ export function build(ctx) {
   let session = null;
   /** @type {StripKnobs} */
   const knobs = { ...STRIP_DEFAULTS };
-  /** Source toggle, per session id. */
-  /** @type {Map<string, "original" | "stripped">} */
-  const sourcePick = new Map();
   /** Selected original WAV name, per session id (drives the waveform header). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
@@ -399,7 +396,7 @@ export function build(ctx) {
     if (!session) return;
     const sid = session.session;
     const sel = selectedFor();
-    if (!sel || effectiveSource(session, sourcePick) !== "original") return;
+    if (!sel || effectiveSource(session) !== "original") return;
     const token = ++previewToken;
     const key = waveKey(sid, sel.name, sel.size);
     fetchStripPreview(sid, sel.name, { ...knobs })
@@ -410,7 +407,7 @@ export function build(ctx) {
         // paint another WAV's preview (the next drawWaveform tick would
         // only reconcile it up to a poll later).
         const cur = selectedFor();
-        if (!session || !cur || effectiveSource(session, sourcePick) !== "original") return;
+        if (!session || !cur || effectiveSource(session) !== "original") return;
         if (waveKey(session.session, cur.name, cur.size) !== key) return;
         livePreview = { key, p };
         waveform.setPreview({ spans: p.spans, speech_floor_db: p.knobs.speech_floor_db });
@@ -474,7 +471,7 @@ export function build(ctx) {
       // The committed cut now reflects these knobs — drop the live preview.
       dropPreview();
       // Flip to the cleaned audio on success so the operator can act on it.
-      if ((res.files_written || 0) > 0) sourcePick.set(sid, "stripped");
+      if ((res.files_written || 0) > 0) setSourcePick(sid, "stripped");
     } catch (e) {
       alert(`Strip silence failed: ${errText(e)}`);
     } finally {
@@ -494,7 +491,7 @@ export function build(ctx) {
     catch (e) { alert(`Clear stripped failed: ${errText(e)}`); return; }
     lastStrip.delete(sid);
     dropPreview();
-    if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
+    clearSourcePick(sid);
     // Every stripped clip of this session just went; the originals are kept.
     player.forgetWhere((f) => f.session === sid && f.source === "stripped");
     repaintAfterMutate();
@@ -882,7 +879,7 @@ export function build(ctx) {
   const update = (j, sess) => {
     session = sess;
     const sid = sess?.session || "";
-    const src = effectiveSource(sess, sourcePick);
+    const src = effectiveSource(sess);
     const filesSig = sess?.files_sig || "";
     const stripped = sess?.stripped || null;
     const job = sess?.progress || null;
@@ -931,7 +928,7 @@ export function build(ctx) {
           hasStripped: !!stripped,
           onPick: (which) => {
             if (!session) return;
-            sourcePick.set(session.session, which);
+            setSourcePick(session.session, which);
             // The live strip-preview is an original-view tuning artifact; a
             // source switch must clear it. The waveKey is source-independent
             // (the hero is always the original tap), so a lingering preview
