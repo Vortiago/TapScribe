@@ -2,7 +2,9 @@
 // Stages-only shared helpers. New file under js/next/ so the existing shared
 // modules stay untouched — see the Phase-1 brief. Mostly pure DOM + template
 // glue, plus a couple of shared click-to-mutate wirings (wireRecPill) that
-// don't warrant their own module.
+// don't warrant their own module — AND THE owner of "which audio of a session
+// the dashboard acts on", the source pick both stages read and write (#354; see
+// CONTEXT.md "Source pick · original / stripped · effective source").
 
 import { tpl, pick } from "../templates.js";
 import { postJson, mutateButton } from "../api.js";
@@ -161,12 +163,35 @@ export function renderJobBar({ jobBar, jobLabel, jobCount, jobProgress, jobWav }
 /** One vc progress instance per jobProgress host. @type {WeakMap<Element, { el: HTMLElement, setValue: (v: number, m?: number) => void }>} */
 const _jobMeters = new WeakMap();
 
+/** The session-scoped source pick store: session id → "original" | "stripped".
+ * Shared by the Recordings and Transcript views so a pick in one view is the
+ * pick the other view reads and acts on. In-memory only — not persisted. */
+/** @type {Map<string, "original" | "stripped">} */
+const _sourcePick = new Map();
+
+/**
+ * Record the operator's source pick for one session.
+ * @param {string} sessionId
+ * @param {"original" | "stripped"} source
+ */
+export function setSourcePick(sessionId, source) {
+  _sourcePick.set(sessionId, source);
+}
+
+/**
+ * Clear a session's source pick, returning it to the default (original).
+ * @param {string} sessionId
+ */
+export function clearSourcePick(sessionId) {
+  _sourcePick.delete(sessionId);
+}
+
 /**
  * Build the original/stripped source toggle (template `tpl-next-srcsw`), shared
  * by the Recordings and Transcript views. The "stripped" button is disabled
  * until the session has a stripped/ folder; `onPick` fires with the chosen
- * source on a click of an enabled button, where the caller updates its own
- * sourcePick map and invalidates its render signature.
+ * source on a click of an enabled button, where the caller updates the shared
+ * store via `setSourcePick` and invalidates its render signature.
  * @param {{
  *   active: "original" | "stripped",
  *   hasStripped: boolean,
@@ -191,17 +216,15 @@ export function buildSourceToggle({ active, hasStripped, onPick }) {
 }
 
 /**
- * The effective audio source for a session given the operator's per-session
- * toggle pick: falls back to "original" when "stripped" is picked but the
- * session has no stripped/ folder, so a stale toggle can't operate on nothing
- * after the clips were cleared. Shared by the Recordings and Transcript views
- * (each keeps its own sourcePick map), next to the source-toggle seam above.
+ * The effective audio source for a session: the operator's pick from the
+ * shared store, falling back to "original" when unpicked or when "stripped"
+ * is picked but the session has no stripped/ folder (so a stale pick can't
+ * operate on nothing after the clips were cleared).
  * @param {import('../types.js').Session | null} session
- * @param {Map<string, "original" | "stripped">} sourcePick
  * @returns {"original" | "stripped"}
  */
-export function effectiveSource(session, sourcePick) {
-  const want = sourcePick.get(session?.session || "") || "original";
+export function effectiveSource(session) {
+  const want = _sourcePick.get(session?.session || "") || "original";
   return want === "stripped" && !session?.stripped ? "original" : want;
 }
 

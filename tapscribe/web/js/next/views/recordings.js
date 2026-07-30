@@ -36,7 +36,7 @@ import { tpl, mount, pick, renderList, markListStale } from "../../templates.js"
 import { postJson, del, wavTranscript, wavePeaks, wavStripMeta, fetchStripPreview, wavUrl, errText } from "../../api.js";
 import { createFilesSource, listState } from "../session-files.js";
 import { fmtBytes, fmtDur, fmtClock, fmtMs, fmtMmSs, truncMid } from "../../formatters.js";
-import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
+import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, setSourcePick, clearSourcePick, sessionLabel } from "../shell.js";
 import { setDimmable } from "../ui.js";
 import { createWaveform } from "../components/waveform.js";
 
@@ -148,9 +148,6 @@ export function build(ctx) {
   let session = null;
   /** @type {StripKnobs} */
   const knobs = { ...STRIP_DEFAULTS };
-  /** Source toggle, per session id. */
-  /** @type {Map<string, "original" | "stripped">} */
-  const sourcePick = new Map();
   /** Selected original WAV name, per session id (drives the waveform header). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
@@ -219,6 +216,11 @@ export function build(ctx) {
   let previewToken = 0;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let previewTimer = null;
+  /** The source `update()` last painted, so the reconcile below can see a
+   * switch — the pick store is SHARED (#354), so one can arrive from Transcript
+   * with no local handler of ours having run. */
+  /** @type {"original" | "stripped"} */
+  let lastSrc = "original";
 
   // ---- Helpers --------------------------------------------------------------
 
@@ -399,7 +401,7 @@ export function build(ctx) {
     if (!session) return;
     const sid = session.session;
     const sel = selectedFor();
-    if (!sel || effectiveSource(session, sourcePick) !== "original") return;
+    if (!sel || effectiveSource(session) !== "original") return;
     const token = ++previewToken;
     const key = waveKey(sid, sel.name, sel.size);
     fetchStripPreview(sid, sel.name, { ...knobs })
@@ -410,7 +412,7 @@ export function build(ctx) {
         // paint another WAV's preview (the next drawWaveform tick would
         // only reconcile it up to a poll later).
         const cur = selectedFor();
-        if (!session || !cur || effectiveSource(session, sourcePick) !== "original") return;
+        if (!session || !cur || effectiveSource(session) !== "original") return;
         if (waveKey(session.session, cur.name, cur.size) !== key) return;
         livePreview = { key, p };
         waveform.setPreview({ spans: p.spans, speech_floor_db: p.knobs.speech_floor_db });
@@ -432,8 +434,15 @@ export function build(ctx) {
    * in-flight `firePreview` fetch (its `.then` bails on a token mismatch) —
    * without it, a preview requested before the drop lands afterwards (e.g.
    * dropped on a toggle to stripped, then the fetch resolves back in the
-   * original view). */
-  const dropPreview = () => {
+   * original view).
+   *
+   * Named for the session it drops FOR, and a no-op once the view has moved on:
+   * this is view-singleton state and an async caller's POST can land long after
+   * the operator switched sessions, where dropping would wipe the preview being
+   * tuned on the new one.
+   * @param {string} forSid */
+  const dropPreview = (forSid) => {
+    if (forSid !== (session?.session || "")) return;
     if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
     previewToken++;
     livePreview = null;
@@ -472,9 +481,9 @@ export function build(ctx) {
       // sessions.js's delete paths already follow).
       player.forgetWhere((f) => f.session === sid && f.source === "stripped");
       // The committed cut now reflects these knobs — drop the live preview.
-      dropPreview();
+      dropPreview(sid);
       // Flip to the cleaned audio on success so the operator can act on it.
-      if ((res.files_written || 0) > 0) sourcePick.set(sid, "stripped");
+      if ((res.files_written || 0) > 0) setSourcePick(sid, "stripped");
     } catch (e) {
       alert(`Strip silence failed: ${errText(e)}`);
     } finally {
@@ -493,8 +502,8 @@ export function build(ctx) {
     try { await del(`/api/sessions/${encodeURIComponent(sid)}/stripped`); }
     catch (e) { alert(`Clear stripped failed: ${errText(e)}`); return; }
     lastStrip.delete(sid);
-    dropPreview();
-    if (sourcePick.get(sid) === "stripped") sourcePick.delete(sid);
+    dropPreview(sid);
+    clearSourcePick(sid);
     // Every stripped clip of this session just went; the originals are kept.
     player.forgetWhere((f) => f.session === sid && f.source === "stripped");
     repaintAfterMutate();
@@ -882,7 +891,18 @@ export function build(ctx) {
   const update = (j, sess) => {
     session = sess;
     const sid = sess?.session || "";
-    const src = effectiveSource(sess, sourcePick);
+    const src = effectiveSource(sess);
+    // THE one owner of "a source switch drops the live strip-preview", wherever
+    // the pick was made: the preview is an original-view knob-tuning artifact
+    // and the waveKey is source-independent, so nothing downstream notices the
+    // switch. The local toggle's onPick reaches here through its synchronous
+    // afterMutate, and Transcript — which writes the same shared store (#354)
+    // and never runs that onPick — through the next tick. Before `chromeSig`,
+    // so this pass repaints the stats from the committed cut, not the preview.
+    if (src !== lastSrc) {
+      lastSrc = src;
+      dropPreview(sid);
+    }
     const filesSig = sess?.files_sig || "";
     const stripped = sess?.stripped || null;
     const job = sess?.progress || null;
@@ -931,13 +951,11 @@ export function build(ctx) {
           hasStripped: !!stripped,
           onPick: (which) => {
             if (!session) return;
-            sourcePick.set(session.session, which);
-            // The live strip-preview is an original-view tuning artifact; a
-            // source switch must clear it. The waveKey is source-independent
-            // (the hero is always the original tap), so a lingering preview
-            // would otherwise survive the toggle and overlay the stripped
-            // view's committed cut instead of being dropped.
-            dropPreview();
+            setSourcePick(session.session, which);
+            // No dropPreview() here: afterMutate() below repaints synchronously
+            // through update()'s `lastSrc` reconcile, which owns that drop. It
+            // keys off a CHANGE of source, so re-clicking the already-lit
+            // button is now inert and leaves a live preview being tuned alone.
             // No markListStale: `src` is a term in the list's sig, so the
             // synchronous afterMutate repaint crosses the gate on its own.
             lastChromeSig = " ";

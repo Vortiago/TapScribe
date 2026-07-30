@@ -48,7 +48,7 @@
 import { tpl, pick, mount, renderList, deferIfInteractionInside } from "../../templates.js";
 import { postJson, del, getJson, errText } from "../../api.js";
 import { fmtBytes, fmtSessionLabel } from "../../formatters.js";
-import { header, strong, inline, newestFirst } from "../shell.js";
+import { header, strong, inline, newestFirst, clearSourcePick } from "../shell.js";
 import {
   editSessionLabel,
   forgetSessionLabel,
@@ -215,6 +215,10 @@ export function build(ctx) {
       // files on disk, and unloading there would stop the audio and blame a
       // deletion that never happened.
       player.forgetWhere((f) => f.session === s.session);
+      // The stripped/ folder this pick described went with the audio; the
+      // session survives and can regain one (a later strip, an absorb), so a
+      // kept "stripped" pick would silently govern the views (#354).
+      clearSourcePick(s.session);
     } catch (e) {
       alert(`Delete audio failed: ${errText(e)}`);
       return;
@@ -243,6 +247,7 @@ export function build(ctx) {
       await del(`/api/sessions/${encodeURIComponent(s.session)}`);
       // Success path only — see deleteAudio.
       player.forgetWhere((f) => f.session === s.session);
+      clearSourcePick(s.session);
     } catch (e) {
       alert(`Delete session failed: ${errText(e)}`);
       return;

@@ -1106,6 +1106,40 @@ the affordance, so playability turns itself on exactly once, when the tap
 closes and the listing refetches.
 _Avoid_: live WAV, current WAV (the *current session* is a different thing).
 
+## Source pick · original / stripped · effective source
+
+Which audio of a session the dashboard acts on: the **originals** as recorded,
+or the **stripped** region clips a strip-silence run wrote. The **source pick**
+belongs to the SESSION, not to a view — it is *that session's* source — so
+Recordings and Transcript read and write ONE store owned by the Stages shell
+(`next/shell.js`, keyed by session id, in-memory only: a reload comes back on
+the original, the pick is deliberately not persisted). Picking "stripped" in
+either stage is the pick the other stage lists, transcribes and plays from. A
+view keeping its own copy is the bug this term exists to prevent (#354).
+_Avoid_: source toggle (that is the CONTROL that writes the pick), per-view
+source, audio mode.
+
+The **effective source** is what every consumer must act on:
+`effectiveSource(session)` falls back to "original" whenever the pick says
+"stripped" but the session has no `stripped/` folder, so a stale pick can't
+operate on nothing after the clips were cleared. Resolved per tick from the
+store — a view that caches the resolved value paints a source the session left.
+
+**A source switch must also drop the switching view's derived artifacts** —
+Recordings' live strip-preview is tuned against the ORIGINAL, so a flip to
+stripped has to clear it or it stays overlaid on the committed cut. The store
+has no subscribers, so this cannot live at the write site: each view reconciles
+the source it last painted (recordings' `lastSrc`) and invalidates its own
+derived state, which is what makes the invariant hold for a pick made in the
+OTHER stage. Same class of convention as "every verb that removes audio must
+tell the Player": the seam cannot enforce it and it fails silently.
+
+**Every verb that removes a session's stripped clips must clear the pick** —
+`clearSourcePick(session)` on clear-stripped, delete-audio and delete-session.
+`effectiveSource` masks a stale "stripped" only while the folder is gone; the
+session can regain one (a later strip, an absorb) and the un-cleared pick would
+then govern the stages with no operator having picked it.
+
 ## Per-WAV transcript cache
 
 Each transcribed WAV gets one or more cached transcripts stored next to

@@ -32,7 +32,7 @@ import { resolveSeekTarget } from "../seek-target.js";
 import { wireSave } from "../../save-status.js";
 import { fmtBytes, fmtClock, fmtDur, fmtMs, truncMid } from "../../formatters.js";
 import { aliasOf } from "../../speakers.js";
-import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, sessionLabel } from "../shell.js";
+import { header, strong, inline, buildSourceToggle, renderJobBar, effectiveSource, setSourcePick, sessionLabel } from "../shell.js";
 import { makeStatusFlasher, copyToClipboard, downloadFile, showTextForManualCopy } from "../ui.js";
 import { toSRT, toVTT } from "../subtitles.js";
 import * as mergedTranscript from "../../components/merged-transcript.js";
@@ -285,10 +285,6 @@ export function build(ctx) {
   /** Selected WAV/clip name, per session id (drives re-transcribe + cache). */
   /** @type {Map<string, string>} */
   const selectedWav = new Map();
-  /** Source toggle (original / stripped) per session id — which audio the
-   * transcribe actions + the per-WAV picker operate on. Mirrors Recordings. */
-  /** @type {Map<string, "original" | "stripped">} */
-  const sourcePick = new Map();
   /** wavKey ("session/name[@stripped]") currently transcribing optimistically. */
   /** @type {Set<string>} */
   const txInflight = new Set();
@@ -302,6 +298,9 @@ export function build(ctx) {
   // own sig (txSig) is held by `renderRegion(mergedHost, …)`; only the control
   // column keeps a closure sig here.
   let lastCtlSig = " "; // control column chrome: toggle/range/note/selected/cache
+  /** The source that chrome was last painted for — the one term the mid-edit
+   * freeze below must NOT hold back (the pick store is shared, #354). */
+  let lastCtlSrc = "";
   /** This view's watcher on the merged body: when one lands, force the pane past
    * its sig gate and render now, so "loading… → loaded" re-crosses the gate
    * without a marker change. */
@@ -354,7 +353,7 @@ export function build(ctx) {
    * no longer ships). */
   /** @returns {(import('../../types.js').WavFile | import('../../types.js').WavRegion)[]} */
   const sourceFiles = () =>
-    effectiveSource(session, sourcePick) === "stripped" ? currentFiles.flatMap((f) => f.regions || []) : currentFiles;
+    effectiveSource(session) === "stripped" ? currentFiles.flatMap((f) => f.regions || []) : currentFiles;
 
   /** In-flight key for a (name, source) — matches transcribeWav's key shape so
    * the row "⟳ tx" busy state lines up with the optimistic set. */
@@ -483,7 +482,7 @@ export function build(ctx) {
 
   txOneBtn.addEventListener("click", () => {
     const sel = selectedFor();
-    if (sel) transcribeWav(sel.name, effectiveSource(session, sourcePick));
+    if (sel) transcribeWav(sel.name, effectiveSource(session));
   });
 
   txRangeBtn.addEventListener("click", async () => {
@@ -494,7 +493,7 @@ export function build(ctx) {
       if (!(await saveLanguagesOrAlert())) return;
       await postJson("/api/transcribe-session", {
         session: sid,
-        source: effectiveSource(session, sourcePick),
+        source: effectiveSource(session),
         from_iso: rangeFrom.value.trim(),
         to_iso: rangeTo.value.trim(),
         force: forceBox.checked,
@@ -801,7 +800,7 @@ export function build(ctx) {
     // session doesn't replaceChildren on every selection / poll tick. Skip the
     // chrome rebuild when nothing it depends on changed, or while a range box is
     // mid-edit (so an in-progress ISO edit isn't wiped).
-    const src = effectiveSource(session, sourcePick);
+    const src = effectiveSource(session);
     const srcFiles = sourceFiles();
     const sel = selectedFor(srcFiles);
     const ctlSig = [
@@ -818,8 +817,15 @@ export function build(ctx) {
     ].join("§");
     const focused = /** @type {HTMLElement | null} */ (document.activeElement);
     const editing = !!focused && (focused === rangeFrom || focused === rangeTo);
-    if (!(ctlSig === lastCtlSig || editing)) {
+    // The mid-edit freeze must not cover the SOURCE. The picker list and both
+    // transcribe buttons read `src` UNGATED, and the pick is now shared (#354) —
+    // Recordings' ✂ strip all writes it when its POST resolves — so a flip that
+    // lands while an ISO box has focus would leave the toggle lit "original"
+    // over a transcribe that posts "stripped". Safe to let through: this block
+    // writes no range-box VALUE, only a placeholder, and only while empty.
+    if (!(ctlSig === lastCtlSig || (editing && src === lastCtlSrc))) {
       lastCtlSig = ctlSig;
+      lastCtlSrc = src;
 
       // Source toggle (original / stripped) — drives the range transcribe AND
       // the per-WAV picker below.
@@ -828,7 +834,7 @@ export function build(ctx) {
         hasStripped: !!sess?.stripped,
         onPick: (which) => {
           if (!session) return;
-          sourcePick.set(session.session, which);
+          setSourcePick(session.session, which);
           // No markListStale: `src` is a term in the picker's sig, so the
           // synchronous afterMutate repaint crosses the gate on its own.
           lastCtlSig = " ";
