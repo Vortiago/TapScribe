@@ -78,12 +78,14 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
         do_record=True,
         do_live=True,
     )
-    # `pytest.raises`, not a bare `try/except`: an `except` clause also accepts
-    # "nothing propagated", so if `__aexit__` ever started SUPPRESSING the
-    # exception this half would stay green while no longer exercising an
-    # abnormal close at all — and it is the only guard that an abnormal close
-    # still finalises the WAV and releases the UtteranceIndex entry.
-    with pytest.raises(RuntimeError, match="simulated abnormal /tap close"):
+
+    # `pytest.raises`, not a bare `try/except`: an `except` also accepts
+    # "nothing propagated", so a suppressing `__aexit__` would leave this green
+    # while no longer testing an abnormal close. Nested helper rather than an
+    # inline `raise`: an analyser that doesn't model `pytest.raises.__exit__` as
+    # suppressing sees the raise escape and calls everything below dead — CodeQL
+    # did, reporting unreachable-statement + unused `tasks_before`.
+    async def _abnormal_close_mid_stream() -> None:
         async with fan_out:
             await fan_out.write_frame(PCM_FRAME)
             await fan_out.write_frame(PCM_FRAME)
@@ -91,6 +93,9 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
             # mid-utterance — e.g. a ConnectionResetError bubbling from
             # the ASGI transport. __aexit__ must still finalize.
             raise RuntimeError("simulated abnormal /tap close mid-stream")
+
+    with pytest.raises(RuntimeError, match="simulated abnormal /tap close"):
+        await _abnormal_close_mid_stream()
 
     # WAV finalized non-empty.
     wavs = list(r.session_dir.glob("*.wav"))
@@ -133,12 +138,15 @@ async def test_abnormal_tap_close_finalizes_or_unlinks_and_leaks_no_tasks(
         do_record=True,
         do_live=False,
     )
-    # Same reasoning as half A: the abnormal close must PROPAGATE, and this is
-    # the only guard that it leaves no WAV, no UtteranceIndex entry and no
-    # ActiveStream.
-    with pytest.raises(RuntimeError, match="abnormal close before any frame written"):
+
+    # Same two reasons as half A: the close must PROPAGATE, and the helper keeps
+    # the assertions below reachable to a static analyser.
+    async def _abnormal_close_before_any_frame() -> None:
         async with fan_out2:
             raise RuntimeError("abnormal close before any frame written")
+
+    with pytest.raises(RuntimeError, match="abnormal close before any frame written"):
+        await _abnormal_close_before_any_frame()
 
     assert list(r2.session_dir.glob("*.wav")) == []
     assert "utt-abnormal-empty" not in r2.utterances.snapshot()
