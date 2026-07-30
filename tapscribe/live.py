@@ -873,8 +873,8 @@ class WhisperLiveKitChannel(LiveChannelBase):
     `whisperlivekit-server` integration.
 
     `info` is a dict mirrored into `/api/state` so the dashboard can
-    render the live-channel panel. `log` is a 200-entry deque of the
-    child's stdout tail. `config` holds the current LiveConfig; replaced
+    render the live-channel panel. `log` is a `LOG_TAIL_LINES`-entry deque
+    of the child's stdout tail. `config` holds the current LiveConfig; replaced
     wholesale via `start(model=..., language=...)`.
     """
 
@@ -1147,7 +1147,7 @@ class WhisperLiveKitChannel(LiveChannelBase):
         second per stream, has no timestamp, and drowns the console.
 
         Only WARNING/ERROR/Traceback lines are forwarded to the recorder's
-        stdout; everything else stays in the 200-line deque, exposed via
+        stdout; everything else stays in the `LOG_TAIL_LINES` deque, exposed via
         GET /api/live/log and the dashboard's log dialog. Spawn/stop
         breadcrumbs that the operator actually needs in the console are
         printed by `start()`/`stop()` directly.

@@ -135,9 +135,12 @@ class StateInputs:
     Recorder at ONE instant and hands the projection a frozen record of that
     instant. That is what makes the thread hop safe to reason about — nothing the
     worker touches is still being mutated — and what lets a CLI, a queue worker
-    or a test build a tick by hand. It is also why a transposition is no longer
-    a hazard worth a keyword-only signature: every input is a named field, so
-    swapping two same-typed ones is unwritable rather than merely lint-clean.
+    or a test build a tick by hand. `build_state_blob` no longer needs a
+    keyword-only signature to keep a transposition unwritable, but `kw_only=True`
+    below is what moved that guarantee here rather than dropping it: four fields
+    are `list[dict[str, Any]]` (`active`, `sessions_list`, `occs`, `live_feed`),
+    so a positional constructor would let two of them swap and type-check. Being
+    a named field is not the guarantee; being unconstructible positionally is.
 
     `live_identities` is a PROPERTY, not a field. It must be the identity set of
     the open taps; while it was a thirteenth parameter that was a docstring

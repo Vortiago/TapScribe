@@ -91,10 +91,10 @@ async def api_live_stop(recorder: Recorder = Depends(get_recorder)):
 
 @router.get("/api/live/log")
 async def api_live_log(recorder: Recorder = Depends(get_recorder)):
-    """Full WhisperLiveKit log tail (up to 200 lines) — the source for
-    the dashboard's log dialog. /api/state only sends a small preview
-    so the once-per-second poll stays cheap; this endpoint is requested
-    on demand when the operator opens the dialog."""
+    """Full WhisperLiveKit log tail (up to `live.LOG_TAIL_LINES` lines) — the
+    source for the dashboard's log dialog. /api/state only sends a
+    `live.LOG_PREVIEW_LINES` preview so the poll stays cheap; this endpoint is
+    requested on demand when the operator opens the dialog."""
     return {
         "log": list(recorder.live.log),
         "state": recorder.live.info.get("state", ""),
