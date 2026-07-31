@@ -437,7 +437,10 @@
       </div>
       <div class="panel__body">
         <div class="field">
-          <label>model idle TTL <span class="dim">— seconds before idle model eviction (−1 = never)</span></label>
+          <!-- The sentinel is spelled with an ASCII hyphen on purpose: a number
+               input rejects U+2212 MINUS, so an operator copying the hint would
+               save an EMPTY value (= clear the override) with a green "saved". -->
+          <label>model idle TTL <span class="dim">— seconds before idle model eviction (-1 = never)</span></label>
           <div class="field__row">
             <input class="inp-txt mono" type="number" data-slot="setIdleTtlS" min="-1" max="86400" step="1" aria-label="model idle TTL">
             <button class="act act--sm" type="button" data-slot="setIdleTtlSSave">save</button>

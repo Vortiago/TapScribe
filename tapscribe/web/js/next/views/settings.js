@@ -196,31 +196,75 @@ export function build(ctx) {
     onSuccess: () => afterMutate(),
   });
 
+  // ---- Advanced card (#210) --------------------------------------------------
+  // The operator knobs that used to be env-only. Each row is the same shape —
+  // number input + save + status, saving through PUT /api/config/{key} and
+  // seeding from the resolved value on /api/state — so one row record drives the
+  // wiring and the seeding below instead of four hand-written regions. The
+  // pick() names stay literal (check-slots resolves the .html ↔ .js seam from
+  // exactly those literals).
+  /**
+   * @typedef {"idle_ttl_s" | "parakeet_chunk_s" | "parakeet_overlap_s"
+   *   | "summarize_timeout_s" | "summarize_gguf_ctx"} KnobField
+   */
+  /**
+   * @param {string} key the /api/config/{key} this row saves through
+   * @param {KnobField} field the /api/state field carrying its value in force
+   * @param {HTMLInputElement} input
+   * @param {HTMLButtonElement} btn
+   * @param {HTMLElement} status
+   */
+  const knobRow = (key, field, input, btn, status) => {
+    // Two holds, both needed. The ROW (input + its save button) covers focus, so
+    // a repaint can't land between the click and the PUT reading `input.value`.
+    // `baseline` — the last value the poll or a successful save put in the box —
+    // covers the rest: it tells "untouched since we wrote it" from "typed but
+    // not saved yet", so filling two knobs and saving one can't have the poll
+    // wipe the other one's pending edit (config-card.js keeps the same baseline
+    // for its unsaved badge).
+    const knob = { field, input, row: input.closest(".field") || input, baseline: "" };
+    wireConfigSave({
+      key,
+      btn,
+      textarea: input,
+      status,
+      onSuccess: (v) => {
+        knob.baseline = v;
+        afterMutate();
+      },
+    });
+    return knob;
+  };
+  const knobs = [
+    knobRow("model-idle-ttl", "idle_ttl_s",
+      /** @type {HTMLInputElement} */ (pick(frag, "setIdleTtlS")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setIdleTtlSSave")),
+      pick(frag, "setIdleTtlSStatus")),
+    knobRow("parakeet-chunk-s", "parakeet_chunk_s",
+      /** @type {HTMLInputElement} */ (pick(frag, "setChunkS")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setChunkSSave")),
+      pick(frag, "setChunkSStatus")),
+    knobRow("parakeet-overlap-s", "parakeet_overlap_s",
+      /** @type {HTMLInputElement} */ (pick(frag, "setOverlapS")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setOverlapSSave")),
+      pick(frag, "setOverlapSStatus")),
+    knobRow("summarize-timeout-s", "summarize_timeout_s",
+      /** @type {HTMLInputElement} */ (pick(frag, "setSummarizeTimeoutS")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setSummarizeTimeoutSSave")),
+      pick(frag, "setSummarizeTimeoutSStatus")),
+    knobRow("summarize-gguf-ctx", "summarize_gguf_ctx",
+      /** @type {HTMLInputElement} */ (pick(frag, "setGgufCtx")),
+      /** @type {HTMLButtonElement} */ (pick(frag, "setGgufCtxSave")),
+      pick(frag, "setGgufCtxStatus")),
+  ];
+  const specialistsEl = pick(frag, "setSpecialists");
+
   // ---- Summarizer-default card (#84) ----------------------------------------
   // Built ONCE — every control is interactive, so there is no renderRegion and
   // no sig to drift (the Summary view's discipline). Values seed once from the
   // first poll carrying `summarizer_default`; the per-tick update only writes
   // the override-count hint in place. One Save persists the whole structured
   // object via PUT /api/summarize/config.
-
-  // Advanced card controls
-  const idleTtlInput = /** @type {HTMLInputElement} */ (pick(frag, "setIdleTtlS"));
-  const idleTtlSave = /** @type {HTMLButtonElement} */ (pick(frag, "setIdleTtlSSave"));
-  const idleTtlStatus = pick(frag, "setIdleTtlSStatus");
-  const chunkSInput = /** @type {HTMLInputElement} */ (pick(frag, "setChunkS"));
-  const chunkSSave = /** @type {HTMLButtonElement} */ (pick(frag, "setChunkSSave"));
-  const chunkSStatus = pick(frag, "setChunkSStatus");
-  const overlapSInput = /** @type {HTMLInputElement} */ (pick(frag, "setOverlapS"));
-  const overlapSSave = /** @type {HTMLButtonElement} */ (pick(frag, "setOverlapSSave"));
-  const overlapSStatus = pick(frag, "setOverlapSStatus");
-  const timeoutInput = /** @type {HTMLInputElement} */ (pick(frag, "setSummarizeTimeoutS"));
-  const timeoutSave = /** @type {HTMLButtonElement} */ (pick(frag, "setSummarizeTimeoutSSave"));
-  const timeoutStatus = pick(frag, "setSummarizeTimeoutSStatus");
-  const ggufCtxInput = /** @type {HTMLInputElement} */ (pick(frag, "setGgufCtx"));
-  const ggufCtxSave = /** @type {HTMLButtonElement} */ (pick(frag, "setGgufCtxSave"));
-  const ggufCtxStatus = pick(frag, "setGgufCtxStatus");
-  const specialistsEl = pick(frag, "setSpecialists");
-
   const sdSourceWrap = pick(frag, "sdSource");
   const sdButtons = /** @type {NodeListOf<HTMLButtonElement>} */ (
     sdSourceWrap.querySelectorAll("[data-sd-src]")
@@ -242,14 +286,8 @@ export function build(ctx) {
   const sdOverrides = pick(frag, "sdOverrides");
 
   /** One-shot: seed the controls from the first poll carrying the saved
-    * default, then never touch them again (interaction hold). */
+   * default, then never touch them again (interaction hold). */
   let sdSeeded = false;
-  let idleTtlSeeded = false;
-  let chunkSeeded = false;
-  let overlapSeeded = false;
-  let timeoutSeeded = false;
-  let ggufSeeded = false;
-  let specialistsSeeded = false;
 
   // Source segctl + model/preset/max-tokens wiring is the shared
   // summarizer-controls component (the Summary view uses the same one).
@@ -288,13 +326,6 @@ export function build(ctx) {
     put: () => putJson("/api/summarize/config", { ...ctl.values(), prompt: sdPrompt.value }),
     onSuccess: () => afterMutate(),
   });
-
-  // Advanced card save wiring
-  wireConfigSave({ key: "model-idle-ttl", btn: idleTtlSave, textarea: idleTtlInput, status: idleTtlStatus, onSuccess: () => afterMutate() });
-  wireConfigSave({ key: "parakeet-chunk-s", btn: chunkSSave, textarea: chunkSInput, status: chunkSStatus, onSuccess: () => afterMutate() });
-  wireConfigSave({ key: "parakeet-overlap-s", btn: overlapSSave, textarea: overlapSInput, status: overlapSStatus, onSuccess: () => afterMutate() });
-  wireConfigSave({ key: "summarize-timeout-s", btn: timeoutSave, textarea: timeoutInput, status: timeoutStatus, onSuccess: () => afterMutate() });
-  wireConfigSave({ key: "summarize-gguf-ctx", btn: ggufCtxSave, textarea: ggufCtxInput, status: ggufCtxStatus, onSuccess: () => afterMutate() });
 
   /** Does this live model declare an initial_prompt input? Falls back to the
    * registry-wide flag when the model isn't in the live catalog. */
@@ -430,19 +461,24 @@ export function build(ctx) {
     const n = j.default_override_counts?.summarizer || 0;
     sdOverrides.textContent = n ? `· ${n} session${n === 1 ? "" : "s"} override this` : "";
 
-    // Seed the Advanced card controls ONCE from the first poll
-    if (!idleTtlSeeded && j.idle_ttl_s !== undefined) { idleTtlSeeded = true; idleTtlInput.value = String(j.idle_ttl_s); }
-    if (!chunkSeeded && j.parakeet_chunk_s !== undefined) { chunkSeeded = true; chunkSInput.value = String(j.parakeet_chunk_s); }
-    if (!overlapSeeded && j.parakeet_overlap_s !== undefined) { overlapSeeded = true; overlapSInput.value = String(j.parakeet_overlap_s); }
-    if (!timeoutSeeded && j.summarize_timeout_s !== undefined) { timeoutSeeded = true; timeoutInput.value = String(j.summarize_timeout_s); }
-    if (!ggufSeeded && j.summarize_gguf_ctx !== undefined) { ggufSeeded = true; ggufCtxInput.value = String(j.summarize_gguf_ctx); }
-    if (!specialistsSeeded && j.specialists) {
-      specialistsSeeded = true;
-      const entries = Object.entries(j.specialists);
-      specialistsEl.textContent = entries.length
-        ? entries.map(([lang, model]) => `${lang}: ${model}`).join(", ")
-        : "(none)";
+    // Advanced knobs: render the value IN FORCE on every poll, behind the usual
+    // interaction hold (skip the row the operator is in). Not a one-shot seed —
+    // /api/state carries the RESOLVED value, so a save the server accepted but
+    // did not honour verbatim (the joint chunk/overlap clamp reduces an overlap
+    // the moment a small chunk lands) must correct the field, or the card shows
+    // a number the recorder isn't using and the operator's next save persists it.
+    for (const knob of knobs) {
+      const { field, input, row } = knob;
+      if (j[field] === undefined || row.contains(document.activeElement)) continue;
+      if (input.value !== knob.baseline) continue; // typed, not saved — the operator's
+      const next = String(j[field]);
+      if (input.value !== next) input.value = next;
+      knob.baseline = next;
     }
+    const specialists = Object.entries(j.specialists || {});
+    specialistsEl.textContent = specialists.length
+      ? specialists.map(([lang, model]) => `${lang}: ${model}`).join(", ")
+      : "(none)";
   };
 
   return { node: frag, update, rebuildEngine: () => rebuildEngine(engineHost) };

@@ -43,11 +43,13 @@ it be VISIBLE ("visibility beats editability here"), so it is surfaced read-only
 from __future__ import annotations
 
 import math
+import wave
 from pathlib import Path
 
 import pytest
 from conftest import repoint_config_files  # type: ignore[import-not-found]  # tests/ on sys.path
 
+from tapscribe import config_store
 from tapscribe.config_store import read_config, write_config
 from tapscribe.summarizers.catalog import default_gguf_ctx
 from tapscribe.summarizers.command import _default_timeout_s
@@ -417,6 +419,123 @@ def test_write_config_empty_clears_the_override(
     write_config(key, "")
     assert read_config(key) == ""
     assert resolve() == default, f"{key}: clearing the override must restore the default"
+
+
+# --------------------------------------------------------------------------------
+# The OPERATOR LOG. Falling through a bad env var must stay VISIBLE: the knobs used
+# to resolve through `env_float`/`env_int`, which print a one-line
+# "[tapscribe] ignoring …" notice for a value they reject. A resolver that returns
+# the right number silently passes every assertion above while deleting the only
+# signal an operator has that their env var is a typo.
+# --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "env", "filename", "resolve", "default", "sample", "oob"), KNOBS, ids=_KNOB_IDS
+)
+@pytest.mark.parametrize("bad_env", ["abc", "-99999999"])
+def test_invalid_env_is_reported_to_the_operator(
+    cfg: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    bad_env: str,
+    key: str,
+    env: str,
+    filename: str,
+    resolve,
+    default,
+    sample,
+    oob,
+) -> None:
+    # The notice is emitted once per distinct bad value (the resolvers run per
+    # summarize/transcribe AND behind the ~2 Hz /api/state poll), so clear the
+    # registry first — otherwise this pin would depend on test ORDER.
+    monkeypatch.setattr(config_store, "_WARNED_ENV", {})
+    _write_knob_file(cfg, filename, sample)
+    monkeypatch.setenv(env, bad_env)
+
+    assert resolve() == sample  # the value still falls through to the file
+    out = capsys.readouterr().out
+    assert env in out and "ignoring" in out, (
+        f"{key}: a set-but-invalid {env}={bad_env!r} must still be reported — it is an "
+        "operator typo, and the resolvers that replaced env_float inherited its notice"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "env", "filename", "resolve", "default", "sample", "oob"), KNOBS, ids=_KNOB_IDS
+)
+def test_a_valid_env_is_not_reported(
+    cfg: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    key: str,
+    env: str,
+    filename: str,
+    resolve,
+    default,
+    sample,
+    oob,
+) -> None:
+    # The mirror: the notice must mark a MISTAKE, not narrate every resolve — a
+    # per-poll line for a perfectly good env var would bury the one that matters.
+    monkeypatch.setattr(config_store, "_WARNED_ENV", {})
+    monkeypatch.setenv(env, str(sample))
+    assert resolve() == sample
+    assert "ignoring" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------------
+# The knob must reach a WARM adapter. `load_transcriber` caches a loaded model and
+# only evicts it at idle-TTL 0, so an adapter constructed before the operator's
+# save can outlive it — freezing chunk/overlap at construction makes the knob
+# use-time in name only, while /api/state already reports the new value.
+# --------------------------------------------------------------------------------
+
+
+class _StubChunked(ChunkedTranscriber):
+    """The base skeleton with the model call stubbed out (what both Parakeet
+    adapters are, minus the weights)."""
+
+    name = "stub"
+    backend = "cpu"
+    device = "CPU"
+
+    def _transcribe_window(self, chunk_pcm, window):  # noqa: ARG002
+        return ()
+
+
+def _silent_wav(path: Path, *, seconds: float = 0.2) -> Path:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\x00\x00" * int(16000 * seconds))
+    return path
+
+
+def test_a_cached_adapter_rereads_the_knobs_on_its_next_transcribe(cfg: Path, tmp_path: Path) -> None:
+    t = _StubChunked(model_name="parakeet-tdt-0.6b-v2")
+    assert t.chunk_duration_s == 120.0
+
+    _write_knob_file(cfg, "parakeet-chunk-s.txt", 30)
+    _write_knob_file(cfg, "parakeet-overlap-s.txt", 5)
+    result = t.transcribe(_silent_wav(tmp_path / "a.wav"))
+
+    assert (t.chunk_duration_s, t.overlap_duration_s) == (30.0, 5.0), (
+        "a dashboard save must reach the adapter the model cache is holding warm, "
+        "not just the next freshly-constructed one"
+    )
+    assert result.quality_settings["chunk_duration_s"] == 30.0
+
+
+def test_an_explicit_constructor_arg_survives_the_reread(cfg: Path, tmp_path: Path) -> None:
+    # The re-read must not promote the operator knob over a caller's explicit
+    # override — that top rung is pinned above and outranks BOTH value sources.
+    t = _StubChunked(model_name="parakeet-tdt-0.6b-v2", chunk_duration_s=45.0, overlap_duration_s=5.0)
+    _write_knob_file(cfg, "parakeet-chunk-s.txt", 30)
+    t.transcribe(_silent_wav(tmp_path / "b.wav"))
+    assert (t.chunk_duration_s, t.overlap_duration_s) == (45.0, 5.0)
 
 
 def test_idle_ttl_key_is_untouched(cfg: Path) -> None:

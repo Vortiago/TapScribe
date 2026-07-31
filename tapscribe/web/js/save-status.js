@@ -155,7 +155,15 @@ export function wireConfigSave({ key, btn, textarea, status, onSuccess }) {
   wireSave({
     btn,
     status,
-    put: () => putJson(`/api/config/${key}`, { content: textarea.value }),
+    put: () => {
+      // An <input type="number"> hands back "" for text it cannot parse ("12o",
+      // or the U+2212 minus a hint might tempt someone to paste) — and "" is the
+      // DELIBERATE clear that drops a knob back to its default. `validity.badInput`
+      // is the only thing that tells the two apart, so a typo fails loudly here
+      // instead of silently resetting the knob under a green "saved".
+      if (textarea.validity?.badInput) throw new Error(`${textarea.value || "that"} is not a number`);
+      return putJson(`/api/config/${key}`, { content: textarea.value });
+    },
     onSuccess: () => onSuccess?.(textarea.value),
   });
 }

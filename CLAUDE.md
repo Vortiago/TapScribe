@@ -309,14 +309,18 @@ operator's signal to convert the file, not a cue to silently
 re-introduce ffmpeg. Reintroducing a `model.transcribe(str(path))`
 fallback would defeat the whole point and is rejected at review.
 
-The chunk-size knobs are env-tunable (`TAPSCRIBE_PARAKEET_CHUNK_S`,
-`TAPSCRIBE_PARAKEET_OVERLAP_S` — shared by both Parakeet adapters); env
-names are module constants in `transcribers/_chunked.py` (`ENV_CHUNK_S`,
-`ENV_OVERLAP_S`) so the dashboard wiring — when it lands — has one
-source of truth. Every operator-tunable setting
-belongs in the dashboard eventually; see the strip-silence knobs in
-`web/components/next/recordings.html` for the pattern when adding
-these.
+The chunk-size knobs are dashboard-tunable (Settings → Advanced), resolved
+`env > config file > default` at use-time: `TAPSCRIBE_PARAKEET_CHUNK_S` /
+`TAPSCRIBE_PARAKEET_OVERLAP_S` (module constants `ENV_CHUNK_S` /
+`ENV_OVERLAP_S` in `transcribers/_chunked.py`, shared by both Parakeet
+adapters) over `config/parakeet-{chunk,overlap}-s.txt`. Every
+operator-tunable setting belongs in the dashboard; the pattern for a new
+one is a `_ConfigSpec` entry in `config_store.CONFIG_KEYS` (write-time
+bounds check), a `config_store.resolve_knob` resolver at the use site, the
+resolved value on `/api/state`, and a field in the Advanced card
+(`web/components/next/views.html` + `next/views/settings.js`). Per-session
+ACTIONS — the strip-silence knobs in `web/components/next/recordings.html`
+— are a different shape: a POST, not a persisted knob.
 
 If a new runtime dep with the same shape (system binary, or optional
 Python package gated by a lazy import) lands, add it as a `Step` in

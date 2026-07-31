@@ -123,6 +123,47 @@ async def test_saving_a_knob_in_settings_survives_a_reload(
             await browser.close()
 
 
+async def test_a_clamped_knob_repaints_to_the_value_actually_in_force(
+    running_recorder: RunningRecorder,
+):
+    """A knob field shows the value IN FORCE, not the one that was typed.
+
+    Saving a 10 s chunk makes the default 15 s overlap illegal (`chunk_windows`
+    needs overlap <= 0.9 x chunk), so every transcribe silently runs 9 s — the
+    clamp's notice goes to the server log, nowhere the operator looks. The
+    overlap field must therefore repaint itself to 9 on the next poll. Under a
+    one-shot seed it keeps advertising 15, and the operator's next save persists
+    a number the recorder never uses."""
+    async with playwright_session() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(viewport={"width": 1400, "height": 900})
+            page = await context.new_page()
+            await _open_settings(page, running_recorder.base_url)
+
+            await page.wait_for_function(
+                """() => {
+                  const f = document.querySelector('#viewRoot [data-slot="setOverlapS"]');
+                  return f && f.value === "15";
+                }""",
+                timeout=15000,
+                polling=50,
+            )
+            await page.locator('#viewRoot [data-slot="setChunkS"]').fill("10")
+            await page.click('#viewRoot [data-slot="setChunkSSave"]')
+
+            await page.wait_for_function(
+                """() => {
+                  const f = document.querySelector('#viewRoot [data-slot="setOverlapS"]');
+                  return f && f.value === "9";
+                }""",
+                timeout=15000,
+                polling=50,
+            )
+        finally:
+            await browser.close()
+
+
 async def test_settings_shows_the_specialist_map_read_only(
     running_recorder: RunningRecorder,
 ):
@@ -140,7 +181,13 @@ async def test_settings_shows_the_specialist_map_read_only(
             line = page.locator('#viewRoot [data-slot="setSpecialists"]')
             assert await line.count() > 0, "Settings must show the specialist language→model map"
             text = (await line.inner_text()).strip()
-            assert text, "the specialist map must render its content, not an empty node"
+            # The rendered SHAPE, not merely non-empty text: the template ships a
+            # "…" placeholder, so a seed that never fires satisfies a truthiness
+            # check while showing the operator nothing. Either `lang: model`
+            # pairs or the explicit "(none)".
+            assert text == "(none)" or all(": " in pair for pair in text.split(", ")), (
+                f"the specialist map must render as `lang: model` pairs (or `(none)`), got {text!r}"
+            )
             assert await page.locator('#viewRoot [data-slot="setSpecialistsSave"]').count() == 0, (
                 "the specialist map is read-only in #210 — it must have no save control"
             )

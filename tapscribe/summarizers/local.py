@@ -71,7 +71,7 @@ def _gguf_generation_failed_message(n_ctx: int, max_tokens: int, why: object) ->
     `ValueError: Requested tokens (N) exceed context window of <n_ctx>` from
     INSIDE generation — outside `_build_generate_fn`'s try, which wraps only
     the load — so it used to surface as a bare 500. The window in force is
-    `TAPSCRIBE_SUMMARIZE_GGUF_CTX` (8192 by default), and `max_tokens` is
+    `catalog.default_gguf_ctx()` (8192 by default), and `max_tokens` is
     carved out of it for the OUTPUT, leaving the rest for the transcript —
     roughly 25-30 minutes of meeting at the defaults. Note the top of
     `MAX_TOKENS_BOUNDS` (8192) equals the default window, so a maxed-out
@@ -81,9 +81,9 @@ def _gguf_generation_failed_message(n_ctx: int, max_tokens: int, why: object) ->
     return (
         f"the local summarizer couldn't generate a summary ({why}). This is almost always the "
         f"transcript being too long for the {n_ctx}-token window: the output cap of {max_tokens} "
-        f"tokens leaves ~{room} tokens for the transcript. Raise "
-        f"{catalog.ENV_GGUF_CTX}=<tokens> (bounded by host RAM) — or lower "
-        f"{catalog.ENV_MAX_TOKENS} — and summarize again."
+        f"tokens leaves ~{room} tokens for the transcript. Raise the summarize context "
+        f"window in Settings → Advanced (or {catalog.ENV_GGUF_CTX}=<tokens>, bounded by "
+        f"host RAM) — or lower {catalog.ENV_MAX_TOKENS} — and summarize again."
     )
 
 

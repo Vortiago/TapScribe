@@ -19,6 +19,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import config
 
@@ -65,6 +66,52 @@ def file_stat_sig(path: Path, *, include_path: bool = False) -> tuple | None:
     if include_path:
         return (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
     return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+# ---------------------------------------------------------------------------
+# Use-time knob resolution — env var > dashboard config file > default
+# ---------------------------------------------------------------------------
+
+# Last set-but-invalid env value complained about, per knob name. The notice
+# below fires once per distinct bad value instead of on every resolve: these
+# resolvers run per transcribe/summarize AND behind the ~2 Hz /api/state poll,
+# where an unconditional print would bury the log it is meant to be visible in.
+_WARNED_ENV: dict[str, str] = {}
+
+
+def resolve_knob(env_name: str, file_path: Path, parse: Callable[[str], Any], default: Any) -> Any:
+    """Resolve one operator-tunable knob: a set-AND-VALID env var wins, else the
+    dashboard-written config file, else `default`.
+
+    "set AND valid" is the load-bearing half. A set-but-INVALID env var — empty
+    (a systemd `EnvironmentFile` leaving `TAPSCRIBE_…=`), non-numeric, or out of
+    bounds — is not a real override and falls through to the file exactly like
+    an unset one; keying the env branch on mere presence would silently discard
+    what the operator chose in the dashboard. It is still an operator MISTAKE,
+    so it prints the same one-line `[tapscribe] ignoring …` notice `env_float`
+    emits — the resolvers replaced that helper, and losing its notice would make
+    a typo'd env var invisible.
+
+    The file is read FRESH (uncached) at use-time: a dashboard edit must apply
+    without a restart, and the stat-signature cache behind `read_config` would
+    miss a same-size in-place rewrite ("300" -> "120") landing inside one
+    coarse-mtime tick, stranding the old value at the consumer.
+    """
+    raw_env = os.environ.get(env_name)
+    if raw_env:
+        v = parse(raw_env)
+        if v is not None:
+            _WARNED_ENV.pop(env_name, None)
+            return v
+        if _WARNED_ENV.get(env_name) != raw_env:
+            _WARNED_ENV[env_name] = raw_env
+            print(
+                f"[tapscribe] ignoring {env_name}={raw_env!r} (unparseable or out of bounds); "
+                "using the config file / default",
+                flush=True,
+            )
+    v = parse(read_text_file(file_path))
+    return v if v is not None else default
 
 
 # ---------------------------------------------------------------------------
@@ -179,36 +226,45 @@ def _check_idle_ttl(content: str) -> None:
         raise ValueError(f"idle TTL must be a finite number between {lo} and {hi}, got {content!r}")
 
 
-def _check_parakeet_chunk(content: str) -> None:
-    if not content:
-        return
-    if config._parse_parakeet_chunk(content) is None:
-        lo, hi = config._PARAKEET_CHUNK_S_BOUNDS
-        raise ValueError(f"parakeet chunk must be a finite number between {lo} and {hi}, got {content!r}")
+def _bounded_check(
+    parse: Callable[[str], Any], bounds: tuple[float, float], noun: str, kind: str
+) -> Callable[[str], None]:
+    """Build the WRITE-time check for one bounded numeric knob (#210's four):
+    empty clears the override, anything the knob's own READ-time parser rejects
+    raises, so write acceptance and use-time resolution stay one rule. One
+    factory instead of a validator per knob; `_check_idle_ttl` above predates it
+    and keeps its own body — #347's knob is out of this slice.
+
+    `parse` and `bounds` bind HERE, at build time — unlike `_ConfigSpec.attr`,
+    which is a NAME resolved per call because tests repoint the config paths.
+    These two are module constants in the leaf config module that nothing
+    repoints, so early binding costs no testability."""
+
+    def check(content: str) -> None:
+        if not content:
+            return
+        if parse(content) is None:
+            lo, hi = bounds
+            raise ValueError(f"{noun} must be {kind} between {lo} and {hi}, got {content!r}")
+
+    return check
 
 
-def _check_parakeet_overlap(content: str) -> None:
-    if not content:
-        return
-    if config._parse_parakeet_overlap(content) is None:
-        lo, hi = config._PARAKEET_OVERLAP_S_BOUNDS
-        raise ValueError(f"parakeet overlap must be a finite number between {lo} and {hi}, got {content!r}")
-
-
-def _check_summarize_timeout(content: str) -> None:
-    if not content:
-        return
-    if config._parse_summarize_timeout(content) is None:
-        lo, hi = config._SUMMARIZE_TIMEOUT_S_BOUNDS
-        raise ValueError(f"summarize timeout must be a finite number between {lo} and {hi}, got {content!r}")
-
-
-def _check_summarize_gguf_ctx(content: str) -> None:
-    if not content:
-        return
-    if config._parse_summarize_gguf_ctx(content) is None:
-        lo, hi = config._SUMMARIZE_GGUF_CTX_BOUNDS
-        raise ValueError(f"summarize gguf ctx must be an integer between {lo} and {hi}, got {content!r}")
+_check_parakeet_chunk = _bounded_check(
+    config._parse_parakeet_chunk, config._PARAKEET_CHUNK_S_BOUNDS, "parakeet chunk", "a finite number"
+)
+_check_parakeet_overlap = _bounded_check(
+    config._parse_parakeet_overlap, config._PARAKEET_OVERLAP_S_BOUNDS, "parakeet overlap", "a finite number"
+)
+_check_summarize_timeout = _bounded_check(
+    config._parse_summarize_timeout,
+    config._SUMMARIZE_TIMEOUT_S_BOUNDS,
+    "summarize timeout",
+    "a finite number",
+)
+_check_summarize_gguf_ctx = _bounded_check(
+    config._parse_summarize_gguf_ctx, config._SUMMARIZE_GGUF_CTX_BOUNDS, "summarize gguf ctx", "an integer"
+)
 
 
 # The editable config files behind read_config / write_config, keyed by the

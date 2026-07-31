@@ -24,7 +24,6 @@ the transcript to a file.
 
 from __future__ import annotations
 
-import os
 import shlex
 import subprocess
 import tempfile
@@ -42,24 +41,24 @@ ENV_TIMEOUT_S = "TAPSCRIBE_SUMMARIZE_TIMEOUT_S"
 _DEFAULT_TIMEOUT_S = 120.0
 
 
-def _resolve_timeout_s() -> float:
-    """Current per-summarize subprocess timeout (seconds), resolved env > file > default."""
-    raw_env = os.environ.get(ENV_TIMEOUT_S)
-    if raw_env:
-        v = config._parse_summarize_timeout(raw_env)
-        if v is not None:
-            return v
-    v = config._parse_summarize_timeout(_config_store.read_text_file(config.SUMMARIZE_TIMEOUT_S_FILE))
-    return v if v is not None else _DEFAULT_TIMEOUT_S
+def _default_timeout_s() -> float:
+    """Current per-summarize subprocess timeout (seconds), resolved
+    env > config file > default and re-read per summarize, so an operator can
+    retune it from the dashboard without a restart."""
+    return _config_store.resolve_knob(
+        ENV_TIMEOUT_S,
+        config.SUMMARIZE_TIMEOUT_S_FILE,
+        config._parse_summarize_timeout,
+        _DEFAULT_TIMEOUT_S,
+    )
 
 
 def current_summarize_timeout_s() -> float:
-    """Public accessor for the resolved summarize timeout (env > file > default)."""
-    return _resolve_timeout_s()
-
-
-# Alias kept for test imports (test_operator_knobs_config.py)
-_default_timeout_s = current_summarize_timeout_s
+    """Public accessor for the resolved summarize timeout — the /api/state
+    display value. Wraps `_default_timeout_s()` so callers outside this package
+    don't reach for a private name (the `_idle_ttl_s` / `current_idle_ttl_s`
+    precedent)."""
+    return _default_timeout_s()
 
 
 def build_command_argv(command: str, prompt: str) -> list[str]:
