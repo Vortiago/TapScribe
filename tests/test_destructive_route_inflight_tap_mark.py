@@ -231,7 +231,11 @@ def test_releasing_the_mark_reopens_the_route(client, recorder_under_test):
     root = recorder_under_test.recordings_dir
     sd = seed_session(root, "detached", [_WAV])
     session_maintenance.mark_session_in_flight("detached")
-    assert client.delete("/api/sessions/detached").status_code == 409
+    # The request is hoisted out of the assert deliberately: inside one, `python -O`
+    # strips the DELETE along with the check, so the release below would act on a
+    # session this test never tried to delete (py/side-effect-in-assert).
+    refused = client.delete("/api/sessions/detached")
+    assert refused.status_code == 409
     session_maintenance.release_session_mark("detached")
 
     r = client.delete("/api/sessions/detached")
