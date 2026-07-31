@@ -2,11 +2,11 @@
 deleting a session while a tap is opening it.
 
 The canonical home. Imported by the tap hot path (``tap_fan_out``), the
-destructive-route preflight (``routes/guards``), and re-exported by
-``session_maintenance`` (its prune path and #257's leak detector resolve
-through that alias). Deliberately a leaf: imports nothing in TapScribe,
-so neither the hot path nor the preflight pulls operator-maintenance
-weight."""
+destructive-route preflight (``routes/guards``) and ``session_maintenance``'s
+prune walk; ``session_maintenance`` also re-exports these names, which is how
+#257's leak detector and the destructive-route contract reach the registry.
+Deliberately a leaf: imports nothing in TapScribe, so neither the hot path nor
+the preflight pulls operator-maintenance weight."""
 
 from __future__ import annotations
 
@@ -23,8 +23,10 @@ def mark_session_in_flight(session_name: str) -> None:
 
     Take the mark BEFORE the mkdir; one taken after it leaves that window open.
     Pair every mark with `release_session_mark` on EVERY exit path, partial-init
-    failures included: a leaked mark makes the session permanently un-prunable,
-    which is worse than the race it closes.
+    failures included: nothing but a process restart clears a leaked mark, and
+    the destructive-route preflight reads this same registry (#405), so a leak
+    leaves the session un-prunable AND makes its delete, audio-delete, absorb
+    and WAV-delete routes answer 409 forever. Worse than the race it closes.
 
     Only the fresh-record open needs it: `try_resume` appends to an existing WAV
     (never empty) and a probe tap takes no mark at all. A record-off tap takes

@@ -249,3 +249,61 @@ def test_the_leak_detector_still_watches_the_live_registry():
         "clearing session_maintenance._tap_open_sessions did not clear the live registry, "
         "so the leak detector's cleanup no longer resets state between tests"
     )
+
+
+def test_no_other_module_reaches_the_registry_through_the_alias():
+    """The alias `session_maintenance` keeps is a COMPATIBILITY surface for the two
+    contract files, not a second front door. The two graph tests above watch only
+    `tap_fan_out`, so without this rule any new consumer (an ops route, a CLI, another
+    leaf) can write `from .session_maintenance import mark_session_in_flight`, re-create
+    the backwards hot-path edge this slice deleted, and stay green.
+
+    Both discoverable spellings are checked: the from-import and `session_maintenance.
+    <name>` attribute access. `session_maintenance` itself is exempt because it IS the
+    alias, and tests are out of scope because the contract deliberately marks through it.
+    """
+    registry = _registry_module().split(".")[-1]
+    offenders: dict[str, list[str]] = {}
+    for path in sorted(_PKG.rglob("*.py")):
+        if path.name == "session_maintenance.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        # Both checks below need the literal name in the text, so a file without it
+        # can never be an offender — skip the parse instead of paying it 92 times.
+        if "session_maintenance" not in source:
+            continue
+        hits = {n for n in _MARK_NAMES if f"session_maintenance.{n}" in source}
+        for node in ast.walk(ast.parse(source, filename=str(path))):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.split(".")[-1] == "session_maintenance":
+                    hits |= _MARK_NAMES & {a.name for a in node.names}
+        if hits:
+            offenders[str(path.relative_to(_REPO))] = sorted(hits)
+    assert not offenders, (
+        f"`{registry}` is the in-flight registry's canonical home; these modules reach it "
+        f"through session_maintenance's compatibility alias instead: {offenders}"
+    )
+
+
+def test_the_module_map_names_the_registry_home():
+    """CONTEXT.md is this repo's domain glossary (CLAUDE.md points every contributor
+    at it) and nothing else in the suite reads it, so a relocation can leave the map
+    naming the old owner with the whole gate green. A map that still credits
+    `session_maintenance` sends the next consumer straight at the alias the test above
+    forbids, which is how the deleted edge comes back.
+
+    Pinned as "the bullet that enumerates the mark functions must name their module",
+    not as a fixed sentence, so the prose stays free to change.
+    """
+    registry = _registry_module().split(".")[-1]
+    doc = (_REPO / "CONTEXT.md").read_text(encoding="utf-8")
+    assert f"`{registry}`" in doc, (
+        f"CONTEXT.md never names `{registry}`, the in-flight tap registry's canonical home"
+    )
+    bullets = [b for b in doc.split("\n- ") if "mark_session_in_flight" in b]
+    assert bullets, "CONTEXT.md's module map no longer enumerates the in-flight mark functions"
+    for bullet in bullets:
+        assert f"`{registry}`" in bullet, (
+            "a CONTEXT.md module-map entry enumerates the in-flight mark functions without naming "
+            f"`{registry}`, so the glossary still credits the wrong owner:\n{bullet.strip()[:300]}"
+        )

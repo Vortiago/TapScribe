@@ -240,6 +240,27 @@ def test_releasing_the_mark_reopens_the_route(client, recorder_under_test):
     assert not sd.exists()
 
 
+def test_two_marks_and_one_release_still_refuse(client, recorder_under_test):
+    """Refcount DEPTH, pinned through the route rather than at the registry.
+    `test_releasing_the_mark_reopens_the_route` above uses one mark and one
+    release, so a registry that popped the key on the first release (the exact
+    bug `release_session_mark`'s docstring warns about) passes it. With two
+    concurrent taps into one session, the first `_close` would then strand the
+    second tap's mark and hand the route a 200 while that tap is still opening.
+    """
+    root = recorder_under_test.recordings_dir
+    sd = seed_session(root, "detached", [_WAV])
+    session_maintenance.mark_session_in_flight("detached")
+    session_maintenance.mark_session_in_flight("detached")
+    session_maintenance.release_session_mark("detached")
+
+    r = client.delete("/api/sessions/detached")
+
+    assert r.status_code == 409
+    assert sd.is_dir()
+    assert (sd / _WAV).is_file()
+
+
 def test_the_existing_active_stream_branch_still_refuses(client, recorder_under_test):
     """Regression rail: the mark is an ADDITIONAL signal. A tap past the WAV open
     has an ActiveStream and (after `_close`) may hold no mark, so the stream

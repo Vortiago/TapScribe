@@ -5,8 +5,16 @@ delete, session-audio delete, absorb, WAV delete. It stays in the HTTP layer
 rather than moving into `session_maintenance` because it needs the live
 Recorder (jobs + streams) and that module is deliberately recorder-free (its
 bulk reclaim takes a `busy_check` callback instead). The in-flight-tap guard
-consults both the Recorder's ActiveStreams (fully-open taps) and the tap-open
-registry in `tap_registry` (taps in the mkdir-to-WAV-open window).
+consults two signals: the Recorder's ActiveStreams (a tap that has registered
+its stream row) and the in-flight tap registry in `tap_registry` (a mark taken
+before the session mkdir and held until the tap closes, so it is the ONLY
+signal from that mkdir until `streams.register`).
+
+The registry check NARROWS the delete-vs-tap race; it does not close it. These
+routes finish in `await asyncio.to_thread(shutil.rmtree, ...)`, so a tap can
+take its mark one instruction after the guard read and still lose its audio,
+exactly as `prune_empty_sessions` documents for its own check. Real mutual
+exclusion is a separate decision, tracked in #408.
 """
 
 from __future__ import annotations
@@ -29,8 +37,9 @@ async def refuse_current_or_busy(
     since the live session's directory may not be materialised on disk yet
     (rotate_session creates it lazily) — then refuse if any of `sessions`
     has a transcribe/strip job in flight — then refuse if `current` has a
-    live tap writing to it (ActiveStreams) or has an in-flight mark (tap in
-    the mkdir-to-WAV-open window, `tap_registry`).
+    live tap writing to it (ActiveStreams) or has an in-flight mark (a tap
+    that took its mark before the session mkdir and has not closed yet,
+    `tap_registry`).
 
     `current` names which of `sessions` must not be the live session —
     required, not derived, so a multi-session caller (absorb) can't
@@ -41,7 +50,7 @@ async def refuse_current_or_busy(
     never unsafe — only a tap on the session actually being emptied/deleted
     (`current`) is. `action` fills the current-session message's verb
     phrase ("delete", "absorb", …); `hint` appends extra guidance (absorb's
-    rotate-then-absorb tip). The busy-job and active-tap branches both raise
+    rotate-then-absorb tip). The busy-job branch and both tap branches raise
     `SessionBusy` — the same domain error `JobTracker.run` raises, mapped to
     409 by `DOMAIN_ERROR_STATUS` — so "session busy" has one canonical
     exception app-wide; only the current-session branch raises

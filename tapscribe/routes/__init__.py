@@ -25,7 +25,7 @@ Support modules (never a route between them, so a router imports only these):
   deps             get_recorder, the one shared FastAPI dependency
   body             read a JSON body, parse one field of it
   errors           domain error to HTTP status, registered on the app
-  guards           the destructive-route preflight (current / busy / live tap)
+  guards           the destructive-route preflight (current / busy / live tap / mark)
 
 Grouping follows the DOMAIN CONCERN, not the URL prefix (ADR-0018), so a helper
 that two routes must share stays module-private: `strip` owns four routes across

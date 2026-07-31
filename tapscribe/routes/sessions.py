@@ -93,8 +93,8 @@ async def api_session_audio_delete(session: str, recorder: Recorder = Depends(ge
     """Delete ALL of a session's audio (original WAVs + stripped/ + per-WAV
     transcript-cache sidecars) to reclaim disk. KEEPS the merged
     session-transcript + session-meta. Refuses the CURRENT session, any
-    session with a transcribe/strip job in flight, or a session with a live
-    tap writing to it."""
+    session with a transcribe/strip job in flight, or a session with a tap
+    open on it (a live ActiveStream or an in-flight mark)."""
     await refuse_current_or_busy(recorder, session, current=session, action="delete audio from")
     resolve_session_dir(session)
     # Hold the session's job slot for the walk's duration: the pre-flight
@@ -135,8 +135,8 @@ async def api_bulk_reclaim_audio(req: Request, recorder: Recorder = Depends(get_
 
     Returns ``{ok, sessions, total_bytes, failed}``. Refuses
     ``older_than_days <= 0`` (400). The current session, any session with a
-    transcribe/strip job in flight, and any session with a live tap are all
-    excluded, so live/busy audio is never touched.
+    transcribe/strip job in flight, and any session with a live tap writing to
+    it (an ActiveStream) are all excluded, so live/busy audio is never touched.
     """
     body = await json_body(req)
     older_than_days = body.get("older_than_days")
@@ -151,7 +151,10 @@ async def api_bulk_reclaim_audio(req: Request, recorder: Recorder = Depends(get_
     # it (recorder.streams). Deleting their WAVs mid-job would corrupt output;
     # the current session is excluded inside the fn. Mirrors the single-item
     # DELETE route's refuse_current_or_busy, but as an EXCLUSION (skip the
-    # busy ones) rather than refusing the whole bulk op.
+    # busy ones) rather than refusing the whole bulk op, and minus that
+    # preflight's in-flight-mark branch: eligibility here needs a WAV older
+    # than the cutoff, and a fresh-record open's WAV is stamped now(), so a
+    # marked session is never eligible on the mark's account.
     busy = set(recorder.jobs.snapshot())
     busy |= {s.session for s in await recorder.streams.snapshot()}
 
@@ -179,10 +182,10 @@ async def api_session_absorb(
 
     Refuses if the source is the currently-recording session — rotate
     first if you want to absorb the live one into a previous folder.
-    Refuses if either side has an in-flight transcribe / strip job, or if
-    the SOURCE has a live tap writing to it. The target may freely be the
-    live session or have a live tap open — absorb only ever moves source's
-    files in, it never rewrites target's own files.
+    Refuses if either side has an in-flight transcribe / strip job, or if the
+    SOURCE has a tap open on it (a live ActiveStream or an in-flight mark). The
+    target may freely be the live session or have a tap open: absorb only ever
+    moves source's files in, it never rewrites target's own files.
     """
     body = await json_body(req)
     source = body.get("source") or ""
@@ -213,10 +216,11 @@ async def api_session_absorb(
 @router.delete("/api/sessions/{session}")
 async def api_session_delete(session: str, recorder: Recorder = Depends(get_recorder)):
     """Recursively delete a recordings folder. Refuses the CURRENT session,
-    any session with a transcribe/strip job in flight, or a session with a
-    live tap writing to it — `rmtree`-ing the folder out from under a running
-    job thread or an open tap WS would crash it mid-write (the same guard
-    the sibling /audio and /absorb endpoints enforce)."""
+    any session with a transcribe/strip job in flight, or a session with a tap
+    open on it (a live ActiveStream or an in-flight mark). `rmtree`-ing the
+    folder out from under a running job thread or an open tap WS would crash
+    it mid-write (the same guard the sibling /audio and /absorb endpoints
+    enforce)."""
     await refuse_current_or_busy(recorder, session, current=session, action="delete")
     session_dir = resolve_session_dir(session)
     # Same hold-for-the-walk bracket as the sibling /audio delete, for the two

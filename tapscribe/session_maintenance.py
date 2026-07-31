@@ -6,13 +6,14 @@ Split out of `sessions.py` (which keeps the poll-path listing / catalog): these
 are destructive, infrequent, operator-driven filesystem operations, not part of
 the once-per-second dashboard read path. They take a `session` id, resolve it
 through `session_paths` (the path-safety seam), and read/write session meta via
-`sessions`. Pure — no FastAPI dependency. The route handlers do the
-current-session / in-flight-job pre-flight; these functions are purely the
-filesystem op.
+`sessions`. Pure — no FastAPI dependency. The route handlers do the pre-flight
+(current session, in-flight job, live tap, in-flight tap mark); these functions
+are purely the filesystem op.
 
-The in-flight tap registry (mark/release/has_open_tap) lives in `tap_registry`
-—a neutral leaf—and is re-exported here so `prune_empty_sessions` and
-#257's leak detector reach it without importing the tap or HTTP layers.
+The in-flight tap registry (mark/release/has_open_tap) lives in `tap_registry`,
+a neutral leaf. `prune_empty_sessions` calls it there; the names re-exported
+below are the compatibility surface for #257's leak detector and the
+destructive-route contract, which reach the registry through this module.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from typing import Any
 
 import tapscribe.strip_meta as strip_meta
 
-from . import config
+from . import config, tap_registry
 from .roster import read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
@@ -41,16 +42,41 @@ from .session_paths import (
 from .sessions import read_session_meta, write_session_meta
 
 # Re-exported from tap_registry (the canonical home, #405). These names must
-# resolve here so #257's leak detector and the destructive-route contract
-# keep accessing the live registry without importing the tap or HTTP layers.
+# resolve here so #257's leak detector and the destructive-route contract keep
+# reaching the live registry without importing the tap or HTTP layers. Prune
+# itself calls `tap_registry.session_has_open_tap` directly (below), so these
+# four are purely the compatibility surface, not this module's own reads.
 from .tap_registry import (
-    _tap_open_sessions,  # noqa: F401 — re-export for test contract
-    mark_session_in_flight,  # noqa: F401 — re-export for test contract
-    release_session_mark,  # noqa: F401 — re-export for test contract
+    _tap_open_sessions,
+    mark_session_in_flight,
+    release_session_mark,
     session_has_open_tap,
 )
 from .text import atomic_write_text, parse_wav_start
 from .wav_cache import sidecar_paths
+
+# Public surface: this module's own operations plus the tap_registry names it
+# re-exports. Declared explicitly so ruff AND CodeQL see the re-exports as
+# intentional exports rather than "unused imports" (the latter's autofix would
+# delete them and break the contract callers that reach them here).
+__all__ = [
+    # session_maintenance's own operations
+    "absorb_session",
+    "delete_session_audio",
+    "delete_session_wav",
+    "prune_empty_sessions",
+    "reclaim_audio_older_than",
+    "session_is_empty",
+    # domain errors
+    "AbsorbCollision",
+    "InvalidAbsorbRequest",
+    "SessionDeleteError",
+    # re-exported from tap_registry (the canonical home, #405)
+    "_tap_open_sessions",
+    "mark_session_in_flight",
+    "release_session_mark",
+    "session_has_open_tap",
+]
 
 # ---------------------------------------------------------------------------
 # Domain errors — FastAPI-free maintenance exceptions.
@@ -138,7 +164,11 @@ def prune_empty_sessions(current_session: str) -> dict[str, Any]:
     pruned: list[str] = []
     failed: list[dict[str, str]] = []
     for sd in _iter_candidate_session_dirs(current_session):
-        if session_has_open_tap(sd.name):
+        # Through `tap_registry`, not this module's re-exported alias: the
+        # destructive-route preflight holds its own binding, so reading the
+        # alias here would let one monkeypatch change prune's answer and not
+        # the routes' (ADR-0018's "a patch that looks applied and is not").
+        if tap_registry.session_has_open_tap(sd.name):
             continue
         if not session_is_empty(sd):
             continue

@@ -136,9 +136,9 @@ class TapFanOut:
         # Session dirname marked in-flight against prune — taken in _open before
         # the mkdir, released in _close (sync-first) and nulled, so a second
         # _close can't double-decrement a concurrent tap's mark. None on the
-        # resume / record-off / probe paths, which take no mark. Importing the
-        # operator-ops module from this hot path is a known layering wart; a
-        # neutral leaf module for the mark is tracked in #405.
+        # resume / record-off / probe paths, which take no mark. A leaked mark
+        # costs more than a skipped prune now: the destructive-route preflight
+        # reads this same registry, so it 409s delete / absorb too (#405).
         self._prune_mark: str | None = None
 
     @classmethod
