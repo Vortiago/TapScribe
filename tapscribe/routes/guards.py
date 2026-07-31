@@ -4,7 +4,9 @@ Every route that deletes or moves a session's bytes crosses this: session
 delete, session-audio delete, absorb, WAV delete. It stays in the HTTP layer
 rather than moving into `session_maintenance` because it needs the live
 Recorder (jobs + streams) and that module is deliberately recorder-free (its
-bulk reclaim takes a `busy_check` callback instead).
+bulk reclaim takes a `busy_check` callback instead). The in-flight-tap guard
+consults both the Recorder's ActiveStreams (fully-open taps) and the tap-open
+registry in `tap_registry` (taps in the mkdir-to-WAV-open window).
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from ..recorder import Recorder, SessionBusy
+from ..tap_registry import session_has_open_tap
 
 
 async def refuse_current_or_busy(
@@ -21,12 +24,13 @@ async def refuse_current_or_busy(
     current: str,
     hint: str = "",
 ) -> None:
-    """The three-guard pre-flight the destructive session/WAV routes need:
+    """The four-guard pre-flight the destructive session/WAV routes need:
     refuse the CURRENT session — before the caller's `resolve_session_dir`,
     since the live session's directory may not be materialised on disk yet
     (rotate_session creates it lazily) — then refuse if any of `sessions`
     has a transcribe/strip job in flight — then refuse if `current` has a
-    live tap writing to it.
+    live tap writing to it (ActiveStreams) or has an in-flight mark (tap in
+    the mkdir-to-WAV-open window, `tap_registry`).
 
     `current` names which of `sessions` must not be the live session —
     required, not derived, so a multi-session caller (absorb) can't
@@ -50,6 +54,8 @@ async def refuse_current_or_busy(
         raise SessionBusy(f"a transcribe or strip job is in flight on {noun}")
     if any(s.session == current for s in await recorder.streams.snapshot()):
         raise SessionBusy("a live tap is writing to this session")
+    if session_has_open_tap(current):
+        raise SessionBusy("a tap is opening this session")
 
 
 def ops_log(message: str) -> None:

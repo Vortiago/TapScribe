@@ -25,7 +25,7 @@ from uuid import uuid4
 from . import roster
 from .audio import int16_peak_norm, open_recorder_wav
 from .recorder import ActiveStream, Recorder, UtteranceRecord
-from .session_maintenance import mark_session_in_flight, release_session_mark
+from .tap_registry import mark_session_in_flight, release_session_mark
 from .tap_relay import RelayHandlers, TapRelay
 from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 from .wav_append import open_recorder_wav_append
