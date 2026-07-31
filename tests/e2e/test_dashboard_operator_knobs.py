@@ -42,7 +42,6 @@ KNOB_FIELDS = [
     ("setSummarizeTimeoutS", "summarize timeout", "summarize-timeout-s", "600"),
     ("setGgufCtx", "summarize context window", "summarize-gguf-ctx", "16384"),
 ]
-_IDS = [k[0] for k in KNOB_FIELDS]
 
 
 async def _open_settings(page, base_url: str) -> None:
