@@ -6,16 +6,14 @@ Split out of `sessions.py` (which keeps the poll-path listing / catalog): these
 are destructive, infrequent, operator-driven filesystem operations, not part of
 the once-per-second dashboard read path. They take a `session` id, resolve it
 through `session_paths` (the path-safety seam), and read/write session meta via
-`sessions`. Pure — no FastAPI dependency. The route handlers do the
-current-session / in-flight-job pre-flight; these functions are purely the
-filesystem op.
+`sessions`. Pure — no FastAPI dependency. The route handlers do the pre-flight
+(current session, in-flight job, live tap, in-flight tap mark); these functions
+are purely the filesystem op.
 
-One documented exception to "purely the filesystem op": the in-flight tap mark
-below. `prune_empty_sessions` is the enforcement point for the prune-vs-tap
-invariant (#257), so the registry it consults lives beside it rather than on the
-Recorder — the mark is a plain session-dirname refcount, not recorder state, so
-this module stays recorder-free. `TapFanOut._open` (the recording hot path) is
-what sets it; that mark is the one frequent, non-destructive thing here.
+The in-flight tap registry (mark/release/has_open_tap) lives in `tap_registry`,
+a neutral leaf. `prune_empty_sessions` calls it there; the names re-exported
+below are the compatibility surface for #257's leak detector and the
+destructive-route contract, which reach the registry through this module.
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ from typing import Any
 
 import tapscribe.strip_meta as strip_meta
 
-from . import config
+from . import config, tap_registry
 from .roster import read_roster
 from .session_paths import (
     DIRNAME_STRIPPED,
@@ -42,57 +40,43 @@ from .session_paths import (
     stripped_dir,
 )
 from .sessions import read_session_meta, write_session_meta
+
+# Re-exported from tap_registry (the canonical home, #405). These names must
+# resolve here so #257's leak detector and the destructive-route contract keep
+# reaching the live registry without importing the tap or HTTP layers. Prune
+# itself calls `tap_registry.session_has_open_tap` directly (below), so these
+# four are purely the compatibility surface, not this module's own reads.
+from .tap_registry import (
+    _tap_open_sessions,
+    mark_session_in_flight,
+    release_session_mark,
+    session_has_open_tap,
+)
 from .text import atomic_write_text, parse_wav_start
 from .wav_cache import sidecar_paths
 
-# Sessions with a tap in flight, keyed by session dirname. Reference-counted so
-# concurrent taps into one session are independent. Read it through
-# `session_has_open_tap`; write it through the mark/release pair below.
-_tap_open_sessions: dict[str, int] = {}
-
-
-def mark_session_in_flight(session_name: str) -> None:
-    """Mark a session as having a tap in flight, so `prune_empty_sessions`
-    spares its directory through the mkdir→WAV-open window — the span where the
-    folder exists and is still empty.
-
-    Take the mark BEFORE the mkdir; one taken after it leaves that window open.
-    Pair every mark with `release_session_mark` on EVERY exit path, partial-init
-    failures included: a leaked mark makes the session permanently un-prunable,
-    which is worse than the race it closes.
-
-    Only the fresh-record open needs it: `try_resume` appends to an existing WAV
-    (never empty) and a probe tap takes no mark at all. A record-off tap takes
-    none either, though it can still materialise the folder via
-    `roster.record_occurrence` — that path is safe only because prune stays
-    synchronous on the event loop (see `prune_empty_sessions`).
-
-    The registry is module-global rather than injected the way
-    `reclaim_audio_older_than` takes `exclude_sessions` / `busy_check`; a neutral
-    home for it is tracked in #405.
-    """
-    _tap_open_sessions[session_name] = _tap_open_sessions.get(session_name, 0) + 1
-
-
-def release_session_mark(session_name: str) -> None:
-    """Drop one in-flight mark; releasing an UNMARKED session is a no-op.
-
-    That no-op is not double-release safety. With two concurrent taps the count
-    is 2, so a second release from one of them drives it to 0 and pops the key —
-    stranding the other tap's mark and making its directory prunable mid-window.
-    Exactly one release per mark is the caller's obligation; `TapFanOut._close`
-    discharges it by nulling `_prune_mark` after releasing."""
-    count = _tap_open_sessions.get(session_name, 0) - 1
-    if count > 0:
-        _tap_open_sessions[session_name] = count
-    else:
-        _tap_open_sessions.pop(session_name, None)
-
-
-def session_has_open_tap(session_name: str) -> bool:
-    """True while at least one tap holds an in-flight mark on `session_name`."""
-    return session_name in _tap_open_sessions
-
+# Public surface: this module's own operations plus the tap_registry names it
+# re-exports. Declared explicitly so ruff AND CodeQL see the re-exports as
+# intentional exports rather than "unused imports" (the latter's autofix would
+# delete them and break the contract callers that reach them here).
+__all__ = [
+    # session_maintenance's own operations
+    "absorb_session",
+    "delete_session_audio",
+    "delete_session_wav",
+    "prune_empty_sessions",
+    "reclaim_audio_older_than",
+    "session_is_empty",
+    # domain errors
+    "AbsorbCollision",
+    "InvalidAbsorbRequest",
+    "SessionDeleteError",
+    # re-exported from tap_registry (the canonical home, #405)
+    "_tap_open_sessions",
+    "mark_session_in_flight",
+    "release_session_mark",
+    "session_has_open_tap",
+]
 
 # ---------------------------------------------------------------------------
 # Domain errors — FastAPI-free maintenance exceptions.
@@ -180,7 +164,11 @@ def prune_empty_sessions(current_session: str) -> dict[str, Any]:
     pruned: list[str] = []
     failed: list[dict[str, str]] = []
     for sd in _iter_candidate_session_dirs(current_session):
-        if session_has_open_tap(sd.name):
+        # Through `tap_registry`, not this module's re-exported alias: the
+        # destructive-route preflight holds its own binding, so reading the
+        # alias here would let one monkeypatch change prune's answer and not
+        # the routes' (ADR-0018's "a patch that looks applied and is not").
+        if tap_registry.session_has_open_tap(sd.name):
             continue
         if not session_is_empty(sd):
             continue

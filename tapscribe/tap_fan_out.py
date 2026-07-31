@@ -25,7 +25,7 @@ from uuid import uuid4
 from . import roster
 from .audio import int16_peak_norm, open_recorder_wav
 from .recorder import ActiveStream, Recorder, UtteranceRecord
-from .session_maintenance import mark_session_in_flight, release_session_mark
+from .tap_registry import mark_session_in_flight, release_session_mark
 from .tap_relay import RelayHandlers, TapRelay
 from .text import build_recorder_wav_name, clean_meta_tokens, safe_name
 from .wav_append import open_recorder_wav_append
@@ -136,9 +136,9 @@ class TapFanOut:
         # Session dirname marked in-flight against prune — taken in _open before
         # the mkdir, released in _close (sync-first) and nulled, so a second
         # _close can't double-decrement a concurrent tap's mark. None on the
-        # resume / record-off / probe paths, which take no mark. Importing the
-        # operator-ops module from this hot path is a known layering wart; a
-        # neutral leaf module for the mark is tracked in #405.
+        # resume / record-off / probe paths, which take no mark. A leaked mark
+        # costs more than a skipped prune now: the destructive-route preflight
+        # reads this same registry, so it 409s delete / absorb too (#405).
         self._prune_mark: str | None = None
 
     @classmethod

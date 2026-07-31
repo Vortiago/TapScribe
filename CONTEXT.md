@@ -1201,7 +1201,7 @@ Four support modules are the only thing a route module may import from a sibling
 `deps` (the shared `get_recorder` dependency), `body` (read a JSON body, parse one
 field of it), `errors` (domain error to HTTP status) and `guards` (the
 destructive-route preflight: refuse the current session, a busy session, a session
-with a live tap).
+with a live tap, and a session with an in-flight tap mark from `tap_registry`).
 
 The **State view** (`tapscribe/state_view.py`) is the read model behind
 `GET /api/state`: given one **`StateInputs`** — a frozen record of everything
@@ -1227,7 +1227,7 @@ with two owners could not be captured in one call.
 
 ## Session modules — paths · listing · maintenance
 
-Recording-session bookkeeping is split across three modules by concern, so the
+Recording-session bookkeeping is split across four modules by concern, so the
 once-per-second read path isn't tangled with path-safety or destructive
 operations:
 
@@ -1255,12 +1255,19 @@ operations:
 - **`session_maintenance`** — destructive, infrequent operator operations:
   `absorb_session`, `delete_session_audio` / `delete_session_wav`,
   `prune_empty_sessions`, `session_is_empty`. Resolves via `session_paths`,
-  reads/writes meta via `sessions`. Also owns the in-flight tap mark
-  (`mark_session_in_flight` / `release_session_mark` / `session_has_open_tap`)
-  that `TapFanOut._open` takes before its session mkdir — it lives beside
-  `prune_empty_sessions`, the point that enforces it, rather than on the
-  Recorder, and is the one hot-path thing in an otherwise operator-only
-  module (#257).
+  reads/writes meta via `sessions`. Reads the in-flight tap mark through
+  `tap_registry` in `prune_empty_sessions` (the point that enforces the
+  prune-vs-tap invariant, #257), and re-exports the registry's names so #257's
+  leak detector and the destructive-route contract keep reaching them here
+  (#405).
+- **`tap_registry`**: the canonical home of the in-flight tap mark
+  (`mark_session_in_flight` / `release_session_mark` / `session_has_open_tap`),
+  a session-dirname refcount that `TapFanOut._open` takes before its session
+  mkdir and holds until the tap closes. A stdlib-only leaf that imports nothing
+  in TapScribe, so both readers (the recording hot path and the
+  destructive-route preflight in `routes/guards`) reach it without pulling
+  operator-maintenance weight (#405). Not on the Recorder: the mark is not
+  recorder state (#257).
 
 (The recorder-filename parsers `parse_wav_start` / `parse_wav_speaker_slug` /
 `parse_wav_speaker_ident` and `build_recorder_wav_name` all live in `text` — the

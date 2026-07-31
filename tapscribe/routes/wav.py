@@ -106,10 +106,11 @@ async def api_wav_delete(
     """Delete one WAV + its transcript-cache sidecars. source=stripped
     targets a region under <session>/stripped/. No region cascade — see
     `delete_session_wav`. Refuses the CURRENT session, any session with
-    a transcribe/strip job in flight, or a session with a live tap writing
-    to it. An unknown `source` is rejected (400) by `resolve_source_dir` —
-    the path seam owns that check; `source` itself is never a path
-    component (only compared against the two literals)."""
+    a transcribe/strip job in flight, or a session with a tap open on it (a
+    live ActiveStream or an in-flight mark). An unknown `source` is rejected
+    (400) by `resolve_source_dir`: the path seam owns that check; `source`
+    itself is never a path component (only compared against the two
+    literals)."""
     await refuse_current_or_busy(recorder, session, current=session, action="delete WAVs from")
     resolve_session_dir(session)
     # Same hold-for-the-walk bracket as the sibling /audio delete, for the two
